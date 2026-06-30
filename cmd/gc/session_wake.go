@@ -224,7 +224,7 @@ const executionStalledDrainReason = "execution-stalled"
 
 func drainReasonCancelable(reason string) bool {
 	return reason != "config-drift" && reason != "orphaned" && reason != "suspended" &&
-		reason != executionStalledDrainReason
+		reason != executionStalledDrainReason && reason != idleRespawnDrainReason
 }
 
 func pendingDrainReasonCancelable(reason string) bool {
