@@ -206,6 +206,16 @@ Capabilities activate progressively via config presence.
 
 ## Architecture docs
 
+### Conditional source architecture context
+
+When a task asks about source dependencies, impact, or an unfamiliar code
+path, read [`docs/agents/graphify.md`](docs/agents/graphify.md) and run a
+bounded query through `scripts/graphify-harness.sh`. When a task ID is in
+scope, read its Beads record and dependency tree with `bd show <id>` and
+`bd dep tree <id>` for task context; use Graphify only for source context.
+Treat Graphify output as a staleable hint, follow the harness fallback when it
+reports missing or stale data, and verify the cited source directly.
+
 Read **`engdocs/architecture/api-control-plane.md`** and
 **`engdocs/contributors/huma-usage.md`** before touching:
 

@@ -46,6 +46,9 @@ internal/api/dashboardspa/web/frontend/.playwright/
 .agents/migration/
 .gc/
 
+# Local Graphify code-only architecture index and freshness receipt.
+/graphify-out/
+
 # Dolt database files (added by bd init)
 .dolt/
 *.db
