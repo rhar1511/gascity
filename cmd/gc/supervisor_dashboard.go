@@ -120,12 +120,47 @@ func dashboardDeps(resolver api.CityResolver, readOnly bool, bind string, port i
 		OperatorWireAlias:  os.Getenv("DASHBOARD_OPERATOR_WIRE_ALIAS"),
 		DecisionLabel:      os.Getenv("DASHBOARD_DECISION_LABEL"),
 		DefaultView:        os.Getenv("DEFAULT_VIEW"),
-		// EnabledModules is intentionally left unset: every shipped dashboard view
-		// module is core (always on), and no first-party (gated) module exists yet,
-		// so the config projection emits an empty enabledModules list by design.
-		// When the first gated module lands, wire its enable source here (mirroring
-		// runCwdAllowedRootsFromEnv) and update TestDashboardDepsModulesCoreOnly.
+		EnabledModules:     dashboardEnabledModulesFromEnv(),
 	}
+}
+
+// dashboardEnabledModulesFromEnv parses MODULES_ENABLED as the ordered,
+// comma-separated allowlist of first-party dashboard module IDs. Invalid and
+// duplicate entries are ignored. An unset value preserves the core-only
+// default; first-party modules must always be enabled explicitly.
+func dashboardEnabledModulesFromEnv() []string {
+	raw := os.Getenv("MODULES_ENABLED")
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+
+	seen := make(map[string]struct{})
+	var modules []string
+	for _, entry := range strings.Split(raw, ",") {
+		module := strings.TrimSpace(entry)
+		if !validDashboardModuleID(module) {
+			continue
+		}
+		if _, exists := seen[module]; exists {
+			continue
+		}
+		seen[module] = struct{}{}
+		modules = append(modules, module)
+	}
+	return modules
+}
+
+func validDashboardModuleID(module string) bool {
+	if module == "" {
+		return false
+	}
+	for i, r := range module {
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || i > 0 && r == '-' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // wildcardBind reports whether bind is a wildcard listener address (every

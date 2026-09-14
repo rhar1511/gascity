@@ -46,6 +46,19 @@ reflects live state: agents and their sessions, beads, mail, formula runs, and a
 health view (system, local tools, per-rig store health, and the dolt store
 trend).
 
+## Enable optional views
+
+Core views are always available. First-party optional views are enabled with
+the comma-separated `MODULES_ENABLED` environment variable before starting the
+supervisor. For example, enable Beads Canvas with:
+
+```bash
+MODULES_ENABLED=canvas gc supervisor run
+```
+
+Service installations should set the same environment variable in the
+supervisor service and restart it. Unknown or malformed module IDs are ignored.
+
 ## Security posture
 
 The dashboard is served on the supervisor's bind address, which defaults to
