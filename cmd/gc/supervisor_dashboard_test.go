@@ -74,15 +74,30 @@ func TestDashboardDepsWiresSelfReadTransport(t *testing.T) {
 	}
 }
 
-// TestDashboardDepsModulesCoreOnly records that core-only dashboard modules are
-// the intentional steady state: dashboardDeps leaves EnabledModules unset
-// because no first-party (gated) view module ships yet, so the omission is a
-// tested decision rather than an oversight. When a gated module is added, wire
-// its enable source in dashboardDeps and update this test.
-func TestDashboardDepsModulesCoreOnly(t *testing.T) {
+func TestDashboardEnabledModulesFromEnv(t *testing.T) {
+	t.Setenv("MODULES_ENABLED", " canvas,health, canvas,Canvas,../bad, ,beads-map ")
+	got := dashboardEnabledModulesFromEnv()
+	want := []string{"canvas", "health", "beads-map"}
+	if len(got) != len(want) {
+		t.Fatalf("modules = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("modules[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+
+	t.Setenv("MODULES_ENABLED", "")
+	if got := dashboardEnabledModulesFromEnv(); got != nil {
+		t.Errorf("empty env should yield nil, got %v", got)
+	}
+}
+
+func TestDashboardDepsWiresEnabledModules(t *testing.T) {
+	t.Setenv("MODULES_ENABLED", "canvas")
 	deps := dashboardDeps(fakeDashResolver{}, false, "127.0.0.1", 8372, nil)
-	if len(deps.EnabledModules) != 0 {
-		t.Errorf("EnabledModules = %v, want empty: core-only is the intentional default; wire the enable source and update this test when a gated module ships", deps.EnabledModules)
+	if len(deps.EnabledModules) != 1 || deps.EnabledModules[0] != "canvas" {
+		t.Errorf("EnabledModules = %v, want [canvas]", deps.EnabledModules)
 	}
 }
 
