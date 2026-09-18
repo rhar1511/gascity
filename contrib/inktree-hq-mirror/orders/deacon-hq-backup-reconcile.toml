@@ -1,0 +1,6 @@
+[order]
+description = "Verify the HQ mirror, refresh the local Dolt backup, and retain recovery receipts"
+trigger = "cooldown"
+interval = "1h"
+exec = "$PACK_DIR/roles/deacon/hq-backup-mirror.sh reconcile"
+timeout = "1800s"

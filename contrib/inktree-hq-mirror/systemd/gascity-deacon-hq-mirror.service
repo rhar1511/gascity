@@ -1,0 +1,14 @@
+[Unit]
+Description=Gas City Deacon post-commit HQ mirror
+After=gascity-dolt.service
+Requires=gascity-dolt.service
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=oneshot
+Environment=PATH=/home/ricky/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=HQ_ALERTS=0
+ExecStart=/home/ricky/gascity-pilot/roles/deacon/hq-backup-mirror.sh mirror
+TimeoutStartSec=180
+
