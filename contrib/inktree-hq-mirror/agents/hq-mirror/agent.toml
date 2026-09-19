@@ -1,0 +1,4 @@
+scope = "city"
+nudge = "Inspect the routed HQ mirror or PR-repair bead, continue one bounded recovery step, and report the exact evidence."
+idle_timeout = "30m"
+max_active_sessions = 1
