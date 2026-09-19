@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch canonical HQ commits for Deacon mirroring
+
+[Path]
+PathModified=/home/ricky/gascity-production/dolt-data/hq/.dolt/noms/vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
+Unit=gascity-deacon-hq-mirror.service
+
+[Install]
+WantedBy=default.target

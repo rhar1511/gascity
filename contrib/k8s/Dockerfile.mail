@@ -14,17 +14,20 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     TMPDIR=/tmp
 
-# The util-linux set carries CVE-2026-53615, fixed in 2.41.5-0+deb13u1. All nine
-# names are binary packages of one source, and Trivy reports each separately, so
-# they are upgraded together rather than through util-linux alone.
+# The pinned base predates security updates for gzip, PCRE2, SQLite, OpenSSL,
+# systemd, and util-linux. Trivy reports binary packages separately, so each
+# affected package is explicitly upgraded before the application is installed.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends --only-upgrade \
     bsdutils \
+    gzip \
     libblkid1 \
     libcap2 \
     liblastlog2-2 \
     libmount1 \
+    libpcre2-8-0 \
     libsmartcols1 \
+    libsqlite3-0 \
     libssl3t64 \
     libsystemd0 \
     libudev1 \

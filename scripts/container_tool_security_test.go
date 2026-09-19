@@ -69,7 +69,7 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 		bdSourceSHA256 = "3e256519a683b413f7baa9f4d1071084bb2646478faabad9bf3ac7bd05952f43"
 		bdBuild        = "c185735c38"
 		bdBranch       = "HEAD"
-		grpcVersion    = "1.83.0"
+		grpcVersion    = "1.83.2"
 	)
 
 	root := repoRoot(t)
@@ -147,6 +147,7 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 	for _, want := range []string{
 		"gitpython>=3.1.57",
 		"aiohttp>=3.14.3",
+		"anyio>=4.14.2",
 		"pillow>=12.3.0",
 	} {
 		if !strings.Contains(input, want) {
@@ -162,6 +163,7 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 	for _, want := range []string{
 		"gitpython==3.1.58 \\",
 		"aiohttp==3.14.3 \\",
+		"anyio==4.15.1 \\",
 		"cryptography==50.0.0 \\",
 		"pillow==12.3.0 \\",
 	} {
@@ -188,6 +190,8 @@ func TestMCPMailImageUpgradesPatchedOSPackages(t *testing.T) {
 	}
 
 	for _, pkg := range []string{
+		// gzip, PCRE2, and SQLite fixes published after the pinned base image.
+		"gzip", "libpcre2-8-0", "libsqlite3-0",
 		// openssl / systemd set, already present.
 		"libcap2", "libssl3t64", "libsystemd0", "libudev1", "openssl", "openssl-provider-legacy",
 		// util-linux set, CVE-2026-53615, fixed in 2.41.5-0+deb13u1.
@@ -350,16 +354,14 @@ func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 			"usr/local/bin/kubectl": true,
 		},
 		// grpc, fixed in 1.83.1 (CVE-2026-84304) and 1.82.2 / 1.83.2 (CVE-2026-84445);
-		// the gh and Dolt rebuilds pin 1.82.1 and the bd rebuild pins 1.83.0.
+		// only the gh and Dolt rebuilds remain on the waived 1.82.1 version.
 		"CVE-2026-84304": {
 			"usr/bin/gh":         true,
 			"usr/local/bin/dolt": true,
-			"usr/local/bin/bd":   true,
 		},
 		"CVE-2026-84445": {
 			"usr/bin/gh":         true,
 			"usr/local/bin/dolt": true,
-			"usr/local/bin/bd":   true,
 		},
 		// thrift, fixed in 0.24.0; the Dolt rebuild pins 0.23.0 and bd's pinned source selects it.
 		"CVE-2026-43871": {
@@ -581,12 +583,12 @@ func TestTrivyIgnoreKeepsReviewedBridgeEntries(t *testing.T) {
 	wantEntries := []wantEntry{
 		{
 			id:         "CVE-2026-84304",
-			paths:      toSet("usr/bin/gh", "usr/local/bin/dolt", "usr/local/bin/bd", "usr/local/bin/gc"),
+			paths:      toSet("usr/bin/gh", "usr/local/bin/dolt"),
 			substrings: []string{"grpc", "1.83.1", "GRPC_VERSION", "go.mod"},
 		},
 		{
 			id:         "CVE-2026-84445",
-			paths:      toSet("usr/bin/gh", "usr/local/bin/dolt", "usr/local/bin/bd", "usr/local/bin/gc"),
+			paths:      toSet("usr/bin/gh", "usr/local/bin/dolt"),
 			substrings: []string{"grpc", "1.83.2", "GRPC_VERSION", "go.mod"},
 		},
 		{
