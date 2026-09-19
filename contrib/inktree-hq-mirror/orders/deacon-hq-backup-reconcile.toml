@@ -4,3 +4,4 @@ trigger = "cooldown"
 interval = "1h"
 exec = "$PACK_DIR/roles/deacon/hq-backup-mirror.sh reconcile"
 timeout = "1800s"
+reserved_dispatch = true

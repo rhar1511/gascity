@@ -37,6 +37,7 @@ not shipped in this contribution.
 Run the shell contract tests from this directory:
 
 ```sh
+./test-pack-contract.sh
 roles/deacon/test-hq-backup-mirror.sh
 ```
 
