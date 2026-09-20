@@ -271,7 +271,7 @@ func Catalog() []Entry {
 			"tmux", "exact:tmux", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/tmux", "NewSeamBackedWithConfig"),
-				time.Date(2026, time.September, 17, 0, 0, 0, 0, time.UTC),
+				time.Date(2026, time.October, 2, 0, 0, 0, 0, time.UTC),
 				"the existing full conformance run skips when the tmux executable is absent",
 			),
 		),
