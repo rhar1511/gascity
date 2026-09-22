@@ -1,0 +1,6 @@
+[order]
+description = "Mirror committed HQ changes to the canonical GitHub backup"
+trigger = "event"
+on = "bead.updated"
+exec = "env HQ_ALERTS=0 $PACK_DIR/roles/deacon/hq-backup-mirror.sh mirror"
+timeout = "180s"

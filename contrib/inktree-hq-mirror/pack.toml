@@ -1,0 +1,13 @@
+[pack]
+name = "inktree-hq-mirror"
+schema = 2
+version = "0.1.0"
+
+[agent_defaults]
+provider = "claude"
+scope = "city"
+
+[[named_session]]
+template = "hq-mirror"
+scope = "city"
+mode = "on_demand"
