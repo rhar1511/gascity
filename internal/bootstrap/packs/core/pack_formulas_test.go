@@ -288,3 +288,32 @@ func TestMolScopedWorkResolvesRepoBeforeRemovingWorktree(t *testing.T) {
 		t.Error("cleanup-worktree runs rm -rf before the linked-worktree check; the check must gate the delete, not follow it")
 	}
 }
+
+func TestRSIFormulaPinsCandidateJudgeAndGateSeparation(t *testing.T) {
+	formula := readFormula(t, "mol-rsi-candidate.toml")
+	if formula.Formula != "mol-rsi-candidate" {
+		t.Fatalf("formula = %q, want mol-rsi-candidate", formula.Formula)
+	}
+
+	produce := formulaStep(t, formula, "produce-candidate")
+	correctness := formulaStep(t, formula, "judge-correctness")
+	performance := formulaStep(t, formula, "judge-performance")
+	gate := formulaStep(t, formula, "promote-gate")
+
+	if !strings.Contains(produce, "bead-specific worktree") || !strings.Contains(produce, "fixed maximum of three") {
+		t.Fatal("candidate step must require an isolated worktree and bounded attempts")
+	}
+	if !strings.Contains(correctness, "independent of the improver") || !strings.Contains(performance, "independent of the improver") {
+		t.Fatal("judge steps must be independent of the improver")
+	}
+	for _, required := range []string{
+		"internal/rsipolicy.Evaluate",
+		"Go review finalizer",
+		"rollback bundle",
+		"human approval gate",
+	} {
+		if !strings.Contains(gate, required) {
+			t.Fatalf("promote-gate step missing %q", required)
+		}
+	}
+}
