@@ -286,10 +286,29 @@ func ClearExpiredQuarantinePatch(sleepReason string) MetadataPatch {
 	return patch
 }
 
-// ConfirmStartedPatch records a confirmed runtime start. The timestamp pins
-// the "creation_complete" transition so downstream readers (e.g. the pool
-// bead sweep) can distinguish a just-committed start from a long-stable
-// bead whose last_woke_at was later cleared by crash/churn recovery.
+// AdoptObservedRuntimePatch records that the reconciler positively observed
+// the runtime for an existing session identity. It is used when lifecycle
+// metadata says a start/reset is still pending even though the matching runtime
+// is already alive. The patch is provider-neutral: runtime identity is checked
+// by the caller through runtime.Provider, while this function only repairs
+// durable session lifecycle markers.
+func AdoptObservedRuntimePatch(now time.Time) MetadataPatch {
+	patch := ConfirmStartedPatch(now)
+	patch["continuation_reset_pending"] = ""
+	patch[ResetCommittedAtKey] = ""
+	patch["restart_requested"] = ""
+	patch["last_woke_at"] = ""
+	// This is a re-confirmation of an already-running interval, so preserve
+	// awake_started_at and its usage-accounting boundary.
+	delete(patch, "awake_started_at")
+	return patch
+}
+
+// ConfirmStartedPatch records a successful runtime start atomically with the
+// lifecycle markers that identify the "creation_complete" transition so
+// downstream readers (e.g. the pool bead sweep) can distinguish a just-committed
+// start from a long-stable bead whose last_woke_at was later cleared by
+// crash/churn recovery.
 func ConfirmStartedPatch(now time.Time) MetadataPatch {
 	return MetadataPatch{
 		"state":                string(StateActive),

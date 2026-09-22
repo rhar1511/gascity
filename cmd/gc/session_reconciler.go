@@ -331,6 +331,70 @@ func resetPendingCommittedAtInfo(info sessionpkg.Info) (string, time.Time, bool)
 	return raw, committedAt, true
 }
 
+// adoptObservedRuntimeIfNeeded repairs stale lifecycle and breaker metadata
+// when the provider reports a live runtime whose generic identity matches the
+// named session bead. This is deliberately provider/agent agnostic: no model,
+// provider, or agent name participates in the decision.
+func adoptObservedRuntimeIfNeeded(
+	info sessionpkg.Info,
+	name string,
+	running bool,
+	alive bool,
+	sp runtime.Provider,
+	cb *sessionCircuitBreaker,
+	now time.Time,
+) (sessionpkg.MetadataPatch, string, sessionCircuitBreakerIdentitySnapshot, bool, bool) {
+	if !running || !alive || sp == nil || !isNamedSessionInfo(info) {
+		return nil, "", sessionCircuitBreakerIdentitySnapshot{}, false, false
+	}
+	if !runningSessionMatchesPendingCreateInfo(info, name, sp) {
+		return nil, "", sessionCircuitBreakerIdentitySnapshot{}, false, false
+	}
+	identity := namedSessionIdentityInfo(info)
+	if identity == "" {
+		return nil, "", sessionCircuitBreakerIdentitySnapshot{}, false, false
+	}
+
+	circuitOpen := strings.TrimSpace(info.SessionCircuitState) == sessionpkg.SessionCircuitStateOpen
+	if cb != nil && cb.IsOpen(identity, now) {
+		circuitOpen = true
+	}
+	lifecycleResidue := strings.TrimSpace(info.MetadataState) != string(sessionpkg.StateActive) &&
+		strings.TrimSpace(info.MetadataState) != string(sessionpkg.StateAwake)
+	lifecycleResidue = lifecycleResidue || strings.TrimSpace(info.ContinuationResetPending) == "true"
+	lifecycleResidue = lifecycleResidue || strings.TrimSpace(info.ResetCommittedAt) != ""
+	lifecycleResidue = lifecycleResidue || info.PendingCreateClaim
+	lifecycleResidue = lifecycleResidue || strings.TrimSpace(info.PendingCreateStartedAt) != ""
+	lifecycleResidue = lifecycleResidue || strings.TrimSpace(info.SleepReason) != ""
+	if !lifecycleResidue && !circuitOpen {
+		return nil, "", sessionCircuitBreakerIdentitySnapshot{}, false, false
+	}
+
+	patch := sessionpkg.AdoptObservedRuntimePatch(now)
+	var previous sessionCircuitBreakerIdentitySnapshot
+	breakerChanged := false
+	if circuitOpen {
+		if cb != nil {
+			previous = cb.snapshotIdentity(identity)
+			cb.Reset(identity)
+			metadata, err := cb.metadata(identity, now)
+			if err != nil {
+				cb.restoreIdentity(identity, previous)
+				return nil, "", sessionCircuitBreakerIdentitySnapshot{}, false, false
+			}
+			for key, value := range metadata {
+				patch[key] = value
+			}
+			breakerChanged = true
+		} else {
+			for key, value := range emptySessionCircuitMetadata() {
+				patch[key] = value
+			}
+		}
+	}
+	return patch, identity, previous, breakerChanged, true
+}
+
 func recordResetStallIfDue(
 	cityPath string,
 	store beads.Store,
@@ -2556,15 +2620,32 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			continue
 		}
 		peek := cachedSessionPeek(cityPath, store, sp, cfg, id, tp.Hints.ProcessNames)
+		adoptionPatch, identity, breakerSnapshot, breakerChanged, adopted := adoptObservedRuntimeIfNeeded(
+			infoByID[id], name, running, alive, sp, cb, clk.Now().UTC(),
+		)
+		if adopted {
+			if err := sessFront.ApplyPatch(id, adoptionPatch); err != nil {
+				if breakerChanged {
+					cb.restoreIdentity(identity, breakerSnapshot)
+				}
+				fmt.Fprintf(stderr, "session reconciler: observed runtime adoption for %s failed: %v\n", name, err) //nolint:errcheck
+			} else {
+				tick.apply(id, adoptionPatch)
+				if dt != nil {
+					dt.clearResetStall(id)
+				}
+				if trace != nil {
+					trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonRuntimeAdopted, TraceOutcomeHealed, tp.TemplateName, name, traceRecordPayload{
+						"session_bead_id": id,
+						"identity":        identity,
+						"breaker_cleared": breakerChanged,
+					})
+				}
+			}
+		}
 		if running && !alive {
 			// Warm the peek before recordResetStallIfDue may evict the stale
-			// runtime below: cachedSessionPeek is lazy, and a capture-pane
-			// against a killed tmux session errors, which would silently skip
-			// the zombie forensics, the crash event, and both
-			// checkRateLimitStability call sites on the eviction tick.
-			// Successful peeks are cached, so every consumer below (all of
-			// which use rateLimitPeekLines) is served from this one read —
-			// no extra capture in a branch that already peeks.
+			// runtime below so zombie forensics remain available on this tick.
 			_, _ = peek(rateLimitPeekLines)
 		}
 		recordResetStallIfDue(cityPath, store, sp, cfg, infoByID[id], tp.TemplateName, name, running, alive, startupTimeout, clk.Now().UTC(), dt, rec, stderr, trace)
