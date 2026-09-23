@@ -171,7 +171,7 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 	for _, want := range []string{
 		"gitpython==3.1.59 \\",
 		"aiohttp==3.14.3 \\",
-		"anyio==4.14.2 \\",
+		"anyio==4.15.1 \\",
 		"cryptography==50.0.0 \\",
 		"pillow==12.3.0 \\",
 	} {
