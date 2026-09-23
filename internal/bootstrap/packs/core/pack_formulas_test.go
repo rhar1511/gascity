@@ -16,7 +16,8 @@ type formulaFile struct {
 	Steps   []struct {
 		ID          string `toml:"id"`
 		Title       string `toml:"title"`
-		Description string `toml:"description"`
+		Description string            `toml:"description"`
+		Metadata    map[string]string `toml:"metadata"`
 	} `toml:"steps"`
 }
 
@@ -122,6 +123,18 @@ func TestMolDoWorkDrainClaimsCurrentContinuation(t *testing.T) {
 	if updateAt < 0 || !strings.Contains(step[updateAt:drainAckAt], "|| exit 1") {
 		t.Fatal("drain must not acknowledge runtime drain after a failed bead close")
 	}
+}
+
+
+func formulaStepMetadata(t *testing.T, f formulaFile, id string) map[string]string {
+	t.Helper()
+	for _, step := range f.Steps {
+		if step.ID == id {
+			return step.Metadata
+		}
+	}
+	t.Fatalf("formula %s has no step %q", f.Formula, id)
+	return nil
 }
 
 // TestPolecatPreflightSearchesLedgerBeforeFiling pins the search-before-file
@@ -356,5 +369,44 @@ func TestMolScopedWorkResolvesRepoBeforeRemovingWorktree(t *testing.T) {
 	removeAt := strings.Index(step, `rm -rf "$WORKTREE"`)
 	if guardAt > removeAt {
 		t.Error("cleanup-worktree runs rm -rf before the linked-worktree check; the check must gate the delete, not follow it")
+	}
+}
+
+func TestRSIFormulaPinsCandidateJudgeAndGateSeparation(t *testing.T) {
+	formula := readFormula(t, "mol-rsi-candidate.toml")
+	if formula.Formula != "mol-rsi-candidate" {
+		t.Fatalf("formula = %q, want mol-rsi-candidate", formula.Formula)
+	}
+
+	produce := formulaStep(t, formula, "produce-candidate")
+	correctness := formulaStep(t, formula, "judge-correctness")
+	performance := formulaStep(t, formula, "judge-performance")
+	gate := formulaStep(t, formula, "promote-gate")
+
+	if !strings.Contains(produce, "bead-specific worktree") || !strings.Contains(produce, "fixed maximum of three") {
+		t.Fatal("candidate step must require an isolated worktree and bounded attempts")
+	}
+	if !strings.Contains(produce, "rsipolicy.CandidateEvidence") {
+		t.Fatal("candidate step must emit rsipolicy.CandidateEvidence JSON")
+	}
+	if !strings.Contains(correctness, "reviewquorum.LaneOutput") || !strings.Contains(performance, "reviewquorum.LaneOutput") {
+		t.Fatal("judge steps must emit reviewquorum.LaneOutput JSON")
+	}
+	if !strings.Contains(correctness, "independent of the improver") || !strings.Contains(performance, "independent of the improver") {
+		t.Fatal("judge steps must be independent of the improver")
+	}
+	gateMetadata := formulaStepMetadata(t, formula, "promote-gate")
+	if gateMetadata["gc.kind"] != "rsi-promotion-gate" {
+		t.Fatalf("promote-gate gc.kind = %q, want rsi-promotion-gate", gateMetadata["gc.kind"])
+	}
+	for _, required := range []string{
+		"internal/rsipolicy.Evaluate",
+		"Go review finalizer",
+		"rollback bundle",
+		"human approval gate",
+	} {
+		if !strings.Contains(gate, required) {
+			t.Fatalf("promote-gate step missing %q", required)
+		}
 	}
 }

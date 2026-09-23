@@ -413,7 +413,7 @@ jobs:
   # Cross-version contract gate: the "current" cell of the bd matrix. The
   # "prev" cell is contract-acceptance-previous above (the min-supported
   # release). This cell builds bd from gastownhall/beads source at
-  # BD_CURRENT_REF (deps.env) — a commit, which need not be a tagged release —
+  # BD_CURRENT_REF (deps.env), independently of the installed release archive,
   # and runs the same focused CLI contract, so a bd change that breaks gc's
   # decoder/classifier surface against the newer bd is caught before merge.
   # Path-gated on the beads filter; tolerated as a skip by the Check gate.
