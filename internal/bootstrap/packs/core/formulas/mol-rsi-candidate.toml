@@ -60,7 +60,7 @@ Run the frozen regression suite and bounded benchmark suite. Report baseline
 and candidate metrics for quality score, safety score, latency, cost, and
 new dependency count. Do not edit evaluation criteria, safety thresholds,
 or promotion policy. Persist the candidate bundle, metrics, commands, and
-failure evidence as `gc.output_json`.
+failure evidence as `gc.output_json` using `rsipolicy.CandidateEvidence` JSON.
 """
 
 [steps.retry]
@@ -77,7 +77,7 @@ Review the candidate bundle from `produce-candidate` in read-only mode. You
 are independent of the improver and must not modify files, evaluation criteria,
 limits, or the candidate. Validate correctness, safety behavior, dependency
 changes, and the frozen regression suite. Record evidence and a structured lane
-output with verdict `pass`, `pass_with_findings`, `fail`, or `blocked`.
+output using `reviewquorum.LaneOutput` JSON with verdict `pass`, `pass_with_findings`, `fail`, or `blocked`.
 """
 
 [steps.retry]
@@ -94,7 +94,7 @@ Review the candidate bundle from `produce-candidate` in read-only mode. You
 are independent of the improver and correctness judge. Measure latency, cost,
 resource use, and dependency limits against the recorded baseline. Do not
 change thresholds or evaluation criteria. Record evidence and a structured
-lane output with verdict `pass`, `pass_with_findings`, `fail`, or `blocked`.
+lane output using `reviewquorum.LaneOutput` JSON with verdict `pass`, `pass_with_findings`, `fail`, or `blocked`.
 """
 
 [steps.retry]
@@ -105,10 +105,11 @@ on_exhausted = "soft_fail"
 id = "promote-gate"
 title = "Finalize quorum and apply the monotonic promotion gate"
 needs = ["judge-correctness", "judge-performance"]
-metadata = { "gc.rsi_role" = "gate", "gc.rsi_policy" = "internal/rsipolicy.Evaluate", "gc.output_json_schema" = "rsi.decision.v1", "gc.output_json_required" = "true", "gc.rsi_authority_class" = "{{authority_class}}" }
+metadata = { "gc.kind" = "rsi-promotion-gate", "gc.rsi_role" = "gate", "gc.rsi_policy" = "internal/rsipolicy.Evaluate", "gc.output_json_schema" = "rsi.decision.v1", "gc.output_json_required" = "true", "gc.rsi_authority_class" = "{{authority_class}}" }
 description = """
 Load the candidate bundle, metrics, and both durable judge lane outputs. The
-Go review finalizer must synthesize the lane outputs before the promotion gate
+candidate step must emit `rsipolicy.CandidateEvidence` JSON and each judge step
+must emit `reviewquorum.LaneOutput` JSON. The Go review finalizer must synthesize the lane outputs before the promotion gate
 runs. Build the policy input for `internal/rsipolicy.Evaluate` with the current
 bundle as the rollback target, the frozen evaluation suite hash, the explicit
 objective, and the bounded attempt count.

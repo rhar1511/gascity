@@ -239,3 +239,29 @@ func TestEvaluateRequiresJudgeIDsToMatchFinalizedLanes(t *testing.T) {
 		t.Errorf("reasons %v do not contain %q", decision.Reasons, ReasonJudgeLaneMismatch)
 	}
 }
+
+func TestCandidateEvidenceBuildsPolicyInputWithoutMergingJudgeData(t *testing.T) {
+	input := passingInput()
+	evidence := CandidateEvidence{
+		Objective:        input.Objective,
+		Current:          input.Current,
+		Candidate:        input.Candidate,
+		Baseline:         input.Baseline,
+		CandidateMetrics: input.CandidateMetrics,
+		Limits:           input.Limits,
+		AuthorityClass:   input.AuthorityClass,
+		Attempts:         input.Attempts,
+		MaxAttempts:      input.MaxAttempts,
+		Improver:         input.Review.Improver,
+		Judges:           input.Review.Judges,
+		ReviewSubject:    "candidate:bundle-002",
+		ReviewBaseRef:    "bundle-001",
+	}
+	got := evidence.Input(input.Review.Summary.Lanes)
+	if got.Candidate.ID != input.Candidate.ID || got.Current.ID != input.Current.ID {
+		t.Fatalf("bundle lineage = %q/%q, want %q/%q", got.Current.ID, got.Candidate.ID, input.Current.ID, input.Candidate.ID)
+	}
+	if got.Review.Improver != input.Review.Improver || len(got.Review.LaneOutputs) != 2 {
+		t.Fatalf("review input = %+v, want improver and two lanes", got.Review)
+	}
+}

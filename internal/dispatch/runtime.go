@@ -190,6 +190,8 @@ func ProcessControl(store beads.Store, bead beads.Bead, opts ProcessOptions) (Co
 		return processScopeCheck(store, bead, opts)
 	case beadmeta.KindWorkflowFinalize:
 		return processWorkflowFinalize(store, bead, opts)
+	case beadmeta.KindRSIPromotionGate:
+		return processRSIPromotionGate(store, bead, opts)
 	default:
 		return ControlResult{}, fmt.Errorf("%s: unsupported control bead kind %q", bead.ID, bead.Metadata[beadmeta.KindMetadataKey])
 	}

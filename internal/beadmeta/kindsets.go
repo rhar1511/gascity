@@ -41,6 +41,7 @@ var ControlKinds = []string{
 	KindDrain,
 	KindScopeCheck,
 	KindWorkflowFinalize,
+	KindRSIPromotionGate,
 }
 
 // IsControlKind reports whether kind is a member of ControlKinds.
@@ -83,6 +84,7 @@ var ScopeCheckExemptKinds = []string{
 	KindScope,
 	KindScopeCheck,
 	KindWorkflowFinalize,
+	KindRSIPromotionGate,
 	KindFanout,
 	KindCheck,
 	KindDrain,
@@ -134,6 +136,7 @@ var GraphContractMetadataKinds = []string{
 	KindCleanup,
 	KindScopeCheck,
 	KindWorkflowFinalize,
+	KindRSIPromotionGate,
 	KindRetry,
 	KindRetryRun,
 	KindRetryEval,

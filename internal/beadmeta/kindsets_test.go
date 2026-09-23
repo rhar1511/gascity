@@ -12,7 +12,7 @@ import (
 func TestControlKindsExact(t *testing.T) {
 	want := []string{
 		KindRetry, KindRalph, KindCheck, KindRetryEval, KindFanout,
-		KindDrain, KindScopeCheck, KindWorkflowFinalize,
+		KindDrain, KindScopeCheck, KindWorkflowFinalize, KindRSIPromotionGate,
 	}
 	if !slices.Equal(ControlKinds, want) {
 		t.Errorf("ControlKinds = %v, want %v", ControlKinds, want)

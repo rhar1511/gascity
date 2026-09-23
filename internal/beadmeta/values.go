@@ -22,6 +22,9 @@ const (
 	KindDrain            = "drain"
 	KindScopeCheck       = "scope-check"
 	KindWorkflowFinalize = "workflow-finalize"
+	// KindRSIPromotionGate runs the deterministic RSI promotion policy over
+	// candidate evidence and independent judge lane outputs.
+	KindRSIPromotionGate = "rsi-promotion-gate"
 
 	// Structural graph-node kinds: compiled into graphs, never dispatched as
 	// control beads (the dispatch switch hard-errors on them).
@@ -39,6 +42,13 @@ const (
 	// KindSpec marks a generated step-spec sidecar bead carrying a serialized
 	// step definition rather than executable work.
 	KindSpec = "spec"
+)
+
+// Values of RSIRoleMetadataKey identify the producer of durable RSI evidence.
+const (
+	RSIRoleImprover = "improver"
+	RSIRoleJudge    = "judge"
+	RSIRoleGate     = "gate"
 )
 
 // Values of OutcomeMetadataKey ("gc.outcome").
