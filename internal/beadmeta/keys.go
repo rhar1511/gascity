@@ -204,6 +204,12 @@ const (
 	PackWorkspaceMetadataKey            = "gc.pack_workspace"
 	PerDispatchModelMetadataKey         = "gc.per_dispatch_model"
 	RalphStepIDMetadataKey              = "gc.ralph_step_id"
+	RSIRoleMetadataKey                  = "gc.rsi_role"
+	RSIAuthorityClassMetadataKey        = "gc.rsi_authority_class"
+	RSICandidateInputMetadataKey        = "gc.rsi_candidate_input"
+	RSIPromoteMetadataKey               = "gc.rsi_promote"
+	RSIReasonMetadataKey                = "gc.rsi_reason"
+	RSIManualApprovalMetadataKey        = "gc.rsi_manual_approval_required"
 	ReasoningMetadataKey                = "gc.reasoning"
 	RequiredArtifactMetadataKey         = "gc.required_artifact"
 	RequiredArtifactsMetadataKey        = "gc.required_artifacts"
@@ -534,6 +540,12 @@ var KnownMetadataKeys = []string{
 	PackWorkspaceMetadataKey,
 	PerDispatchModelMetadataKey,
 	RalphStepIDMetadataKey,
+	RSIRoleMetadataKey,
+	RSIAuthorityClassMetadataKey,
+	RSICandidateInputMetadataKey,
+	RSIPromoteMetadataKey,
+	RSIReasonMetadataKey,
+	RSIManualApprovalMetadataKey,
 	ReasoningMetadataKey,
 	RequiredArtifactMetadataKey,
 	RequiredArtifactsMetadataKey,

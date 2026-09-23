@@ -14,9 +14,10 @@ import (
 type formulaFile struct {
 	Formula string `toml:"formula"`
 	Steps   []struct {
-		ID          string `toml:"id"`
-		Title       string `toml:"title"`
-		Description string `toml:"description"`
+		ID          string            `toml:"id"`
+		Title       string            `toml:"title"`
+		Description string            `toml:"description"`
+		Metadata    map[string]string `toml:"metadata"`
 	} `toml:"steps"`
 }
 
@@ -52,6 +53,17 @@ func formulaStep(t *testing.T, f formulaFile, id string) string {
 	}
 	t.Fatalf("formula %s has no step %q", f.Formula, id)
 	return ""
+}
+
+func formulaStepMetadata(t *testing.T, f formulaFile, id string) map[string]string {
+	t.Helper()
+	for _, step := range f.Steps {
+		if step.ID == id {
+			return step.Metadata
+		}
+	}
+	t.Fatalf("formula %s has no step %q", f.Formula, id)
+	return nil
 }
 
 // TestPolecatPreflightSearchesLedgerBeforeFiling pins the search-before-file
@@ -303,8 +315,18 @@ func TestRSIFormulaPinsCandidateJudgeAndGateSeparation(t *testing.T) {
 	if !strings.Contains(produce, "bead-specific worktree") || !strings.Contains(produce, "fixed maximum of three") {
 		t.Fatal("candidate step must require an isolated worktree and bounded attempts")
 	}
+	if !strings.Contains(produce, "rsipolicy.CandidateEvidence") {
+		t.Fatal("candidate step must emit rsipolicy.CandidateEvidence JSON")
+	}
+	if !strings.Contains(correctness, "reviewquorum.LaneOutput") || !strings.Contains(performance, "reviewquorum.LaneOutput") {
+		t.Fatal("judge steps must emit reviewquorum.LaneOutput JSON")
+	}
 	if !strings.Contains(correctness, "independent of the improver") || !strings.Contains(performance, "independent of the improver") {
 		t.Fatal("judge steps must be independent of the improver")
+	}
+	gateMetadata := formulaStepMetadata(t, formula, "promote-gate")
+	if gateMetadata["gc.kind"] != "rsi-promotion-gate" {
+		t.Fatalf("promote-gate gc.kind = %q, want rsi-promotion-gate", gateMetadata["gc.kind"])
 	}
 	for _, required := range []string{
 		"internal/rsipolicy.Evaluate",

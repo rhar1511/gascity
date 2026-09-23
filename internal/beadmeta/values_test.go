@@ -17,6 +17,7 @@ func TestPinnedKindValues(t *testing.T) {
 		KindDrain:            "drain",
 		KindScopeCheck:       "scope-check",
 		KindWorkflowFinalize: "workflow-finalize",
+		KindRSIPromotionGate: "rsi-promotion-gate",
 		KindScope:            "scope",
 		KindCleanup:          "cleanup",
 		KindRun:              "run",
