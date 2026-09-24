@@ -45,6 +45,7 @@ gc [flags]
 | [gc event](#gc-event) | Event operations |
 | [gc events](#gc-events) | Show events from the GC API |
 | [gc extmsg](#gc-extmsg) | Manage external-conversation bindings |
+| [gc factory](#gc-factory) | Inspect software-factory policy |
 | [gc formula](#gc-formula) | Manage and inspect formulas |
 | [gc github](#gc-github) | GitHub integration commands |
 | [gc graph](#gc-graph) | Show dependency graph for beads |
@@ -1719,6 +1720,30 @@ gc extmsg unbind [flags]
 | `--provider` | string |  | External messaging provider (required) |
 | `--scope-id` | string |  | Conversation scope (default: the city name) |
 | `--session` | string |  | Unbind conversations bound to this session ID |
+
+## gc factory
+
+Inspect software-factory policy
+
+```
+gc factory
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc factory validate](#gc-factory-validate) | Validate .agent-factory/config.yaml without running it |
+
+## gc factory validate
+
+Validate .agent-factory/config.yaml without running it
+
+```
+gc factory validate [config-path] [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | emit structured JSON |
 
 ## gc formula
 
