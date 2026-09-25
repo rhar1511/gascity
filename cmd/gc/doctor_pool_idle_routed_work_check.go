@@ -117,47 +117,68 @@ func (c *poolIdleRoutedWorkCheck) collect() (findings []poolIdleRoutedWorkFindin
 }
 
 // collectStoreFindings checks every generic-ephemeral pool template in cfg
-// against one store: a targeted session-class list for idle live instances,
-// and (only when at least one is idle) a targeted gc.routed_to metadata
-// lookup for unclaimed work — never a full-store scan.
+// against one store with at most TWO reads: one session-class enumeration for
+// idle live instances, and one authoritative ready read. Both are whole-scope
+// reads bucketed in Go, replacing the previous per-template session Ledger scan
+// and per-template gc.routed_to metadata List (O(templates) round-trips each).
+// On remote Dolt that per-template fan-out made the check exceed its budget and
+// time out; two reads are O(1) in template count.
 func (c *poolIdleRoutedWorkCheck) collectStoreFindings(store beads.Store, label string) ([]poolIdleRoutedWorkFinding, error) {
 	sessStore := cliSessionFrontDoor(store, c.cfg, c.cityPath)
 
-	var findings []poolIdleRoutedWorkFinding
+	// Build the generic pool-template set once.
+	genericTemplates := make(map[string]struct{})
 	for i := range c.cfg.Agents {
 		agent := &c.cfg.Agents[i]
 		if agent.Suspended || !agent.SupportsGenericEphemeralSessions() {
 			continue
 		}
-		template := agent.QualifiedName()
-		if template == "" {
+		if template := agent.QualifiedName(); template != "" {
+			genericTemplates[template] = struct{}{}
+		}
+	}
+	if len(genericTemplates) == 0 {
+		return nil, nil
+	}
+
+	// One session-class enumeration, bucketed into idle instances per template.
+	sessions, err := sessStore.List("", "")
+	if err != nil {
+		return nil, fmt.Errorf("listing sessions: %w", err)
+	}
+	idleByTemplate := make(map[string][]string)
+	for _, info := range sessions {
+		template := strings.TrimSpace(info.Template)
+		if _, ok := genericTemplates[template]; !ok {
 			continue
 		}
-
-		sessions, err := sessStore.List("", template)
-		if err != nil {
-			return findings, fmt.Errorf("listing sessions for %s: %w", template, err)
-		}
-		var idle []string
-		for _, info := range sessions {
-			if !poolSessionIsLiveInfo(info) || strings.TrimSpace(info.TriggerBeadID) != "" {
-				continue
-			}
-			name := strings.TrimSpace(info.SessionName)
-			if name == "" {
-				name = info.ID
-			}
-			idle = append(idle, name)
-		}
-		if len(idle) == 0 {
+		if !poolSessionIsLiveInfo(info) || strings.TrimSpace(info.TriggerBeadID) != "" {
 			continue
 		}
+		name := strings.TrimSpace(info.SessionName)
+		if name == "" {
+			name = info.ID
+		}
+		idleByTemplate[template] = append(idleByTemplate[template], name)
+	}
+	if len(idleByTemplate) == 0 {
+		// No idle instance in this scope: no finding is possible, so skip the
+		// ready read entirely.
+		return nil, nil
+	}
 
-		// Live so bd's raw --status=open filter drops blocked/deferred rows
-		// before mapBdStatus collapses them into "open" and the check reports
-		// work the instance is correct to leave alone (same tradeoff as
-		// listOpenForControllerDemandLive). FederatedReadTier because a
-		// relocated class leg answers at exactly the tier asked.
+	// Per-template routed lookup, but ONLY for templates that actually have an
+	// idle instance. The previous shape ran both reads for every generic pool
+	// template; idle templates are typically 1-2, so this is O(idle) not
+	// O(templates) round-trips against remote Dolt.
+	//
+	// Live so bd's raw --status=open filter drops blocked/deferred rows before
+	// mapBdStatus collapses them into "open" and the check reports work the
+	// instance is correct to leave alone (same tradeoff as
+	// listOpenForControllerDemandLive). FederatedReadTier because a relocated
+	// class leg answers at exactly the tier asked.
+	var findings []poolIdleRoutedWorkFinding
+	for template, idle := range idleByTemplate {
 		items, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
 			Status:   "open",
 			TierMode: beads.FederatedReadTier,
