@@ -499,6 +499,58 @@ func TestComputePoolDesiredStates_RespawnsInFlightWorkWhosePoolSessionGone(t *te
 // TestComputePoolDesiredStates_LeavesOpenPoolAssignedWorkAlone guards the other
 // side of the in-flight rule: an OPEN bead assigned to the same pool session
 // name is not in-flight work and must not respawn a pool instance.
+// TestIsPoolSessionNameForTemplate pins the assignee-shape discriminator that
+// keeps the in-flight respawn narrow. Per pool_session_name.go a pool assignee
+// is PoolSessionName(template, beadID) = "<sanitized-template-base>-<beadID>",
+// which also admits the legacy "-mc-" bead-ID form. Session-bead ids, the
+// runtime identity name, and arbitrary unknown assignees must NOT match, or
+// genuinely orphaned work would respawn.
+func TestIsPoolSessionNameForTemplate(t *testing.T) {
+	template := "gascity-packs/implementation-worker"
+	cases := []struct {
+		name     string
+		assignee string
+		want     bool
+	}{
+		{"modern bead-scoped", PoolSessionName(template, "gp-1a2b"), true},
+		{"legacy mc bead form", "implementation-worker-mc-abc123", true},
+		{"runtime identity name", "gascity-packs--implementation-worker-1-pool", false},
+		{"session bead id", "dead-session", false},
+		{"unknown assignee", "unknown-session-id", false},
+		{"empty", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isPoolSessionNameForTemplate(template, tc.assignee); got != tc.want {
+				t.Fatalf("isPoolSessionNameForTemplate(%q, %q) = %v, want %v", template, tc.assignee, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestComputePoolDesiredStates_RespawnsInFlightLegacyMcForm covers the legacy
+// "-mc-" assignee shape end to end: it is still this pool's own session name, so
+// the in-flight respawn applies.
+func TestComputePoolDesiredStates_RespawnsInFlightLegacyMcForm(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("implementation-worker", "gascity-packs", intPtr(8), 0)},
+	}
+	template := "gascity-packs/implementation-worker"
+	work := []beads.Bead{
+		workBead("gp-legacy", template, "implementation-worker-mc-abc123", "in_progress", 5),
+	}
+
+	result := ComputePoolDesiredStates(cfg, work, nil, nil)
+
+	if len(result) != 1 {
+		t.Fatalf("len(result) = %d, want 1", len(result))
+	}
+	reqs := result[0].Requests
+	if len(reqs) != 1 || reqs[0].Tier != "wake-known-identity" || reqs[0].WorkBeadID != "gp-legacy" {
+		t.Fatalf("requests = %+v, want one wake-known-identity for gp-legacy", reqs)
+	}
+}
+
 func TestComputePoolDesiredStates_LeavesOpenPoolAssignedWorkAlone(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{poolAgent("implementation-worker", "gascity-packs", intPtr(8), 0)},
