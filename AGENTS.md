@@ -86,6 +86,61 @@ infrastructure (tmux, filesystem) go in `test/` with build tags.
 **The architecture docs are a reference, not a blueprint.** When the DX
 conflicts with the docs, DX wins. We update the docs to match.
 
+## Default software-factory workflow
+
+Use the software-factory workflow for improvement work that changes code,
+prompts, policies, formulas, evaluation behavior, or delivery wiring. Read
+[`docs/reference/software-factory.md`](docs/reference/software-factory.md) and
+validate the project policy before starting:
+
+```bash
+gc factory validate .agent-factory/config.yaml
+gc formula list
+gc status
+gc doctor
+```
+
+The lifecycle is deliberately staged:
+
+1. **Collect and look back.** Run the configured collection and bounded-lookback
+   steps. Keep empty, unavailable, and truncated reads distinct, and preserve
+   source links and coverage evidence.
+2. **Ask for the decision that belongs to a human.** Build the human digest and
+   route unresolved intent, sensitive interpretation, canon changes, and
+   publication decisions through the configured human channel. Do not infer
+   approval from implementation permission.
+3. **Implement in an isolated bead worktree.** Keep every rig root clean and
+   pinned to `main`. Use `gc worktree ensure` for a bead-specific `work_dir`,
+   verify it with `gc worktree verify`, and launch work with `gc sling`. A
+   worker must refuse to edit when `work_dir` and `rig_root` are the same.
+4. **Review independently.** The improver may change the candidate, but the
+   reviewer must use a read-only checkout and must not change thresholds,
+   evaluation criteria, or shipping policy. Use `gc status`, `gc wait`, and
+   `gc doctor` to collect evidence; use `gc converge` only for the configured
+   convergence action.
+5. **Promote a revision bundle.** Record the candidate commit, review result,
+   test evidence, evaluation-suite identity, parent accepted bundle, and
+   rollback target. Promote only when the candidate beats the current baseline
+   without exceeding safety, latency, cost, dependency, or worktree limits.
+6. **Deliver only the named action.** The factory gate does not imply reply,
+   approval, merge, deploy, close, or notify. Run the delivery step only when
+   its action policy explicitly authorizes it. Keep the previous accepted
+   bundle immediately available for rollback.
+
+Bound every cycle with an explicit objective, maximum attempts, and stop
+condition. A failed cycle produces evidence for the next proposal; it does not
+recursively modify itself forever. Raise the gate as authority increases:
+formatting and administrative changes may be automated, UI and workflow
+changes need simulation and canary evidence, and evaluator, safety, clinical,
+world-model, or deployment-policy changes require independent evaluation and
+human approval.
+
+For this fork, push and open pull requests only in `rhar1511/gascity` unless
+the user explicitly directs otherwise. Do not target upstream or another
+repository as part of a factory run. Keep delivery evidence with the bead and
+return the commit SHA, validation evidence, exported capability, and rollback
+point to the controlling workflow.
+
 ## Architecture
 
 **Orchestration is the value.** A formula is a method for how a job gets
