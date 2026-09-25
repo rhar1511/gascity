@@ -288,7 +288,8 @@ func TestPoolIdleRoutedWorkCheckOKWhenRoutedWorkIsBlockedInBackingStore(t *testi
 // A read left at the TierIssues zero value gets nothing back.
 type poolIdleRoutedWorkTierStore struct {
 	beads.Store
-	wispRouted []beads.Bead
+	wispRouted  []beads.Bead
+	readyRouted []beads.Bead
 }
 
 func (s poolIdleRoutedWorkTierStore) List(q beads.ListQuery) ([]beads.Bead, error) {
@@ -301,6 +302,48 @@ func (s poolIdleRoutedWorkTierStore) List(q beads.ListQuery) ([]beads.Bead, erro
 	return append([]beads.Bead(nil), s.wispRouted...), nil
 }
 
+func (s poolIdleRoutedWorkTierStore) Ready(q ...beads.ReadyQuery) ([]beads.Bead, error) {
+	if len(q) > 0 && q[0].TierMode != beads.TierBoth {
+		return nil, nil
+	}
+	return append([]beads.Bead(nil), s.readyRouted...), nil
+}
+
+func TestPoolIdleRoutedWorkCheckIgnoresNonClaimableRoutedRows(t *testing.T) {
+	cityDir := t.TempDir()
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "builder", Dir: "gascity"}},
+	}
+	message := poolIdleWorkRoutedBead("gascity/builder", "")
+	message.ID = "WISP-MESSAGE"
+	message.Type = "message"
+	message.Ephemeral = true
+	hold := poolIdleWorkRoutedBead("gascity/builder", "")
+	hold.ID = "WISP-HOLD"
+	hold.Ephemeral = true
+	hold.Labels = []string{"gt:message", "delivery:pending"}
+	real := poolIdleWorkRoutedBead("gascity/builder", "")
+	real.ID = "REAL-TASK"
+	store := poolIdleRoutedWorkTierStore{
+		Store: beads.NewMemStoreFrom(0, []beads.Bead{
+			poolIdleWorkSessionBead("gascity/builder", "active", ""),
+		}, nil),
+		wispRouted:  []beads.Bead{message, hold, real},
+		readyRouted: []beads.Bead{message, hold, real},
+	}
+
+	result := newPoolIdleRoutedWorkCheck(cfg, cityDir, func(_ string) (beads.Store, error) {
+		return store, nil
+	}).Run(&doctor.CheckContext{})
+	if result.Status != doctor.StatusWarning {
+		t.Fatalf("status = %v, want warning for the one claimable task: %#v", result.Status, result)
+	}
+	details := strings.Join(result.Details, "\n")
+	if strings.Contains(details, "WISP-MESSAGE") || strings.Contains(details, "WISP-HOLD") || !strings.Contains(details, "REAL-TASK") {
+		t.Fatalf("details = %s, want only REAL-TASK", details)
+	}
+}
+
 func TestPoolIdleRoutedWorkCheckReadsBothTiers(t *testing.T) {
 	cityDir := t.TempDir()
 	cfg := &config.City{
@@ -310,7 +353,8 @@ func TestPoolIdleRoutedWorkCheckReadsBothTiers(t *testing.T) {
 		Store: beads.NewMemStoreFrom(0, []beads.Bead{
 			poolIdleWorkSessionBead("gascity/builder", "active", ""),
 		}, nil),
-		wispRouted: []beads.Bead{poolIdleWorkRoutedBead("gascity/builder", "")},
+		wispRouted:  []beads.Bead{poolIdleWorkRoutedBead("gascity/builder", "")},
+		readyRouted: []beads.Bead{poolIdleWorkRoutedBead("gascity/builder", "")},
 	}
 
 	result := newPoolIdleRoutedWorkCheck(cfg, cityDir, func(_ string) (beads.Store, error) {

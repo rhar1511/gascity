@@ -13,14 +13,15 @@ import (
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
-// poolIdleRoutedWorkCheck detects a pool template that has gc.routed_to work
+// poolIdleRoutedWorkCheck detects a pool template that has claimable gc.routed_to work
 // sitting open and unclaimed while a live instance of that same pool is idle
 // (holds no current trigger bead) and so could pick the work up right now.
 //
 // An idle instance alone is not a finding: a pool's min-floor idle workers
 // legitimately hold no bead while waiting for routed work to arrive. This
 // check only fires when both conditions hold together — idle capacity AND
-// unclaimed work already routed to it.
+// claimable work already routed to it. Notifications, human holds, blocked
+// beads, and deferred work are not claimable pool work and are ignored.
 type poolIdleRoutedWorkCheck struct {
 	cfg      *config.City
 	cityPath string
@@ -42,7 +43,7 @@ func (c *poolIdleRoutedWorkCheck) CanFix() bool { return false }
 func (c *poolIdleRoutedWorkCheck) Fix(_ *doctor.CheckContext) error { return nil }
 
 // poolIdleRoutedWorkFinding is one pool template, in one store scope, that
-// has unclaimed gc.routed_to work sitting beside at least one idle instance.
+// has claimable gc.routed_to work sitting beside at least one idle instance.
 type poolIdleRoutedWorkFinding struct {
 	scope         string
 	template      string
@@ -51,7 +52,7 @@ type poolIdleRoutedWorkFinding struct {
 }
 
 func (f poolIdleRoutedWorkFinding) describe() string {
-	return fmt.Sprintf("%s pool %s has %d unclaimed routed bead(s) (%s) while %d instance(s) sit idle (%s)",
+	return fmt.Sprintf("%s pool %s has %d claimable unclaimed routed bead(s) (%s) while %d instance(s) sit idle (%s)",
 		f.scope, f.template, len(f.beadIDs), strings.Join(f.beadIDs, ", "), len(f.idleInstances), strings.Join(f.idleInstances, ", "))
 }
 
@@ -75,7 +76,7 @@ func (c *poolIdleRoutedWorkCheck) Run(_ *doctor.CheckContext) *doctor.CheckResul
 			"fix bead store access, then rerun gc doctor",
 			details)
 	}
-	msg := fmt.Sprintf("%d pool(s) have unclaimed routed work while an instance sits idle", len(findings))
+	msg := fmt.Sprintf("%d pool(s) have claimable unclaimed routed work while an instance sits idle", len(findings))
 	if len(skipped) > 0 {
 		msg = fmt.Sprintf("%s; %d scope(s) skipped", msg, len(skipped))
 	}
@@ -119,45 +120,71 @@ func (c *poolIdleRoutedWorkCheck) collect() (findings []poolIdleRoutedWorkFindin
 // collectStoreFindings checks every generic-ephemeral pool template in cfg
 // against one store: a targeted session-class list for idle live instances,
 // and (only when at least one is idle) a targeted gc.routed_to metadata
-// lookup for unclaimed work — never a full-store scan.
+// lookup intersected with the store's authoritative ready set. This keeps
+// blocked, deferred, held, and notification beads out of the finding without
+// mutating or closing them.
 func (c *poolIdleRoutedWorkCheck) collectStoreFindings(store beads.Store, label string) ([]poolIdleRoutedWorkFinding, error) {
 	sessStore := cliSessionFrontDoor(store, c.cfg, c.cityPath)
 
-	var findings []poolIdleRoutedWorkFinding
+	// Build the set of generic pool templates once, then enumerate the session
+	// class once. The former per-template List calls each scanned the complete
+	// session ledger and made this check exceed its budget on remote Dolt.
+	genericTemplates := make(map[string]struct{})
 	for i := range c.cfg.Agents {
 		agent := &c.cfg.Agents[i]
 		if agent.Suspended || !agent.SupportsGenericEphemeralSessions() {
 			continue
 		}
-		template := agent.QualifiedName()
-		if template == "" {
+		if template := agent.QualifiedName(); template != "" {
+			genericTemplates[template] = struct{}{}
+		}
+	}
+	if len(genericTemplates) == 0 {
+		return nil, nil
+	}
+
+	allSessions, err := sessStore.List("", "")
+	if err != nil {
+		return nil, fmt.Errorf("listing sessions: %w", err)
+	}
+	idleByTemplate := make(map[string][]string)
+	for _, info := range allSessions {
+		template := strings.TrimSpace(info.Template)
+		if _, ok := genericTemplates[template]; !ok {
 			continue
 		}
-
-		sessions, err := sessStore.List("", template)
-		if err != nil {
-			return findings, fmt.Errorf("listing sessions for %s: %w", template, err)
-		}
-		var idle []string
-		for _, info := range sessions {
-			if !poolSessionIsLiveInfo(info) || strings.TrimSpace(info.TriggerBeadID) != "" {
-				continue
-			}
-			name := strings.TrimSpace(info.SessionName)
-			if name == "" {
-				name = info.ID
-			}
-			idle = append(idle, name)
-		}
-		if len(idle) == 0 {
+		if !poolSessionIsLiveInfo(info) || strings.TrimSpace(info.TriggerBeadID) != "" {
 			continue
 		}
+		name := strings.TrimSpace(info.SessionName)
+		if name == "" {
+			name = info.ID
+		}
+		idleByTemplate[template] = append(idleByTemplate[template], name)
+	}
+	if len(idleByTemplate) == 0 {
+		return nil, nil
+	}
+	for template := range idleByTemplate {
+		sort.Strings(idleByTemplate[template])
+	}
 
-		// Live so bd's raw --status=open filter drops blocked/deferred rows
-		// before mapBdStatus collapses them into "open" and the check reports
-		// work the instance is correct to leave alone (same tradeoff as
-		// listOpenForControllerDemandLive). FederatedReadTier because a
-		// relocated class leg answers at exactly the tier asked.
+	// Ready is the authoritative claimability projection. It excludes rows
+	// that are blocked, deferred, held, or notification-only even when a broad
+	// routed metadata list still returns them.
+	ready, err := beads.HandlesFor(store).Live.Ready(beads.ReadyQuery{TierMode: beads.FederatedReadTier})
+	if err != nil {
+		return nil, fmt.Errorf("listing ready work: %w", err)
+	}
+	readyIDs := make(map[string]struct{}, len(ready))
+	for _, b := range ready {
+		readyIDs[b.ID] = struct{}{}
+	}
+
+	var findings []poolIdleRoutedWorkFinding
+	for template, idle := range idleByTemplate {
+		// FederatedReadTier because a relocated class leg answers at exactly the
+		// tier asked. Live keeps the routed read authoritative.
 		items, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
 			Status:   "open",
 			TierMode: beads.FederatedReadTier,
@@ -168,7 +195,10 @@ func (c *poolIdleRoutedWorkCheck) collectStoreFindings(store beads.Store, label 
 		}
 		var beadIDs []string
 		for _, b := range items {
-			if strings.TrimSpace(b.Assignee) != "" || b.Status != "open" {
+			if strings.TrimSpace(b.Assignee) != "" || b.Status != "open" || !poolRoutedWorkIsClaimable(b) {
+				continue
+			}
+			if _, ok := readyIDs[b.ID]; !ok {
 				continue
 			}
 			beadIDs = append(beadIDs, b.ID)
@@ -177,7 +207,6 @@ func (c *poolIdleRoutedWorkCheck) collectStoreFindings(store beads.Store, label 
 			continue
 		}
 		sort.Strings(beadIDs)
-		sort.Strings(idle)
 		findings = append(findings, poolIdleRoutedWorkFinding{
 			scope:         label,
 			template:      template,
@@ -186,4 +215,21 @@ func (c *poolIdleRoutedWorkCheck) collectStoreFindings(store beads.Store, label 
 		})
 	}
 	return findings, nil
+}
+
+// poolRoutedWorkIsClaimable keeps the doctor finding limited to work a pool
+// worker may actually claim. Mail and explicit dispatch holds can be open and
+// routed, but their next actor is a controller or human rather than the idle
+// pool instance.
+func poolRoutedWorkIsClaimable(b beads.Bead) bool {
+	if b.Type == "message" {
+		return false
+	}
+	for _, label := range b.Labels {
+		switch label {
+		case "gt:message", beadmeta.HoldMayorLabel, beadmeta.HoldExternalLabel:
+			return false
+		}
+	}
+	return true
 }
