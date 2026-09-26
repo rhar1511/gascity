@@ -81,7 +81,9 @@ beforeEach(() => {
       if (beadMatch) {
         const id = decodeURIComponent(beadMatch[1] ?? '');
         const bead =
-          stubMode.kind === 'ok' ? stubMode.beads.find((candidate) => candidate.id === id) : undefined;
+          stubMode.kind === 'ok'
+            ? stubMode.beads.find((candidate) => candidate.id === id)
+            : undefined;
         if (bead) return jsonResponse(bead);
         return jsonResponse({ error: 'not found' }, { status: 404 });
       }
@@ -104,30 +106,28 @@ describe('WorkbenchPage', () => {
     expect(await screen.findByText('Sample bead')).toBeTruthy();
   });
 
-  it('opens the corresponding real bead when a work queue entry is selected', async () => {
+  it('keeps bead details and attempt controls together without covering them in a modal', async () => {
     renderPage();
 
     await screen.findByText('Sample bead');
     fireEvent.click(screen.getByTitle('Open gascity-0001'));
 
-    const dialog = await screen.findByRole('dialog');
-    expect(within(dialog).getByText(`${PROJECT}-0001`)).toBeTruthy();
-    expect(within(dialog).getByText('Sample bead description.')).toBeTruthy();
+    const detail = await screen.findByRole('region', { name: /selected bead/i });
+    expect(within(detail).getByText(`${PROJECT}-0001`)).toBeTruthy();
+    expect(within(detail).getByText('Sample bead description.')).toBeTruthy();
+    expect(within(detail).getByLabelText('Execution attempt')).toBeTruthy();
+    expect(screen.queryByRole('dialog')).toBeNull();
   });
 
   it('is read-only: renders no create, close, or claim controls and performs no writes', async () => {
     renderPage('/workbench?bead=gascity-0001');
 
     expect((await screen.findAllByText('Sample bead')).length).toBeGreaterThan(0);
-    const dialog = await screen.findByRole('dialog');
+    const detail = await screen.findByRole('region', { name: /selected bead/i });
 
     expect(screen.queryByRole('button', { name: /new bead/i })).toBeNull();
-    expect(
-      within(dialog)
-        .getAllByRole('button', { name: /^close$/i })
-        .filter((button) => button.textContent?.trim() === 'Close'),
-    ).toHaveLength(0);
-    expect(within(dialog).queryByRole('button', { name: /^claim$/i })).toBeNull();
+    expect(within(detail).queryByRole('button', { name: /^close$/i })).toBeNull();
+    expect(within(detail).queryByRole('button', { name: /^claim$/i })).toBeNull();
     expect(supervisorWrites).toEqual([]);
   });
 
@@ -151,10 +151,48 @@ describe('WorkbenchPage', () => {
     setStub({ kind: 'ok', beads: [] });
     renderPage('/workbench?bead=gascity-9999');
 
-    const dialog = await screen.findByRole('dialog');
-    expect(
-      await within(dialog).findByText(/resolved or removed/i),
-    ).toBeTruthy();
+    const detail = await screen.findByRole('region', { name: /selected bead/i });
+    expect(await within(detail).findByText(/resolved or removed/i)).toBeTruthy();
+  });
+
+  it('filters and orders the queue without changing the shared bead read', async () => {
+    setStub({
+      kind: 'ok',
+      beads: [
+        sampleBead(),
+        {
+          ...sampleBead(),
+          id: 'gascity-0002',
+          title: 'Other bead',
+          priority: 0,
+          status: 'closed',
+        } as SupervisorBead,
+      ],
+    });
+    renderPage();
+    await screen.findByText('Other bead');
+    fireEvent.change(screen.getByRole('searchbox', { name: /search work queue/i }), {
+      target: { value: 'Sample' },
+    });
+    const queue = screen.getByRole('list', { name: /work queue/i });
+    expect(within(queue).getByText('Sample bead')).toBeTruthy();
+    expect(within(queue).queryByText('Other bead')).toBeNull();
+    fireEvent.change(screen.getByRole('searchbox', { name: /search work queue/i }), {
+      target: { value: '' },
+    });
+    fireEvent.change(screen.getByLabelText('Filter status'), { target: { value: 'closed' } });
+    expect(within(queue).getByText('Other bead')).toBeTruthy();
+    expect(within(queue).queryByText('Sample bead')).toBeNull();
+  });
+
+  it('offers a keyboard and touch-friendly move control for board cards', async () => {
+    renderPage();
+    await screen.findByText('Sample bead');
+    fireEvent.click(screen.getByRole('button', { name: /kanban/i }));
+    fireEvent.change(screen.getByLabelText('Move gascity-0001 to status'), {
+      target: { value: 'in_progress' },
+    });
+    await waitFor(() => expect(supervisorWrites[0]?.body).toEqual({ status: 'in_progress' }));
   });
 
   it('Kanban drag changes only the supported Bead status', async () => {
@@ -249,7 +287,51 @@ describe('WorkbenchPage', () => {
     expect(supervisorWrites.filter((w) => w.path.includes('/bead/'))).toEqual([]);
   });
 
-  it('queues a per-attempt chat message and delivers it in order (gp-bod)', async () => {
+  it('lets the operator inspect a prior attempt without offering live controls on it', async () => {
+    stubSessions = [
+      {
+        id: 's-active',
+        session_name: 'worker-1',
+        state: 'active',
+        running: true,
+        active_bead: 'gascity-0001',
+        created_at: '2026-01-02T00:00:00Z',
+      },
+      {
+        id: 's-old',
+        session_name: 'worker-old',
+        state: 'completed',
+        running: false,
+        active_bead: 'gascity-0001',
+        created_at: '2026-01-01T00:00:00Z',
+      },
+    ];
+    renderPage('/workbench?bead=gascity-0001');
+    fireEvent.click(await screen.findByRole('button', { name: /inspect worker-old/i }));
+    const panel = screen.getByLabelText('Execution attempt');
+    expect(within(panel).getAllByText(/worker-old/).length).toBeGreaterThan(0);
+    expect(within(panel).queryByRole('button', { name: /send/i })).toBeNull();
+  });
+
+  it('does not offer PR actions without a Gas City queue, policy and conflict verdict', async () => {
+    stubSessions = [
+      {
+        id: 's-active',
+        session_name: 'worker-1',
+        state: 'active',
+        running: true,
+        active_bead: 'gascity-0001',
+        created_at: '2026-01-02T00:00:00Z',
+      },
+    ];
+    renderPage('/workbench?bead=gascity-0001');
+    const actions = await screen.findByLabelText('Pull request actions');
+    expect(actions.textContent).toMatch(/verdicts/i);
+    expect(within(actions).queryByRole('button', { name: /prepare pr|queue pr/i })).toBeNull();
+    expect(supervisorWrites.some((write) => write.path.endsWith('/mail'))).toBe(false);
+  });
+
+  it('does not claim session delivery merely because mail was accepted (gp-bod)', async () => {
     stubSessions = [
       {
         id: 's-active',
@@ -273,7 +355,8 @@ describe('WorkbenchPage', () => {
 
     const queue = await screen.findByLabelText('Queued messages');
     expect(queue.textContent).toContain('please continue');
-    await waitFor(() => expect(queue.textContent).toContain('delivered'));
+    await waitFor(() => expect(queue.textContent).toContain('awaiting session acknowledgement'));
+    expect(queue.textContent).not.toContain('delivered');
   });
 
   it('offers an explicit start action when a Bead has no active attempt (gp-w3q)', async () => {
@@ -292,10 +375,10 @@ describe('WorkbenchPage', () => {
     const start = await screen.findByRole('button', { name: /start new attempt/i });
     fireEvent.click(start);
     fireEvent.click(start); // second click while in flight is ignored (idempotent)
+    await waitFor(() => expect(supervisorWrites.some((w) => w.path.endsWith('/sling'))).toBe(true));
     await waitFor(() =>
-      expect(supervisorWrites.some((w) => w.path.endsWith('/sling'))).toBe(true),
+      expect(supervisorWrites.filter((w) => w.path.endsWith('/sling'))).toHaveLength(1),
     );
-    await waitFor(() => expect(supervisorWrites.filter((w) => w.path.endsWith('/sling'))).toHaveLength(1));
   });
 
   it('reverts the optimistic move and surfaces a server rejection', async () => {

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { GC_EVENT_PREFIX } from 'gas-city-dashboard-shared';
 import { getActiveCity } from '../api/cityBase';
-import { BeadDetailModal } from '../components/BeadDetailModal';
+import { BeadBody } from '../components/BeadBody';
 import { LiveSessionPeek } from '../components/LiveSessionPeek';
 import { Button } from '../components/Button';
 import { PageHeader } from '../components/PageHeader';
@@ -17,7 +17,6 @@ import { sendSupervisorMail } from '../supervisor/mailWrites';
 import { useOperatorConfig } from '../contexts/OperatorConfigContext';
 import { resolveAttempts, type ExecutionAttempt } from '../lib/workbenchAttempts';
 import { resolvePreview } from '../lib/workbenchPreview';
-import { PullRequestActions } from '../workbench/PullRequestActions';
 
 // Gas City Workbench: Canvas/Kanban/Priority/Work Queue as views over the same
 // Beads data.
@@ -47,21 +46,42 @@ export function WorkbenchPage() {
   const selectedBeadParam = normalizeSelectedBeadParam(searchParams.get('bead'));
   const [selectedId, setSelectedId] = useState<string | null>(selectedBeadParam);
   const [view, setView] = useState<WorkbenchView>('queue');
+  const [query, setQuery] = useState('');
+  const [statusFilter, setStatusFilter] = useState('all');
+  const [order, setOrder] = useState<'priority' | 'title' | 'updated'>('priority');
   // Optimistic overlays keyed by bead id; cleared once the shared read catches up.
   const [overrides, setOverrides] = useState<Record<string, Patch>>({});
   const [mutationError, setMutationError] = useState<string | null>(null);
   const [confirmCloseId, setConfirmCloseId] = useState<string | null>(null);
 
-  const { data, loading, error, refresh } = useCachedData(
-    `workbench:queue:${cityCacheKey}`,
-    () => listSupervisorBeads(),
+  const { data, loading, error, refresh } = useCachedData(`workbench:queue:${cityCacheKey}`, () =>
+    listSupervisorBeads({ includeClosed: true }),
   );
-  const { data: sessionsData } = useCachedData(
-    `workbench:sessions:${cityCacheKey}`,
-    () => listSupervisorSessions(),
+  const { data: sessionsData } = useCachedData(`workbench:sessions:${cityCacheKey}`, () =>
+    listSupervisorSessions(),
   );
   const sessions = useMemo(() => sessionsData?.items ?? [], [sessionsData]);
   const rows = useMemo(() => applyOverrides(data?.items ?? [], overrides), [data, overrides]);
+  const queueRows = useMemo(
+    () =>
+      rows
+        .filter((row) => {
+          const matchesQuery = `${row.id} ${row.title}`
+            .toLowerCase()
+            .includes(query.trim().toLowerCase());
+          return matchesQuery && (statusFilter === 'all' || row.status === statusFilter);
+        })
+        .sort((a, b) => {
+          if (order === 'title') return a.title.localeCompare(b.title) || a.id.localeCompare(b.id);
+          if (order === 'updated')
+            return (
+              String(b.updated_at ?? '').localeCompare(String(a.updated_at ?? '')) ||
+              a.id.localeCompare(b.id)
+            );
+          return (a.priority ?? 99) - (b.priority ?? 99) || a.id.localeCompare(b.id);
+        }),
+    [rows, query, statusFilter, order],
+  );
   const hasLoadedQueue = data !== undefined;
 
   useGcEventRefresh([GC_EVENT_PREFIX.bead], () => void refresh(), {
@@ -164,57 +184,119 @@ export function WorkbenchPage() {
         ))}
       </nav>
 
-      {!hasLoadedQueue && loading ? (
-        <p className="text-body text-fg-muted italic">Loading work queue.</p>
-      ) : error && !hasLoadedQueue ? (
-        <div className="space-y-3">
-          <p className="text-body text-accent" role="alert">
-            Work queue unavailable: {error}
-          </p>
-          <Button size="sm" onClick={() => void refresh()} disabled={loading}>
-            Retry
-          </Button>
-        </div>
-      ) : rows.length === 0 ? (
-        <p className="text-body text-fg-muted italic">Nothing on the queue right now.</p>
-      ) : view === 'queue' ? (
-        <ul aria-label="Work queue" className="space-y-2 max-w-prose">
-          {rows.map((bead) => (
-            <li key={bead.id}>
-              <button
-                type="button"
-                onClick={() => openBead(bead.id)}
-                aria-pressed={selectedId === bead.id}
-                title={`Open ${bead.id}`}
-                className="w-full text-left rounded-sm border border-rule px-4 py-3 hover:border-fg-faint focus-mark transition-colors duration-150 ease-out-quart"
+      <div className="grid gap-5 xl:grid-cols-[minmax(17rem,0.8fr)_minmax(0,1.2fr)]">
+        <div className="min-w-0">
+          {view === 'queue' && (
+            <div className="mb-3 flex flex-wrap gap-2">
+              <input
+                type="search"
+                aria-label="Search work queue"
+                placeholder="Search beads"
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                className="min-w-36 flex-1 rounded-sm border border-rule bg-surface px-2 py-1 text-body text-fg"
+              />
+              <select
+                aria-label="Filter status"
+                value={statusFilter}
+                onChange={(event) => setStatusFilter(event.target.value)}
+                className="rounded-sm border border-rule bg-surface px-2 py-1 text-body text-fg"
               >
-                <span className="flex items-baseline justify-between gap-3">
-                  <span className="text-body text-fg font-medium truncate">{bead.title}</span>
-                  <StatusBadge tone={beadStatusTone(bead.status)} label={bead.status} />
-                </span>
-                <span className="text-label uppercase tracking-wider text-fg-faint">
-                  <code>{bead.id}</code>
-                  {' · '}
-                  {bead.issue_type}
-                </span>
-              </button>
-            </li>
-          ))}
-        </ul>
-      ) : (
-        <LaneBoard
-          rows={rows}
-          view={view}
-          selectedId={selectedId}
-          onOpen={openBead}
-          onMove={mutate}
-          onRequestClose={(id) => setConfirmCloseId(id)}
-        />
-      )}
-
-      {selectedBead && (
-        <AttemptPanel bead={selectedBead} sessions={sessions} />
-      )}
+                <option value="all">All statuses</option>
+                {KANBAN_STATUSES.map((status) => (
+                  <option key={status} value={status}>
+                    {status}
+                  </option>
+                ))}
+              </select>
+              <select
+                aria-label="Order work queue"
+                value={order}
+                onChange={(event) => setOrder(event.target.value as typeof order)}
+                className="rounded-sm border border-rule bg-surface px-2 py-1 text-body text-fg"
+              >
+                <option value="priority">Priority</option>
+                <option value="updated">Recently updated</option>
+                <option value="title">Title</option>
+              </select>
+            </div>
+          )}
+          {!hasLoadedQueue && loading ? (
+            <p className="text-body text-fg-muted italic">Loading work queue.</p>
+          ) : error && !hasLoadedQueue ? (
+            <div className="space-y-3">
+              <p className="text-body text-accent" role="alert">
+                Work queue unavailable: {error}
+              </p>
+              <Button size="sm" onClick={() => void refresh()} disabled={loading}>
+                Retry
+              </Button>
+            </div>
+          ) : rows.length === 0 ? (
+            <p className="text-body text-fg-muted italic">Nothing on the queue right now.</p>
+          ) : view === 'queue' && queueRows.length === 0 ? (
+            <p className="text-body text-fg-muted">No beads match these filters.</p>
+          ) : view === 'queue' ? (
+            <ul aria-label="Work queue" className="space-y-2">
+              {queueRows.map((bead) => (
+                <li key={bead.id}>
+                  <button
+                    type="button"
+                    onClick={() => openBead(bead.id)}
+                    aria-pressed={selectedId === bead.id}
+                    title={`Open ${bead.id}`}
+                    className="w-full text-left rounded-sm border border-rule px-4 py-3 hover:border-fg-faint focus-mark transition-colors duration-150 ease-out-quart"
+                  >
+                    <span className="flex items-baseline justify-between gap-3">
+                      <span className="text-body text-fg font-medium truncate">{bead.title}</span>
+                      <StatusBadge tone={beadStatusTone(bead.status)} label={bead.status} />
+                    </span>
+                    <span className="text-label uppercase tracking-wider text-fg-faint">
+                      <code>{bead.id}</code>
+                      {' · '}
+                      {bead.issue_type}
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <LaneBoard
+              rows={rows}
+              view={view}
+              selectedId={selectedId}
+              onOpen={openBead}
+              onMove={mutate}
+              onRequestClose={(id) => setConfirmCloseId(id)}
+            />
+          )}
+        </div>
+        {selectedId !== null && (
+          <section
+            aria-label="Selected bead"
+            className="min-w-0 rounded-sm border border-rule bg-surface p-4 sm:p-5"
+          >
+            <div className="mb-4 flex items-center justify-between gap-3">
+              <h2 className="text-body font-semibold text-fg">
+                <code>{selectedId}</code>
+              </h2>
+              <Button size="sm" tone="quiet" onClick={closeBead}>
+                Clear selection
+              </Button>
+            </div>
+            {selectedBead ? (
+              <>
+                <BeadBody bead={selectedBead} />
+                <AttemptPanel bead={selectedBead} sessions={sessions} />
+              </>
+            ) : hasLoadedQueue ? (
+              <p className="text-body text-fg-muted">This bead was resolved or removed.</p>
+            ) : (
+              <p className="text-body text-fg-muted">Loading bead.</p>
+            )}
+          </section>
+        )}
+      </div>
 
       {confirmCloseId !== null && (
         <div
@@ -238,14 +320,6 @@ export function WorkbenchPage() {
           </div>
         </div>
       )}
-
-      <BeadDetailModal
-        open={selectedId !== null}
-        onClose={closeBead}
-        beadId={selectedId}
-        initialBead={selectedBead}
-        onOpenBead={openBead}
-      />
     </section>
   );
 }
@@ -284,7 +358,11 @@ interface LaneBoardProps {
 function LaneBoard({ rows, view, selectedId, onOpen, onMove, onRequestClose }: LaneBoardProps) {
   const lanes =
     view === 'kanban'
-      ? KANBAN_STATUSES.map((status) => ({ key: `status:${status}`, label: status, patch: { status } as Patch }))
+      ? KANBAN_STATUSES.map((status) => ({
+          key: `status:${status}`,
+          label: status,
+          patch: { status } as Patch,
+        }))
       : PRIORITY_LANES.map((priority) => ({
           key: `priority:${priority}`,
           label: `P${priority}`,
@@ -311,7 +389,9 @@ function LaneBoard({ rows, view, selectedId, onOpen, onMove, onRequestClose }: L
             className="min-w-[14rem] flex-1 rounded-sm border border-rule p-2"
           >
             <div className="mb-2 flex items-center justify-between">
-              <span className="text-label uppercase tracking-wider text-fg-faint">{lane.label}</span>
+              <span className="text-label uppercase tracking-wider text-fg-faint">
+                {lane.label}
+              </span>
               <span className="text-label text-fg-faint">{laneRows.length}</span>
             </div>
             <ul className="space-y-2">
@@ -336,6 +416,31 @@ function LaneBoard({ rows, view, selectedId, onOpen, onMove, onRequestClose }: L
                   <Button size="sm" tone="quiet" onClick={() => onRequestClose(row.id)}>
                     Close
                   </Button>
+                  <select
+                    aria-label={`Move ${row.id} to ${view === 'kanban' ? 'status' : 'priority'}`}
+                    value={view === 'kanban' ? row.status : row.priority}
+                    onChange={(event) =>
+                      void onMove(
+                        row.id,
+                        view === 'kanban'
+                          ? { status: event.target.value }
+                          : { priority: Number(event.target.value) },
+                      )
+                    }
+                    className="mt-2 w-full rounded-sm border border-rule bg-surface px-2 py-1 text-label text-fg"
+                  >
+                    <option value={view === 'kanban' ? row.status : row.priority}>Move to…</option>
+                    {lanes
+                      .filter((target) => target.key !== lane.key)
+                      .map((target) => (
+                        <option
+                          key={target.key}
+                          value={view === 'kanban' ? target.patch.status : target.patch.priority}
+                        >
+                          {target.label}
+                        </option>
+                      ))}
+                  </select>
                 </li>
               ))}
             </ul>
@@ -355,32 +460,53 @@ function LaneBoard({ rows, view, selectedId, onOpen, onMove, onRequestClose }: L
 // detaches the previous stream before attaching the next. It never opens a
 // parallel terminal process — it follows Gas City's session identity and
 // streaming boundaries, and grants no access to unrelated terminals.
-function AttemptPanel({ bead, sessions }: { bead: Row; sessions: NonNullable<Awaited<ReturnType<typeof listSupervisorSessions>>['items']> }) {
+function AttemptPanel({
+  bead,
+  sessions,
+}: {
+  bead: Row;
+  sessions: NonNullable<Awaited<ReturnType<typeof listSupervisorSessions>>['items']>;
+}) {
   const attempts = resolveAttempts(bead, sessions);
+  const [inspectedId, setInspectedId] = useState<string | null>(null);
+  const inspected =
+    attempts.history.find((attempt) => attempt.sessionId === inspectedId) ?? attempts.current;
+  const inspectingHistory =
+    inspected !== null && inspected.sessionId !== attempts.current?.sessionId;
   return (
     <section aria-label="Execution attempt" className="mt-4 max-w-prose space-y-1">
-      {attempts.current ? (
+      {inspected ? (
         <>
           <p className="text-body text-fg">
-            Current attempt: <code>{attempts.current.sessionName}</code> ({attempts.current.state})
-            {attempts.current.workDir.length > 0 ? (
+            {inspectingHistory ? 'Prior' : 'Current'} attempt: <code>{inspected.sessionName}</code>{' '}
+            ({inspected.state})
+            {inspected.workDir.length > 0 ? (
               <>
                 {' · '}
-                <code>{attempts.current.workDir}</code>
+                <code>{inspected.workDir}</code>
               </>
             ) : null}
           </p>
           <LiveSessionPeek
-            key={attempts.current.sessionId}
-            sessionId={attempts.current.sessionId}
-            stream
+            key={inspected.sessionId}
+            sessionId={inspected.sessionId}
+            stream={!inspectingHistory}
             showBadge
             showCaption
           />
-          <AttemptDiffPanel key={`diff:${attempts.current.sessionId}`} beadId={bead.id} />
-          <AttemptChatPanel key={`chat:${attempts.current.sessionId}`} attempt={attempts.current} />
-          <AttemptPreviewPanel bead={bead} />
-          <AttemptPullRequestPanel bead={bead} attempt={attempts.current} />
+          {inspectingHistory ? (
+            <p className="text-label text-fg-muted">
+              Historical worktree diff and PR actions are unavailable; showing this session’s output
+              only.
+            </p>
+          ) : (
+            <>
+              <AttemptDiffPanel key={`diff:${inspected.sessionId}`} beadId={bead.id} />
+              <AttemptChatPanel key={`chat:${inspected.sessionId}`} attempt={inspected} />
+              <AttemptPreviewPanel bead={bead} />
+              <AttemptPullRequestPanel bead={bead} attempt={inspected} />
+            </>
+          )}
         </>
       ) : attempts.staleReference ? (
         <p className="text-body text-accent" role="alert">
@@ -394,10 +520,23 @@ function AttemptPanel({ bead, sessions }: { bead: Row; sessions: NonNullable<Awa
         <ul aria-label="Attempt history" className="space-y-1">
           {attempts.history.map((attempt) => (
             <li key={attempt.sessionId} className="text-label text-fg-faint">
-              <code>{attempt.sessionName}</code> — {attempt.state}
+              <button
+                type="button"
+                aria-label={`Inspect ${attempt.sessionName}`}
+                aria-pressed={inspected?.sessionId === attempt.sessionId}
+                onClick={() => setInspectedId(attempt.sessionId)}
+                className="text-left underline decoration-rule hover:text-fg focus-mark"
+              >
+                <code>{attempt.sessionName}</code> — {attempt.state}
+              </button>
             </li>
           ))}
         </ul>
+      )}
+      {inspectingHistory && attempts.current && (
+        <Button size="sm" tone="quiet" onClick={() => setInspectedId(null)}>
+          Return to current attempt
+        </Button>
       )}
     </section>
   );
@@ -448,32 +587,12 @@ function AttemptDiffPanel({ beadId }: { beadId: string }) {
 // has no merge authority: prepare/queue delegate to Gas City (here, a request to
 // the merge queue role), and the action + result are auditable against the Bead.
 function AttemptPullRequestPanel({ bead, attempt }: { bead: Row; attempt: ExecutionAttempt }) {
-  const { operatorWireAlias } = useOperatorConfig();
-  const metadata = (bead as { metadata?: Record<string, string> }).metadata ?? {};
-  const context = {
-    bead,
-    attempt,
-    attemptRevision: (metadata['gc.work_commit'] ?? metadata['gc.work_branch'] ?? '').trim(),
-    policyRevision: (metadata['gc.work_commit'] ?? metadata['gc.work_branch'] ?? '').trim(),
-    queueAvailable: true,
-    policyRejected: false,
-    hasConflict: false,
-  };
   return (
     <section aria-label="Pull request actions" className="mt-3">
-      <PullRequestActions
-        context={context}
-        onAction={async (action) => {
-          await sendSupervisorMail(
-            {
-              to: 'inktree/mergequeue',
-              subject: `Workbench ${action} PR for ${bead.id}`,
-              body: `Attempt ${attempt.sessionId} requests: ${action} a pull request for ${bead.id}.`,
-            },
-            operatorWireAlias,
-          );
-        }}
-      />
+      <p role="status" className="text-body text-fg-muted">
+        PR actions unavailable: Gas City has not supplied queue, policy, and conflict verdicts for{' '}
+        <code>{bead.id}</code> / <code>{attempt.sessionId}</code>.
+      </p>
     </section>
   );
 }
@@ -564,7 +683,7 @@ function AttemptStartActions({ bead, hasHistory }: { bead: Row; hasHistory: bool
   );
 }
 
-type ChatState = 'queued' | 'delivered' | 'rejected';
+type ChatState = 'queued' | 'mail accepted; awaiting session acknowledgement' | 'rejected';
 interface ChatMessage {
   id: string;
   text: string;
@@ -593,7 +712,11 @@ function AttemptChatPanel({ attempt }: { attempt: ExecutionAttempt }) {
         operatorWireAlias,
       );
       setMessages((current) =>
-        current.map((message) => (message.id === id ? { ...message, state: 'delivered' } : message)),
+        current.map((message) =>
+          message.id === id
+            ? { ...message, state: 'mail accepted; awaiting session acknowledgement' }
+            : message,
+        ),
       );
     } catch {
       setMessages((current) =>
