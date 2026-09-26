@@ -12,6 +12,7 @@ import { useGcEventRefresh } from '../hooks/useGcEvents';
 import { listSupervisorBeads } from '../supervisor/beadReads';
 import { updateSupervisorBead } from '../supervisor/beadWrites';
 import { listSupervisorSessions } from '../supervisor/sessionReads';
+import { fetchAttemptDiff } from '../supervisor/attemptReads';
 import { resolveAttempts } from '../lib/workbenchAttempts';
 
 // Gas City Workbench: Canvas/Kanban/Priority/Work Queue as views over the same
@@ -372,6 +373,7 @@ function AttemptPanel({ bead, sessions }: { bead: Row; sessions: NonNullable<Awa
             showBadge
             showCaption
           />
+          <AttemptDiffPanel key={`diff:${attempts.current.sessionId}`} beadId={bead.id} />
         </>
       ) : attempts.staleReference ? (
         <p className="text-body text-accent" role="alert">
@@ -391,6 +393,47 @@ function AttemptPanel({ bead, sessions }: { bead: Row; sessions: NonNullable<Awa
         </ul>
       )}
     </section>
+  );
+}
+
+// AttemptDiffPanel shows the read-only worktree diff for the attempt's Bead,
+// bounded and with explicit states. Viewing it cannot mutate the worktree.
+function AttemptDiffPanel({ beadId }: { beadId: string }) {
+  const { data, loading, error } = useCachedData(`workbench:diff:${beadId}`, () =>
+    fetchAttemptDiff(beadId),
+  );
+  if (loading && data === undefined) {
+    return <p className="text-body text-fg-muted italic">Loading diff…</p>;
+  }
+  if (error && data === undefined) {
+    return (
+      <p className="text-body text-accent" role="alert">
+        Diff unavailable: {error}
+      </p>
+    );
+  }
+  if (!data) return null;
+  if (data.state === 'empty') {
+    return <p className="text-body text-fg-muted italic">No changes in this attempt's worktree.</p>;
+  }
+  if (data.state === 'missing_worktree') {
+    return <p className="text-body text-fg-muted italic">Worktree missing for this attempt.</p>;
+  }
+  if (data.state === 'unavailable') {
+    return (
+      <p className="text-body text-accent" role="alert">
+        Diff unavailable for this attempt.
+      </p>
+    );
+  }
+  return (
+    <div aria-label="Attempt diff" className="space-y-1">
+      {data.binary && <p className="text-label text-fg-faint">Binary diff</p>}
+      <pre className="max-h-80 overflow-auto text-label">{data.text}</pre>
+      {data.truncated && (
+        <p className="text-label text-fg-faint">Diff truncated ({data.bytes} bytes).</p>
+      )}
+    </div>
   );
 }
 

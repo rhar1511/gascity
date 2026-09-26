@@ -64,6 +64,18 @@ beforeEach(() => {
       if (url.pathname === '/v0/city/test-city/sessions' && method === 'GET') {
         return jsonResponse({ items: stubSessions, total: stubSessions.length });
       }
+      if (/\/attempts\/diff$/.test(url.pathname) && method === 'GET') {
+        return jsonResponse({
+          body: {
+            worktree: '/wt/s-active',
+            state: 'ok',
+            text: 'diff --git a/a.txt b/a.txt\n-old\n+new\n',
+            truncated: false,
+            binary: false,
+            bytes: 42,
+          },
+        });
+      }
       if (beadMatch) {
         const id = decodeURIComponent(beadMatch[1] ?? '');
         const bead =
@@ -209,6 +221,30 @@ describe('WorkbenchPage', () => {
 
     expect(await screen.findByText(/current attempt/i)).toBeTruthy();
     expect(screen.getByText('worker-1')).toBeTruthy();
+  });
+
+  it('shows the read-only worktree diff for the attempt (gp-466)', async () => {
+    stubSessions = [
+      {
+        id: 's-active',
+        template: 'worker',
+        session_name: 'worker-1',
+        title: 'worker-1',
+        state: 'active',
+        running: true,
+        attached: false,
+        provider: 'opencode',
+        created_at: '2026-01-02T00:00:00Z',
+        active_bead: `${PROJECT}-0001`,
+        work_dir: '/wt/s-active',
+      },
+    ];
+    renderPage('/workbench?bead=gascity-0001');
+
+    const diff = await screen.findByLabelText('Attempt diff');
+    expect(diff.textContent).toContain('+new');
+    // Viewing the diff mutates nothing: no bead/worktree write is issued.
+    expect(supervisorWrites.filter((w) => w.path.includes('/bead/'))).toEqual([]);
   });
 
   it('reverts the optimistic move and surfaces a server rejection', async () => {
