@@ -192,6 +192,9 @@ func (c *poolIdleRoutedWorkCheck) collectStoreFindings(store beads.Store, label 
 			if strings.TrimSpace(b.Assignee) != "" || b.Status != "open" {
 				continue
 			}
+			if !poolRoutedWorkIsClaimable(b) {
+				continue
+			}
 			beadIDs = append(beadIDs, b.ID)
 		}
 		if len(beadIDs) == 0 {
@@ -207,4 +210,23 @@ func (c *poolIdleRoutedWorkCheck) collectStoreFindings(store beads.Store, label 
 		})
 	}
 	return findings, nil
+}
+
+// poolRoutedWorkIsClaimable keeps the doctor finding limited to work a pool
+// worker may actually claim. Mail and explicit dispatch holds can be open and
+// routed, but their next actor is a controller or human rather than the idle
+// pool instance, so reporting them as "unclaimed work beside an idle instance"
+// is a false positive (observed: 6 of 8 flagged beads were issue_type=message
+// mail wisps routed to control-dispatchers/mergequeue).
+func poolRoutedWorkIsClaimable(b beads.Bead) bool {
+	if b.Type == "message" {
+		return false
+	}
+	for _, label := range b.Labels {
+		switch label {
+		case "gt:message", beadmeta.HoldMayorLabel, beadmeta.HoldExternalLabel:
+			return false
+		}
+	}
+	return true
 }
