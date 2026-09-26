@@ -16,6 +16,7 @@ import { fetchAttemptDiff } from '../supervisor/attemptReads';
 import { sendSupervisorMail } from '../supervisor/mailWrites';
 import { useOperatorConfig } from '../contexts/OperatorConfigContext';
 import { resolveAttempts, type ExecutionAttempt } from '../lib/workbenchAttempts';
+import { resolvePreview } from '../lib/workbenchPreview';
 
 // Gas City Workbench: Canvas/Kanban/Priority/Work Queue as views over the same
 // Beads data.
@@ -377,6 +378,7 @@ function AttemptPanel({ bead, sessions }: { bead: Row; sessions: NonNullable<Awa
           />
           <AttemptDiffPanel key={`diff:${attempts.current.sessionId}`} beadId={bead.id} />
           <AttemptChatPanel key={`chat:${attempts.current.sessionId}`} attempt={attempts.current} />
+          <AttemptPreviewPanel bead={bead} />
         </>
       ) : attempts.staleReference ? (
         <p className="text-body text-accent" role="alert">
@@ -436,6 +438,44 @@ function AttemptDiffPanel({ beadId }: { beadId: string }) {
       {data.truncated && (
         <p className="text-label text-fg-faint">Diff truncated ({data.bytes} bytes).</p>
       )}
+    </div>
+  );
+}
+
+// AttemptPreviewPanel shows the attempt's application preview (a projection of
+// Gas City lifecycle state, resolved from the Bead's gc.preview_url). The frame
+// is sandboxed and only ever points at an allowlisted host; missing/blocked/
+// unavailable states are explicit, and it starts no preview process.
+function AttemptPreviewPanel({ bead }: { bead: Row }) {
+  const preview = resolvePreview(bead);
+  if (preview.state === 'missing') {
+    return <p className="text-body text-fg-muted italic">No preview for this attempt.</p>;
+  }
+  if (preview.state === 'blocked') {
+    return (
+      <p className="text-body text-accent" role="alert">
+        Preview host {preview.host} is not allowlisted; not framed.
+      </p>
+    );
+  }
+  if (preview.state === 'unavailable' || preview.url === null) {
+    return (
+      <p className="text-body text-accent" role="alert">
+        Preview unavailable for this attempt.
+      </p>
+    );
+  }
+  return (
+    <div aria-label="Attempt preview" className="space-y-1">
+      <iframe
+        title="Execution Attempt preview"
+        src={preview.url}
+        sandbox="allow-scripts allow-same-origin"
+        className="h-80 w-full rounded-sm border border-rule"
+      />
+      <p className="text-label text-fg-faint">
+        <code>{preview.host}</code>
+      </p>
     </div>
   );
 }
