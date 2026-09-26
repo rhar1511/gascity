@@ -1,21 +1,23 @@
 load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
-    name = "factory",
-    srcs = ["config.go"],
-    importpath = "github.com/gastownhall/gascity/internal/factory",
+    name = "workbench",
+    srcs = ["diff.go"],
+    importpath = "github.com/gastownhall/gascity/internal/workbench",
     visibility = ["//:__subpackages__"],
-    deps = ["@in_gopkg_yaml_v3//:yaml_v3"],
 )
 
 go_test(
-    name = "factory_test",
+    name = "workbench_test",
     srcs = [
-        "config_test.go",
+        "diff_test.go",
         "testenv_import_test.go",
     ],
-    embed = [":factory"],
-    deps = ["//internal/testenv"],
+    embed = [":workbench"],
+    deps = [
+        "//internal/testenv",
+        "//internal/testutil",
+    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

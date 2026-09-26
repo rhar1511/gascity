@@ -1,21 +1,27 @@
 load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
-    name = "factory",
-    srcs = ["config.go"],
-    importpath = "github.com/gastownhall/gascity/internal/factory",
+    name = "rsipolicy",
+    srcs = [
+        "evidence.go",
+        "policy.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/rsipolicy",
     visibility = ["//:__subpackages__"],
-    deps = ["@in_gopkg_yaml_v3//:yaml_v3"],
+    deps = ["//internal/reviewquorum"],
 )
 
 go_test(
-    name = "factory_test",
+    name = "rsipolicy_test",
     srcs = [
-        "config_test.go",
+        "policy_test.go",
         "testenv_import_test.go",
     ],
-    embed = [":factory"],
-    deps = ["//internal/testenv"],
+    embed = [":rsipolicy"],
+    deps = [
+        "//internal/reviewquorum",
+        "//internal/testenv",
+    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
