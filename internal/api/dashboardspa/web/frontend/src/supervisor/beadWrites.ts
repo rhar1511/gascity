@@ -3,6 +3,7 @@ import { supervisorApi } from './client';
 import type {
   Bead,
   BeadCreateInputBody,
+  BeadUpdateBody,
   SlingInputBody,
   SlingResponse,
 } from 'gas-city-dashboard-shared/gc-supervisor';
@@ -21,6 +22,27 @@ export interface CreateAndSlingSupervisorBeadResult {
 
 export async function closeSupervisorBead(id: string): Promise<void> {
   await supervisorApi().closeBead(activeCityOrThrow('close supervisor bead'), id);
+}
+
+export interface UpdateSupervisorBeadPatch {
+  status?: string;
+  priority?: number;
+}
+
+// updateSupervisorBead changes only the fields present in the patch, through the
+// typed supervisor bead-update endpoint. The Workbench views use it for lane
+// movement (Kanban -> status, Priority -> priority) and for the confirmed close
+// (status='closed'). It never creates an Execution Attempt or Session: those
+// are Gas City's responsibility, not the view's.
+export async function updateSupervisorBead(
+  id: string,
+  patch: UpdateSupervisorBeadPatch,
+): Promise<void> {
+  const body: BeadUpdateBody = {};
+  if (patch.status !== undefined) body.status = patch.status;
+  if (patch.priority !== undefined) body.priority = patch.priority;
+  if (Object.keys(body).length === 0) return;
+  await supervisorApi().updateBead(activeCityOrThrow('update supervisor bead'), id, body);
 }
 
 export async function createAndSlingSupervisorBead(

@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { WorkbenchPage } from './Workbench';
@@ -15,7 +15,8 @@ type StubMode =
   | { kind: 'pending' };
 
 let stubMode: StubMode = { kind: 'ok', beads: [sampleBead()] };
-const supervisorWrites: Array<{ method: string; path: string }> = [];
+let updateMode: 'ok' | 'reject' = 'ok';
+const supervisorWrites: Array<{ method: string; path: string; body?: unknown }> = [];
 
 function setStub(mode: StubMode) {
   stubMode = mode;
@@ -24,6 +25,7 @@ function setStub(mode: StubMode) {
 beforeEach(() => {
   setActiveCity('test-city');
   supervisorWrites.length = 0;
+  updateMode = 'ok';
   setStub({ kind: 'ok', beads: [sampleBead()] });
   invalidate('workbench:queue:');
   vi.stubGlobal(
@@ -31,8 +33,23 @@ beforeEach(() => {
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = parsedUrl(input);
       const method = requestMethod(input, init);
+      const beadMatch = /^\/v0\/city\/test-city\/bead\/([^/]+)$/.exec(url.pathname);
       if (method !== 'GET') {
-        supervisorWrites.push({ method, path: url.pathname });
+        let capturedBody: unknown;
+        if (input instanceof Request) {
+          try {
+            capturedBody = JSON.parse(await input.clone().text());
+          } catch {
+            capturedBody = undefined;
+          }
+        } else {
+          capturedBody = parseBody(init?.body);
+        }
+        supervisorWrites.push({ method, path: url.pathname, body: capturedBody });
+        if (beadMatch && updateMode === 'ok') return jsonResponse({ ok: true });
+        if (beadMatch && updateMode === 'reject') {
+          return jsonResponse({ error: 'update rejected' }, { status: 409 });
+        }
         return jsonResponse({ error: 'unexpected write' }, { status: 405 });
       }
       if (url.pathname === '/v0/city/test-city/beads' && method === 'GET') {
@@ -42,7 +59,6 @@ beforeEach(() => {
         }
         return jsonResponse(beadListPayload(stubMode.beads));
       }
-      const beadMatch = /^\/v0\/city\/test-city\/bead\/([^/]+)$/.exec(url.pathname);
       if (beadMatch) {
         const id = decodeURIComponent(beadMatch[1] ?? '');
         const bead =
@@ -121,7 +137,88 @@ describe('WorkbenchPage', () => {
       await within(dialog).findByText(/resolved or removed/i),
     ).toBeTruthy();
   });
+
+  it('Kanban drag changes only the supported Bead status', async () => {
+    renderPage();
+    await screen.findByText('Sample bead');
+    fireEvent.click(screen.getByRole('button', { name: /kanban/i }));
+
+    const lane = await screen.findByTestId('lane-status:in_progress');
+    fireEvent.drop(lane, { dataTransfer: dt(`${PROJECT}-0001`) });
+
+    await waitFor(() => expect(supervisorWrites).toHaveLength(1));
+    expect(supervisorWrites[0]?.method).not.toBe('GET');
+    expect(supervisorWrites[0]?.path).toContain(`${PROJECT}-0001`);
+    expect(supervisorWrites[0]?.body).toEqual({ status: 'in_progress' });
+  });
+
+  it('Priority drag changes only the supported Bead priority', async () => {
+    renderPage();
+    await screen.findByText('Sample bead');
+    fireEvent.click(screen.getByRole('button', { name: /priority/i }));
+
+    const lane = await screen.findByTestId('lane-priority:3');
+    fireEvent.drop(lane, { dataTransfer: dt(`${PROJECT}-0001`) });
+
+    await waitFor(() => expect(supervisorWrites).toHaveLength(1));
+    expect(supervisorWrites[0]?.body).toEqual({ priority: 3 });
+  });
+
+  it('closing requires confirmation and cancellation leaves the Bead unchanged', async () => {
+    renderPage();
+    await screen.findByText('Sample bead');
+    fireEvent.click(screen.getByRole('button', { name: /kanban/i }));
+
+    fireEvent.click(await screen.findByRole('button', { name: /^close$/i }));
+    const dialog = await screen.findByRole('alertdialog');
+    expect(dialog).toBeTruthy();
+
+    fireEvent.click(within(dialog).getByRole('button', { name: /cancel/i }));
+    expect(supervisorWrites).toEqual([]);
+
+    fireEvent.click(screen.getByRole('button', { name: /^close$/i }));
+    fireEvent.click(
+      within(await screen.findByRole('alertdialog')).getByRole('button', { name: /close bead/i }),
+    );
+    await waitFor(() => expect(supervisorWrites).toHaveLength(1));
+    expect(supervisorWrites[0]?.body).toEqual({ status: 'closed' });
+  });
+
+  it('reverts the optimistic move and surfaces a server rejection', async () => {
+    updateMode = 'reject';
+    renderPage();
+    await screen.findByText('Sample bead');
+    fireEvent.click(screen.getByRole('button', { name: /kanban/i }));
+
+    const lane = await screen.findByTestId('lane-status:blocked');
+    fireEvent.drop(lane, { dataTransfer: dt(`${PROJECT}-0001`) });
+
+    expect(await screen.findByText(/update rejected/i)).toBeTruthy();
+    // The Bead reconverges on the authoritative read: it stays in its open lane.
+    await waitFor(() =>
+      expect(screen.getByTestId('lane-status:open').textContent).toContain('Sample bead'),
+    );
+  });
 });
+
+function dt(id: string): DataTransfer {
+  const store = new Map<string, string>([['text/bead-id', id]]);
+  return {
+    getData: (key: string) => store.get(key) ?? '',
+    setData: (key: string, value: string) => {
+      store.set(key, value);
+    },
+  } as unknown as DataTransfer;
+}
+
+function parseBody(body: BodyInit | null | undefined): unknown {
+  if (typeof body !== 'string') return undefined;
+  try {
+    return JSON.parse(body);
+  } catch {
+    return body;
+  }
+}
 
 function renderPage(path = '/workbench') {
   return render(
