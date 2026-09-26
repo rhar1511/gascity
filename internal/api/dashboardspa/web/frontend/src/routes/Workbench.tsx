@@ -13,7 +13,9 @@ import { listSupervisorBeads } from '../supervisor/beadReads';
 import { updateSupervisorBead } from '../supervisor/beadWrites';
 import { listSupervisorSessions } from '../supervisor/sessionReads';
 import { fetchAttemptDiff } from '../supervisor/attemptReads';
-import { resolveAttempts } from '../lib/workbenchAttempts';
+import { sendSupervisorMail } from '../supervisor/mailWrites';
+import { useOperatorConfig } from '../contexts/OperatorConfigContext';
+import { resolveAttempts, type ExecutionAttempt } from '../lib/workbenchAttempts';
 
 // Gas City Workbench: Canvas/Kanban/Priority/Work Queue as views over the same
 // Beads data.
@@ -374,6 +376,7 @@ function AttemptPanel({ bead, sessions }: { bead: Row; sessions: NonNullable<Awa
             showCaption
           />
           <AttemptDiffPanel key={`diff:${attempts.current.sessionId}`} beadId={bead.id} />
+          <AttemptChatPanel key={`chat:${attempts.current.sessionId}`} attempt={attempts.current} />
         </>
       ) : attempts.staleReference ? (
         <p className="text-body text-accent" role="alert">
@@ -434,6 +437,68 @@ function AttemptDiffPanel({ beadId }: { beadId: string }) {
         <p className="text-label text-fg-faint">Diff truncated ({data.bytes} bytes).</p>
       )}
     </div>
+  );
+}
+
+type ChatState = 'queued' | 'delivered' | 'rejected';
+interface ChatMessage {
+  id: string;
+  text: string;
+  state: ChatState;
+}
+
+// AttemptChatPanel adds per-attempt chat: a submitted message targets the newest
+// active Session/worktree with follow_up semantics. Messages are queued in order
+// and only leave the queue once Gas City accepts them; a rejection stays visible
+// without re-sending. Sending to a completed/failed attempt is not offered here
+// (the panel only renders for a live attempt), so chat cannot restart one.
+function AttemptChatPanel({ attempt }: { attempt: ExecutionAttempt }) {
+  const { operatorWireAlias } = useOperatorConfig();
+  const [draft, setDraft] = useState('');
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+
+  const submit = async () => {
+    const text = draft.trim();
+    if (text.length === 0) return;
+    const id = `${attempt.sessionId}:${Date.now()}:${messages.length}`;
+    setMessages((current) => [...current, { id, text, state: 'queued' }]);
+    setDraft('');
+    try {
+      await sendSupervisorMail(
+        { to: attempt.sessionName, subject: 'workbench follow-up', body: text },
+        operatorWireAlias,
+      );
+      setMessages((current) =>
+        current.map((message) => (message.id === id ? { ...message, state: 'delivered' } : message)),
+      );
+    } catch {
+      setMessages((current) =>
+        current.map((message) => (message.id === id ? { ...message, state: 'rejected' } : message)),
+      );
+    }
+  };
+
+  return (
+    <section aria-label="Attempt chat" className="mt-3 space-y-2">
+      <ul aria-label="Queued messages" className="space-y-1">
+        {messages.map((message) => (
+          <li key={message.id} className="text-label text-fg-faint">
+            <span className="uppercase tracking-wider">{message.state}</span> · {message.text}
+          </li>
+        ))}
+      </ul>
+      <div className="flex gap-2">
+        <input
+          aria-label="Message"
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+          className="flex-1 rounded-sm border border-rule px-2 py-1 text-body"
+        />
+        <Button size="sm" onClick={() => void submit()} disabled={draft.trim().length === 0}>
+          Send
+        </Button>
+      </div>
+    </section>
   );
 }
 

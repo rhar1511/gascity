@@ -48,6 +48,7 @@ beforeEach(() => {
           capturedBody = parseBody(init?.body);
         }
         supervisorWrites.push({ method, path: url.pathname, body: capturedBody });
+        if (/\/mail$/.test(url.pathname)) return jsonResponse({ id: 'm-1' });
         if (beadMatch && updateMode === 'ok') return jsonResponse({ ok: true });
         if (beadMatch && updateMode === 'reject') {
           return jsonResponse({ error: 'update rejected' }, { status: 409 });
@@ -245,6 +246,33 @@ describe('WorkbenchPage', () => {
     expect(diff.textContent).toContain('+new');
     // Viewing the diff mutates nothing: no bead/worktree write is issued.
     expect(supervisorWrites.filter((w) => w.path.includes('/bead/'))).toEqual([]);
+  });
+
+  it('queues a per-attempt chat message and delivers it in order (gp-bod)', async () => {
+    stubSessions = [
+      {
+        id: 's-active',
+        template: 'worker',
+        session_name: 'worker-1',
+        title: 'worker-1',
+        state: 'active',
+        running: true,
+        attached: false,
+        provider: 'opencode',
+        created_at: '2026-01-02T00:00:00Z',
+        active_bead: `${PROJECT}-0001`,
+        work_dir: '/wt/s-active',
+      },
+    ];
+    renderPage('/workbench?bead=gascity-0001');
+
+    const input = await screen.findByLabelText('Message');
+    fireEvent.change(input, { target: { value: 'please continue' } });
+    fireEvent.click(screen.getByRole('button', { name: /send/i }));
+
+    const queue = await screen.findByLabelText('Queued messages');
+    expect(queue.textContent).toContain('please continue');
+    await waitFor(() => expect(queue.textContent).toContain('delivered'));
   });
 
   it('reverts the optimistic move and surfaces a server rejection', async () => {
