@@ -1220,6 +1220,14 @@
           "$ref": "#/$defs/DaemonConfig",
           "description": "Daemon configures controller daemon settings."
         },
+        "lifecycle": {
+          "$ref": "#/$defs/LifecycleConfig",
+          "description": "Lifecycle configures the opt-in, evidence-backed work admission and\nrecovery contract. Both gates default to disabled; see LifecycleConfig."
+        },
+        "rsi": {
+          "$ref": "#/$defs/RSIConfig",
+          "description": "RSI points the controller at trusted signed evaluation and human\napproval records. An unset evaluator leaves promotion fail-closed."
+        },
         "orders": {
           "$ref": "#/$defs/OrdersConfig",
           "description": "Orders configures order settings: skip list, max_timeout cap, and\nper-order overrides."
@@ -1902,6 +1910,39 @@
       "additionalProperties": false,
       "type": "object",
       "description": "K8sConfig holds native K8s session provider settings."
+    },
+    "LifecycleConfig": {
+      "properties": {
+        "admission_enabled": {
+          "type": "boolean",
+          "description": "AdmissionEnabled requires a signed admission receipt for work carrying\nexplicit lifecycle admission intent. Defaults to false."
+        },
+        "recovery_enabled": {
+          "type": "boolean",
+          "description": "RecoveryEnabled permits the controller lifecycle recovery policy. It is\nseparately gated because an admission authority does not grant permission\nto recover work. Defaults to false."
+        },
+        "admission_authorities": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "AdmissionAuthorities maps trusted triage/contract authors to their\nEd25519 public keys. Keys are base64-encoded 32-byte public keys."
+        },
+        "acceptance_authorities": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "AcceptanceAuthorities maps trusted completion authorities to their\nEd25519 public keys. Keys are base64-encoded 32-byte public keys."
+        },
+        "escalation_target": {
+          "type": "string",
+          "description": "EscalationTarget is the configured recipient for one exhaustion\nescalation per work item. Empty deliberately leaves recovery disabled."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "LifecycleConfig controls controller-owned admission and recovery."
     },
     "LocalDoctorCheck": {
       "properties": {
@@ -2591,6 +2632,31 @@
       "additionalProperties": false,
       "type": "object",
       "description": "ProviderSpec defines a named provider's startup parameters."
+    },
+    "RSIConfig": {
+      "properties": {
+        "evaluation_file": {
+          "type": "string"
+        },
+        "evaluation_key_id": {
+          "type": "string"
+        },
+        "evaluation_public_key": {
+          "type": "string"
+        },
+        "human_approval_file": {
+          "type": "string"
+        },
+        "human_approval_key_id": {
+          "type": "string"
+        },
+        "human_approval_public_key": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "RSIConfig points the controller at signed, controller-owned evaluation and human-approval records."
     },
     "Rig": {
       "properties": {

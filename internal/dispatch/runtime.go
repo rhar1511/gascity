@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/molecule"
+	"github.com/gastownhall/gascity/internal/rsipolicy"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
@@ -44,6 +45,10 @@ type ProcessOptions struct {
 	PrepareFragment    func(*formula.FragmentRecipe, beads.Bead) error
 	PrepareRecipe      func(*formula.Recipe, beads.Bead) error
 	RecycleSession     func(beads.Bead) error
+	// ResolveRSIEvaluation loads and verifies controller-owned evaluation and
+	// human-approval evidence for the RSI promotion gate. When nil, the gate
+	// fails closed.
+	ResolveRSIEvaluation rsipolicy.ResolveTrustedEvaluationFunc
 	// RequiredArtifactStat checks required-artifact files. When nil, the
 	// dispatcher uses os.Stat.
 	RequiredArtifactStat func(path string) (os.FileInfo, error)
