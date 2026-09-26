@@ -10,6 +10,7 @@ go_library(
 
 go_test(
     name = "factory_test",
-    srcs = ["config_test.go"],
+    srcs = ["config_test.go", "testenv_import_test.go"],
+    deps = ["//internal/testenv"],
     embed = [":factory"],
 )
