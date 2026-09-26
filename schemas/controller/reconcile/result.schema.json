@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "ok", "status", "city_path"],
+  "properties": {
+    "schema_version": { "const": "1" },
+    "ok": { "const": true },
+    "status": { "const": "requested" },
+    "city_path": { "type": "string", "minLength": 1 }
+  },
+  "additionalProperties": false
+}
