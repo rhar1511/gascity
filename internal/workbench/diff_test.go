@@ -3,25 +3,16 @@ package workbench
 import (
 	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 func gitRepo(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
-	for _, args := range [][]string{
-		{"init"},
-		{"config", "user.email", "t@example.com"},
-		{"config", "user.name", "t"},
-	} {
-		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Skipf("git unavailable: %v %s", err, out)
-		}
-	}
+	dir, _ := testutil.InitGitRepo(t)
 	return dir
 }
 
@@ -51,12 +42,8 @@ func TestWorktreeDiff_Empty(t *testing.T) {
 func TestWorktreeDiff_OK(t *testing.T) {
 	dir := gitRepo(t)
 	write(t, filepath.Join(dir, "a.txt"), "one\n")
-	if out, err := exec.Command("git", "-C", dir, "add", "a.txt").CombinedOutput(); err != nil {
-		t.Fatalf("add: %v %s", err, out)
-	}
-	if out, err := exec.Command("git", "-C", dir, "commit", "-m", "init").CombinedOutput(); err != nil {
-		t.Fatalf("commit: %v %s", err, out)
-	}
+	testutil.RunGit(t, dir, "add", "a.txt")
+	testutil.RunGit(t, dir, "commit", "-m", "init")
 	write(t, filepath.Join(dir, "a.txt"), "two\n")
 
 	got := WorktreeDiff(context.Background(), dir, 0)
@@ -71,12 +58,8 @@ func TestWorktreeDiff_OK(t *testing.T) {
 func TestWorktreeDiff_Truncated(t *testing.T) {
 	dir := gitRepo(t)
 	write(t, filepath.Join(dir, "a.txt"), strings.Repeat("x\n", 100))
-	if out, err := exec.Command("git", "-C", dir, "add", "a.txt").CombinedOutput(); err != nil {
-		t.Fatalf("add: %v %s", err, out)
-	}
-	if out, err := exec.Command("git", "-C", dir, "commit", "-m", "init").CombinedOutput(); err != nil {
-		t.Fatalf("commit: %v %s", err, out)
-	}
+	testutil.RunGit(t, dir, "add", "a.txt")
+	testutil.RunGit(t, dir, "commit", "-m", "init")
 	write(t, filepath.Join(dir, "a.txt"), strings.Repeat("y\n", 100))
 
 	got := WorktreeDiff(context.Background(), dir, 32)
