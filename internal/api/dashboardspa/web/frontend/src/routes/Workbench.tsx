@@ -17,6 +17,7 @@ import { sendSupervisorMail } from '../supervisor/mailWrites';
 import { useOperatorConfig } from '../contexts/OperatorConfigContext';
 import { resolveAttempts, type ExecutionAttempt } from '../lib/workbenchAttempts';
 import { resolvePreview } from '../lib/workbenchPreview';
+import { PullRequestActions } from '../workbench/PullRequestActions';
 
 // Gas City Workbench: Canvas/Kanban/Priority/Work Queue as views over the same
 // Beads data.
@@ -379,6 +380,7 @@ function AttemptPanel({ bead, sessions }: { bead: Row; sessions: NonNullable<Awa
           <AttemptDiffPanel key={`diff:${attempts.current.sessionId}`} beadId={bead.id} />
           <AttemptChatPanel key={`chat:${attempts.current.sessionId}`} attempt={attempts.current} />
           <AttemptPreviewPanel bead={bead} />
+          <AttemptPullRequestPanel bead={bead} attempt={attempts.current} />
         </>
       ) : attempts.staleReference ? (
         <p className="text-body text-accent" role="alert">
@@ -439,6 +441,40 @@ function AttemptDiffPanel({ beadId }: { beadId: string }) {
         <p className="text-label text-fg-faint">Diff truncated ({data.bytes} bytes).</p>
       )}
     </div>
+  );
+}
+
+// AttemptPullRequestPanel exposes policy-bound PR actions for the attempt. It
+// has no merge authority: prepare/queue delegate to Gas City (here, a request to
+// the merge queue role), and the action + result are auditable against the Bead.
+function AttemptPullRequestPanel({ bead, attempt }: { bead: Row; attempt: ExecutionAttempt }) {
+  const { operatorWireAlias } = useOperatorConfig();
+  const metadata = (bead as { metadata?: Record<string, string> }).metadata ?? {};
+  const context = {
+    bead,
+    attempt,
+    attemptRevision: (metadata['gc.work_commit'] ?? metadata['gc.work_branch'] ?? '').trim(),
+    policyRevision: (metadata['gc.work_commit'] ?? metadata['gc.work_branch'] ?? '').trim(),
+    queueAvailable: true,
+    policyRejected: false,
+    hasConflict: false,
+  };
+  return (
+    <section aria-label="Pull request actions" className="mt-3">
+      <PullRequestActions
+        context={context}
+        onAction={async (action) => {
+          await sendSupervisorMail(
+            {
+              to: 'inktree/mergequeue',
+              subject: `Workbench ${action} PR for ${bead.id}`,
+              body: `Attempt ${attempt.sessionId} requests: ${action} a pull request for ${bead.id}.`,
+            },
+            operatorWireAlias,
+          );
+        }}
+      />
+    </section>
   );
 }
 
