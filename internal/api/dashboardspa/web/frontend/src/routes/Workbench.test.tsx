@@ -16,6 +16,7 @@ type StubMode =
 
 let stubMode: StubMode = { kind: 'ok', beads: [sampleBead()] };
 let updateMode: 'ok' | 'reject' = 'ok';
+let stubSessions: Array<Record<string, unknown>> = [];
 const supervisorWrites: Array<{ method: string; path: string; body?: unknown }> = [];
 
 function setStub(mode: StubMode) {
@@ -26,6 +27,7 @@ beforeEach(() => {
   setActiveCity('test-city');
   supervisorWrites.length = 0;
   updateMode = 'ok';
+  stubSessions = [];
   setStub({ kind: 'ok', beads: [sampleBead()] });
   invalidate('workbench:queue:');
   vi.stubGlobal(
@@ -60,7 +62,7 @@ beforeEach(() => {
         return jsonResponse(beadListPayload(stubMode.beads));
       }
       if (url.pathname === '/v0/city/test-city/sessions' && method === 'GET') {
-        return jsonResponse({ items: [], total: 0 });
+        return jsonResponse({ items: stubSessions, total: stubSessions.length });
       }
       if (beadMatch) {
         const id = decodeURIComponent(beadMatch[1] ?? '');
@@ -185,6 +187,28 @@ describe('WorkbenchPage', () => {
     );
     await waitFor(() => expect(supervisorWrites).toHaveLength(1));
     expect(supervisorWrites[0]?.body).toEqual({ status: 'closed' });
+  });
+
+  it('shows the active Execution Attempt terminal for the selected Bead', async () => {
+    stubSessions = [
+      {
+        id: 's-active',
+        template: 'worker',
+        session_name: 'worker-1',
+        title: 'worker-1',
+        state: 'active',
+        running: true,
+        attached: false,
+        provider: 'opencode',
+        created_at: '2026-01-02T00:00:00Z',
+        active_bead: `${PROJECT}-0001`,
+        work_dir: '/wt/s-active',
+      },
+    ];
+    renderPage('/workbench?bead=gascity-0001');
+
+    expect(await screen.findByText(/current attempt/i)).toBeTruthy();
+    expect(screen.getByText('worker-1')).toBeTruthy();
   });
 
   it('reverts the optimistic move and surfaces a server rejection', async () => {

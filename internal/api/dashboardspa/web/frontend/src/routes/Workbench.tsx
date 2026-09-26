@@ -3,6 +3,7 @@ import { useSearchParams } from 'react-router-dom';
 import { GC_EVENT_PREFIX } from 'gas-city-dashboard-shared';
 import { getActiveCity } from '../api/cityBase';
 import { BeadDetailModal } from '../components/BeadDetailModal';
+import { LiveSessionPeek } from '../components/LiveSessionPeek';
 import { Button } from '../components/Button';
 import { PageHeader } from '../components/PageHeader';
 import { StatusBadge, beadStatusTone } from '../components/StatusBadge';
@@ -343,20 +344,35 @@ function LaneBoard({ rows, view, selectedId, onOpen, onMove, onRequestClose }: L
 // AttemptPanel projects the selected Bead's newest ACTIVE Execution Attempt and
 // its prior attempts from the typed session read. Gas City owns the Session and
 // worktree; this only resolves and displays them (no new record).
+//
+// The terminal is the Session's own live stream (LiveSessionPeek), keyed by the
+// attempt's session id: selecting a different attempt changes the key, so React
+// detaches the previous stream before attaching the next. It never opens a
+// parallel terminal process — it follows Gas City's session identity and
+// streaming boundaries, and grants no access to unrelated terminals.
 function AttemptPanel({ bead, sessions }: { bead: Row; sessions: NonNullable<Awaited<ReturnType<typeof listSupervisorSessions>>['items']> }) {
   const attempts = resolveAttempts(bead, sessions);
   return (
     <section aria-label="Execution attempt" className="mt-4 max-w-prose space-y-1">
       {attempts.current ? (
-        <p className="text-body text-fg">
-          Current attempt: <code>{attempts.current.sessionName}</code> ({attempts.current.state})
-          {attempts.current.workDir.length > 0 ? (
-            <>
-              {' · '}
-              <code>{attempts.current.workDir}</code>
-            </>
-          ) : null}
-        </p>
+        <>
+          <p className="text-body text-fg">
+            Current attempt: <code>{attempts.current.sessionName}</code> ({attempts.current.state})
+            {attempts.current.workDir.length > 0 ? (
+              <>
+                {' · '}
+                <code>{attempts.current.workDir}</code>
+              </>
+            ) : null}
+          </p>
+          <LiveSessionPeek
+            key={attempts.current.sessionId}
+            sessionId={attempts.current.sessionId}
+            stream
+            showBadge
+            showCaption
+          />
+        </>
       ) : attempts.staleReference ? (
         <p className="text-body text-accent" role="alert">
           Referenced session <code>{attempts.referencedSessionId}</code> is no longer present (stale
