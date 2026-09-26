@@ -157,7 +157,7 @@ description = """
 Load the candidate and review evidence. Promote only when the configured
 criteria pass, the current head still matches the reviewed head, and all
 safety, latency, cost, dependency, and worktree invariants hold. Keep publish,
-approve, merge, deploy, close, and notify decisions independent. For
+approve, merge, deploy, close, reply, and notify decisions independent. For
 world-model, evaluator, safety, clinical, or deployment-policy changes, stop
 for human approval even when the implementation review passes. Persist the
 decision and rollback target as `gc.output_json`.
