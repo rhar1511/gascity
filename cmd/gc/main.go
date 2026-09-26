@@ -327,6 +327,7 @@ func newRootCmdWithOptions(stdout, stderr io.Writer, options rootCommandOptions)
 		newStartCmd(stdout, stderr),
 		newInitCmd(stdout, stderr),
 		newReloadCmd(stdout, stderr),
+		newControllerCmd(stdout, stderr),
 		newStopCmd(stdout, stderr),
 		newRestartCmd(stdout, stderr),
 		newStatusCmd(stdout, stderr),

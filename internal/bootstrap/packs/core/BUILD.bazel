@@ -31,6 +31,7 @@ go_library(
         "formulas/mol-prompt-synth.toml",
         "formulas/mol-review-quorum.toml",
         "formulas/mol-scoped-work.toml",
+        "formulas/mol-software-factory.toml",
         "orders/beads-health.toml",
         "orders/cascade-nudge-on-blocker-close.toml",
         "orders/cross-rig-deps.toml",
@@ -65,6 +66,7 @@ go_library(
         "skills/gc-city/SKILL.md",
         "skills/gc-dashboard/SKILL.md",
         "skills/gc-dispatch/SKILL.md",
+        "skills/gc-factory/SKILL.md",
         "skills/gc-mail/SKILL.md",
         "skills/gc-rigs/SKILL.md",
         "skills/gc-work/SKILL.md",
@@ -81,6 +83,7 @@ go_test(
         "pack_assets_test.go",
         "pack_formulas_test.go",
         "pack_orders_test.go",
+        "software_factory_test.go",
         "testenv_import_test.go",
     ],
     data = glob(
