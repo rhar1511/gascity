@@ -171,18 +171,93 @@ describe('WorkbenchPage', () => {
     });
     renderPage();
     await screen.findByText('Other bead');
-    fireEvent.change(screen.getByRole('searchbox', { name: /search work queue/i }), {
+    fireEvent.change(screen.getByRole('searchbox', { name: /search workbench/i }), {
       target: { value: 'Sample' },
     });
     const queue = screen.getByRole('list', { name: /work queue/i });
     expect(within(queue).getByText('Sample bead')).toBeTruthy();
     expect(within(queue).queryByText('Other bead')).toBeNull();
-    fireEvent.change(screen.getByRole('searchbox', { name: /search work queue/i }), {
+    fireEvent.change(screen.getByRole('searchbox', { name: /search workbench/i }), {
       target: { value: '' },
     });
     fireEvent.change(screen.getByLabelText('Filter status'), { target: { value: 'closed' } });
     expect(within(queue).getByText('Other bead')).toBeTruthy();
     expect(within(queue).queryByText('Sample bead')).toBeNull();
+  });
+
+  it('groups work by the rig of its linked session without inventing an owner', async () => {
+    setStub({
+      kind: 'ok',
+      beads: [sampleBead(), { ...sampleBead(), id: 'gascity-0002', title: 'Unlinked bead' }],
+    });
+    stubSessions = [
+      {
+        id: 's-old',
+        session_name: 'worker-old',
+        title: 'worker-old',
+        template: 'worker',
+        state: 'stopped',
+        running: false,
+        attached: false,
+        provider: 'opencode',
+        created_at: '2026-01-01T00:00:00Z',
+        active_bead: 'gascity-0001',
+        rig: 'legacy',
+      },
+      {
+        id: 's-1',
+        session_name: 'worker-1',
+        title: 'worker-1',
+        template: 'worker',
+        state: 'active',
+        running: true,
+        attached: false,
+        provider: 'opencode',
+        created_at: '2026-01-02T00:00:00Z',
+        active_bead: 'gascity-0001',
+        rig: 'frontend',
+      },
+    ];
+    renderPage();
+    await screen.findByText('Sample bead');
+    fireEvent.click(screen.getByRole('button', { name: /^rigs$/i }));
+    expect(
+      within(screen.getByRole('region', { name: 'Rig frontend' })).getByText('Sample bead'),
+    ).toBeTruthy();
+    expect(screen.queryByRole('region', { name: 'Rig legacy' })).toBeNull();
+    expect(
+      within(screen.getByRole('region', { name: 'No rig-linked session' })).getByText(
+        'Unlinked bead',
+      ),
+    ).toBeTruthy();
+  });
+
+  it('shows only blocked or stale-session beads in Needs attention, respecting shared search', async () => {
+    setStub({
+      kind: 'ok',
+      beads: [
+        sampleBead(),
+        { ...sampleBead(), id: 'gascity-0002', title: 'Blocked bead', status: 'blocked' },
+        {
+          ...sampleBead(),
+          id: 'gascity-0003',
+          title: 'Stale bead',
+          metadata: { 'gc.session_id': 'missing' },
+        },
+      ],
+    });
+    renderPage();
+    await screen.findByText('Sample bead');
+    fireEvent.click(screen.getByRole('button', { name: /needs attention/i }));
+    const attention = screen.getByRole('list', { name: /needs attention/i });
+    expect(within(attention).getByText('Blocked bead')).toBeTruthy();
+    expect(within(attention).getByText('Stale bead')).toBeTruthy();
+    expect(within(attention).queryByText('Sample bead')).toBeNull();
+    fireEvent.change(screen.getByRole('searchbox', { name: /search workbench/i }), {
+      target: { value: 'Stale' },
+    });
+    expect(within(attention).queryByText('Blocked bead')).toBeNull();
+    expect(within(attention).getByText('Stale bead')).toBeTruthy();
   });
 
   it('offers a keyboard and touch-friendly move control for board cards', async () => {

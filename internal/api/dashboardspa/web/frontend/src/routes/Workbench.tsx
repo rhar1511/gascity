@@ -31,7 +31,7 @@ import { resolvePreview } from '../lib/workbenchPreview';
 
 const QUEUE_REFRESH_COALESCE_MS = 10_000;
 
-export type WorkbenchView = 'queue' | 'kanban' | 'priority';
+export type WorkbenchView = 'queue' | 'kanban' | 'priority' | 'rigs' | 'attention';
 
 const KANBAN_STATUSES = ['open', 'in_progress', 'blocked', 'hooked', 'closed'] as const;
 const PRIORITY_LANES = [0, 1, 2, 3, 4] as const;
@@ -57,11 +57,25 @@ export function WorkbenchPage() {
   const { data, loading, error, refresh } = useCachedData(`workbench:queue:${cityCacheKey}`, () =>
     listSupervisorBeads({ includeClosed: true }),
   );
-  const { data: sessionsData } = useCachedData(`workbench:sessions:${cityCacheKey}`, () =>
-    listSupervisorSessions(),
-  );
+  const {
+    data: sessionsData,
+    loading: sessionsLoading,
+    error: sessionsError,
+  } = useCachedData(`workbench:sessions:${cityCacheKey}`, () => listSupervisorSessions());
   const sessions = useMemo(() => sessionsData?.items ?? [], [sessionsData]);
   const rows = useMemo(() => applyOverrides(data?.items ?? [], overrides), [data, overrides]);
+  const rigByBead = useMemo(() => {
+    const linked = new Map<string, { rig: string; createdAt: string }>();
+    for (const session of sessions) {
+      if (session.active_bead && session.rig) {
+        const previous = linked.get(session.active_bead);
+        if (!previous || session.created_at > previous.createdAt) {
+          linked.set(session.active_bead, { rig: session.rig, createdAt: session.created_at });
+        }
+      }
+    }
+    return new Map([...linked].map(([id, session]) => [id, session.rig]));
+  }, [sessions]);
   const queueRows = useMemo(
     () =>
       rows
@@ -82,6 +96,30 @@ export function WorkbenchPage() {
         }),
     [rows, query, statusFilter, order],
   );
+  const attentionRows = useMemo(
+    () =>
+      queueRows.filter(
+        (row) =>
+          row.status === 'blocked' ||
+          row.is_blocked ||
+          (sessionsData !== undefined && resolveAttempts(row, sessions).staleReference),
+      ),
+    [queueRows, sessions, sessionsData],
+  );
+  const rigGroups = useMemo(() => {
+    const groups = new Map<string, Row[]>();
+    for (const row of queueRows) {
+      const rig = rigByBead.get(row.id) ?? 'No rig-linked session';
+      groups.set(rig, [...(groups.get(rig) ?? []), row]);
+    }
+    return [...groups.entries()].sort(([left], [right]) =>
+      left === 'No rig-linked session'
+        ? 1
+        : right === 'No rig-linked session'
+          ? -1
+          : left.localeCompare(right),
+    );
+  }, [queueRows, rigByBead]);
   const hasLoadedQueue = data !== undefined;
 
   useGcEventRefresh([GC_EVENT_PREFIX.bead], () => void refresh(), {
@@ -171,7 +209,7 @@ export function WorkbenchPage() {
       />
 
       <nav aria-label="Workbench views" className="mb-4 flex gap-2">
-        {(['queue', 'kanban', 'priority'] as const).map((candidate) => (
+        {(['queue', 'kanban', 'priority', 'rigs', 'attention'] as const).map((candidate) => (
           <Button
             key={candidate}
             size="sm"
@@ -180,47 +218,48 @@ export function WorkbenchPage() {
             tone={view === candidate ? 'accent' : 'quiet'}
           >
             {viewLabel(candidate)}
+            {candidate === 'attention' && attentionRows.length > 0
+              ? ` · ${attentionRows.length}`
+              : ''}
           </Button>
         ))}
       </nav>
 
       <div className="grid gap-5 xl:grid-cols-[minmax(17rem,0.8fr)_minmax(0,1.2fr)]">
         <div className="min-w-0">
-          {view === 'queue' && (
-            <div className="mb-3 flex flex-wrap gap-2">
-              <input
-                type="search"
-                aria-label="Search work queue"
-                placeholder="Search beads"
-                value={query}
-                onChange={(event) => setQuery(event.target.value)}
-                className="min-w-36 flex-1 rounded-sm border border-rule bg-surface px-2 py-1 text-body text-fg"
-              />
-              <select
-                aria-label="Filter status"
-                value={statusFilter}
-                onChange={(event) => setStatusFilter(event.target.value)}
-                className="rounded-sm border border-rule bg-surface px-2 py-1 text-body text-fg"
-              >
-                <option value="all">All statuses</option>
-                {KANBAN_STATUSES.map((status) => (
-                  <option key={status} value={status}>
-                    {status}
-                  </option>
-                ))}
-              </select>
-              <select
-                aria-label="Order work queue"
-                value={order}
-                onChange={(event) => setOrder(event.target.value as typeof order)}
-                className="rounded-sm border border-rule bg-surface px-2 py-1 text-body text-fg"
-              >
-                <option value="priority">Priority</option>
-                <option value="updated">Recently updated</option>
-                <option value="title">Title</option>
-              </select>
-            </div>
-          )}
+          <div aria-label="Workbench filters" className="mb-3 flex flex-wrap gap-2">
+            <input
+              type="search"
+              aria-label="Search workbench"
+              placeholder="Search beads"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              className="min-w-36 flex-1 rounded-sm border border-rule bg-surface px-2 py-1 text-body text-fg"
+            />
+            <select
+              aria-label="Filter status"
+              value={statusFilter}
+              onChange={(event) => setStatusFilter(event.target.value)}
+              className="rounded-sm border border-rule bg-surface px-2 py-1 text-body text-fg"
+            >
+              <option value="all">All statuses</option>
+              {KANBAN_STATUSES.map((status) => (
+                <option key={status} value={status}>
+                  {status}
+                </option>
+              ))}
+            </select>
+            <select
+              aria-label="Order work queue"
+              value={order}
+              onChange={(event) => setOrder(event.target.value as typeof order)}
+              className="rounded-sm border border-rule bg-surface px-2 py-1 text-body text-fg"
+            >
+              <option value="priority">Priority</option>
+              <option value="updated">Recently updated</option>
+              <option value="title">Title</option>
+            </select>
+          </div>
           {!hasLoadedQueue && loading ? (
             <p className="text-body text-fg-muted italic">Loading work queue.</p>
           ) : error && !hasLoadedQueue ? (
@@ -234,35 +273,63 @@ export function WorkbenchPage() {
             </div>
           ) : rows.length === 0 ? (
             <p className="text-body text-fg-muted italic">Nothing on the queue right now.</p>
-          ) : view === 'queue' && queueRows.length === 0 ? (
+          ) : queueRows.length === 0 ? (
             <p className="text-body text-fg-muted">No beads match these filters.</p>
           ) : view === 'queue' ? (
-            <ul aria-label="Work queue" className="space-y-2">
-              {queueRows.map((bead) => (
-                <li key={bead.id}>
-                  <button
-                    type="button"
-                    onClick={() => openBead(bead.id)}
-                    aria-pressed={selectedId === bead.id}
-                    title={`Open ${bead.id}`}
-                    className="w-full text-left rounded-sm border border-rule px-4 py-3 hover:border-fg-faint focus-mark transition-colors duration-150 ease-out-quart"
+            <BeadList
+              label="Work queue"
+              rows={queueRows}
+              selectedId={selectedId}
+              onOpen={openBead}
+            />
+          ) : view === 'attention' ? (
+            attentionRows.length === 0 ? (
+              <p className="text-body text-fg-muted">
+                No blocked beads or stale session references match these filters.
+              </p>
+            ) : (
+              <BeadList
+                label="Needs attention"
+                rows={attentionRows}
+                selectedId={selectedId}
+                onOpen={openBead}
+              />
+            )
+          ) : view === 'rigs' ? (
+            <div className="space-y-5">
+              {sessionsError && (
+                <p role="alert" className="text-body text-accent">
+                  Session ownership unavailable: {sessionsError}
+                </p>
+              )}
+              {sessionsLoading && sessionsData === undefined && (
+                <p className="text-body text-fg-muted">Loading rig links…</p>
+              )}
+              {sessionsData !== undefined &&
+                rigGroups.map(([rig, rigRows]) => (
+                  <section
+                    key={rig}
+                    aria-label={rig === 'No rig-linked session' ? rig : `Rig ${rig}`}
+                    className="border-t border-rule pt-2"
                   >
-                    <span className="flex items-baseline justify-between gap-3">
-                      <span className="text-body text-fg font-medium truncate">{bead.title}</span>
-                      <StatusBadge tone={beadStatusTone(bead.status)} label={bead.status} />
-                    </span>
-                    <span className="text-label uppercase tracking-wider text-fg-faint">
-                      <code>{bead.id}</code>
-                      {' · '}
-                      {bead.issue_type}
-                    </span>
-                  </button>
-                </li>
-              ))}
-            </ul>
+                    <div className="mb-2 flex items-baseline justify-between gap-2">
+                      <h2 className="text-label font-semibold uppercase tracking-wider text-fg-muted">
+                        {rig}
+                      </h2>
+                      <span className="text-label text-fg-faint">{rigRows.length}</span>
+                    </div>
+                    <BeadList
+                      label={`${rig} beads`}
+                      rows={rigRows}
+                      selectedId={selectedId}
+                      onOpen={openBead}
+                    />
+                  </section>
+                ))}
+            </div>
           ) : (
             <LaneBoard
-              rows={rows}
+              rows={queueRows}
               view={view}
               selectedId={selectedId}
               onOpen={openBead}
@@ -332,7 +399,49 @@ function viewLabel(view: WorkbenchView): string {
       return 'Kanban';
     case 'priority':
       return 'Priority';
+    case 'rigs':
+      return 'Rigs';
+    case 'attention':
+      return 'Needs attention';
   }
+}
+
+function BeadList({
+  label,
+  rows,
+  selectedId,
+  onOpen,
+}: {
+  label: string;
+  rows: Row[];
+  selectedId: string | null;
+  onOpen: (id: string) => void;
+}) {
+  return (
+    <ul aria-label={label} className="space-y-2">
+      {rows.map((bead) => (
+        <li key={bead.id}>
+          <button
+            type="button"
+            onClick={() => onOpen(bead.id)}
+            aria-pressed={selectedId === bead.id}
+            title={`Open ${bead.id}`}
+            className="w-full text-left rounded-sm border border-rule px-4 py-3 hover:border-fg-faint focus-mark transition-colors duration-150 ease-out-quart"
+          >
+            <span className="flex items-baseline justify-between gap-3">
+              <span className="text-body text-fg font-medium truncate">{bead.title}</span>
+              <StatusBadge tone={beadStatusTone(bead.status)} label={bead.status} />
+            </span>
+            <span className="text-label uppercase tracking-wider text-fg-faint">
+              <code>{bead.id}</code>
+              {' · '}
+              {bead.issue_type}
+            </span>
+          </button>
+        </li>
+      ))}
+    </ul>
+  );
 }
 
 function applyOverrides(rows: Row[], overrides: Record<string, Patch>): Row[] {
@@ -345,7 +454,7 @@ function applyOverrides(rows: Row[], overrides: Record<string, Patch>): Row[] {
 
 interface LaneBoardProps {
   rows: Row[];
-  view: Exclude<WorkbenchView, 'queue'>;
+  view: 'kanban' | 'priority';
   selectedId: string | null;
   onOpen: (id: string) => void;
   onMove: (id: string, patch: Patch) => void | Promise<void>;
