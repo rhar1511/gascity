@@ -230,6 +230,7 @@
               "reference/gastown-command-map",
               "reference/config",
               "reference/trust-boundaries",
+              "reference/rsi-trusted-evaluation",
               "reference/api",
               "reference/events",
               "reference/schema/index",

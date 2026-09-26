@@ -27,6 +27,7 @@ import (
 	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/graphv2"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/rsipolicy"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/spf13/cobra"
@@ -241,7 +242,7 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 	// deliberately absent because it needs no config resolution; a future
 	// control kind that needs cfg must be added here explicitly.
 	switch bead.Metadata[beadmeta.KindMetadataKey] {
-	case "check", "drain", "fanout", "retry-eval", "retry", "ralph":
+	case "check", "drain", "fanout", "retry-eval", "retry", "ralph", beadmeta.KindRSIPromotionGate:
 		loadCfg = true
 	case "workflow-finalize":
 		// Need cfg to resolve "city:<name>" / "rig:<name>" store refs when
@@ -256,6 +257,16 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 			return fmt.Errorf("loading city config for %s: unavailable after warning-only load", cityPath)
 		}
 		opts.ResolveStoreRef = makeStoreRefResolver(cityPath, cfg)
+		if bead.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindRSIPromotionGate {
+			opts.ResolveRSIEvaluation = rsipolicy.NewFileResolver(cityPath, rsipolicy.FileResolverConfig{
+				EvaluationFile:      cfg.RSI.EvaluationFile,
+				EvaluationKeyID:     cfg.RSI.EvaluationKeyID,
+				EvaluationPublicKey: cfg.RSI.EvaluationPublicKey,
+				HumanApprovalFile:   cfg.RSI.HumanApprovalFile,
+				HumanApprovalKeyID:  cfg.RSI.HumanApprovalKeyID,
+				HumanApprovalPubKey: cfg.RSI.HumanApprovalPublicKey,
+			}).Resolve
+		}
 		if bead.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflowFinalize {
 			sourceWorkflowCtx, cancelSourceWorkflowCtx := sourceWorkflowCommandContext()
 			defer cancelSourceWorkflowCtx()

@@ -1066,6 +1066,9 @@ func validateCityRequirements(reqs []PackRequirement, agents []Agent) error {
 // mergeFragment merges a fragment into the base config in-place.
 // Arrays concatenate, providers deep-merge, workspace per-field merges.
 func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string, prov *Provenance) error {
+	if fragMeta.IsDefined("rsi") {
+		return fmt.Errorf("rsi trust configuration is root-city-only; remove [rsi] from %q", fragPath)
+	}
 	if err := mergeStorageConfig(base, fragment, fragMeta, fragPath); err != nil {
 		return err
 	}

@@ -39,14 +39,10 @@ required = true
 description = "Independent performance and cost judge target"
 required = true
 
-[vars.authority_class]
-description = "optimization, workflow, world_model, evaluator, safety_policy, clinical, deployment, or deployment_policy"
-default = "optimization"
-
 [[steps]]
 id = "produce-candidate"
 title = "Produce a bounded candidate in its bead worktree"
-metadata = { "gc.run_target" = "{{improver_target}}", "gc.rsi_role" = "improver", "gc.rsi_work_dir" = "{{work_dir}}", "gc.rsi_parent_bundle" = "{{current_bundle_id}}", "gc.rsi_eval_suite" = "{{eval_suite_hash}}", "gc.output_json_schema" = "rsi.candidate.v1", "gc.output_json_required" = "true" }
+metadata = { "gc.run_target" = "{{improver_target}}", "gc.rsi_role" = "improver", "gc.rsi_work_dir" = "{{work_dir}}", "gc.rsi_parent_bundle" = "{{current_bundle_id}}", "gc.rsi_eval_suite" = "{{eval_suite_hash}}", "gc.output_json_schema" = "rsi.candidate-proposal.v1", "gc.output_json_required" = "true" }
 description = """
 Work only in bead-specific worktree `{{work_dir}}`. Refuse to run when
 `{{work_dir}}` is the rig root `{{rig_root}}`, and do not change the rig root.
@@ -56,11 +52,12 @@ SHA for every changed rig. Emit a revision bundle with `id`, `types`, `ai`,
 `frontend`, `inktree`, `evals`, and `parent`; `parent` must equal
 `{{current_bundle_id}}` and `evals` must equal `{{eval_suite_hash}}`.
 
-Run the frozen regression suite and bounded benchmark suite. Report baseline
-and candidate metrics for quality score, safety score, latency, cost, and
-new dependency count. Do not edit evaluation criteria, safety thresholds,
-or promotion policy. Persist the candidate bundle, metrics, commands, and
-failure evidence as `gc.output_json` using `rsipolicy.CandidateEvidence` JSON.
+You may run tests and benchmarks while developing, but your estimates are not
+promotion evidence. Do not edit evaluation criteria, safety thresholds, or
+promotion policy. Persist only the proposed exact bundle as
+`gc.output_json` using `rsipolicy.CandidateProposal` JSON with a `candidate`
+field. A separately controlled evaluator measures the candidate after both
+judge lanes finish.
 """
 
 [steps.retry]
@@ -75,7 +72,9 @@ metadata = { "gc.run_target" = "{{correctness_target}}", "gc.rsi_role" = "judge"
 description = """
 Review the candidate bundle from `produce-candidate` in read-only mode. You
 are independent of the improver and must not modify files, evaluation criteria,
-limits, or the candidate. Validate correctness, safety behavior, dependency
+limits, or the candidate. You may read public policy and criteria, but may not
+read held-out evaluation data, controller configuration, or signing keys.
+Validate correctness, safety behavior, dependency
 changes, and the frozen regression suite. Record evidence and a structured lane
 output using `reviewquorum.LaneOutput` JSON with verdict `pass`, `pass_with_findings`, `fail`, or `blocked`.
 """
@@ -92,8 +91,9 @@ metadata = { "gc.run_target" = "{{performance_target}}", "gc.rsi_role" = "judge"
 description = """
 Review the candidate bundle from `produce-candidate` in read-only mode. You
 are independent of the improver and correctness judge. Measure latency, cost,
-resource use, and dependency limits against the recorded baseline. Do not
-change thresholds or evaluation criteria. Record evidence and a structured
+resource use, and dependency limits. You may read public policy and criteria,
+but may not read held-out evaluation data, controller configuration, or signing
+keys. Do not change thresholds or evaluation criteria. Record evidence and a structured
 lane output using `reviewquorum.LaneOutput` JSON with verdict `pass`, `pass_with_findings`, `fail`, or `blocked`.
 """
 
@@ -104,29 +104,25 @@ on_exhausted = "soft_fail"
 [[steps]]
 id = "promote-gate"
 title = "Finalize quorum and apply the monotonic promotion gate"
-needs = ["judge-correctness", "judge-performance"]
-metadata = { "gc.kind" = "rsi-promotion-gate", "gc.rsi_role" = "gate", "gc.rsi_policy" = "internal/rsipolicy.Evaluate", "gc.output_json_schema" = "rsi.decision.v1", "gc.output_json_required" = "true", "gc.rsi_authority_class" = "{{authority_class}}" }
+needs = ["produce-candidate", "judge-correctness", "judge-performance"]
+metadata = { "gc.kind" = "rsi-promotion-gate", "gc.rsi_role" = "gate", "gc.rsi_policy" = "internal/rsipolicy.Evaluate", "gc.output_json_schema" = "rsi.decision.v1", "gc.output_json_required" = "true" }
 description = """
-Load the candidate bundle, metrics, and both durable judge lane outputs. The
-candidate step must emit `rsipolicy.CandidateEvidence` JSON and each judge step
-must emit `reviewquorum.LaneOutput` JSON. The Go review finalizer must synthesize the lane outputs before the promotion gate
-runs. Build the policy input for `internal/rsipolicy.Evaluate` with the current
-bundle as the rollback target, the frozen evaluation suite hash, the explicit
-objective, and the bounded attempt count.
+The controller loads the candidate proposal and both durable judge outputs,
+then resolves a signed evaluation manifest from root city `[rsi]` config. The
+manifest is created by an evaluator that runs outside the improver and judges,
+uses a key they cannot access, and binds their actual assigned actors/sessions
+and permission profiles. It records independently measured baseline/candidate
+metrics, approved limits, the fixed acceptance-unit set and results, worker-time
+ledgers, the frozen suite, bundle lineage, and judge output digests. Candidate
+reported metrics, limits, attempts, and authority labels have no policy effect.
+The Go review finalizer synthesizes the judge lanes before `Evaluate` runs.
 
-Promote only when the candidate strictly improves the baseline score, passes
-both independent judge lanes, satisfies every safety, latency, cost, and
-dependency limit, preserves parent/evaluation-suite identity, and remains
-within the maximum attempt budget. Persist the decision, stable failure
-reasons, evidence, and rollback bundle ID as `gc.output_json`.
-
-For authority class `evaluator`, `safety_policy`, `clinical`, `deployment`, `deployment_policy`, or `world_model`,
-stop at a human approval gate even when the policy decision passes. Formatting,
-administrative, and ordinary optimization changes may proceed automatically
-only when the policy decision passes. A failed or blocked cycle is evidence for
-the next proposal; never recursively modify the evaluator or its criteria.
+Promote only when the trusted measurements improve strictly, both independent
+judge lanes pass, every safety/resource limit holds, the candidate differs
+from its accepted baseline, suite and parent identities match, the bounded
+attempt budget remains, and a human signature approves this exact evaluation
+manifest, candidate bead, bundles, suite, and policy version. First promotion
+always requires a separate human key. Persist the decision and rollback bundle
+ID as `gc.output_json`. A failed or blocked cycle is evidence for the next
+proposal; never recursively modify the evaluator or its criteria.
 """
-
-[steps.retry]
-max_attempts = 1
-on_exhausted = "hard_fail"

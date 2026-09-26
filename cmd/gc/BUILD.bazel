@@ -519,6 +519,7 @@ go_library(
         "//internal/reliability",
         "//internal/remotesource",
         "//internal/rig",
+        "//internal/rsipolicy",
         "//internal/rollout",
         "//internal/rollout/gate",
         "//internal/runtime",
