@@ -59,6 +59,9 @@ beforeEach(() => {
         }
         return jsonResponse(beadListPayload(stubMode.beads));
       }
+      if (url.pathname === '/v0/city/test-city/sessions' && method === 'GET') {
+        return jsonResponse({ items: [], total: 0 });
+      }
       if (beadMatch) {
         const id = decodeURIComponent(beadMatch[1] ?? '');
         const bead =

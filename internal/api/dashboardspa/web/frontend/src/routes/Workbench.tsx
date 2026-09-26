@@ -10,6 +10,8 @@ import { useCachedData } from '../hooks/useCachedData';
 import { useGcEventRefresh } from '../hooks/useGcEvents';
 import { listSupervisorBeads } from '../supervisor/beadReads';
 import { updateSupervisorBead } from '../supervisor/beadWrites';
+import { listSupervisorSessions } from '../supervisor/sessionReads';
+import { resolveAttempts } from '../lib/workbenchAttempts';
 
 // Gas City Workbench: Canvas/Kanban/Priority/Work Queue as views over the same
 // Beads data.
@@ -48,6 +50,11 @@ export function WorkbenchPage() {
     `workbench:queue:${cityCacheKey}`,
     () => listSupervisorBeads(),
   );
+  const { data: sessionsData } = useCachedData(
+    `workbench:sessions:${cityCacheKey}`,
+    () => listSupervisorSessions(),
+  );
+  const sessions = useMemo(() => sessionsData?.items ?? [], [sessionsData]);
   const rows = useMemo(() => applyOverrides(data?.items ?? [], overrides), [data, overrides]);
   const hasLoadedQueue = data !== undefined;
 
@@ -199,6 +206,10 @@ export function WorkbenchPage() {
         />
       )}
 
+      {selectedBead && (
+        <AttemptPanel bead={selectedBead} sessions={sessions} />
+      )}
+
       {confirmCloseId !== null && (
         <div
           role="alertdialog"
@@ -326,6 +337,44 @@ function LaneBoard({ rows, view, selectedId, onOpen, onMove, onRequestClose }: L
         );
       })}
     </div>
+  );
+}
+
+// AttemptPanel projects the selected Bead's newest ACTIVE Execution Attempt and
+// its prior attempts from the typed session read. Gas City owns the Session and
+// worktree; this only resolves and displays them (no new record).
+function AttemptPanel({ bead, sessions }: { bead: Row; sessions: NonNullable<Awaited<ReturnType<typeof listSupervisorSessions>>['items']> }) {
+  const attempts = resolveAttempts(bead, sessions);
+  return (
+    <section aria-label="Execution attempt" className="mt-4 max-w-prose space-y-1">
+      {attempts.current ? (
+        <p className="text-body text-fg">
+          Current attempt: <code>{attempts.current.sessionName}</code> ({attempts.current.state})
+          {attempts.current.workDir.length > 0 ? (
+            <>
+              {' · '}
+              <code>{attempts.current.workDir}</code>
+            </>
+          ) : null}
+        </p>
+      ) : attempts.staleReference ? (
+        <p className="text-body text-accent" role="alert">
+          Referenced session <code>{attempts.referencedSessionId}</code> is no longer present (stale
+          reference).
+        </p>
+      ) : (
+        <p className="text-body text-fg-muted italic">No active execution attempt.</p>
+      )}
+      {attempts.history.length > 0 && (
+        <ul aria-label="Attempt history" className="space-y-1">
+          {attempts.history.map((attempt) => (
+            <li key={attempt.sessionId} className="text-label text-fg-faint">
+              <code>{attempt.sessionName}</code> — {attempt.state}
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }
 
