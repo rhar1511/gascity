@@ -67,3 +67,15 @@ export async function createAndSlingSupervisorBead(
 
   return { bead, sling };
 }
+
+// startSupervisorAttempt delegates lifecycle creation to Gas City: slinging the
+// Bead creates a NEW Execution Attempt (Session + worktree). It never revives a
+// completed or failed Session in place, and repeated calls are the caller's to
+// dedupe (the UI disables while in flight).
+export async function startSupervisorAttempt(beadId: string, target: string): Promise<void> {
+  const trimmed = target.trim();
+  if (trimmed.length === 0) throw new Error('a sling target is required to start an attempt');
+  const cityName = activeCityOrThrow('start supervisor attempt');
+  const body: SlingInputBody = { bead: beadId, target: trimmed };
+  await supervisorApi().sling(cityName, body);
+}

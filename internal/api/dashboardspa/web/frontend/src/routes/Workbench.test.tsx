@@ -49,6 +49,7 @@ beforeEach(() => {
         }
         supervisorWrites.push({ method, path: url.pathname, body: capturedBody });
         if (/\/mail$/.test(url.pathname)) return jsonResponse({ id: 'm-1' });
+        if (/\/sling$/.test(url.pathname)) return jsonResponse({ ok: true });
         if (beadMatch && updateMode === 'ok') return jsonResponse({ ok: true });
         if (beadMatch && updateMode === 'reject') {
           return jsonResponse({ error: 'update rejected' }, { status: 409 });
@@ -273,6 +274,28 @@ describe('WorkbenchPage', () => {
     const queue = await screen.findByLabelText('Queued messages');
     expect(queue.textContent).toContain('please continue');
     await waitFor(() => expect(queue.textContent).toContain('delivered'));
+  });
+
+  it('offers an explicit start action when a Bead has no active attempt (gp-w3q)', async () => {
+    setStub({
+      kind: 'ok',
+      beads: [
+        {
+          ...sampleBead(),
+          status: 'open',
+          metadata: { 'gc.routed_to': 'worker' },
+        } as unknown as SupervisorBead,
+      ],
+    });
+    renderPage('/workbench?bead=gascity-0001');
+
+    const start = await screen.findByRole('button', { name: /start new attempt/i });
+    fireEvent.click(start);
+    fireEvent.click(start); // second click while in flight is ignored (idempotent)
+    await waitFor(() =>
+      expect(supervisorWrites.some((w) => w.path.endsWith('/sling'))).toBe(true),
+    );
+    await waitFor(() => expect(supervisorWrites.filter((w) => w.path.endsWith('/sling'))).toHaveLength(1));
   });
 
   it('reverts the optimistic move and surfaces a server rejection', async () => {

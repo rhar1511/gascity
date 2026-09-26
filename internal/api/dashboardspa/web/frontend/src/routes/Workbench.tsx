@@ -10,7 +10,7 @@ import { StatusBadge, beadStatusTone } from '../components/StatusBadge';
 import { useCachedData } from '../hooks/useCachedData';
 import { useGcEventRefresh } from '../hooks/useGcEvents';
 import { listSupervisorBeads } from '../supervisor/beadReads';
-import { updateSupervisorBead } from '../supervisor/beadWrites';
+import { startSupervisorAttempt, updateSupervisorBead } from '../supervisor/beadWrites';
 import { listSupervisorSessions } from '../supervisor/sessionReads';
 import { fetchAttemptDiff } from '../supervisor/attemptReads';
 import { sendSupervisorMail } from '../supervisor/mailWrites';
@@ -384,7 +384,7 @@ function AttemptPanel({ bead, sessions }: { bead: Row; sessions: NonNullable<Awa
           reference).
         </p>
       ) : (
-        <p className="text-body text-fg-muted italic">No active execution attempt.</p>
+        <AttemptStartActions bead={bead} hasHistory={attempts.history.length > 0} />
       )}
       {attempts.history.length > 0 && (
         <ul aria-label="Attempt history" className="space-y-1">
@@ -435,6 +435,54 @@ function AttemptDiffPanel({ beadId }: { beadId: string }) {
       <pre className="max-h-80 overflow-auto text-label">{data.text}</pre>
       {data.truncated && (
         <p className="text-label text-fg-faint">Diff truncated ({data.bytes} bytes).</p>
+      )}
+    </div>
+  );
+}
+
+// AttemptStartActions offers an EXPLICIT start/resume when a Bead has no active
+// attempt. Both delegate lifecycle creation to Gas City (sling -> new Session +
+// worktree); neither revives a completed/failed Session in place. "Resume in new
+// attempt" is offered only when prior attempts exist, and links the new attempt
+// to that history by construction (Gas City mints a distinct Session). Repeated
+// submission is idempotent: the buttons disable while a start is in flight.
+function AttemptStartActions({ bead, hasHistory }: { bead: Row; hasHistory: boolean }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const metadata = (bead as { metadata?: Record<string, string> }).metadata ?? {};
+  const target = (metadata['gc.routed_to'] ?? '').trim();
+
+  const start = async () => {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await startSupervisorAttempt(bead.id, target);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'start failed');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="space-y-2">
+      <p className="text-body text-fg-muted italic">No active execution attempt.</p>
+      {target.length > 0 ? (
+        <div className="flex gap-2">
+          <Button size="sm" onClick={() => void start()} disabled={busy}>
+            {hasHistory ? 'Resume in new attempt' : 'Start new attempt'}
+          </Button>
+        </div>
+      ) : (
+        <p className="text-body text-fg-faint">
+          No sling target on this Bead; start it from its rig.
+        </p>
+      )}
+      {error && (
+        <p role="alert" className="text-body text-accent">
+          {error}
+        </p>
       )}
     </div>
   );
