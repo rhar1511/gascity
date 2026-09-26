@@ -16,13 +16,13 @@ import (
 type DiffState string
 
 const (
-	// DiffOK: a non-empty diff was read.
+	// DiffOK means a non-empty diff was read.
 	DiffOK DiffState = "ok"
-	// DiffEmpty: the worktree exists and has no changes.
+	// DiffEmpty means the worktree exists and has no changes.
 	DiffEmpty DiffState = "empty"
-	// DiffMissingWorktree: the attempt names no worktree, or it is gone.
+	// DiffMissingWorktree means the attempt names no worktree, or it is gone.
 	DiffMissingWorktree DiffState = "missing_worktree"
-	// DiffUnavailable: git could not be run (missing, not a repo, error).
+	// DiffUnavailable means git could not be run (missing, not a repo, error).
 	DiffUnavailable DiffState = "unavailable"
 )
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { DashboardSession } from 'gas-city-dashboard-shared';
+import type { SupervisorSession } from '../supervisor/sessionReads';
 import { attemptWorktree, resolveAttempts } from './workbenchAttempts';
 import type { SupervisorBead } from '../supervisor/beadReads';
 
@@ -17,7 +17,7 @@ function bead(id: string, metadata: Record<string, string> = {}): SupervisorBead
   } as unknown as SupervisorBead;
 }
 
-function session(over: Partial<DashboardSession>): DashboardSession {
+function session(over: Partial<SupervisorSession>): SupervisorSession {
   return {
     id: 's-1',
     template: 'worker',
@@ -26,13 +26,15 @@ function session(over: Partial<DashboardSession>): DashboardSession {
     running: true,
     created_at: '2026-01-01T00:00:00Z',
     ...over,
-  } as unknown as DashboardSession;
+  } as SupervisorSession;
 }
 
 describe('resolveAttempts', () => {
   it('resolves the newest active attempt when one exists', () => {
     const b = bead('gascity-1', { 'gc.session_id': 's-1' });
-    const resolved = resolveAttempts(b, [session({ id: 's-1', running: true, work_dir: '/wt/s-1' })]);
+    const resolved = resolveAttempts(b, [
+      session({ id: 's-1', running: true, work_dir: '/wt/s-1' }),
+    ]);
     expect(resolved.current?.sessionId).toBe('s-1');
     expect(resolved.staleReference).toBe(false);
     expect(attemptWorktree(b, resolved)).toBe('/wt/s-1');
