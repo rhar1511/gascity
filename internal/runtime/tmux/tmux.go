@@ -4390,10 +4390,13 @@ func IsInsideTmux() bool {
 // SetMailClickBinding configures left-click on status-right to show mail preview.
 // This creates a popup showing the first unread message when clicking the mail icon area.
 //
-// The binding is conditional: it only activates in Gas Town sessions (those matching
-// a registered rig prefix or "hq-"). In non-GT sessions, the user's original
+// The binding is conditional: it only activates in Gas City sessions (those matching
+// a registered rig prefix or "hq-"). In non-city sessions, the user's original
 // MouseDown1StatusRight binding (if any) is preserved.
-// See: https://github.com/steveyegge/gastown/issues/1548
+//
+// The popup runs `gc mail peek` (the Gas City mail surface). It previously ran
+// the retired Gas Town `gt mail peek`; gc supersedes gt, so no gt binary is
+// required at runtime.
 func (t *Tmux) SetMailClickBinding(_ string) error {
 	// Skip if already configured — preserves user's original fallback from first call
 	if t.isGTBinding("root", "MouseDown1StatusRight") {
@@ -4407,7 +4410,7 @@ func (t *Tmux) SetMailClickBinding(_ string) error {
 	}
 	_, err := t.run("bind-key", "-T", "root", "MouseDown1StatusRight",
 		"if-shell", ifShell,
-		"display-popup -E -w 60 -h 15 'gt mail peek || echo No unread mail'",
+		"display-popup -E -w 60 -h 15 'gc mail peek || echo No unread mail'",
 		fallback)
 	return err
 }
