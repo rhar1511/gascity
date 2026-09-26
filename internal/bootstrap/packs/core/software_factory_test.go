@@ -24,14 +24,14 @@ func TestSoftwareFactoryFormulaCarriesIndependentGates(t *testing.T) {
 		"collect-signals", "bounded-lookback", "human-digest", "implement-candidate",
 		"independent-review", "factory-gate", "deliver-authorized-change",
 	} {
-		if !strings.Contains(data, `id = "`+step+`"`) {
+		if !strings.Contains(string(data), `id = "`+step+`"`) {
 			t.Errorf("formula missing step %q", step)
 		}
 	}
 	if !strings.Contains(string(data), "fail closed if it equals the rig root") {
 		t.Error("implementation step does not enforce rig-root isolation")
 	}
-	if !strings.Contains(string(data), "publish, approve, merge, deploy, close, reply, and notify") {
+	if !strings.Contains(strings.Join(strings.Fields(string(data)), " "), "publish, approve, merge, deploy, close, reply, and notify") {
 		t.Error("formula does not preserve separate delivery gates")
 	}
 }
@@ -42,7 +42,7 @@ func TestSoftwareFactorySkillIsEmbedded(t *testing.T) {
 		t.Fatalf("read gc-factory skill: %v", err)
 	}
 	text := string(data)
-	for _, want := range []string{".agent-factory/config.yaml", "gc worktree verify", "independent", "publish, approve, merge, deploy"} {
+	for _, want := range []string{".agent-factory/config.yaml", "gc worktree verify", "independent", "Publish, approve, merge, deploy"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("gc-factory skill missing %q", want)
 		}

@@ -234,6 +234,7 @@
               "reference/events",
               "reference/schema/index",
               "reference/system-packs",
+            "reference/software-factory",
               "reference/exec-session-provider",
               "reference/exec-beads-provider",
               "reference/tmux-agent-slice",
