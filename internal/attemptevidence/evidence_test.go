@@ -2,11 +2,18 @@ package attemptevidence
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -135,6 +142,94 @@ func TestCapturePreservesExactAttemptAfterOwnerDeleteAndStoreRestart(t *testing.
 	}
 	if len(refs) != 1 || refs[0].AttemptID != first.AttemptID || refs[0].WorkID != owner.ID || refs[0].DiffSHA256 != first.Diff.SHA256 {
 		t.Fatalf("exact references = %#v", refs)
+	}
+}
+
+func TestConfiguredHTTPReadsArchivedAttemptsAfterOwnerDeletion(t *testing.T) {
+	identity := Identity{Kind: KindRetry, OwnerBeadID: "gc-owner", ExecutionBeadID: "gc-attempt"}
+	attemptID, err := AttemptID(identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence := Evidence{
+		SchemaVersion: SchemaVersion, AttemptID: attemptID, Identity: identity,
+		StoreRef: "rig:fixture", CapturedAt: time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC),
+		SourceStatus: StatusUnavailable, SourceReason: "source_unavailable",
+		BaseStatus: StatusUnavailable, BaseReason: "base_unavailable",
+		CandidateStatus: StatusUnavailable, CandidateReason: "candidate_unavailable",
+		WorkingTreeStatus: WorkingTreeUnknown,
+		Diff:              DiffSnapshot{Status: StatusUnavailable, Reason: "base_unavailable"},
+		WorkspaceDiff:     DiffSnapshot{Status: StatusUnavailable, Reason: "workspace_unavailable"},
+		Policy:            unavailableFacet("not_linked"), Actions: unavailableFacet("not_linked"),
+		Acknowledgements: unavailableFacet("not_linked"), Redaction: unavailableFacet("not_performed"),
+	}
+	payload, err := json.Marshal(evidence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(payload)
+	metadata := map[string]string{
+		beadmeta.AttemptEvidenceArchiveOwnerIDMetadataKey:   identity.OwnerBeadID,
+		beadmeta.AttemptEvidenceArchiveAttemptIDMetadataKey: attemptID,
+		beadmeta.AttemptEvidenceArchiveDigestMetadataKey:    hex.EncodeToString(digest[:]),
+		beadmeta.AttemptEvidenceArchivePayloadMetadataKey:   string(payload),
+	}
+	metadataJSON, err := json.Marshal(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listItem, err := json.Marshal(map[string]any{
+		"id": "gc-archive", "title": "Immutable execution attempt evidence", "status": "closed",
+		"issue_type": "molecule", "labels": []string{"gc:attempt-evidence"}, "metadata": json.RawMessage(metadataJSON),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer controller-secret" || r.Header.Get("Bd-Project-Id") != "project-a" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		switch r.URL.Path {
+		case "/v0/beads/context":
+			_, _ = io.WriteString(w, `{"api_version":"v0","backend":"dolt","bd_version":"1.3.0","capabilities":["issues.casMetadata","issues.create","issues.get","project.enforce"],"database":"gc_fixture","dolt_mode":"server","project_id":"project-a"}`)
+		case "/v0/beads/issues/gc-owner":
+			http.NotFound(w, r)
+		case "/v0/beads/issues":
+			if len(r.URL.Query()["metadata_field"]) == 0 {
+				t.Errorf("archive read omitted metadata filters: %v", r.URL.Query())
+			}
+			_, _ = w.Write([]byte(`{"items":[` + string(listItem) + `],"has_more":false}`))
+		default:
+			t.Errorf("unexpected HTTP request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	tokenPath := filepath.Join(t.TempDir(), "controller-token")
+	if err := os.WriteFile(tokenPath, []byte("controller-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := beads.NewBdStore(t.TempDir(), func(_, _ string, _ ...string) ([]byte, error) {
+		t.Fatal("configured HTTP evidence path invoked bd command runner")
+		return nil, nil
+	}, beads.WithBdStorePrivateEvidenceHTTP(beads.PrivateEvidenceHTTPConfig{
+		Endpoint: server.URL, ProjectID: "project-a", Database: "gc_fixture", ScopeRef: "rig:fixture", TokenFile: tokenPath,
+	}))
+
+	listed, err := List(store, identity.OwnerBeadID)
+	if err != nil {
+		t.Fatalf("List after owner deletion: %v", err)
+	}
+	if len(listed) != 1 || listed[0].AttemptID != attemptID {
+		t.Fatalf("List after owner deletion = %#v, want exact archive %s", listed, attemptID)
+	}
+	read, err := Read(store, identity.OwnerBeadID, attemptID)
+	if err != nil {
+		t.Fatalf("Read after owner deletion: %v", err)
+	}
+	if read.AttemptID != attemptID || read.Identity != identity {
+		t.Fatalf("Read after owner deletion = %#v, want exact archived attempt", read)
 	}
 }
 
@@ -641,6 +736,60 @@ func TestUnsupportedMetadataCASRefusesToSeal(t *testing.T) {
 	}
 }
 
+func TestUnsupportedBdEvidenceReadsRefuseBeforeRunnerForWrappers(t *testing.T) {
+	for _, config := range []struct {
+		name   string
+		option beads.BdStoreOption
+	}{
+		{name: "unconfigured"},
+		{
+			name: "misconfigured",
+			option: beads.WithBdStorePrivateEvidenceHTTP(beads.PrivateEvidenceHTTPConfig{
+				Endpoint: "http://127.0.0.1:1", ProjectID: "project-a", Database: "gc_fixture",
+				ScopeRef: "rig:fixture", TokenFile: filepath.Join(t.TempDir(), "missing-token"),
+			}),
+		},
+	} {
+		for _, wrap := range []struct {
+			name string
+			fn   func(beads.Store) beads.Store
+		}{
+			{name: "direct", fn: func(store beads.Store) beads.Store { return store }},
+			{name: "typed", fn: func(store beads.Store) beads.Store { return beads.WorkStore{Store: store} }},
+			{name: "cached", fn: func(store beads.Store) beads.Store { return beads.NewCachingStore(store, nil) }},
+		} {
+			t.Run(config.name+"/"+wrap.name, func(t *testing.T) {
+				var calls atomic.Int32
+				base := beads.NewBdStore(t.TempDir(), func(_, _ string, _ ...string) ([]byte, error) {
+					calls.Add(1)
+					return []byte(`{"id":"gc-owner","metadata":{"gc.attempt_evidence.index.a1":"private-value"}}`), nil
+				}, config.option)
+				store := wrap.fn(base)
+				identity := Identity{Kind: KindRetry, OwnerBeadID: "gc-owner", ExecutionBeadID: "gc-attempt"}
+				spec := CaptureSpec{Identity: identity, StoreRef: "rig:fixture"}
+				operations := []struct {
+					name string
+					run  func() error
+				}{
+					{name: "Capture", run: func() error { _, err := Capture(context.Background(), store, spec); return err }},
+					{name: "Read", run: func() error { _, err := Read(store, "gc-owner", "attempt-1"); return err }},
+					{name: "List", run: func() error { _, err := List(store, "gc-owner"); return err }},
+				}
+				for _, operation := range operations {
+					t.Run(operation.name, func(t *testing.T) {
+						if err := operation.run(); !errors.Is(err, ErrPrivatePayloadTransportUnsupported) {
+							t.Errorf("%s error = %v, want unsupported private transport", operation.name, err)
+						}
+						if calls.Load() != 0 {
+							t.Errorf("%s invoked bd runner %d times", operation.name, calls.Load())
+						}
+					})
+				}
+			})
+		}
+	}
+}
+
 func TestUnsafePayloadTransportDoesNotDowngradePresentDiffOrWriteIndex(t *testing.T) {
 	base := beads.NewMemStore()
 	owner, err := base.Create(beads.Bead{Title: "source", Type: "task"})
@@ -663,8 +812,8 @@ func TestUnsafePayloadTransportDoesNotDowngradePresentDiffOrWriteIndex(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Read(base, owner.ID, id); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("unsafe capture wrote an evidence index: %v", err)
+	if _, err := Read(base, owner.ID, id); !errors.Is(err, ErrPrivatePayloadTransportUnsupported) {
+		t.Fatalf("unsafe capture read = %v, want explicit transport refusal", err)
 	}
 	archives, err := base.ListByMetadata(map[string]string{beadmeta.AttemptEvidenceArchiveOwnerIDMetadataKey: owner.ID}, 0, beads.IncludeClosed)
 	if err != nil {

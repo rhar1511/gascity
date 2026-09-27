@@ -104,6 +104,78 @@ func (s OrdersStore) ConditionalWritesResolveTarget() Store { return s.Store }
 // conditional-writes resolution target.
 func (s NudgesStore) ConditionalWritesResolveTarget() Store { return s.Store }
 
+// PrivateEvidenceMetadataCASWriterHandle forwards the narrowly scoped private
+// evidence writer without bypassing any inner wrapper that owns write policy.
+func (s WorkStore) PrivateEvidenceMetadataCASWriterHandle() (PrivateEvidenceMetadataCASWriter, bool) {
+	return PrivateEvidenceMetadataCASWriterFor(s.Store)
+}
+
+// PrivateEvidenceMetadataCASWriterHandle forwards the private-evidence writer
+// from the wrapped store.
+func (s GraphStore) PrivateEvidenceMetadataCASWriterHandle() (PrivateEvidenceMetadataCASWriter, bool) {
+	return PrivateEvidenceMetadataCASWriterFor(s.Store)
+}
+
+// PrivateEvidenceMetadataCASWriterHandle forwards the private-evidence writer
+// from the wrapped store.
+func (s SessionStore) PrivateEvidenceMetadataCASWriterHandle() (PrivateEvidenceMetadataCASWriter, bool) {
+	return PrivateEvidenceMetadataCASWriterFor(s.Store)
+}
+
+// PrivateEvidenceMetadataCASWriterHandle forwards the private-evidence writer
+// from the wrapped store.
+func (s MailStore) PrivateEvidenceMetadataCASWriterHandle() (PrivateEvidenceMetadataCASWriter, bool) {
+	return PrivateEvidenceMetadataCASWriterFor(s.Store)
+}
+
+// PrivateEvidenceMetadataCASWriterHandle forwards the private-evidence writer
+// from the wrapped store.
+func (s OrdersStore) PrivateEvidenceMetadataCASWriterHandle() (PrivateEvidenceMetadataCASWriter, bool) {
+	return PrivateEvidenceMetadataCASWriterFor(s.Store)
+}
+
+// PrivateEvidenceMetadataCASWriterHandle forwards the private-evidence writer
+// from the wrapped store.
+func (s NudgesStore) PrivateEvidenceMetadataCASWriterHandle() (PrivateEvidenceMetadataCASWriter, bool) {
+	return PrivateEvidenceMetadataCASWriterFor(s.Store)
+}
+
+// PrivateEvidenceArchiveReaderHandle forwards the private-evidence reader
+// from the wrapped store.
+func (s WorkStore) PrivateEvidenceArchiveReaderHandle() (PrivateEvidenceArchiveReader, bool) {
+	return PrivateEvidenceArchiveReaderFor(s.Store)
+}
+
+// PrivateEvidenceArchiveReaderHandle forwards the private-evidence reader
+// from the wrapped store.
+func (s GraphStore) PrivateEvidenceArchiveReaderHandle() (PrivateEvidenceArchiveReader, bool) {
+	return PrivateEvidenceArchiveReaderFor(s.Store)
+}
+
+// PrivateEvidenceArchiveReaderHandle forwards the private-evidence reader
+// from the wrapped store.
+func (s SessionStore) PrivateEvidenceArchiveReaderHandle() (PrivateEvidenceArchiveReader, bool) {
+	return PrivateEvidenceArchiveReaderFor(s.Store)
+}
+
+// PrivateEvidenceArchiveReaderHandle forwards the private-evidence reader
+// from the wrapped store.
+func (s MailStore) PrivateEvidenceArchiveReaderHandle() (PrivateEvidenceArchiveReader, bool) {
+	return PrivateEvidenceArchiveReaderFor(s.Store)
+}
+
+// PrivateEvidenceArchiveReaderHandle forwards the private-evidence reader
+// from the wrapped store.
+func (s OrdersStore) PrivateEvidenceArchiveReaderHandle() (PrivateEvidenceArchiveReader, bool) {
+	return PrivateEvidenceArchiveReaderFor(s.Store)
+}
+
+// PrivateEvidenceArchiveReaderHandle forwards the private-evidence reader
+// from the wrapped store.
+func (s NudgesStore) PrivateEvidenceArchiveReaderHandle() (PrivateEvidenceArchiveReader, bool) {
+	return PrivateEvidenceArchiveReaderFor(s.Store)
+}
+
 var (
 	_ ConditionalWritesResolveTargeter = WorkStore{}
 	_ ConditionalWritesResolveTargeter = GraphStore{}

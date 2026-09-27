@@ -93,3 +93,37 @@ func TestBdFailureDetailIsUnchangedWithoutNoise(t *testing.T) {
 		})
 	}
 }
+
+func TestClassifyBDExecResultRedactsPrivateEvidenceOnEarlyErrorPaths(t *testing.T) {
+	const privateOutput = `gc.attempt_evidence.index.abcd: immutable-private-payload`
+
+	t.Run("silent fallback", func(t *testing.T) {
+		stderr := "auto-importing beads into empty database: " + privateOutput
+		status, traceErr, resultErr := classifyBDExecResult(
+			context.Background(), context.Background(), "bd", time.Minute, time.Now(), nil, stderr, nil,
+		)
+		if status != "error" || !errors.Is(resultErr, ErrBDSilentFallback) {
+			t.Fatalf("status=%q resultErr=%v, want silent-fallback error", status, resultErr)
+		}
+		for label, err := range map[string]error{"trace": traceErr, "result": resultErr} {
+			if err == nil || strings.Contains(err.Error(), "immutable-private-payload") || !strings.Contains(err.Error(), redactedPrivateEvidenceDiagnostic) {
+				t.Errorf("%s error = %v, want private output redacted", label, err)
+			}
+		}
+	})
+
+	t.Run("timeout", func(t *testing.T) {
+		ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+		defer cancel()
+		stderr := "request timed out: " + privateOutput
+		status, traceErr, resultErr := classifyBDExecResult(
+			context.Background(), ctx, "bd", time.Minute, time.Now(), nil, stderr, errors.New("deadline exceeded"),
+		)
+		if status != "timeout" || traceErr == nil || resultErr == nil {
+			t.Fatalf("status=%q traceErr=%v resultErr=%v, want timeout errors", status, traceErr, resultErr)
+		}
+		if strings.Contains(resultErr.Error(), "immutable-private-payload") || !strings.Contains(resultErr.Error(), redactedPrivateEvidenceDiagnostic) {
+			t.Fatalf("result error = %v, want private output redacted", resultErr)
+		}
+	})
+}

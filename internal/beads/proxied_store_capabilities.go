@@ -358,6 +358,46 @@ func (s *ProxiedStore) ConditionalWritesResolveTarget() Store {
 	return s.writeLeaf()
 }
 
+// PrivatePayloadValueTransportTarget declares that private-value safety is
+// determined by the bd write leaf, not the native read leaf.
+func (s *ProxiedStore) PrivatePayloadValueTransportTarget() Store { return s.writeLeaf() }
+
+type proxiedPrivateEvidenceMetadataCASWriter struct {
+	store  *ProxiedStore
+	writer PrivateEvidenceMetadataCASWriter
+}
+
+func (w proxiedPrivateEvidenceMetadataCASWriter) CompareAndSetPrivateEvidenceMetadataKey(id, key, expected, next string) (bool, error) {
+	var swapped bool
+	err := w.store.withMutation("private-evidence-metadata-cas "+id, func(Store) error {
+		var err error
+		swapped, err = w.writer.CompareAndSetPrivateEvidenceMetadataKey(id, key, expected, next)
+		return err
+	})
+	return swapped, err
+}
+
+func (w proxiedPrivateEvidenceMetadataCASWriter) ReadPrivateEvidenceMetadataKey(id, key string) (string, bool, error) {
+	return w.writer.ReadPrivateEvidenceMetadataKey(id, key)
+}
+
+// PrivateEvidenceMetadataCASWriterHandle keeps the write inside the proxy
+// generation bracket instead of using generic conditional target resolution.
+func (s *ProxiedStore) PrivateEvidenceMetadataCASWriterHandle() (PrivateEvidenceMetadataCASWriter, bool) {
+	writer, ok := PrivateEvidenceMetadataCASWriterFor(s.writeLeaf())
+	if !ok {
+		return nil, false
+	}
+	return proxiedPrivateEvidenceMetadataCASWriter{store: s, writer: writer}, true
+}
+
+// PrivateEvidenceArchiveReaderHandle reads through the currently authoritative
+// bd write leaf. It does not resolve through the native read leaf and does not
+// put payload rows into a cache.
+func (s *ProxiedStore) PrivateEvidenceArchiveReaderHandle() (PrivateEvidenceArchiveReader, bool) {
+	return PrivateEvidenceArchiveReaderFor(s.writeLeaf())
+}
+
 // ReleaseIfCurrent releases an assignment on the write leaf, conditionally.
 func (s *ProxiedStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error) {
 	releaser, ok := s.writeLeaf().(ConditionalAssignmentReleaser)
