@@ -157,6 +157,32 @@ func TestSessionRequestDeliveryForAttemptCannotRetrofitLegacyAcceptance(t *testi
 	}
 }
 
+func TestSessionRecoveryRequestRejectsDifferentRevisionInsertedAfterPreflight(t *testing.T) {
+	mgr, front, sp, info, binding, generation := requestDeliveryAttemptFixture(t)
+	if _, err := front.GetRequest(info.ID, "recovery-revision-race"); !errors.Is(err, ErrRequestNotFound) {
+		t.Fatalf("preflight receipt = %v, want not found", err)
+	}
+	intervening := binding
+	intervening.WorkRevision = "8"
+	if _, err := front.AcceptRequestForAttempt(info.ID, "recovery-revision-race", generation, "report progress", intervening, time.Now()); err != nil {
+		t.Fatalf("insert intervening pending receipt: %v", err)
+	}
+
+	if _, err := mgr.SubmitRequestForAttemptExact(context.Background(), info.ID, "recovery-revision-race", generation, "report progress", binding); !errors.Is(err, ErrRequestConflict) {
+		t.Fatalf("exact submit accepted receipt with a different original revision: %v", err)
+	}
+	if got := sp.CountCalls("Nudge", info.SessionName); got != 0 {
+		t.Fatalf("provider sends=%d after revision race, want 0", got)
+	}
+	receipt, err := front.GetRequest(info.ID, "recovery-revision-race")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt.Delivery != RequestDeliveryPending || receipt.Attempt == nil || *receipt.Attempt != intervening || receipt.DeliveryAttemptedAt != nil {
+		t.Fatalf("intervening receipt changed despite exact-binding refusal: %+v", receipt)
+	}
+}
+
 func requestDeliveryAttemptFixture(t *testing.T) (*Manager, *Store, *runtime.Fake, Info, RequestAttemptBinding, int) {
 	t.Helper()
 	backing := beads.NewMemStore()

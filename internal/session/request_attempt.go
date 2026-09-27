@@ -50,6 +50,10 @@ func sameRequestAttempt(left, right *RequestAttemptBinding) bool {
 		left.AttemptID == right.AttemptID && left.Identity == right.Identity
 }
 
+func sameRequestAttemptExact(left, right *RequestAttemptBinding) bool {
+	return sameRequestAttempt(left, right) && left.WorkRevision == right.WorkRevision
+}
+
 func requestAttemptClaimMatches(current beads.Bead, binding *RequestAttemptBinding) bool {
 	return binding == nil || strings.TrimSpace(current.Metadata[beadmeta.CurrentClaimBeadIDMetadataKey]) == binding.Identity.ExecutionBeadID
 }

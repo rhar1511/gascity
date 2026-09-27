@@ -17,7 +17,7 @@ import (
 // fences cooperating in-process incarnation changes; provider/credential
 // isolation is still required against external writers and runtime replacement.
 func (m *Manager) SubmitRequest(ctx context.Context, id, requestID string, generation int, message string) (RequestReceipt, error) {
-	return m.submitRequest(ctx, id, requestID, generation, message, nil)
+	return m.submitRequest(ctx, id, requestID, generation, message, nil, false)
 }
 
 // SubmitRequestForAttempt accepts controller-verified attempt attribution and
@@ -28,10 +28,22 @@ func (m *Manager) SubmitRequestForAttempt(ctx context.Context, id, requestID str
 	if !validRequestAttemptBinding(binding, id, generation) {
 		return RequestReceipt{}, ErrRequestConflict
 	}
-	return m.submitRequest(ctx, id, requestID, generation, message, &binding)
+	return m.submitRequest(ctx, id, requestID, generation, message, &binding, false)
 }
 
-func (m *Manager) submitRequest(ctx context.Context, id, requestID string, generation int, message string, binding *RequestAttemptBinding) (RequestReceipt, error) {
+// SubmitRequestForAttemptExact is the recovery-controller path. Unlike the
+// general SubmitRequestForAttempt retry contract, it requires the entire stored
+// binding, including the original work revision, to match at the atomic send
+// reservation. This prevents a pending receipt created after controller
+// preflight from being delivered under a different signed work revision.
+func (m *Manager) SubmitRequestForAttemptExact(ctx context.Context, id, requestID string, generation int, message string, binding RequestAttemptBinding) (RequestReceipt, error) {
+	if !validRequestAttemptBinding(binding, id, generation) {
+		return RequestReceipt{}, ErrRequestConflict
+	}
+	return m.submitRequest(ctx, id, requestID, generation, message, &binding, true)
+}
+
+func (m *Manager) submitRequest(ctx context.Context, id, requestID string, generation int, message string, binding *RequestAttemptBinding, exactBinding bool) (RequestReceipt, error) {
 	var result RequestReceipt
 	err := withSessionMutationLock(id, func() error {
 		b, name, err := m.sessionBead(id)
@@ -58,6 +70,9 @@ func (m *Manager) submitRequest(ctx context.Context, id, requestID string, gener
 		result, err = front.mutateRequestReceipt(id, requestID, func(current beads.Bead, record *storedRequestReceipt) (bool, error) {
 			claimed = false
 			if current.Metadata["generation"] != strconv.Itoa(generation) || requestDigest(current.Metadata["instance_token"]) != record.ExecutionTokenDigest || current.Status == "closed" {
+				return false, ErrRequestConflict
+			}
+			if exactBinding && !sameRequestAttemptExact(record.Attempt, binding) {
 				return false, ErrRequestConflict
 			}
 			if !requestAttemptClaimMatches(current, record.Attempt) {

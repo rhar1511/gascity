@@ -10,10 +10,12 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/attemptevidence"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -47,6 +49,10 @@ func TestLifecycleRecoveryControllerNudgesOnlyTheCASWinnerAndObservesReplay(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
+	wantBinding := lifecycleRecoveryBindingForTest(t, fixture, request)
+	if receipt.Attempt == nil || *receipt.Attempt != wantBinding {
+		t.Fatalf("session receipt attempt=%+v, want exact trusted binding %+v", receipt.Attempt, wantBinding)
+	}
 	if receipt.Delivery != session.RequestDeliveryAccepted || receipt.AcknowledgedAt != nil || receipt.Effect != "unverified" {
 		t.Fatalf("session receipt=%+v, want provider acceptance only", receipt)
 	}
@@ -60,6 +66,70 @@ func TestLifecycleRecoveryControllerNudgesOnlyTheCASWinnerAndObservesReplay(t *t
 	}
 	if !bytes.Contains(logs.Bytes(), []byte("not useful-progress evidence")) {
 		t.Fatalf("controller log conflated nudge receipt with progress: %s", logs.String())
+	}
+}
+
+func TestLifecycleRecoveryRejectsUnboundOrMismatchedAttemptReceipt(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(session.RequestAttemptBinding, worklifecycle.RecoveryRequest) *session.RequestAttemptBinding
+	}{
+		{name: "legacy unbound", mutate: func(session.RequestAttemptBinding, worklifecycle.RecoveryRequest) *session.RequestAttemptBinding {
+			return nil
+		}},
+		{name: "wrong physical store", mutate: func(binding session.RequestAttemptBinding, _ worklifecycle.RecoveryRequest) *session.RequestAttemptBinding {
+			binding.StoreRef = "city:other"
+			return &binding
+		}},
+		{name: "wrong signed work revision", mutate: func(binding session.RequestAttemptBinding, request worklifecycle.RecoveryRequest) *session.RequestAttemptBinding {
+			binding.WorkRevision = strconv.FormatInt(request.ExpectedRevision+1, 10)
+			return &binding
+		}},
+		{name: "wrong execution identity", mutate: func(binding session.RequestAttemptBinding, _ worklifecycle.RecoveryRequest) *session.RequestAttemptBinding {
+			binding.Identity.ClaimGeneration = "other-claim-generation"
+			attemptID, err := attemptevidence.AttemptID(binding.Identity)
+			if err != nil {
+				t.Fatal(err)
+			}
+			binding.AttemptID = attemptID
+			return &binding
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newLifecycleRecoveryFixture(t)
+			request := fixture.newRequest(t, "nudge-preexisting", fixture.work.Revision)
+			fixture.persist(t, request)
+			front := session.NewStore(beads.SessionStore{Store: fixture.store})
+			generation, err := strconv.Atoi(request.SessionGeneration)
+			if err != nil {
+				t.Fatal(err)
+			}
+			binding := tc.mutate(lifecycleRecoveryBindingForTest(t, fixture, request), request)
+			if binding == nil {
+				if _, err := front.AcceptRequest(request.SessionID, request.RequestID, generation, request.Message, time.Now()); err != nil {
+					t.Fatalf("seed legacy request receipt: %v", err)
+				}
+			} else if _, err := front.AcceptRequestForAttempt(request.SessionID, request.RequestID, generation, request.Message, *binding, time.Now()); err != nil {
+				t.Fatalf("seed mismatched attempt receipt: %v", err)
+			}
+
+			var logs bytes.Buffer
+			reconcileLifecycleRecoveryRequests(context.Background(), fixture.city, fixture.cityPath, fixture.cfg, fixture.store, nil,
+				beads.SessionStore{Store: fixture.store}, fixture.provider, &logs)
+			if got := fixture.provider.CountCalls("Nudge", fixture.info.SessionName); got != 0 {
+				t.Fatalf("mismatched receipt triggered %d provider send(s)", got)
+			}
+			if !bytes.Contains(logs.Bytes(), []byte("conflicts with an existing session receipt; holding")) {
+				t.Fatalf("controller did not reject the unbound/mismatched receipt: %s", logs.String())
+			}
+			work, err := fixture.store.Get(fixture.work.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if raw := work.Metadata[beadmeta.LifecycleRecoveryStateMetadataKey]; raw != "" {
+				t.Fatalf("mismatched receipt consumed recovery budget: %s", raw)
+			}
+		})
 	}
 }
 
@@ -402,6 +472,23 @@ func (f *lifecycleRecoveryFixture) persist(t *testing.T, request worklifecycle.R
 	}
 	if _, _, err := worklifecycle.PersistRecoveryIntent(f.store, "work", request, digest); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func lifecycleRecoveryBindingForTest(t *testing.T, fixture *lifecycleRecoveryFixture, request worklifecycle.RecoveryRequest) session.RequestAttemptBinding {
+	t.Helper()
+	identity := attemptevidence.Identity{
+		Kind: attemptevidence.KindWorkbench, OwnerBeadID: request.WorkItemID,
+		ExecutionBeadID: request.WorkItemID, SessionID: request.SessionID,
+		SessionGeneration: request.SessionGeneration, ClaimGeneration: request.ClaimGeneration,
+	}
+	attemptID, err := attemptevidence.AttemptID(identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return session.RequestAttemptBinding{
+		StoreRef: "city:" + fixture.city, AttemptID: attemptID,
+		WorkRevision: strconv.FormatInt(request.ExpectedRevision, 10), Identity: identity,
 	}
 }
 
