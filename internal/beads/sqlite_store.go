@@ -1159,6 +1159,9 @@ func (s *SQLiteStore) Update(id string, opts UpdateOpts) error {
 			return err
 		}
 		before := b
+		if err := ValidateLifecycleMutation(b, opts); err != nil {
+			return fmt.Errorf("updating lifecycle bead %q: %w", id, err)
+		}
 		b = applySQLiteUpdateOpts(b, opts)
 		b.UpdatedAt = time.Now()
 		if err := s.upsertBeadTx(ctx, tx, b); err != nil {
@@ -1253,6 +1256,20 @@ func (s *SQLiteStore) Reopen(id string) error {
 func (s *SQLiteStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
 	if err := s.ensureOpen(); err != nil {
 		return 0, err
+	}
+	closedStatus := "closed"
+	preflight := UpdateOpts{Status: &closedStatus, Metadata: maps.Clone(metadata)}
+	for _, id := range ids {
+		b, err := s.Get(id)
+		if errors.Is(err, ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return 0, err
+		}
+		if err := ValidateLifecycleMutation(b, preflight); err != nil {
+			return 0, fmt.Errorf("batch closing lifecycle bead %q: %w", id, err)
+		}
 	}
 	closed := 0
 	for _, id := range ids {
@@ -1711,6 +1728,9 @@ func (t *sqliteStoreTx) Update(id string, opts UpdateOpts) error {
 	if err != nil {
 		return err
 	}
+	if err := ValidateLifecycleMutation(b, opts); err != nil {
+		return fmt.Errorf("updating lifecycle bead %q: %w", id, err)
+	}
 	before := b
 	b = applySQLiteUpdateOpts(b, opts)
 	b.UpdatedAt = time.Now()
@@ -1734,6 +1754,9 @@ func (t *sqliteStoreTx) Close(id string) error {
 	}
 	if b.Status == "closed" {
 		return nil
+	}
+	if err := ValidateLifecycleClose(b); err != nil {
+		return fmt.Errorf("closing lifecycle bead %q: %w", id, err)
 	}
 	before := b
 	b.Status = "closed"

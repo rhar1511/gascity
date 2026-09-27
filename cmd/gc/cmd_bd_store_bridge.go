@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/worklifecycle"
 	"github.com/spf13/cobra"
 )
 
@@ -187,7 +188,7 @@ func runBdStoreBridge(op string, args []string, dir, host, port, user string, st
 		if err := decodeJSON(stdin, &req); err != nil {
 			return err
 		}
-		return store.Update(args[0], beads.UpdateOpts{
+		opts := beads.UpdateOpts{
 			Title:        req.Title,
 			Status:       req.Status,
 			Type:         req.Type,
@@ -198,7 +199,15 @@ func runBdStoreBridge(op string, args []string, dir, host, port, user string, st
 			Labels:       req.Labels,
 			RemoveLabels: req.RemoveLabels,
 			Metadata:     req.Metadata,
-		})
+		}
+		current, err := store.Get(args[0])
+		if err != nil {
+			return err
+		}
+		if err := worklifecycle.ValidateEnrolledMutation(current, opts); err != nil {
+			return err
+		}
+		return store.Update(args[0], opts)
 	case "close":
 		if len(args) < 1 {
 			return fmt.Errorf("usage: close <id>")
@@ -207,6 +216,14 @@ func runBdStoreBridge(op string, args []string, dir, host, port, user string, st
 	case "reopen":
 		if len(args) < 1 {
 			return fmt.Errorf("usage: reopen <id>")
+		}
+		current, err := store.Get(args[0])
+		if err != nil {
+			return err
+		}
+		open := "open"
+		if err := worklifecycle.ValidateEnrolledMutation(current, beads.UpdateOpts{Status: &open}); err != nil {
+			return err
 		}
 		return store.Reopen(args[0])
 	case "list":

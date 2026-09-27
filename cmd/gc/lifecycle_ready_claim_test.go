@@ -69,6 +69,7 @@ func TestReadyJSONCarriesTrustedLifecycleScopeIntoHookClaim(t *testing.T) {
 			metadata[beadmeta.LifecycleMaterializationMetadataKey], err = encodeLifecycleMaterialization(lifecycleMaterialization{
 				Version: 1, State: "attached", Scope: scope, Contract: digest, Route: "worker",
 				Workflow: "mol-polecat-work", MergeStrategy: "mr", Token: "controller-token", WorkflowID: "wf-1",
+				SourceID: "work-1", SourceStoreRef: "city:pilot", WorkflowStoreRef: "city:pilot", AdmissionReceipt: encoded,
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -98,16 +99,28 @@ func TestReadyJSONCarriesTrustedLifecycleScopeIntoHookClaim(t *testing.T) {
 		intent    bool
 		receipt   bool
 		wantClaim bool
+		noCAS     bool
+		raceHold  bool
+		wantError bool
 	}{
 		{name: "local receipt with verified workflow", scope: worklifecycle.ScopeForStore("pilot", "city:pilot"), verified: true, intent: true, receipt: true, wantClaim: true},
 		{name: "receipt replayed from another city", scope: worklifecycle.ScopeForStore("elsewhere", "city:elsewhere"), verified: true, intent: true, receipt: true, wantClaim: false},
 		{name: "worker workflow metadata without controller verification", scope: worklifecycle.ScopeForStore("pilot", "city:pilot"), intent: true, receipt: true, wantClaim: false},
 		{name: "removed intent and receipt after durable enrollment", scope: worklifecycle.ScopeForStore("pilot", "city:pilot"), verified: true, wantClaim: false},
+		{name: "unsupported CAS refuses lifecycle claim", scope: worklifecycle.ScopeForStore("pilot", "city:pilot"), verified: true, intent: true, receipt: true, noCAS: true, wantError: true},
+		{name: "hold racing the claim CAS refuses lifecycle claim", scope: worklifecycle.ScopeForStore("pilot", "city:pilot"), verified: true, intent: true, receipt: true, raceHold: true, wantError: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			store := &beads.MemStore{IDPrefix: "work", HonorExplicitIDs: true}
-			if _, err := store.Create(makeCandidate(tc.scope, tc.verified, tc.intent, tc.receipt)); err != nil {
+			mem := &beads.MemStore{IDPrefix: "work", HonorExplicitIDs: true}
+			if _, err := mem.Create(makeCandidate(tc.scope, tc.verified, tc.intent, tc.receipt)); err != nil {
 				t.Fatal(err)
+			}
+			var store beads.Store = mem
+			if tc.noCAS {
+				mem.DisableConditionalWrites = true
+			}
+			if tc.raceHold {
+				store = &lifecycleHoldDuringClaimStore{MemStore: mem}
 			}
 			leg := readyLeg{
 				label:          "city",
@@ -145,11 +158,11 @@ func TestReadyJSONCarriesTrustedLifecycleScopeIntoHookClaim(t *testing.T) {
 				}
 			}
 
-			attempts := 0
+			legacyClaimAttempts := 0
 			ops := hookClaimOps{
 				Runner: func(string, string) (string, error) { return string(readyJSON), nil },
 				Claim: func(_ context.Context, _ string, _ []string, id, assignee string) (beads.Bead, bool, error) {
-					attempts++
+					legacyClaimAttempts++
 					row, err := store.Get(id)
 					if err != nil {
 						return beads.Bead{}, false, err
@@ -161,21 +174,59 @@ func TestReadyJSONCarriesTrustedLifecycleScopeIntoHookClaim(t *testing.T) {
 				DrainAck: func(io.Writer) error { return nil },
 			}
 			var stdout, stderr bytes.Buffer
-			_ = doHookClaim("gc ready --json", "/city", hookClaimOptions{
+			code := doHookClaim("gc ready --json", "/city", hookClaimOptions{
 				Assignee:              "worker-session",
 				IdentityCandidates:    []string{"worker-session"},
 				RouteTargets:          []string{"worker"},
 				Lifecycle:             lifecycleCfg,
 				LifecycleCity:         cityCfg,
 				TrustedLifecycleScope: true,
-				JSON:                  true,
+				ResolveLifecycleStore: func(ref string) (beads.Store, error) {
+					if ref != "city:pilot" {
+						return nil, beads.ErrNotFound
+					}
+					return store, nil
+				},
+				JSON: true,
 			}, ops, &stdout, &stderr)
-			if (attempts == 1) != tc.wantClaim {
-				t.Fatalf("claim attempts = %d, wantClaim=%v; stdout=%q stderr=%q", attempts, tc.wantClaim, stdout.String(), stderr.String())
+			current, err := store.Get("work-1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (strings.EqualFold(current.Status, "in_progress") && current.Assignee == "worker-session") != tc.wantClaim {
+				t.Fatalf("canonical status/owner = %q/%q, wantClaim=%v; stdout=%q stderr=%q", current.Status, current.Assignee, tc.wantClaim, stdout.String(), stderr.String())
+			}
+			if legacyClaimAttempts != 0 {
+				t.Fatalf("legacy Claim called %d times for lifecycle work", legacyClaimAttempts)
+			}
+			if tc.wantError && code == 0 {
+				t.Fatalf("hook claim code = 0, want refusal; stdout=%q stderr=%q", stdout.String(), stderr.String())
 			}
 			if !tc.wantClaim && !strings.Contains(stderr.String(), "holding lifecycle item work-1") {
-				t.Fatalf("stderr = %q, want a lifecycle hold explanation", stderr.String())
+				if !tc.wantError {
+					t.Fatalf("stderr = %q, want a lifecycle hold explanation", stderr.String())
+				}
+			}
+			if tc.raceHold {
+				current, err := mem.Get("work-1")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if strings.EqualFold(current.Status, "in_progress") || current.Assignee != "" || !lifecycleRowHeld(current) {
+					t.Fatalf("claim race changed owner/status or lost the hold: status=%q owner=%q labels=%v", current.Status, current.Assignee, current.Labels)
+				}
 			}
 		})
 	}
+}
+
+type lifecycleHoldDuringClaimStore struct {
+	*beads.MemStore
+}
+
+func (s *lifecycleHoldDuringClaimStore) UpdateIfMatch(id string, revision int64, opts beads.UpdateOpts) error {
+	if err := s.Update(id, beads.UpdateOpts{Labels: []string{beadmeta.DispatchHoldLabels[0]}}); err != nil {
+		return err
+	}
+	return s.MemStore.UpdateIfMatch(id, revision, opts)
 }

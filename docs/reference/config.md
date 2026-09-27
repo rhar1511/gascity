@@ -536,6 +536,8 @@ LifecycleConfig controls controller-owned admission and recovery.
 | `admission_authorities` | map[string]string |  |  | AdmissionAuthorities maps trusted triage/contract authors to their Ed25519 public keys. Keys are base64-encoded 32-byte public keys. |
 | `acceptance_authorities` | map[string]string |  |  | AcceptanceAuthorities maps trusted completion authorities to their Ed25519 public keys. Keys are base64-encoded 32-byte public keys. |
 | `escalation_target` | string |  |  | EscalationTarget is the configured recipient for one exhaustion escalation per work item. Empty deliberately leaves recovery disabled. |
+| `completion_receipt_max_age` | string |  |  | CompletionReceiptMaxAge bounds how long after signing an acceptance receipt may close work. Operators must choose this from their acceptance and rollout policy; no default is inferred. Empty disables completion reconciliation. |
+| `completion_clock_skew` | string |  |  | CompletionClockSkew is the largest accepted future timestamp allowance. Operators must choose this from expected signer/controller clock drift. It must be set with CompletionReceiptMaxAge; empty disables completion reconciliation rather than choosing a controller-specific default. |
 
 ## LocalDoctorCheck
 

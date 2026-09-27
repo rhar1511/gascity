@@ -17,6 +17,7 @@ import (
 	"time"
 
 	beadslib "github.com/steveyegge/beads"
+	beadops "github.com/steveyegge/beads/issueops"
 )
 
 func TestNativeDoltStoreCreateDelegatesToUpstreamStorage(t *testing.T) {
@@ -585,9 +586,9 @@ func TestNativeDoltStoreCloseForwardsMetadataCloseReason(t *testing.T) {
 				Metadata:  raw,
 			}, nil
 		},
-		closeIssue: func(_ context.Context, _ string, reason string, _ string, _ string) error {
-			gotReason = reason
-			return nil
+		closeIssueChecked: func(_ context.Context, _ string, _ string, opts beadslib.CloseIssueOptions) (beadslib.CloseIssueResult, error) {
+			gotReason = opts.Reason
+			return beadslib.CloseIssueResult{}, nil
 		},
 	}
 	store := newNativeDoltStoreForTest(storage)
@@ -600,9 +601,8 @@ func TestNativeDoltStoreCloseForwardsMetadataCloseReason(t *testing.T) {
 	}
 }
 
-func TestNativeDoltStoreCloseTreatsMalformedMetadataAsEmptyReason(t *testing.T) {
+func TestNativeDoltStoreCloseFailsClosedOnMalformedMetadata(t *testing.T) {
 	closeCalled := false
-	var gotReason string
 	storage := &nativeDoltStorageSpy{
 		getIssue: func(context.Context, string) (*beadslib.Issue, error) {
 			return &beadslib.Issue{
@@ -614,22 +614,18 @@ func TestNativeDoltStoreCloseTreatsMalformedMetadataAsEmptyReason(t *testing.T) 
 				Metadata:  json.RawMessage(`{"close_reason":`),
 			}, nil
 		},
-		closeIssue: func(_ context.Context, _ string, reason string, _ string, _ string) error {
+		closeIssueChecked: func(context.Context, string, string, beadslib.CloseIssueOptions) (beadslib.CloseIssueResult, error) {
 			closeCalled = true
-			gotReason = reason
-			return nil
+			return beadslib.CloseIssueResult{}, nil
 		},
 	}
 	store := newNativeDoltStoreForTest(storage)
 
-	if err := store.Close("gc-close"); err != nil {
-		t.Fatalf("Close: %v", err)
+	if err := store.Close("gc-close"); err == nil || !errors.Is(err, ErrMetadataParse) {
+		t.Fatalf("Close error = %v, want metadata parse refusal", err)
 	}
-	if !closeCalled {
-		t.Fatal("CloseIssue was not called")
-	}
-	if gotReason != "" {
-		t.Fatalf("Close reason = %q, want empty reason for malformed metadata", gotReason)
+	if closeCalled {
+		t.Fatal("CloseIssueChecked was called after lifecycle metadata could not be validated")
 	}
 }
 
@@ -732,8 +728,8 @@ func TestNativeDoltStoreCloseStoreWaitsForInFlightOperation(t *testing.T) {
 			<-release
 			return &beadslib.Issue{ID: "gc-open", Status: beadslib.StatusOpen}, nil
 		},
-		closeIssue: func(context.Context, string, string, string, string) error {
-			return nil
+		closeIssueChecked: func(context.Context, string, string, beadslib.CloseIssueOptions) (beadslib.CloseIssueResult, error) {
+			return beadslib.CloseIssueResult{}, nil
 		},
 		close: func() error {
 			close(closed)
@@ -781,9 +777,9 @@ func TestNativeDoltStoreReopenAlreadyOpenSkipsUpstreamCall(t *testing.T) {
 		getIssue: func(context.Context, string) (*beadslib.Issue, error) {
 			return &beadslib.Issue{ID: "gc-open", Status: beadslib.StatusOpen}, nil
 		},
-		reopenIssue: func(context.Context, string, string, string) error {
+		updateIssueChecked: func(context.Context, string, map[string]interface{}, string, beadslib.UpdateIssueOptions) error {
 			reopened = true
-			return errors.New("unexpected reopen")
+			return errors.New("unexpected checked reopen update")
 		},
 	}
 	store := newNativeDoltStoreForTest(storage)
@@ -792,7 +788,7 @@ func TestNativeDoltStoreReopenAlreadyOpenSkipsUpstreamCall(t *testing.T) {
 		t.Fatalf("Reopen(open): %v", err)
 	}
 	if reopened {
-		t.Fatal("Reopen(open) called upstream ReopenIssue")
+		t.Fatal("Reopen(open) called UpdateIssueChecked")
 	}
 }
 
@@ -2628,6 +2624,7 @@ type nativeDoltStorageSpy struct {
 	updateIssue                 func(context.Context, string, map[string]interface{}, string) error
 	updateIssueChecked          func(context.Context, string, map[string]interface{}, string, beadslib.UpdateIssueOptions) error
 	runInTransaction            func(context.Context, string, func(beadslib.Transaction) error) error
+	issueLifecycle              func() (beadops.Lifecycle, error)
 	reopenIssue                 func(context.Context, string, string, string) error
 	closeIssue                  func(context.Context, string, string, string, string) error
 	closeIssueChecked           func(context.Context, string, string, beadslib.CloseIssueOptions) (beadslib.CloseIssueResult, error)
@@ -2691,6 +2688,13 @@ func (s *nativeDoltStorageSpy) RunInTransaction(ctx context.Context, commitMsg s
 		return s.runInTransaction(ctx, commitMsg, fn)
 	}
 	return fn(nativeDoltTransactionForTest{storage: s})
+}
+
+func (s *nativeDoltStorageSpy) IssueLifecycle() (beadops.Lifecycle, error) {
+	if s.issueLifecycle == nil {
+		return nil, errors.New("IssueLifecycle test seam not configured")
+	}
+	return s.issueLifecycle()
 }
 
 func (s *nativeDoltStorageSpy) ReopenIssue(ctx context.Context, id string, reason string, actor string) error {
@@ -3152,6 +3156,11 @@ func (s *nativeDoltFailingCloseStorage) CloseIssue(ctx context.Context, id, reas
 func (s *nativeDoltCloseCapturingStorage) CloseIssue(ctx context.Context, id string, reason string, actor string, session string) error {
 	s.closeReasons = append(s.closeReasons, reason)
 	return s.nativeDoltMemStorage.CloseIssue(ctx, id, reason, actor, session)
+}
+
+func (s *nativeDoltCloseCapturingStorage) CloseIssueChecked(ctx context.Context, id string, actor string, opts beadslib.CloseIssueOptions) (beadslib.CloseIssueResult, error) {
+	s.closeReasons = append(s.closeReasons, opts.Reason)
+	return s.nativeDoltMemStorage.CloseIssueChecked(ctx, id, actor, opts)
 }
 
 func (s *nativeDoltMemStorage) issueForDependency(id string) *beadslib.Issue {

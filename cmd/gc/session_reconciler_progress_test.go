@@ -421,6 +421,40 @@ func TestReconcileSessionBeads_ClaimHolderStallPreservesLifecycleOwner(t *testin
 	}
 }
 
+func TestReconcileSessionBeads_DisablingAdmissionStillPreservesEnrolledOwner(t *testing.T) {
+	env, session, sessionName := newProgressStallTestEnv(t)
+	env.cfg.Session.ProgressStallTimeout = ""
+	env.cfg.Session.ClaimHolderStallTimeout = "20m"
+	// Enrollment is durable; this toggle only stops new admission.
+	env.cfg.Lifecycle.AdmissionEnabled = false
+	work, err := env.store.Create(beads.Bead{
+		Title:    "previously enrolled claimed work",
+		Type:     "task",
+		Assignee: sessionName,
+		Metadata: map[string]string{beadmeta.LifecycleAdmissionReceiptMetadataKey: "signed enrollment evidence"},
+	})
+	if err != nil {
+		t.Fatalf("Create(work): %v", err)
+	}
+	status := "in_progress"
+	if err := env.store.Update(work.ID, beads.UpdateOpts{Status: &status}); err != nil {
+		t.Fatalf("Update(work): %v", err)
+	}
+
+	env.reconcileAtPath(t.TempDir(), []beads.Bead{session})
+
+	if !env.sp.IsRunning(sessionName) {
+		t.Fatalf("session %q was recycled after admission was disabled", sessionName)
+	}
+	got, err := env.store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", work.ID, err)
+	}
+	if got.Status != "in_progress" || got.Assignee != sessionName {
+		t.Fatalf("enrolled work changed after admission was disabled: status=%q assignee=%q", got.Status, got.Assignee)
+	}
+}
+
 func TestReconcileSessionBeads_RestartRequestPreservesLifecycleOwner(t *testing.T) {
 	env, session, sessionName := newProgressStallTestEnv(t)
 	env.cfg.Session.ProgressStallTimeout = ""

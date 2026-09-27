@@ -1484,6 +1484,15 @@ func (s *BdStore) Update(id string, opts UpdateOpts) error {
 	if len(args) == 3 {
 		return nil
 	}
+	if bdUpdateMayReopenOrClearLifecycleEvidence(opts) {
+		current, err := s.Get(id)
+		if err != nil {
+			return err
+		}
+		if err := ValidateLifecycleMutation(current, opts); err != nil {
+			return fmt.Errorf("updating lifecycle bead %q: %w", id, err)
+		}
+	}
 	// Internal store callers supply canonical full IDs; the exact-ID collision
 	// guard lives at the CLI/API entry points (cmd_bd.go, huma_handlers_beads.go)
 	// where user-typed short IDs originate (gcy-g4o).
@@ -1870,6 +1879,17 @@ func (s *BdStore) UpdateAll(ids []string, opts UpdateOpts) (int, error) {
 	if len(ids) == 0 {
 		return 0, nil
 	}
+	if bdUpdateMayReopenOrClearLifecycleEvidence(opts) {
+		for _, id := range ids {
+			current, err := s.Get(id)
+			if err != nil {
+				return 0, err
+			}
+			if err := ValidateLifecycleMutation(current, opts); err != nil {
+				return 0, fmt.Errorf("batch updating lifecycle bead %q: %w", id, err)
+			}
+		}
+	}
 	args := append([]string{"update", "--json"}, ids...)
 	baseLen := len(args)
 	if opts.Title != nil {
@@ -1994,6 +2014,16 @@ func beadSliceContains(items []Bead, id string) bool {
 
 // SetMetadata sets a key-value metadata pair on a bead via bd update.
 func (s *BdStore) SetMetadata(id, key, value string) error {
+	metadata := map[string]string{key: value}
+	if bdUpdateMayReopenOrClearLifecycleEvidence(UpdateOpts{Metadata: metadata}) {
+		current, err := s.Get(id)
+		if err != nil {
+			return err
+		}
+		if err := ValidateLifecycleMutation(current, UpdateOpts{Metadata: metadata}); err != nil {
+			return fmt.Errorf("setting lifecycle metadata on %q: %w", id, err)
+		}
+	}
 	err := s.runBDTransientWrite("update", "--json", id,
 		"--set-metadata", key+"="+value)
 	if err != nil {
@@ -2011,6 +2041,15 @@ func (s *BdStore) SetMetadata(id, key, value string) error {
 func (s *BdStore) SetMetadataBatch(id string, kvs map[string]string) error {
 	if len(kvs) == 0 {
 		return nil
+	}
+	if bdUpdateMayReopenOrClearLifecycleEvidence(UpdateOpts{Metadata: kvs}) {
+		current, err := s.Get(id)
+		if err != nil {
+			return err
+		}
+		if err := ValidateLifecycleMutation(current, UpdateOpts{Metadata: kvs}); err != nil {
+			return fmt.Errorf("setting lifecycle metadata batch on %q: %w", id, err)
+		}
 	}
 	args := []string{"update", "--json", id}
 	keys := make([]string, 0, len(kvs))
@@ -2133,6 +2172,9 @@ func (tx *bdStoreTx) Update(id string, opts UpdateOpts) error {
 	if err != nil {
 		return err
 	}
+	if err := ValidateLifecycleMutation(item.current, opts); err != nil {
+		return fmt.Errorf("updating lifecycle bead %q: %w", id, err)
+	}
 	item.current = applyUpdateOptsToBead(item.current, opts)
 	item.touched.note(opts)
 	item.updated = true
@@ -2150,6 +2192,9 @@ func (tx *bdStoreTx) Close(id string) error {
 	item, err := tx.item(id)
 	if err != nil {
 		return err
+	}
+	if err := ValidateLifecycleClose(item.current); err != nil {
+		return fmt.Errorf("closing lifecycle bead %q: %w", id, err)
 	}
 	setBeadStatus(&item.current, "closed")
 	item.closed = true
@@ -2529,6 +2574,9 @@ func (s *BdStore) CloseAll(ids []string, metadata map[string]string) (int, error
 	if len(ids) == 0 {
 		return 0, nil
 	}
+	if err := s.validateLifecycleCloseTargets(ids, metadata); err != nil {
+		return 0, err
+	}
 
 	// Set metadata on all beads first (before closing, since some stores
 	// prevent metadata writes on closed beads).
@@ -2597,6 +2645,9 @@ func (s *BdStore) CloseAllWithReason(ids []string, reason string) (int, error) {
 	if len(ids) == 0 {
 		return 0, nil
 	}
+	if err := s.validateLifecycleCloseTargets(ids, nil); err != nil {
+		return 0, err
+	}
 	reason = strings.TrimSpace(reason)
 	err := s.runBDTransientWrite(bdCloseArgs(reason, ids...)...)
 	if err != nil {
@@ -2634,11 +2685,14 @@ func (s *BdStore) CloseAllWithReason(ids []string, reason string) (int, error) {
 // the supplied reason; it forwards what the caller set, or omits
 // --reason entirely when no metadata is set.
 func (s *BdStore) Close(id string) error {
-	reason := ""
-	if b, err := s.Get(id); err == nil {
-		reason = strings.TrimSpace(b.Metadata["close_reason"])
+	b, err := s.Get(id)
+	if err != nil {
+		return fmt.Errorf("closing bead %q: %w", id, err)
 	}
-	return s.close(id, reason)
+	if err := ValidateLifecycleClose(b); err != nil {
+		return fmt.Errorf("closing lifecycle bead %q: %w", id, err)
+	}
+	return s.close(id, strings.TrimSpace(b.Metadata["close_reason"]))
 }
 
 // CloseWithReason closes a bead with an explicit reason without first reading
@@ -2657,9 +2711,16 @@ func bdCloseArgs(reason string, ids ...string) []string {
 }
 
 func (s *BdStore) close(id, reason string) error {
+	current, err := s.Get(id)
+	if err != nil {
+		return fmt.Errorf("closing bead %q: %w", id, err)
+	}
+	if err := ValidateLifecycleClose(current); err != nil {
+		return fmt.Errorf("closing lifecycle bead %q: %w", id, err)
+	}
 	// Internal callers supply canonical full IDs; exact-ID guard lives at the
 	// CLI/API entry points (gcy-g4o).
-	err := s.runBDTransientWrite(bdCloseArgs(reason, id)...)
+	err = s.runBDTransientWrite(bdCloseArgs(reason, id)...)
 	if err != nil {
 		// Some bd error paths collapse to a bare exit status without a helpful
 		// not-found string. Re-read the bead to distinguish "already closed" from
@@ -2685,12 +2746,51 @@ func (s *BdStore) close(id, reason string) error {
 
 // Reopen sets a closed bead's status to open via bd reopen.
 func (s *BdStore) Reopen(id string) error {
-	err := s.runBDTransientWrite("reopen", "--json", id)
+	current, err := s.Get(id)
+	if err != nil {
+		return fmt.Errorf("reopening bead %q: %w", id, err)
+	}
+	open := "open"
+	if err := ValidateLifecycleMutation(current, UpdateOpts{Status: &open}); err != nil {
+		return fmt.Errorf("reopening lifecycle bead %q: %w", id, err)
+	}
+	err = s.runBDTransientWrite("reopen", "--json", id)
 	if err != nil {
 		if isBdNotFound(err) {
 			return fmt.Errorf("reopening bead %q: %w", id, ErrNotFound)
 		}
 		return fmt.Errorf("reopening bead %q: %w", id, err)
+	}
+	return nil
+}
+
+func bdUpdateMayReopenOrClearLifecycleEvidence(opts UpdateOpts) bool {
+	if opts.Status != nil {
+		return true
+	}
+	for _, key := range []string{
+		beadmeta.LifecycleAdmissionReceiptMetadataKey,
+		beadmeta.LifecycleMaterializationMetadataKey,
+		beadmeta.LifecycleCompletionReceiptMetadataKey,
+		beadmeta.LifecycleRecoveryStateMetadataKey,
+	} {
+		if value, supplied := opts.Metadata[key]; supplied && strings.TrimSpace(value) == "" {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *BdStore) validateLifecycleCloseTargets(ids []string, metadata map[string]string) error {
+	for _, id := range ids {
+		current, err := s.Get(id)
+		if err != nil {
+			return fmt.Errorf("checking close target %q: %w", id, err)
+		}
+		closedStatus := "closed"
+		if err := ValidateLifecycleMutation(current, UpdateOpts{Status: &closedStatus, Metadata: metadata}); err != nil {
+			return fmt.Errorf("closing lifecycle bead %q: %w", id, err)
+		}
 	}
 	return nil
 }

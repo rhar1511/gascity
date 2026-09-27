@@ -71,6 +71,44 @@ func TestLifecycleCompletionRequiresScopedAcceptance(t *testing.T) {
 	}
 }
 
+func TestLifecycleCompletionReceiptCannotBeReplayedAfterGenericReopen(t *testing.T) {
+	cfg, row := lifecycleCompletionFixture(t)
+	store := newLifecycleCompletionStore(t, row)
+	reconcileLifecycleCompletions("pilot", "/fixture/city", cfg, store, nil, nil, io.Discard)
+	closed, err := store.Get(row.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closed.Status != "closed" {
+		t.Fatalf("initial completion status=%q, want closed", closed.Status)
+	}
+	if err := store.Update(row.ID, beads.UpdateOpts{Metadata: map[string]string{beadmeta.LifecycleCompletionReceiptMetadataKey: ""}}); !errors.Is(err, beads.ErrLifecycleMutationBlocked) {
+		t.Fatalf("clearing accepted receipt error = %v, want lifecycle mutation refusal", err)
+	}
+	open := "open"
+	if err := store.Update(row.ID, beads.UpdateOpts{Status: &open}); !errors.Is(err, beads.ErrLifecycleMutationBlocked) {
+		t.Fatalf("generic status reopen error = %v, want lifecycle mutation refusal", err)
+	}
+	if err := store.Reopen(row.ID); !errors.Is(err, beads.ErrLifecycleMutationBlocked) {
+		t.Fatalf("Reopen error = %v, want lifecycle mutation refusal", err)
+	}
+	after, err := store.Get(row.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Status != "closed" || after.Metadata[beadmeta.LifecycleCompletionReceiptMetadataKey] == "" {
+		t.Fatalf("refused mutations changed completion evidence: status=%q metadata=%v", after.Status, after.Metadata)
+	}
+	reconcileLifecycleCompletions("pilot", "/fixture/city", cfg, store, nil, nil, io.Discard)
+	repeated, err := store.Get(row.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repeated.Revision != after.Revision {
+		t.Fatalf("verified completion replay mutated evidence: revision %d -> %d", after.Revision, repeated.Revision)
+	}
+}
+
 func TestLifecycleCompletionRefusesUnsupportedOrStaleClose(t *testing.T) {
 	for _, stale := range []bool{false, true} {
 		cfg, row := lifecycleCompletionFixture(t)
@@ -156,8 +194,9 @@ func lifecycleCompletionFixture(t *testing.T) (*config.City, beads.Bead) {
 	acceptanceKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{2}, ed25519.SeedSize))
 	cfg := &config.City{Workspace: config.Workspace{Name: "pilot"}, Lifecycle: config.LifecycleConfig{
 		AdmissionEnabled: true, RecoveryEnabled: true, EscalationTarget: "human",
-		AdmissionAuthorities:  map[string]string{"triage": base64.StdEncoding.EncodeToString(admissionKey.Public().(ed25519.PublicKey))},
-		AcceptanceAuthorities: map[string]string{"reviewer": base64.StdEncoding.EncodeToString(acceptanceKey.Public().(ed25519.PublicKey))},
+		AdmissionAuthorities:    map[string]string{"triage": base64.StdEncoding.EncodeToString(admissionKey.Public().(ed25519.PublicKey))},
+		AcceptanceAuthorities:   map[string]string{"reviewer": base64.StdEncoding.EncodeToString(acceptanceKey.Public().(ed25519.PublicKey))},
+		CompletionReceiptMaxAge: "168h", CompletionClockSkew: "5m",
 	}}
 	admission := worklifecycle.AdmissionReceipt{
 		Version: 1, WorkItemID: "work-1", Scope: worklifecycle.ScopeForStore("pilot", "city:pilot"),
@@ -175,7 +214,7 @@ func lifecycleCompletionFixture(t *testing.T) (*config.City, beads.Bead) {
 	completionJSON, err := worklifecycle.SignCompletionReceipt(worklifecycle.CompletionReceipt{
 		Version: 1, WorkItemID: admission.WorkItemID, Scope: admission.Scope, AdmissionDigest: digest,
 		DeliverableRef: "commit:reviewed", VerificationRef: "report:acceptance", AcceptedBy: "reviewer",
-		AcceptedAt: time.Date(2026, 9, 26, 0, 0, 0, 0, time.UTC).Format(time.RFC3339),
+		AcceptedAt: time.Now().UTC().Format(time.RFC3339Nano),
 	}, acceptanceKey)
 	if err != nil {
 		t.Fatal(err)

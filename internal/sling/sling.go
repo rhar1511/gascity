@@ -143,6 +143,11 @@ type SlingDeps struct {
 	// store). When nil, graph beads collapse onto Store — the single-store
 	// default — so a single-store caller behaves exactly as before the seam.
 	GraphStore beads.Store
+	// LifecycleRecipeMetadata is set only by the controller's signed lifecycle
+	// admission path. It is copied onto every graph.v2 recipe bead before the
+	// graph is materialized, so descendants are held while admission is still
+	// reserved and remain identifiable by the hook and retirement guards.
+	LifecycleRecipeMetadata map[string]string
 	// Events records best-effort current execution facts after graph workflow
 	// materialization. Nil leaves sling event-silent.
 	Events events.Recorder
@@ -1351,6 +1356,14 @@ func InstantiateCompiledSlingFormula(ctx context.Context, recipe *formula.Recipe
 	rootKey := ""
 	if graphWorkflow {
 		stampGraphV2RootMetadata(recipe, formulaName, opts.Vars, scopeKind, scopeRef)
+		for i := range recipe.Steps {
+			if recipe.Steps[i].Metadata == nil {
+				recipe.Steps[i].Metadata = make(map[string]string, len(deps.LifecycleRecipeMetadata))
+			}
+			for key, value := range deps.LifecycleRecipeMetadata {
+				recipe.Steps[i].Metadata[key] = value
+			}
+		}
 		sourceBeadID = ""
 		rootKey = strings.TrimSpace(recipe.Steps[0].Metadata[beadmeta.Graphv2RootKeyMetadataKey])
 	}

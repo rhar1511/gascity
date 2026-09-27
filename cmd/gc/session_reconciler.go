@@ -2978,7 +2978,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					}
 				}
 				lifecycleWorkOwned := false
-				if !exempt && cfg != nil && cfg.Lifecycle.AdmissionEnabled {
+				if !exempt && cfg != nil {
 					var lifecycleErr error
 					lifecycleWorkOwned, lifecycleErr = sessionHasLifecycleEnrolledAssignedWorkForConfig(cityPath, cfg, store, rigStores, infoByID[id])
 					if lifecycleErr != nil {
@@ -3037,7 +3037,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			beadRequested := infoByID[id].RestartRequested == "true"
 			if tmuxRequested || beadRequested {
 				explicitControllerReset := strings.TrimSpace(infoByID[id].ContinuationResetPending) == "true"
-				if cfg != nil && cfg.Lifecycle.AdmissionEnabled && !explicitControllerReset {
+				if cfg != nil && !explicitControllerReset {
 					lifecycleWorkOwned, lifecycleErr := sessionHasLifecycleEnrolledAssignedWorkForConfig(cityPath, cfg, store, rigStores, infoByID[id])
 					if lifecycleErr != nil {
 						// restart_requested has several producers, including the legacy
@@ -4688,7 +4688,7 @@ func sessionHasInProgressAssignedWorkForConfig(cityPath string, cfg *config.City
 // preassigned work and in-progress claims across the authoritative work legs;
 // unreadable legs are returned as errors so callers can fail closed.
 func sessionHasLifecycleEnrolledAssignedWorkForConfig(cityPath string, cfg *config.City, store beads.Store, rigStores map[string]beads.Store, info sessionpkg.Info) (bool, error) {
-	if cfg == nil || !cfg.Lifecycle.AdmissionEnabled {
+	if cfg == nil {
 		return false, nil
 	}
 	identifiers := sessionAssignmentIdentifiersForConfigInfo(info, cfg)

@@ -481,6 +481,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 			JSON:                  opts.JSON,
 			Lifecycle:             cfg.Lifecycle,
 			LifecycleCity:         cfg,
+			ResolveLifecycleStore: func(ref string) (beads.Store, error) { return lifecycleStoreForRef(cityPath, cfg, ref) },
 			TrustedLifecycleScope: cfg.Lifecycle.AdmissionEnabled && a.WorkQuery == "",
 			RuntimeActor:          strings.TrimSpace(os.Getenv("BEADS_ACTOR")),
 		}
@@ -494,6 +495,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 		JSON:                  opts.JSON,
 		Lifecycle:             cfg.Lifecycle,
 		LifecycleCity:         cfg,
+		ResolveLifecycleStore: func(ref string) (beads.Store, error) { return lifecycleStoreForRef(cityPath, cfg, ref) },
 		TrustedLifecycleScope: cfg.Lifecycle.AdmissionEnabled && a.WorkQuery == "",
 	}, hookClaimOps{}, runner, stdout, stderr, hookVisibility{
 		Identities:   identityCandidates,

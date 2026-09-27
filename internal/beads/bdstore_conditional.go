@@ -391,6 +391,15 @@ func (s *BdStore) UpdateIfMatch(id string, expectedRevision int64, opts UpdateOp
 	if err := validateConditionalUpdateOpts(opts); err != nil {
 		return fmt.Errorf("conditional update %s: %w", id, err)
 	}
+	if bdUpdateMayReopenOrClearLifecycleEvidence(opts) {
+		current, err := s.Get(id)
+		if err != nil {
+			return err
+		}
+		if err := ValidateLifecycleMutation(current, opts); err != nil {
+			return fmt.Errorf("conditional update lifecycle bead %q: %w", id, err)
+		}
+	}
 	if capable, _ := s.conditionalWritesCapable(); !capable {
 		return ErrConditionalWriteUnsupported
 	}

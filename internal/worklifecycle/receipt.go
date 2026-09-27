@@ -23,6 +23,10 @@ import (
 // AdmissionIntentLabel explicitly enrolls a bead in controller lifecycle admission.
 const AdmissionIntentLabel = "ready-for-agent"
 
+// ErrEnrolledWorkMutationBlocked reports an attempted ordinary mutation of
+// controller-enrolled work that requires verified lifecycle evidence.
+var ErrEnrolledWorkMutationBlocked = beads.ErrLifecycleMutationBlocked
+
 const (
 	admissionDomain  = "gascity.lifecycle.admission.v1\n"
 	completionDomain = "gascity.lifecycle.completion.v1\n"
@@ -188,6 +192,13 @@ func AdmissionDigest(receipt AdmissionReceipt) (string, error) {
 // a valid admission receipt and the configured acceptance authority signs a
 // non-empty deliverable/verification record bound to that exact contract.
 func EvaluateCompletion(bead beads.Bead, cfg config.LifecycleConfig, scope string) CompletionDecision {
+	return EvaluateCompletionAt(bead, cfg, scope, time.Now())
+}
+
+// EvaluateCompletionAt accepts completion only within the explicitly
+// configured freshness window. The injected clock keeps policy boundary tests
+// deterministic; callers should use EvaluateCompletion for live work.
+func EvaluateCompletionAt(bead beads.Bead, cfg config.LifecycleConfig, scope string, now time.Time) CompletionDecision {
 	admission := EvaluateAdmission(bead, cfg, scope)
 	if !admission.Requested || !admission.Admitted {
 		return CompletionDecision{Reason: "work item has no verified admission contract"}
@@ -211,6 +222,19 @@ func EvaluateCompletion(bead beads.Bead, cfg config.LifecycleConfig, scope strin
 		decision.Reason = "completion receipt has an invalid acceptance time"
 		return decision
 	}
+	maxAge, clockSkew, configured := completionFreshnessPolicy(cfg)
+	if !configured {
+		decision.Reason = "completion receipt freshness policy is not configured"
+		return decision
+	}
+	if now.IsZero() || acceptedAt.After(now.Add(clockSkew)) {
+		decision.Reason = "completion receipt acceptance time is too far in the future"
+		return decision
+	}
+	if acceptedAt.Before(now.Add(-maxAge)) {
+		decision.Reason = "completion receipt is older than the configured freshness window"
+		return decision
+	}
 	digest, err := AdmissionDigest(admission.Receipt)
 	if err != nil || receipt.AdmissionDigest != digest {
 		decision.Reason = "completion receipt does not bind to the current admission contract"
@@ -228,6 +252,40 @@ func EvaluateCompletion(bead beads.Bead, cfg config.LifecycleConfig, scope strin
 	decision.Reason = "verified"
 	decision.Receipt = receipt
 	return decision
+}
+
+func completionFreshnessPolicy(cfg config.LifecycleConfig) (maxAge, clockSkew time.Duration, configured bool) {
+	maxAgeText := strings.TrimSpace(cfg.CompletionReceiptMaxAge)
+	skewText := strings.TrimSpace(cfg.CompletionClockSkew)
+	if maxAgeText == "" || skewText == "" {
+		return 0, 0, false
+	}
+	maxAge, err := time.ParseDuration(maxAgeText)
+	if err != nil || maxAge <= 0 {
+		return 0, 0, false
+	}
+	clockSkew, err = time.ParseDuration(skewText)
+	if err != nil || clockSkew < 0 {
+		return 0, 0, false
+	}
+	return maxAge, clockSkew, true
+}
+
+// HasDurableEnrollment reports controller-owned lifecycle evidence persisted
+// on the row. It deliberately ignores the removable intent label: once a
+// signed receipt, materialization, completion receipt, or recovery state exists,
+// ordinary label edits cannot return the record to legacy mutation paths.
+func HasDurableEnrollment(bead beads.Bead) bool {
+	return beads.HasLifecycleEvidence(bead)
+}
+
+// ValidateEnrolledMutation prevents generic close/reopen/status and metadata
+// writes from bypassing completion or erasing the lifecycle record before the
+// next controller reconciliation. A changed signed contract must use a
+// separately authorized fresh attempt; blank values cannot silently opt
+// existing work back into legacy behavior.
+func ValidateEnrolledMutation(current beads.Bead, opts beads.UpdateOpts) error {
+	return beads.ValidateLifecycleMutation(current, opts)
 }
 
 func hasLabel(bead beads.Bead, wanted string) bool {

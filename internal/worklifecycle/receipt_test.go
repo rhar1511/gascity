@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -32,6 +33,8 @@ func lifecycleKeys(t *testing.T) (ed25519.PrivateKey, ed25519.PrivateKey, config
 		AcceptanceAuthorities: map[string]string{
 			"reviewer": base64.StdEncoding.EncodeToString(acceptancePublic),
 		},
+		CompletionReceiptMaxAge: "168h",
+		CompletionClockSkew:     "5m",
 	}
 }
 
@@ -145,7 +148,7 @@ func TestEvaluateCompletionRequiresTrustedAcceptanceBoundToContract(t *testing.T
 		DeliverableRef:  "git:commit:abc123",
 		VerificationRef: "test-run:run-456",
 		AcceptedBy:      "reviewer",
-		AcceptedAt:      "2026-09-26T10:00:00Z",
+		AcceptedAt:      time.Now().UTC().Format(time.RFC3339Nano),
 	}
 	encoded, err := SignCompletionReceipt(completion, acceptancePrivate)
 	if err != nil {
@@ -188,4 +191,48 @@ func TestEvaluateCompletionRequiresTrustedAcceptanceBoundToContract(t *testing.T
 			t.Fatalf("second authority overrode the admitted acceptance authority: %+v", got)
 		}
 	})
+}
+
+func TestEvaluateCompletionRequiresFreshnessPolicyAndHonorsItsBounds(t *testing.T) {
+	admissionPrivate, acceptancePrivate, cfg := lifecycleKeys(t)
+	bead, admission := admittedBead(t, admissionPrivate)
+	digest, err := AdmissionDigest(admission)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name        string
+		offset      time.Duration
+		policyUnset bool
+		wantAccept  bool
+	}{
+		{name: "fresh", offset: -2 * time.Hour, wantAccept: true},
+		{name: "future within skew", offset: time.Minute, wantAccept: true},
+		{name: "future beyond skew", offset: 6 * time.Minute},
+		{name: "expired", offset: -168*time.Hour - time.Second},
+		{name: "unset freshness is disabled", offset: -time.Hour, policyUnset: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			configured := cfg
+			if tc.policyUnset {
+				configured.CompletionReceiptMaxAge = ""
+				configured.CompletionClockSkew = ""
+			}
+			completion := CompletionReceipt{
+				Version: 1, WorkItemID: bead.ID, Scope: "rig:pilot", AdmissionDigest: digest,
+				DeliverableRef: "git:commit:abc123", VerificationRef: "test-run:run-456",
+				AcceptedBy: "reviewer", AcceptedAt: now.Add(tc.offset).Format(time.RFC3339Nano),
+			}
+			encoded, err := SignCompletionReceipt(completion, acceptancePrivate)
+			if err != nil {
+				t.Fatal(err)
+			}
+			bead.Metadata[beadmeta.LifecycleCompletionReceiptMetadataKey] = encoded
+			decision := EvaluateCompletionAt(bead, configured, "rig:pilot", now)
+			if decision.Accepted != tc.wantAccept {
+				t.Fatalf("completion decision = %+v, want accepted=%v", decision, tc.wantAccept)
+			}
+		})
+	}
 }

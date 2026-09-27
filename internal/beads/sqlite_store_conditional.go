@@ -33,6 +33,9 @@ func (s *SQLiteStore) UpdateIfMatch(id string, expectedRevision int64, opts Upda
 		return ErrEmptyConditionalUpdate
 	}
 	return s.conditionalWrite(id, expectedRevision, func(ctx context.Context, tx *sql.Tx, b Bead) error {
+		if err := ValidateLifecycleMutation(b, opts); err != nil {
+			return fmt.Errorf("conditional update lifecycle bead %q: %w", id, err)
+		}
 		next := applySQLiteUpdateOpts(b, opts)
 		next.UpdatedAt = time.Now()
 		return s.upsertBeadTx(ctx, tx, next)

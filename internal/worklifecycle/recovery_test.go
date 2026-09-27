@@ -92,13 +92,21 @@ func TestRecoveryBudgetPersistsAcrossFileStoreReopenAndUnknownOutcome(t *testing
 	if err != nil || !reserved || len(second.Attempts) != 2 {
 		t.Fatalf("second reservation after reopen = (%+v, %v, %v), want second durable reservation", second, reserved, err)
 	}
-	// A later status transition that might look like recovery does not refund
-	// either reservation if the work item is reopened.
+	// A later status transition that might look like recovery cannot reopen a
+	// work item carrying durable recovery state, and it cannot refund either
+	// reservation.
 	if err := store.Close(beadID); err != nil {
 		t.Fatalf("Close after apparent recovery: %v", err)
 	}
-	if err := store.Reopen(beadID); err != nil {
-		t.Fatalf("Reopen after apparent recovery: %v", err)
+	if err := store.Reopen(beadID); !errors.Is(err, ErrEnrolledWorkMutationBlocked) {
+		t.Fatalf("Reopen after apparent recovery error = %v, want enrolled-work refusal", err)
+	}
+	closed, err := store.Get(beadID)
+	if err != nil {
+		t.Fatalf("Get after refused Reopen: %v", err)
+	}
+	if closed.Status != "closed" {
+		t.Fatalf("status after refused Reopen = %q, want closed", closed.Status)
 	}
 
 	store, err = beads.OpenFileStore(fsys.OSFS{}, path)

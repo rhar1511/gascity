@@ -7,6 +7,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/worklifecycle"
 )
 
 // humaHandleBeadList is the Huma-typed handler for GET /v0/beads.
@@ -758,6 +759,9 @@ func (s *Server) humaHandleBeadClose(ctx context.Context, input *BeadCloseInput)
 	if err != nil {
 		return nil, err
 	}
+	if err := beads.ValidateLifecycleClose(current); err != nil {
+		return nil, apierr.ConflictWrongState.Msg(err.Error())
+	}
 	if err := s.gateWorkRecordClose(ctx, id, store, current, nil); err != nil {
 		return nil, err
 	}
@@ -782,6 +786,9 @@ func (s *Server) humaHandleBeadReopen(_ context.Context, input *BeadReopenInput)
 	}
 	if b.Status != "closed" {
 		return nil, apierr.ConflictWrongState.Msg("conflict: bead " + id + " is not closed (status: " + b.Status + ")")
+	}
+	if worklifecycle.HasDurableEnrollment(b) {
+		return nil, apierr.ConflictWrongState.Msg(worklifecycle.ErrEnrolledWorkMutationBlocked.Error())
 	}
 	if err := store.Reopen(id); err != nil {
 		return nil, apierr.Internal.Msg(err.Error())
@@ -861,6 +868,9 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 			return nil, apierr.InvalidRequest.Msg(err.Error())
 		}
 		opts.Assignee = &assignee
+	}
+	if err := worklifecycle.ValidateEnrolledMutation(current, opts); err != nil {
+		return nil, apierr.ConflictWrongState.Msg(err.Error())
 	}
 	waitStatus := current.Status
 	if opts.Status != nil {
