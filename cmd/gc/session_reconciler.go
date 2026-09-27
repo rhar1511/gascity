@@ -2547,7 +2547,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						//
 						// Restricted to "orphaned": a "suspended" seat is configured and
 						// merely scaled down, so its work stays put for its return.
-						if released := releaseConfirmedOrphanSessionWork(cfg, store, rigStores, assignedWorkBeads, orphanReleaseStores, infoByID[id]); len(released) > 0 {
+						if released := releaseConfirmedOrphanSessionWork(cfg, store, rigStores, assignedWorkBeads, orphanReleaseStores, infoByID[id], cityPath); len(released) > 0 {
 							emitDeadAssigneeReopenedEvents(rec, assignedWorkBeads, released, clk.Now().UTC())
 							closed = closeSessionBeadIfReachableStoreUnassigned(cityPath, cfg, store, rigStores, infoByID[id], reason, clk.Now().UTC(), stderr, false)
 						}

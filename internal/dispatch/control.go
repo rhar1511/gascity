@@ -144,6 +144,20 @@ func processAttemptControl(store beads.Store, bead beads.Bead, opts ProcessOptio
 	if err != nil {
 		return ControlResult{}, err
 	}
+	if opts.CaptureAttemptEvidence != nil {
+		ctx := opts.Context
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		outcome := eval.logOutcome
+		if eval.reason != "" {
+			outcome += ":" + eval.reason
+		}
+		if err := opts.CaptureAttemptEvidence(ctx, bead, attempt, attemptNum, outcome); err != nil {
+			opts.tracef("attempt-evidence pending control=%s execution=%s attempt=%d err=%v", bead.ID, attempt.ID, attemptNum, err)
+			return ControlResult{}, ErrControlPending
+		}
+	}
 	attemptLog, err := appendAttemptLogValue(bead.Metadata[beadmeta.AttemptLogMetadataKey], attemptNum, eval.logOutcome, eval.logDetail, opts.tracef)
 	if err != nil {
 		return ControlResult{}, fmt.Errorf("%s: recording attempt log: %w", bead.ID, err)

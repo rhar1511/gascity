@@ -1856,6 +1856,14 @@ func cmdSessionClose(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 	if sessionBeadErr != nil {
 		closedSessionBead = beads.Bead{ID: sessionID}
 	}
+	var rigStores map[string]beads.Store
+	if cityErr == nil && cfg != nil {
+		rigStores = buildStandaloneRigStoresWithConfig(cfg, cityPath, stderr)
+	}
+	if err := captureAssignedWorkbenchAttempts(context.Background(), cityPath, cfg, store, rigStores, closedSessionBead); err != nil {
+		fmt.Fprintf(stderr, "gc session close: attempt evidence capture pending; session and assigned work were left unchanged: %v\n", err) //nolint:errcheck
+		return 1
+	}
 
 	closeResult, err := handle.CloseDetailed(context.Background())
 	if err != nil {
@@ -1881,10 +1889,6 @@ func cmdSessionClose(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 	// binding, and a work-led scan cannot see it. The binding is now a leg of
 	// the sweep's own plan (assignedWorkSweepPlan), so this site hands in
 	// nothing and a city that relocates nothing still reads one store.
-	var rigStores map[string]beads.Store
-	if cityErr == nil && cfg != nil {
-		rigStores = buildStandaloneRigStoresWithConfig(cfg, cityPath, stderr)
-	}
 	unclaimWorkAssignedToRetiredSessionBead(cityPath, cfg, store, rigStores, closedSessionBead, "", stderr)
 
 	if asJSON {

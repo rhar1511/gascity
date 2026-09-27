@@ -671,6 +671,9 @@ func (m *MemStore) Delete(id string) error {
 	defer m.mu.Unlock()
 	for i, b := range m.beads {
 		if b.ID == id {
+			if err := protectAttemptEvidenceDelete(b); err != nil {
+				return err
+			}
 			m.beads = append(m.beads[:i], m.beads[i+1:]...)
 			delete(m.localStrings, id)
 			return nil

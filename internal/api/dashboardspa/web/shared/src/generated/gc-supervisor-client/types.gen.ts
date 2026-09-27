@@ -847,6 +847,16 @@ export type Dep = {
     type: string;
 };
 
+export type DiffSnapshot = {
+    encoding?: string;
+    payload?: string;
+    reason?: string;
+    sha256?: string;
+    source: string;
+    status: string;
+    uncompressed_bytes?: number;
+};
+
 export type ErrorDetail = {
     /**
      * Where the error occurred, e.g. 'body.items[3].tags' or 'path.thing-id'
@@ -987,6 +997,31 @@ export type EventStreamEnvelope = {
     ts: string;
     type: string;
     workflow?: WorkflowEventProjection;
+};
+
+export type Evidence = {
+    acknowledgements: Facet;
+    actions: Facet;
+    attempt_id: string;
+    base_reason?: string;
+    base_sha?: string;
+    base_status: string;
+    candidate_reason?: string;
+    candidate_sha?: string;
+    candidate_status: string;
+    captured_at: string;
+    diff: DiffSnapshot;
+    identity: Identity;
+    outcome?: string;
+    permission_scope: PermissionScope;
+    policy: Facet;
+    redaction: Facet;
+    schema_version: number;
+    source_reason?: string;
+    source_status: string;
+    store_ref?: string;
+    working_tree_status: string;
+    workspace_diff: DiffSnapshot;
 };
 
 export type ExecutionClaimWindowExpiredPayload = {
@@ -1255,6 +1290,12 @@ export type ExtmsgAdapterInfo = {
     provider: string;
 };
 
+export type Facet = {
+    reason?: string;
+    refs?: Array<string> | null;
+    status: string;
+};
+
 export type FanoutPolicy = {
     AllowUntargetedPublication: boolean;
     Enabled: boolean;
@@ -1449,6 +1490,15 @@ export type HookClaimReclaimedStalePayload = {
     bead_id: string;
     new_assignee: string;
     previous_owner: string;
+};
+
+export type Identity = {
+    claim_generation?: string;
+    execution_bead_id: string;
+    kind: string;
+    owner_bead_id: string;
+    session_generation?: string;
+    session_id?: string;
 };
 
 export type InboundEventPayload = {
@@ -2319,6 +2369,13 @@ export type PendingInteraction = {
     options?: Array<string> | null;
     prompt?: string;
     request_id: string;
+};
+
+export type PermissionScope = {
+    repository_root?: string;
+    store_ref: string;
+    work_id: string;
+    workspace_root?: string;
 };
 
 export type PoolOverride = {
@@ -11226,6 +11283,110 @@ export type PostV0CityByCityNameBeadByIdAssignResponses = {
 };
 
 export type PostV0CityByCityNameBeadByIdAssignResponse = PostV0CityByCityNameBeadByIdAssignResponses[keyof PostV0CityByCityNameBeadByIdAssignResponses];
+
+export type ListV0CityByCityNameBeadByIdAttemptEvidenceData = {
+    body?: never;
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Work bead ID that owns the captured execution attempts.
+         */
+        id: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/bead/{id}/attempt-evidence';
+};
+
+export type ListV0CityByCityNameBeadByIdAttemptEvidenceErrors = {
+    /**
+     * Forbidden
+     */
+    403: ErrorModel;
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type ListV0CityByCityNameBeadByIdAttemptEvidenceError = ListV0CityByCityNameBeadByIdAttemptEvidenceErrors[keyof ListV0CityByCityNameBeadByIdAttemptEvidenceErrors];
+
+export type ListV0CityByCityNameBeadByIdAttemptEvidenceResponses = {
+    /**
+     * OK
+     */
+    200: Array<Evidence> | null;
+};
+
+export type ListV0CityByCityNameBeadByIdAttemptEvidenceResponse = ListV0CityByCityNameBeadByIdAttemptEvidenceResponses[keyof ListV0CityByCityNameBeadByIdAttemptEvidenceResponses];
+
+export type GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdData = {
+    body?: never;
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Work bead ID that owns the captured execution attempt.
+         */
+        id: string;
+        /**
+         * Exact immutable attempt ID.
+         */
+        attemptID: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/bead/{id}/attempt-evidence/{attemptID}';
+};
+
+export type GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdErrors = {
+    /**
+     * Forbidden
+     */
+    403: ErrorModel;
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdError = GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdErrors[keyof GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdErrors];
+
+export type GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdResponses = {
+    /**
+     * OK
+     */
+    200: Evidence;
+};
+
+export type GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdResponse = GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdResponses[keyof GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdResponses];
 
 export type PostV0CityByCityNameBeadByIdCloseData = {
     body?: never;

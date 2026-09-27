@@ -387,6 +387,10 @@ func releaseOrphanedPoolAssignments(
 		if !allowsRelease {
 			continue
 		}
+		if err := captureWorkbenchBeforeAssignmentRelease(context.Background(), cityPath, cfg, ownerStore, sessionStore.Store, wb); err != nil {
+			log.Printf("releaseOrphanedPoolAssignments: leaving execution %s assigned because attempt evidence capture failed: %v", wb.ID, err)
+			continue
+		}
 		if !releaseOrphanedPoolAssignment(ownerStore, wb, clearDetached) {
 			continue
 		}
@@ -442,6 +446,7 @@ func releaseConfirmedOrphanSessionWork(
 	assignedWorkBeads []beads.Bead,
 	assignedWorkStores []beads.Store,
 	info session.Info,
+	cityPaths ...string,
 ) []releasedPoolAssignment {
 	if cfg == nil || store == nil || len(assignedWorkBeads) == 0 {
 		return nil
@@ -454,6 +459,10 @@ func releaseConfirmedOrphanSessionWork(
 	}
 	if len(identifiers) == 0 {
 		return nil
+	}
+	cityPath := ""
+	if len(cityPaths) > 0 {
+		cityPath = strings.TrimSpace(cityPaths[0])
 	}
 
 	var released []releasedPoolAssignment
@@ -488,6 +497,10 @@ func releaseConfirmedOrphanSessionWork(
 		}
 		allowsRelease, clearDetached := detachedProbeAllowsOrphanRelease(wb)
 		if !allowsRelease {
+			continue
+		}
+		if err := captureWorkbenchBeforeAssignmentRelease(context.Background(), cityPath, cfg, ownerStore, store, wb); err != nil {
+			log.Printf("releaseConfirmedOrphanSessionWork: leaving execution %s assigned because attempt evidence capture failed: %v", wb.ID, err)
 			continue
 		}
 		if !releaseOrphanedPoolAssignment(ownerStore, wb, clearDetached) {

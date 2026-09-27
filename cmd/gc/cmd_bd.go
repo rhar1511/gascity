@@ -626,8 +626,8 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// blocks the close only when GC_WORK_RECORD_ENFORCE is set. Reuses the
 	// store/beads the write-ID guard above already opened and read, and the
 	// config the caller already loaded.
-	if runWorkRecordCloseGate(bdArgs, target.ScopeRoot, cityPath, cfg, guardStore, guardBeads, stderr) {
-		return 1
+	if gateExitCode := runWorkRecordCloseGate(bdArgs, target.ScopeRoot, cityPath, cfg, guardStore, guardBeads, stderr); gateExitCode != 0 {
+		return gateExitCode
 	}
 
 	reapStaleBdExportJSONL(target.ScopeRoot)

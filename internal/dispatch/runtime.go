@@ -44,6 +44,10 @@ type ProcessOptions struct {
 	PrepareFragment    func(*formula.FragmentRecipe, beads.Bead) error
 	PrepareRecipe      func(*formula.Recipe, beads.Bead) error
 	RecycleSession     func(beads.Bead) error
+	// CaptureAttemptEvidence seals the closed execution attempt's immutable
+	// evidence before the control loop records its outcome, spawns a retry, or
+	// closes the logical control. A capture error leaves the control pending.
+	CaptureAttemptEvidence func(context.Context, beads.Bead, beads.Bead, int, string) error
 	// RequiredArtifactStat checks required-artifact files. When nil, the
 	// dispatcher uses os.Stat.
 	RequiredArtifactStat func(path string) (os.FileInfo, error)

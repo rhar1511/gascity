@@ -131,6 +131,7 @@ go_test(
         "native_dolt_store_test.go",
         "native_dolt_store_update_retry_test.go",
         "native_step_topology_test.go",
+        "private_payload_test.go",
         "proxied_admission_test.go",
         "proxied_guard_tick_test.go",
         "proxied_incident_log_test.go",

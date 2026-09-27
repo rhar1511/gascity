@@ -314,6 +314,9 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 			}
 		case "retry", "ralph":
 			opts.FormulaSearchPaths = workflowFormulaSearchPaths(cfg, bead)
+			opts.CaptureAttemptEvidence = func(ctx context.Context, control, attempt beads.Bead, attemptNum int, outcome string) error {
+				return captureControlAttemptEvidence(ctx, graphStore, cityPath, storePath, cfg, control, attempt, attemptNum, outcome)
+			}
 			// Same cross-store required-artifact source resolution as
 			// retry-eval above.
 			if graphStore != store {

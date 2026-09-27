@@ -436,6 +436,16 @@ export const zConvoyGetResponse = z.object({
     progress: zConvoyProgress.optional()
 });
 
+export const zDiffSnapshot = z.object({
+    encoding: z.string().optional(),
+    payload: z.string().optional(),
+    reason: z.string().optional(),
+    sha256: z.string().optional(),
+    source: z.string(),
+    status: z.string(),
+    uncompressed_bytes: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional()
+});
+
 export const zErrorDetail = z.object({
     location: z.string().optional(),
     message: z.string().optional(),
@@ -601,6 +611,12 @@ export const zExtmsgAdapterInfo = z.object({
     provider: z.string()
 });
 
+export const zFacet = z.object({
+    reason: z.string().optional(),
+    refs: z.array(z.string()).nullish(),
+    status: z.string()
+});
+
 export const zFanoutPolicy = z.object({
     AllowUntargetedPublication: z.boolean(),
     Enabled: z.boolean(),
@@ -748,6 +764,15 @@ export const zHookClaimReclaimedStalePayload = z.object({
     bead_id: z.string(),
     new_assignee: z.string(),
     previous_owner: z.string()
+});
+
+export const zIdentity = z.object({
+    claim_generation: z.string().optional(),
+    execution_bead_id: z.string(),
+    kind: z.string(),
+    owner_bead_id: z.string(),
+    session_generation: z.string().optional(),
+    session_id: z.string().optional()
 });
 
 export const zInboundEventPayload = z.object({
@@ -1092,6 +1117,38 @@ export const zPendingInteraction = z.object({
     options: z.array(z.string()).nullish(),
     prompt: z.string().optional(),
     request_id: z.string()
+});
+
+export const zPermissionScope = z.object({
+    repository_root: z.string().optional(),
+    store_ref: z.string(),
+    work_id: z.string(),
+    workspace_root: z.string().optional()
+});
+
+export const zEvidence = z.object({
+    acknowledgements: zFacet,
+    actions: zFacet,
+    attempt_id: z.string(),
+    base_reason: z.string().optional(),
+    base_sha: z.string().optional(),
+    base_status: z.string(),
+    candidate_reason: z.string().optional(),
+    candidate_sha: z.string().optional(),
+    candidate_status: z.string(),
+    captured_at: z.iso.datetime(),
+    diff: zDiffSnapshot,
+    identity: zIdentity,
+    outcome: z.string().optional(),
+    permission_scope: zPermissionScope,
+    policy: zFacet,
+    redaction: zFacet,
+    schema_version: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    source_reason: z.string().optional(),
+    source_status: z.string(),
+    store_ref: z.string().optional(),
+    working_tree_status: z.string(),
+    workspace_diff: zDiffSnapshot
 });
 
 export const zPoolOverride = z.object({
@@ -7819,6 +7876,27 @@ export const zPostV0CityByCityNameBeadByIdAssignPath = z.object({
  * OK
  */
 export const zPostV0CityByCityNameBeadByIdAssignResponse = z.record(z.string(), z.string());
+
+export const zListV0CityByCityNameBeadByIdAttemptEvidencePath = z.object({
+    cityName: z.string().min(1).regex(/\S/),
+    id: z.string()
+});
+
+/**
+ * OK
+ */
+export const zListV0CityByCityNameBeadByIdAttemptEvidenceResponse = z.array(zEvidence).nullable();
+
+export const zGetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdPath = z.object({
+    cityName: z.string().min(1).regex(/\S/),
+    id: z.string(),
+    attemptID: z.string()
+});
+
+/**
+ * OK
+ */
+export const zGetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdResponse = zEvidence;
 
 export const zPostV0CityByCityNameBeadByIdCloseHeaders = z.object({
     'X-GC-Request': z.string().min(1)
