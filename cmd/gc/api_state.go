@@ -92,6 +92,7 @@ type controllerState struct {
 	version                string
 	qualificationBuild     qualification.BuildIdentity
 	releaseAuthorizer      qualification.ReleaseAuthorizer
+	compatibilityAuthority qualification.CompatibilityAuthority
 	startedAt              time.Time
 	storeMetadataSignature string
 	ct                     crashTracker  // nil if crash tracking disabled
@@ -1481,6 +1482,35 @@ func (cs *controllerState) QualificationBuildIdentity() qualification.BuildIdent
 	return cs.qualificationBuild
 }
 
+// CompatibilityRuntimeIdentity returns one loaded config/build/authority
+// generation for API materialization gates. The host authority is installed
+// only by supervisor startup and cannot be changed by city config reloads.
+func (cs *controllerState) CompatibilityRuntimeIdentity() (api.CompatibilityRuntimeIdentity, error) {
+	cs.mu.RLock()
+	cfg := cs.cfg
+	build := cs.qualificationBuild
+	authority := cs.compatibilityAuthority
+	cs.mu.RUnlock()
+	if cfg == nil {
+		return api.CompatibilityRuntimeIdentity{}, qualification.ErrUnavailable
+	}
+	return api.CompatibilityRuntimeIdentity{
+		Config:    cfg,
+		Snapshot:  cfg.QualificationSnapshot(),
+		Build:     build,
+		Authority: authority,
+	}, nil
+}
+
+// setCompatibilityAuthority captures a supervisor-owned authority before
+// the city's API state is published. Later city config mutations cannot
+// replace the process trust root.
+func (cs *controllerState) setCompatibilityAuthority(authority qualification.CompatibilityAuthority) {
+	cs.mu.Lock()
+	cs.compatibilityAuthority = authority
+	cs.mu.Unlock()
+}
+
 // ReleaseAuthorization remains unavailable until a trusted release authority
 // is composed into controller startup. A local packs.lock never authorizes a
 // compatibility action.
@@ -1513,8 +1543,9 @@ func (cs *controllerState) QualificationReport() qualification.ControllerReport 
 func (cs *controllerState) RolloutFlags() rollout.Flags { return cs.rolloutFlags }
 
 var (
-	_ api.RolloutFlagsProvider  = (*controllerState)(nil)
-	_ api.QualificationProvider = (*controllerState)(nil)
+	_ api.RolloutFlagsProvider                 = (*controllerState)(nil)
+	_ api.QualificationProvider                = (*controllerState)(nil)
+	_ api.CompatibilityRuntimeIdentityProvider = (*controllerState)(nil)
 )
 
 // SessionProvider returns the current session provider.

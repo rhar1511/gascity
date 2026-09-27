@@ -264,6 +264,33 @@ func (c *qualificationCapture) addRootLocked(id, kind, path, pin, pinStatus, una
 	}
 }
 
+func (c *qualificationCapture) compatibilityRoot(path string) (capturedQualificationRoot, bool) {
+	canonical := canonicalQualificationPath(path)
+	if c == nil || canonical == "" {
+		return capturedQualificationRoot{}, false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var selected *capturedQualificationRoot
+	for _, candidate := range c.allRootsLocked() {
+		if !pathIsWithin(canonical, candidate.path) {
+			continue
+		}
+		if selected == nil || len(candidate.path) > len(selected.path) {
+			selected = candidate
+			continue
+		}
+		if len(candidate.path) == len(selected.path) &&
+			(candidate.id != selected.id || candidate.pin != selected.pin || candidate.pinStatus != selected.pinStatus) {
+			return capturedQualificationRoot{}, false
+		}
+	}
+	if selected == nil {
+		return capturedQualificationRoot{}, false
+	}
+	return *selected, true
+}
+
 func (c *qualificationCapture) snapshotPackTree(root *capturedQualificationRoot) {
 	if root == nil {
 		return

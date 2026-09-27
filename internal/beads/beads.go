@@ -486,9 +486,9 @@ type DecisionFrontierRecordWriterHandleProvider interface {
 }
 
 // DecisionFrontierRecordWriterFor returns the trusted record capability for
-// the two direct stores whose creation and metadata CAS semantics are proven.
-// Wrappers and other backends fail closed until they implement and test their
-// own persistence and routing behavior.
+// direct stores whose creation, metadata CAS, and link semantics are proven
+// and currently writable. Wrappers and other backends fail closed until they
+// implement and test their own persistence and routing behavior.
 func DecisionFrontierRecordWriterFor(store Store) (DecisionFrontierRecordWriter, bool) {
 	if store == nil {
 		return nil, false
@@ -496,10 +496,21 @@ func DecisionFrontierRecordWriterFor(store Store) (DecisionFrontierRecordWriter,
 	if provider, ok := store.(DecisionFrontierRecordWriterHandleProvider); ok {
 		return provider.DecisionFrontierRecordWriterHandle()
 	}
-	switch store.(type) {
-	case *MemStore, *SQLiteStore:
-		writer, ok := store.(DecisionFrontierRecordWriter)
-		return writer, ok
+	switch typed := store.(type) {
+	case *MemStore:
+		if typed == nil {
+			return nil, false
+		}
+		writable, _ := typed.probeConditionalWriteCapability()
+		if !writable {
+			return nil, false
+		}
+		return typed, true
+	case *SQLiteStore:
+		if typed == nil || typed.readOnly || !typed.hasRevisionColumn {
+			return nil, false
+		}
+		return typed, true
 	default:
 		return nil, false
 	}
@@ -769,10 +780,11 @@ type RevisionTransitionWriterHandleProvider interface {
 	RevisionTransitionWriterHandle() (RevisionTransitionWriter, bool)
 }
 
-// RevisionTransitionWriterFor returns a capability only for direct supported
-// stores or wrappers that explicitly expose an atomic revision-receipt handle.
-// Embedding a capable store is not enough: wrappers such as FileStore and
-// CachingStore must implement their own persistence/refresh semantics first.
+// RevisionTransitionWriterFor returns a capability only for direct supported,
+// writable stores or wrappers that explicitly expose an atomic
+// revision-receipt handle. Embedding a capable store is not enough: wrappers
+// such as FileStore and CachingStore must implement their own
+// persistence/refresh semantics first.
 func RevisionTransitionWriterFor(store Store) (RevisionTransitionWriter, bool) {
 	if store == nil {
 		return nil, false
@@ -780,10 +792,21 @@ func RevisionTransitionWriterFor(store Store) (RevisionTransitionWriter, bool) {
 	if provider, ok := store.(RevisionTransitionWriterHandleProvider); ok {
 		return provider.RevisionTransitionWriterHandle()
 	}
-	switch store.(type) {
-	case *MemStore, *SQLiteStore:
-		writer, ok := store.(RevisionTransitionWriter)
-		return writer, ok
+	switch typed := store.(type) {
+	case *MemStore:
+		if typed == nil {
+			return nil, false
+		}
+		writable, _ := typed.probeConditionalWriteCapability()
+		if !writable {
+			return nil, false
+		}
+		return typed, true
+	case *SQLiteStore:
+		if typed == nil || typed.readOnly || !typed.hasRevisionColumn {
+			return nil, false
+		}
+		return typed, true
 	default:
 		return nil, false
 	}

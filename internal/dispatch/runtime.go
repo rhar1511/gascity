@@ -44,7 +44,13 @@ type ProcessOptions struct {
 	FormulaSearchPaths []string
 	PrepareFragment    func(*formula.FragmentRecipe, beads.Bead) error
 	PrepareRecipe      func(*formula.Recipe, beads.Bead) error
-	RecycleSession     func(beads.Bead) error
+	// FormulaActionGate is the controller's source-aware compatibility gate
+	// for formula molecules created by this dispatch pass.
+	FormulaActionGate molecule.FormulaActionGate
+	// RequireFormulaActionGate refuses materialization if the dispatcher was
+	// wired without the controller-owned gate.
+	RequireFormulaActionGate bool
+	RecycleSession           func(beads.Bead) error
 	// ResolveRSIEvaluation loads and verifies controller-owned evaluation and
 	// human-approval evidence for the RSI promotion gate. When nil, the gate
 	// fails closed.
@@ -177,6 +183,18 @@ func ProcessControl(store beads.Store, bead beads.Bead, opts ProcessOptions) (Co
 		opts.tracef("process-control bead=%s kind=%s skip reason=bead_not_open status=%s",
 			bead.ID, bead.Metadata[beadmeta.KindMetadataKey], bead.Status)
 		return ControlResult{}, nil
+	}
+	if opts.RequireFormulaActionGate && opts.FormulaActionGate == nil {
+		return ControlResult{}, fmt.Errorf("controller formula compatibility gate is unavailable")
+	}
+	if opts.FormulaActionGate != nil {
+		ctx := opts.Context
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		if err := opts.FormulaActionGate.RevalidateBead(ctx, bead, store); err != nil {
+			return ControlResult{}, fmt.Errorf("revalidating control %s formula compatibility before dispatch: %w", bead.ID, err)
+		}
 	}
 	if result, handled, err := closeOrphanedControl(store, bead, opts); handled || err != nil {
 		return result, err

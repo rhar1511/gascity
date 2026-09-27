@@ -427,6 +427,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	// `gc ready` does not answer. No-op on a single-store city and for a custom
 	// work_query, where both forms are the same string.
 	stores = scopeFederatedHookStores(stores, workQuery, singleStoreHookWorkQuery(cityPath, cityName, cfg, &a, topo, stderr))
+	formulaActionCheck := controllerFormulaActionCandidateCheck(cityPath, cfg, a.WorkQuery != "")
 
 	// emitQueryFailure surfaces a killed/timed-out work query on the event bus
 	// so the reconciler can escalate instead of silently treating the strand as
@@ -483,6 +484,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 			LifecycleCity:         cfg,
 			ResolveLifecycleStore: func(ref string) (beads.Store, error) { return lifecycleStoreForRef(cityPath, cfg, ref) },
 			TrustedLifecycleScope: cfg.Lifecycle.AdmissionEnabled && a.WorkQuery == "",
+			CheckFormulaAction:    formulaActionCheck,
 			RuntimeActor:          strings.TrimSpace(os.Getenv("BEADS_ACTOR")),
 		}
 		return claimHookWork(cityPath, workQuery, workDir, queryEnv, stores, claimOpts, emitQueryFailure, stdout, stderr)
@@ -497,9 +499,12 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 		LifecycleCity:         cfg,
 		ResolveLifecycleStore: func(ref string) (beads.Store, error) { return lifecycleStoreForRef(cityPath, cfg, ref) },
 		TrustedLifecycleScope: cfg.Lifecycle.AdmissionEnabled && a.WorkQuery == "",
+		CheckFormulaAction:    formulaActionCheck,
 	}, hookClaimOps{}, runner, stdout, stderr, hookVisibility{
-		Identities:   identityCandidates,
-		RouteTargets: routeTargets,
+		Identities:                         identityCandidates,
+		RouteTargets:                       routeTargets,
+		CheckFormulaAction:                 formulaActionCheck,
+		RequireStructuredFormulaCandidates: cfg.HasRequiredCompatibilityPacks(),
 	})
 }
 
@@ -1011,8 +1016,10 @@ func workQueryEnvForDir(env []string, dir string) []string {
 // target for fresh unassigned claims. The zero value disables filtering
 // entirely, matching pre-ga-1xaqgo.2 behavior byte-for-byte.
 type hookVisibility struct {
-	Identities   []string
-	RouteTargets []string
+	Identities                         []string
+	RouteTargets                       []string
+	CheckFormulaAction                 formulaActionCandidateCheck
+	RequireStructuredFormulaCandidates bool
 }
 
 // doHook is the pure logic for gc hook. Runs the work query and outputs
@@ -1076,6 +1083,14 @@ func doHook(workQuery, dir string, inject bool, runner WorkQueryRunner, stdout, 
 	normalized := normalizeWorkQueryOutput(trimmed)
 	normalized = filterUnreadyHookCandidates(normalized, time.Now())
 	normalized = filterForeignHookCandidates(normalized, visibility)
+	if visibility.CheckFormulaAction != nil {
+		var err error
+		normalized, err = validateHookFormulaActionCandidates(normalized, visibility.CheckFormulaAction, visibility.RequireStructuredFormulaCandidates)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc hook: formula compatibility check failed: %v\n", err) //nolint:errcheck
+			return 1
+		}
+	}
 	hasWork := workQueryHasReadyWork(normalized)
 
 	// Non-inject mode: print normalized, ready-only output. Return 0 only when work exists.
@@ -1087,6 +1102,39 @@ func doHook(workQuery, dir string, inject bool, runner WorkQueryRunner, stdout, 
 	}
 	fmt.Fprint(stdout, normalized) //nolint:errcheck // best-effort stdout
 	return 0
+}
+
+func validateHookFormulaActionCandidates(output string, check formulaActionCandidateCheck, requireStructured bool) (string, error) {
+	if output == "" || !workQueryHasReadyWork(output) {
+		return output, nil
+	}
+	var rows []json.RawMessage
+	if err := json.Unmarshal([]byte(output), &rows); err != nil {
+		if requireStructured {
+			return "", fmt.Errorf("required formula provenance needs structured work-query rows: %w", err)
+		}
+		return output, nil
+	}
+	for _, raw := range rows {
+		var candidate beads.Bead
+		if err := json.Unmarshal(raw, &candidate); err != nil {
+			if requireStructured {
+				return "", fmt.Errorf("decoding work-query candidate for formula compatibility: %w", err)
+			}
+			continue
+		}
+		var provenance struct {
+			SourceStoreRef string `json:"source_store_ref"`
+		}
+		if err := json.Unmarshal(raw, &provenance); err != nil {
+			return "", fmt.Errorf("decoding work-query store provenance: %w", err)
+		}
+		candidate.SourceStoreRef = strings.TrimSpace(provenance.SourceStoreRef)
+		if _, err := check(context.Background(), candidate); err != nil {
+			return "", fmt.Errorf("candidate %s: %w", candidate.ID, err)
+		}
+	}
+	return output, nil
 }
 
 func workQueryHasReadyWork(output string) bool {
@@ -1229,6 +1277,13 @@ func decodeHookCandidateBead(obj map[string]any) (beads.Bead, bool) {
 	if err := json.Unmarshal(raw, &candidate); err != nil {
 		return beads.Bead{}, false
 	}
+	var provenance struct {
+		SourceStoreRef string `json:"source_store_ref"`
+	}
+	if err := json.Unmarshal(raw, &provenance); err != nil {
+		return beads.Bead{}, false
+	}
+	candidate.SourceStoreRef = strings.TrimSpace(provenance.SourceStoreRef)
 	return candidate, true
 }
 

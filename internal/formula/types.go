@@ -142,7 +142,19 @@ type Formula struct {
 	// Set by ParseFile; empty for formulas parsed from in-memory bytes.
 	ContentHash string `json:"content_hash,omitempty"`
 
+	// SourceFiles records the raw formula files that contribute to this
+	// resolved formula, including inheritance and compiler-loaded compositions.
+	// It is runtime provenance and is not serialized in formula files or APIs.
+	SourceFiles []SourceIdentity `json:"-" toml:"-"`
+
 	compilerRequirementSources []formulaCompilerConstraint
+}
+
+// SourceIdentity binds one loaded formula file to the bytes parsed by
+// the formula compiler. Path is process-local provenance, not a wire field.
+type SourceIdentity struct {
+	Path          string `json:"-"`
+	ContentSHA256 string `json:"-"`
 }
 
 // CatalogMetadata describes a formula exposed through gc formula catalog.

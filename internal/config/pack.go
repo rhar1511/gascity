@@ -1276,6 +1276,9 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 	if err := validatePackMeta(&tc.Pack); err != nil {
 		return nil, nil, nil, nil, nil, nil, nil, nil, err
 	}
+	if opts.packCompatibilityCapture != nil {
+		opts.packCompatibilityCapture.record(topoDir, tc.Pack, data, opts.qualificationCapture)
+	}
 
 	// Process includes: accumulate base-layer agents, providers,
 	// pack dirs, requirements, and globals from included packs.
@@ -2447,6 +2450,9 @@ func validatePackMeta(meta *PackMeta) error {
 	}
 	if meta.Schema > currentPackSchema {
 		return fmt.Errorf("[pack] schema %d not supported (max %d)", meta.Schema, currentPackSchema)
+	}
+	if err := validateRequiresGC(meta.RequiresGC); err != nil {
+		return fmt.Errorf("[pack] %w", err)
 	}
 	for i, req := range meta.Requires {
 		if req.Agent == "" {

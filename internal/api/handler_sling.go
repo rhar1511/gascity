@@ -15,11 +15,16 @@ import (
 	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/compatibility"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/execenv"
 	gitpkg "github.com/gastownhall/gascity/internal/git"
+	"github.com/gastownhall/gascity/internal/molecule"
+	"github.com/gastownhall/gascity/internal/qualification"
 	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 type slingBody struct {
@@ -38,6 +43,80 @@ type slingBody struct {
 	NoConvoy       bool              `json:"no_convoy"`
 	Owned          bool              `json:"owned"`
 	NoFormula      bool              `json:"no_formula"`
+}
+
+// graphFormulaCompatibility composes the generic pre-write gate for API sling
+// requests. It derives the graph StoreRef from opened API topology and reads
+// config/build/authority identity again at each pre-write check so a reload
+// cannot reuse an authorization from stale runtime state. The host authority
+// is supplied only by trusted supervisor startup.
+func (s *Server) graphFormulaCompatibility() (*config.City, string, molecule.FormulaActionGate) {
+	cfg := s.state.Config()
+	var build qualification.BuildIdentity
+	var authority qualification.CompatibilityAuthority
+	if provider, ok := s.state.(CompatibilityRuntimeIdentityProvider); ok {
+		if identity, err := provider.CompatibilityRuntimeIdentity(); err == nil {
+			cfg = identity.Config
+			build = identity.Build
+			authority = identity.Authority
+		} else {
+			cfg = nil
+		}
+	} else if provider, ok := s.state.(QualificationProvider); ok {
+		report := provider.QualificationReport()
+		build = report.ControllerBuild
+		if cfg != nil && report.Qualification.EffectiveConfigIdentitySHA256 != cfg.QualificationSnapshot().EffectiveConfigIdentitySHA256 {
+			cfg = nil
+		}
+	}
+	cityName := strings.TrimSpace(s.state.CityName())
+	if cityName == "" && cfg != nil {
+		cityName = strings.TrimSpace(cfg.Workspace.Name)
+	}
+	if cityName == "" {
+		cityName = "city"
+	}
+	cityPath := s.state.CityPath()
+	serverID, _ := compatibility.ControllerScopeID(cityPath)
+	graphStore := s.state.GraphBeadStore().Store
+	storeRef := ""
+	if cfg != nil && graphStore != nil {
+		plan, err := storeref.Plan(storeref.Class{C: coordclass.ClassGraph}, s.residencyTopologyForConfig(cfg))
+		if err == nil {
+			if leg, err := storeref.ResolvePlacement(plan); err == nil && leg.Store == graphStore {
+				storeRef = string(leg.Ref)
+				if storeRef == "" {
+					storeRef = "city:" + cityName
+				}
+			}
+		}
+	}
+	gate := compatibility.NewMaterializationGate(cfg, cityName, serverID, storeRef, build, authority)
+	gate.Current = func() (*config.City, qualification.Snapshot, qualification.BuildIdentity, qualification.CompatibilityAuthority, error) {
+		if provider, ok := s.state.(CompatibilityRuntimeIdentityProvider); ok {
+			identity, err := provider.CompatibilityRuntimeIdentity()
+			if err != nil {
+				return nil, qualification.Snapshot{}, qualification.BuildIdentity{}, nil, err
+			}
+			return identity.Config, identity.Snapshot, identity.Build, identity.Authority, nil
+		}
+		currentConfig := s.state.Config()
+		if currentConfig == nil {
+			return nil, qualification.Snapshot{}, qualification.BuildIdentity{}, nil, qualification.ErrUnavailable
+		}
+		snapshot := currentConfig.QualificationSnapshot()
+		currentBuild := qualification.BuildIdentity{}
+		if provider, ok := s.state.(QualificationProvider); ok {
+			report := provider.QualificationReport()
+			if report.Qualification.EffectiveConfigIdentitySHA256 != snapshot.EffectiveConfigIdentitySHA256 {
+				return nil, qualification.Snapshot{}, qualification.BuildIdentity{}, nil, qualification.ErrUnavailable
+			}
+			snapshot = report.Qualification
+			currentBuild = report.ControllerBuild
+		}
+		return currentConfig, snapshot, currentBuild, nil, nil
+	}
+	return cfg, storeRef, gate
 }
 
 // routeOptsFromBody builds the domain RouteOpts from the wire body for a plain
@@ -115,15 +194,19 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 	// degraded cross-store conflict coverage.
 	sourceWorkflowScanWarnings := make(map[string]struct{})
 	var sourceWorkflowScanMessages []string
+	formulaConfig, graphStoreRef, formulaActionGate := s.graphFormulaCompatibility()
 	deps := sling.SlingDeps{
-		CityName:   s.state.CityName(),
-		CityPath:   s.state.CityPath(),
-		Cfg:        s.state.Config(),
-		SP:         s.state.SessionProvider(),
-		Store:      store,
-		GraphStore: s.state.GraphBeadStore().Store,
-		Events:     s.state.EventProvider(),
-		StoreRef:   storeRef,
+		CityName:                 s.state.CityName(),
+		CityPath:                 s.state.CityPath(),
+		Cfg:                      formulaConfig,
+		SP:                       s.state.SessionProvider(),
+		Store:                    store,
+		GraphStore:               s.state.GraphBeadStore().Store,
+		GraphStoreRef:            graphStoreRef,
+		FormulaActionGate:        formulaActionGate,
+		RequireFormulaActionGate: true,
+		Events:                   s.state.EventProvider(),
+		StoreRef:                 storeRef,
 		SourceWorkflowStores: func() ([]sling.SourceWorkflowStore, error) {
 			return s.sourceWorkflowStores(), nil
 		},

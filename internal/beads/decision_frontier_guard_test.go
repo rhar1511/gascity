@@ -27,6 +27,63 @@ func decisionFrontierStores(t *testing.T) []decisionFrontierStoreFixture {
 	}
 }
 
+func TestDecisionFrontierWriterDiscoveryRequiresAnActiveWritableRole(t *testing.T) {
+	assertWriterRoles := func(t *testing.T, store Store, wantWriter, wantReader, wantTransition bool) {
+		t.Helper()
+		_, gotWriter := DecisionFrontierRecordWriterFor(store)
+		_, gotReader := DecisionFrontierSourceReaderFor(store)
+		_, gotTransition := RevisionTransitionWriterFor(store)
+		if gotWriter != wantWriter || gotReader != wantReader || gotTransition != wantTransition {
+			t.Fatalf("frontier capabilities = writer:%t reader:%t transition:%t, want %t:%t:%t",
+				gotWriter, gotReader, gotTransition, wantWriter, wantReader, wantTransition)
+		}
+	}
+
+	t.Run("typed nil stores are unavailable", func(t *testing.T) {
+		var nilMem *MemStore
+		var nilSQLite *SQLiteStore
+		assertWriterRoles(t, nilMem, false, false, false)
+		assertWriterRoles(t, nilSQLite, false, false, false)
+	})
+
+	t.Run("disabled memory writes do not advertise controller writers", func(t *testing.T) {
+		store := &MemStore{IDPrefix: "wrk", HonorExplicitIDs: true, DisableConditionalWrites: true}
+		assertWriterRoles(t, store, false, true, false)
+	})
+
+	for _, tc := range []struct {
+		name               string
+		revision, readOnly bool
+		wantWriter         bool
+		wantReader         bool
+		wantTransition     bool
+	}{
+		{name: "writable revisioned sqlite", revision: true, wantWriter: true, wantReader: true, wantTransition: true},
+		{name: "revisionless sqlite", revision: false},
+		{name: "read-only revisioned sqlite", revision: true, readOnly: true, wantReader: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			createSQLiteSchemaFixture(t, dir, tc.revision, false, nil)
+			options := []SQLiteStoreOption{WithSQLiteStoreIDPrefix("gcg")}
+			if tc.readOnly {
+				options = append(options, WithSQLiteStoreReadOnly())
+			}
+			opened, err := OpenSQLiteStore(dir, options...)
+			if err != nil {
+				t.Fatalf("open SQLite fixture: %v", err)
+			}
+			store := opened.(*SQLiteStore)
+			defer func() {
+				if err := store.CloseStore(); err != nil {
+					t.Errorf("close SQLite fixture: %v", err)
+				}
+			}()
+			assertWriterRoles(t, store, tc.wantWriter, tc.wantReader, tc.wantTransition)
+		})
+	}
+}
+
 func TestDecisionFrontierReservedRowsAndHoldsAreProtectedOnSupportedStores(t *testing.T) {
 	for _, tc := range decisionFrontierStores(t) {
 		t.Run(tc.name, func(t *testing.T) {

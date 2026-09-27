@@ -162,9 +162,11 @@ func processFanout(store beads.Store, bead beads.Bead, opts ProcessOptions) (Con
 			idMapping = existingMapping
 		} else {
 			inst, err := molecule.InstantiateFragment(context.Background(), store, fragment, molecule.FragmentOptions{
-				RootID:       rootID,
-				Vars:         itemVars,
-				ExternalDeps: externalDeps,
+				RootID:            rootID,
+				Vars:              itemVars,
+				ExternalDeps:      externalDeps,
+				ActionGate:        opts.FormulaActionGate,
+				RequireActionGate: opts.RequireFormulaActionGate,
 			})
 			if err != nil {
 				if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {

@@ -91,6 +91,24 @@ func IsGraphV2Formula(formulaName string, searchPaths []string) (bool, *formula.
 // PrepareInvocation validates and normalizes a graph.v2 invocation. Non-graph
 // formulas are returned with Formula set and no input convoy.
 func PrepareInvocation(ctx context.Context, store beads.Store, formulaName string, searchPaths []string, targetID string, vars map[string]string) (Invocation, error) {
+	return PrepareInvocationWithBeforeInputConvoy(ctx, store, formulaName, searchPaths, targetID, vars, nil)
+}
+
+// PrepareInvocationWithBeforeInputConvoy is PrepareInvocation with an optional
+// authorization hook at the graph.v2 write boundary. The hook runs after the
+// formula has been resolved and validated, but before NormalizeInputConvoy can
+// create a synthetic input convoy. It receives validation-only reserved values;
+// callers must still authorize the final compiled recipe before materializing
+// workflow beads.
+func PrepareInvocationWithBeforeInputConvoy(
+	ctx context.Context,
+	store beads.Store,
+	formulaName string,
+	searchPaths []string,
+	targetID string,
+	vars map[string]string,
+	beforeInputConvoy func(context.Context, *formula.Recipe, map[string]string) error,
+) (Invocation, error) {
 	resolved, parser, err := loadFormulaWithParser(formulaName, searchPaths)
 	if err != nil {
 		return Invocation{}, err
@@ -154,6 +172,11 @@ func PrepareInvocation(ctx context.Context, store beads.Store, formulaName strin
 	}
 	if store == nil {
 		return Invocation{}, fmt.Errorf("v2 formula %q requires a bead store to normalize target %s", formulaName, targetID)
+	}
+	if beforeInputConvoy != nil {
+		if err := beforeInputConvoy(ctx, recipe, varsWithConvoyPlaceholder(inv.Vars)); err != nil {
+			return Invocation{}, fmt.Errorf("authorizing v2 formula %q before input-convoy preparation: %w", formulaName, err)
+		}
 	}
 	convoyID, err := NormalizeInputConvoy(store, targetID)
 	if err != nil {

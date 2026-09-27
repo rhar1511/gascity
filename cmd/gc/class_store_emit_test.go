@@ -682,6 +682,105 @@ func TestTheEmittingClassStoreOnlyAdvertisesACensusItCanAnswer(t *testing.T) {
 	})
 }
 
+func TestEmittingClassStoreFrontierRolesFollowBacking(t *testing.T) {
+	t.Run("unsupported and degraded backings are not advertised", func(t *testing.T) {
+		for _, tc := range []struct {
+			name       string
+			leaf       beads.Store
+			wantReader bool
+		}{
+			{name: "native Dolt", leaf: &beads.NativeDoltStore{}},
+			{name: "conditional writes disabled", leaf: &beads.MemStore{IDPrefix: "gcg", HonorExplicitIDs: true, DisableConditionalWrites: true}, wantReader: true},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				wrapped := splitClassRoutes(tc.leaf).withCLIEmission(t.TempDir()).stores[coordclass.ClassGraph]
+				if _, ok := wrapped.(beads.DecisionFrontierRecordWriter); !ok {
+					t.Fatalf("wrapper %T does not structurally retain the record-writer methods", wrapped)
+				}
+				if _, ok := wrapped.(beads.DecisionFrontierSourceReader); !ok {
+					t.Fatalf("wrapper %T does not structurally retain the source-reader method", wrapped)
+				}
+				if _, ok := wrapped.(beads.RevisionTransitionWriter); !ok {
+					t.Fatalf("wrapper %T does not structurally retain the transition-writer method", wrapped)
+				}
+				if _, ok := beads.DecisionFrontierRecordWriterFor(wrapped); ok {
+					t.Fatal("record writer was discovered over a backing that cannot honor it")
+				}
+				if _, ok := beads.DecisionFrontierSourceReaderFor(wrapped); ok != tc.wantReader {
+					t.Fatalf("source reader discovered = %t, want %t", ok, tc.wantReader)
+				}
+				if _, ok := beads.RevisionTransitionWriterFor(wrapped); ok {
+					t.Fatal("transition writer was discovered over a backing that cannot honor it")
+				}
+
+				recordWriter := wrapped.(beads.DecisionFrontierRecordWriter)
+				if _, err := recordWriter.CreateDecisionFrontierRecord(beads.Bead{}); !errors.Is(err, beads.ErrDecisionFrontierCapabilityUnsupported) {
+					t.Fatalf("direct unsupported record create error = %v", err)
+				}
+				if swapped, err := recordWriter.CompareAndSetDecisionFrontierRecordMetadataKey("record", "key", "", "next"); swapped || !errors.Is(err, beads.ErrDecisionFrontierCapabilityUnsupported) {
+					t.Fatalf("direct unsupported record CAS = (swapped:%t, err:%v)", swapped, err)
+				}
+				if err := recordWriter.EnsureDecisionFrontierLink("source", "target", "relates-to"); !errors.Is(err, beads.ErrDecisionFrontierCapabilityUnsupported) {
+					t.Fatalf("direct unsupported record link error = %v", err)
+				}
+				reader := wrapped.(beads.DecisionFrontierSourceReader)
+				if _, err := reader.DecisionFrontierSourceSnapshot("work"); tc.wantReader {
+					if err == nil || !errors.Is(err, beads.ErrNotFound) {
+						t.Fatalf("supported source snapshot error = %v, want not found", err)
+					}
+				} else if !errors.Is(err, beads.ErrConditionalWriteUnsupported) {
+					t.Fatalf("unsupported source snapshot error = %v", err)
+				}
+				transitionWriter := wrapped.(beads.RevisionTransitionWriter)
+				if _, won, err := transitionWriter.CompareAndSetMetadataKeyWithReceipt("work", "", "", "", 0, beads.RevisionTransitionReceipt{}); won || !errors.Is(err, beads.ErrConditionalWriteUnsupported) {
+					t.Fatalf("unsupported receipt transition = (won:%t, err:%v)", won, err)
+				}
+			})
+		}
+	})
+
+	t.Run("SQLite keeps the supported lifecycle event-dark", func(t *testing.T) {
+		cityPath := t.TempDir()
+		leaf, err := beads.OpenSQLiteStore(t.TempDir(), beads.WithSQLiteStoreIDPrefix("gcg"))
+		if err != nil {
+			t.Fatalf("opening SQLite leaf: %v", err)
+		}
+		t.Cleanup(func() {
+			if err := closeBeadStoreHandle(leaf); err != nil {
+				t.Errorf("closing SQLite leaf: %v", err)
+			}
+		})
+		work := seedClassBead(t, leaf, "frontier-work")
+		updatedTitle := "step with a persisted revision"
+		if err := leaf.Update(work.ID, beads.UpdateOpts{Title: &updatedTitle}); err != nil {
+			t.Fatalf("initializing SQLite revision on leaf: %v", err)
+		}
+		work, err = leaf.Get(work.ID)
+		if err != nil {
+			t.Fatalf("reloading source work after revision initialization: %v", err)
+		}
+		wrapped := splitClassRoutes(leaf).withCLIEmission(cityPath).stores[coordclass.ClassGraph]
+		if _, ok := beads.DecisionFrontierRecordWriterFor(wrapped); !ok {
+			t.Fatal("supported SQLite record writer was hidden by the emitting wrapper")
+		}
+		if _, ok := beads.DecisionFrontierSourceReaderFor(wrapped); !ok {
+			t.Fatal("supported SQLite source reader was hidden by the emitting wrapper")
+		}
+		if _, ok := beads.RevisionTransitionWriterFor(wrapped); !ok {
+			t.Fatal("supported SQLite transition writer was hidden by the emitting wrapper")
+		}
+
+		released := resolveLifecycleDecisionFrontier(t, wrapped, work.ID)
+		if beads.HasDecisionFrontierHold(released) || released.Metadata[beadmeta.DecisionFrontierRevisionReceiptsMetadataKey] == "" {
+			t.Fatalf("frontier lifecycle did not release with a durable receipt: hold=%t metadata=%v",
+				beads.HasDecisionFrontierHold(released), released.Metadata)
+		}
+		if got := readCityJournal(t, cityPath); len(got) != 0 {
+			t.Fatalf("private decision records, answers, links, or transition receipts entered the generic event journal: %s", eventSummary(got))
+		}
+	})
+}
+
 // TestEmittingClassStoreCarriesAnEdgePayloadAndEmitsForIt covers the wrapper's
 // edge-payload write, which TestEmittingClassStoreKeepsEveryEngineCapability
 // forces to EXIST but says nothing about the behavior of.

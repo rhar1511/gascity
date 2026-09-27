@@ -154,6 +154,15 @@ func (cr *CityRuntime) rebuildConvergenceHandler() {
 // infrastructure binding.
 func (cr *CityRuntime) newConvergenceScope(rig string, store beads.Store, storePath string, formulaSearchPaths []string, relocated bool) *convergenceScope {
 	adapter := newConvergenceStoreAdapter(store, formulaSearchPaths, relocated)
+	scopeStore, graphStore := store, store
+	if rig == "" {
+		scopeStore = cr.cityBeadStore()
+	}
+	storeRef := formulaMaterializationStoreRef(cr.cityPath, cr.cfg, storePath, scopeStore, graphStore, store)
+	adapter.formulaActionGate = controllerFormulaActionGateWithCurrent(
+		cr.cityPath, cr.cfg, storeRef, cr.compatibilityAuthority, cr.compatibilityRuntimeIdentity,
+	)
+	adapter.requireActionGate = true
 	return &convergenceScope{
 		rig:       rig,
 		storePath: storePath,

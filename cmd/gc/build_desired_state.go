@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/hooks"
 	"github.com/gastownhall/gascity/internal/poolplan"
+	"github.com/gastownhall/gascity/internal/qualification"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	"github.com/gastownhall/gascity/internal/session"
@@ -396,6 +397,7 @@ func buildDesiredState(
 	sp runtime.Provider,
 	store beads.Store,
 	stderr io.Writer,
+	authorities ...qualification.CompatibilityAuthority,
 ) DesiredStateResult {
 	var sessionBeads *sessionBeadSnapshot
 	var sessionQueryPartial bool
@@ -420,6 +422,7 @@ func buildDesiredState(
 		sessionBeads,
 		nil,
 		stderr,
+		authorities...,
 	)
 	result.SessionQueryPartial = result.SessionQueryPartial || sessionQueryPartial
 	return result
@@ -476,7 +479,12 @@ func buildDesiredStateWithSessionBeadsAt(
 	sessionBeads *sessionBeadSnapshot,
 	trace *sessionReconcilerTraceCycle,
 	stderr io.Writer,
+	authorities ...qualification.CompatibilityAuthority,
 ) DesiredStateResult {
+	var compatibilityAuthority qualification.CompatibilityAuthority
+	if len(authorities) > 0 {
+		compatibilityAuthority = authorities[0]
+	}
 	citySt, _ := loadSuspensionState(fsys.OSFS{}, cityPath)
 	if effectiveCitySuspended(cfg, citySt) {
 		return DesiredStateResult{}
@@ -494,7 +502,7 @@ func buildDesiredStateWithSessionBeadsAt(
 	// merge behavior stays attached before this tick measures routed demand.
 	// The gate is disabled by default; a partial or unreadable admission simply
 	// leaves that one item untouched for a later reconciliation.
-	reconcileLifecycleAdmission(cityName, cityPath, cfg, store, rigStores, suspendedRigPaths, stderr)
+	reconcileLifecycleAdmission(cityName, cityPath, cfg, store, rigStores, suspendedRigPaths, stderr, compatibilityAuthority)
 	reconcileLifecycleCompletions(cityName, cityPath, cfg, store, rigStores, suspendedRigPaths, stderr)
 	bp.sessionCensusRigStores = cloneSessionCensusRigStores(rigStores)
 	bp.sessionCensusSuspendedRigPaths = cloneSessionCensusSuspendedRigPaths(suspendedRigPaths)

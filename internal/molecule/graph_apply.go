@@ -50,11 +50,14 @@ func graphApplyTracef(format string, args ...any) {
 	fmt.Fprintf(f, "%s %s\n", time.Now().UTC().Format(time.RFC3339Nano), fmt.Sprintf(format, args...)) //nolint:errcheck
 }
 
-func instantiateViaGraphApply(ctx context.Context, applier beads.GraphApplyStore, recipe *formula.Recipe, opts Options) (*Result, error) {
+func instantiateViaGraphApply(ctx context.Context, store beads.Store, applier beads.GraphApplyStore, recipe *formula.Recipe, opts Options) (*Result, error) {
 	graphApplyTracef("graph-apply enter recipe=%s applier=%T", recipe.Name, applier)
 	plan, graphWorkflow, rootKey, err := buildRecipeApplyPlan(recipe, opts)
 	if err != nil {
 		graphApplyTracef("graph-apply plan-error recipe=%s err=%v", recipe.Name, err)
+		return nil, err
+	}
+	if err := revalidateRecipeAction(ctx, opts.ActionGate, recipe, store, opts.actionAuthorization); err != nil {
 		return nil, err
 	}
 	applied, err := applier.ApplyGraphPlan(ctx, plan)
@@ -109,6 +112,9 @@ func instantiateFragmentViaGraphApply(ctx context.Context, store beads.Store, ap
 	plan, err := buildFragmentApplyPlan(store, recipe, opts)
 	if err != nil {
 		graphApplyTracef("graph-apply fragment-plan-error root=%s err=%v", opts.RootID, err)
+		return nil, err
+	}
+	if err := revalidateFragmentAction(ctx, opts.ActionGate, recipe, store, opts.actionAuthorization); err != nil {
 		return nil, err
 	}
 	applied, err := applier.ApplyGraphPlan(ctx, plan)
@@ -264,6 +270,16 @@ func buildRecipeApplyPlan(recipe *formula.Recipe, opts Options) (*beads.GraphApp
 				node.AssignAfterCreate = true
 			}
 		}
+		if recipe.FormulaSource != "" {
+			if node.Metadata == nil {
+				node.Metadata = make(map[string]string, 2)
+			}
+			node.Metadata[beadmeta.FormulaSourceMetadataKey] = recipe.FormulaSource
+		}
+		if opts.actionAuthorization != nil && node.Metadata == nil {
+			node.Metadata = make(map[string]string, 2)
+		}
+		stampFormulaActionAuthorization(node.Metadata, opts.actionAuthorization)
 		for _, dep := range externalDepsByStep[step.ID] {
 			if dep.Type == "parent-child" && recipeParentByStep[step.ID] != "" {
 				continue
@@ -478,6 +494,10 @@ func buildFragmentApplyPlan(store beads.Store, recipe *formula.FragmentRecipe, o
 			node.Metadata[beadmeta.StepRefMetadataKey] = step.ID
 		}
 		node.Metadata[beadmeta.RootBeadIDMetadataKey] = opts.RootID
+		if recipe.FormulaSource != "" {
+			node.Metadata[beadmeta.FormulaSourceMetadataKey] = recipe.FormulaSource
+		}
+		stampFormulaActionAuthorization(node.Metadata, opts.actionAuthorization)
 		if logicalStepID, ok := logicalRecipeStepID(step); ok {
 			if existingLogicalBeadID := existingLogicalBeadIDs[logicalStepID]; existingLogicalBeadID != "" {
 				node.Metadata[beadmeta.LogicalBeadIDMetadataKey] = existingLogicalBeadID

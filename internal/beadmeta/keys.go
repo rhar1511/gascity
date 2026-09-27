@@ -171,14 +171,21 @@ const (
 	FormulaHashMetadataKey               = "gc.formula_hash"
 	FormulaNameMetadataKey               = "gc.formula_name"
 	FormulaSourceMetadataKey             = "gc.formula_source"
-	GCExemptMetadataKey                  = "gc.gc_exempt"
-	Graphv2RootKeyMetadataKey            = "gc.graphv2_root_key"
-	IdempotencyKeyMetadataKey            = "gc.idempotency_key"
-	InputConvoyIDMetadataKey             = "gc.input_convoy_id"
-	InstantiatingMetadataKey             = "gc.instantiating"
-	IterationMetadataKey                 = "gc.iteration"
-	ItemRootKeyMetadataKey               = "gc.item_root_key"
-	KindMetadataKey                      = "gc.kind"
+	// CompatibilityRequestMetadataKey stores the exact controller compatibility
+	// request that authorized materialization of this executable formula bead.
+	CompatibilityRequestMetadataKey = "gc.compatibility_request.v1"
+	// CompatibilityAuthorizationMetadataKey stores the authority-issued record
+	// reference bound to CompatibilityRequestMetadataKey. Workers must verify it
+	// through the controller authority before execution.
+	CompatibilityAuthorizationMetadataKey = "gc.compatibility_authorization.v1"
+	GCExemptMetadataKey                   = "gc.gc_exempt"
+	Graphv2RootKeyMetadataKey             = "gc.graphv2_root_key"
+	IdempotencyKeyMetadataKey             = "gc.idempotency_key"
+	InputConvoyIDMetadataKey              = "gc.input_convoy_id"
+	InstantiatingMetadataKey              = "gc.instantiating"
+	IterationMetadataKey                  = "gc.iteration"
+	ItemRootKeyMetadataKey                = "gc.item_root_key"
+	KindMetadataKey                       = "gc.kind"
 	// CompletionFactsConvergedMetadataKey stamps a graph.v2 workflow root whose
 	// completion facts the completions backstop has fully reconciled: the root
 	// is closed, every listed step is closed, and every emittable fact is in
@@ -581,6 +588,8 @@ var KnownMetadataKeys = []string{
 	FormulaHashMetadataKey,
 	FormulaNameMetadataKey,
 	FormulaSourceMetadataKey,
+	CompatibilityRequestMetadataKey,
+	CompatibilityAuthorizationMetadataKey,
 	GCExemptMetadataKey,
 	Graphv2RootKeyMetadataKey,
 	IdempotencyKeyMetadataKey,

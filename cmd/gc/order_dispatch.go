@@ -313,21 +313,22 @@ type memoryOrderDispatcher struct {
 	// work ledger; neither class belongs there on a split city. A nil value
 	// relocates nothing, so graphStoreFor/ordersStoreFor hand back the caller's
 	// own store and the dispatch is byte-identical to the single-store path.
-	storageRoutes        *storageRoutes
-	ep                   events.Provider
-	execRun              ExecRunner
-	rec                  events.Recorder
-	stderr               io.Writer
-	maxTimeout           time.Duration
-	maxDispatchesPerTick int
-	nextDispatchStart    int
-	cfg                  *config.City
-	cityName             string
-	cityPath             string
-	cacheMu              sync.Mutex
-	lastRunCache         map[string]time.Time
-	gateBackoffUntil     map[string]time.Time
-	openWorkSuppression  map[string]orderOpenWorkSuppression
+	storageRoutes             *storageRoutes
+	ep                        events.Provider
+	execRun                   ExecRunner
+	rec                       events.Recorder
+	stderr                    io.Writer
+	maxTimeout                time.Duration
+	maxDispatchesPerTick      int
+	nextDispatchStart         int
+	cfg                       *config.City
+	cityName                  string
+	cityPath                  string
+	formulaActionGateForStore func(*config.City, string, beads.Store, beads.Store) func(beads.Store) molecule.FormulaActionGate
+	cacheMu                   sync.Mutex
+	lastRunCache              map[string]time.Time
+	gateBackoffUntil          map[string]time.Time
+	openWorkSuppression       map[string]orderOpenWorkSuppression
 
 	dispatchCtx    context.Context
 	dispatchCancel context.CancelFunc
@@ -1020,15 +1021,15 @@ func (m *memoryOrderDispatcher) fireCandidate(ctx context.Context, cand *orderDi
 	// same launchResolvedDispatch → dispatchOne path through the exported
 	// seam, so a tick dispatch and a webhook dispatch run the identical core,
 	// not two implementations. inFlight (this tick's WaitGroup) is reserved
-	// before the launch and released via onDone; on a create failure nothing
-	// launched, so it is released immediately to balance the reservation.
+	// before the launch and released via onDone; if preparation or tracking
+	// creation fails, nothing launched, so it is released immediately.
 	//
 	// Auto-triggered orders carry no args channel: vars/execEnv are nil.
 	inFlight.Add(1)
 	trackingBead, err := m.launchResolvedDispatch(ctx, store, target, a, cityPath, nil, nil, inFlight.Done)
 	if err != nil {
 		inFlight.Done()
-		logDispatchError(m.stderr, "gc: order dispatch: creating tracking bead for %s: %v", scoped, err)
+		logDispatchError(m.stderr, "gc: order dispatch: starting %s: %v", scoped, err)
 		return false
 	}
 	m.rememberLastRun(scoped, storeKeysForGate, trackingBead.CreatedAt)
@@ -1094,6 +1095,9 @@ func (m *memoryOrderDispatcher) runDispatchGuarded(ctx context.Context, store be
 // A caller tracking its own WaitGroup must register it before calling and
 // release it in onDone (and, on a returned error, itself — nothing launched).
 func (m *memoryOrderDispatcher) launchResolvedDispatch(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath string, vars, execEnv map[string]string, onDone func()) (orders.OrderRun, error) {
+	if err := m.preauthorizeRequiredOrderFormula(ctx, store, target, a, cityPath, vars); err != nil {
+		return orders.OrderRun{}, fmt.Errorf("preparing required order formula before tracking: %w", err)
+	}
 	trackingRun, err := m.orderFrontDoorFor(store).CreateRun(a.ScopedName(), orders.RunOpts{})
 	if err != nil {
 		return orders.OrderRun{}, err
@@ -1101,6 +1105,51 @@ func (m *memoryOrderDispatcher) launchResolvedDispatch(ctx context.Context, stor
 	m.addInflight()
 	m.launchDispatchOne(ctx, store, target, a, cityPath, trackingRun.ID, vars, execEnv, onDone)
 	return trackingRun, nil
+}
+
+// preauthorizeRequiredOrderFormula checks formula eligibility before the
+// order-tracking bead is written. A denied required-pack action must leave no
+// tracking side effect. Preparation and authorization errors return without a
+// tracking write. Instantiate still performs its own fresh
+// authorization/revalidation before materialization, so this check only moves
+// the first authorization earlier.
+func (m *memoryOrderDispatcher) preauthorizeRequiredOrderFormula(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath string, vars map[string]string) error {
+	if a.IsExec() || m.cfg == nil || !m.cfg.HasRequiredCompatibilityPacks() {
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	searchPaths := orderFormulaSearchPaths(m.cfg, a)
+	recipe, effectiveVars, err := prepareOrderWispRecipe(ctx, store, a, searchPaths, vars)
+	if err != nil {
+		return err
+	}
+	if err := molecule.ValidateRecipeRuntimeVars(recipe, molecule.Options{Vars: effectiveVars}); err != nil {
+		return err
+	}
+	var pool string
+	if a.Pool != "" {
+		pool, err = qualifyOrderPool(a, m.cfg)
+		if err != nil {
+			return err
+		}
+	}
+	graphStore := m.graphStoreFor(store)
+	if err := applyOrderRecipeRouting(recipe, pool, vars, target, graphStore, m.cityName, cityPath, m.cfg); err != nil {
+		return err
+	}
+	stampOrderWispRuntimeVars(recipe, effectiveVars)
+	actionGateForStore := controllerFormulaActionGateForStore(cityPath, m.cfg, target.ScopeRoot, store, graphStore)
+	if m.formulaActionGateForStore != nil {
+		actionGateForStore = m.formulaActionGateForStore(m.cfg, target.ScopeRoot, store, graphStore)
+	}
+	_, _, err = molecule.PrepareFormulaAction(ctx, graphStore, recipe, molecule.Options{
+		Vars:               effectiveVars,
+		ActionGateForStore: actionGateForStore,
+		RequireActionGate:  true,
+	})
+	return err
 }
 
 // cancel signals all in-flight dispatchOne goroutines to terminate. Safe
@@ -2372,7 +2421,15 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 	// the created bead text instead of the caller's value (#4668).
 	stampOrderWispRuntimeVars(recipe, effectiveVars)
 
-	cookResult, err := molecule.Instantiate(ctx, graphStore, recipe, molecule.Options{Vars: effectiveVars})
+	actionGateForStore := controllerFormulaActionGateForStore(cityPath, m.cfg, target.ScopeRoot, store, graphStore)
+	if m.formulaActionGateForStore != nil {
+		actionGateForStore = m.formulaActionGateForStore(m.cfg, target.ScopeRoot, store, graphStore)
+	}
+	cookResult, err := molecule.Instantiate(ctx, graphStore, recipe, molecule.Options{
+		Vars:               effectiveVars,
+		ActionGateForStore: actionGateForStore,
+		RequireActionGate:  true,
+	})
 	if err != nil {
 		m.rec.Record(events.Event{
 			Type:    events.OrderFailed,

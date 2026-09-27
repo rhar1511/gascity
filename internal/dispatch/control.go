@@ -746,8 +746,10 @@ func spawnNextAttempt(ctx context.Context, store beads.Store, control beads.Bead
 	}
 
 	result, err := molecule.Attach(ctx, store, recipe, control.ID, molecule.AttachOptions{
-		IdempotencyKey: fmt.Sprintf("%s:attempt:%d", control.ID, attemptNum),
-		ExpectedEpoch:  epoch,
+		IdempotencyKey:    fmt.Sprintf("%s:attempt:%d", control.ID, attemptNum),
+		ExpectedEpoch:     epoch,
+		ActionGate:        opts.FormulaActionGate,
+		RequireActionGate: opts.RequireFormulaActionGate,
 	})
 	if err != nil {
 		// An epoch conflict is a ROUTINE convergence signal under the CAS-last

@@ -56,6 +56,23 @@ type QualificationProvider interface {
 	QualificationReport() qualification.ControllerReport
 }
 
+// CompatibilityRuntimeIdentity is one published controller generation used
+// by API materialization gates. The authority is captured by trusted server
+// startup and is never selected by city, pack, provider, or worker config.
+type CompatibilityRuntimeIdentity struct {
+	Config    *config.City
+	Snapshot  qualification.Snapshot
+	Build     qualification.BuildIdentity
+	Authority qualification.CompatibilityAuthority
+}
+
+// CompatibilityRuntimeIdentityProvider optionally exposes the complete
+// compatibility identity under one state lock. Returning the trust handle with
+// config and build identity prevents a reload from mixing generations.
+type CompatibilityRuntimeIdentityProvider interface {
+	CompatibilityRuntimeIdentity() (CompatibilityRuntimeIdentity, error)
+}
+
 // State provides read access to controller-managed state.
 // The controller implements this with RWMutex-protected hot-reload.
 //

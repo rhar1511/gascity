@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -16,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/coordclass"
+	"github.com/gastownhall/gascity/internal/qualification"
 	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 	"github.com/gastownhall/gascity/internal/storeref"
@@ -35,7 +37,12 @@ func reconcileLifecycleAdmission(
 	rigStores map[string]beads.Store,
 	suspendedRigPaths map[string]bool,
 	stderr io.Writer,
+	authorities ...qualification.CompatibilityAuthority,
 ) {
+	var authority qualification.CompatibilityAuthority
+	if len(authorities) > 0 {
+		authority = authorities[0]
+	}
 	if cfg == nil || !cfg.Lifecycle.AdmissionEnabled {
 		return
 	}
@@ -143,7 +150,7 @@ func reconcileLifecycleAdmission(
 				fmt.Fprintf(stderr, "lifecycle admission: %s has an incomplete prior materialization reservation; holding for review\n", bead.ID) //nolint:errcheck
 				continue
 			}
-			deps, graphStoreRef, err := lifecycleSlingDeps(cityName, cityPath, cfg, store, rigStores, suspendedRigPaths, leg, legs, runner)
+			deps, graphStoreRef, err := lifecycleSlingDeps(cityName, cityPath, cfg, store, rigStores, suspendedRigPaths, leg, legs, runner, authority)
 			if err != nil {
 				fmt.Fprintf(stderr, "lifecycle admission: preparing workflow materialization for %s: %v\n", bead.ID, err) //nolint:errcheck
 				continue
@@ -463,6 +470,7 @@ func lifecycleSlingDeps(
 	selected classStoreCandidate,
 	sourceStores []classStoreCandidate,
 	runner sling.SlingRunner,
+	authority qualification.CompatibilityAuthority,
 ) (sling.SlingDeps, string, error) {
 	work := censusWorkLeg(cityPath, store)
 	topology := residencyTopologyForCity(cityPath, cfg, work, servingRigStores(cfg, rigStores, suspendedRigPaths))
@@ -492,14 +500,17 @@ func lifecycleSlingDeps(
 		cityName = censusCityName(cfg)
 	}
 	deps := sling.SlingDeps{
-		CityName:           cityName,
-		CityPath:           cityPath,
-		Cfg:                cfg,
-		Runner:             runner,
-		Store:              selected.store,
-		GraphStore:         graphStore,
-		ExecutionWorkStore: selected.store,
-		StoreRef:           selected.ref,
+		CityName:                 cityName,
+		CityPath:                 cityPath,
+		Cfg:                      cfg,
+		Runner:                   runner,
+		Store:                    selected.store,
+		GraphStore:               graphStore,
+		GraphStoreRef:            graphStoreRef,
+		FormulaActionGate:        controllerFormulaActionGateWithCurrent(cityPath, cfg, graphStoreRef, authority, nil),
+		RequireFormulaActionGate: true,
+		ExecutionWorkStore:       selected.store,
+		StoreRef:                 selected.ref,
 		SourceWorkflowStores: func() ([]sling.SourceWorkflowStore, error) {
 			out := make([]sling.SourceWorkflowStore, 0, len(sourceStores))
 			for _, source := range sourceStores {
@@ -1001,7 +1012,7 @@ func lifecycleAuthoritativeCandidate(candidate beads.Bead, opts hookClaimOptions
 // fences the exact row revision and re-reads both the work row and its signed
 // source/root lineage after the write. Stores without real revision CAS hold
 // lifecycle work; the legacy `bd update --claim` path is never a fallback.
-func lifecycleConditionalClaim(candidate beads.Bead, actor string, readyAssignment bool, opts hookClaimOptions) (beads.Bead, bool, error) {
+func lifecycleConditionalClaim(candidate beads.Bead, actor string, readyAssignment bool, opts hookClaimOptions, compatibilityChecks ...formulaActionCandidateCheck) (beads.Bead, bool, error) {
 	store, current, ok := lifecycleAuthoritativeCandidate(candidate, opts)
 	if !ok {
 		return beads.Bead{}, false, nil
@@ -1013,6 +1024,16 @@ func lifecycleConditionalClaim(candidate beads.Bead, actor string, readyAssignme
 	status := strings.ToLower(strings.TrimSpace(current.Status))
 	if status != "open" {
 		return beads.Bead{}, false, nil
+	}
+	if len(compatibilityChecks) > 0 && compatibilityChecks[0] != nil {
+		state, err := compatibilityChecks[0](context.Background(), current)
+		if err != nil {
+			return beads.Bead{}, false, fmt.Errorf("validating formula compatibility before lifecycle claim: %w", err)
+		}
+		if state.Bead.ID != current.ID || state.Bead.Revision != current.Revision ||
+			state.Bead.SourceStoreRef != current.SourceStoreRef {
+			return beads.Bead{}, false, fmt.Errorf("formula compatibility candidate changed before lifecycle claim")
+		}
 	}
 	owner := strings.TrimSpace(current.Assignee)
 	if readyAssignment {

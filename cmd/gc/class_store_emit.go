@@ -65,6 +65,11 @@ package main
 // was before this file. That is a known gap rather than an oversight; closing it
 // needs a touched-id set from the Tx itself.
 //
+// The decision-frontier record and receipt roles are also event-dark by
+// design. Their immutable descriptions and controller metadata contain private
+// prompts, answers, and verification state, so those writes do not pass through
+// the generic bead-event payload.
+
 // Emission is best-effort, per the one-shot recorder precedent: the mutation has
 // already committed when the row is written, so a journal that cannot be opened
 // must not turn a landed close into a failed command. Failures are surfaced once
@@ -89,8 +94,9 @@ import (
 )
 
 // withCLIEmission makes every class store these routes serve append a canonical
-// bead.* event to cityPath's journal after each successful mutation, and
-// returns the routes.
+// bead.* event to cityPath's journal after each successful public mutation,
+// and returns the routes. The private decision-frontier writer roles stay
+// event-dark.
 //
 // It is the ONE injector. Nil routes (a city that relocates nothing) and an
 // empty city path are returned untouched, so a single-store city reaches none
@@ -122,9 +128,10 @@ func (r *storageRoutes) withCLIEmission(cityPath string) *storageRoutes {
 }
 
 // emittingClassStore is a relocated class store that appends a bead.* event
-// after each successful mutation. The embedded Store carries the required
-// surface; every optional capability either bead engine declares is forwarded
-// explicitly below.
+// after each successful public mutation. Private decision-frontier writes are
+// forwarded through their typed roles without generic events. The embedded
+// Store carries the required surface; every optional capability either bead
+// engine declares is forwarded explicitly below.
 type emittingClassStore struct {
 	beads.Store
 	cityPath string
@@ -456,6 +463,99 @@ func (s *emittingClassStore) DepRemove(issueID, dependsOnID string) error {
 // method the underlying store does not implement answers with the sentinel the
 // beads package publishes for it, or with the zero value where the question is
 // a capability question and the honest answer is "no".
+
+// StableCreateIDResolveTarget preserves the backing store's durable
+// caller-supplied ID guarantee. The resolver follows this exact target rather
+// than treating the emitting wrapper's structural methods as proof.
+func (s *emittingClassStore) StableCreateIDResolveTarget() beads.Store {
+	return s.Store
+}
+
+// DecisionFrontierRecordWriterHandle preserves the backing store's trusted
+// record capability without emitting generic bead events. Decision records,
+// answers, and their links contain private controller state and are written
+// only through this narrow role.
+func (s *emittingClassStore) DecisionFrontierRecordWriterHandle() (beads.DecisionFrontierRecordWriter, bool) {
+	writer, ok := beads.DecisionFrontierRecordWriterFor(s.Store)
+	if !ok || writer == nil {
+		return nil, false
+	}
+	return s, true
+}
+
+// DecisionFrontierSourceReaderHandle keeps authoritative source snapshots on
+// the wrapped class store. This read-only capability adds no event emission.
+func (s *emittingClassStore) DecisionFrontierSourceReaderHandle() (beads.DecisionFrontierSourceReader, bool) {
+	reader, ok := beads.DecisionFrontierSourceReaderFor(s.Store)
+	if !ok || reader == nil {
+		return nil, false
+	}
+	return s, true
+}
+
+// RevisionTransitionWriterHandle preserves the backing store's atomic hold
+// and receipt transition while keeping its private metadata out of generic
+// bead events.
+func (s *emittingClassStore) RevisionTransitionWriterHandle() (beads.RevisionTransitionWriter, bool) {
+	writer, ok := beads.RevisionTransitionWriterFor(s.Store)
+	if !ok || writer == nil {
+		return nil, false
+	}
+	return s, true
+}
+
+// CreateDecisionFrontierRecord is a private controller write. It deliberately
+// does not call emitCreated: the record description can contain prompts,
+// answers, and immutable verification material that must not enter generic
+// bead events.
+func (s *emittingClassStore) CreateDecisionFrontierRecord(bead beads.Bead) (beads.Bead, error) {
+	writer, ok := beads.DecisionFrontierRecordWriterFor(s.Store)
+	if !ok || writer == nil {
+		return beads.Bead{}, beads.ErrDecisionFrontierCapabilityUnsupported
+	}
+	return writer.CreateDecisionFrontierRecord(bead)
+}
+
+// CompareAndSetDecisionFrontierRecordMetadataKey advances private controller
+// state without publishing it as a generic bead update.
+func (s *emittingClassStore) CompareAndSetDecisionFrontierRecordMetadataKey(id, key, expected, next string) (bool, error) {
+	writer, ok := beads.DecisionFrontierRecordWriterFor(s.Store)
+	if !ok || writer == nil {
+		return false, beads.ErrDecisionFrontierCapabilityUnsupported
+	}
+	return writer.CompareAndSetDecisionFrontierRecordMetadataKey(id, key, expected, next)
+}
+
+// EnsureDecisionFrontierLink writes only the validated private relationship
+// between immutable records. Its payload is intentionally event-dark.
+func (s *emittingClassStore) EnsureDecisionFrontierLink(sourceID, targetID, depType string) error {
+	writer, ok := beads.DecisionFrontierRecordWriterFor(s.Store)
+	if !ok || writer == nil {
+		return beads.ErrDecisionFrontierCapabilityUnsupported
+	}
+	return writer.EnsureDecisionFrontierLink(sourceID, targetID, depType)
+}
+
+// DecisionFrontierSourceSnapshot returns the backing store's authoritative
+// source row and graph snapshot. It does not emit because it is read-only.
+func (s *emittingClassStore) DecisionFrontierSourceSnapshot(id string) (beads.Bead, error) {
+	reader, ok := beads.DecisionFrontierSourceReaderFor(s.Store)
+	if !ok || reader == nil {
+		return beads.Bead{}, beads.ErrConditionalWriteUnsupported
+	}
+	return reader.DecisionFrontierSourceSnapshot(id)
+}
+
+// CompareAndSetMetadataKeyWithReceipt performs the private atomic source
+// transition without exposing its hold marker or immutable receipt in a
+// generic event payload.
+func (s *emittingClassStore) CompareAndSetMetadataKeyWithReceipt(id, key, expected, next string, expectedRevision int64, receipt beads.RevisionTransitionReceipt) (beads.Bead, bool, error) {
+	writer, ok := beads.RevisionTransitionWriterFor(s.Store)
+	if !ok || writer == nil {
+		return beads.Bead{}, false, beads.ErrConditionalWriteUnsupported
+	}
+	return writer.CompareAndSetMetadataKeyWithReceipt(id, key, expected, next, expectedRevision, receipt)
+}
 
 func (s *emittingClassStore) CreateWithStorage(bead beads.Bead, storage beads.StorageClass) (beads.Bead, error) {
 	creator, ok := s.Store.(beads.StorageCreateStore)

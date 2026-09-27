@@ -173,6 +173,7 @@ func (p *Parser) parseResolvedAt(data []byte, absPath, label string) (*Formula, 
 
 	f.Source = absPath
 	f.ContentHash = contentHash(data)
+	f.SourceFiles = []SourceIdentity{{Path: absPath, ContentSHA256: f.ContentHash}}
 
 	// Set source tracing info on all steps (gt-8tmz.18)
 	SetSourceInfo(f)
@@ -261,6 +262,9 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 		if err := formula.Validate(); err != nil {
 			return nil, err
 		}
+		if len(formula.SourceFiles) == 0 && formula.Source != "" && formula.ContentHash != "" {
+			formula.SourceFiles = []SourceIdentity{{Path: formula.Source, ContentSHA256: formula.ContentHash}}
+		}
 		return formula, nil
 	}
 
@@ -276,6 +280,8 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 		Requires:    cloneRequirements(formula.Requires),
 		Type:        formula.Type,
 		Source:      formula.Source,
+		ContentHash: formula.ContentHash,
+		SourceFiles: append([]SourceIdentity(nil), formula.SourceFiles...),
 		Phase:       formula.Phase,
 		Pour:        formula.Pour,
 		Vars:        make(map[string]*VarDef),
@@ -296,6 +302,7 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 		if err != nil {
 			return nil, fmt.Errorf("resolve parent %s: %w", parentName, err)
 		}
+		merged.SourceFiles = append(merged.SourceFiles, parent.SourceFiles...)
 
 		parentConstraints, err := formulaCompilerConstraints(parent)
 		if err != nil {
@@ -358,6 +365,11 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 	merged.Template = mergeSteps(merged.Template, formula.Template)
 
 	merged.Compose = mergeComposeRules(merged.Compose, formula.Compose)
+	mergedSources, sourceErr := uniqueFormulaSourceIdentities(merged.SourceFiles)
+	if sourceErr != nil {
+		return nil, sourceErr
+	}
+	merged.SourceFiles = mergedSources
 
 	// Use child description if set
 	if formula.Description != "" {
@@ -432,6 +444,26 @@ func mergeSteps(parent, child []*Step) []*Step {
 	}
 
 	return result
+}
+
+func uniqueFormulaSourceIdentities(sources []SourceIdentity) ([]SourceIdentity, error) {
+	byPath := make(map[string]string, len(sources))
+	for _, source := range sources {
+		path := filepath.Clean(strings.TrimSpace(source.Path))
+		if path == "." || source.ContentSHA256 == "" {
+			return nil, fmt.Errorf("formula source identity is incomplete")
+		}
+		if prior, exists := byPath[path]; exists && prior != source.ContentSHA256 {
+			return nil, fmt.Errorf("formula source %q changed while resolving composition", filepath.Base(path))
+		}
+		byPath[path] = source.ContentSHA256
+	}
+	out := make([]SourceIdentity, 0, len(byPath))
+	for path, digest := range byPath {
+		out = append(out, SourceIdentity{Path: path, ContentSHA256: digest})
+	}
+	slices.SortFunc(out, func(a, b SourceIdentity) int { return strings.Compare(a.Path, b.Path) })
+	return out, nil
 }
 
 func mergeFormulaMetadata(base, overlay map[string]any) map[string]any {

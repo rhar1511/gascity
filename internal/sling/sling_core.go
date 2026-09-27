@@ -1720,7 +1720,19 @@ func isGraphSlingFormula(ctx context.Context, formulaName string, searchPaths []
 func prepareGraphV2FormulaInvocation(ctx context.Context, formulaName, targetID string, opts SlingOpts, deps SlingDeps, a config.Agent) (graphv2.Invocation, bool, error) {
 	searchPaths := SlingFormulaSearchPaths(deps, a)
 	vars := buildGraphV2SlingFormulaVars(formulaName, targetID, opts.Vars, a, deps)
-	inv, err := graphv2.PrepareInvocation(ctx, deps.Store, formulaName, searchPaths, targetID, vars)
+	beforeInputConvoy := func(ctx context.Context, recipe *formula.Recipe, vars map[string]string) error {
+		if !deps.RequireFormulaActionGate && deps.FormulaActionGate == nil {
+			return nil
+		}
+		_, _, err := molecule.PrepareFormulaAction(ctx, deps.graphStore(), recipe, molecule.Options{
+			Title:             opts.Title,
+			Vars:              vars,
+			ActionGate:        deps.FormulaActionGate,
+			RequireActionGate: deps.RequireFormulaActionGate,
+		})
+		return err
+	}
+	inv, err := graphv2.PrepareInvocationWithBeforeInputConvoy(ctx, deps.Store, formulaName, searchPaths, targetID, vars, beforeInputConvoy)
 	if err != nil {
 		return graphv2.Invocation{}, false, err
 	}
