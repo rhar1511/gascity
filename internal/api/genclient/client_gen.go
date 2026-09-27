@@ -4013,6 +4013,7 @@ type SessionResponse struct {
 	ContextWindow          *int64                  `json:"context_window,omitempty"`
 	CreatedAt              string                  `json:"created_at"`
 	DisplayName            *string                 `json:"display_name,omitempty"`
+	ExecutionGeneration    *int64                  `json:"execution_generation,omitempty"`
 	Id                     string                  `json:"id"`
 	Kind                   *string                 `json:"kind,omitempty"`
 	LastActive             *string                 `json:"last_active,omitempty"`

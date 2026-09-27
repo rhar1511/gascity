@@ -1,6 +1,7 @@
 import { createClient, type Client as GeneratedSupervisorClient } from '@hey-api/client-fetch';
 import {
   createBead as postSupervisorBead,
+  executePrAction,
   getHealth,
   getV0Cities,
   getV0CityByCityNameAgents,
@@ -14,7 +15,9 @@ import {
   getV0CityByCityNameMailThreadById,
   getV0CityByCityNameRigs,
   getV0CityByCityNameRunsCensus,
+  getV0CityByCityNamePrActionsQueue,
   getV0CityByCityNameSessionByIdPending,
+  getV0CityByCityNameSessionByIdRequestsByRequestId,
   getV0CityByCityNameSessionByIdTranscript,
   getV0CityByCityNameSessions,
   getV0CityByCityNameStatus,
@@ -26,6 +29,7 @@ import {
   postV0CityByCityNameMailByIdArchive,
   postV0CityByCityNameMailByIdMarkUnread,
   postV0CityByCityNameMailByIdRead,
+  postV0CityByCityNameSessionByIdRequests,
   replyMail as postSupervisorMailReply,
   respondSession as postSupervisorSessionRespond,
   sendMail as postSupervisorMail,
@@ -56,6 +60,9 @@ import type {
   Message,
   ListBodySessionResponse,
   OkResponseBody,
+  PrActionExecuteBody,
+  PrActionQueue,
+  PrActionResult,
   PostV0CityByCityNameMailByIdArchiveData,
   PostV0CityByCityNameMailByIdMarkUnreadData,
   PostV0CityByCityNameMailByIdReadData,
@@ -64,6 +71,8 @@ import type {
   RunsCensusOutputBody,
   SessionTranscriptGetResponse,
   SessionPendingResponse,
+  SessionRequestSubmitInputBody,
+  RequestReceipt,
   SessionRespondInputBody,
   SlingInputBody,
   SlingResponse,
@@ -91,6 +100,10 @@ type SessionStreamFormat = NonNullable<NonNullable<StreamSessionData['query']>['
 type SessionTranscriptFormat = NonNullable<
   NonNullable<GetV0CityByCityNameSessionByIdTranscriptData['query']>['format']
 >;
+
+export type WorkbenchPRActionBody = Omit<PrActionExecuteBody, 'action' | 'human_grant'> & {
+  action: 'prepare' | 'queue_review';
+};
 
 export interface SupervisorApi {
   readonly baseUrl: string;
@@ -166,6 +179,22 @@ export interface SupervisorApi {
     sessionId: string,
     format?: SessionTranscriptFormat,
   ): Promise<SessionTranscriptGetResponse>;
+  prActionQueue(cityName: string, signal?: AbortSignal): Promise<PrActionQueue>;
+  executePRAction(
+    cityName: string,
+    body: WorkbenchPRActionBody,
+    idempotencyKey: string,
+  ): Promise<PrActionResult>;
+  submitSessionRequest(
+    cityName: string,
+    sessionId: string,
+    body: SessionRequestSubmitInputBody,
+  ): Promise<RequestReceipt>;
+  getSessionRequest(
+    cityName: string,
+    sessionId: string,
+    requestId: string,
+  ): Promise<RequestReceipt>;
   workflowRun(
     cityName: string,
     workflowId: string,
@@ -518,6 +547,50 @@ export function createSupervisorApi(options: CreateSupervisorApiOptions = {}): S
           query: { format: format ?? 'conversation' },
         }) as Promise<SupervisorResult<SessionTranscriptGetResponse>>,
         'gc supervisor transcript response was empty',
+      );
+    },
+    prActionQueue(cityName, signal) {
+      return unwrapSupervisorResult<PrActionQueue>(
+        getV0CityByCityNamePrActionsQueue({
+          client,
+          path: { cityName },
+          ...(signal === undefined ? {} : { signal }),
+        }) as Promise<SupervisorResult<PrActionQueue>>,
+        'gc supervisor PR action queue response was empty',
+      );
+    },
+    executePRAction(cityName, body, idempotencyKey) {
+      if ((body as PrActionExecuteBody).action === 'merge') {
+        throw new Error('Workbench does not support PR merge actions');
+      }
+      return unwrapSupervisorResult<PrActionResult>(
+        executePrAction({
+          client,
+          path: { cityName },
+          headers: { ...GC_MUTATION_HEADERS, 'Idempotency-Key': idempotencyKey },
+          body: body as PrActionExecuteBody,
+        }) as Promise<SupervisorResult<PrActionResult>>,
+        'gc supervisor PR action response was empty',
+      );
+    },
+    submitSessionRequest(cityName, sessionId, body) {
+      return unwrapSupervisorResult<RequestReceipt>(
+        postV0CityByCityNameSessionByIdRequests({
+          client,
+          path: { cityName, id: sessionId },
+          headers: GC_MUTATION_HEADERS,
+          body,
+        }) as Promise<SupervisorResult<RequestReceipt>>,
+        'gc supervisor session request response was empty',
+      );
+    },
+    getSessionRequest(cityName, sessionId, requestId) {
+      return unwrapSupervisorResult<RequestReceipt>(
+        getV0CityByCityNameSessionByIdRequestsByRequestId({
+          client,
+          path: { cityName, id: sessionId, request_id: requestId },
+        }) as Promise<SupervisorResult<RequestReceipt>>,
+        'gc supervisor session request receipt was empty',
       );
     },
     workflowRun(cityName, workflowId, query) {

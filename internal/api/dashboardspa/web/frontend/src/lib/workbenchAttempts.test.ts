@@ -33,11 +33,37 @@ describe('resolveAttempts', () => {
   it('resolves the newest active attempt when one exists', () => {
     const b = bead('gascity-1', { 'gc.session_id': 's-1' });
     const resolved = resolveAttempts(b, [
-      session({ id: 's-1', running: true, work_dir: '/wt/s-1' }),
+      session({ id: 's-1', running: true, work_dir: '/wt/s-1', execution_generation: 7 }),
     ]);
     expect(resolved.current?.sessionId).toBe('s-1');
+    expect(resolved.current?.executionGeneration).toBe(7);
     expect(resolved.staleReference).toBe(false);
     expect(attemptWorktree(b, resolved)).toBe('/wt/s-1');
+  });
+
+  it('accepts the largest exact JavaScript generation', () => {
+    const resolved = resolveAttempts(bead('gascity-1'), [
+      session({
+        id: 's-1',
+        running: true,
+        active_bead: 'gascity-1',
+        execution_generation: Number.MAX_SAFE_INTEGER,
+      }),
+    ]);
+    expect(resolved.current?.executionGeneration).toBe(Number.MAX_SAFE_INTEGER);
+  });
+
+  it('rejects absent, non-positive, and unsafe execution generations in the browser', () => {
+    for (const generation of [undefined, 0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      const sessionInput: Partial<SupervisorSession> = {
+        id: 's-1',
+        running: true,
+        active_bead: 'gascity-1',
+      };
+      if (generation !== undefined) sessionInput.execution_generation = generation;
+      const resolved = resolveAttempts(bead('gascity-1'), [session(sessionInput)]);
+      expect(resolved.current?.executionGeneration).toBeNull();
+    }
   });
 
   it('keeps earlier completed/failed attempts as chronological history', () => {

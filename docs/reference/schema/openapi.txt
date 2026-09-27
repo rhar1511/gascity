@@ -8547,6 +8547,10 @@
           "display_name": {
             "type": "string"
           },
+          "execution_generation": {
+            "format": "int64",
+            "type": "integer"
+          },
           "id": {
             "type": "string"
           },

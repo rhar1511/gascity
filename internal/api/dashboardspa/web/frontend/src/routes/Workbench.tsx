@@ -13,10 +13,10 @@ import { listSupervisorBeads } from '../supervisor/beadReads';
 import { startSupervisorAttempt, updateSupervisorBead } from '../supervisor/beadWrites';
 import { listSupervisorSessions } from '../supervisor/sessionReads';
 import { fetchAttemptDiff } from '../supervisor/attemptReads';
-import { sendSupervisorMail } from '../supervisor/mailWrites';
-import { useOperatorConfig } from '../contexts/OperatorConfigContext';
-import { resolveAttempts, type ExecutionAttempt } from '../lib/workbenchAttempts';
+import { resolveAttempts } from '../lib/workbenchAttempts';
 import { resolvePreview } from '../lib/workbenchPreview';
+import { AttemptChatPanel } from '../workbench/AttemptChatPanel';
+import { CentralPRActionPanel } from '../workbench/CentralPRActionPanel';
 
 // Gas City Workbench: Canvas/Kanban/Priority/Work Queue as views over the same
 // Beads data.
@@ -354,7 +354,12 @@ export function WorkbenchPage() {
             {selectedBead ? (
               <>
                 <BeadBody bead={selectedBead} />
-                <AttemptPanel bead={selectedBead} sessions={sessions} />
+                <AttemptPanel bead={selectedBead} sessions={sessions} cityKey={cityCacheKey} />
+                <CentralPRActionPanel
+                  key={cityCacheKey}
+                  cityName={cityName}
+                  beadId={selectedBead.id}
+                />
               </>
             ) : hasLoadedQueue ? (
               <p className="text-body text-fg-muted">This bead was resolved or removed.</p>
@@ -572,9 +577,11 @@ function LaneBoard({ rows, view, selectedId, onOpen, onMove, onRequestClose }: L
 function AttemptPanel({
   bead,
   sessions,
+  cityKey,
 }: {
   bead: Row;
   sessions: NonNullable<Awaited<ReturnType<typeof listSupervisorSessions>>['items']>;
+  cityKey: string;
 }) {
   const attempts = resolveAttempts(bead, sessions);
   const [inspectedId, setInspectedId] = useState<string | null>(null);
@@ -611,9 +618,11 @@ function AttemptPanel({
           ) : (
             <>
               <AttemptDiffPanel key={`diff:${inspected.sessionId}`} beadId={bead.id} />
-              <AttemptChatPanel key={`chat:${inspected.sessionId}`} attempt={inspected} />
+              <AttemptChatPanel
+                key={`chat:${cityKey}:${bead.id}:${inspected.sessionId}:${inspected.executionGeneration ?? 'unavailable'}`}
+                attempt={inspected}
+              />
               <AttemptPreviewPanel bead={bead} />
-              <AttemptPullRequestPanel bead={bead} attempt={inspected} />
             </>
           )}
         </>
@@ -689,20 +698,6 @@ function AttemptDiffPanel({ beadId }: { beadId: string }) {
         <p className="text-label text-fg-faint">Diff truncated ({data.bytes} bytes).</p>
       )}
     </div>
-  );
-}
-
-// AttemptPullRequestPanel exposes policy-bound PR actions for the attempt. It
-// has no merge authority: prepare/queue delegate to Gas City (here, a request to
-// the merge queue role), and the action + result are auditable against the Bead.
-function AttemptPullRequestPanel({ bead, attempt }: { bead: Row; attempt: ExecutionAttempt }) {
-  return (
-    <section aria-label="Pull request actions" className="mt-3">
-      <p role="status" className="text-body text-fg-muted">
-        PR actions unavailable: Gas City has not supplied queue, policy, and conflict verdicts for{' '}
-        <code>{bead.id}</code> / <code>{attempt.sessionId}</code>.
-      </p>
-    </section>
   );
 }
 
@@ -789,72 +784,6 @@ function AttemptStartActions({ bead, hasHistory }: { bead: Row; hasHistory: bool
         </p>
       )}
     </div>
-  );
-}
-
-type ChatState = 'queued' | 'mail accepted; awaiting session acknowledgement' | 'rejected';
-interface ChatMessage {
-  id: string;
-  text: string;
-  state: ChatState;
-}
-
-// AttemptChatPanel adds per-attempt chat: a submitted message targets the newest
-// active Session/worktree with follow_up semantics. Messages are queued in order
-// and only leave the queue once Gas City accepts them; a rejection stays visible
-// without re-sending. Sending to a completed/failed attempt is not offered here
-// (the panel only renders for a live attempt), so chat cannot restart one.
-function AttemptChatPanel({ attempt }: { attempt: ExecutionAttempt }) {
-  const { operatorWireAlias } = useOperatorConfig();
-  const [draft, setDraft] = useState('');
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-
-  const submit = async () => {
-    const text = draft.trim();
-    if (text.length === 0) return;
-    const id = `${attempt.sessionId}:${Date.now()}:${messages.length}`;
-    setMessages((current) => [...current, { id, text, state: 'queued' }]);
-    setDraft('');
-    try {
-      await sendSupervisorMail(
-        { to: attempt.sessionName, subject: 'workbench follow-up', body: text },
-        operatorWireAlias,
-      );
-      setMessages((current) =>
-        current.map((message) =>
-          message.id === id
-            ? { ...message, state: 'mail accepted; awaiting session acknowledgement' }
-            : message,
-        ),
-      );
-    } catch {
-      setMessages((current) =>
-        current.map((message) => (message.id === id ? { ...message, state: 'rejected' } : message)),
-      );
-    }
-  };
-
-  return (
-    <section aria-label="Attempt chat" className="mt-3 space-y-2">
-      <ul aria-label="Queued messages" className="space-y-1">
-        {messages.map((message) => (
-          <li key={message.id} className="text-label text-fg-faint">
-            <span className="uppercase tracking-wider">{message.state}</span> · {message.text}
-          </li>
-        ))}
-      </ul>
-      <div className="flex gap-2">
-        <input
-          aria-label="Message"
-          value={draft}
-          onChange={(event) => setDraft(event.target.value)}
-          className="flex-1 rounded-sm border border-rule px-2 py-1 text-body"
-        />
-        <Button size="sm" onClick={() => void submit()} disabled={draft.trim().length === 0}>
-          Send
-        </Button>
-      </div>
-    </section>
   );
 }
 

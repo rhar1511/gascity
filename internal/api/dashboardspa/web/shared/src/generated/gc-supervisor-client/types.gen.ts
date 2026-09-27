@@ -3556,6 +3556,7 @@ export type SessionResponse = {
     context_window?: number;
     created_at: string;
     display_name?: string;
+    execution_generation?: number;
     id: string;
     kind?: string;
     last_active?: string;
