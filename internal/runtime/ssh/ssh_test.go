@@ -3,10 +3,13 @@ package ssh
 import (
 	"context"
 	"errors"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -100,6 +103,50 @@ func TestSSHArgs_MinimalEndpoint(t *testing.T) {
 	}
 	if !slices.Equal(got, want) {
 		t.Errorf("sshArgs = %v, want %v", got, want)
+	}
+}
+
+// Exercise the real Conn -> shellRunner -> sshArgs path without a network
+// connection. The fixture substitutes only the SSH client and runs its remote
+// command argument through a local POSIX shell in a disposable directory.
+func TestConnExecPreservesShellMetacharacters(t *testing.T) {
+	fixture := t.TempDir()
+	client := filepath.Join(fixture, "ssh")
+	script := `#!/bin/sh
+set -eu
+[ "$#" -eq 7 ]
+[ "$1" = '-o' ]
+[ "$2" = 'BatchMode=yes' ]
+[ "$3" = '-o' ]
+[ "$4" = 'StrictHostKeyChecking=accept-new' ]
+[ "$5" = '--' ]
+[ "$6" = 'fixture.invalid' ]
+cd "${0%/*}"
+exec /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C /bin/sh -c "$7"
+`
+	if err := os.WriteFile(client, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fixture)
+	values := []string{
+		"", "ordinary", "a'b", "a\\b", "\"quoted\"", "a\nb", "a\tb", "☃", "--help",
+		"$(printf injected > sentinel)", "`printf injected > sentinel`",
+		"x; printf injected > sentinel", "' ; printf injected > sentinel ; '",
+		"x & printf injected > sentinel #", "$HOME", "${PATH}", "*?[]{}()<>!",
+	}
+	argv := append([]string{"printf", "%s\\000"}, values...)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	c := &Conn{ep: Endpoint{Host: "fixture.invalid"}, run: shellRunner{}}
+	output, code, err := c.Exec(ctx, "fixture", argv)
+	if err != nil || code != 0 {
+		t.Fatalf("Exec: code=%d, err=%v", code, err)
+	}
+	if want := strings.Join(values, "\x00") + "\x00"; string(output) != want {
+		t.Fatalf("arguments changed: got %q, want %q", output, want)
+	}
+	if _, err := os.Stat(filepath.Join(fixture, "sentinel")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("shell injection side effect: stat sentinel: %v", err)
 	}
 }
 

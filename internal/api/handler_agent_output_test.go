@@ -208,6 +208,80 @@ func TestAgentOutputNotFound(t *testing.T) {
 	}
 }
 
+func TestAgentOutputRejectsTraversalNames(t *testing.T) {
+	state := newFakeState(t)
+	srv := newServerWithSearchPaths(state, t.TempDir())
+	for _, name := range []string{
+		"../worker", "myrig/../worker", "myrig/worker/../../outside",
+		"myrig/worker-1/../../outside", "myrig/worker-%2e%2e%2foutside",
+		"/absolute/worker", "myrig\\..\\worker", "unknown/worker",
+	} {
+		t.Run(name, func(t *testing.T) {
+			for _, handler := range []func(http.ResponseWriter, *http.Request, string){
+				srv.handleAgentOutput, srv.handleAgentOutputStream,
+			} {
+				rec := httptest.NewRecorder()
+				req := httptest.NewRequest(http.MethodGet, "/", nil)
+				handler(rec, req, name)
+				if rec.Code != http.StatusNotFound {
+					t.Fatalf("status = %d, want 404; body: %s", rec.Code, rec.Body.String())
+				}
+			}
+		})
+	}
+}
+
+func TestAgentOutputRejectsTraversalSessionKey(t *testing.T) {
+	state := newSessionFakeState(t)
+	workDir := t.TempDir()
+	state.cfg.Rigs = []config.Rig{{Name: "myrig", Path: workDir}}
+	state.cfg.Agents[0].Provider = "claude/tmux-cli"
+	searchBase := t.TempDir()
+	outsidePath := filepath.Join(searchBase, "outside.jsonl")
+	const secret = "outside-transcript-sentinel"
+	if err := os.WriteFile(outsidePath, []byte(
+		`{"uuid":"u1","type":"user","message":{"role":"user","content":"`+secret+`"}}`+"\n",
+	), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	slug := strings.NewReplacer("/", "-", ".", "-").Replace(workDir)
+	if err := os.MkdirAll(filepath.Join(searchBase, slug), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	mgr := session.NewManagerWithOptions(state.cityBeadStore, state.sp)
+	sessionName := agentSessionName(state.CityName(), "myrig/worker", state.cfg.Workspace.SessionTemplate)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{
+		ExplicitName: sessionName, Template: "myrig/worker", Title: "Chat",
+		Command: "claude", WorkDir: workDir, Provider: "claude/tmux-cli",
+		ExtraMeta: map[string]string{"session_origin": "manual"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"../outside", "../../outside", outsidePath, "..\\outside"} {
+		t.Run(key, func(t *testing.T) {
+			if err := state.cityBeadStore.SetMetadata(info.ID, "session_key", key); err != nil {
+				t.Fatal(err)
+			}
+			srv := newServerWithSearchPaths(state, searchBase)
+			resolved, err := srv.resolveAgentTranscript("myrig/worker", state.cfg.Agents[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resolved.sessionKey != key || resolved.path != "" {
+				t.Fatalf("session key = %q, path = %q; want supplied key and no transcript", resolved.sessionKey, resolved.path)
+			}
+			rec := httptest.NewRecorder()
+			h := newTestCityHandlerWith(t, state, srv)
+			req := httptest.NewRequest(http.MethodGet, cityURL(state, "/agent/myrig/worker/output"), nil)
+			h.ServeHTTP(rec, req)
+			if strings.Contains(rec.Body.String(), secret) {
+				t.Fatal("HTTP response disclosed the outside transcript")
+			}
+		})
+	}
+}
+
 func TestAgentOutputCityScoped(t *testing.T) {
 	state := newFakeState(t)
 	state.cfg.Agents = append(state.cfg.Agents, config.Agent{Name: "mayor"})
