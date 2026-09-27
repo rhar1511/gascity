@@ -103,6 +103,32 @@ func TestHostCompatibilityAuthorityRejectsWrongScopePurposeAndIncompleteProofs(t
 	})
 }
 
+func TestHostCompatibilityAuthorityRejectsRecomputedSubsetOfSignedPolicy(t *testing.T) {
+	now := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
+	fixture := newHostAuthorityFixture(t, now)
+	authority := NewHostCompatibilityAuthority(fixture.source, time.Hour, func() time.Time { return now })
+	policy, err := authority.Resolve(context.Background(), fixture.scope)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	request := fixture.request(t, policy)
+	if len(request.Proofs) < 2 {
+		t.Fatalf("fixture policy has %d proofs, want a multi-capability policy", len(request.Proofs))
+	}
+
+	// Model a caller that keeps its request internally consistent while trying
+	// to authorize only a strict subset of the signed record's requirements.
+	request.Policy.RequiredCapabilities = append([]string(nil), request.Policy.RequiredCapabilities[:1]...)
+	request.Proofs = append([]qualification.CapabilityProof(nil), request.Proofs[:1]...)
+	request.RequestSHA256, err = qualification.CompatibilityRequestIdentitySHA(request)
+	if err != nil {
+		t.Fatalf("CompatibilityRequestIdentitySHA for internally valid subset: %v", err)
+	}
+	if _, err := authority.Authorize(context.Background(), request); !errors.Is(err, qualification.ErrUnavailable) {
+		t.Fatalf("Authorize recomputed strict-subset request = %v, want unavailable against full signed policy", err)
+	}
+}
+
 func TestHostCompatibilityAuthorityRejectsExpiredRevocationSnapshot(t *testing.T) {
 	now := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
 	fixture := newHostAuthorityFixture(t, now)
@@ -238,6 +264,72 @@ func TestFileHostCompatibilityAuthoritySourceRejectsReplacedRootAndSymlinkedFile
 			t.Fatalf("Load symlinked keyring = %v, want unavailable", err)
 		}
 	})
+}
+
+func TestFileHostCompatibilityAuthorityRevalidatesSignedRevocationReplacement(t *testing.T) {
+	now := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
+	fixture := newHostAuthorityFixture(t, now)
+	directory := filepath.Join(t.TempDir(), "authority")
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeHostAuthorityBundleFiles(t, directory, fixture.bundle)
+
+	source, err := NewFileHostCompatibilityAuthoritySource(directory)
+	if err != nil {
+		t.Fatalf("NewFileHostCompatibilityAuthoritySource: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := source.Close(); err != nil {
+			t.Errorf("close host compatibility source: %v", err)
+		}
+	})
+	authority := NewHostCompatibilityAuthority(source, time.Hour, func() time.Time { return now })
+	policy, err := authority.Resolve(context.Background(), fixture.scope)
+	if err != nil {
+		t.Fatalf("Resolve from host files: %v", err)
+	}
+	if !equalStrings(policy.RequiredCapabilities, []string{"cap.alpha", "cap.beta"}) {
+		t.Fatalf("host-file policy capabilities = %v, want complete signed set", policy.RequiredCapabilities)
+	}
+	request := fixture.request(t, policy)
+	decision, err := authority.Authorize(context.Background(), request)
+	if err != nil || decision.Status != qualification.StatusAuthorized {
+		t.Fatalf("Authorize from host files = %#v, %v; want authorized", decision, err)
+	}
+	if err := authority.Verify(context.Background(), request, decision); err != nil {
+		t.Fatalf("Verify before revocation replacement: %v", err)
+	}
+
+	fixture.revoke(t, fixture.record.RecordID)
+	data, err := json.Marshal(fixture.bundle.Revocation)
+	if err != nil {
+		t.Fatalf("marshal replacement revocations: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, HostCompatibilityRevocationsFile), data, 0o600); err != nil {
+		t.Fatalf("replace signed revocation snapshot: %v", err)
+	}
+	if err := authority.Verify(context.Background(), request, decision); !errors.Is(err, qualification.ErrUnavailable) {
+		t.Fatalf("Verify after signed revocation replacement = %v, want unavailable", err)
+	}
+}
+
+func TestHostCompatibilityAuthorityRejectsRevocationLifetimeBeyondMaximumAge(t *testing.T) {
+	now := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
+	fixture := newHostAuthorityFixture(t, now)
+	issued := now.Add(-time.Minute)
+	list := HostCompatibilityRevocationsPayload{
+		SchemaVersion: HostCompatibilityRevocationsSchemaV1,
+		KeyID:         "revocation-key",
+		IssuedAt:      issued.Format(time.RFC3339Nano),
+		ExpiresAt:     issued.Add(2 * time.Hour).Format(time.RFC3339Nano),
+	}
+	fixture.bundle.Revocation = signHostRevocations(t, list, fixture.revocationPrivate)
+	fixture.source.bundle = fixture.bundle
+	authority := NewHostCompatibilityAuthority(fixture.source, time.Hour, func() time.Time { return now })
+	if _, err := authority.Resolve(context.Background(), fixture.scope); !errors.Is(err, qualification.ErrUnavailable) {
+		t.Fatalf("Resolve revocation snapshot issued recently but valid for longer than max age = %v, want unavailable", err)
+	}
 }
 
 type hostAuthorityFixture struct {
