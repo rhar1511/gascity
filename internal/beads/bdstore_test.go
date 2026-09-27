@@ -570,14 +570,17 @@ func TestBdStoreGetExactIDGuard(t *testing.T) {
 	}
 }
 
-// TestBdStoreMutationsPassThroughOnNotFound verifies that Update/Delete/Close
-// always reach bd directly (internal hot-path callers supply canonical full IDs;
-// the exact-ID collision guard lives at the CLI/API entry points — gcy-g4o).
+// TestBdStoreMutationsPassThroughOnNotFound verifies that Update/Delete errors
+// still come from bd, while Close refuses to run when its lifecycle preflight
+// cannot read the target row.
 func TestBdStoreMutationsPassThroughOnNotFound(t *testing.T) {
-	var updateCalled, deleteCalled, closeCalled bool
+	var updateCalled, deleteCalled, closeCalled, closeReadCalled bool
 	runner := func(_, name string, args ...string) ([]byte, error) {
 		cmd := strings.Join(append([]string{name}, args...), " ")
 		switch {
+		case strings.HasPrefix(cmd, "bd show "):
+			closeReadCalled = true
+			return nil, fmt.Errorf("bd: issue not found")
 		case strings.HasPrefix(cmd, "bd update "):
 			updateCalled = true
 			return nil, fmt.Errorf("bd: issue not found")
@@ -601,22 +604,33 @@ func TestBdStoreMutationsPassThroughOnNotFound(t *testing.T) {
 	if !deleteCalled {
 		t.Error("Delete did not reach bd when bead was not-found (should pass through)")
 	}
-	if !closeCalled {
-		t.Error("Close did not reach bd when bead was not-found (should pass through)")
+	if closeCalled || !closeReadCalled {
+		t.Error("Close must stop after its lifecycle preflight cannot read the bead")
 	}
 }
 
 // --- Close ---
 
 func TestBdStoreClose(t *testing.T) {
-	runner := fakeRunner(map[string]struct {
-		out []byte
-		err error
-	}{
-		`bd close --force --json bd-abc-123`: {
-			out: []byte(`[{"id":"bd-abc-123","title":"test","status":"closed","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`),
-		},
-	})
+	var closed bool
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		if name != "bd" {
+			return nil, fmt.Errorf("unexpected command name: %s", name)
+		}
+		switch strings.Join(args, " ") {
+		case "show --json bd-abc-123":
+			status := "open"
+			if closed {
+				status = "closed"
+			}
+			return []byte(`[{"id":"bd-abc-123","title":"test","status":"` + status + `","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
+		case "close --force --json bd-abc-123":
+			closed = true
+			return []byte(`[{"id":"bd-abc-123","title":"test","status":"closed","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
+		default:
+			return nil, fmt.Errorf("unexpected command: bd %s", strings.Join(args, " "))
+		}
+	}
 	s := beads.NewBdStore("/city", runner)
 	if err := s.Close("bd-abc-123"); err != nil {
 		t.Fatal(err)
@@ -658,19 +672,24 @@ func TestBdStoreCloseForwardsStampedCloseReason(t *testing.T) {
 	}
 }
 
-func TestBdStoreCloseWithReasonUsesExplicitReasonWithoutShow(t *testing.T) {
+func TestBdStoreCloseWithReasonUsesExplicitReasonAfterLifecyclePreflight(t *testing.T) {
 	const reason = "convoy autoclose: all children closed"
 	var closeArgs []string
+	var closed bool
 	runner := func(_, name string, args ...string) ([]byte, error) {
 		if name != "bd" {
 			return nil, fmt.Errorf("unexpected command name: %s", name)
 		}
-		if len(args) > 0 && args[0] == "show" {
-			return nil, fmt.Errorf("unexpected bd show before explicit-reason close")
-		}
 		switch strings.Join(args, " ") {
+		case "show --json bd-x":
+			status := "open"
+			if closed {
+				status = "closed"
+			}
+			return []byte(`[{"id":"bd-x","title":"t","status":"` + status + `","issue_type":"convoy","created_at":"2025-01-15T10:30:00Z"}]`), nil
 		case "close --force --json --reason " + reason + " bd-x":
 			closeArgs = append([]string(nil), args...)
+			closed = true
 			return []byte(`[{"id":"bd-x","title":"t","status":"closed","issue_type":"convoy","created_at":"2025-01-15T10:30:00Z"}]`), nil
 		default:
 			return nil, fmt.Errorf("unexpected command: bd %s", strings.Join(args, " "))
@@ -928,11 +947,16 @@ func TestBdStoreCloseHonestyGuardAcceptsConfirmedClose(t *testing.T) {
 // convert a transient post-close read failure into a close failure: bd
 // reported success, so absent positive evidence of a revert we trust it.
 func TestBdStoreCloseHonestyGuardToleratesReadFailure(t *testing.T) {
+	showCalls := 0
 	runner := func(_, _ string, args ...string) ([]byte, error) {
 		switch args[0] {
 		case "close":
 			return []byte(`[{"id":"bd-x","title":"t","status":"closed","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
 		case "show":
+			showCalls++
+			if showCalls == 1 {
+				return []byte(`[{"id":"bd-x","title":"t","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
+			}
 			return nil, fmt.Errorf("exit status 1: transient backend error")
 		}
 		return nil, fmt.Errorf("unexpected command: %v", args)
@@ -1107,11 +1131,13 @@ func TestBdStoreTxCombinesWritesForSameBead(t *testing.T) {
 	want := []string{
 		"bd show --json bd-42", // Tx initial Get
 		"bd update --json bd-42 --title before --type task --priority 2 --description after --set-metadata close_reason=completed during transaction --set-metadata existing=kept --set-metadata tx=applied",
-		"bd show --json bd-42", // honesty re-read after update (close's honesty guard)
+		"bd show --json bd-42", // update honesty re-read
+		"bd show --json bd-42", // close lifecycle preflight after the update
 		"bd close --force --json --reason completed during transaction bd-42",
-		"bd show --json bd-42", // honesty re-read after close (close's honesty guard)
+		"bd show --json bd-42", // honesty re-read after close
+		"bd show --json bd-42", // status update lifecycle preflight
 		"bd update --json bd-42 --title before --status closed --type task --priority 2 --description after --set-metadata close_reason=completed during transaction --set-metadata existing=kept --set-metadata tx=applied",
-		"bd show --json bd-42", // Tx final Get
+		"bd show --json bd-42", // update honesty re-read
 		"bd show --json bd-42", // final Get after Tx
 	}
 	if !reflect.DeepEqual(commands, want) {
@@ -1148,6 +1174,7 @@ func TestBdStoreTxCloseOnlyUsesCloseCommand(t *testing.T) {
 
 	want := []string{
 		"bd show --json bd-42", // Tx initial Get
+		"bd show --json bd-42", // close lifecycle preflight
 		"bd close --force --json --reason completed during transaction bd-42",
 		"bd show --json bd-42", // honesty re-read after close
 	}
@@ -1211,6 +1238,7 @@ func TestBdStoreTxPreservesAddsAndRemovesLabels(t *testing.T) {
 
 	want := []string{
 		"bd show --json bd-42", // Tx initial Get
+		"bd show --json bd-42", // lifecycle preflight before status update
 		"bd update --json bd-42 --title before --status open --type task --add-label b --add-label c --remove-label a",
 	}
 	if !reflect.DeepEqual(commands, want) {
@@ -1220,12 +1248,18 @@ func TestBdStoreTxPreservesAddsAndRemovesLabels(t *testing.T) {
 
 func TestBdStoreUpdateAllBatchesIDsAndRetriesTransientWrite(t *testing.T) {
 	var calls [][]string
+	var updateCalls int
 	runner := func(_, name string, args ...string) ([]byte, error) {
 		if name != "bd" {
 			return nil, fmt.Errorf("unexpected command name %q", name)
 		}
+		if len(args) > 0 && args[0] == "show" {
+			id := args[len(args)-1]
+			return []byte(`[{"id":"` + id + `","status":"open","issue_type":"task"}]`), nil
+		}
 		calls = append(calls, append([]string(nil), args...))
-		if len(calls) == 1 {
+		updateCalls++
+		if updateCalls == 1 {
 			return nil, fmt.Errorf("Error 1213 (40001): serialization failure")
 		}
 		return nil, nil
@@ -1425,6 +1459,9 @@ func TestBdStoreCloseAllReturnsMetadataWriteFailure(t *testing.T) {
 		out []byte
 		err error
 	}{
+		`bd show --json bd-abc-123`: {
+			out: []byte(`[{"id":"bd-abc-123","title":"test","status":"closed","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`),
+		},
 		`bd update --json bd-abc-123 --set-metadata source=wave1`: {
 			err: metadataErr,
 		},
@@ -1454,6 +1491,8 @@ func TestBdStoreCloseAllWritesSharedMetadataInSingleBatch(t *testing.T) {
 		out []byte
 		err error
 	}{
+		`bd show --json bd-1`: {out: []byte(`[{"id":"bd-1","status":"closed","issue_type":"task"}]`)},
+		`bd show --json bd-2`: {out: []byte(`[{"id":"bd-2","status":"closed","issue_type":"task"}]`)},
 		`bd update --json bd-1 bd-2 --set-metadata source=wave1`: {
 			out: []byte(`[]`),
 		},
@@ -1478,23 +1517,32 @@ func TestBdStoreCloseAllWritesSharedMetadataInSingleBatch(t *testing.T) {
 func TestBdStoreCloseAllReturnsPartialCountAndErrorOnFallbackFailure(t *testing.T) {
 	batchErr := errors.New("batch close failed")
 	individualErr := errors.New("single close failed")
-	runner := fakeRunner(map[string]struct {
-		out []byte
-		err error
-	}{
-		`bd close --force --json bd-1 bd-2`: {
-			err: batchErr,
-		},
-		`bd close --force --json bd-1`: {
-			out: []byte(`[{"id":"bd-1","title":"one","status":"closed","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`),
-		},
-		`bd close --force --json bd-2`: {
-			err: individualErr,
-		},
-		`bd show --json bd-2`: {
-			out: []byte(`[{"id":"bd-2","title":"two","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`),
-		},
-	})
+	closedIDs := map[string]bool{}
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		if len(args) == 0 {
+			return nil, errors.New("empty command")
+		}
+		switch args[0] {
+		case "show":
+			id := args[len(args)-1]
+			status := "open"
+			if closedIDs[id] {
+				status = "closed"
+			}
+			return []byte(`[{"id":"` + id + `","title":"test","status":"` + status + `","issue_type":"task"}]`), nil
+		case "close":
+			switch strings.Join(args, " ") {
+			case "close --force --json bd-1 bd-2":
+				return nil, batchErr
+			case "close --force --json bd-1":
+				closedIDs["bd-1"] = true
+				return []byte(`[{"id":"bd-1","title":"one","status":"closed","issue_type":"task"}]`), nil
+			case "close --force --json bd-2":
+				return nil, individualErr
+			}
+		}
+		return nil, fmt.Errorf("unexpected command: %v", args)
+	}
 
 	s := beads.NewBdStore("/city", runner)
 	closed, err := s.CloseAll([]string{"bd-1", "bd-2"}, nil)
@@ -1521,6 +1569,8 @@ func TestBdStoreCloseAllFallbackSuccessReturnsNil(t *testing.T) {
 		out []byte
 		err error
 	}{
+		`bd show --json bd-1`: {out: []byte(`[{"id":"bd-1","status":"closed","issue_type":"task"}]`)},
+		`bd show --json bd-2`: {out: []byte(`[{"id":"bd-2","status":"closed","issue_type":"task"}]`)},
 		`bd close --force --json bd-1 bd-2`: {
 			err: batchErr,
 		},
@@ -1620,6 +1670,9 @@ func captureCloseAllRunner(closeArgs *[]string, ids ...string) beads.CommandRunn
 			return nil, fmt.Errorf("empty args")
 		}
 		switch args[0] {
+		case "show":
+			id := args[len(args)-1]
+			return []byte(`[{"id":"` + id + `","title":"t","status":"closed","issue_type":"task"}]`), nil
 		case "update":
 			return []byte(`[]`), nil
 		case "close":
@@ -1675,13 +1728,17 @@ func TestBdStoreCloseAllWithReasonSkipsMetadataWrites(t *testing.T) {
 		if strings.HasPrefix(cmd, "bd update ") {
 			t.Fatalf("CloseAllWithReason must not pre-write metadata: %s", cmd)
 		}
-		if cmd != "bd close --force --json --reason "+reason+" bd-1 bd-2" {
-			return nil, fmt.Errorf("unexpected command: %s", cmd)
+		if strings.HasPrefix(cmd, "bd show --json ") {
+			id := strings.TrimPrefix(cmd, "bd show --json ")
+			return []byte(`[{"id":"` + id + `","title":"one","status":"closed","issue_type":"message"}]`), nil
 		}
-		return []byte(`[
-			{"id":"bd-1","title":"one","status":"closed","issue_type":"message","created_at":"2025-01-15T10:30:00Z"},
-			{"id":"bd-2","title":"two","status":"closed","issue_type":"message","created_at":"2025-01-15T10:30:00Z"}
-		]`), nil
+		if cmd == "bd close --force --json --reason "+reason+" bd-1 bd-2" {
+			return []byte(`[
+				{"id":"bd-1","title":"one","status":"closed","issue_type":"message","created_at":"2025-01-15T10:30:00Z"},
+				{"id":"bd-2","title":"two","status":"closed","issue_type":"message","created_at":"2025-01-15T10:30:00Z"}
+			]`), nil
+		}
+		return nil, fmt.Errorf("unexpected command: %s", cmd)
 	}
 
 	s := beads.NewBdStore("/city", runner)
@@ -1692,8 +1749,14 @@ func TestBdStoreCloseAllWithReasonSkipsMetadataWrites(t *testing.T) {
 	if closed != 2 {
 		t.Fatalf("closed = %d, want 2", closed)
 	}
-	if len(commands) != 1 {
-		t.Fatalf("commands = %v, want exactly one close command", commands)
+	closeCount := 0
+	for _, command := range commands {
+		if strings.HasPrefix(command, "bd close ") {
+			closeCount++
+		}
+	}
+	if closeCount != 1 {
+		t.Fatalf("commands = %v, want exactly one close command and lifecycle preflight reads", commands)
 	}
 }
 
@@ -5413,5 +5476,23 @@ func TestBdStoreReclaimStaleReportsNothingReclaimed(t *testing.T) {
 	}
 	if reclaimed {
 		t.Fatalf("ReclaimStale reclaimed = true, want false; previousOwner=%q", previousOwner)
+	}
+}
+
+func TestBdStoreListAbsentMetadataKeyFiltersBeforeLimit(t *testing.T) {
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd list --json --label=bounded-caller --include-infra --include-gates --limit 0`: {
+			out: []byte(`[
+				{"id":"bd-private","title":"private","status":"open","issue_type":"task","labels":["bounded-caller"],"metadata":{"private":"payload"}},
+				{"id":"bd-public","title":"public","status":"open","issue_type":"task","labels":["bounded-caller"]}
+			]`),
+		},
+	})
+	rows, err := beads.NewBdStore("/city", runner).List(beads.ListQuery{Label: "bounded-caller", Limit: 1, AbsentMetadataKey: "private"})
+	if err != nil || len(rows) != 1 || rows[0].ID != "bd-public" {
+		t.Fatalf("private prefix consumed bd public page: %+v err=%v", rows, err)
 	}
 }

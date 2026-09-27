@@ -1099,15 +1099,34 @@ export const zPrActionOption = z.object({
     requires_human_approval: z.boolean()
 });
 
+export const zPrActionPolicyVerdict = z.object({
+    action: zPrActionOption,
+    attempt: zPrActionAttemptReference.optional(),
+    base_sha: z.string(),
+    evidence_state: z.string(),
+    fresh_until: z.iso.datetime(),
+    head_sha: z.string(),
+    monitor: z.string(),
+    observed_at: z.iso.datetime(),
+    owner: z.string(),
+    policy_version: z.string(),
+    pull_request: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    repo: z.string(),
+    required_checks: z.array(z.string()).nullable(),
+    store_ref: z.string()
+});
+
 export const zPrActionResult = z.object({
     action: z.string(),
     actor_issuer: z.string().optional(),
     actor_key_id: z.string(),
     actor_subject: z.string().optional(),
+    admission_verdict: zPrActionPolicyVerdict.optional(),
     attempt_id: z.string().optional(),
     base_sha: z.string(),
     created_at: z.iso.datetime(),
     detail: z.string().optional(),
+    execution_verdict: zPrActionPolicyVerdict.optional(),
     head_sha: z.string(),
     id: z.string(),
     idempotency_key: z.string(),
@@ -1121,6 +1140,23 @@ export const zPrActionResult = z.object({
     status: z.string(),
     verified_at: z.iso.datetime().optional(),
     work_id: z.string().optional()
+});
+
+export const zHistoricalPrActionRecord = z.object({
+    admission_policy: zFacet,
+    execution_policy: zFacet,
+    receipt: zPrActionResult
+});
+
+export const zAttemptActionRecords = z.object({
+    reason: z.string().optional(),
+    records: z.array(zHistoricalPrActionRecord).nullable(),
+    status: z.string()
+});
+
+export const zAttemptRelatedRecords = z.object({
+    acknowledgements: zFacet,
+    actions: zAttemptActionRecords
 });
 
 export const zPrActionSource = z.object({
@@ -1245,6 +1281,32 @@ export const zPermissionScope = z.object({
     store_ref: z.string(),
     work_id: z.string(),
     workspace_root: z.string().optional()
+});
+
+export const zAttemptEvidenceRead = z.object({
+    acknowledgements: zFacet,
+    actions: zFacet,
+    attempt_id: z.string(),
+    base_reason: z.string().optional(),
+    base_sha: z.string().optional(),
+    base_status: z.string(),
+    candidate_reason: z.string().optional(),
+    candidate_sha: z.string().optional(),
+    candidate_status: z.string(),
+    captured_at: z.iso.datetime(),
+    diff: zDiffSnapshot,
+    identity: zIdentity,
+    outcome: z.string().optional(),
+    permission_scope: zPermissionScope,
+    policy: zFacet,
+    redaction: zFacet,
+    related_records: zAttemptRelatedRecords,
+    schema_version: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    source_reason: z.string().optional(),
+    source_status: z.string(),
+    store_ref: z.string().optional(),
+    working_tree_status: z.string(),
+    workspace_diff: zDiffSnapshot
 });
 
 export const zEvidence = z.object({
@@ -3248,6 +3310,7 @@ export const zSessionResponse = z.object({
     context_window: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
     created_at: z.string(),
     display_name: z.string().optional(),
+    execution_generation: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
     id: z.string(),
     kind: z.string().optional(),
     last_active: z.string().optional(),
@@ -8040,7 +8103,7 @@ export const zGetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdPath = z.obje
 /**
  * OK
  */
-export const zGetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdResponse = zEvidence;
+export const zGetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdResponse = zAttemptEvidenceRead;
 
 export const zGetV0CityByCityNameBeadByIdAttemptsDiffPath = z.object({
     cityName: z.string().min(1).regex(/\S/),

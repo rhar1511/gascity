@@ -269,6 +269,43 @@ export type AsyncAcceptedResponse = {
     request_id: string;
 };
 
+export type AttemptActionRecords = {
+    reason?: string;
+    records: Array<HistoricalPrActionRecord> | null;
+    status: string;
+};
+
+export type AttemptEvidenceRead = {
+    acknowledgements: Facet;
+    actions: Facet;
+    attempt_id: string;
+    base_reason?: string;
+    base_sha?: string;
+    base_status: string;
+    candidate_reason?: string;
+    candidate_sha?: string;
+    candidate_status: string;
+    captured_at: string;
+    diff: DiffSnapshot;
+    identity: Identity;
+    outcome?: string;
+    permission_scope: PermissionScope;
+    policy: Facet;
+    redaction: Facet;
+    related_records: AttemptRelatedRecords;
+    schema_version: number;
+    source_reason?: string;
+    source_status: string;
+    store_ref?: string;
+    working_tree_status: string;
+    workspace_diff: DiffSnapshot;
+};
+
+export type AttemptRelatedRecords = {
+    acknowledgements: Facet;
+    actions: AttemptActionRecords;
+};
+
 export type BackendCredentialResolvedPayload = {
     backend: string;
     host: string;
@@ -1495,6 +1532,12 @@ export type HeartbeatEvent = {
     timestamp: string;
 };
 
+export type HistoricalPrActionRecord = {
+    admission_policy: Facet;
+    execution_policy: Facet;
+    receipt: PrActionResult;
+};
+
 export type HookClaimReclaimedStalePayload = {
     bead_id: string;
     new_assignee: string;
@@ -2331,6 +2374,23 @@ export type PrActionOption = {
     requires_human_approval: boolean;
 };
 
+export type PrActionPolicyVerdict = {
+    action: PrActionOption;
+    attempt?: PrActionAttemptReference;
+    base_sha: string;
+    evidence_state: string;
+    fresh_until: string;
+    head_sha: string;
+    monitor: string;
+    observed_at: string;
+    owner: string;
+    policy_version: string;
+    pull_request: number;
+    repo: string;
+    required_checks: Array<string> | null;
+    store_ref: string;
+};
+
 export type PrActionQueue = {
     availability: string;
     fresh_until: string;
@@ -2370,10 +2430,12 @@ export type PrActionResult = {
     actor_issuer?: string;
     actor_key_id: string;
     actor_subject?: string;
+    admission_verdict?: PrActionPolicyVerdict;
     attempt_id?: string;
     base_sha: string;
     created_at: string;
     detail?: string;
+    execution_verdict?: PrActionPolicyVerdict;
     head_sha: string;
     id: string;
     idempotency_key: string;
@@ -3613,6 +3675,7 @@ export type SessionResponse = {
     context_window?: number;
     created_at: string;
     display_name?: string;
+    execution_generation?: number;
     id: string;
     kind?: string;
     last_active?: string;
@@ -11565,7 +11628,7 @@ export type GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdResponses = {
     /**
      * OK
      */
-    200: Evidence;
+    200: AttemptEvidenceRead;
 };
 
 export type GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdResponse = GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdResponses[keyof GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdResponses];

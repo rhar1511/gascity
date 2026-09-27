@@ -1497,3 +1497,16 @@ esac
 		t.Fatalf("list args should not limit before seek filtering: %s", argsText)
 	}
 }
+
+func TestListAbsentMetadataKeyFiltersBeforeLimit(t *testing.T) {
+	script := writeScript(t, t.TempDir(), `
+for arg in "$@"; do
+  case "$arg" in --limit=*) exit 3 ;; esac
+done
+echo '[{"id":"private","title":"private","status":"open","type":"task","metadata":{"private":""}},{"id":"public","title":"public","status":"open","type":"task"}]'
+`)
+	rows, err := NewStore(script).List(beads.ListQuery{Type: "task", Limit: 1, AbsentMetadataKey: "private"})
+	if err != nil || len(rows) != 1 || rows[0].ID != "public" {
+		t.Fatalf("private prefix consumed exec public page: %+v err=%v", rows, err)
+	}
+}

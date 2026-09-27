@@ -862,6 +862,142 @@
         ],
         "type": "object"
       },
+      "AttemptActionRecords": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "type": "string"
+          },
+          "records": {
+            "items": {
+              "$ref": "#/components/schemas/HistoricalPRActionRecord"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "records"
+        ],
+        "type": "object"
+      },
+      "AttemptEvidenceRead": {
+        "additionalProperties": false,
+        "properties": {
+          "acknowledgements": {
+            "$ref": "#/components/schemas/Facet"
+          },
+          "actions": {
+            "$ref": "#/components/schemas/Facet"
+          },
+          "attempt_id": {
+            "type": "string"
+          },
+          "base_reason": {
+            "type": "string"
+          },
+          "base_sha": {
+            "type": "string"
+          },
+          "base_status": {
+            "type": "string"
+          },
+          "candidate_reason": {
+            "type": "string"
+          },
+          "candidate_sha": {
+            "type": "string"
+          },
+          "candidate_status": {
+            "type": "string"
+          },
+          "captured_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "diff": {
+            "$ref": "#/components/schemas/DiffSnapshot"
+          },
+          "identity": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "outcome": {
+            "type": "string"
+          },
+          "permission_scope": {
+            "$ref": "#/components/schemas/PermissionScope"
+          },
+          "policy": {
+            "$ref": "#/components/schemas/Facet"
+          },
+          "redaction": {
+            "$ref": "#/components/schemas/Facet"
+          },
+          "related_records": {
+            "$ref": "#/components/schemas/AttemptRelatedRecords"
+          },
+          "schema_version": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "source_reason": {
+            "type": "string"
+          },
+          "source_status": {
+            "type": "string"
+          },
+          "store_ref": {
+            "type": "string"
+          },
+          "working_tree_status": {
+            "type": "string"
+          },
+          "workspace_diff": {
+            "$ref": "#/components/schemas/DiffSnapshot"
+          }
+        },
+        "required": [
+          "related_records",
+          "schema_version",
+          "attempt_id",
+          "identity",
+          "permission_scope",
+          "captured_at",
+          "source_status",
+          "base_status",
+          "candidate_status",
+          "working_tree_status",
+          "diff",
+          "workspace_diff",
+          "policy",
+          "actions",
+          "acknowledgements",
+          "redaction"
+        ],
+        "type": "object"
+      },
+      "AttemptRelatedRecords": {
+        "additionalProperties": false,
+        "properties": {
+          "acknowledgements": {
+            "$ref": "#/components/schemas/Facet"
+          },
+          "actions": {
+            "$ref": "#/components/schemas/AttemptActionRecords"
+          }
+        },
+        "required": [
+          "actions",
+          "acknowledgements"
+        ],
+        "type": "object"
+      },
       "BackendCredentialResolvedPayload": {
         "additionalProperties": false,
         "properties": {
@@ -4145,6 +4281,26 @@
         ],
         "type": "object"
       },
+      "HistoricalPRActionRecord": {
+        "additionalProperties": false,
+        "properties": {
+          "admission_policy": {
+            "$ref": "#/components/schemas/Facet"
+          },
+          "execution_policy": {
+            "$ref": "#/components/schemas/Facet"
+          },
+          "receipt": {
+            "$ref": "#/components/schemas/PRActionResult"
+          }
+        },
+        "required": [
+          "receipt",
+          "admission_policy",
+          "execution_policy"
+        ],
+        "type": "object"
+      },
       "HookClaimReclaimedStalePayload": {
         "additionalProperties": false,
         "properties": {
@@ -5941,6 +6097,78 @@
         ],
         "type": "object"
       },
+      "PRActionPolicyVerdict": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/PRActionOption"
+          },
+          "attempt": {
+            "$ref": "#/components/schemas/PRActionAttemptReference"
+          },
+          "base_sha": {
+            "type": "string"
+          },
+          "evidence_state": {
+            "type": "string"
+          },
+          "fresh_until": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "head_sha": {
+            "type": "string"
+          },
+          "monitor": {
+            "type": "string"
+          },
+          "observed_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "owner": {
+            "type": "string"
+          },
+          "policy_version": {
+            "type": "string"
+          },
+          "pull_request": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "repo": {
+            "type": "string"
+          },
+          "required_checks": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "store_ref": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "policy_version",
+          "monitor",
+          "owner",
+          "repo",
+          "pull_request",
+          "store_ref",
+          "head_sha",
+          "base_sha",
+          "observed_at",
+          "fresh_until",
+          "evidence_state",
+          "action",
+          "required_checks"
+        ],
+        "type": "object"
+      },
       "PRActionQueue": {
         "additionalProperties": false,
         "properties": {
@@ -6122,6 +6350,9 @@
           "actor_subject": {
             "type": "string"
           },
+          "admission_verdict": {
+            "$ref": "#/components/schemas/PRActionPolicyVerdict"
+          },
           "attempt_id": {
             "type": "string"
           },
@@ -6134,6 +6365,9 @@
           },
           "detail": {
             "type": "string"
+          },
+          "execution_verdict": {
+            "$ref": "#/components/schemas/PRActionPolicyVerdict"
           },
           "head_sha": {
             "type": "string"
@@ -8745,6 +8979,10 @@
           },
           "display_name": {
             "type": "string"
+          },
+          "execution_generation": {
+            "format": "int64",
+            "type": "integer"
           },
           "id": {
             "type": "string"
@@ -30549,7 +30787,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Evidence"
+                  "$ref": "#/components/schemas/AttemptEvidenceRead"
                 }
               }
             },

@@ -138,7 +138,8 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 				// and the unwrapped graph leg does not, so the relocated store's
 				// ephemeral rows dropped out of an authoritative-looking 200
 				// (ga-8lyxc). See beads.FederatedReadTier.
-				TierMode: beads.FederatedReadTier,
+				TierMode:          beads.FederatedReadTier,
+				AbsentMetadataKey: beadmeta.AttemptEvidenceArchivePayloadMetadataKey,
 			}
 			if !query.HasFilter() {
 				query.AllowScan = true
@@ -427,12 +428,6 @@ func beadListFanOut(state State, stores map[string]beads.Store, rigNames []strin
 // cannot, only that leg hydrates and the caller takes its exact total from the
 // rows it returned.
 func beadListBounding(ctx context.Context, legs []beadListLeg, assignee string, input *BeadListInput) (on bool, counts map[int]int, hydrate map[int]bool) {
-	// Archive rows are intentionally hidden from raw bead lists. A backend
-	// Count cannot apply that metadata predicate, so hydrate the matching broad
-	// and molecule queries before computing totals or page boundaries.
-	if input.Type == "" || input.Type == "molecule" {
-		return false, nil, nil
-	}
 	counts = make(map[int]int, len(legs))
 	for i, leg := range legs {
 		n, ok := beadListLegCount(ctx, leg.store, assignee, input)
@@ -473,13 +468,14 @@ func beadListLegCount(ctx context.Context, store beads.Store, assignee string, i
 // list it bounds advertises a Total the walk can never reach.
 func beadListCountQuery(assignee string, input *BeadListInput) beads.ListQuery {
 	q := beads.ListQuery{
-		Status:        input.Status,
-		Type:          input.Type,
-		Label:         input.Label,
-		Assignee:      assignee,
-		IncludeClosed: input.All,
-		Live:          input.Status == "in_progress",
-		TierMode:      beads.FederatedReadTier,
+		Status:            input.Status,
+		Type:              input.Type,
+		Label:             input.Label,
+		Assignee:          assignee,
+		IncludeClosed:     input.All,
+		Live:              input.Status == "in_progress",
+		TierMode:          beads.FederatedReadTier,
+		AbsentMetadataKey: beadmeta.AttemptEvidenceArchivePayloadMetadataKey,
 	}
 	if !q.HasFilter() {
 		q.AllowScan = true

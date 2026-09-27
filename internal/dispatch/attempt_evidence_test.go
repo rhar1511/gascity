@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -15,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 func TestRetryEvidenceCaptureFailureBlocksSpawnAndKeepsBothAttempts(t *testing.T) {
@@ -133,12 +133,7 @@ func newDispatchEvidenceRepo(t *testing.T) (string, string) {
 	root := t.TempDir()
 	git := func(args ...string) string {
 		t.Helper()
-		cmd := exec.Command("git", append([]string{"-C", root}, args...)...)
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
-		}
-		return strings.TrimSpace(string(out))
+		return testutil.RunGit(t, root, args...)
 	}
 	git("init", "-q")
 	git("config", "user.email", "dispatch-evidence-test@example.invalid")

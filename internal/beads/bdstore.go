@@ -2692,7 +2692,7 @@ func (s *BdStore) Close(id string) error {
 	if err := ValidateLifecycleClose(b); err != nil {
 		return fmt.Errorf("closing lifecycle bead %q: %w", id, err)
 	}
-	return s.close(id, strings.TrimSpace(b.Metadata["close_reason"]))
+	return s.closeWithCurrent(id, strings.TrimSpace(b.Metadata["close_reason"]))
 }
 
 // CloseWithReason closes a bead with an explicit reason. It reads the current
@@ -2719,9 +2719,16 @@ func (s *BdStore) close(id, reason string) error {
 	if err := ValidateLifecycleClose(current); err != nil {
 		return fmt.Errorf("closing lifecycle bead %q: %w", id, err)
 	}
+	return s.closeWithCurrent(id, reason)
+}
+
+// closeWithCurrent performs the close and its honesty readback after the
+// caller has validated the current row. Close uses this to avoid a second
+// pre-close read between reading close_reason and issuing the same close.
+func (s *BdStore) closeWithCurrent(id, reason string) error {
 	// Internal callers supply canonical full IDs; exact-ID guard lives at the
 	// CLI/API entry points (gcy-g4o).
-	err = s.runBDTransientWrite(bdCloseArgs(reason, id)...)
+	err := s.runBDTransientWrite(bdCloseArgs(reason, id)...)
 	if err != nil {
 		// Some bd error paths collapse to a bare exit status without a helpful
 		// not-found string. Re-read the bead to distinguish "already closed" from
@@ -2980,7 +2987,7 @@ func bdListRequiresClientLimit(query, serverQuery ListQuery, clientFilteredAssig
 	// resolved Go-side (identical tie-break to the in-memory sort), so a
 	// bd-side limit would cut rows before that filter runs — fetch unbounded
 	// and let applyListQuery filter then limit.
-	if serverQuery.SeekAfter != nil {
+	if serverQuery.SeekAfter != nil || serverQuery.AbsentMetadataKey != "" {
 		return true
 	}
 	// IDs is a Go-side-only residual filter (see ListQuery.Matches): bd list
@@ -3142,6 +3149,7 @@ func canApplyWispsServerLimit(query ListQuery) bool {
 		query.CreatedBefore.IsZero() &&
 		query.UpdatedBefore.IsZero() &&
 		len(query.Metadata) == 0 &&
+		query.AbsentMetadataKey == "" &&
 		query.SeekAfter == nil
 }
 

@@ -438,7 +438,7 @@ func TestPRActionPrepareDifferentIdempotencyKeysShareOneSemanticWorkRecord(t *te
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := createPRActionIntent(fx.store, request, actor, fingerprint, fx.now); err != nil {
+		if _, err := createPRActionIntent(fx.store, request, actor, fingerprint, fx.now, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -536,7 +536,7 @@ func TestPRActionPrepareResumesPendingIntentAfterDurableWorkWasCreated(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	intent, err := createPRActionIntent(fx.store, request, actor, fingerprint, fx.now)
+	intent, err := createPRActionIntent(fx.store, request, actor, fingerprint, fx.now, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -678,7 +678,7 @@ func TestPRActionMergeClaimRejectsStalePendingReadAfterUnknownReservation(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := createPRActionIntent(fx.store, request, actor, fingerprint, fx.now); err != nil {
+	if _, err := createPRActionIntent(fx.store, request, actor, fingerprint, fx.now, nil); err != nil {
 		t.Fatal(err)
 	}
 	blockedStore := &prActionStaleSnapshotStore{

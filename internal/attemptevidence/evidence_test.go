@@ -3,9 +3,7 @@ package attemptevidence
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -15,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 func TestCapturePreservesExactAttemptAfterOwnerDeleteAndStoreRestart(t *testing.T) {
@@ -498,10 +497,7 @@ func TestSnapshotRejectsHeadMovementDuringCapture(t *testing.T) {
 		StoreRef: "rig:pilot", WorkDir: repo, BaseSHA: baseSHA,
 	}
 	_, err := snapshotWithProbe(context.Background(), spec, mustAttemptID(t, spec.Identity), func() error {
-		cmd := exec.Command("git", "-C", repo, "checkout", "--detach", otherSHA)
-		if output, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("move HEAD in probe: %w: %s", err, output)
-		}
+		testutil.RunGit(t, repo, "checkout", "--detach", otherSHA)
 		return nil
 	})
 	if err == nil || !strings.Contains(err.Error(), "changed during evidence capture") {
@@ -719,12 +715,7 @@ func newEvidenceRepo(t *testing.T) (string, string) {
 	root := t.TempDir()
 	git := func(args ...string) string {
 		t.Helper()
-		cmd := exec.Command("git", append([]string{"-C", root}, args...)...)
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
-		}
-		return strings.TrimSpace(string(out))
+		return testutil.RunGit(t, root, args...)
 	}
 	git("init", "-q")
 	git("config", "user.email", "evidence-test@example.invalid")
@@ -748,12 +739,7 @@ func newAttemptEvidenceStore(t *testing.T) *beads.FileStore {
 
 func runEvidenceGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()
-	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("git %v: %v\n%s", args, err, output)
-	}
-	return strings.TrimSpace(string(output))
+	return testutil.RunGit(t, dir, args...)
 }
 
 func mustAttemptID(t *testing.T, identity Identity) string {

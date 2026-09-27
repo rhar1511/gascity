@@ -23,11 +23,11 @@ go_test(
     ],
     embed = [":attemptevidence"],
     deps = [
-        "//internal/bazeltest",
         "//internal/beadmeta",
         "//internal/beads",
         "//internal/fsys",
         "//internal/testenv",
+        "//internal/testutil",
     ],
 )
 

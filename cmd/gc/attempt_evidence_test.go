@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -19,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 func TestCLICloseGateCapturesWorkbenchAttemptBeforeClose(t *testing.T) {
@@ -386,12 +386,7 @@ func newCLIAttemptEvidenceRepo(t *testing.T) (string, string) {
 	repo := t.TempDir()
 	run := func(args ...string) string {
 		t.Helper()
-		cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
-		output, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, output)
-		}
-		return strings.TrimSpace(string(output))
+		return testutil.RunGit(t, repo, args...)
 	}
 	run("init", "-q")
 	run("config", "user.email", "attempt-test@example.invalid")

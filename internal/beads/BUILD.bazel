@@ -141,6 +141,7 @@ go_test(
         "proxied_store_view_test.go",
         "proxied_verdict_test.go",
         "query_ids_test.go",
+        "query_absent_metadata_test.go",
         "query_seek_test.go",
         "ready_context_internal_test.go",
         "runview_lifecycle_test.go",

@@ -68,7 +68,7 @@ go_test(
     ],
     embed = [":dispatch"],
     deps = [
-		"//internal/attemptevidence",
+        "//internal/attemptevidence",
         "//internal/beadmeta",
         "//internal/beads",
         "//internal/config",
@@ -76,6 +76,7 @@ go_test(
         "//internal/convoy",
         "//internal/formula",
         "//internal/formulatest",
+        "//internal/fsys",
         "//internal/graphv2",
         "//internal/molecule",
         "//internal/reviewquorum",
@@ -84,6 +85,7 @@ go_test(
         "//internal/session",
         "//internal/sourceworkflow",
         "//internal/testenv",
+        "//internal/testutil",
         "@com_github_steveyegge_beads//:beads",
     ],
 )

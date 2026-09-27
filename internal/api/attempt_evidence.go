@@ -269,7 +269,7 @@ func (s *Server) authorizeAttemptEvidence(ctx context.Context, authorizer Attemp
 }
 
 func publicAttemptEvidenceBead(b beads.Bead) (beads.Bead, bool) {
-	if beads.IsAttemptEvidenceArchive(b) {
+	if _, privatePayload := b.Metadata[beadmeta.AttemptEvidenceArchivePayloadMetadataKey]; privatePayload {
 		return beads.Bead{}, false
 	}
 	for key := range b.Metadata {
@@ -334,7 +334,7 @@ func (s *Server) humaHandleAttemptEvidenceList(ctx context.Context, input *Attem
 
 // humaHandleAttemptEvidenceGet reads one immutable execution attempt by its
 // exact ID. It never resolves a latest-attempt alias.
-func (s *Server) humaHandleAttemptEvidenceGet(ctx context.Context, input *AttemptEvidenceGetInput) (*IndexOutput[attemptevidence.Evidence], error) {
+func (s *Server) humaHandleAttemptEvidenceGet(ctx context.Context, input *AttemptEvidenceGetInput) (*IndexOutput[AttemptEvidenceRead], error) {
 	authorizer, err := s.requireAttemptEvidenceAuthorizer(ctx)
 	if err != nil {
 		return nil, err
@@ -346,5 +346,5 @@ func (s *Server) humaHandleAttemptEvidenceGet(ctx context.Context, input *Attemp
 	if err := s.authorizeAttemptEvidence(ctx, authorizer, evidence); err != nil {
 		return nil, err
 	}
-	return &IndexOutput[attemptevidence.Evidence]{Index: s.latestIndex(), Body: evidence}, nil
+	return &IndexOutput[AttemptEvidenceRead]{Index: s.latestIndex(), Body: AttemptEvidenceRead{Evidence: evidence, RelatedRecords: s.attemptRelatedRecords(evidence)}}, nil
 }

@@ -82,6 +82,8 @@ func (s *NativeDoltStore) Count(ctx context.Context, query ListQuery, excludeTyp
 //     the backend's own predicate, Before() precision, the parent
 //     projection) a bare COUNT cannot be proven to reproduce — the same
 //     over-conservative gate the DoltLite Counter applies.
+//   - AbsentMetadataKey: the backing filter cannot express absence. Subtracting
+//     two independent counts would race concurrent writes and is not exact.
 //   - Limit: the Counter contract is List cardinality, including List's
 //     post-sort limit cap.
 //
@@ -105,6 +107,7 @@ func nativeDoltCountSupported(query ListQuery, excludeTypes []string) bool {
 		query.SeekAfter == nil &&
 		query.UpdatedBefore.IsZero() &&
 		len(query.Metadata) == 0 &&
+		query.AbsentMetadataKey == "" &&
 		query.CreatedBefore.IsZero() &&
 		query.ParentID == "" &&
 		query.Limit == 0

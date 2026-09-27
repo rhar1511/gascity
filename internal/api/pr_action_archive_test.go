@@ -2,7 +2,10 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -81,6 +84,24 @@ func TestPRActionServerReadsSealedAttemptAfterBranchMovement(t *testing.T) {
 	if ref.AttemptID != first.AttemptID || ref.BaseSHA != base || ref.CandidateSHA != head || ref.DiffSHA256 != first.Diff.SHA256 {
 		t.Fatalf("queue used a different attempt: %+v", ref)
 	}
+	request := fx.actionRequest(PRActionQueueReview)
+	request.WorkID, request.AttemptID = work.ID, first.AttemptID
+	request.HeadSHA, request.BaseSHA = head, base
+	firstAction, err := fx.service.Execute(context.Background(), request, fx.workerActor())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The same work has a separate later action, which must not appear in the
+	// first attempt's historical read.
+	if err := store.SetMetadata(work.ID, "github.head_sha", second.CandidateSHA); err != nil {
+		t.Fatal(err)
+	}
+	fx.forge.pullRequests[0].HeadSHA = second.CandidateSHA
+	request.AttemptID, request.HeadSHA = second.AttemptID, second.CandidateSHA
+	request.IdempotencyKey += "-later"
+	if _, err := fx.service.Execute(context.Background(), request, fx.workerActor()); err != nil {
+		t.Fatal(err)
+	}
 	// A fresh store handle and deleted owner cannot erase the historical read.
 	if err := store.Delete(work.ID); err != nil {
 		t.Fatal(err)
@@ -89,6 +110,7 @@ func TestPRActionServerReadsSealedAttemptAfterBranchMovement(t *testing.T) {
 		t.Fatal(err)
 	}
 	store = open()
+	fx.state.stores["myrig"] = store
 	got, err := reader.Read(store, work.ID, first.AttemptID)
 	if err != nil || got.CandidateSHA != head || got.DiffSHA256 != first.Diff.SHA256 {
 		t.Fatalf("historical read=%+v err=%v", got, err)
@@ -98,5 +120,50 @@ func TestPRActionServerReadsSealedAttemptAfterBranchMovement(t *testing.T) {
 	}
 	if _, err := reader.Read(store, work.ID, "missing-attempt"); !errors.Is(err, ErrPRActionEvidenceMissing) {
 		t.Fatalf("missing attempt error=%v", err)
+	}
+	// History is served from durable records even when the PR and current
+	// policy no longer exist. Authorization still uses the sealed scope.
+	fx.forge.pullRequests = nil
+	fx.service.policy = nil
+	server.attemptEvidenceReadAuthorizer = attemptEvidenceAuthorizerFunc(func(_ context.Context, req attemptevidence.ReadAuthorizationRequest) error {
+		if req.AttemptID != first.AttemptID || req.Scope != first.Permission {
+			return ErrAttemptEvidenceReadDenied
+		}
+		return nil
+	})
+	w := httptest.NewRecorder()
+	path = cityURL(fx.state, "/bead/"+work.ID+"/attempt-evidence/"+first.AttemptID)
+	newTestCityHandlerWith(t, fx.state, server).ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("historical get=%d %s", w.Code, w.Body.String())
+	}
+	var response struct {
+		attemptevidence.Evidence
+		Related struct {
+			Actions struct {
+				Status  string `json:"status"`
+				Records []struct {
+					Receipt         PRActionResult        `json:"receipt"`
+					AdmissionPolicy attemptevidence.Facet `json:"admission_policy"`
+				} `json:"records"`
+			} `json:"actions"`
+			Acknowledgements attemptevidence.Facet `json:"acknowledgements"`
+		} `json:"related_records"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.AttemptID != first.AttemptID || response.Diff.SHA256 != first.Diff.SHA256 {
+		t.Fatal("related record composition replaced the immutable archive")
+	}
+	if response.Related.Actions.Status != attemptevidence.StatusAvailable || len(response.Related.Actions.Records) != 1 {
+		t.Fatalf("historical action records missing or include another attempt: %+v", response.Related)
+	}
+	record := response.Related.Actions.Records[0]
+	if record.Receipt.ID != firstAction.ID || record.Receipt.AttemptID != first.AttemptID || record.AdmissionPolicy.Status != attemptevidence.StatusAvailable || record.Receipt.AdmissionVerdict == nil {
+		t.Fatalf("historical action lost its receipt or verdict: %+v", record)
+	}
+	if response.Related.Acknowledgements.Status != attemptevidence.StatusUnavailable {
+		t.Fatal("session acknowledgements were inferred without work/attempt attribution")
 	}
 }

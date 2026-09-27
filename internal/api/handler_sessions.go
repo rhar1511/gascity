@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -33,6 +34,11 @@ type sessionResponse struct {
 	WorkDir     string `json:"work_dir,omitempty"`
 	CreatedAt   string `json:"created_at"`
 	LastActive  string `json:"last_active,omitempty"`
+	// ExecutionGeneration is the authoritative positive session runtime
+	// generation used to bind durable requests to one execution. Values outside
+	// JavaScript's exact integer range are omitted so browser clients cannot
+	// round an identity-bearing generation.
+	ExecutionGeneration *int64 `json:"execution_generation,omitempty"`
 	// LastNudgeDeliveredAt is the most recent successful nudge delivery
 	// timestamp for this session.
 	LastNudgeDeliveredAt string `json:"last_nudge_delivered_at,omitempty"`
@@ -95,18 +101,19 @@ func sessionToResponse(info session.Info, cfg *config.City) sessionResponse {
 	}
 	rig, _ := config.ParseQualifiedName(info.Template)
 	r := sessionResponse{
-		ID:          info.ID,
-		Template:    info.Template,
-		State:       string(info.State),
-		Title:       info.Title,
-		Alias:       info.Alias,
-		Provider:    provider,
-		DisplayName: displayName,
-		SessionName: info.SessionName,
-		WorkDir:     info.WorkDir,
-		CreatedAt:   info.CreatedAt.Format(time.RFC3339),
-		Attached:    info.Attached,
-		Rig:         rig,
+		ID:                  info.ID,
+		Template:            info.Template,
+		State:               string(info.State),
+		Title:               info.Title,
+		Alias:               info.Alias,
+		Provider:            provider,
+		DisplayName:         displayName,
+		SessionName:         info.SessionName,
+		WorkDir:             info.WorkDir,
+		CreatedAt:           info.CreatedAt.Format(time.RFC3339),
+		Attached:            info.Attached,
+		ExecutionGeneration: safeExecutionGeneration(info.Generation),
+		Rig:                 rig,
 	}
 	// Populate pool and agent_kind from config lookup. The pool field is
 	// the agent's base name (e.g., "polecat"), useful for dashboard type
@@ -127,6 +134,14 @@ func sessionToResponse(info session.Info, cfg *config.City) sessionResponse {
 		r.LastNudgeDeliveredAt = info.LastNudgeDeliveredAt.Format(time.RFC3339)
 	}
 	return r
+}
+
+func safeExecutionGeneration(raw string) *int64 {
+	generation, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || generation <= 0 || generation > (1<<53)-1 {
+		return nil
+	}
+	return &generation
 }
 
 // sessionResponseWithReason builds a session response from session.Info plus the

@@ -8281,6 +8281,53 @@ func TestSessionToResponse_ProjectsLastNudgeDeliveredAt(t *testing.T) {
 	}
 }
 
+func TestSessionToResponse_ProjectsOnlySafeExecutionGeneration(t *testing.T) {
+	tests := []struct {
+		name       string
+		generation string
+		want       int64
+	}{
+		{name: "positive", generation: "42", want: 42},
+		{name: "zero omitted", generation: "0"},
+		{name: "negative omitted", generation: "-1"},
+		{name: "malformed omitted", generation: "1.5"},
+		{name: "unsafe JavaScript integer omitted", generation: "9007199254740992"},
+		{name: "empty omitted"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := sessionToResponse(session.Info{ID: "sess-1", Generation: tc.generation}, nil)
+			encoded, err := json.Marshal(resp)
+			if err != nil {
+				t.Fatalf("marshal session response: %v", err)
+			}
+			var body map[string]json.RawMessage
+			if err := json.Unmarshal(encoded, &body); err != nil {
+				t.Fatalf("decode session response: %v", err)
+			}
+			if _, ok := body["token"]; ok {
+				t.Fatal("session response must not expose a session token")
+			}
+			if tc.want == 0 {
+				if resp.ExecutionGeneration != nil {
+					t.Fatalf("ExecutionGeneration = %d, want omitted", *resp.ExecutionGeneration)
+				}
+				if _, ok := body["execution_generation"]; ok {
+					t.Fatal("execution_generation must be omitted when it is not a safe positive integer")
+				}
+				return
+			}
+			if resp.ExecutionGeneration == nil || *resp.ExecutionGeneration != tc.want {
+				t.Fatalf("ExecutionGeneration = %v, want %d", resp.ExecutionGeneration, tc.want)
+			}
+			var got int64
+			if err := json.Unmarshal(body["execution_generation"], &got); err != nil || got != tc.want {
+				t.Fatalf("JSON execution_generation = %d (%v), want %d", got, err, tc.want)
+			}
+		})
+	}
+}
+
 func TestHandleSessionStopReturnsOKWithID(t *testing.T) {
 	fs := newSessionFakeState(t)
 	h := newTestCityHandler(t, fs)

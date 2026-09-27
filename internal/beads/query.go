@@ -117,9 +117,13 @@ type ListQuery struct {
 	// into its backend returns a superset, which ApplyListQuery/Matches then cut
 	// exactly — so the RESULT is always exact and only the pushdown is
 	// best-effort. It counts as a filter, so an IDs query needs no AllowScan.
-	IDs           []string
-	Metadata      map[string]string
-	CreatedBefore time.Time
+	IDs      []string
+	Metadata map[string]string
+	// AbsentMetadataKey excludes rows containing this key, including an empty
+	// value. Backends must apply it before Limit, or fetch a superset and filter
+	// in Go. It alone is not an indexed selector for HasFilter.
+	AbsentMetadataKey string
+	CreatedBefore     time.Time
 	// UpdatedBefore matches beads whose UpdatedAt is before this timestamp.
 	// Legacy beads with zero UpdatedAt fall back to CreatedAt. Purge callers
 	// using CachingStore must also set Live: true to avoid stale cached timestamps.
@@ -291,6 +295,11 @@ func (q ListQuery) Matches(b Bead) bool {
 			}
 		}
 		if !matched {
+			return false
+		}
+	}
+	if q.AbsentMetadataKey != "" {
+		if _, present := b.Metadata[q.AbsentMetadataKey]; present {
 			return false
 		}
 	}

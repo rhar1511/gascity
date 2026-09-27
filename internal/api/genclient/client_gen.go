@@ -1167,6 +1167,46 @@ type AsyncAcceptedResponse struct {
 	RequestId string `json:"request_id"`
 }
 
+// AttemptActionRecords defines model for AttemptActionRecords.
+type AttemptActionRecords struct {
+	Reason  *string                     `json:"reason,omitempty"`
+	Records *[]HistoricalPRActionRecord `json:"records"`
+	Status  string                      `json:"status"`
+}
+
+// AttemptEvidenceRead defines model for AttemptEvidenceRead.
+type AttemptEvidenceRead struct {
+	Acknowledgements  Facet                 `json:"acknowledgements"`
+	Actions           Facet                 `json:"actions"`
+	AttemptId         string                `json:"attempt_id"`
+	BaseReason        *string               `json:"base_reason,omitempty"`
+	BaseSha           *string               `json:"base_sha,omitempty"`
+	BaseStatus        string                `json:"base_status"`
+	CandidateReason   *string               `json:"candidate_reason,omitempty"`
+	CandidateSha      *string               `json:"candidate_sha,omitempty"`
+	CandidateStatus   string                `json:"candidate_status"`
+	CapturedAt        time.Time             `json:"captured_at"`
+	Diff              DiffSnapshot          `json:"diff"`
+	Identity          Identity              `json:"identity"`
+	Outcome           *string               `json:"outcome,omitempty"`
+	PermissionScope   PermissionScope       `json:"permission_scope"`
+	Policy            Facet                 `json:"policy"`
+	Redaction         Facet                 `json:"redaction"`
+	RelatedRecords    AttemptRelatedRecords `json:"related_records"`
+	SchemaVersion     int64                 `json:"schema_version"`
+	SourceReason      *string               `json:"source_reason,omitempty"`
+	SourceStatus      string                `json:"source_status"`
+	StoreRef          *string               `json:"store_ref,omitempty"`
+	WorkingTreeStatus string                `json:"working_tree_status"`
+	WorkspaceDiff     DiffSnapshot          `json:"workspace_diff"`
+}
+
+// AttemptRelatedRecords defines model for AttemptRelatedRecords.
+type AttemptRelatedRecords struct {
+	Acknowledgements Facet                `json:"acknowledgements"`
+	Actions          AttemptActionRecords `json:"actions"`
+}
+
 // BackendCredentialResolvedPayload defines model for BackendCredentialResolvedPayload.
 type BackendCredentialResolvedPayload struct {
 	Backend   string `json:"backend"`
@@ -2273,6 +2313,13 @@ type HeartbeatEvent struct {
 	Timestamp string `json:"timestamp"`
 }
 
+// HistoricalPRActionRecord defines model for HistoricalPRActionRecord.
+type HistoricalPRActionRecord struct {
+	AdmissionPolicy Facet          `json:"admission_policy"`
+	ExecutionPolicy Facet          `json:"execution_policy"`
+	Receipt         PRActionResult `json:"receipt"`
+}
+
 // HookClaimReclaimedStalePayload defines model for HookClaimReclaimedStalePayload.
 type HookClaimReclaimedStalePayload struct {
 	BeadId        string `json:"bead_id"`
@@ -2986,6 +3033,24 @@ type PRActionOption struct {
 	RequiresHumanApproval bool   `json:"requires_human_approval"`
 }
 
+// PRActionPolicyVerdict defines model for PRActionPolicyVerdict.
+type PRActionPolicyVerdict struct {
+	Action         PRActionOption            `json:"action"`
+	Attempt        *PRActionAttemptReference `json:"attempt,omitempty"`
+	BaseSha        string                    `json:"base_sha"`
+	EvidenceState  string                    `json:"evidence_state"`
+	FreshUntil     time.Time                 `json:"fresh_until"`
+	HeadSha        string                    `json:"head_sha"`
+	Monitor        string                    `json:"monitor"`
+	ObservedAt     time.Time                 `json:"observed_at"`
+	Owner          string                    `json:"owner"`
+	PolicyVersion  string                    `json:"policy_version"`
+	PullRequest    int64                     `json:"pull_request"`
+	Repo           string                    `json:"repo"`
+	RequiredChecks *[]string                 `json:"required_checks"`
+	StoreRef       string                    `json:"store_ref"`
+}
+
 // PRActionQueue defines model for PRActionQueue.
 type PRActionQueue struct {
 	Availability  string               `json:"availability"`
@@ -3024,27 +3089,29 @@ type PRActionQueueItem struct {
 
 // PRActionResult defines model for PRActionResult.
 type PRActionResult struct {
-	Action         string     `json:"action"`
-	ActorIssuer    *string    `json:"actor_issuer,omitempty"`
-	ActorKeyId     string     `json:"actor_key_id"`
-	ActorSubject   *string    `json:"actor_subject,omitempty"`
-	AttemptId      *string    `json:"attempt_id,omitempty"`
-	BaseSha        string     `json:"base_sha"`
-	CreatedAt      time.Time  `json:"created_at"`
-	Detail         *string    `json:"detail,omitempty"`
-	HeadSha        string     `json:"head_sha"`
-	Id             string     `json:"id"`
-	IdempotencyKey string     `json:"idempotency_key"`
-	MergeCommitSha *string    `json:"merge_commit_sha,omitempty"`
-	Monitor        string     `json:"monitor"`
-	Outcome        *string    `json:"outcome,omitempty"`
-	Owner          string     `json:"owner"`
-	PolicyVersion  string     `json:"policy_version"`
-	PullRequest    int64      `json:"pull_request"`
-	Repo           string     `json:"repo"`
-	Status         string     `json:"status"`
-	VerifiedAt     *time.Time `json:"verified_at,omitempty"`
-	WorkId         *string    `json:"work_id,omitempty"`
+	Action           string                 `json:"action"`
+	ActorIssuer      *string                `json:"actor_issuer,omitempty"`
+	ActorKeyId       string                 `json:"actor_key_id"`
+	ActorSubject     *string                `json:"actor_subject,omitempty"`
+	AdmissionVerdict *PRActionPolicyVerdict `json:"admission_verdict,omitempty"`
+	AttemptId        *string                `json:"attempt_id,omitempty"`
+	BaseSha          string                 `json:"base_sha"`
+	CreatedAt        time.Time              `json:"created_at"`
+	Detail           *string                `json:"detail,omitempty"`
+	ExecutionVerdict *PRActionPolicyVerdict `json:"execution_verdict,omitempty"`
+	HeadSha          string                 `json:"head_sha"`
+	Id               string                 `json:"id"`
+	IdempotencyKey   string                 `json:"idempotency_key"`
+	MergeCommitSha   *string                `json:"merge_commit_sha,omitempty"`
+	Monitor          string                 `json:"monitor"`
+	Outcome          *string                `json:"outcome,omitempty"`
+	Owner            string                 `json:"owner"`
+	PolicyVersion    string                 `json:"policy_version"`
+	PullRequest      int64                  `json:"pull_request"`
+	Repo             string                 `json:"repo"`
+	Status           string                 `json:"status"`
+	VerifiedAt       *time.Time             `json:"verified_at,omitempty"`
+	WorkId           *string                `json:"work_id,omitempty"`
 }
 
 // PRActionSource defines model for PRActionSource.
@@ -4075,6 +4142,7 @@ type SessionResponse struct {
 	ContextWindow          *int64                  `json:"context_window,omitempty"`
 	CreatedAt              string                  `json:"created_at"`
 	DisplayName            *string                 `json:"display_name,omitempty"`
+	ExecutionGeneration    *int64                  `json:"execution_generation,omitempty"`
 	Id                     string                  `json:"id"`
 	Kind                   *string                 `json:"kind,omitempty"`
 	LastActive             *string                 `json:"last_active,omitempty"`
@@ -35355,7 +35423,7 @@ func (r ListV0CityByCityNameBeadByIdAttemptEvidenceResponse) StatusCode() int {
 type GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdResponse struct {
 	Body                      []byte
 	HTTPResponse              *http.Response
-	JSON200                   *Evidence
+	JSON200                   *AttemptEvidenceRead
 	ApplicationproblemJSON403 *ErrorModel
 	ApplicationproblemJSON404 *ErrorModel
 	ApplicationproblemJSON422 *ErrorModel
@@ -42744,7 +42812,7 @@ func ParseGetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdResponse(rsp *htt
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest Evidence
+		var dest AttemptEvidenceRead
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
