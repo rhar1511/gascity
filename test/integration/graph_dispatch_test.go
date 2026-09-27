@@ -239,6 +239,33 @@ func TestGraphProxyConfigMatchesSemanticListenerFields(t *testing.T) {
 	}
 }
 
+func TestGraphFixtureListenerOwnershipAllowsSeparateProxyAndDoltPorts(t *testing.T) {
+	const (
+		proxyPID  = 101
+		proxyPort = 33001
+		doltPID   = 202
+		doltPort  = 33002
+	)
+	owned := map[int]int{proxyPID: proxyPort, doltPID: doltPort}
+	owns := func(pid, port int) bool { return owned[pid] == port }
+
+	if !graphFixtureListenersOwnedWith(proxyPID, proxyPort, doltPID, doltPort, owns) {
+		t.Fatal("fixture listener proof rejected separate proxy and Dolt listener owners")
+	}
+	if graphFixtureListenersOwnedWith(proxyPID, doltPort, doltPID, proxyPort, owns) {
+		t.Fatal("fixture listener proof accepted swapped proxy and Dolt port ownership")
+	}
+	if graphFixtureListenersOwnedWith(proxyPID, 0, doltPID, doltPort, owns) {
+		t.Fatal("fixture listener proof accepted an invalid proxy port")
+	}
+	if graphFixtureListenersOwnedWith(proxyPID, proxyPort, doltPID, 65536, owns) {
+		t.Fatal("fixture listener proof accepted an invalid Dolt port")
+	}
+	if graphFixtureListenersOwnedWith(proxyPID, proxyPort, proxyPID, doltPort, owns) {
+		t.Fatal("fixture listener proof accepted one PID for the proxy and Dolt listeners")
+	}
+}
+
 func TestGraphWorkflowFailureRunsCleanup(t *testing.T) {
 	cityDir := setupGraphWorkflowCity(t, "fail-preflight")
 	convoyID, workflowID := startScopedWorkflow(t, cityDir)
@@ -822,8 +849,11 @@ func graphFixtureProxyPortForTest(cityDir string) (string, bool) {
 		return "", false
 	}
 	var child graphProxyProcessRecord
-	if json.Unmarshal(childData, &child) != nil || child.PID <= 0 || child.Port != endpoint.Record.Port ||
+	if json.Unmarshal(childData, &child) != nil || child.PID <= 0 || child.Port <= 0 || child.Port > 65535 ||
 		child.Kind != graphDoltBackendRecordKind || child.Schema < proxyendpoint.SchemaV2 || child.Birth == "" || child.RootID != endpoint.RootID {
+		return "", false
+	}
+	if child.PID == endpoint.Record.PID {
 		return "", false
 	}
 	processes := proxyendpoint.DefaultProcessTable()
@@ -839,7 +869,8 @@ func graphFixtureProxyPortForTest(cityDir string) (string, bool) {
 		return "", false
 	}
 	configData, ok := graphReadFixtureRegularFile(configPath, 1<<20)
-	if !ok || !graphProxyConfigMatches(configData, child.Port) || !graphDoltProcessOwnsListeningPort(child.PID, endpoint.Record.Port) {
+	if !ok || !graphProxyConfigMatches(configData, child.Port) ||
+		!graphFixtureListenersOwned(endpoint.Record.PID, endpoint.Record.Port, child.PID, child.Port) {
 		return "", false
 	}
 	port := strconv.Itoa(endpoint.Record.Port)
@@ -1073,7 +1104,21 @@ func graphProxyConfigMatches(contents []byte, port int) bool {
 	return config.Listener.Host == proxyendpoint.Host && config.Listener.Port == port && config.Listener.Socket == ""
 }
 
-func graphDoltProcessOwnsListeningPort(pid, port int) bool {
+func graphFixtureListenersOwned(proxyPID, proxyPort, doltPID, doltPort int) bool {
+	return graphFixtureListenersOwnedWith(proxyPID, proxyPort, doltPID, doltPort, graphProcessOwnsListeningPort)
+}
+
+func graphFixtureListenersOwnedWith(proxyPID, proxyPort, doltPID, doltPort int, owns func(pid, port int) bool) bool {
+	if proxyPID <= 0 || doltPID <= 0 || proxyPort < 1 || proxyPort > 65535 || doltPort < 1 || doltPort > 65535 {
+		return false
+	}
+	if proxyPID == doltPID || owns == nil {
+		return false
+	}
+	return owns(proxyPID, proxyPort) && owns(doltPID, doltPort)
+}
+
+func graphProcessOwnsListeningPort(pid, port int) bool {
 	if runtime.GOOS != "linux" || pid <= 0 || port < 1 || port > 65535 {
 		return false
 	}
