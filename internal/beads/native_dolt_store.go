@@ -1342,6 +1342,9 @@ func (s *NativeDoltStore) SupportsEphemeralGraphApply() bool {
 // reserved namespaces when the store is fenced
 // (WithNativeDoltStoreReservedIDPrefixes).
 func (s *NativeDoltStore) Create(b Bead) (Bead, error) {
+	if err := ValidateDecisionFrontierCreate(b); err != nil {
+		return Bead{}, err
+	}
 	return s.create(b, false)
 }
 
@@ -1358,6 +1361,9 @@ func (s *NativeDoltStore) CreateWithForeignID(b Bead) (Bead, error) {
 	}
 	if strings.TrimSpace(b.ID) == "" {
 		return Bead{}, fmt.Errorf("creating bead with foreign id: empty id")
+	}
+	if err := ValidateDecisionFrontierCreate(b); err != nil {
+		return Bead{}, err
 	}
 	return s.create(b, true)
 }
@@ -2400,6 +2406,9 @@ type nativeDoltTx struct {
 }
 
 func (t *nativeDoltTx) Create(b Bead) (Bead, error) {
+	if err := ValidateDecisionFrontierCreate(b); err != nil {
+		return Bead{}, err
+	}
 	return t.store.applyCreateInTx(t.ctx, t.tx, b)
 }
 

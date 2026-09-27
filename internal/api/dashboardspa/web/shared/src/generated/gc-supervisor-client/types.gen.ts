@@ -243,6 +243,25 @@ export type AnnotatedProviderResponse = {
     ready_delay_ms?: number;
 };
 
+export type AnswerSubmission = {
+    proof: string;
+    question_version: string;
+    resolution: string;
+    text: string;
+    ticket_id: string;
+    work_revision: string;
+};
+
+export type AnswerView = {
+    digest: string;
+    id: string;
+    issuer: string;
+    key_id: string;
+    resolution: string;
+    subject: string;
+    text: string;
+};
+
 export type AsyncAcceptedBody = {
     /**
      * City event-stream sequence captured before the async request was accepted. Pass this value as after_seq to /v0/city/{cityName}/events/stream to receive the request result without replaying unrelated historical backlog. A value of 0 can also mean no event provider is configured or the event log is empty.
@@ -890,6 +909,14 @@ export type Cursors = {
     main: number;
 };
 
+export type DecisionFrontierEnsureRequest = {
+    proposal: Proposal;
+    /**
+     * Exact source work revision token.
+     */
+    work_revision: string;
+};
+
 export type DeliveryContextRecord = {
     BindingGeneration: number;
     Conversation: ConversationRef;
@@ -1510,6 +1537,22 @@ export type FormulaVarDefResponse = {
     pattern?: string;
     required?: boolean;
     type: string;
+};
+
+export type Frontier = {
+    city_ref: string;
+    map_id: string;
+    open_questions: Array<QuestionView> | null;
+    prompt: PromptView;
+    questions: Array<QuestionView> | null;
+    source_links?: {
+        [key: string]: string;
+    };
+    state: string;
+    store_ref: string;
+    work_digest: string;
+    work_id: string;
+    work_revision: string;
 };
 
 export type GitStatus = {
@@ -2659,6 +2702,19 @@ export type ProjectIdentityStampedPayload = {
     source: string;
 };
 
+export type PromptView = {
+    id: string;
+    reason?: string;
+    status: string;
+};
+
+export type Proposal = {
+    questions: Array<Question> | null;
+    source_links?: {
+        [key: string]: string;
+    };
+};
+
 export type ProviderCreateInputBody = {
     /**
      * ACP transport command arguments override.
@@ -2959,6 +3015,28 @@ export type PublishReceipt = {
         [key: string]: string;
     };
     RetryAfter: number;
+};
+
+export type Question = {
+    depends_on?: Array<string> | null;
+    id: string;
+    prompt: string;
+    recommendations?: Array<string> | null;
+    source_links?: Array<string> | null;
+    title: string;
+};
+
+export type QuestionView = {
+    answer?: AnswerView;
+    depends_on?: Array<string> | null;
+    id: string;
+    prompt: string;
+    recommendations?: Array<string> | null;
+    source_links?: Array<string> | null;
+    status: string;
+    ticket_id: string;
+    title: string;
+    version: string;
 };
 
 export type ReadinessItem = {
@@ -11830,6 +11908,201 @@ export type PostV0CityByCityNameBeadByIdCloseResponses = {
 };
 
 export type PostV0CityByCityNameBeadByIdCloseResponse = PostV0CityByCityNameBeadByIdCloseResponses[keyof PostV0CityByCityNameBeadByIdCloseResponses];
+
+export type GetDecisionFrontierData = {
+    body?: never;
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Source work bead ID.
+         */
+        id: string;
+    };
+    query: {
+        /**
+         * Exact source work revision token.
+         */
+        work_revision: string;
+    };
+    url: '/v0/city/{cityName}/bead/{id}/decision-frontier';
+};
+
+export type GetDecisionFrontierErrors = {
+    /**
+     * Bad Request
+     */
+    400: ErrorModel;
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type GetDecisionFrontierError = GetDecisionFrontierErrors[keyof GetDecisionFrontierErrors];
+
+export type GetDecisionFrontierResponses = {
+    /**
+     * OK
+     */
+    200: Frontier;
+};
+
+export type GetDecisionFrontierResponse = GetDecisionFrontierResponses[keyof GetDecisionFrontierResponses];
+
+export type EnsureDecisionFrontierData = {
+    body: DecisionFrontierEnsureRequest;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+        /**
+         * Stable key for retries of this exact proposal.
+         */
+        'Idempotency-Key': string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Source work bead ID.
+         */
+        id: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/bead/{id}/decision-frontier';
+};
+
+export type EnsureDecisionFrontierErrors = {
+    /**
+     * Bad Request
+     */
+    400: ErrorModel;
+    /**
+     * Forbidden
+     */
+    403: ErrorModel;
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type EnsureDecisionFrontierError = EnsureDecisionFrontierErrors[keyof EnsureDecisionFrontierErrors];
+
+export type EnsureDecisionFrontierResponses = {
+    /**
+     * OK
+     */
+    200: Frontier;
+};
+
+export type EnsureDecisionFrontierResponse = EnsureDecisionFrontierResponses[keyof EnsureDecisionFrontierResponses];
+
+export type AnswerDecisionFrontierData = {
+    body: AnswerSubmission;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+        /**
+         * Stable key for retries of this exact answer.
+         */
+        'Idempotency-Key': string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Source work bead ID.
+         */
+        id: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/bead/{id}/decision-frontier/answers';
+};
+
+export type AnswerDecisionFrontierErrors = {
+    /**
+     * Bad Request
+     */
+    400: ErrorModel;
+    /**
+     * Forbidden
+     */
+    403: ErrorModel;
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type AnswerDecisionFrontierError = AnswerDecisionFrontierErrors[keyof AnswerDecisionFrontierErrors];
+
+export type AnswerDecisionFrontierResponses = {
+    /**
+     * OK
+     */
+    200: Frontier;
+};
+
+export type AnswerDecisionFrontierResponse = AnswerDecisionFrontierResponses[keyof AnswerDecisionFrontierResponses];
 
 export type GetV0CityByCityNameBeadByIdDepsData = {
     body?: never;

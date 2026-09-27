@@ -483,4 +483,5 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	cityDelete(sm, "/extmsg/adapters", (*Server).humaHandleExtMsgAdapterUnregister, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusServiceUnavailable))
 
 	sm.registerCityPRActionRoutes()
+	sm.registerCityDecisionFrontierRoutes()
 }

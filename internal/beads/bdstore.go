@@ -1279,6 +1279,9 @@ func (s *BdStore) Create(b Bead) (Bead, error) {
 // CreateWithStorage persists a new bead via bd create using a storage tier
 // selected by policy middleware.
 func (s *BdStore) CreateWithStorage(b Bead, storage StorageClass) (Bead, error) {
+	if err := ValidateDecisionFrontierCreate(b); err != nil {
+		return Bead{}, err
+	}
 	effectiveEphemeral, effectiveNoHistory, err := effectiveStorageFlags(b, storage)
 	if err != nil {
 		return Bead{}, fmt.Errorf("bd create: %w", err)

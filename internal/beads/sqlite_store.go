@@ -578,7 +578,10 @@ func (s *SQLiteStore) CreateWithForeignID(b Bead) (Bead, error) {
 	if strings.TrimSpace(b.ID) == "" {
 		return Bead{}, fmt.Errorf("creating bead with foreign id: empty id")
 	}
-	return s.create(b, true)
+	if err := ValidateDecisionFrontierCreate(b); err != nil {
+		return Bead{}, err
+	}
+	return s.create(b, true, false)
 }
 
 // Create persists a new bead, minting a prefixed sequential id when the
@@ -586,15 +589,35 @@ func (s *SQLiteStore) CreateWithForeignID(b Bead) (Bead, error) {
 // duplicate-id error, provided it carries one of the store's reserved
 // namespaces when the store is fenced (WithSQLiteStoreReservedIDPrefixes).
 func (s *SQLiteStore) Create(b Bead) (Bead, error) {
-	return s.create(b, false)
+	if err := ValidateDecisionFrontierCreate(b); err != nil {
+		return Bead{}, err
+	}
+	return s.create(b, false, false)
+}
+
+// CreateDecisionFrontierRecord is the narrow controller-only creation path.
+// Generic Create and migration copies reject this metadata namespace.
+func (s *SQLiteStore) CreateDecisionFrontierRecord(b Bead) (Bead, error) {
+	if err := s.ensureOpen(); err != nil {
+		return Bead{}, err
+	}
+	if err := validateDecisionFrontierRecordCreate(b); err != nil {
+		return Bead{}, err
+	}
+	return s.create(b, false, true)
 }
 
 // create is the shared body. allowForeign is the CreateWithForeignID
 // exemption: the store-migration copy path carries preserved ids across, and
 // refusing them there would leave the beads nowhere at all.
-func (s *SQLiteStore) create(b Bead, allowForeign bool) (Bead, error) {
+func (s *SQLiteStore) create(b Bead, allowForeign, allowDecisionFrontier bool) (Bead, error) {
 	if err := s.ensureOpen(); err != nil {
 		return Bead{}, err
+	}
+	if !allowDecisionFrontier {
+		if err := ValidateDecisionFrontierCreate(b); err != nil {
+			return Bead{}, err
+		}
 	}
 	if !allowForeign {
 		if err := s.checkPinnedIDNamespace(b.ID); err != nil {
@@ -630,7 +653,7 @@ func (s *SQLiteStore) create(b Bead, allowForeign bool) (Bead, error) {
 			return err
 		}
 		for _, dep := range depsFromBeadFields(stored) {
-			if err := s.depAddTx(ctx, tx, dep.IssueID, dep.DependsOnID, dep.Type); err != nil {
+			if err := s.depAddForCreatedBeadTx(ctx, tx, stored.ID, dep); err != nil {
 				return err
 			}
 		}
@@ -1198,6 +1221,9 @@ func (s *SQLiteStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error
 		if b.Status != "in_progress" || b.Assignee != expectedAssignee {
 			return nil
 		}
+		if HasDecisionFrontierHold(b) {
+			return ErrDecisionFrontierMutationBlocked
+		}
 		before := b
 		b.Status = "open"
 		b.Assignee = ""
@@ -1700,6 +1726,9 @@ type sqliteStoreTx struct {
 // the exemption runs through CreateWithForeignID on the store, not inside a
 // caller's transaction, so adding one would open a bypass nothing asks for.
 func (t *sqliteStoreTx) Create(b Bead) (Bead, error) {
+	if err := ValidateDecisionFrontierCreate(b); err != nil {
+		return Bead{}, err
+	}
 	if err := t.store.checkPinnedIDNamespace(b.ID); err != nil {
 		return Bead{}, err
 	}
@@ -1720,7 +1749,7 @@ func (t *sqliteStoreTx) Create(b Bead) (Bead, error) {
 		return Bead{}, err
 	}
 	for _, dep := range depsFromBeadFields(stored) {
-		if err := t.store.depAddTx(t.ctx, t.tx, dep.IssueID, dep.DependsOnID, dep.Type); err != nil {
+		if err := t.store.depAddForCreatedBeadTx(t.ctx, t.tx, stored.ID, dep); err != nil {
 			return Bead{}, err
 		}
 	}
@@ -1786,11 +1815,17 @@ func (s *SQLiteStore) Delete(id string) error {
 		if err != nil {
 			return fmt.Errorf("deleting bead %q: %w", id, err)
 		}
+		if err := ValidateDecisionFrontierDelete(current); err != nil {
+			return fmt.Errorf("deleting bead %q: %w", id, err)
+		}
 		if err := protectAttemptEvidenceDelete(current); err != nil {
 			return err
 		}
 		if err := ValidateLifecycleDelete(current); err != nil {
 			return fmt.Errorf("deleting lifecycle bead %q: %w", id, err)
+		}
+		if err := s.guardAndFenceIncomingDependenciesTx(context.Background(), tx, []string{id}, []string{id}); err != nil {
+			return fmt.Errorf("deleting bead %q incoming dependencies: %w", id, err)
 		}
 		res, err := tx.Exec(`DELETE FROM beads WHERE id=?`, id)
 		if err != nil {
@@ -1879,11 +1914,45 @@ func (s *SQLiteStore) depAddTx(ctx context.Context, tx *sql.Tx, issueID, depends
 	return s.depAddWithMetadataTx(ctx, tx, issueID, dependsOnID, depType, "")
 }
 
-// depAddWithMetadataTx adds one dependency and transactionally replaces its
-// Graph-only opaque metadata sidecar. The sidecar lives in kv because the
-// deployed deps schemas have no metadata column; direct DepAdd calls carry no
-// metadata and therefore clear a previously graph-applied value.
+// depAddInitialTx adds an edge that is part of a row being created in this
+// transaction. The new source row has no prior snapshot to fence, so its
+// initial revision remains unchanged.
+func (s *SQLiteStore) depAddInitialTx(ctx context.Context, tx *sql.Tx, issueID, dependsOnID, depType string) error {
+	return s.depAddInitialWithMetadataTx(ctx, tx, issueID, dependsOnID, depType, "")
+}
+
+// depAddWithMetadataTx applies an actual source-edge or edge-metadata change
+// under the existing frontier hold and advances the source revision in the
+// same transaction. Idempotent re-adds do not consume a revision.
 func (s *SQLiteStore) depAddWithMetadataTx(ctx context.Context, tx *sql.Tx, issueID, dependsOnID, depType, metadata string) error {
+	if depType == "" {
+		depType = "blocks"
+	}
+	existingType, edgeExists, err := s.dependencyStateTx(ctx, tx, issueID, dependsOnID)
+	if err != nil {
+		return err
+	}
+	metadataMatches, err := s.graphEdgeMetadataMatchesTx(ctx, tx, issueID, dependsOnID, depType, metadata)
+	if err != nil {
+		return err
+	}
+	if edgeExists && existingType == depType && metadataMatches {
+		return nil
+	}
+	sourceExists, err := s.guardDependencySourceMutationTx(ctx, tx, issueID)
+	if err != nil {
+		return err
+	}
+	if err := s.depAddInitialWithMetadataTx(ctx, tx, issueID, dependsOnID, depType, metadata); err != nil {
+		return err
+	}
+	return s.bumpDependencySourceRevisionTx(ctx, tx, issueID, sourceExists)
+}
+
+// depAddInitialWithMetadataTx adds one edge and transactionally replaces its
+// Graph-only opaque metadata sidecar. Use this only for an edge that belongs to
+// a newly created source row; existing rows must use depAddWithMetadataTx.
+func (s *SQLiteStore) depAddInitialWithMetadataTx(ctx context.Context, tx *sql.Tx, issueID, dependsOnID, depType, metadata string) error {
 	if depType == "" {
 		depType = "blocks"
 	}
@@ -1937,11 +2006,29 @@ func (s *SQLiteStore) DepRemove(issueID, dependsOnID string) error {
 			return fmt.Errorf("sqlite dep remove: begin tx: %w", err)
 		}
 		defer tx.Rollback() //nolint:errcheck
+		existingType, edgeExists, err := s.dependencyStateTx(ctx, tx, issueID, dependsOnID)
+		if err != nil {
+			return err
+		}
+		metadataMatches, err := s.graphEdgeMetadataMatchesTx(ctx, tx, issueID, dependsOnID, existingType, "")
+		if err != nil {
+			return err
+		}
+		if !edgeExists && metadataMatches {
+			return tx.Commit()
+		}
+		sourceExists, err := s.guardDependencySourceMutationTx(ctx, tx, issueID)
+		if err != nil {
+			return err
+		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM deps WHERE issue_id=? AND depends_on_id=?`, issueID, dependsOnID); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM kv WHERE key GLOB ?`, sqliteGraphEdgeMetadataPairPrefix(issueID, dependsOnID)+"*"); err != nil {
 			return fmt.Errorf("clearing Graph dependency metadata %s -> %s: %w", issueID, dependsOnID, err)
+		}
+		if err := s.bumpDependencySourceRevisionTx(ctx, tx, issueID, sourceExists); err != nil {
+			return err
 		}
 		return tx.Commit()
 	})

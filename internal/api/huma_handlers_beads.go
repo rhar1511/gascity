@@ -750,6 +750,9 @@ type BeadDepsResponse struct {
 // Title required via struct tag on BeadCreateInput.
 func (s *Server) humaHandleBeadCreate(ctx context.Context, input *BeadCreateInput) (*IndexOutput[beads.Bead], error) {
 	for key := range input.Body.Metadata {
+		if beadmeta.IsDecisionFrontierMetadataKey(key) {
+			return nil, apierr.Forbidden.Msg("decision-frontier metadata is reserved for the controller")
+		}
 		if strings.HasPrefix(key, beadmeta.PRActionMetadataPrefix) {
 			return nil, apierr.Forbidden.Msg("PR action ledger metadata is reserved for the controller")
 		}

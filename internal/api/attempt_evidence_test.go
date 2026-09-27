@@ -76,6 +76,21 @@ func TestAttemptEvidencePublicReadRequiresExactScopeAuthorization(t *testing.T) 
 	srv := New(state)
 	srv.attemptEvidenceReadAuthorizer = authorizer
 	handler := newTestCityHandlerWith(t, state, srv)
+	// The default fake rig has no private archive reader. A found city archive
+	// cannot make that incomplete search authoritative, even with a read grant.
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, requestPath, nil))
+	if w.Code != http.StatusServiceUnavailable || authorized.AttemptID != "" {
+		t.Fatalf("incomplete archive search status = %d, authorized attempt = %q; want 503 before authorization", w.Code, authorized.AttemptID)
+	}
+	if strings.Contains(w.Body.String(), spec.Permission.RepositoryRoot) {
+		t.Fatal("incomplete archive search exposed retained repository scope")
+	}
+	rigStore, err := beads.OpenFileStore(fsys.OSFS{}, filepath.Join(t.TempDir(), "rig-beads.json"))
+	if err != nil {
+		t.Fatalf("OpenFileStore rig: %v", err)
+	}
+	state.stores["myrig"] = rigStore
 	w = httptest.NewRecorder()
 	handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, requestPath, nil))
 	if w.Code != http.StatusOK {
@@ -100,6 +115,11 @@ func TestAttemptEvidenceReadDenialAndListUseStoredPermissionScope(t *testing.T) 
 		t.Fatalf("OpenFileStore: %v", err)
 	}
 	state.cityBeadStore = store
+	rigStore, err := beads.OpenFileStore(fsys.OSFS{}, filepath.Join(t.TempDir(), "rig-beads.json"))
+	if err != nil {
+		t.Fatalf("OpenFileStore rig: %v", err)
+	}
+	state.stores["myrig"] = rigStore
 	owner, err := store.Create(beads.Bead{Title: "work item", Type: "task"})
 	if err != nil {
 		t.Fatalf("Create owner: %v", err)

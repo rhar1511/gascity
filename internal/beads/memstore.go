@@ -118,6 +118,13 @@ func cloneBead(b Bead) Bead {
 // Create persists a new bead in memory with a sequential ID, or with the
 // caller's own ID when HonorExplicitIDs is set and the ID is free.
 func (m *MemStore) Create(b Bead) (Bead, error) {
+	if err := ValidateDecisionFrontierCreate(b); err != nil {
+		return Bead{}, err
+	}
+	return m.create(b)
+}
+
+func (m *MemStore) create(b Bead) (Bead, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -310,6 +317,9 @@ func (m *MemStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error) {
 		}
 		if m.beads[i].Status != "in_progress" || m.beads[i].Assignee != expectedAssignee {
 			return false, nil
+		}
+		if HasDecisionFrontierHold(m.beads[i]) {
+			return false, ErrDecisionFrontierMutationBlocked
 		}
 		setBeadStatus(&m.beads[i], "open")
 		m.beads[i].Assignee = ""
@@ -699,6 +709,9 @@ func (m *MemStore) Delete(id string) error {
 	defer m.mu.Unlock()
 	for i, b := range m.beads {
 		if b.ID == id {
+			if err := ValidateDecisionFrontierDelete(b); err != nil {
+				return err
+			}
 			if err := protectAttemptEvidenceDelete(b); err != nil {
 				return err
 			}
@@ -727,15 +740,23 @@ func (m *MemStore) DepAdd(issueID, dependsOnID, depType string) error {
 			return nil
 		}
 		if d.IssueID == issueID && d.DependsOnID == dependsOnID && d.Type != "parent-child" && depType != "parent-child" {
+			if err := m.checkDependencySourceMutationLocked(issueID); err != nil {
+				return err
+			}
 			m.deps[i].Type = depType
+			m.bumpDependencySourceRevisionLocked(issueID)
 			return nil
 		}
+	}
+	if err := m.checkDependencySourceMutationLocked(issueID); err != nil {
+		return err
 	}
 	m.deps = append(m.deps, Dep{
 		IssueID:     issueID,
 		DependsOnID: dependsOnID,
 		Type:        depType,
 	})
+	m.bumpDependencySourceRevisionLocked(issueID)
 	return nil
 }
 
@@ -745,11 +766,33 @@ func (m *MemStore) DepRemove(issueID, dependsOnID string) error {
 	defer m.mu.Unlock()
 	for i, d := range m.deps {
 		if d.IssueID == issueID && d.DependsOnID == dependsOnID {
+			if err := m.checkDependencySourceMutationLocked(issueID); err != nil {
+				return err
+			}
 			m.deps = append(m.deps[:i], m.deps[i+1:]...)
+			m.bumpDependencySourceRevisionLocked(issueID)
 			return nil
 		}
 	}
 	return nil // removing nonexistent dep is a no-op
+}
+
+func (m *MemStore) checkDependencySourceMutationLocked(issueID string) error {
+	index := m.indexOfLocked(issueID)
+	if index >= 0 {
+		if HasDecisionFrontierHold(m.beads[index]) || IsDecisionFrontierRecord(m.beads[index]) {
+			return ErrDecisionFrontierMutationBlocked
+		}
+	}
+	return nil
+}
+
+func (m *MemStore) bumpDependencySourceRevisionLocked(issueID string) {
+	index := m.indexOfLocked(issueID)
+	if index < 0 {
+		return
+	}
+	m.beads[index].Revision++
 }
 
 // DepList returns dependencies for a bead. Direction "down" (default)

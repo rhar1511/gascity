@@ -77,6 +77,25 @@ export const zAnnotatedProviderResponse = z.object({
     ready_delay_ms: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional()
 });
 
+export const zAnswerSubmission = z.object({
+    proof: z.string(),
+    question_version: z.string(),
+    resolution: z.string(),
+    text: z.string(),
+    ticket_id: z.string(),
+    work_revision: z.string()
+});
+
+export const zAnswerView = z.object({
+    digest: z.string(),
+    id: z.string(),
+    issuer: z.string(),
+    key_id: z.string(),
+    resolution: z.string(),
+    subject: z.string(),
+    text: z.string()
+});
+
 export const zAsyncAcceptedBody = z.object({
     event_cursor: z.string(),
     request_id: z.string(),
@@ -1414,6 +1433,12 @@ export const zProjectIdentityStampedPayload = z.object({
     source: z.string()
 });
 
+export const zPromptView = z.object({
+    id: z.string(),
+    reason: z.string().optional(),
+    status: z.string()
+});
+
 export const zProviderCreateInputBody = z.object({
     acp_args: z.array(z.string()).nullish(),
     acp_command: z.string().optional(),
@@ -1590,6 +1615,52 @@ export const zPublishReceipt = z.object({
     MessageID: z.string(),
     Metadata: z.record(z.string(), z.string()),
     RetryAfter: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' })
+});
+
+export const zQuestion = z.object({
+    depends_on: z.array(z.string()).nullish(),
+    id: z.string(),
+    prompt: z.string(),
+    recommendations: z.array(z.string()).nullish(),
+    source_links: z.array(z.string()).nullish(),
+    title: z.string()
+});
+
+export const zProposal = z.object({
+    questions: z.array(zQuestion).nullable(),
+    source_links: z.record(z.string(), z.string()).optional()
+});
+
+export const zDecisionFrontierEnsureRequest = z.object({
+    proposal: zProposal,
+    work_revision: z.string().min(1)
+});
+
+export const zQuestionView = z.object({
+    answer: zAnswerView.optional(),
+    depends_on: z.array(z.string()).nullish(),
+    id: z.string(),
+    prompt: z.string(),
+    recommendations: z.array(z.string()).nullish(),
+    source_links: z.array(z.string()).nullish(),
+    status: z.string(),
+    ticket_id: z.string(),
+    title: z.string(),
+    version: z.string()
+});
+
+export const zFrontier = z.object({
+    city_ref: z.string(),
+    map_id: z.string(),
+    open_questions: z.array(zQuestionView).nullable(),
+    prompt: zPromptView,
+    questions: z.array(zQuestionView).nullable(),
+    source_links: z.record(z.string(), z.string()).optional(),
+    state: z.string(),
+    store_ref: z.string(),
+    work_digest: z.string(),
+    work_id: z.string(),
+    work_revision: z.string()
 });
 
 export const zReadinessItem = z.object({
@@ -8211,6 +8282,54 @@ export const zPostV0CityByCityNameBeadByIdClosePath = z.object({
  * OK
  */
 export const zPostV0CityByCityNameBeadByIdCloseResponse = zOkResponseBody;
+
+export const zGetDecisionFrontierPath = z.object({
+    cityName: z.string().min(1).regex(/\S/),
+    id: z.string()
+});
+
+export const zGetDecisionFrontierQuery = z.object({
+    work_revision: z.string()
+});
+
+/**
+ * OK
+ */
+export const zGetDecisionFrontierResponse = zFrontier;
+
+export const zEnsureDecisionFrontierBody = zDecisionFrontierEnsureRequest;
+
+export const zEnsureDecisionFrontierHeaders = z.object({
+    'X-GC-Request': z.string().min(1),
+    'Idempotency-Key': z.string()
+});
+
+export const zEnsureDecisionFrontierPath = z.object({
+    cityName: z.string().min(1).regex(/\S/),
+    id: z.string()
+});
+
+/**
+ * OK
+ */
+export const zEnsureDecisionFrontierResponse = zFrontier;
+
+export const zAnswerDecisionFrontierBody = zAnswerSubmission;
+
+export const zAnswerDecisionFrontierHeaders = z.object({
+    'X-GC-Request': z.string().min(1),
+    'Idempotency-Key': z.string()
+});
+
+export const zAnswerDecisionFrontierPath = z.object({
+    cityName: z.string().min(1).regex(/\S/),
+    id: z.string()
+});
+
+/**
+ * OK
+ */
+export const zAnswerDecisionFrontierResponse = zFrontier;
 
 export const zGetV0CityByCityNameBeadByIdDepsPath = z.object({
     cityName: z.string().min(1).regex(/\S/),

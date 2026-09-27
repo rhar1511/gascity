@@ -1146,6 +1146,27 @@ type AnnotatedProviderResponse struct {
 	ReadyDelayMs *int64  `json:"ready_delay_ms,omitempty"`
 }
 
+// AnswerSubmission defines model for AnswerSubmission.
+type AnswerSubmission struct {
+	Proof           string `json:"proof"`
+	QuestionVersion string `json:"question_version"`
+	Resolution      string `json:"resolution"`
+	Text            string `json:"text"`
+	TicketId        string `json:"ticket_id"`
+	WorkRevision    string `json:"work_revision"`
+}
+
+// AnswerView defines model for AnswerView.
+type AnswerView struct {
+	Digest     string `json:"digest"`
+	Id         string `json:"id"`
+	Issuer     string `json:"issuer"`
+	KeyId      string `json:"key_id"`
+	Resolution string `json:"resolution"`
+	Subject    string `json:"subject"`
+	Text       string `json:"text"`
+}
+
 // AsyncAcceptedBody defines model for AsyncAcceptedBody.
 type AsyncAcceptedBody struct {
 	// EventCursor City event-stream sequence captured before the async request was accepted. Pass this value as after_seq to /v0/city/{cityName}/events/stream to receive the request result without replaying unrelated historical backlog. A value of 0 can also mean no event provider is configured or the event log is empty.
@@ -1757,6 +1778,14 @@ type Cursors struct {
 	Main    int64 `json:"main"`
 }
 
+// DecisionFrontierEnsureRequest defines model for DecisionFrontierEnsureRequest.
+type DecisionFrontierEnsureRequest struct {
+	Proposal Proposal `json:"proposal"`
+
+	// WorkRevision Exact source work revision token.
+	WorkRevision string `json:"work_revision"`
+}
+
 // DeliveryContextRecord defines model for DeliveryContextRecord.
 type DeliveryContextRecord struct {
 	BindingGeneration int64             `json:"BindingGeneration"`
@@ -2296,6 +2325,21 @@ type FormulaVarDefResponse struct {
 	Pattern     *string     `json:"pattern,omitempty"`
 	Required    *bool       `json:"required,omitempty"`
 	Type        string      `json:"type"`
+}
+
+// Frontier defines model for Frontier.
+type Frontier struct {
+	CityRef       string             `json:"city_ref"`
+	MapId         string             `json:"map_id"`
+	OpenQuestions *[]QuestionView    `json:"open_questions"`
+	Prompt        PromptView         `json:"prompt"`
+	Questions     *[]QuestionView    `json:"questions"`
+	SourceLinks   *map[string]string `json:"source_links,omitempty"`
+	State         string             `json:"state"`
+	StoreRef      string             `json:"store_ref"`
+	WorkDigest    string             `json:"work_digest"`
+	WorkId        string             `json:"work_id"`
+	WorkRevision  string             `json:"work_revision"`
 }
 
 // GitStatus defines model for GitStatus.
@@ -3307,6 +3351,19 @@ type ProjectIdentityStampedPayload struct {
 	Source    string  `json:"source"`
 }
 
+// PromptView defines model for PromptView.
+type PromptView struct {
+	Id     string  `json:"id"`
+	Reason *string `json:"reason,omitempty"`
+	Status string  `json:"status"`
+}
+
+// Proposal defines model for Proposal.
+type Proposal struct {
+	Questions   *[]Question        `json:"questions"`
+	SourceLinks *map[string]string `json:"source_links,omitempty"`
+}
+
 // ProviderCreateInputBody defines model for ProviderCreateInputBody.
 type ProviderCreateInputBody struct {
 	// AcpArgs ACP transport command arguments override.
@@ -3553,6 +3610,30 @@ type PublishReceipt struct {
 	MessageID    string            `json:"MessageID"`
 	Metadata     map[string]string `json:"Metadata"`
 	RetryAfter   int64             `json:"RetryAfter"`
+}
+
+// Question defines model for Question.
+type Question struct {
+	DependsOn       *[]string `json:"depends_on,omitempty"`
+	Id              string    `json:"id"`
+	Prompt          string    `json:"prompt"`
+	Recommendations *[]string `json:"recommendations,omitempty"`
+	SourceLinks     *[]string `json:"source_links,omitempty"`
+	Title           string    `json:"title"`
+}
+
+// QuestionView defines model for QuestionView.
+type QuestionView struct {
+	Answer          *AnswerView `json:"answer,omitempty"`
+	DependsOn       *[]string   `json:"depends_on,omitempty"`
+	Id              string      `json:"id"`
+	Prompt          string      `json:"prompt"`
+	Recommendations *[]string   `json:"recommendations,omitempty"`
+	SourceLinks     *[]string   `json:"source_links,omitempty"`
+	Status          string      `json:"status"`
+	TicketId        string      `json:"ticket_id"`
+	Title           string      `json:"title"`
+	Version         string      `json:"version"`
 }
 
 // ReadinessItem defines model for ReadinessItem.
@@ -9662,6 +9743,30 @@ type PostV0CityByCityNameBeadByIdCloseParams struct {
 	XGCRequest string `json:"X-GC-Request"`
 }
 
+// GetDecisionFrontierParams defines parameters for GetDecisionFrontier.
+type GetDecisionFrontierParams struct {
+	// WorkRevision Exact source work revision token.
+	WorkRevision string `form:"work_revision" json:"work_revision"`
+}
+
+// EnsureDecisionFrontierParams defines parameters for EnsureDecisionFrontier.
+type EnsureDecisionFrontierParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+
+	// IdempotencyKey Stable key for retries of this exact proposal.
+	IdempotencyKey string `json:"Idempotency-Key"`
+}
+
+// AnswerDecisionFrontierParams defines parameters for AnswerDecisionFrontier.
+type AnswerDecisionFrontierParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+
+	// IdempotencyKey Stable key for retries of this exact answer.
+	IdempotencyKey string `json:"Idempotency-Key"`
+}
+
 // PostV0CityByCityNameBeadByIdReopenParams defines parameters for PostV0CityByCityNameBeadByIdReopen.
 type PostV0CityByCityNameBeadByIdReopenParams struct {
 	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
@@ -10651,6 +10756,12 @@ type PatchV0CityByCityNameBeadByIdJSONRequestBody = BeadUpdateBody
 
 // PostV0CityByCityNameBeadByIdAssignJSONRequestBody defines body for PostV0CityByCityNameBeadByIdAssign for application/json ContentType.
 type PostV0CityByCityNameBeadByIdAssignJSONRequestBody = BeadAssignInputBody
+
+// EnsureDecisionFrontierJSONRequestBody defines body for EnsureDecisionFrontier for application/json ContentType.
+type EnsureDecisionFrontierJSONRequestBody = DecisionFrontierEnsureRequest
+
+// AnswerDecisionFrontierJSONRequestBody defines body for AnswerDecisionFrontier for application/json ContentType.
+type AnswerDecisionFrontierJSONRequestBody = AnswerSubmission
 
 // PostV0CityByCityNameBeadByIdUpdateJSONRequestBody defines body for PostV0CityByCityNameBeadByIdUpdate for application/json ContentType.
 type PostV0CityByCityNameBeadByIdUpdateJSONRequestBody = BeadUpdateBody
@@ -20215,6 +20326,19 @@ type ClientInterface interface {
 	// PostV0CityByCityNameBeadByIdClose request
 	PostV0CityByCityNameBeadByIdClose(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdCloseParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// GetDecisionFrontier request
+	GetDecisionFrontier(ctx context.Context, cityName string, id string, params *GetDecisionFrontierParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// EnsureDecisionFrontierWithBody request with any body
+	EnsureDecisionFrontierWithBody(ctx context.Context, cityName string, id string, params *EnsureDecisionFrontierParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	EnsureDecisionFrontier(ctx context.Context, cityName string, id string, params *EnsureDecisionFrontierParams, body EnsureDecisionFrontierJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// AnswerDecisionFrontierWithBody request with any body
+	AnswerDecisionFrontierWithBody(ctx context.Context, cityName string, id string, params *AnswerDecisionFrontierParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	AnswerDecisionFrontier(ctx context.Context, cityName string, id string, params *AnswerDecisionFrontierParams, body AnswerDecisionFrontierJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// GetV0CityByCityNameBeadByIdDeps request
 	GetV0CityByCityNameBeadByIdDeps(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -21132,6 +21256,66 @@ func (c *Client) GetV0CityByCityNameBeadByIdAttemptsDiff(ctx context.Context, ci
 
 func (c *Client) PostV0CityByCityNameBeadByIdClose(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdCloseParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewPostV0CityByCityNameBeadByIdCloseRequest(c.Server, cityName, id, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetDecisionFrontier(ctx context.Context, cityName string, id string, params *GetDecisionFrontierParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetDecisionFrontierRequest(c.Server, cityName, id, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) EnsureDecisionFrontierWithBody(ctx context.Context, cityName string, id string, params *EnsureDecisionFrontierParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewEnsureDecisionFrontierRequestWithBody(c.Server, cityName, id, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) EnsureDecisionFrontier(ctx context.Context, cityName string, id string, params *EnsureDecisionFrontierParams, body EnsureDecisionFrontierJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewEnsureDecisionFrontierRequest(c.Server, cityName, id, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) AnswerDecisionFrontierWithBody(ctx context.Context, cityName string, id string, params *AnswerDecisionFrontierParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAnswerDecisionFrontierRequestWithBody(c.Server, cityName, id, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) AnswerDecisionFrontier(ctx context.Context, cityName string, id string, params *AnswerDecisionFrontierParams, body AnswerDecisionFrontierJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAnswerDecisionFrontierRequest(c.Server, cityName, id, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -24928,6 +25112,217 @@ func NewPostV0CityByCityNameBeadByIdCloseRequest(server string, cityName string,
 		}
 
 		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
+	return req, nil
+}
+
+// NewGetDecisionFrontierRequest generates requests for GetDecisionFrontier
+func NewGetDecisionFrontierRequest(server string, cityName string, id string, params *GetDecisionFrontierParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/bead/%s/decision-frontier", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if queryFrag, err := runtime.StyleParamWithOptions("form", false, "work_revision", params.WorkRevision, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+			return nil, err
+		} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+			return nil, err
+		} else {
+			for k, v := range parsed {
+				for _, v2 := range v {
+					queryValues.Add(k, v2)
+				}
+			}
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewEnsureDecisionFrontierRequest calls the generic EnsureDecisionFrontier builder with application/json body
+func NewEnsureDecisionFrontierRequest(server string, cityName string, id string, params *EnsureDecisionFrontierParams, body EnsureDecisionFrontierJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewEnsureDecisionFrontierRequestWithBody(server, cityName, id, params, "application/json", bodyReader)
+}
+
+// NewEnsureDecisionFrontierRequestWithBody generates requests for EnsureDecisionFrontier with any type of body
+func NewEnsureDecisionFrontierRequestWithBody(server string, cityName string, id string, params *EnsureDecisionFrontierParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/bead/%s/decision-frontier", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+		var headerParam1 string
+
+		headerParam1, err = runtime.StyleParamWithOptions("simple", false, "Idempotency-Key", params.IdempotencyKey, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("Idempotency-Key", headerParam1)
+
+	}
+
+	return req, nil
+}
+
+// NewAnswerDecisionFrontierRequest calls the generic AnswerDecisionFrontier builder with application/json body
+func NewAnswerDecisionFrontierRequest(server string, cityName string, id string, params *AnswerDecisionFrontierParams, body AnswerDecisionFrontierJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewAnswerDecisionFrontierRequestWithBody(server, cityName, id, params, "application/json", bodyReader)
+}
+
+// NewAnswerDecisionFrontierRequestWithBody generates requests for AnswerDecisionFrontier with any type of body
+func NewAnswerDecisionFrontierRequestWithBody(server string, cityName string, id string, params *AnswerDecisionFrontierParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/bead/%s/decision-frontier/answers", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+		var headerParam1 string
+
+		headerParam1, err = runtime.StyleParamWithOptions("simple", false, "Idempotency-Key", params.IdempotencyKey, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("Idempotency-Key", headerParam1)
 
 	}
 
@@ -34449,6 +34844,19 @@ type ClientWithResponsesInterface interface {
 	// PostV0CityByCityNameBeadByIdCloseWithResponse request
 	PostV0CityByCityNameBeadByIdCloseWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdCloseParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadByIdCloseResponse, error)
 
+	// GetDecisionFrontierWithResponse request
+	GetDecisionFrontierWithResponse(ctx context.Context, cityName string, id string, params *GetDecisionFrontierParams, reqEditors ...RequestEditorFn) (*GetDecisionFrontierResponse, error)
+
+	// EnsureDecisionFrontierWithBodyWithResponse request with any body
+	EnsureDecisionFrontierWithBodyWithResponse(ctx context.Context, cityName string, id string, params *EnsureDecisionFrontierParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EnsureDecisionFrontierResponse, error)
+
+	EnsureDecisionFrontierWithResponse(ctx context.Context, cityName string, id string, params *EnsureDecisionFrontierParams, body EnsureDecisionFrontierJSONRequestBody, reqEditors ...RequestEditorFn) (*EnsureDecisionFrontierResponse, error)
+
+	// AnswerDecisionFrontierWithBodyWithResponse request with any body
+	AnswerDecisionFrontierWithBodyWithResponse(ctx context.Context, cityName string, id string, params *AnswerDecisionFrontierParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*AnswerDecisionFrontierResponse, error)
+
+	AnswerDecisionFrontierWithResponse(ctx context.Context, cityName string, id string, params *AnswerDecisionFrontierParams, body AnswerDecisionFrontierJSONRequestBody, reqEditors ...RequestEditorFn) (*AnswerDecisionFrontierResponse, error)
+
 	// GetV0CityByCityNameBeadByIdDepsWithResponse request
 	GetV0CityByCityNameBeadByIdDepsWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameBeadByIdDepsResponse, error)
 
@@ -35689,6 +36097,92 @@ func (r PostV0CityByCityNameBeadByIdCloseResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r PostV0CityByCityNameBeadByIdCloseResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type GetDecisionFrontierResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON200                   *Frontier
+	ApplicationproblemJSON400 *ErrorModel
+	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON409 *ErrorModel
+	ApplicationproblemJSON422 *ErrorModel
+	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON503 *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r GetDecisionFrontierResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetDecisionFrontierResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type EnsureDecisionFrontierResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON200                   *Frontier
+	ApplicationproblemJSON400 *ErrorModel
+	ApplicationproblemJSON403 *ErrorModel
+	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON409 *ErrorModel
+	ApplicationproblemJSON422 *ErrorModel
+	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON503 *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r EnsureDecisionFrontierResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r EnsureDecisionFrontierResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type AnswerDecisionFrontierResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON200                   *Frontier
+	ApplicationproblemJSON400 *ErrorModel
+	ApplicationproblemJSON403 *ErrorModel
+	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON409 *ErrorModel
+	ApplicationproblemJSON422 *ErrorModel
+	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON503 *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r AnswerDecisionFrontierResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r AnswerDecisionFrontierResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -39953,6 +40447,49 @@ func (c *ClientWithResponses) PostV0CityByCityNameBeadByIdCloseWithResponse(ctx 
 	return ParsePostV0CityByCityNameBeadByIdCloseResponse(rsp)
 }
 
+// GetDecisionFrontierWithResponse request returning *GetDecisionFrontierResponse
+func (c *ClientWithResponses) GetDecisionFrontierWithResponse(ctx context.Context, cityName string, id string, params *GetDecisionFrontierParams, reqEditors ...RequestEditorFn) (*GetDecisionFrontierResponse, error) {
+	rsp, err := c.GetDecisionFrontier(ctx, cityName, id, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetDecisionFrontierResponse(rsp)
+}
+
+// EnsureDecisionFrontierWithBodyWithResponse request with arbitrary body returning *EnsureDecisionFrontierResponse
+func (c *ClientWithResponses) EnsureDecisionFrontierWithBodyWithResponse(ctx context.Context, cityName string, id string, params *EnsureDecisionFrontierParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EnsureDecisionFrontierResponse, error) {
+	rsp, err := c.EnsureDecisionFrontierWithBody(ctx, cityName, id, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseEnsureDecisionFrontierResponse(rsp)
+}
+
+func (c *ClientWithResponses) EnsureDecisionFrontierWithResponse(ctx context.Context, cityName string, id string, params *EnsureDecisionFrontierParams, body EnsureDecisionFrontierJSONRequestBody, reqEditors ...RequestEditorFn) (*EnsureDecisionFrontierResponse, error) {
+	rsp, err := c.EnsureDecisionFrontier(ctx, cityName, id, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseEnsureDecisionFrontierResponse(rsp)
+}
+
+// AnswerDecisionFrontierWithBodyWithResponse request with arbitrary body returning *AnswerDecisionFrontierResponse
+func (c *ClientWithResponses) AnswerDecisionFrontierWithBodyWithResponse(ctx context.Context, cityName string, id string, params *AnswerDecisionFrontierParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*AnswerDecisionFrontierResponse, error) {
+	rsp, err := c.AnswerDecisionFrontierWithBody(ctx, cityName, id, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseAnswerDecisionFrontierResponse(rsp)
+}
+
+func (c *ClientWithResponses) AnswerDecisionFrontierWithResponse(ctx context.Context, cityName string, id string, params *AnswerDecisionFrontierParams, body AnswerDecisionFrontierJSONRequestBody, reqEditors ...RequestEditorFn) (*AnswerDecisionFrontierResponse, error) {
+	rsp, err := c.AnswerDecisionFrontier(ctx, cityName, id, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseAnswerDecisionFrontierResponse(rsp)
+}
+
 // GetV0CityByCityNameBeadByIdDepsWithResponse request returning *GetV0CityByCityNameBeadByIdDepsResponse
 func (c *ClientWithResponses) GetV0CityByCityNameBeadByIdDepsWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameBeadByIdDepsResponse, error) {
 	rsp, err := c.GetV0CityByCityNameBeadByIdDeps(ctx, cityName, id, reqEditors...)
@@ -43214,6 +43751,224 @@ func ParsePostV0CityByCityNameBeadByIdCloseResponse(rsp *http.Response) (*PostV0
 			return nil, err
 		}
 		response.ApplicationproblemJSON500 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetDecisionFrontierResponse parses an HTTP response from a GetDecisionFrontierWithResponse call
+func ParseGetDecisionFrontierResponse(rsp *http.Response) (*GetDecisionFrontierResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetDecisionFrontierResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest Frontier
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 400:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON400 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON409 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseEnsureDecisionFrontierResponse parses an HTTP response from a EnsureDecisionFrontierWithResponse call
+func ParseEnsureDecisionFrontierResponse(rsp *http.Response) (*EnsureDecisionFrontierResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &EnsureDecisionFrontierResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest Frontier
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 400:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON400 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON403 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON409 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseAnswerDecisionFrontierResponse parses an HTTP response from a AnswerDecisionFrontierWithResponse call
+func ParseAnswerDecisionFrontierResponse(rsp *http.Response) (*AnswerDecisionFrontierResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &AnswerDecisionFrontierResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest Frontier
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 400:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON400 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON403 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON409 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
 
 	}
 

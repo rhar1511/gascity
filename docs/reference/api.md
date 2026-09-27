@@ -33,7 +33,8 @@ The spec is the full reference. A brief summary of the surfaces:
 - **Agents.** `GET/POST/DELETE` under `/v0/city/{cityName}/agents`
   plus SSE `/v0/city/{cityName}/agents/{agent}/output/stream`.
 - **Beads (work units).** CRUD under `/v0/city/{cityName}/beads`,
-  query + hook operations, dependencies, labels.
+  query + hook operations, dependencies, labels, and exact-revision
+  decision-frontier reads and operations.
 - **Sessions.** CRUD under `/v0/city/{cityName}/sessions`, submit,
   prompt, resume, interaction response, transcript, SSE stream.
 - **Connected-client external messaging.** `POST /v0/extmsg/clients`
@@ -57,6 +58,26 @@ The spec is the full reference. A brief summary of the surfaces:
   immutable attempt-evidence references. `POST /v0/city/{cityName}/pr-actions`
   prepares repair work, records an exact revision for review, or merges after
   separate human approval. See the trust requirements below.
+
+### Decision frontiers
+
+`GET /v0/city/{cityName}/bead/{id}/decision-frontier?work_revision=...`
+reads one question map for the exact Beads revision. `POST` to the same path
+idempotently persists a proposed question map and places a controller-owned
+hold on that source revision. `POST /v0/city/{cityName}/bead/{id}/decision-frontier/answers` submits a proof
+envelope for one exact ticket and question version. Both writes require an
+`Idempotency-Key`; callers cannot choose the city, physical store, authenticated
+subject, verifier, or delivery provider.
+
+The question map is proposal state, not a human decision. Only an explicitly
+composed trusted answer verifier can record a resolution and release the
+controller's hold. Missing verifiers or unsupported atomic store capabilities
+return unavailable; no caller field, city-write identity, prompt delivery, or
+session acknowledgement substitutes for verified human authorization. Prompt
+intent is persisted separately, and no prompt is sent unless a trusted delivery
+provider is configured. This source slice does not install an authority,
+delivery provider, or mayor runtime, so those operations remain unavailable by
+default.
 
 ### Historical attempt reads
 

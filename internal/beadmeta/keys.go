@@ -110,6 +110,11 @@ const (
 	CoordinatorOutcomeProducerDispositionMetadataKey = "gc.coordinator_outcome.producer_disposition"
 	CurrentRunIDMetadataKey                          = "gc.current_run_id"
 	CwdMetadataKey                                   = "gc.cwd"
+	DecisionFrontierHoldMetadataKey                  = "gc.decision_frontier.hold"
+	DecisionFrontierRecordMetadataKey                = "gc.decision_frontier.record"
+	DecisionFrontierReasonMetadataKey                = "gc.decision_frontier.reason"
+	DecisionFrontierStateMetadataKey                 = "gc.decision_frontier.state"
+	DecisionFrontierRevisionReceiptsMetadataKey      = "gc.decision_frontier.revision_receipts"
 	// AttachFencePendingMetadataKey marks a fenced attach's sub-DAG root
 	// between speculative (deferred, non-runnable) creation and the CAS-last
 	// epoch fence committing. Cleared on activation; a root still carrying it
@@ -461,6 +466,10 @@ const OptionMetadataPrefix = "opt_"
 // PRActionMetadataPrefix reserves the controller-owned PR action ledger namespace.
 const PRActionMetadataPrefix = Namespace + "pr_action."
 
+// DecisionFrontierMetadataPrefix reserves controller-owned decision maps,
+// answer records, holds, and transition receipts from generic bead writers.
+const DecisionFrontierMetadataPrefix = Namespace + "decision_frontier."
+
 // PR action metadata binds durable queue records and idempotent action receipts.
 const (
 	PRActionSourceMetadataKey        = PRActionMetadataPrefix + "source"
@@ -523,6 +532,11 @@ var KnownMetadataKeys = []string{
 	CoordinatorOutcomeProducerDispositionMetadataKey,
 	CurrentRunIDMetadataKey,
 	CwdMetadataKey,
+	DecisionFrontierHoldMetadataKey,
+	DecisionFrontierRecordMetadataKey,
+	DecisionFrontierReasonMetadataKey,
+	DecisionFrontierStateMetadataKey,
+	DecisionFrontierRevisionReceiptsMetadataKey,
 	AttachFencePendingMetadataKey,
 	DeferredAssigneeMetadataKey,
 	DeferredExecutionRoutedToMetadataKey,
@@ -686,6 +700,7 @@ var KnownMetadataKeys = []string{
 // begins with one of these is considered declared even though its full key is
 // not enumerable.
 var KnownMetadataPrefixes = []string{
+	DecisionFrontierMetadataPrefix,
 	SessionRequestReceiptPrefix,
 	FormulaVarPrefix,
 	IdemPrefix,

@@ -4,8 +4,10 @@ package beads
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,6 +28,26 @@ var ErrLifecycleCompletionRequired = errors.New("lifecycle source work requires 
 // ErrLifecycleIntentImmutable reports a generic mutation or deletion of a
 // durable signed recovery request.
 var ErrLifecycleIntentImmutable = errors.New("durable lifecycle recovery intents are immutable")
+
+// ErrDecisionFrontierMutationBlocked reports an ordinary mutation of source
+// work or a decision-frontier record while the controller owns its state.
+var ErrDecisionFrontierMutationBlocked = errors.New("decision-frontier state is controller managed")
+
+// ErrDecisionFrontierRecordProtected reports an attempt to delete an immutable
+// controller decision-frontier record.
+var ErrDecisionFrontierRecordProtected = errors.New("decision-frontier records cannot be deleted")
+
+// ErrDecisionFrontierLinkConflict reports a requested relationship that does
+// not follow from the immutable decision-frontier record documents.
+var ErrDecisionFrontierLinkConflict = errors.New("decision-frontier relationship conflicts with immutable records")
+
+// ErrDecisionFrontierTransitionReceiptExists reports a duplicate immutable
+// source-revision transition receipt ID.
+var ErrDecisionFrontierTransitionReceiptExists = errors.New("decision-frontier transition receipt already exists")
+
+// ErrDecisionFrontierCapabilityUnsupported reports a store without the
+// controller-only create/transition capability required for trusted records.
+var ErrDecisionFrontierCapabilityUnsupported = errors.New("decision-frontier record capability unsupported")
 
 // ErrIDCollision is returned when bd's fuzzy/substring resolver returns a bead
 // whose ID differs from the requested ID (e.g. "gcy-dv7" resolves to
@@ -282,6 +304,9 @@ func ValidateLifecycleClose(current Bead) error {
 	if HasLifecycleRecoveryIntent(current) {
 		return ErrLifecycleIntentImmutable
 	}
+	if err := ValidateDecisionFrontierClose(current); err != nil {
+		return err
+	}
 	if !strings.EqualFold(strings.TrimSpace(current.Status), "closed") && HasLifecycleAdmissionReceipt(current) {
 		return ErrLifecycleCompletionRequired
 	}
@@ -298,6 +323,23 @@ func ValidateLifecycleMutation(current Bead, opts UpdateOpts) error {
 	}
 	if _, writingRecoveryState := opts.Metadata[beadmeta.LifecycleRecoveryStateMetadataKey]; writingRecoveryState && !opts.lifecycleRecoveryStateWrite {
 		return ErrLifecycleMutationBlocked
+	}
+	if opts.Status != nil && strings.EqualFold(strings.TrimSpace(*opts.Status), "closed") &&
+		!strings.EqualFold(strings.TrimSpace(current.Status), "closed") {
+		if err := ValidateDecisionFrontierClose(current); err != nil {
+			return err
+		}
+	}
+	if IsDecisionFrontierRecord(current) && !isEmptyUpdateOpts(opts) {
+		return ErrDecisionFrontierMutationBlocked
+	}
+	for key := range opts.Metadata {
+		if beadmeta.IsDecisionFrontierMetadataKey(key) {
+			return ErrDecisionFrontierMutationBlocked
+		}
+	}
+	if HasDecisionFrontierHold(current) && !isEmptyUpdateOpts(opts) {
+		return ErrDecisionFrontierMutationBlocked
 	}
 	if opts.Status != nil && strings.EqualFold(strings.TrimSpace(*opts.Status), "closed") &&
 		!strings.EqualFold(strings.TrimSpace(current.Status), "closed") && HasLifecycleAdmissionReceipt(current) {
@@ -385,6 +427,366 @@ func ValidateLifecycleDelete(current Bead) error {
 		return ErrLifecycleMutationBlocked
 	}
 	return nil
+}
+
+// HasDecisionFrontierHold reports whether the source bead is currently held by
+// an unresolved controller-owned question frontier. Unknown nonempty marker
+// values remain held so malformed evidence cannot open work.
+func HasDecisionFrontierHold(b Bead) bool {
+	return beadmeta.HasDecisionFrontierHold(b.Metadata)
+}
+
+// IsDecisionFrontierRecord reports whether a bead carries a controller-owned
+// immutable map, ticket, answer, or prompt record marker.
+func IsDecisionFrontierRecord(b Bead) bool {
+	return strings.TrimSpace(b.Metadata[beadmeta.DecisionFrontierRecordMetadataKey]) != ""
+}
+
+// ValidateDecisionFrontierCreate rejects controller-reserved metadata on an
+// ordinary Create path. A dedicated controller capability validates and
+// creates immutable records.
+func ValidateDecisionFrontierCreate(b Bead) error {
+	for key := range b.Metadata {
+		if beadmeta.IsDecisionFrontierMetadataKey(key) {
+			return ErrDecisionFrontierMutationBlocked
+		}
+	}
+	return nil
+}
+
+// ValidateDecisionFrontierClose blocks closing actively held source work and
+// immutable controller records. Released source rows retain their immutable
+// transition receipts but regain their ordinary lifecycle close behavior.
+func ValidateDecisionFrontierClose(current Bead) error {
+	if HasDecisionFrontierHold(current) || IsDecisionFrontierRecord(current) {
+		return ErrDecisionFrontierMutationBlocked
+	}
+	return nil
+}
+
+func isDecisionFrontierControlKey(key string) bool {
+	return beadmeta.IsDecisionFrontierMetadataKey(key)
+}
+
+// DecisionFrontierRecordWriter is a controller-only capability for creating
+// immutable decision records, advancing their narrow state machine, and
+// ensuring only the graph links authorized by those immutable documents.
+// Generic Store.Create and ConditionalWriter methods reject the reserved
+// namespace.
+type DecisionFrontierRecordWriter interface {
+	CreateDecisionFrontierRecord(Bead) (Bead, error)
+	CompareAndSetDecisionFrontierRecordMetadataKey(id, key, expected, next string) (bool, error)
+	EnsureDecisionFrontierLink(sourceID, targetID, depType string) error
+}
+
+// DecisionFrontierRecordWriterHandleProvider lets a wrapper expose the
+// capability only when it preserves the backing store's atomic semantics.
+type DecisionFrontierRecordWriterHandleProvider interface {
+	DecisionFrontierRecordWriterHandle() (DecisionFrontierRecordWriter, bool)
+}
+
+// DecisionFrontierRecordWriterFor returns the trusted record capability for
+// the two direct stores whose creation and metadata CAS semantics are proven.
+// Wrappers and other backends fail closed until they implement and test their
+// own persistence and routing behavior.
+func DecisionFrontierRecordWriterFor(store Store) (DecisionFrontierRecordWriter, bool) {
+	if store == nil {
+		return nil, false
+	}
+	if provider, ok := store.(DecisionFrontierRecordWriterHandleProvider); ok {
+		return provider.DecisionFrontierRecordWriterHandle()
+	}
+	switch store.(type) {
+	case *MemStore, *SQLiteStore:
+		writer, ok := store.(DecisionFrontierRecordWriter)
+		return writer, ok
+	default:
+		return nil, false
+	}
+}
+
+func validateDecisionFrontierRecordCreate(b Bead) error {
+	kind := b.Metadata[beadmeta.DecisionFrontierRecordMetadataKey]
+	state := b.Metadata[beadmeta.DecisionFrontierStateMetadataKey]
+	wantState := map[string]string{
+		"decision-frontier/map/v1":      "pending",
+		"decision-frontier/question/v1": "pending",
+		"decision-frontier/answer/v1":   "recorded",
+		"decision-frontier/prompt/v1":   "unconfigured",
+	}[kind]
+	if wantState == "" || state != wantState || b.ID == "" || b.Type != "gate" || strings.TrimSpace(b.Title) == "" {
+		return fmt.Errorf("invalid decision-frontier record envelope")
+	}
+	for key := range b.Metadata {
+		if key != beadmeta.DecisionFrontierRecordMetadataKey && key != beadmeta.DecisionFrontierStateMetadataKey {
+			return fmt.Errorf("invalid decision-frontier record metadata %q", key)
+		}
+	}
+	var common struct {
+		SchemaVersion int    `json:"schema_version"`
+		CityRef       string `json:"city_ref"`
+		StoreRef      string `json:"store_ref"`
+		WorkID        string `json:"work_id"`
+		WorkRevision  string `json:"work_revision"`
+		MapID         string `json:"map_id"`
+	}
+	if err := json.Unmarshal([]byte(b.Description), &common); err != nil || common.SchemaVersion != 1 ||
+		common.CityRef == "" || common.StoreRef == "" || common.WorkID == "" || common.MapID == "" {
+		return fmt.Errorf("invalid decision-frontier record document")
+	}
+	revision, err := strconv.ParseInt(common.WorkRevision, 10, 64)
+	if err != nil || revision == 0 || strconv.FormatInt(revision, 10) != common.WorkRevision {
+		return fmt.Errorf("invalid decision-frontier record work revision")
+	}
+	if kind == "decision-frontier/map/v1" && b.ID != common.MapID {
+		return fmt.Errorf("decision-frontier map ID does not match record ID")
+	}
+	return nil
+}
+
+func validateDecisionFrontierRecordCAS(current Bead, key, expected, next string) error {
+	kind := current.Metadata[beadmeta.DecisionFrontierRecordMetadataKey]
+	if strings.TrimSpace(kind) == "" {
+		return ErrDecisionFrontierMutationBlocked
+	}
+	switch key {
+	case beadmeta.DecisionFrontierReasonMetadataKey:
+		if kind != "decision-frontier/prompt/v1" {
+			return ErrDecisionFrontierMutationBlocked
+		}
+		return nil
+	case beadmeta.DecisionFrontierStateMetadataKey:
+		state := current.Metadata[key]
+		valid := false
+		switch kind {
+		case "decision-frontier/map/v1":
+			valid = state == "pending" && next == "resolved"
+		case "decision-frontier/question/v1":
+			if state == "pending" || strings.HasPrefix(state, "unresolved:") {
+				valid = strings.HasPrefix(next, "answering:") && strings.TrimPrefix(next, "answering:") != ""
+			}
+			if strings.HasPrefix(state, "answering:") {
+				id := strings.TrimPrefix(state, "answering:")
+				valid = id != "" && (next == "answered:"+id || next == "unresolved:"+id)
+			}
+		case "decision-frontier/prompt/v1":
+			valid = decisionFrontierPromptTransition(state, next)
+		}
+		if !valid || expected != state {
+			return ErrDecisionFrontierMutationBlocked
+		}
+		return nil
+	default:
+		return ErrDecisionFrontierMutationBlocked
+	}
+}
+
+func decisionFrontierPromptTransition(state, next string) bool {
+	switch state {
+	case "unconfigured":
+		return next == "pending"
+	case "pending":
+		return next == "submitting"
+	case "submitting", "unknown":
+		return next == "pending" || next == "accepted" || next == "delivered" || next == "acknowledged" || next == "unknown" || next == "failed"
+	default:
+		return false
+	}
+}
+
+// ValidateDecisionFrontierDelete rejects ordinary deletion of held source work
+// and immutable controller records. The controller has no deletion path for
+// these records; retirement requires a separately reviewed migration.
+func ValidateDecisionFrontierDelete(current Bead) error {
+	if HasDecisionFrontierHold(current) || IsDecisionFrontierRecord(current) ||
+		strings.TrimSpace(current.Metadata[beadmeta.DecisionFrontierRevisionReceiptsMetadataKey]) != "" {
+		return ErrDecisionFrontierRecordProtected
+	}
+	return nil
+}
+
+// RevisionTransitionReceipt binds one controller-owned metadata transition to
+// an exact Beads revision token. The storage backend fills ToRevision with its
+// committed token and stores the receipt atomically with the metadata update.
+type RevisionTransitionReceipt struct {
+	ID           string `json:"id"`
+	CityRef      string `json:"city_ref"`
+	StoreRef     string `json:"store_ref"`
+	WorkID       string `json:"work_id"`
+	MapID        string `json:"map_id"`
+	Operation    string `json:"operation"`
+	FromRevision int64  `json:"from_revision"`
+	ToRevision   int64  `json:"to_revision"`
+}
+
+// DecisionFrontierSourceReader returns the source row and its persisted
+// outgoing dependency edges from one backend-consistent snapshot. It is
+// separate from Store.Get so ordinary projections do not change merely to
+// support decision-frontier validation.
+type DecisionFrontierSourceReader interface {
+	DecisionFrontierSourceSnapshot(id string) (Bead, error)
+}
+
+// DecisionFrontierSourceReaderHandleProvider exposes a source-snapshot role
+// only when the outer store handle can preserve its routing and generation
+// checks. The controller never unwraps a wrapper to discover this capability.
+type DecisionFrontierSourceReaderHandleProvider interface {
+	DecisionFrontierSourceReaderHandle() (DecisionFrontierSourceReader, bool)
+}
+
+// DecisionFrontierSourceReaderFor returns an authoritative source snapshot
+// capability for direct supported stores or an outer wrapper that explicitly
+// exposes a safe handle. Direct SQLite stores without a revision column cannot
+// participate because source mutations cannot be fenced.
+func DecisionFrontierSourceReaderFor(store Store) (DecisionFrontierSourceReader, bool) {
+	if store == nil {
+		return nil, false
+	}
+	if provider, ok := store.(DecisionFrontierSourceReaderHandleProvider); ok {
+		return provider.DecisionFrontierSourceReaderHandle()
+	}
+	switch typed := store.(type) {
+	case *MemStore:
+		return typed, typed != nil
+	case *SQLiteStore:
+		if typed == nil || !typed.hasRevisionColumn {
+			return nil, false
+		}
+		return typed, true
+	default:
+		return nil, false
+	}
+}
+
+// RevisionTransitionWriter atomically compares a bead revision and metadata
+// key, updates that key, appends a bound decision-frontier transition receipt
+// under DecisionFrontierRevisionReceiptsMetadataKey, and returns the actual
+// committed row. When paired with DecisionFrontierSourceReader, the revision
+// must fence every input used by the source digest, including outgoing edge
+// changes. Implementations must not assume revision tokens are consecutive.
+// An absent implementation is a fail-closed capability gap.
+type RevisionTransitionWriter interface {
+	CompareAndSetMetadataKeyWithReceipt(id, key, expected, next string, expectedRevision int64, receipt RevisionTransitionReceipt) (Bead, bool, error)
+}
+
+func appendRevisionTransitionReceipt(raw string, receipt RevisionTransitionReceipt, toRevision int64) (string, error) {
+	if receipt.ID == "" || receipt.CityRef == "" || receipt.StoreRef == "" || receipt.WorkID == "" ||
+		receipt.MapID == "" || (receipt.Operation != "reserve" && receipt.Operation != "release") ||
+		receipt.FromRevision == 0 || receipt.ToRevision != 0 || toRevision == 0 || toRevision == receipt.FromRevision {
+		return "", fmt.Errorf("invalid decision-frontier revision transition receipt")
+	}
+	var receipts []RevisionTransitionReceipt
+	if strings.TrimSpace(raw) != "" {
+		if err := json.Unmarshal([]byte(raw), &receipts); err != nil {
+			return "", fmt.Errorf("decode decision-frontier revision receipts: %w", err)
+		}
+	}
+	for _, existing := range receipts {
+		if existing.ID == receipt.ID {
+			return "", ErrDecisionFrontierTransitionReceiptExists
+		}
+	}
+	receipt.ToRevision = toRevision
+	receipts = append(receipts, receipt)
+	encoded, err := json.Marshal(receipts)
+	if err != nil {
+		return "", fmt.Errorf("encode decision-frontier revision receipt: %w", err)
+	}
+	return string(encoded), nil
+}
+
+type decisionFrontierHoldBinding struct {
+	SchemaVersion int    `json:"schema_version"`
+	CityRef       string `json:"city_ref"`
+	StoreRef      string `json:"store_ref"`
+	WorkID        string `json:"work_id"`
+	MapID         string `json:"map_id"`
+	WorkRevision  string `json:"work_revision"`
+	WorkDigest    string `json:"work_digest"`
+	ProposalHash  string `json:"proposal_hash"`
+	ReservationID string `json:"reservation_id"`
+}
+
+// validateDecisionFrontierTransition binds the protected hold marker to the
+// source row and transition receipt before a backend makes the atomic change.
+func validateDecisionFrontierTransition(current Bead, key, expected, next string, expectedRevision int64, receipt RevisionTransitionReceipt) error {
+	if key != beadmeta.DecisionFrontierHoldMetadataKey || current.ID != receipt.WorkID ||
+		receipt.FromRevision != expectedRevision || receipt.ToRevision != 0 ||
+		receipt.CityRef == "" || receipt.StoreRef == "" || receipt.MapID == "" || receipt.ID == "" ||
+		(receipt.Operation != "reserve" && receipt.Operation != "release") {
+		return fmt.Errorf("invalid decision-frontier conditional transition")
+	}
+	marker := next
+	if receipt.Operation == "reserve" {
+		if expected != "" || next == "" {
+			return fmt.Errorf("invalid decision-frontier reservation transition")
+		}
+	} else {
+		if expected == "" || next != "" {
+			return fmt.Errorf("invalid decision-frontier release transition")
+		}
+		marker = expected
+	}
+	var hold decisionFrontierHoldBinding
+	if err := json.Unmarshal([]byte(marker), &hold); err != nil || hold.SchemaVersion != 1 ||
+		hold.CityRef != receipt.CityRef || hold.StoreRef != receipt.StoreRef || hold.WorkID != receipt.WorkID ||
+		hold.MapID != receipt.MapID || hold.WorkDigest == "" || hold.ProposalHash == "" ||
+		hold.ReservationID == "" {
+		return fmt.Errorf("decision-frontier marker does not match transition receipt")
+	}
+	from, err := strconv.ParseInt(hold.WorkRevision, 10, 64)
+	if err != nil || from == 0 || strconv.FormatInt(from, 10) != hold.WorkRevision {
+		return fmt.Errorf("decision-frontier marker has invalid base revision")
+	}
+	if receipt.Operation == "reserve" {
+		if receipt.ID != hold.ReservationID || from != receipt.FromRevision {
+			return fmt.Errorf("decision-frontier reservation identity does not match marker")
+		}
+		return nil
+	}
+	if receipt.ID == hold.ReservationID {
+		return fmt.Errorf("decision-frontier release identity does not match marker")
+	}
+	var receipts []RevisionTransitionReceipt
+	if raw := current.Metadata[beadmeta.DecisionFrontierRevisionReceiptsMetadataKey]; strings.TrimSpace(raw) != "" {
+		if err := json.Unmarshal([]byte(raw), &receipts); err != nil {
+			return fmt.Errorf("decode decision-frontier reservation receipt: %w", err)
+		}
+	}
+	for _, prior := range receipts {
+		if prior.ID == hold.ReservationID && prior.CityRef == hold.CityRef && prior.StoreRef == hold.StoreRef &&
+			prior.WorkID == hold.WorkID && prior.MapID == hold.MapID && prior.Operation == "reserve" &&
+			prior.FromRevision == from && prior.ToRevision == receipt.FromRevision {
+			return nil
+		}
+	}
+	return fmt.Errorf("decision-frontier release has no matching reservation receipt")
+}
+
+// RevisionTransitionWriterHandleProvider exposes this capability only when a
+// wrapper can preserve the backend's atomic receipt contract.
+type RevisionTransitionWriterHandleProvider interface {
+	RevisionTransitionWriterHandle() (RevisionTransitionWriter, bool)
+}
+
+// RevisionTransitionWriterFor returns a capability only for direct supported
+// stores or wrappers that explicitly expose an atomic revision-receipt handle.
+// Embedding a capable store is not enough: wrappers such as FileStore and
+// CachingStore must implement their own persistence/refresh semantics first.
+func RevisionTransitionWriterFor(store Store) (RevisionTransitionWriter, bool) {
+	if store == nil {
+		return nil, false
+	}
+	if provider, ok := store.(RevisionTransitionWriterHandleProvider); ok {
+		return provider.RevisionTransitionWriterHandle()
+	}
+	switch store.(type) {
+	case *MemStore, *SQLiteStore:
+		writer, ok := store.(RevisionTransitionWriter)
+		return writer, ok
+	default:
+		return nil, false
+	}
 }
 
 // ConditionalAssignmentReleaser is implemented by stores that can release an
@@ -815,7 +1217,7 @@ func IsReadyCandidateForTier(b Bead, now time.Time, tier TierMode) bool {
 // IsReadyExcludedBead reports whether a bead is infrastructure rather than
 // actionable Ready work.
 func IsReadyExcludedBead(b Bead) bool {
-	return IsReadyExcludedType(b.Type) || HasReadyExcludedLabel(b)
+	return IsReadyExcludedType(b.Type) || HasReadyExcludedLabel(b) || HasDecisionFrontierHold(b)
 }
 
 // HasReadyExcludedLabel reports whether a bead carries a label that marks it

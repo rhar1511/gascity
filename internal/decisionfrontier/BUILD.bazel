@@ -1,0 +1,39 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "decisionfrontier",
+    srcs = ["frontier.go"],
+    importpath = "github.com/gastownhall/gascity/internal/decisionfrontier",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/beadmeta",
+        "//internal/beads",
+    ],
+)
+
+go_test(
+    name = "decisionfrontier_test",
+    srcs = [
+        "frontier_test.go",
+        "testenv_import_test.go",
+        "transition_test.go",
+    ],
+    embed = [":decisionfrontier"],
+    deps = [
+        "//internal/beadmeta",
+        "//internal/beads",
+        "//internal/testenv",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

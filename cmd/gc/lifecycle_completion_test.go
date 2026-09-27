@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
@@ -13,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/decisionfrontier"
 	"github.com/gastownhall/gascity/internal/worklifecycle"
 )
 
@@ -125,6 +127,171 @@ func TestLifecycleCompletionRefusesUnsupportedOrStaleClose(t *testing.T) {
 		if after.Status == "closed" {
 			t.Fatalf("unsupported/stale close succeeded (stale=%v)", stale)
 		}
+	}
+}
+
+func TestDecisionFrontierAnswerAllowsAuthorizedLifecycleCompletionOnSupportedStores(t *testing.T) {
+	for _, tc := range lifecycleCompletionStores(t) {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, row := lifecycleCompletionFixture(t)
+			store, closeStore := tc.open(t, row)
+			defer func() {
+				if err := closeStore(); err != nil {
+					t.Errorf("close lifecycle completion store: %v", err)
+				}
+			}()
+			released := resolveLifecycleDecisionFrontier(t, store, row.ID)
+			if beads.HasDecisionFrontierHold(released) || released.Metadata[beadmeta.DecisionFrontierRevisionReceiptsMetadataKey] == "" {
+				t.Fatalf("frontier hold/receipts after answer: hold=%v receipts=%q",
+					beads.HasDecisionFrontierHold(released), released.Metadata[beadmeta.DecisionFrontierRevisionReceiptsMetadataKey])
+			}
+			if err := store.Close(row.ID); !errors.Is(err, beads.ErrLifecycleCompletionRequired) {
+				t.Fatalf("ordinary close error = %v, want lifecycle authorization guard", err)
+			}
+			if err := reconcileLifecycleCompletion(store, row.ID,
+				worklifecycle.ScopeForStore("pilot", "city:pilot"), cfg.Lifecycle); err != nil {
+				t.Fatalf("authorized lifecycle completion after answer: %v", err)
+			}
+			closed, err := store.Get(row.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if closed.Status != "closed" || beads.HasDecisionFrontierHold(closed) ||
+				closed.Metadata[beadmeta.DecisionFrontierRevisionReceiptsMetadataKey] == "" {
+				t.Fatalf("completed source lost expected state or receipts: status=%q metadata=%v", closed.Status, closed.Metadata)
+			}
+		})
+	}
+}
+
+func TestDecisionFrontierReleasePreservesUnrelatedHoldDuringLifecycleCompletion(t *testing.T) {
+	for _, tc := range lifecycleCompletionStores(t) {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, row := lifecycleCompletionFixture(t)
+			row.Labels = append(row.Labels, beadmeta.HoldExternalLabel)
+			store, closeStore := tc.open(t, row)
+			defer func() {
+				if err := closeStore(); err != nil {
+					t.Errorf("close lifecycle completion store: %v", err)
+				}
+			}()
+			released := resolveLifecycleDecisionFrontier(t, store, row.ID)
+			if beads.HasDecisionFrontierHold(released) || !containsLifecycleLabel(released.Labels, beadmeta.HoldExternalLabel) {
+				t.Fatalf("answer changed frontier/external holds: %v metadata=%v", released.Labels, released.Metadata)
+			}
+			if err := reconcileLifecycleCompletion(store, row.ID,
+				worklifecycle.ScopeForStore("pilot", "city:pilot"), cfg.Lifecycle); err != nil {
+				t.Fatalf("reconcile held completion: %v", err)
+			}
+			after, err := store.Get(row.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if after.Status != "in_progress" || !containsLifecycleLabel(after.Labels, beadmeta.HoldExternalLabel) {
+				t.Fatalf("unrelated hold did not keep source open: status=%q labels=%v", after.Status, after.Labels)
+			}
+		})
+	}
+}
+
+func resolveLifecycleDecisionFrontier(t *testing.T, store beads.Store, workID string) beads.Bead {
+	t.Helper()
+	current, err := store.Get(workID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	revision, err := decisionfrontier.WorkRevision(current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := decisionfrontier.Scope{CityRef: "city:pilot", StoreRef: "city:pilot"}
+	service := decisionfrontier.Service{Verifier: lifecycleDecisionAnswerVerifier{}}
+	frontier, err := service.Ensure(context.Background(), store, scope, workID, revision,
+		decisionfrontier.Proposal{Questions: []decisionfrontier.Question{{
+			ID: "complete", Title: "Completion choice", Prompt: "Confirm the completion choice.",
+		}}})
+	if err != nil {
+		t.Fatalf("ensure decision frontier: %v", err)
+	}
+	if len(frontier.OpenQuestions) != 1 {
+		t.Fatalf("open questions = %d, want 1", len(frontier.OpenQuestions))
+	}
+	question := frontier.OpenQuestions[0]
+	resolved, err := service.Answer(context.Background(), store, scope, workID, decisionfrontier.AnswerSubmission{
+		TicketID: question.TicketID, WorkRevision: frontier.WorkRevision, QuestionVersion: question.Version,
+		Resolution: decisionfrontier.ResolutionAnswered, Text: "The accepted work is complete.", Proof: "test-authority-proof",
+	})
+	if err != nil {
+		t.Fatalf("answer decision frontier: %v", err)
+	}
+	if resolved.State != decisionfrontier.StateResolved {
+		t.Fatalf("frontier state = %q, want resolved", resolved.State)
+	}
+	released, err := store.Get(workID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return released
+}
+
+type lifecycleDecisionAnswerVerifier struct{}
+
+func (lifecycleDecisionAnswerVerifier) VerifyDecisionAnswer(_ context.Context, challenge decisionfrontier.AnswerChallenge,
+	submission decisionfrontier.AnswerSubmission,
+) (decisionfrontier.VerifiedAnswer, error) {
+	if submission.Proof != "test-authority-proof" {
+		return decisionfrontier.VerifiedAnswer{}, errors.New("untrusted test proof")
+	}
+	return decisionfrontier.VerifiedAnswer{
+		CityRef: challenge.CityRef, StoreRef: challenge.StoreRef, KeyID: "human-key", Issuer: "human-authority",
+		Subject: "authorized-human", WorkID: challenge.WorkID, WorkRevision: challenge.WorkRevision,
+		WorkDigest: challenge.WorkDigest, MapID: challenge.MapID, TicketID: challenge.TicketID,
+		QuestionVersion: challenge.QuestionVersion, AnswerDigest: challenge.AnswerDigest, Resolution: challenge.Resolution,
+	}, nil
+}
+
+type lifecycleCompletionStore struct {
+	name string
+	open func(*testing.T, beads.Bead) (beads.Store, func() error)
+}
+
+func lifecycleCompletionStores(t *testing.T) []lifecycleCompletionStore {
+	t.Helper()
+	memFixture := lifecycleCompletionStore{name: "mem", open: func(t *testing.T, row beads.Bead) (beads.Store, func() error) {
+		t.Helper()
+		mem := &beads.MemStore{IDPrefix: "work", HonorExplicitIDs: true}
+		seedLifecycleCompletionStore(t, mem, row)
+		return mem, func() error { return nil }
+	}}
+	sqliteFixture := lifecycleCompletionStore{name: "sqlite", open: func(t *testing.T, row beads.Bead) (beads.Store, func() error) {
+		t.Helper()
+		opened, err := beads.OpenSQLiteStore(t.TempDir())
+		if err != nil {
+			t.Fatalf("OpenSQLiteStore: %v", err)
+		}
+		sqlite := opened.(*beads.SQLiteStore)
+		seedLifecycleCompletionStore(t, sqlite, row)
+		return sqlite, sqlite.CloseStore
+	}}
+	return []lifecycleCompletionStore{memFixture, sqliteFixture}
+}
+
+func containsLifecycleLabel(labels []string, want string) bool {
+	for _, label := range labels {
+		if label == want {
+			return true
+		}
+	}
+	return false
+}
+
+func seedLifecycleCompletionStore(t *testing.T, store beads.Store, row beads.Bead) {
+	t.Helper()
+	if _, err := store.Create(row); err != nil {
+		t.Fatalf("create lifecycle source: %v", err)
+	}
+	if err := store.Update(row.ID, beads.UpdateOpts{Status: &row.Status}); err != nil {
+		t.Fatalf("set lifecycle source status: %v", err)
 	}
 }
 
