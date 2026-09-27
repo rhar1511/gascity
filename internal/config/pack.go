@@ -2014,13 +2014,16 @@ func cachedPackDoctors(cache *packLoadCache, topoDir string) []DiscoveredDoctor 
 }
 
 // isOSFileSystem reports whether fs is the real operating-system
-// filesystem. Bundled builtin pack content only exists there (embedded in
-// the binary, served via the user-global cache), so non-OS loads skip
-// bundled imports.
+// filesystem, including the loader's read-capture wrapper. Bundled builtin
+// imports and host path-durability checks apply only to OS-backed loads.
 func isOSFileSystem(fs fsys.FS) bool {
-	switch fs.(type) {
+	switch typed := fs.(type) {
 	case fsys.OSFS, *fsys.OSFS:
 		return true
+	case qualificationCaptureFS:
+		return isOSFileSystem(typed.fs)
+	case *qualificationCaptureFS:
+		return typed != nil && isOSFileSystem(typed.fs)
 	default:
 		return false
 	}
