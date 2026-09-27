@@ -5373,7 +5373,10 @@ while True:
 		cityPath: cityPath,
 		cityName: "bright-lights",
 		cfg: &config.City{
-			Daemon: config.DaemonConfig{ShutdownTimeout: "20ms"},
+			// Forced city shutdown gets five times this grace period. Keep it
+			// above the proxy process's 2s process-group stop wait so this test
+			// observes completed service cleanup before that bounded wait expires.
+			Daemon: config.DaemonConfig{ShutdownTimeout: "500ms"},
 			Services: []config.Service{{
 				Name: "bridge",
 				Kind: "proxy_process",
