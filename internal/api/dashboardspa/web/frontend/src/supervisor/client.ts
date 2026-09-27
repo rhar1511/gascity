@@ -16,6 +16,7 @@ import {
   getV0CityByCityNameRigs,
   getV0CityByCityNameRunsCensus,
   getV0CityByCityNamePrActionsQueue,
+  getV0CityByCityNameBeadByIdAttemptEvidenceByAttemptId,
   getV0CityByCityNameSessionByIdPending,
   getV0CityByCityNameSessionByIdRequestsByRequestId,
   getV0CityByCityNameSessionByIdTranscript,
@@ -39,6 +40,7 @@ import type {
   Bead,
   BeadCreateInputBody,
   BeadUpdateBody,
+  AttemptEvidenceRead,
   Evidence,
   FormulaFeedBody,
   GetV0CityByCityNameBeadsData,
@@ -183,6 +185,12 @@ export interface SupervisorApi {
   ): Promise<SessionTranscriptGetResponse>;
   prActionQueue(cityName: string, signal?: AbortSignal): Promise<PrActionQueue>;
   listAttemptEvidence(cityName: string, workID: string, signal?: AbortSignal): Promise<Evidence[]>;
+  getAttemptEvidence(
+    cityName: string,
+    workID: string,
+    attemptID: string,
+    signal?: AbortSignal,
+  ): Promise<AttemptEvidenceRead>;
   executePRAction(
     cityName: string,
     body: WorkbenchPRActionBody,
@@ -575,6 +583,16 @@ export function createSupervisorApi(options: CreateSupervisorApiOptions = {}): S
         throw new SupervisorApiError(undefined, 'gc supervisor attempt-evidence list was malformed', undefined);
       }
       return rows;
+    },
+    getAttemptEvidence(cityName, workID, attemptID, signal) {
+      return unwrapSupervisorResult<AttemptEvidenceRead>(
+        getV0CityByCityNameBeadByIdAttemptEvidenceByAttemptId({
+          client,
+          path: { cityName, id: workID, attemptID },
+          ...(signal === undefined ? {} : { signal }),
+        }) as Promise<SupervisorResult<AttemptEvidenceRead>>,
+        'gc supervisor exact attempt-evidence response was empty',
+      );
     },
     executePRAction(cityName, body, idempotencyKey) {
       if ((body as PrActionExecuteBody).action === 'merge') {

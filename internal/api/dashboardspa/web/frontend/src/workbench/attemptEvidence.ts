@@ -1,4 +1,9 @@
-import type { DiffSnapshot, Evidence } from 'gas-city-dashboard-shared/gc-supervisor';
+import type {
+  AttemptEvidenceRead,
+  DiffSnapshot,
+  Evidence,
+  RequestReceipt,
+} from 'gas-city-dashboard-shared/gc-supervisor';
 import type { ExecutionAttempt } from '../lib/workbenchAttempts';
 
 const MAX_ARCHIVED_DIFF_BYTES = 16 * 1024 * 1024;
@@ -27,6 +32,107 @@ export function matchingWorkbenchEvidence(
       evidence.identity.session_id === attempt.sessionId &&
       evidence.identity.session_generation === exactGeneration,
   );
+}
+
+/**
+ * Require the exact read to match both the selected immutable list row and
+ * the Workbench session incarnation before displaying its later records.
+ */
+export function exactWorkbenchEvidenceMatches(
+  read: AttemptEvidenceRead,
+  listed: Evidence,
+  workID: string,
+  attempt: Pick<ExecutionAttempt, 'sessionId' | 'executionGeneration'>,
+): boolean {
+  const generation = attempt.executionGeneration;
+  if (
+    generation === null ||
+    !Number.isSafeInteger(generation) ||
+    generation <= 0 ||
+    workID.trim() === '' ||
+    attempt.sessionId.trim() === ''
+  ) {
+    return false;
+  }
+  const selectedIdentity = listed.identity;
+  const readIdentity = read.identity;
+  return (
+    read.attempt_id === listed.attempt_id &&
+    read.attempt_id.trim() !== '' &&
+    readIdentity.kind === 'workbench' &&
+    readIdentity.kind === selectedIdentity.kind &&
+    readIdentity.owner_bead_id === workID &&
+    readIdentity.owner_bead_id === selectedIdentity.owner_bead_id &&
+    readIdentity.execution_bead_id === selectedIdentity.execution_bead_id &&
+    readIdentity.session_id === attempt.sessionId &&
+    readIdentity.session_id === selectedIdentity.session_id &&
+    readIdentity.session_generation === String(generation) &&
+    readIdentity.session_generation === selectedIdentity.session_generation &&
+    readIdentity.claim_generation === selectedIdentity.claim_generation &&
+    read.store_ref === listed.store_ref &&
+    read.permission_scope.work_id === workID &&
+    read.permission_scope.store_ref === read.store_ref &&
+    read.base_sha === listed.base_sha &&
+    read.candidate_sha === listed.candidate_sha &&
+    read.diff.sha256 === listed.diff.sha256 &&
+    read.diff.source === listed.diff.source &&
+    read.working_tree_status === listed.working_tree_status
+  );
+}
+
+/**
+ * Return true only when a request receipt carries the same immutable execution
+ * binding as the selected archive. The server performs the authoritative join;
+ * this check keeps a malformed or mismatched response from being displayed as
+ * an acknowledgement for the selected attempt.
+ */
+export function exactRequestReceiptMatchesWorkbenchEvidence(
+  receipt: RequestReceipt,
+  evidence: Evidence,
+): boolean {
+  const binding = receipt.attempt;
+  if (!binding || !isCanonicalPositiveDecimal(binding.work_revision)) return false;
+
+  const archived = evidence.identity;
+  const bound = binding.identity;
+  const generation = archived.session_generation;
+  const claimGeneration = archived.claim_generation;
+  if (
+    archived.kind !== 'workbench' ||
+    archived.owner_bead_id.trim() === '' ||
+    archived.execution_bead_id.trim() === '' ||
+    archived.session_id?.trim() === '' ||
+    generation === undefined ||
+    !isCanonicalPositiveDecimal(generation) ||
+    claimGeneration === undefined ||
+    claimGeneration.trim() === '' ||
+    !Number.isSafeInteger(receipt.generation) ||
+    receipt.generation <= 0 ||
+    String(receipt.generation) !== generation
+  ) {
+    return false;
+  }
+
+  return (
+    receipt.request_id.trim() !== '' &&
+    receipt.session_id === archived.session_id &&
+    binding.attempt_id === evidence.attempt_id &&
+    binding.store_ref === evidence.store_ref &&
+    binding.store_ref === evidence.permission_scope.store_ref &&
+    bound.kind === archived.kind &&
+    bound.owner_bead_id === archived.owner_bead_id &&
+    bound.owner_bead_id === evidence.permission_scope.work_id &&
+    bound.execution_bead_id === archived.execution_bead_id &&
+    bound.session_id === archived.session_id &&
+    bound.session_generation === archived.session_generation &&
+    bound.claim_generation === archived.claim_generation
+  );
+}
+
+function isCanonicalPositiveDecimal(value: string): boolean {
+  if (!/^[1-9][0-9]*$/.test(value)) return false;
+  const maxInt64 = '9223372036854775807';
+  return value.length < maxInt64.length || (value.length === maxInt64.length && value <= maxInt64);
 }
 
 /**

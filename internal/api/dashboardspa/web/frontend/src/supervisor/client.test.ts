@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { RequestReceipt } from 'gas-city-dashboard-shared/gc-supervisor';
 import {
   GC_MUTATION_HEADERS,
   SUPERVISOR_PROXY_BASE_URL,
@@ -1443,6 +1444,61 @@ describe('supervisor client wrapper', () => {
     );
   });
 
+  it('reads one exact immutable attempt with its separately fetched related records', async () => {
+    const receipt: RequestReceipt = {
+      accepted_at: '2026-01-03T01:00:00Z',
+      acknowledged_at: '2026-01-03T01:00:04Z',
+      attempt: {
+        attempt_id: 'ae-exact',
+        identity: {
+          kind: 'workbench',
+          owner_bead_id: 'work-1',
+          execution_bead_id: 'attempt-row-1',
+          session_id: 'session-1',
+          session_generation: '7',
+          claim_generation: 'claim-7',
+        },
+        store_ref: 'rig:pilot',
+        work_revision: '12',
+      },
+      delivery: 'accepted',
+      delivery_attempted_at: '2026-01-03T01:00:01Z',
+      effect: 'unverified',
+      generation: 7,
+      message_digest: 'sha256:request',
+      provider_result_at: '2026-01-03T01:00:02Z',
+      request_id: 'request-exact',
+      session_id: 'session-1',
+    };
+    const read = {
+      attempt_id: 'ae-exact',
+      identity: {
+        kind: 'workbench',
+        owner_bead_id: 'work-1',
+        execution_bead_id: 'attempt-row-1',
+        session_id: 'session-1',
+        session_generation: '7',
+        claim_generation: 'claim-7',
+      },
+      related_records: {
+        actions: { status: 'missing', reason: 'no_attributed_pr_action_records', records: [] },
+        acknowledgements: { status: 'available', records: [receipt], unattributed_requests: 1 },
+      },
+    };
+    const fetchSpy = vi.fn(async (_input: RequestInfo | URL) => jsonResponse(read));
+    const api = createSupervisorApi({
+      baseUrl: 'http://gc-supervisor.test',
+      fetch: fetchSpy as typeof fetch,
+    });
+
+    await expect(api.getAttemptEvidence('test-city', 'work-1', 'ae-exact')).resolves.toMatchObject(
+      read,
+    );
+    expect(requestedUrl(fetchSpy.mock.calls[0]?.[0])).toBe(
+      'http://gc-supervisor.test/v0/city/test-city/bead/work-1/attempt-evidence/ae-exact',
+    );
+  });
+
   it('supports test injection without importing the dashboard api client', async () => {
     const fake = {
       baseUrl: 'test://supervisor',
@@ -1478,6 +1534,7 @@ describe('supervisor client wrapper', () => {
       sessionTranscript: vi.fn(),
       prActionQueue: vi.fn(),
       listAttemptEvidence: vi.fn(),
+      getAttemptEvidence: vi.fn(),
       executePRAction: vi.fn(),
       submitSessionRequest: vi.fn(),
       getSessionRequest: vi.fn(),
