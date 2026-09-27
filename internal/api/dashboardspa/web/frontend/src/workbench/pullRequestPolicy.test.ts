@@ -14,11 +14,12 @@ const attempt: ExecutionAttempt = {
 };
 
 function ctx(over: Partial<PullRequestContext> = {}): PullRequestContext {
+  const revision = 'a'.repeat(40);
   return {
     bead: { id: 'gascity-1' } as SupervisorBead,
     attempt,
-    attemptRevision: 'abc123',
-    policyRevision: 'abc123',
+    attemptRevision: revision,
+    policyRevision: revision,
     queueAvailable: true,
     policyRejected: false,
     hasConflict: false,
@@ -54,7 +55,36 @@ describe('pullRequestPolicy', () => {
   });
 
   it('blocks on a stale revision', () => {
-    expect(pullRequestPolicy(ctx({ policyRevision: 'def456' })).blocked).toBe('stale_revision');
+    expect(pullRequestPolicy(ctx({ policyRevision: 'b'.repeat(40) })).blocked).toBe(
+      'stale_revision',
+    );
+  });
+
+  it('does not treat a mutable branch name as an exact attempt revision', () => {
+    expect(
+      pullRequestPolicy(ctx({ attemptRevision: 'feature/workbench', policyRevision: 'feature/workbench' }))
+        .blocked,
+    ).toBe('missing_revision');
+  });
+
+  it('does not accept a branch-name policy verdict', () => {
+    expect(pullRequestPolicy(ctx({ policyRevision: 'feature/workbench' })).blocked).toBe(
+      'missing_policy_revision',
+    );
+  });
+
+  it('does not fall back to a mutable work branch when attempt commit is absent', () => {
+    expect(
+      pullRequestPolicy(
+        ctx({
+          bead: {
+            id: 'gascity-1',
+            metadata: { 'gc.work_branch': 'feature/workbench' },
+          } as unknown as SupervisorBead,
+          attemptRevision: null,
+        }),
+      ).blocked,
+    ).toBe('missing_revision');
   });
 
   it('blocks when the attempt revision is missing, even if the queue reports available', () => {

@@ -29,7 +29,7 @@ export interface PullRequestPolicy {
 export interface PullRequestContext {
   bead: SupervisorBead;
   attempt: ExecutionAttempt | null;
-  /** The revision the attempt currently points at (branch/commit). */
+  /** Immutable commit produced by the attempt. Mutable branch names are not sufficient. */
   attemptRevision: string | null;
   /** The revision Gas City policy would evaluate for the queued PR. */
   policyRevision: string | null;
@@ -43,7 +43,11 @@ export interface PullRequestContext {
 
 function revisionOf(bead: SupervisorBead): string {
   const metadata = (bead as { metadata?: Record<string, string> }).metadata ?? {};
-  return (metadata['gc.work_branch'] ?? metadata['gc.work_commit'] ?? '').trim();
+  return (metadata['gc.work_commit'] ?? '').trim();
+}
+
+function isCommitRevision(value: string): boolean {
+  return /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(value);
 }
 
 /**
@@ -60,8 +64,9 @@ export function pullRequestPolicy(ctx: PullRequestContext): PullRequestPolicy {
 
   const attemptRevision = (ctx.attemptRevision ?? revisionOf(ctx.bead)).trim();
   const policyRevision = (ctx.policyRevision ?? '').trim();
-  if (attemptRevision.length === 0) return { allowed: [], blocked: 'missing_revision' };
-  if (policyRevision.length === 0) return { allowed: [], blocked: 'missing_policy_revision' };
+  if (!isCommitRevision(attemptRevision)) return { allowed: [], blocked: 'missing_revision' };
+  if (!isCommitRevision(policyRevision))
+    return { allowed: [], blocked: 'missing_policy_revision' };
   // The queued PR must target the exact revision the attempt produced.
   if (policyRevision !== attemptRevision) {
     return { allowed: [], blocked: 'stale_revision' };
