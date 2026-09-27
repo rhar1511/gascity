@@ -231,6 +231,7 @@
               "reference/config",
               "reference/trust-boundaries",
               "reference/api",
+              "reference/session-request-receipts",
               "reference/events",
               "reference/schema/index",
               "reference/system-packs",

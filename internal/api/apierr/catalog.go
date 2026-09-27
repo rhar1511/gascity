@@ -36,6 +36,8 @@ var (
 	PatchNotFound   = Register(ProblemType{Code: "patch-not-found", Status: http.StatusNotFound, Title: "Patch Not Found"})
 	PackNotFound    = Register(ProblemType{Code: "pack-not-found", Status: http.StatusNotFound, Title: "Pack Not Found"})
 
+	SessionRequestNotFound = Register(ProblemType{Code: "session-request-not-found", Status: http.StatusNotFound, Title: "Session Request Not Found"})
+
 	// Request validation.
 	InvalidRequest   = Register(ProblemType{Code: "invalid-request", Status: http.StatusBadRequest, Title: "Invalid Request"})
 	ValidationFailed = Register(ProblemType{Code: "validation-failed", Status: http.StatusUnprocessableEntity, Title: "Validation Failed"})

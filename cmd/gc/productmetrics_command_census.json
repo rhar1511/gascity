@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "next_id": 211,
+  "next_id": 214,
   "permanent_ids": [
     {
       "name": "help",
@@ -3826,6 +3826,67 @@
       "classification": "session-rename",
       "owner": "immediate",
       "id": 150
+    },
+    {
+      "path": "gc session request",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "structural",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "help",
+      "canonical_target": "@help",
+      "owner": "structural",
+      "id": 1
+    },
+    {
+      "path": "gc session request ack",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "session-request-ack",
+      "owner": "immediate",
+      "id": 211
+    },
+    {
+      "path": "gc session request get",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "session-request-get",
+      "owner": "immediate",
+      "id": 212
+    },
+    {
+      "path": "gc session request submit",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "session-request-submit",
+      "owner": "immediate",
+      "id": 213
     },
     {
       "path": "gc session reset",
