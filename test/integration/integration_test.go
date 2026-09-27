@@ -199,7 +199,7 @@ func TestMain(m *testing.M) {
 	testsStarted := false
 	cleanupLegacy := func() error {
 		if testsStarted {
-			stopIntegrationSupervisorWithTimeout(integrationSupervisorStopTimeout)
+			_ = stopIntegrationSupervisorWithTimeout(integrationSupervisorStopTimeout)
 			if !subprocess {
 				tmuxtest.KillAllTestSessions(&mainTB{})
 			}
@@ -222,21 +222,24 @@ func TestMain(m *testing.M) {
 		if tmpDir != "" {
 			gcHome = filepath.Join(tmpDir, "gc-home")
 		}
-		return cleanupOwnedIntegrationRun(runParent, tmpDir, gcHome, func() {
+		return cleanupOwnedIntegrationRun(runParent, tmpDir, gcHome, func() error {
 			if testsStarted {
-				stopIntegrationSupervisorWithTimeout(integrationSupervisorStopTimeout)
+				return stopIntegrationSupervisorWithTimeout(integrationSupervisorStopTimeout)
 			}
+			return nil
 		})
 	}
-	finish := func() {
+	finish := func() error {
 		if err := runisolation.Finish(runMode, cleanupLegacy, cleanupOwned); err != nil {
 			fmt.Fprintf(os.Stderr, "integration cleanup: %v\n", err)
+			return err
 		}
+		return nil
 	}
 	finished := false
 	defer func() {
 		if !finished {
-			finish()
+			_ = finish()
 		}
 	}()
 
@@ -308,7 +311,7 @@ func TestMain(m *testing.M) {
 		panic("integration startup: " + startupErr.Error())
 	}
 	if skipForMissingTmux {
-		finish()
+		_ = finish()
 		finished = true
 		os.Exit(0)
 	}
@@ -410,8 +413,11 @@ func TestMain(m *testing.M) {
 	// Run tests.
 	testsStarted = true
 	code := m.Run()
-	finish()
+	cleanupErr := finish()
 	finished = true
+	if runMode == runisolation.Owned && cleanupErr != nil && code == 0 {
+		code = 1
+	}
 	os.Exit(code)
 }
 
@@ -449,7 +455,7 @@ func installIntegrationSignalSweeper(mode runisolation.Mode, subprocess bool) fu
 }
 
 func sweepIntegrationProcesses(subprocess bool) {
-	stopIntegrationSupervisorWithTimeout(integrationSupervisorStopTimeout)
+	_ = stopIntegrationSupervisorWithTimeout(integrationSupervisorStopTimeout)
 	// Reap dolt orphans under this run's home too — the per-test t.Cleanup that
 	// normally does this is bypassed on a signal (issue #3640).
 	if testGCHome != "" {
@@ -462,100 +468,14 @@ func sweepIntegrationProcesses(subprocess bool) {
 }
 
 // cleanupOwnedIntegrationRun removes only this TestMain run's private root.
-// Any preservation marker, unreadable process snapshot, or process that still
-// references the root leaves the full root in place for review.
-func cleanupOwnedIntegrationRun(runParent, tmpDir, gcHome string, stopSupervisor func()) error {
-	if runParent == "" {
-		return nil
-	}
-	parent, err := filepath.Abs(runParent)
-	if err != nil {
-		return fmt.Errorf("preserving private integration run root %s: resolve path: %w", runParent, err)
-	}
-	info, err := os.Lstat(parent)
-	if err != nil {
-		return fmt.Errorf("preserving private integration run root %s: inspect directory: %w", parent, err)
-	}
-	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {
-		return fmt.Errorf("preserving private integration run root because parent is not a private real directory: %s", parent)
-	}
-	parentReal, err := filepath.EvalSymlinks(parent)
-	if err != nil {
-		return fmt.Errorf("preserving private integration run root %s: resolve real path: %w", parent, err)
-	}
-	if marker, err := integrationPreservationPath(parent); err != nil {
-		return fmt.Errorf("preserving private integration run root %s: inspect markers and symlinks: %w", parent, err)
-	} else if marker != "" {
-		fmt.Fprintf(os.Stderr, "integration cleanup: preserving run root %s because marker or symlink exists at %s\n", parent, marker)
-		return nil
-	}
-
-	if stopSupervisor != nil {
-		stopSupervisor()
-	}
-	procs := readProcessSnapshot()
-	if procs == nil {
-		fmt.Fprintf(os.Stderr, "integration cleanup: preserving run root %s because process absence could not be checked\n", parent)
-		return nil
-	}
-	if pids := ownedIntegrationProcesses(procs, parent, gcHome); len(pids) != 0 {
-		fmt.Fprintf(os.Stderr, "integration cleanup: preserving run root %s because fixture processes remain: %v\n", parent, sortedIntegrationPIDs(pids))
-		return nil
-	}
-	if marker, err := integrationPreservationPath(parent); err != nil {
-		return fmt.Errorf("preserving private integration run root %s: recheck markers and symlinks: %w", parent, err)
-	} else if marker != "" {
-		fmt.Fprintf(os.Stderr, "integration cleanup: preserving run root %s because marker or symlink exists at %s\n", parent, marker)
-		return nil
-	}
-
-	if tmpDir != "" {
-		tmpPath, err := filepath.Abs(tmpDir)
-		if err != nil {
-			return fmt.Errorf("preserving private integration run root %s: resolve tool dir %s: %w", parent, tmpDir, err)
+func cleanupOwnedIntegrationRun(runParent, tmpDir, gcHome string, stopSupervisor func() error) error {
+	return runisolation.CleanupOwnedRoot(runParent, tmpDir, gcHome, stopSupervisor, func(root, gcHome string) ([]int, error) {
+		procs := readProcessSnapshot()
+		if procs == nil {
+			return nil, fmt.Errorf("process absence could not be checked")
 		}
-		tmpInfo, err := os.Lstat(tmpPath)
-		if err != nil {
-			return fmt.Errorf("preserving private integration run root %s: inspect tool dir %s: %w", parent, tmpPath, err)
-		}
-		if !tmpInfo.IsDir() || tmpInfo.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("preserving private integration run root %s: tool path is not a real directory: %s", parent, tmpPath)
-		}
-		tmpReal, err := filepath.EvalSymlinks(tmpPath)
-		if err != nil {
-			return fmt.Errorf("preserving private integration run root %s: resolve tool dir %s: %w", parent, tmpPath, err)
-		}
-		rel, err := filepath.Rel(parentReal, tmpReal)
-		if err != nil || rel == "." || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.Dir(rel) != "." {
-			return fmt.Errorf("preserving private integration run root %s: tool dir %s is outside the root", parent, tmpReal)
-		}
-		if err := os.RemoveAll(tmpPath); err != nil {
-			return fmt.Errorf("preserving private integration run root %s: remove tool dir %s: %w", parent, tmpPath, err)
-		}
-	}
-	if err := os.Remove(parent); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("private integration run parent was not empty; preserving %s: %w", parent, err)
-	}
-	return nil
-}
-
-// integrationPreservationPath returns the first marker or symlink beneath the
-// run root; either condition makes recursive cleanup unsafe.
-func integrationPreservationPath(root string) (string, error) {
-	marker := ""
-	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if entry.Name() == integrationPreserveRootMarker || entry.Type()&os.ModeSymlink != 0 {
-			marker = path
-		}
-		return nil
+		return sortedIntegrationPIDs(ownedIntegrationProcesses(procs, root, gcHome)), nil
 	})
-	if os.IsNotExist(err) {
-		return "", nil
-	}
-	return marker, err
 }
 
 func ownedIntegrationProcesses(procs map[int]procSnapshot, runParent, gcHome string) map[int]bool {
@@ -583,9 +503,9 @@ func sortedIntegrationPIDs(pids map[int]bool) []int {
 	return out
 }
 
-func stopIntegrationSupervisorWithTimeout(timeout time.Duration) {
+func stopIntegrationSupervisorWithTimeout(timeout time.Duration) error {
 	if gcBinary == "" {
-		return
+		return fmt.Errorf("gc binary is unavailable for supervisor stop")
 	}
 	if timeout <= 0 {
 		timeout = integrationSupervisorStopTimeout
@@ -596,12 +516,14 @@ func stopIntegrationSupervisorWithTimeout(timeout time.Duration) {
 	stopCmd.Env = integrationEnv()
 	out, err := stopCmd.CombinedOutput()
 	if ctx.Err() == context.DeadlineExceeded {
-		fmt.Fprintf(os.Stderr, "integration cleanup: supervisor stop timed out after %s; continuing cleanup\n%s", timeout, string(out)) //nolint:errcheck
-		return
+		fmt.Fprintf(os.Stderr, "integration cleanup: supervisor stop timed out after %s\n%s", timeout, string(out)) //nolint:errcheck
+		return fmt.Errorf("supervisor stop timed out after %s", timeout)
 	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "integration cleanup: supervisor stop failed: %v; continuing cleanup\n%s", err, string(out)) //nolint:errcheck
+		fmt.Fprintf(os.Stderr, "integration cleanup: supervisor stop failed: %v\n%s", err, string(out)) //nolint:errcheck
+		return fmt.Errorf("supervisor stop failed: %w", err)
 	}
+	return nil
 }
 
 func TestIntegrationSupervisorStopHelperProcess(t *testing.T) {
@@ -688,7 +610,9 @@ func TestStopIntegrationSupervisorWithTimeoutReturnsAfterDeadline(t *testing.T) 
 	runIntegrationSupervisorStopCommand = exec.CommandContext
 
 	start := time.Now()
-	stopIntegrationSupervisorWithTimeout(10 * time.Millisecond)
+	if err := stopIntegrationSupervisorWithTimeout(10 * time.Millisecond); err == nil {
+		t.Fatal("stopIntegrationSupervisorWithTimeout() error = nil, want timeout")
+	}
 	if elapsed := time.Since(start); elapsed > time.Second {
 		t.Fatalf("stopIntegrationSupervisorWithTimeout took %s, want bounded return", elapsed)
 	}
@@ -1779,7 +1703,7 @@ func newIsolatedEnvRoot(t *testing.T, useDolt bool) (string, string, []string) {
 		t.Fatalf("creating isolated env root: %v", err)
 	}
 	t.Cleanup(func() {
-		preserveMarker := filepath.Join(root, integrationPreserveRootMarker)
+		preserveMarker := filepath.Join(root, runisolation.PreserveMarkerName)
 		if _, err := os.Lstat(preserveMarker); err == nil {
 			t.Logf("preserving isolated integration environment root at %s", root)
 			return
@@ -1814,8 +1738,6 @@ func newIsolatedEnvRoot(t *testing.T, useDolt bool) (string, string, []string) {
 	env := integrationEnvFor(gcHome, runtimeDir, useDolt)
 	return gcHome, runtimeDir, env
 }
-
-const integrationPreserveRootMarker = ".gc-integration-preserve"
 
 func seedDoltIdentityForRoot(gcHome string) error {
 	switch mode := doltIdentityMode(); mode {

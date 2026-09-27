@@ -2,7 +2,10 @@ load("@rules_go//go:def.bazel", "go_library", "go_test")
 
 go_library(
     name = "runisolation",
-    srcs = ["runisolation.go"],
+    srcs = [
+        "cleanup.go",
+        "runisolation.go",
+    ],
     importpath = "github.com/gastownhall/gascity/test/integration/runisolation",
     visibility = ["//test/integration:__pkg__"],
 )

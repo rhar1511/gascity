@@ -27,6 +27,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/proxyendpoint"
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/test/integration/runisolation"
 	"github.com/gastownhall/gascity/test/tmuxtest"
 	"gopkg.in/yaml.v3"
 )
@@ -384,7 +385,7 @@ func setupGraphWorkflowCityWithOptions(t *testing.T, mode string, privateEvidenc
 		if !filepath.IsAbs(gcRoot) || !graphPathWithin(gcRoot, gcHome) {
 			return errors.New("isolated GC_HOME is not contained by its fixture root")
 		}
-		marker := filepath.Join(gcRoot, integrationPreserveRootMarker)
+		marker := filepath.Join(gcRoot, runisolation.PreserveMarkerName)
 		return os.WriteFile(marker, []byte("graph fixture process shutdown was not proved\n"), 0o600)
 	}
 	registerCityCommandEnv(cityDir, env)
