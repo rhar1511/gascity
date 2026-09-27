@@ -233,6 +233,9 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 	}
 
 	opts := dispatch.ProcessOptions{CityPath: cityPath, StorePath: storePath}
+	graphStoreRef := graphMaterializationStoreRef(cityPath, storePath, cfg, store, graphStore)
+	opts.FormulaActionGate = controllerFormulaActionGate(cityPath, cfg, graphStoreRef)
+	opts.RequireFormulaActionGate = true
 	opts.Tracef = workflowTracef
 	loadCfg := false
 	// This is a per-kind capability switch (does this control kind need city

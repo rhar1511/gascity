@@ -453,8 +453,9 @@ type City struct {
 	// flattened for legacy callers. Runtime-only.
 	CityPricing []pricing.ModelPricing `toml:"-" json:"-"`
 
-	qualificationInputs   qualification.InputClosure `toml:"-" json:"-"`
-	qualificationSnapshot *qualification.Snapshot    `toml:"-" json:"-"`
+	qualificationInputs       qualification.InputClosure `toml:"-" json:"-"`
+	qualificationSnapshot     *qualification.Snapshot    `toml:"-" json:"-"`
+	packCompatibilityBindings []PackCompatibilityBinding `toml:"-" json:"-"`
 }
 
 // NamedSession defines a canonical persistent session backed by an agent
@@ -863,7 +864,11 @@ type PackMeta struct {
 	Version string `toml:"version"`
 	// Schema is the pack format version (currently 1).
 	Schema int `toml:"schema" jsonschema:"required"`
-	// RequiresGC is an optional minimum gc version requirement.
+	// RequiresGC is an optional semver constraint on the minimum compatible
+	// gc controller version. A non-empty value activates the controller's
+	// generic compatibility gate for formulas loaded from this pack; it does
+	// not declare capabilities or authorize actions. Trusted release policy
+	// supplies the required capability set separately.
 	RequiresGC string `toml:"requires_gc,omitempty"`
 	// Description is an optional human-readable summary of the pack.
 	Description string `toml:"description,omitempty"`

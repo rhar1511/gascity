@@ -143,6 +143,16 @@ type SlingDeps struct {
 	// store). When nil, graph beads collapse onto Store — the single-store
 	// default — so a single-store caller behaves exactly as before the seam.
 	GraphStore beads.Store
+	// GraphStoreRef names the exact graph store that owns formula molecules.
+	// Empty remains unavailable to required compatibility actions.
+	GraphStoreRef string
+	// FormulaActionGate authorizes required formula compatibility before any
+	// molecule writes and revalidates the same decision immediately before the
+	// store operation.
+	FormulaActionGate molecule.FormulaActionGate
+	// RequireFormulaActionGate makes a missing gate fail closed at this
+	// production materialization boundary.
+	RequireFormulaActionGate bool
 	// LifecycleRecipeMetadata is set only by the controller's signed lifecycle
 	// admission path. It is copied onto every graph.v2 recipe bead before the
 	// graph is materialized, so descendants are held while admission is still
@@ -1392,11 +1402,20 @@ func InstantiateCompiledSlingFormula(ctx context.Context, recipe *formula.Recipe
 // atomic across processes.
 func materializeCompiledSlingFormula(ctx context.Context, recipe *formula.Recipe, formulaName string, opts molecule.Options, sourceBeadID, scopeKind, scopeRef string, graphWorkflow bool, a config.Agent, deps SlingDeps, forceGraphV2Replace ...bool) (*molecule.Result, error) {
 	graphStore := deps.graphStore()
+	if deps.RequireFormulaActionGate || deps.FormulaActionGate != nil {
+		opts.ActionGate = deps.FormulaActionGate
+		opts.RequireActionGate = deps.RequireFormulaActionGate
+	}
 	if err := graphroute.ApplyGraphRouting(recipe, &a, agentutil.RoutedToIdentity(&a), opts.Vars, sourceBeadID, scopeKind, scopeRef, deps.StoreRef, graphStore, deps.CityName, deps.Cfg, deps.graphrouteDeps()); err != nil {
 		SlingTracef("instantiate decorate-error formula=%s err=%v", formulaName, err)
 		return nil, err
 	}
 	privatizeAttachedRootOnlyWisp(recipe, sourceBeadID)
+	var err error
+	recipe, opts, err = molecule.PrepareFormulaAction(ctx, graphStore, recipe, opts)
+	if err != nil {
+		return nil, err
+	}
 	var replacedRootID string
 	if graphWorkflow {
 		if err := closeFailedGraphV2Roots(graphStore, recipe); err != nil {

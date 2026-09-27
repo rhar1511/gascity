@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -12,6 +13,9 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/orderdispatch"
 	"github.com/gastownhall/gascity/internal/orders"
 )
@@ -91,6 +95,116 @@ func onlyTrackingBead(t *testing.T, store beads.Store) beads.Bead {
 		t.Fatalf("order-tracking beads = %+v, want exactly one", found)
 	}
 	return found[0]
+}
+
+func newRequiredOrderCompatibilityFixture(t *testing.T, formulaText string) (string, *config.City, orders.Order) {
+	t.Helper()
+	cityPath := t.TempDir()
+	write := func(path, content string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(filepath.Join(cityPath, "city.toml"), "[workspace]\nname = \"test-city\"\n")
+	write(filepath.Join(cityPath, "pack.toml"), "[pack]\nname = \"city-root\"\nschema = 2\nincludes = [\"packs/required\"]\n")
+	write(filepath.Join(cityPath, "packs", "required", "pack.toml"), "[pack]\nname = \"required-pack\"\nschema = 2\nrequires_gc = \">=0.14.0\"\n")
+	formulaDir := filepath.Join(cityPath, "packs", "required", "formulas")
+	write(filepath.Join(formulaDir, "required-order.toml"), formulaText)
+	cfg, _, err := config.LoadWithIncludesOptions(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), config.LoadOptions{CaptureQualificationInputs: true})
+	if err != nil {
+		t.Fatalf("load required-pack city config: %v", err)
+	}
+	if !cfg.HasRequiredCompatibilityPacks() {
+		t.Fatal("test config did not capture required compatibility pack")
+	}
+	a := orders.Order{
+		Name:         "required-order",
+		Trigger:      "cooldown",
+		Interval:     "15m",
+		Formula:      "required-order",
+		FormulaLayer: formulaDir,
+	}
+	return cityPath, cfg, a
+}
+
+// TestRequiredOrderCompatibilityDenialPrecedesTrackingWrite exercises the
+// live tick path, including launchResolvedDispatch. A required formula that
+// cannot be authorized must not create the order-tracking single-flight bead
+// before returning unavailable.
+func TestRequiredOrderCompatibilityDenialPrecedesTrackingWrite(t *testing.T) {
+	cityPath, cfg, a := newRequiredOrderCompatibilityFixture(t, "formula = \"required-order\"\nversion = 1\n\n[[steps]]\nid = \"work\"\ntitle = \"Work\"\n")
+	workStore := beads.NewMemStore()
+	binding := beads.NewMemStore()
+	var rec memRecorder
+	m := newSplitOrderDispatcher(t, cityPath, cfg, []orders.Order{a}, workStore, binding, &rec)
+	gate := &orderDenyFormulaActionGate{err: errors.New("required release authority unavailable")}
+	m.formulaActionGateForStore = func(*config.City, string, beads.Store, beads.Store) func(beads.Store) molecule.FormulaActionGate {
+		return func(beads.Store) molecule.FormulaActionGate { return gate }
+	}
+
+	dispatchOrderTick(t, m, cityPath)
+
+	if gate.authorizeRecipeCalls != 1 {
+		t.Fatalf("formula authorization calls = %d, want one pre-tracking eligibility check", gate.authorizeRecipeCalls)
+	}
+	for name, store := range map[string]beads.Store{"work": workStore, "infrastructure binding": binding} {
+		if got := allBeads(t, store); len(got) != 0 {
+			t.Fatalf("%s store has beads after compatibility denial: %+v", name, got)
+		}
+	}
+}
+
+func TestRequiredOrderFormulaPreparationFailurePrecedesTrackingWrite(t *testing.T) {
+	cityPath, cfg, a := newRequiredOrderCompatibilityFixture(t, "not = [valid\n")
+	workStore := beads.NewMemStore()
+	binding := beads.NewMemStore()
+	var rec memRecorder
+	m := newSplitOrderDispatcher(t, cityPath, cfg, []orders.Order{a}, workStore, binding, &rec)
+	gate := &orderDenyFormulaActionGate{err: errors.New("required release authority unavailable")}
+	m.formulaActionGateForStore = func(*config.City, string, beads.Store, beads.Store) func(beads.Store) molecule.FormulaActionGate {
+		return func(beads.Store) molecule.FormulaActionGate { return gate }
+	}
+
+	dispatchOrderTick(t, m, cityPath)
+
+	if gate.authorizeRecipeCalls != 0 {
+		t.Fatalf("formula authorization calls = %d, want none for a malformed formula", gate.authorizeRecipeCalls)
+	}
+	for name, store := range map[string]beads.Store{"work": workStore, "infrastructure binding": binding} {
+		if got := allBeads(t, store); len(got) != 0 {
+			t.Fatalf("%s store has beads after formula preparation failure: %+v", name, got)
+		}
+	}
+}
+
+type orderDenyFormulaActionGate struct {
+	err                  error
+	authorizeRecipeCalls int
+}
+
+func (g *orderDenyFormulaActionGate) AuthorizeRecipe(context.Context, *formula.Recipe, beads.Store) (molecule.FormulaActionAuthorization, error) {
+	g.authorizeRecipeCalls++
+	return molecule.FormulaActionAuthorization{}, g.err
+}
+
+func (*orderDenyFormulaActionGate) AuthorizeFragment(context.Context, *formula.FragmentRecipe, beads.Store) (molecule.FormulaActionAuthorization, error) {
+	return molecule.FormulaActionAuthorization{}, nil
+}
+
+func (*orderDenyFormulaActionGate) RevalidateRecipe(context.Context, *formula.Recipe, beads.Store, molecule.FormulaActionAuthorization) error {
+	return nil
+}
+
+func (*orderDenyFormulaActionGate) RevalidateFragment(context.Context, *formula.FragmentRecipe, beads.Store, molecule.FormulaActionAuthorization) error {
+	return nil
+}
+
+func (*orderDenyFormulaActionGate) RevalidateBead(context.Context, beads.Bead, beads.Store) error {
+	return nil
 }
 
 // TestOrderDispatchTrackingBeadLandsInTheOrdersBinding is the producer half.

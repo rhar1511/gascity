@@ -1,0 +1,53 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "compatibility",
+    srcs = [
+        "controller_scope.go",
+        "gate.go",
+        "host_authority.go",
+        "host_authority_file.go",
+        "materialization.go",
+        "materialization_factory.go",
+        "store_prover.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/compatibility",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/beadmeta",
+        "//internal/beads",
+        "//internal/config",
+        "//internal/formula",
+        "//internal/molecule",
+        "//internal/qualification",
+    ],
+)
+
+go_test(
+    name = "compatibility_test",
+    srcs = [
+        "gate_test.go",
+        "host_authority_test.go",
+        "store_prover_test.go",
+    ],
+    embed = [":compatibility"],
+    deps = [
+        "//internal/beads",
+        "//internal/config",
+        "//internal/formula",
+        "//internal/fsys",
+        "//internal/qualification",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

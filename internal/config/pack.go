@@ -1276,6 +1276,9 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 	if err := validatePackMeta(&tc.Pack); err != nil {
 		return nil, nil, nil, nil, nil, nil, nil, nil, err
 	}
+	if opts.packCompatibilityCapture != nil {
+		opts.packCompatibilityCapture.record(topoDir, tc.Pack, data, opts.qualificationCapture)
+	}
 
 	// Process includes: accumulate base-layer agents, providers,
 	// pack dirs, requirements, and globals from included packs.
@@ -2014,13 +2017,16 @@ func cachedPackDoctors(cache *packLoadCache, topoDir string) []DiscoveredDoctor 
 }
 
 // isOSFileSystem reports whether fs is the real operating-system
-// filesystem. Bundled builtin pack content only exists there (embedded in
-// the binary, served via the user-global cache), so non-OS loads skip
-// bundled imports.
+// filesystem, including the loader's read-capture wrapper. Bundled builtin
+// imports and host path-durability checks apply only to OS-backed loads.
 func isOSFileSystem(fs fsys.FS) bool {
-	switch fs.(type) {
+	switch typed := fs.(type) {
 	case fsys.OSFS, *fsys.OSFS:
 		return true
+	case qualificationCaptureFS:
+		return isOSFileSystem(typed.fs)
+	case *qualificationCaptureFS:
+		return typed != nil && isOSFileSystem(typed.fs)
 	default:
 		return false
 	}
@@ -2444,6 +2450,9 @@ func validatePackMeta(meta *PackMeta) error {
 	}
 	if meta.Schema > currentPackSchema {
 		return fmt.Errorf("[pack] schema %d not supported (max %d)", meta.Schema, currentPackSchema)
+	}
+	if err := validateRequiresGC(meta.RequiresGC); err != nil {
+		return fmt.Errorf("[pack] %w", err)
 	}
 	for i, req := range meta.Requires {
 		if req.Agent == "" {

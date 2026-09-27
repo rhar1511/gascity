@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/pathutil"
+	"github.com/gastownhall/gascity/internal/qualification"
 	"github.com/gastownhall/gascity/internal/supervisor"
 )
 
@@ -68,6 +69,10 @@ type cityRegistry struct {
 	supervisorRecorder   events.Recorder                     // supervisor-level event recorder for city lifecycle events
 
 	gen uint64 // monotonic generation counter
+	// compatibilityAuthority is captured once by runSupervisor before any
+	// city start workers are launched. Per-city state copies this trusted
+	// handle; config reloads and worker environment never replace it.
+	compatibilityAuthority qualification.CompatibilityAuthority
 }
 
 type recentlyUnregisteredCity struct {

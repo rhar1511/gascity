@@ -54,12 +54,14 @@ func compileFormula(name string, searchPaths []string, vars map[string]string, v
 	parser := NewParser(searchPaths...).SetSource(SourceFromEnv())
 	v2Enabled := IsFormulaV2Enabled()
 	var composedRequirements []formulaCompilerConstraint
+	var composedSources []SourceIdentity
 	collectComposedRequirements := func(f *Formula) error {
 		constraints, err := formulaCompilerConstraints(f)
 		if err != nil {
 			return err
 		}
 		composedRequirements = append(composedRequirements, constraints...)
+		composedSources = append(composedSources, f.SourceFiles...)
 		return nil
 	}
 
@@ -213,6 +215,11 @@ func compileFormula(name string, searchPaths []string, vars map[string]string, v
 	}
 
 	// Stage 13: Flatten to Recipe
+	resolved.SourceFiles = append(resolved.SourceFiles, composedSources...)
+	resolved.SourceFiles, err = uniqueFormulaSourceIdentities(resolved.SourceFiles)
+	if err != nil {
+		return nil, err
+	}
 	return toRecipeWithGraph(resolved, graphWorkflow)
 }
 
@@ -306,14 +313,15 @@ func collectStepConditionVarRefs(condition string, refs map[string]bool) {
 
 func toRecipeWithGraph(f *Formula, graphWorkflow bool) (*Recipe, error) {
 	r := &Recipe{
-		Name:          f.Formula,
-		Description:   f.Description,
-		Metadata:      cloneFormulaMetadata(f.Metadata),
-		Vars:          f.Vars,
-		Phase:         f.Phase,
-		Pour:          f.Pour,
-		ContentHash:   f.ContentHash,
-		FormulaSource: f.Source,
+		Name:           f.Formula,
+		Description:    f.Description,
+		Metadata:       cloneFormulaMetadata(f.Metadata),
+		Vars:           f.Vars,
+		Phase:          f.Phase,
+		Pour:           f.Pour,
+		ContentHash:    f.ContentHash,
+		FormulaSource:  f.Source,
+		FormulaSources: append([]SourceIdentity(nil), f.SourceFiles...),
 	}
 
 	// Determine root title: use {{title}} placeholder if the variable

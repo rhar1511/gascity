@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -826,7 +827,16 @@ store, copy them into the binding with
 					var result *molecule.Result
 					var syntheticInputConvoyID string
 					err := sourceworkflow.WithLock(cmd.Context(), cityPath, sourceWorkflowLockScopeForStoreRef(cityPath, cfg, scope.storeRoot, storeRef), attach, func() error {
-						inv, err := graphv2.PrepareInvocation(cmd.Context(), store, args[0], scope.searchPaths, attach, cookVars)
+						beforeInputConvoy := func(ctx context.Context, recipe *formula.Recipe, vars map[string]string) error {
+							_, _, err := molecule.PrepareFormulaAction(ctx, store, recipe, molecule.Options{
+								Title:             title,
+								Vars:              vars,
+								ActionGate:        controllerFormulaActionGate(cityPath, cfg, storeRef),
+								RequireActionGate: true,
+							})
+							return err
+						}
+						inv, err := graphv2.PrepareInvocationWithBeforeInputConvoy(cmd.Context(), store, args[0], scope.searchPaths, attach, cookVars, beforeInputConvoy)
 						if err != nil {
 							return fmt.Errorf("prepare formulas v2 invocation: %w", err)
 						}
@@ -883,10 +893,12 @@ store, copy them into the binding with
 							return fmt.Errorf("attach bead %s: %w", attach, err)
 						}
 						result, err = molecule.Instantiate(cmd.Context(), store, recipe, molecule.Options{
-							Title:            title,
-							Vars:             cookVars,
-							IdempotencyKey:   graphRootKey,
-							PriorityOverride: cloneFormulaCookPriority(source.Priority),
+							Title:              title,
+							Vars:               cookVars,
+							IdempotencyKey:     graphRootKey,
+							PriorityOverride:   cloneFormulaCookPriority(source.Priority),
+							ActionGateForStore: controllerFormulaActionGateForStore(cityPath, cfg, scope.storeRoot, store, graphStore),
+							RequireActionGate:  true,
 						})
 						if err != nil {
 							if cleanupErr := closeFormulaCookFailedGraphV2Roots(store, recipe); cleanupErr != nil {
@@ -961,9 +973,11 @@ store, copy them into the binding with
 				// names the binding, and its work leg is only read for an input
 				// convoy this arm never mints.
 				result, err := molecule.Attach(cmd.Context(), attachStore, recipe, attach, molecule.AttachOptions{
-					Title:          title,
-					Vars:           cookVars,
-					IdempotencyKey: graphRootKey,
+					Title:              title,
+					Vars:               cookVars,
+					IdempotencyKey:     graphRootKey,
+					ActionGateForStore: controllerFormulaActionGateForStore(cityPath, cfg, scope.storeRoot, store, graphStore),
+					RequireActionGate:  true,
 				})
 				if err != nil {
 					return formulaCommandError(stderr, "gc formula cook: attach", jsonOutput, err)
@@ -1049,9 +1063,11 @@ store, copy them into the binding with
 					defer unlock()
 				}
 				result, err = molecule.Instantiate(cmd.Context(), rootStore, recipe, molecule.Options{
-					Title:          title,
-					Vars:           cookVars,
-					IdempotencyKey: graphRootKey,
+					Title:              title,
+					Vars:               cookVars,
+					IdempotencyKey:     graphRootKey,
+					ActionGateForStore: controllerFormulaActionGateForStore(cityPath, cfg, scope.storeRoot, store, graphStore),
+					RequireActionGate:  true,
 				})
 				if err != nil {
 					return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
@@ -1066,7 +1082,12 @@ store, copy them into the binding with
 				// where it would read as a stranded infrastructure bead and stop
 				// boot. A v1 POURED molecule classifies as work and stays exactly
 				// where it always was.
-				opts := molecule.Options{Title: title, Vars: cookVars}
+				opts := molecule.Options{
+					Title:              title,
+					Vars:               cookVars,
+					ActionGateForStore: controllerFormulaActionGateForStore(cityPath, cfg, scope.storeRoot, store, graphStore),
+					RequireActionGate:  true,
+				}
 				var err error
 				result, rootStore, err = molecule.CookChoosingStore(cmd.Context(), args[0], scope.searchPaths, opts, func(recipe *formula.Recipe) beads.Store {
 					return moleculeClassStore(recipe, store, graphStore)

@@ -31,7 +31,10 @@ import (
 // so: the mint bit observed from the store, the relic bit carried across the
 // State surface from the boot that censused the binding.
 func (s *Server) residencyTopology() storeref.Topology {
-	cfg := s.state.Config()
+	return s.residencyTopologyForConfig(s.state.Config())
+}
+
+func (s *Server) residencyTopologyForConfig(cfg *config.City) storeref.Topology {
 	city := s.state.CityBeadStore()
 
 	byStore := map[beads.Store][]coordclass.Class{}

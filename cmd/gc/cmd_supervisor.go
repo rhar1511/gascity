@@ -30,6 +30,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/hooks"
 	"github.com/gastownhall/gascity/internal/logutil"
+	"github.com/gastownhall/gascity/internal/qualification"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/sdnotify"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -1464,6 +1465,15 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc supervisor: config: %v\n", err) //nolint:errcheck
 		return 1
 	}
+	compatibilityAuthority, compatibilitySource := supervisorCompatibilityAuthorityFromEnvironment(stderr)
+	registry.compatibilityAuthority = compatibilityAuthority
+	if compatibilitySource != nil {
+		defer func() {
+			if err := compatibilitySource.Close(); err != nil {
+				fmt.Fprintf(stderr, "gc supervisor: closing host compatibility authority source: %v\n", err) //nolint:errcheck
+			}
+		}()
+	}
 
 	reg := supervisor.NewRegistry(supervisor.RegistryPath())
 	if err := cleanupSupervisorWorkspaceServicesForSupervisorStart(supervisor.DefaultHome()); err != nil {
@@ -2288,10 +2298,11 @@ func startOneCity(
 			ConfigRev:               configRev,
 			ConfigDirty:             configDirty,
 			Cfg:                     cfg,
+			CompatibilityAuthority:  cr.compatibilityAuthority,
 			SP:                      sp,
 			Publication:             publication,
-			BuildFn:                 supervisorBuildAgentsFn(path, cityName, stderr),
-			BuildFnWithSessionBeads: supervisorBuildAgentsFnWithSessionBeads(path, cityName, stderr),
+			BuildFn:                 supervisorBuildAgentsFn(path, cityName, stderr, cr.compatibilityAuthority),
+			BuildFnWithSessionBeads: supervisorBuildAgentsFnWithSessionBeads(path, cityName, stderr, cr.compatibilityAuthority),
 			Dops:                    dops,
 			Rec:                     rec,
 			PoolSessions:            poolSessions,
@@ -2329,6 +2340,7 @@ func startOneCity(
 	var cs *controllerState
 	if err := runPostPrepareStep("opening_controller_state", func() error {
 		cs = newControllerStateWithRoutes(cityCtx, cityRuntime.storageRoutes, cfg, sp, eventProv, cityName, path)
+		cs.setCompatibilityAuthority(cityRuntime.compatibilityAuthority)
 		return nil
 	}); err != nil {
 		// The runtime is already built, and it holds this city's storage
@@ -2910,14 +2922,22 @@ func effectiveProviderName(configured string) string {
 
 // supervisorBuildAgentsFn returns a buildFn suitable for CityRuntimeParams.
 // It delegates to buildDesiredState with a stable beacon timestamp.
-func supervisorBuildAgentsFn(cityPath, cityName string, stderr io.Writer) func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+func supervisorBuildAgentsFn(cityPath, cityName string, stderr io.Writer, authorities ...qualification.CompatibilityAuthority) func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+	var authority qualification.CompatibilityAuthority
+	if len(authorities) > 0 {
+		authority = authorities[0]
+	}
 	beaconTime := time.Now()
 	return func(c *config.City, sp runtime.Provider, store beads.Store) DesiredStateResult {
-		return buildDesiredState(cityName, cityPath, beaconTime, c, sp, store, stderr)
+		return buildDesiredState(cityName, cityPath, beaconTime, c, sp, store, stderr, authority)
 	}
 }
 
-func supervisorBuildAgentsFnWithSessionBeads(cityPath, cityName string, stderr io.Writer) func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult {
+func supervisorBuildAgentsFnWithSessionBeads(cityPath, cityName string, stderr io.Writer, authorities ...qualification.CompatibilityAuthority) func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult {
+	var authority qualification.CompatibilityAuthority
+	if len(authorities) > 0 {
+		authority = authorities[0]
+	}
 	beaconTime := time.Now()
 	return func(c *config.City, sp runtime.Provider, store beads.Store, rigStores map[string]beads.Store, sessionBeads *sessionBeadSnapshot, trace *sessionReconcilerTraceCycle) DesiredStateResult {
 		return buildDesiredStateWithSessionBeadsAt(
@@ -2932,6 +2952,7 @@ func supervisorBuildAgentsFnWithSessionBeads(cityPath, cityName string, stderr i
 			sessionBeads,
 			trace,
 			stderr,
+			authority,
 		)
 	}
 }

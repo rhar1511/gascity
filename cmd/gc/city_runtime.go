@@ -25,8 +25,10 @@ import (
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/qualification"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -113,6 +115,7 @@ type CityRuntime struct {
 
 	serviceStateMu          sync.RWMutex
 	cfg                     *config.City
+	compatibilityAuthority  qualification.CompatibilityAuthority
 	sp                      runtime.Provider
 	publication             supervisor.PublicationConfig
 	buildFn                 func(*config.City, runtime.Provider, beads.Store) DesiredStateResult
@@ -289,6 +292,7 @@ type CityRuntimeParams struct {
 	ConfigDirty  *atomic.Bool
 
 	Cfg                     *config.City
+	CompatibilityAuthority  qualification.CompatibilityAuthority // supervisor-owned; nil for standalone/local controllers
 	SP                      runtime.Provider
 	Publication             supervisor.PublicationConfig
 	BuildFn                 func(*config.City, runtime.Provider, beads.Store) DesiredStateResult
@@ -421,6 +425,7 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 		configRev:               p.ConfigRev,
 		configDirty:             configDirty,
 		cfg:                     p.Cfg,
+		compatibilityAuthority:  p.CompatibilityAuthority,
 		sp:                      p.SP,
 		publication:             p.Publication,
 		buildFn:                 p.BuildFn,
@@ -474,6 +479,7 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 		stdout:            p.Stdout,
 		stderr:            p.Stderr,
 	}
+	cr.installCompatibilityGateOnOrderDispatcher(od)
 	cr.svc = workspacesvc.NewManager(&serviceRuntime{cr: cr})
 	if err := cr.svc.Reload(); err != nil {
 		fmt.Fprintf(cr.stderr, "%s: service init: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
@@ -492,6 +498,30 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 // accessors read it under RLock.
 func (cr *CityRuntime) setControllerState(cs *controllerState) {
 	cr.cs = cs
+}
+
+func (cr *CityRuntime) compatibilityRuntimeIdentity() (*config.City, qualification.Snapshot, qualification.BuildIdentity, qualification.CompatibilityAuthority, error) {
+	cr.serviceStateMu.RLock()
+	cfg := cr.cfg
+	authority := cr.compatibilityAuthority
+	cr.serviceStateMu.RUnlock()
+	if cfg == nil {
+		return nil, qualification.Snapshot{}, qualification.BuildIdentity{}, nil, qualification.ErrUnavailable
+	}
+	return cfg, cfg.QualificationSnapshot(), currentControllerBuildIdentity(), authority, nil
+}
+
+func (cr *CityRuntime) installCompatibilityGateOnOrderDispatcher(dispatcher orderDispatcher) {
+	memory, ok := dispatcher.(*memoryOrderDispatcher)
+	if !ok || memory == nil {
+		return
+	}
+	memory.formulaActionGateForStore = func(cfg *config.City, scopePath string, scopeStore, graphStore beads.Store) func(beads.Store) molecule.FormulaActionGate {
+		return controllerFormulaActionGateForStoreWithCurrent(
+			cr.cityPath, cfg, scopePath, scopeStore, graphStore,
+			cr.compatibilityAuthority, cr.compatibilityRuntimeIdentity,
+		)
+	}
 }
 
 // crashTracker returns the crash tracker for API server wiring.
@@ -1548,6 +1578,7 @@ func (cr *CityRuntime) rescanOrderDispatcherIfDue(ctx context.Context, cityRoot 
 // them instead of cold-starting (#3201).
 // Call after draining the outgoing dispatcher.
 func (cr *CityRuntime) replaceOrderDispatcher(next orderDispatcher) {
+	cr.installCompatibilityGateOnOrderDispatcher(next)
 	if prev, ok := cr.od.(*memoryOrderDispatcher); ok {
 		if nextMem, ok := next.(*memoryOrderDispatcher); ok {
 			nextMem.carryLastRunCacheFrom(prev)

@@ -133,6 +133,7 @@ type LoadOptions struct {
 	// pay for this source snapshot.
 	CaptureQualificationInputs bool
 	qualificationCapture       *qualificationCapture
+	packCompatibilityCapture   *packCompatibilityCapture
 	deferRigPatches            bool
 	deferredRigPatches         *[]deferredRigPatches
 	allowLegacyOrderLayouts    bool
@@ -149,6 +150,9 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 
 // LoadWithIncludesOptions loads a city.toml with the supplied load options.
 func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraIncludes ...string) (*City, *Provenance, error) {
+	if opts.packCompatibilityCapture == nil {
+		opts.packCompatibilityCapture = newPackCompatibilityCapture()
+	}
 	if opts.CaptureQualificationInputs {
 		capture := newQualificationCapture(fs, filepath.Dir(path))
 		opts.qualificationCapture = capture
@@ -227,6 +231,7 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		if err := validatePackMeta(&pc.Pack); err != nil {
 			return nil, nil, fmt.Errorf("city pack.toml: %w", err)
 		}
+		opts.packCompatibilityCapture.record(cityRoot, pc.Pack, packData, opts.qualificationCapture)
 		legacyV1SurfaceWarningsEnabled = pc.Pack.Schema >= 2
 		if legacyV1SurfaceWarningsEnabled {
 			// Wave 2 hard-stop: schema=2 city packs no longer tolerate PackV1
@@ -887,6 +892,7 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		prov.qualificationInputs = opts.qualificationCapture.closure()
 		root.qualificationInputs = prov.qualificationInputs
 	}
+	root.packCompatibilityBindings = append([]PackCompatibilityBinding(nil), opts.packCompatibilityCapture.bindings...)
 
 	return root, prov, nil
 }
