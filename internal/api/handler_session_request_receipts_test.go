@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -72,38 +73,43 @@ func TestSessionRequestReadAndAcknowledgementHTTP(t *testing.T) {
 }
 
 func TestSessionRequestSubmitHTTPPreservesAcceptanceAndSendsOnce(t *testing.T) {
-	state := newSessionFakeState(t)
-	info := createTestSession(t, state.cityBeadStore, state.sp, "Tracked target")
-	front := session.NewStore(state.SessionsBeadStore())
-	persisted, err := front.Get(info.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	generation, _ := strconv.Atoi(persisted.Generation)
-	h := newTestCityHandler(t, state)
-	url := cityURL(state, "/session/"+info.ID+"/requests")
-	body := fmt.Sprintf(`{"request_id":"submit-http-1","generation":%d,"message":"report progress"}`, generation)
-	for range 2 {
-		response := httptest.NewRecorder()
-		h.ServeHTTP(response, newPostRequest(url, strings.NewReader(body)))
-		if response.Code != http.StatusAccepted {
-			t.Fatalf("submit = %d: %s", response.Code, response.Body.String())
+	synctest.Test(t, func(t *testing.T) {
+		state := newSessionFakeState(t)
+		info := createTestSession(t, state.cityBeadStore, state.sp, "Tracked target")
+		front := session.NewStore(state.SessionsBeadStore())
+		persisted, err := front.Get(info.ID)
+		if err != nil {
+			t.Fatal(err)
 		}
-	}
-	deadline := time.Now().Add(3 * time.Second)
-	for {
-		receipt, err := front.GetRequest(info.ID, "submit-http-1")
-		if err == nil && receipt.Delivery == session.RequestDeliveryAccepted {
-			if receipt.AcknowledgedAt != nil || receipt.Effect != "unverified" {
-				t.Fatal("provider send invented acknowledgement/effect")
+		generation, _ := strconv.Atoi(persisted.Generation)
+		h := newTestCityHandler(t, state)
+		url := cityURL(state, "/session/"+info.ID+"/requests")
+		body := fmt.Sprintf(`{"request_id":"submit-http-1","generation":%d,"message":"report progress"}`, generation)
+		for range 2 {
+			response := httptest.NewRecorder()
+			h.ServeHTTP(response, newPostRequest(url, strings.NewReader(body)))
+			if response.Code != http.StatusAccepted {
+				t.Fatalf("submit = %d: %s", response.Code, response.Body.String())
 			}
-			break
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("delivery never recorded: %+v, %v", receipt, err)
+		synctest.Wait()
+		receipt, err := front.GetRequest(info.ID, "submit-http-1")
+		if err != nil || receipt.Delivery != session.RequestDeliveryAccepted {
+			t.Fatalf("delivery not recorded: %+v, %v", receipt, err)
 		}
-		time.Sleep(time.Millisecond)
-	}
+		if receipt.AcknowledgedAt != nil || receipt.Effect != "unverified" {
+			t.Fatal("provider send invented acknowledgement/effect")
+		}
+		sends := 0
+		for _, call := range state.sp.SnapshotCalls() {
+			if call.Name == info.SessionName && (call.Method == "Nudge" || call.Method == "NudgeNow") {
+				sends++
+			}
+		}
+		if sends != 1 {
+			t.Fatalf("provider sends = %d, want one for repeated request identity", sends)
+		}
+	})
 }
 
 func TestSessionRequestClientRoundTrip(t *testing.T) {
@@ -114,9 +120,7 @@ func TestSessionRequestClientRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	generation, _ := strconv.Atoi(persisted.Generation)
-	server := httptest.NewServer(newTestCityHandler(t, state))
-	defer server.Close()
-	client := NewCityScopedClient(server.URL, state.CityName())
+	client := NewCityScopedClient("http://127.0.0.1", state.CityName(), WithHTTPTransport(loopbackTransport{h: newTestCityHandler(t, state)}))
 	receipt, err := client.SubmitSessionRequest(info.ID, "client-request", generation, "report progress")
 	if err != nil || receipt.RequestId != "client-request" || receipt.AcknowledgedAt != nil {
 		t.Fatalf("submit %+v,%v", receipt, err)

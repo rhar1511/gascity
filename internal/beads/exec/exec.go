@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -279,6 +280,15 @@ func (s *Store) Get(id string) (beads.Bead, error) {
 
 // Update modifies fields of an existing bead: script update <id> (stdin: JSON)
 func (s *Store) Update(id string, opts beads.UpdateOpts) error {
+	if lifecycleMutationMayReopenOrClear(opts) {
+		current, err := s.Get(id)
+		if err != nil {
+			return err
+		}
+		if err := beads.ValidateLifecycleMutation(current, opts); err != nil {
+			return fmt.Errorf("updating lifecycle bead %q: %w", id, err)
+		}
+	}
 	data, err := marshalUpdate(opts)
 	if err != nil {
 		return fmt.Errorf("exec beads update: marshaling: %w", err)
@@ -305,7 +315,14 @@ func (s *Store) Update(id string, opts beads.UpdateOpts) error {
 // would break them. A new exec: wrapper that closes agent-owned beads must
 // inject --force itself.
 func (s *Store) Close(id string) error {
-	_, err := s.run(nil, "close", id)
+	current, err := s.Get(id)
+	if err != nil {
+		return fmt.Errorf("closing bead %q: %w", id, err)
+	}
+	if err := beads.ValidateLifecycleClose(current); err != nil {
+		return fmt.Errorf("closing lifecycle bead %q: %w", id, err)
+	}
+	_, err = s.run(nil, "close", id)
 	if err != nil {
 		if isNotFoundError(err) {
 			return fmt.Errorf("closing bead %q: %w", id, beads.ErrNotFound)
@@ -317,7 +334,15 @@ func (s *Store) Close(id string) error {
 
 // Reopen sets a bead's status to "open": script reopen <id>
 func (s *Store) Reopen(id string) error {
-	_, err := s.run(nil, "reopen", id)
+	current, err := s.Get(id)
+	if err != nil {
+		return fmt.Errorf("reopening bead %q: %w", id, err)
+	}
+	open := "open"
+	if err := beads.ValidateLifecycleMutation(current, beads.UpdateOpts{Status: &open}); err != nil {
+		return fmt.Errorf("reopening lifecycle bead %q: %w", id, err)
+	}
+	_, err = s.run(nil, "reopen", id)
 	if err != nil {
 		if isNotFoundError(err) {
 			return fmt.Errorf("reopening bead %q: %w", id, beads.ErrNotFound)
@@ -327,8 +352,39 @@ func (s *Store) Reopen(id string) error {
 	return nil
 }
 
+func lifecycleMutationMayReopenOrClear(opts beads.UpdateOpts) bool {
+	if opts.Status != nil {
+		return true
+	}
+	for _, key := range []string{
+		beadmeta.LifecycleAdmissionReceiptMetadataKey,
+		beadmeta.LifecycleMaterializationMetadataKey,
+		beadmeta.LifecycleCompletionReceiptMetadataKey,
+		beadmeta.LifecycleRecoveryStateMetadataKey,
+	} {
+		if value, supplied := opts.Metadata[key]; supplied && strings.TrimSpace(value) == "" {
+			return true
+		}
+	}
+	return false
+}
+
 // CloseAll closes multiple beads and sets metadata on each.
 func (s *Store) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	closedStatus := "closed"
+	closeOpts := beads.UpdateOpts{Status: &closedStatus, Metadata: metadata}
+	for _, id := range ids {
+		current, err := s.Get(id)
+		if errors.Is(err, beads.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return 0, fmt.Errorf("checking close target %q: %w", id, err)
+		}
+		if err := beads.ValidateLifecycleMutation(current, closeOpts); err != nil {
+			return 0, fmt.Errorf("closing lifecycle bead %q: %w", id, err)
+		}
+	}
 	closed := 0
 	for _, id := range ids {
 		for k, v := range metadata {
@@ -472,6 +528,15 @@ func (s *Store) ListByMetadata(filters map[string]string, limit int, opts ...bea
 
 // SetMetadata sets a key-value metadata pair: script set-metadata <id> <key> (stdin: value)
 func (s *Store) SetMetadata(id, key, value string) error {
+	if lifecycleMutationMayReopenOrClear(beads.UpdateOpts{Metadata: map[string]string{key: value}}) {
+		current, err := s.Get(id)
+		if err != nil {
+			return err
+		}
+		if err := beads.ValidateLifecycleMutation(current, beads.UpdateOpts{Metadata: map[string]string{key: value}}); err != nil {
+			return fmt.Errorf("setting lifecycle metadata on %q: %w", id, err)
+		}
+	}
 	_, err := s.run([]byte(value), "set-metadata", id, key)
 	if err != nil {
 		return fmt.Errorf("setting metadata on %q: %w", id, err)

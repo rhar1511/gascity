@@ -1228,6 +1228,15 @@ func walkSourceBeadChain(rootStore beads.Store, rootID string, opts ProcessOptio
 			if !mutate {
 				return nil
 			}
+			if strings.TrimSpace(loaded.Metadata[beadmeta.LifecycleAdmissionReceiptMetadataKey]) != "" ||
+				strings.TrimSpace(loaded.Metadata[beadmeta.LifecycleMaterializationMetadataKey]) != "" {
+				// Workflow finalization is not acceptance of the deliverable.
+				// Enrolled source work closes only through the controller's
+				// signed, revision-conditional completion reconciliation.
+				opts.tracef("close-source-chain root=%s stop reason=lifecycle_acceptance_required source=%s ref=%s", rootID, nextID, sourceChainStoreLabel(effectiveRef))
+				stopWalk = true
+				return nil
+			}
 			if err := propagateSourceBeadTerminalMetadata(nextStore, loaded, current.Metadata); err != nil {
 				return fmt.Errorf("propagating source bead metadata %s in %s: %w", nextID, sourceChainStoreLabel(effectiveRef), err)
 			}

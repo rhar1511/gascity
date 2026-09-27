@@ -5,9 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/githubmonitor"
 )
 
 func TestGitHubPRActionForgeRefusesHeadOnlyMergeWithoutBasePrecondition(t *testing.T) {
@@ -15,7 +16,7 @@ func TestGitHubPRActionForgeRefusesHeadOnlyMergeWithoutBasePrecondition(t *testi
 	base := strings.Repeat("b", 40)
 	mergeCalls := 0
 	graphqlCalls := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != "Bearer controller-token" {
 			t.Errorf("Authorization = %q", got)
 		}
@@ -32,9 +33,10 @@ func TestGitHubPRActionForgeRefusesHeadOnlyMergeWithoutBasePrecondition(t *testi
 			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
 			http.NotFound(w, r)
 		}
-	}))
-	defer server.Close()
-	forge := NewGitHubPRActionForge("controller-token", WithGitHubPRActionEndpoints(server.URL, server.URL+"/graphql"))
+	})
+	httpClient := &http.Client{Transport: loopbackTransport{h: handler}}
+	forge := NewGitHubPRActionForge("controller-token", WithGitHubPRActionEndpoints("http://forge.test", "http://forge.test/graphql"), WithGitHubPRActionHTTPClient(httpClient))
+	forge.graphql = githubmonitor.NewGraphQLClient("controller-token", githubmonitor.WithEndpoint("http://forge.test/graphql"), githubmonitor.WithHTTPClient(httpClient))
 	if forge.SupportsAtomicBaseBoundMerge() {
 		t.Fatal("GitHub head-only merge API was advertised as an atomic base-bound action")
 	}

@@ -1591,6 +1591,38 @@ func TestBdCloseServesClassResidentWorkPrefixedBead(t *testing.T) {
 	}
 }
 
+func TestBdByIDCloseAndUpdateRefuseLifecycleSourceWithoutCompletion(t *testing.T) {
+	cityPath, _ := foreignProviderCity(t)
+	relic, classStore := classResidentWorkShapedBead(t, cityPath, "gc-relic1", "lifecycle source")
+	if err := classStore.SetMetadata(relic.ID, beadmeta.LifecycleAdmissionReceiptMetadataKey, "unverified receipt"); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, args := range [][]string{
+		{"close", relic.ID},
+		{"update", relic.ID, "--set-metadata", "gc.outcome=pass", "--status", "closed"},
+	} {
+		var stdout, stderr bytes.Buffer
+		code, handled := maybeRouteBdByID(cityPath, "", args, &stdout, &stderr)
+		if !handled {
+			t.Fatalf("%v fell through to the bd subprocess", args)
+		}
+		if code == 0 {
+			t.Fatalf("%v succeeded without verified completion: %s", args, stdout.String())
+		}
+		if !strings.Contains(stderr.String(), "verified completion") {
+			t.Fatalf("%v refusal = %q, want verified-completion explanation", args, stderr.String())
+		}
+		after, err := classStore.Get(relic.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if after.Status != "open" {
+			t.Fatalf("%v changed lifecycle source status to %q", args, after.Status)
+		}
+	}
+}
+
 // TestBdClosePrefixStoreBeadKeepsPassthrough is T1's control, and it must fail
 // DIFFERENTLY: T1 asserts the door answered, this asserts the passthrough is
 // still reached. A residence probe that turned into an unconditional route to

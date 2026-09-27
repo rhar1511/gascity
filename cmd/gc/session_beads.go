@@ -1123,6 +1123,10 @@ func unclaimWorkAssignedToRetiredSessionBead(
 					if session.IsSessionBeadOrRepairable(item) {
 						continue
 					}
+					if lifecycleProtectedWork(item, cfg) {
+						fmt.Fprintf(stderr, "session beads: retaining lifecycle-enrolled work %s assigned to retired session %s; controller authorization is required before release\n", item.ID, sessionBead.ID) //nolint:errcheck
+						continue
+					}
 					key := strconv.Itoa(storeIndex) + "\x00" + item.ID
 					if _, ok := seen[key]; ok {
 						continue
@@ -1215,6 +1219,10 @@ func releaseUnexecutedClaimsOnDrainAck(
 				if session.IsSessionBeadOrRepairable(item) {
 					continue
 				}
+				if lifecycleProtectedWork(item, cfg) {
+					fmt.Fprintf(stderr, "session beads: retaining lifecycle-enrolled work %s after drain ack by %s; controller authorization is required before release\n", item.ID, sessionBead.ID) //nolint:errcheck
+					continue
+				}
 				key := strconv.Itoa(storeIndex) + "\x00" + item.ID
 				if _, ok := seen[key]; ok {
 					continue
@@ -1270,6 +1278,10 @@ func reassignWorkAssignedToRetiredSessionBead(
 					if session.IsSessionBeadOrRepairable(item) {
 						continue
 					}
+					if lifecycleProtectedWork(item, cfg) {
+						fmt.Fprintf(stderr, "session beads: retaining lifecycle-enrolled work %s assigned to retired session %s; controller authorization is required before reassignment\n", item.ID, retiredSession.ID) //nolint:errcheck
+						continue
+					}
 					key := strconv.Itoa(storeIndex) + "\x00" + item.ID
 					if _, ok := seen[key]; ok {
 						continue
@@ -1322,6 +1334,10 @@ func reassignWorkAssignedToRetiredSessionInfo(
 				}
 				for _, item := range work {
 					if session.IsSessionBeadOrRepairable(item) {
+						continue
+					}
+					if lifecycleProtectedWork(item, cfg) {
+						fmt.Fprintf(stderr, "session beads: retaining lifecycle-enrolled work %s assigned to retired session %s; controller authorization is required before reassignment\n", item.ID, retiredSession.ID) //nolint:errcheck
 						continue
 					}
 					key := strconv.Itoa(storeIndex) + "\x00" + item.ID
@@ -1384,6 +1400,11 @@ func unclaimWorkAssignedToRetiredSessionInfo(
 				}
 				for _, item := range work {
 					if session.IsSessionBeadOrRepairable(item) {
+						continue
+					}
+					if lifecycleProtectedWork(item, cfg) {
+						fmt.Fprintf(stderr, "session beads: retaining lifecycle-enrolled work %s assigned to retired session %s; controller authorization is required before release\n", item.ID, retiredSession.ID) //nolint:errcheck
+						res.Failed++
 						continue
 					}
 					key := strconv.Itoa(storeIndex) + "\x00" + item.ID
@@ -3670,6 +3691,10 @@ func releaseWorkFromClosedSessionBeadExcept(store beads.Store, sessionBead beads
 			}
 			for _, item := range work {
 				if session.IsSessionBeadOrRepairable(item) {
+					continue
+				}
+				if lifecycleEnrollmentEvidence(item) {
+					fmt.Fprintf(stderr, "session beads: retaining lifecycle-enrolled work %s after closing session %s; controller authorization is required before release\n", item.ID, sessionBead.ID) //nolint:errcheck
 					continue
 				}
 				if _, dup := seenWork[item.ID]; dup {

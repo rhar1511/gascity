@@ -48,14 +48,14 @@ const (
 	PRActionDiffCandidateCommit    = "candidate_commit_delta"
 	PRActionWorkingTreeClean       = "clean"
 	prActionRecordSource           = "api"
-	prActionSourceMetadataKey      = "gc.pr_action.source"
-	prActionQueueIndexMetadataKey  = "gc.pr_action.queue_index"
-	prActionIdempotencyMetadataKey = "gc.pr_action.idempotency_key"
-	prActionFingerprintMetadataKey = "gc.pr_action.fingerprint"
-	prActionRecordMetadataKey      = "gc.pr_action.record"
-	prActionTargetMetadataKey      = "gc.pr_action.target_key"
-	prActionClaimMetadataKey       = "gc.pr_action.claim"
-	prActionRouteProposalKey       = "gc.pr_action.proposed_route"
+	prActionSourceMetadataKey      = beadmeta.PRActionSourceMetadataKey
+	prActionQueueIndexMetadataKey  = beadmeta.PRActionQueueIndexMetadataKey
+	prActionIdempotencyMetadataKey = beadmeta.PRActionIdempotencyMetadataKey
+	prActionFingerprintMetadataKey = beadmeta.PRActionFingerprintMetadataKey
+	prActionRecordMetadataKey      = beadmeta.PRActionRecordMetadataKey
+	prActionTargetMetadataKey      = beadmeta.PRActionTargetMetadataKey
+	prActionClaimMetadataKey       = beadmeta.PRActionClaimMetadataKey
+	prActionRouteProposalKey       = beadmeta.PRActionRouteProposalMetadataKey
 	prActionExternalHoldLabel      = "hold:external"
 	prActionIdempotencyMaxLength   = 200
 )
@@ -1281,7 +1281,7 @@ func validPRRepairWork(row beads.Bead, monitor config.GitHubPRMonitor, item PRAc
 	// After explicit lifecycle admission, the signed receipt and serving route
 	// are written by that separate authority. Prepare itself never removes the
 	// hold or installs a serving route.
-	return row.Metadata[beadmeta.RoutedToMetadataKey] == monitor.RepairRoute && row.Metadata["gc.lifecycle.admission_receipt.v1"] != ""
+	return row.Metadata[beadmeta.RoutedToMetadataKey] == monitor.RepairRoute && row.Metadata[beadmeta.LifecycleAdmissionReceiptMetadataKey] != ""
 }
 
 func hasPRActionExternalHold(labels []string) bool {

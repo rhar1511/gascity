@@ -50,6 +50,9 @@ func (m *MemStore) UpdateIfMatch(id string, expectedRevision int64, opts UpdateO
 	if m.beads[i].Revision != expectedRevision {
 		return &PreconditionFailedError{ID: id, Expected: expectedRevision, Current: m.beads[i].Revision}
 	}
+	if err := ValidateLifecycleMutation(m.beads[i], opts); err != nil {
+		return fmt.Errorf("conditional update lifecycle bead %q: %w", id, err)
+	}
 	m.applyUpdateLocked(i, opts)
 	return nil
 }

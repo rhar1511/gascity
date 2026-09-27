@@ -1557,21 +1557,26 @@ func (s failingSetMetadataStore) SetMetadata(string, string, string) error {
 	return errors.New("metadata write failed")
 }
 
-func TestCloseConvoyWithReasonBdStoreForwardsReasonWithoutShow(t *testing.T) {
+func TestCloseConvoyWithReasonBdStoreReadsForLifecycleGuardAndForwardsReason(t *testing.T) {
 	const id = "bd-x"
 	var closeArgs []string
+	status := "open"
 	runner := func(_, name string, args ...string) ([]byte, error) {
 		if name != "bd" {
 			return nil, fmt.Errorf("unexpected command name: %s", name)
 		}
 		if len(args) > 0 && args[0] == "show" {
-			return nil, fmt.Errorf("unexpected bd show before convoy close")
+			if len(args) != 3 || args[1] != "--json" || args[2] != id {
+				return nil, fmt.Errorf("unexpected bd show args: %v", args)
+			}
+			return []byte(fmt.Sprintf(`[{"id":"%s","title":"batch","status":%q,"issue_type":"convoy","created_at":"2025-01-15T10:30:00Z"}]`, id, status)), nil
 		}
 		switch strings.Join(args, " ") {
 		case "update --json " + id + " --set-metadata close_reason=" + convoyAutocloseReason:
 			return []byte(`[{"id":"bd-x","title":"batch","status":"open","issue_type":"convoy","created_at":"2025-01-15T10:30:00Z"}]`), nil
 		case "close --force --json --reason " + convoyAutocloseReason + " " + id:
 			closeArgs = append([]string(nil), args...)
+			status = "closed"
 			return []byte(`[{"id":"bd-x","title":"batch","status":"closed","issue_type":"convoy","created_at":"2025-01-15T10:30:00Z"}]`), nil
 		default:
 			return nil, fmt.Errorf("unexpected command: bd %s", strings.Join(args, " "))

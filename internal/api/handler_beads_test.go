@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -430,6 +431,52 @@ func TestBeadCloseVerifiesStoreContainsBeadBeforeClosing(t *testing.T) {
 	}
 	if got.Status != "closed" {
 		t.Fatalf("rig status = %q, want closed", got.Status)
+	}
+}
+
+func TestBeadCloseAndUpdateRejectLifecycleSourceWithoutCompletion(t *testing.T) {
+	state := newFakeState(t)
+	store := state.stores["myrig"]
+	s := New(state)
+	closed := "closed"
+	for _, tc := range []struct {
+		name  string
+		write func(string) error
+	}{
+		{
+			name: "close endpoint",
+			write: func(id string) error {
+				_, err := s.humaHandleBeadClose(context.Background(), &BeadCloseInput{ID: id})
+				return err
+			},
+		},
+		{
+			name: "update endpoint",
+			write: func(id string) error {
+				_, err := s.humaHandleBeadUpdate(context.Background(), &BeadUpdateInput{ID: id, Body: beadUpdateBody{Status: &closed}})
+				return err
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			created, err := store.Create(beads.Bead{
+				Title: "lifecycle source", Type: "task", Status: "open",
+				Metadata: map[string]string{beadmeta.LifecycleAdmissionReceiptMetadataKey: "unverified receipt"},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := tc.write(created.ID); err == nil {
+				t.Fatal("ordinary API close succeeded without verified completion")
+			}
+			after, err := store.Get(created.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if after.Status != "open" {
+				t.Fatalf("status = %q after refused close, want open", after.Status)
+			}
+		})
 	}
 }
 
@@ -1765,6 +1812,77 @@ func TestBeadReopenNotClosed(t *testing.T) {
 
 	if rec.Code != http.StatusConflict {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusConflict)
+	}
+}
+
+func TestBeadReopenCannotEraseLifecycleEnrollmentFirst(t *testing.T) {
+	state := newFakeState(t)
+	store := state.stores["myrig"]
+	bead, err := store.Create(beads.Bead{Title: "Enrolled task", Status: "open", Metadata: map[string]string{
+		beadmeta.LifecycleAdmissionReceiptMetadataKey: "signed admission evidence",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer, ok := beads.ConditionalWriterFor(store)
+	if !ok {
+		t.Fatal("fixture store lacks the trusted conditional completion path")
+	}
+	current, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.CloseIfMatch(bead.ID, current.Revision); err != nil {
+		t.Fatalf("seed controller-completed enrolled row: %v", err)
+	}
+	closed, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closed.Status != "closed" {
+		t.Fatalf("fixture status = %q, want closed", closed.Status)
+	}
+	h := newTestCityHandler(t, state)
+
+	for _, tc := range []struct {
+		name string
+		path string
+		body string
+	}{
+		{
+			name: "clear receipt",
+			path: "/bead/" + bead.ID + "/update",
+			body: `{"metadata":{"` + beadmeta.LifecycleAdmissionReceiptMetadataKey + `":""}}`,
+		},
+		{
+			name: "generic reopen through status update",
+			path: "/bead/" + bead.ID + "/update",
+			body: `{"status":"open"}`,
+		},
+		{
+			name: "reopen endpoint",
+			path: "/bead/" + bead.ID + "/reopen",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var requestBody io.Reader
+			if tc.body != "" {
+				requestBody = bytes.NewBufferString(tc.body)
+			}
+			req := newPostRequest(cityURL(state, tc.path), requestBody)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != http.StatusConflict {
+				t.Fatalf("status = %d, want conflict; body=%s", rec.Code, rec.Body.String())
+			}
+			current, err := store.Get(bead.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if current.Status != "closed" || current.Metadata[beadmeta.LifecycleAdmissionReceiptMetadataKey] == "" {
+				t.Fatalf("refused request changed enrolled record: status=%q metadata=%v", current.Status, current.Metadata)
+			}
+		})
 	}
 }
 

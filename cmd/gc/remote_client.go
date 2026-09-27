@@ -14,6 +14,8 @@ import (
 
 var remoteCredentialCache = credentialprovider.NewCache()
 
+var remoteCityClientHook = api.NewRemoteCityScopedClient
+
 // remoteClientOptions builds the transport options (TLS + bearer) shared by
 // every remote client for a resolved target. TLS options come from the target's
 // context; the transport bearer comes from the context's credential_command (a
@@ -96,7 +98,7 @@ func buildRemoteClient(target *remoteTarget) (*api.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return api.NewRemoteCityScopedClient(target.BaseURL, target.CityName, opts)
+	return remoteCityClientHook(target.BaseURL, target.CityName, opts)
 }
 
 // buildRemoteWriteClient is buildRemoteClient plus the city-write grant: for a
@@ -129,7 +131,7 @@ func buildRemoteWriteClient(target *remoteTarget) (*api.Client, error) {
 			})
 		}
 	}
-	return api.NewRemoteCityScopedClient(target.BaseURL, target.CityName, opts)
+	return remoteCityClientHook(target.BaseURL, target.CityName, opts)
 }
 
 // resolveReadTarget resolves a no-argument READ command's target. For a REMOTE

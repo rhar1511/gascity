@@ -96,7 +96,12 @@ func githubPRActionClient() (string, *api.Client, error) {
 		endpoint.Fragment = ""
 		endpoint.RawFragment = ""
 		target := strings.TrimRight(endpoint.String(), "/") + "/v0/city/" + url.PathEscape(resolved.Remote.CityName)
-		client, err := buildRemoteWriteClient(resolved.Remote)
+		// Use the same credential-free endpoint for the actual transport and
+		// credential source. Otherwise net/http can turn URL userinfo into an
+		// implicit Basic Authorization header despite the sanitized display.
+		remote := *resolved.Remote
+		remote.BaseURL = endpoint.String()
+		client, err := buildRemoteWriteClient(&remote)
 		return target, client, err
 	}
 	cityPath := resolved.CityPath

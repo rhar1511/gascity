@@ -193,6 +193,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/storebinding"
+	"github.com/gastownhall/gascity/internal/worklifecycle"
 )
 
 // bdByIDVerb names a recognized by-ID gc bd invocation.
@@ -1719,6 +1720,15 @@ func printBdByIDBead(b beads.Bead, jsonOut bool, binding string, stdout, stderr 
 // have learned to trust that output; rendering the UpdateOpts back would report
 // what was asked for rather than what the store now holds.
 func doBdByIDUpdate(graph storebinding.GraphStore, op bdByIDOp, binding string, stdout, stderr io.Writer) int {
+	current, err := graph.Get(op.ID)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc bd update: %s: %v\n", op.ID, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if err := worklifecycle.ValidateEnrolledMutation(current, op.Update); err != nil {
+		fmt.Fprintf(stderr, "gc bd update: %s: %v\n", op.ID, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	if err := graph.Update(op.ID, op.Update); err != nil {
 		fmt.Fprintf(stderr, "gc bd update: %s: %v\n", op.ID, err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1757,6 +1767,24 @@ func doBdByIDReopen(graph storebinding.GraphStore, op bdByIDOp, binding string, 
 // visible here as an error, and invisible to a caller that only echoed the
 // verb.
 func doBdByIDLifecycleWrite(graph storebinding.GraphStore, op bdByIDOp, verb string, write func(string) error, binding string, stdout, stderr io.Writer) int {
+	if verb == "reopen" || verb == "close" {
+		current, err := graph.Get(op.ID)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc bd %s: %s: %v\n", verb, op.ID, err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		var validationErr error
+		if verb == "close" {
+			validationErr = beads.ValidateLifecycleClose(current)
+		} else {
+			open := "open"
+			validationErr = worklifecycle.ValidateEnrolledMutation(current, beads.UpdateOpts{Status: &open})
+		}
+		if validationErr != nil {
+			fmt.Fprintf(stderr, "gc bd %s: %s: %v\n", verb, op.ID, validationErr) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+	}
 	if err := write(op.ID); err != nil {
 		fmt.Fprintf(stderr, "gc bd %s: %s: %v\n", verb, op.ID, err) //nolint:errcheck // best-effort stderr
 		return 1

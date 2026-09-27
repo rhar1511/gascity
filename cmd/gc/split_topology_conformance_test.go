@@ -2212,7 +2212,7 @@ func conformanceFederatedReadTier(t *testing.T, e splitEnv) {
 // normally reads as having nothing in progress.
 //
 // It covers the other two federated readers — `gc ready --status in_progress`
-// (federateListBeads) and GET /v0/beads?status=in_progress (the API's list
+// (federateListBeadsWithOwner) and GET /v0/beads?status=in_progress (the API's list
 // fan-out) — which take a ListQuery rather than a ReadyQuery and had the same
 // unstated tier.
 func conformanceFederatedInFlightTier(t *testing.T, e splitEnv, ownerName string) {

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -40,7 +41,7 @@ var (
 	ErrRequestAcknowledgementRejected = errors.New("session request acknowledgement does not match the intended execution")
 )
 
-const requestReceiptPrefix = "gc.session_request.v1."
+const requestReceiptPrefix = beadmeta.SessionRequestReceiptPrefix
 
 // RequestReceipt keeps acceptance, provider submission, session acknowledgement,
 // and effect evidence separate. An acknowledgement never verifies an effect.

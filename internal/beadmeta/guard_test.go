@@ -36,6 +36,7 @@ var keyShape = regexp.MustCompile(`^gc\.[A-Za-z0-9_.]+$`)
 // namespace — those live in excluded directories or never appear as Go literals,
 // so the open world stays open without listing every pack key here.
 var allowedNonMetadata = map[string]string{
+	"gc.rsipolicy.v1": "signed RSI promotion-policy version, not a bead metadata key (internal/rsipolicy)",
 	// JSON envelope schema-version contract strings (their own per-module
 	// owners; versioned independently of the metadata vocabulary).
 	"gc.dolt.cleanup.v1":       "dolt cleanup manifest schema version (cmd/gc/cmd_dolt_cleanup.go)",

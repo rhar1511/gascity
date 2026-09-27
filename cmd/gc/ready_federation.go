@@ -46,7 +46,7 @@ package main
 // A CLI work query has no `partial_errors` field: its whole output is the array,
 // and a short array is indistinguishable from "no work". So where the API can be
 // honestly partial, this command cannot, and every leg it federates fails LOUD —
-// at BOTH ends. federateBeadLegs is the read end. readyRigLegStores is the open
+// at BOTH ends. The federation readers are the read end. readyRigLegStores is the open
 // end, and it is the end that was the hole: leg assembly runs before any read, so
 // a rig store that could not be opened used to be dropped by the builder, warned
 // about on a stream no work query parses, and answered with exit 0 and a
@@ -105,9 +105,12 @@ import (
 // this reader is overriding a policy that really is PartialDegrade, rather than
 // quietly agreeing with a plan that never said so.
 type readyLeg struct {
-	label   string
-	store   beads.Store
-	onError storeref.ErrPolicy
+	label          string
+	store          beads.Store
+	ref            storeref.StoreRef
+	sourceStoreRef string
+	cityName       string
+	onError        storeref.ErrPolicy
 }
 
 // readyFederationLegs assembles the ordered leg list from Plan(RoutedWork): the
@@ -130,7 +133,12 @@ type readyLeg struct {
 // panic on first read, and by the time the legs are assembled a store that could
 // not be opened has already failed the whole query at readyRigLegStores.
 func readyFederationLegs(cityPath, cityName string, cfg *config.City, cityStore beads.Store, rigStores map[string]beads.Store) ([]readyLeg, error) {
-	return readyLegsForTopology(cliResidencyTopology(cityPath, cfg, cityStore, rigLegsExcludingCityName(cityName, rigStores)))
+	legs, err := readyLegsForTopology(cliResidencyTopology(cityPath, cfg, cityStore, rigLegsExcludingCityName(cityName, rigStores)))
+	if err != nil {
+		return nil, err
+	}
+	setReadyLegSourceScopes(legs, cityName)
+	return legs, nil
 }
 
 // readyFederationLegsOverBinding assembles the legs for an EXPLICITLY supplied
@@ -151,7 +159,12 @@ func readyFederationLegsOverBinding(cityName string, cityStore beads.Store, rigS
 			Leg:      storeref.Leg{Ref: storeref.ClassRef(classes), Store: leg},
 		}}
 	}
-	return readyLegsForTopology(assembleResidencyTopology(nil, cityStore, rigLegsExcludingCityName(cityName, rigStores), bindings, nil))
+	legs, err := readyLegsForTopology(assembleResidencyTopology(nil, cityStore, rigLegsExcludingCityName(cityName, rigStores), bindings, nil))
+	if err != nil {
+		return nil, err
+	}
+	setReadyLegSourceScopes(legs, cityName)
+	return legs, nil
 }
 
 // readyLegsForTopology is the assembly itself: Plan(RoutedWork), enumerated
@@ -168,9 +181,29 @@ func readyLegsForTopology(topo storeref.Topology) ([]readyLeg, error) {
 	}
 	var legs []readyLeg
 	storeref.EachLeg(plan, func(leg storeref.Leg, _ storeref.Role, onError storeref.ErrPolicy) {
-		legs = append(legs, readyLeg{label: readyLegLabel(leg.Ref), store: leg.Store, onError: onError})
+		legs = append(legs, readyLeg{label: readyLegLabel(leg.Ref), store: leg.Store, ref: leg.Ref, onError: onError})
 	})
 	return legs, nil
+}
+
+func setReadyLegSourceScopes(legs []readyLeg, cityName string) {
+	if cityName == "" {
+		cityName = "city"
+	}
+	for i := range legs {
+		legs[i].cityName = cityName
+		switch {
+		case legs[i].ref == storeref.WorkRef:
+			legs[i].sourceStoreRef = "city:" + cityName
+		case storeref.IsClassRef(string(legs[i].ref)):
+			legs[i].sourceStoreRef = string(legs[i].ref)
+		default:
+			rig, ok := storeref.ScopeRigContext(string(legs[i].ref))
+			if ok && rig != "" {
+				legs[i].sourceStoreRef = "rig:" + rig
+			}
+		}
+	}
 }
 
 // rigLegsExcludingCityName drops a rig keyed under the city's own name; see
@@ -215,7 +248,7 @@ func readyLegLabel(ref storeref.StoreRef) string {
 // readyRigLegStores opens the rig legs, failing the whole query when any BOUND
 // rig's store cannot be opened.
 //
-// This is the OPEN end of the fail-loud rule federateBeadLegs applies at the read
+// This is the OPEN end of the fail-loud rule the federation readers apply at the read
 // end, and the two are the same rule for the same reason: a leg missing from the
 // federation is a leg whose claimable rows are missing from the array, and the
 // array is the entire answer. The controller's opener,
@@ -260,41 +293,38 @@ func relocatedGraphLegFrom(binding beads.Store, relocated bool, cityStore beads.
 	return binding
 }
 
-// federateReadyBeads reads the ready set from every leg and merges it.
-//
-// The per-leg read goes through the LIVE handle, which is what the API's ready
-// arm does, so a caching-wrapped leg answers from its backing store rather than
-// from a cache the CLI process never primed.
-func federateReadyBeads(legs []readyLeg, q beads.ReadyQuery) ([]beads.Bead, error) {
-	return federateBeadLegs(legs, func(store beads.Store) ([]beads.Bead, error) {
-		return beads.HandlesFor(store).Live.Ready(q)
-	})
+// federateReadyBeadsWithOwner keeps the authoritative store ref alongside
+// each first-leg-wins row. gc ready exposes this provenance for signed
+// lifecycle receipts so the hook can reject a receipt replayed into another
+// bead store.
+func federateReadyBeadsWithOwner(legs []readyLeg, q beads.ReadyQuery) ([]beads.Bead, map[string]readyLeg, error) {
+	var merged []beads.Bead
+	owner := make(map[string]readyLeg)
+	for _, leg := range legs {
+		rows, err := beads.HandlesFor(leg.store).Live.Ready(q)
+		if err != nil {
+			return nil, nil, fmt.Errorf("%s store: %w", leg.label, err)
+		}
+		for _, bead := range rows {
+			if _, seen := owner[bead.ID]; seen {
+				continue
+			}
+			owner[bead.ID] = leg
+			merged = append(merged, bead)
+		}
+	}
+	return merged, owner, nil
 }
 
-// federateListBeads reads a status-scoped list from every leg and merges it. It
-// backs the --status arm, where a graph step assigned to a worker that died
-// lives in the relocated store.
+// federateListBeadsWithOwner reads a status-scoped list from every leg and
+// records which leg served each merged row. It backs the --status arm, where a
+// graph step assigned to a worker that died lives in the relocated store.
 //
 // The read is a direct store.List rather than the live handle's, because that
 // handle overrides TierMode to TierBoth and would silently discard the caller's
 // tier selection. The API's list arm reads the store directly for the same
-// reason. The caller states the tier it wants (readReadyCandidates), so nothing
-// here has to guess it.
-func federateListBeads(legs []readyLeg, q beads.ListQuery) ([]beads.Bead, error) {
-	return federateBeadLegs(legs, func(store beads.Store) ([]beads.Bead, error) {
-		return store.List(q)
-	})
-}
-
-// federateListBeadsWithOwner is federateListBeads plus a record of which leg
-// served each merged row.
-//
-// It is separate rather than a widened federateListBeads because only the
-// crash-recovery arm needs the ownership map, and every other caller would then
-// carry a map it discards. The merge rule is the same one federateBeadLegs
-// applies — first leg to return an id wins — restated here rather than shared,
-// because sharing it would mean threading a per-leg callback through the read
-// closure that federateBeadLegs deliberately keeps store-shaped.
+// reason. The caller states the tier it wants, so nothing here has to guess it.
+// First leg to return an id wins.
 func federateListBeadsWithOwner(legs []readyLeg, q beads.ListQuery) ([]beads.Bead, map[string]readyLeg, error) {
 	var merged []beads.Bead
 	owner := make(map[string]readyLeg)
@@ -312,31 +342,4 @@ func federateListBeadsWithOwner(legs []readyLeg, q beads.ListQuery) ([]beads.Bea
 		}
 	}
 	return merged, owner, nil
-}
-
-// federateBeadLegs runs read against every leg in order and merges the results,
-// deduped by id with the FIRST leg to return an id winning.
-//
-// Any leg error — including a partial read, which beads reports as an error
-// carrying rows — aborts the whole federation, ESCALATING the plan's
-// PartialDegrade verdict on the rig legs. See the file header: a CLI array has
-// nowhere to say "this is short", so a degraded leg here would be served as a
-// short array indistinguishable from "no work".
-func federateBeadLegs(legs []readyLeg, read func(beads.Store) ([]beads.Bead, error)) ([]beads.Bead, error) {
-	var merged []beads.Bead
-	seen := make(map[string]bool)
-	for _, leg := range legs {
-		rows, err := read(leg.store)
-		if err != nil {
-			return nil, fmt.Errorf("%s store: %w", leg.label, err)
-		}
-		for _, b := range rows {
-			if seen[b.ID] {
-				continue
-			}
-			seen[b.ID] = true
-			merged = append(merged, b)
-		}
-	}
-	return merged, nil
 }

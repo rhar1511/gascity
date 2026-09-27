@@ -5197,6 +5197,96 @@ func TestCloseBeadReleasesWorkAssignedBySessionName(t *testing.T) {
 	}
 }
 
+func TestCloseBeadRetainsLifecycleEnrolledWorkForControllerRecovery(t *testing.T) {
+	store := beads.NewMemStore()
+	now := time.Date(2026, 4, 18, 12, 0, 0, 0, time.UTC)
+	sessionBead, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "worker-lifecycle-dead",
+			"template":     "worker",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	work, err := store.Create(beads.Bead{
+		Title:    "enrolled work",
+		Assignee: "worker-lifecycle-dead",
+		Metadata: map[string]string{
+			beadmeta.RoutedToMetadataKey:                  "worker",
+			beadmeta.LifecycleAdmissionReceiptMetadataKey: "signed enrollment evidence",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create work bead: %v", err)
+	}
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: strPtr("in_progress")}); err != nil {
+		t.Fatalf("set work in_progress: %v", err)
+	}
+
+	if !closeBead(store, sessionBead.ID, "orphaned", now, io.Discard) {
+		t.Fatal("closeBead returned false, want true")
+	}
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("get work bead: %v", err)
+	}
+	if got.Assignee != "worker-lifecycle-dead" || got.Status != "in_progress" {
+		t.Fatalf("closing the session released enrolled work: status=%q assignee=%q", got.Status, got.Assignee)
+	}
+}
+
+func TestRetiredSessionHelpersDoNotReleaseOrReassignLifecycleWork(t *testing.T) {
+	store := beads.NewMemStore()
+	retired, err := store.Create(beads.Bead{
+		Title:  "retired worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "worker-retired",
+			"template":     "worker",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create retired session: %v", err)
+	}
+	work, err := store.Create(beads.Bead{
+		Title:    "enrolled work",
+		Assignee: retired.ID,
+		Metadata: map[string]string{
+			beadmeta.RoutedToMetadataKey:                  "worker",
+			beadmeta.LifecycleAdmissionReceiptMetadataKey: "signed enrollment evidence",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create work bead: %v", err)
+	}
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: strPtr("in_progress")}); err != nil {
+		t.Fatalf("set work in_progress: %v", err)
+	}
+	cfg := &config.City{
+		Lifecycle: config.LifecycleConfig{AdmissionEnabled: true},
+		Agents:    []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}},
+	}
+
+	reassignWorkAssignedToRetiredSessionBead("", cfg, store, nil, retired, "sess-successor", io.Discard)
+	if got, err := store.Get(work.ID); err != nil {
+		t.Fatalf("get work after reassignment path: %v", err)
+	} else if got.Assignee != retired.ID || got.Status != "in_progress" {
+		t.Fatalf("reassignment path changed enrolled work: status=%q assignee=%q", got.Status, got.Assignee)
+	}
+
+	unclaimWorkAssignedToRetiredSessionBead("", cfg, store, nil, retired, "worker", io.Discard)
+	if got, err := store.Get(work.ID); err != nil {
+		t.Fatalf("get work after release path: %v", err)
+	} else if got.Assignee != retired.ID || got.Status != "in_progress" {
+		t.Fatalf("release path changed enrolled work: status=%q assignee=%q", got.Status, got.Assignee)
+	}
+}
+
 func TestCloseBeadClearsSessionAffinityOnRelease(t *testing.T) {
 	store := beads.NewMemStore()
 	now := time.Date(2026, 4, 18, 12, 0, 0, 0, time.UTC)

@@ -1938,6 +1938,14 @@
         "escalation_target": {
           "type": "string",
           "description": "EscalationTarget is the configured recipient for one exhaustion\nescalation per work item. Empty deliberately leaves recovery disabled."
+        },
+        "completion_receipt_max_age": {
+          "type": "string",
+          "description": "CompletionReceiptMaxAge bounds how long after signing an acceptance\nreceipt may close work. Operators must choose this from their acceptance\nand rollout policy; no default is inferred. Empty disables completion\nreconciliation."
+        },
+        "completion_clock_skew": {
+          "type": "string",
+          "description": "CompletionClockSkew is the largest accepted future timestamp allowance.\nOperators must choose this from expected signer/controller clock drift.\nIt must be set with CompletionReceiptMaxAge; empty disables completion\nreconciliation rather than choosing a controller-specific default."
         }
       },
       "additionalProperties": false,

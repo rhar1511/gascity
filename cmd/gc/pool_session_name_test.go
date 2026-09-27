@@ -290,6 +290,83 @@ func TestReleaseOrphanedPoolAssignments_ReopensMissingPoolAssignee(t *testing.T)
 	}
 }
 
+func TestReleaseOrphanedPoolAssignments_HoldsLifecycleEnrollmentWithoutRecoveryAuthorization(t *testing.T) {
+	store := beads.NewMemStore()
+	work, err := store.Create(beads.Bead{
+		Title:    "orphaned enrolled work",
+		Assignee: "worker-dead",
+		Metadata: map[string]string{
+			beadmeta.RoutedToMetadataKey:                  "worker",
+			beadmeta.LifecycleAdmissionReceiptMetadataKey: "signed enrollment evidence",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create work bead: %v", err)
+	}
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("Set work status: %v", err)
+	}
+	work, err = store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Reload work bead: %v", err)
+	}
+	cfg := &config.City{
+		Lifecycle: config.LifecycleConfig{AdmissionEnabled: true},
+		Agents:    []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}},
+	}
+
+	released := releaseOrphanedPoolAssignmentsFromBeads(store, cfg, "", nil, []beads.Bead{work}, nil, nil, nil)
+	if len(released) != 0 {
+		t.Fatalf("released lifecycle-enrolled work without authorization: %v", released)
+	}
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get work bead: %v", err)
+	}
+	if got.Status != "in_progress" || got.Assignee != "worker-dead" {
+		t.Fatalf("orphan sweep changed enrolled work: status=%q assignee=%q", got.Status, got.Assignee)
+	}
+}
+
+func TestConfirmedOrphanSessionReleaseHoldsLifecycleEnrollment(t *testing.T) {
+	store := beads.NewMemStore()
+	work, err := store.Create(beads.Bead{
+		Title:    "confirmed orphan enrolled work",
+		Assignee: "sess-dead",
+		Metadata: map[string]string{
+			beadmeta.RoutedToMetadataKey:                  "worker",
+			beadmeta.LifecycleAdmissionReceiptMetadataKey: "signed enrollment evidence",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create work bead: %v", err)
+	}
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("Set work status: %v", err)
+	}
+	work, err = store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Reload work bead: %v", err)
+	}
+	cfg := &config.City{
+		Lifecycle: config.LifecycleConfig{AdmissionEnabled: true},
+		Agents:    []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}},
+	}
+	dead := session.Info{ID: "sess-dead", SessionNameMetadata: "worker-dead"}
+
+	released := releaseConfirmedOrphanSessionWork(cfg, store, nil, []beads.Bead{work}, []beads.Store{store}, dead)
+	if len(released) != 0 {
+		t.Fatalf("released lifecycle-enrolled work without authorization: %v", released)
+	}
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get work bead: %v", err)
+	}
+	if got.Status != "in_progress" || got.Assignee != "sess-dead" {
+		t.Fatalf("confirmed-orphan path changed enrolled work: status=%q assignee=%q", got.Status, got.Assignee)
+	}
+}
+
 func TestReleaseOrphanedPoolAssignments_SkipsUnassignedWorkflowRoot(t *testing.T) {
 	store := beads.NewMemStore()
 	root, err := store.Create(beads.Bead{

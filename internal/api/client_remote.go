@@ -96,8 +96,8 @@ type RemoteOptions struct {
 // malformed baseURL (or bad CA file) is a hard error at construction — a remote
 // client is never a fallback-eligible stub. The returned client is marked
 // isRemote so every error it produces is non-fallbackable (gate G1).
-func NewRemoteCityScopedClient(baseURL, cityName string, opts RemoteOptions) (*Client, error) {
-	rest, stream, err := newRemoteHTTPClients(opts)
+func NewRemoteCityScopedClient(baseURL, cityName string, opts RemoteOptions, clientOpts ...ClientOption) (*Client, error) {
+	rest, stream, err := newRemoteHTTPClients(opts, clientOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -252,7 +252,7 @@ func bufferRequestBody(req *http.Request) ([]byte, error) {
 // policy: a REST client (bounded overall timeout + tight dial/TLS budgets) and a
 // stream client (no overall timeout; idle-bounded by the caller). Both refuse
 // credential-leaking redirects.
-func newRemoteHTTPClients(opts RemoteOptions) (rest, stream *http.Client, err error) {
+func newRemoteHTTPClients(opts RemoteOptions, clientOpts ...ClientOption) (rest, stream *http.Client, err error) {
 	tlsCfg, err := remoteTLSConfig(opts)
 	if err != nil {
 		return nil, nil, err
@@ -286,14 +286,22 @@ func newRemoteHTTPClients(opts RemoteOptions) (rest, stream *http.Client, err er
 	}
 	rest = &http.Client{
 		Timeout:       restTimeout,
-		Transport:     wrap(newTransport()),
+		Transport:     newTransport(),
 		CheckRedirect: remoteCheckRedirect,
 	}
 	stream = &http.Client{
 		Timeout:       0, // never cap a long-lived SSE stream; see remoteStreamIdleTimeout
-		Transport:     wrap(newTransport()),
+		Transport:     newTransport(),
 		CheckRedirect: remoteCheckRedirect,
 	}
+	for _, opt := range clientOpts {
+		if opt.transport != nil {
+			rest.Transport = opt.transport
+			stream.Transport = opt.transport
+		}
+	}
+	rest.Transport = wrap(rest.Transport)
+	stream.Transport = wrap(stream.Transport)
 	return rest, stream, nil
 }
 

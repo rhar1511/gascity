@@ -607,23 +607,41 @@ func payloadMatchesRequest(raw json.RawMessage, requestID, operation string) (bo
 	return p.RequestID == requestID && p.Operation == operation, nil
 }
 
+// ClientOption configures the generated API transport while preserving the
+// constructor's timeout and redirect policies.
+type ClientOption struct {
+	transport http.RoundTripper
+}
+
+// WithHTTPTransport supplies an HTTP transport, including an in-process handler
+// transport. Request construction and authentication editors remain unchanged.
+// A nil transport retains the constructor's network transport.
+func WithHTTPTransport(transport http.RoundTripper) ClientOption {
+	return ClientOption{transport: transport}
+}
+
 // NewClient creates a new supervisor-scope API client targeting the
 // given base URL (e.g., "http://127.0.0.1:8080"). Supervisor-scope
 // operations (ListCities, ListServices-via-city, etc.) work through
 // this client; per-city calls require NewCityScopedClient.
-func NewClient(baseURL string) *Client {
-	return newClient(baseURL, "")
+func NewClient(baseURL string, opts ...ClientOption) *Client {
+	return newClient(baseURL, "", opts...)
 }
 
 // NewCityScopedClient creates a client that targets per-city operations
 // at "/v0/city/<cityName>/...". The generated client produces those
 // paths natively — no prefix rewrite or path editor needed.
-func NewCityScopedClient(baseURL, cityName string) *Client {
-	return newClient(baseURL, cityName)
+func NewCityScopedClient(baseURL, cityName string, opts ...ClientOption) *Client {
+	return newClient(baseURL, cityName, opts...)
 }
 
-func newClient(baseURL, cityName string) *Client {
+func newClient(baseURL, cityName string, opts ...ClientOption) *Client {
 	httpClient := &http.Client{Timeout: defaultClientTimeout}
+	for _, opt := range opts {
+		if opt.transport != nil {
+			httpClient.Transport = opt.transport
+		}
+	}
 	cw, err := genclient.NewClientWithResponses(
 		baseURL,
 		genclient.WithHTTPClient(httpClient),
