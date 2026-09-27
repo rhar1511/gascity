@@ -360,6 +360,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	cityPost(sm, "/service/{name}/restart", (*Server).humaHandleServiceRestart, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound))
 
 	// Sessions (non-stream — stream is the SSE registration below).
+	registerSessionRequestRoutes(sm)
 	cityRegister(sm, huma.Operation{
 		OperationID:   "create-session",
 		Method:        http.MethodPost,

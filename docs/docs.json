@@ -232,6 +232,7 @@
               "reference/trust-boundaries",
               "reference/rsi-trusted-evaluation",
               "reference/api",
+              "reference/session-request-receipts",
               "reference/events",
               "reference/schema/index",
               "reference/system-packs",

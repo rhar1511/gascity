@@ -2688,6 +2688,19 @@ export type RequestFailedPayload = {
     request_id: string;
 };
 
+export type RequestReceipt = {
+    accepted_at: string;
+    acknowledged_at?: string;
+    delivery: string;
+    delivery_attempted_at?: string;
+    effect: string;
+    generation: number;
+    message_digest: string;
+    provider_result_at?: string;
+    request_id: string;
+    session_id: string;
+};
+
 export type RigActionBody = {
     /**
      * Action that was performed.
@@ -3322,6 +3335,28 @@ export type SessionRenameInputBody = {
      * New session title.
      */
     title: string;
+};
+
+export type SessionRequestAcknowledgementInputBody = {
+    /**
+     * Intended session execution generation.
+     */
+    generation: number;
+};
+
+export type SessionRequestSubmitInputBody = {
+    /**
+     * Exact intended execution generation.
+     */
+    generation: number;
+    /**
+     * Message delivered with its request identity.
+     */
+    message: string;
+    /**
+     * Durable idempotency identity for this request.
+     */
+    request_id: string;
 };
 
 export type SessionResetStalledPayload = {
@@ -17939,6 +17974,196 @@ export type PostV0CityByCityNameSessionByIdRenameResponses = {
 };
 
 export type PostV0CityByCityNameSessionByIdRenameResponse = PostV0CityByCityNameSessionByIdRenameResponses[keyof PostV0CityByCityNameSessionByIdRenameResponses];
+
+export type PostV0CityByCityNameSessionByIdRequestsData = {
+    body: SessionRequestSubmitInputBody;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Exact durable session ID.
+         */
+        id: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/session/{id}/requests';
+};
+
+export type PostV0CityByCityNameSessionByIdRequestsErrors = {
+    /**
+     * Unauthorized
+     */
+    401: ErrorModel;
+    /**
+     * Forbidden
+     */
+    403: ErrorModel;
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type PostV0CityByCityNameSessionByIdRequestsError = PostV0CityByCityNameSessionByIdRequestsErrors[keyof PostV0CityByCityNameSessionByIdRequestsErrors];
+
+export type PostV0CityByCityNameSessionByIdRequestsResponses = {
+    /**
+     * Accepted
+     */
+    202: RequestReceipt;
+};
+
+export type PostV0CityByCityNameSessionByIdRequestsResponse = PostV0CityByCityNameSessionByIdRequestsResponses[keyof PostV0CityByCityNameSessionByIdRequestsResponses];
+
+export type GetV0CityByCityNameSessionByIdRequestsByRequestIdData = {
+    body?: never;
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Exact durable session ID.
+         */
+        id: string;
+        /**
+         * Exact request ID.
+         */
+        request_id: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/session/{id}/requests/{request_id}';
+};
+
+export type GetV0CityByCityNameSessionByIdRequestsByRequestIdErrors = {
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type GetV0CityByCityNameSessionByIdRequestsByRequestIdError = GetV0CityByCityNameSessionByIdRequestsByRequestIdErrors[keyof GetV0CityByCityNameSessionByIdRequestsByRequestIdErrors];
+
+export type GetV0CityByCityNameSessionByIdRequestsByRequestIdResponses = {
+    /**
+     * OK
+     */
+    200: RequestReceipt;
+};
+
+export type GetV0CityByCityNameSessionByIdRequestsByRequestIdResponse = GetV0CityByCityNameSessionByIdRequestsByRequestIdResponses[keyof GetV0CityByCityNameSessionByIdRequestsByRequestIdResponses];
+
+export type PostV0CityByCityNameSessionByIdRequestsByRequestIdAckData = {
+    body: SessionRequestAcknowledgementInputBody;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+        /**
+         * Credential of the intended session execution.
+         */
+        'X-GC-Session-Token'?: string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Exact durable session ID.
+         */
+        id: string;
+        /**
+         * Exact request ID.
+         */
+        request_id: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/session/{id}/requests/{request_id}/ack';
+};
+
+export type PostV0CityByCityNameSessionByIdRequestsByRequestIdAckErrors = {
+    /**
+     * Unauthorized
+     */
+    401: ErrorModel;
+    /**
+     * Forbidden
+     */
+    403: ErrorModel;
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type PostV0CityByCityNameSessionByIdRequestsByRequestIdAckError = PostV0CityByCityNameSessionByIdRequestsByRequestIdAckErrors[keyof PostV0CityByCityNameSessionByIdRequestsByRequestIdAckErrors];
+
+export type PostV0CityByCityNameSessionByIdRequestsByRequestIdAckResponses = {
+    /**
+     * OK
+     */
+    200: RequestReceipt;
+};
+
+export type PostV0CityByCityNameSessionByIdRequestsByRequestIdAckResponse = PostV0CityByCityNameSessionByIdRequestsByRequestIdAckResponses[keyof PostV0CityByCityNameSessionByIdRequestsByRequestIdAckResponses];
 
 export type RespondSessionData = {
     body: SessionRespondInputBody;

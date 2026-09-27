@@ -1393,6 +1393,19 @@ export const zRequestFailedPayload = z.object({
     request_id: z.string()
 });
 
+export const zRequestReceipt = z.object({
+    accepted_at: z.iso.datetime(),
+    acknowledged_at: z.iso.datetime().optional(),
+    delivery: z.string(),
+    delivery_attempted_at: z.iso.datetime().optional(),
+    effect: z.string(),
+    generation: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    message_digest: z.string(),
+    provider_result_at: z.iso.datetime().optional(),
+    request_id: z.string(),
+    session_id: z.string()
+});
+
 export const zRigActionBody = z.object({
     action: z.string(),
     failed: z.array(z.string()).nullish(),
@@ -1758,6 +1771,16 @@ export const zSessionRawMessageFrame = z.unknown();
 
 export const zSessionRenameInputBody = z.object({
     title: z.string().min(1)
+});
+
+export const zSessionRequestAcknowledgementInputBody = z.object({
+    generation: z.coerce.bigint().gte(BigInt(1)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' })
+});
+
+export const zSessionRequestSubmitInputBody = z.object({
+    generation: z.coerce.bigint().gte(BigInt(1)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    message: z.string().min(1),
+    request_id: z.string().min(1).max(200)
 });
 
 export const zSessionResetStalledPayload = z.object({
@@ -9495,6 +9518,51 @@ export const zPostV0CityByCityNameSessionByIdRenamePath = z.object({
  * OK
  */
 export const zPostV0CityByCityNameSessionByIdRenameResponse = zSessionResponse;
+
+export const zPostV0CityByCityNameSessionByIdRequestsBody = zSessionRequestSubmitInputBody;
+
+export const zPostV0CityByCityNameSessionByIdRequestsHeaders = z.object({
+    'X-GC-Request': z.string().min(1)
+});
+
+export const zPostV0CityByCityNameSessionByIdRequestsPath = z.object({
+    cityName: z.string().min(1).regex(/\S/),
+    id: z.string()
+});
+
+/**
+ * Accepted
+ */
+export const zPostV0CityByCityNameSessionByIdRequestsResponse = zRequestReceipt;
+
+export const zGetV0CityByCityNameSessionByIdRequestsByRequestIdPath = z.object({
+    cityName: z.string().min(1).regex(/\S/),
+    id: z.string(),
+    request_id: z.string()
+});
+
+/**
+ * OK
+ */
+export const zGetV0CityByCityNameSessionByIdRequestsByRequestIdResponse = zRequestReceipt;
+
+export const zPostV0CityByCityNameSessionByIdRequestsByRequestIdAckBody = zSessionRequestAcknowledgementInputBody;
+
+export const zPostV0CityByCityNameSessionByIdRequestsByRequestIdAckHeaders = z.object({
+    'X-GC-Request': z.string().min(1),
+    'X-GC-Session-Token': z.string().optional()
+});
+
+export const zPostV0CityByCityNameSessionByIdRequestsByRequestIdAckPath = z.object({
+    cityName: z.string().min(1).regex(/\S/),
+    id: z.string(),
+    request_id: z.string()
+});
+
+/**
+ * OK
+ */
+export const zPostV0CityByCityNameSessionByIdRequestsByRequestIdAckResponse = zRequestReceipt;
 
 export const zRespondSessionBody = zSessionRespondInputBody;
 
