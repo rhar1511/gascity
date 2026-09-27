@@ -10,7 +10,7 @@ describe('Wayfinder review record metadata', () => {
   it('reads valid records newest first and reports malformed or miskeyed history', () => {
     const history = readWayfinderReviewHistory({
       [`${WAYFINDER_REVIEW_EVENT_PREFIX}newer`]:
-        '{"version":1,"id":"newer","kind":"approval","actor":"ricky","recorded_at":"2026-09-27T02:00:00.000Z","scope":"Prototype B","explicitly_confirmed":true}',
+        '{"version":1,"id":"newer","kind":"approval","actor":"ricky","recorded_at":"2026-09-27T02:00:00.000Z","target":"Prototype B","revision":"rev-42","scope":"GC-12","explicitly_confirmed":true}',
       [`${WAYFINDER_REVIEW_EVENT_PREFIX}older`]:
         '{"version":1,"id":"older","kind":"answer","actor":"operator","recorded_at":"2026-09-27T01:00:00.000Z","prompt":"Which?","answer":"B"}',
       [`${WAYFINDER_REVIEW_EVENT_PREFIX}broken`]: '{not json',
@@ -24,11 +24,13 @@ describe('Wayfinder review record metadata', () => {
     expect(history.unreadableCount).toBe(2);
   });
 
-  it('trims and timestamps the operator’s explicit approval scope', () => {
+  it('ties an explicit approval to a stable target, revision, and scope', () => {
     const record = createWayfinderReviewRecord(
       ' ricky ',
       {
         kind: 'approval',
+        target: '  Prototype B  ',
+        revision: '  rev-42  ',
         scope: '  Prototype B for GC-12  ',
         explicitly_confirmed: true,
       },
@@ -41,6 +43,8 @@ describe('Wayfinder review record metadata', () => {
       kind: 'approval',
       actor: 'ricky',
       recorded_at: '2026-09-27T03:00:00.000Z',
+      target: 'Prototype B',
+      revision: 'rev-42',
       scope: 'Prototype B for GC-12',
       explicitly_confirmed: true,
     });
@@ -59,11 +63,27 @@ describe('Wayfinder review record metadata', () => {
 
     const unconfirmed = {
       kind: 'approval',
+      target: 'Prototype B',
+      revision: 'rev-42',
       scope: 'Prototype B',
       explicitly_confirmed: false,
     } as unknown as WayfinderReviewDraft;
     expect(() =>
       createWayfinderReviewRecord('operator', unconfirmed, { id: 'approval-2' }),
     ).toThrow(/explicit confirmation is required/i);
+
+    expect(() =>
+      createWayfinderReviewRecord(
+        'operator',
+        {
+          kind: 'approval',
+          target: 'http://127.0.0.1:4173/session/private-review',
+          revision: 'rev-42',
+          scope: 'GC-12',
+          explicitly_confirmed: true,
+        },
+        { id: 'approval-3' },
+      ),
+    ).toThrow(/local review session URL/i);
   });
 });

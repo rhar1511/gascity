@@ -26,6 +26,8 @@ function WayfinderReviewWorkflowForBead({ bead }: { bead: SupervisorBead }) {
   const [annotation, setAnnotation] = useState('');
   const [prompt, setPrompt] = useState('');
   const [answer, setAnswer] = useState('');
+  const [approvalTarget, setApprovalTarget] = useState('');
+  const [approvalRevision, setApprovalRevision] = useState('');
   const [approvalScope, setApprovalScope] = useState('');
   const [approvalConfirmed, setApprovalConfirmed] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -45,7 +47,10 @@ function WayfinderReviewWorkflowForBead({ bead }: { bead: SupervisorBead }) {
       ? annotation.trim().length > 0
       : entryKind === 'answer'
         ? prompt.trim().length > 0 && answer.trim().length > 0
-        : approvalScope.trim().length > 0 && approvalConfirmed);
+        : approvalTarget.trim().length > 0 &&
+          approvalRevision.trim().length > 0 &&
+          approvalScope.trim().length > 0 &&
+          approvalConfirmed);
   const submitLabel =
     entryKind === 'annotation'
       ? 'Record annotation'
@@ -61,7 +66,13 @@ function WayfinderReviewWorkflowForBead({ bead }: { bead: SupervisorBead }) {
         ? { kind: 'annotation', text: annotation }
         : entryKind === 'answer'
           ? { kind: 'answer', prompt, answer }
-          : { kind: 'approval', scope: approvalScope, explicitly_confirmed: true };
+          : {
+              kind: 'approval',
+              target: approvalTarget,
+              revision: approvalRevision,
+              scope: approvalScope,
+              explicitly_confirmed: true,
+            };
 
     setSaving(true);
     setError(null);
@@ -77,6 +88,8 @@ function WayfinderReviewWorkflowForBead({ bead }: { bead: SupervisorBead }) {
       setAnnotation('');
       setPrompt('');
       setAnswer('');
+      setApprovalTarget('');
+      setApprovalRevision('');
       setApprovalScope('');
       setApprovalConfirmed(false);
       setNotice(`${submitLabel.replace('Record ', '')} recorded on this Bead.`);
@@ -273,6 +286,40 @@ function WayfinderReviewWorkflowForBead({ bead }: { bead: SupervisorBead }) {
 
           {entryKind === 'approval' && (
             <div className="space-y-2">
+              <label className="block text-label text-fg-muted" htmlFor="wayfinder-approval-target">
+                Artifact target
+                <input
+                  id="wayfinder-approval-target"
+                  aria-label="Artifact target"
+                  autoComplete="off"
+                  maxLength={1000}
+                  placeholder="Prototype B"
+                  required
+                  value={approvalTarget}
+                  onChange={(event) => setApprovalTarget(event.target.value)}
+                  className="mt-1 block w-full rounded-sm border border-rule bg-surface px-2 py-1 text-body text-fg focus-mark"
+                />
+              </label>
+              <label
+                className="block text-label text-fg-muted"
+                htmlFor="wayfinder-approval-revision"
+              >
+                Revision
+                <input
+                  id="wayfinder-approval-revision"
+                  aria-label="Revision"
+                  autoComplete="off"
+                  maxLength={256}
+                  placeholder="commit, version, or content hash"
+                  required
+                  value={approvalRevision}
+                  onChange={(event) => setApprovalRevision(event.target.value)}
+                  className="mt-1 block w-full rounded-sm border border-rule bg-surface px-2 py-1 text-body text-fg focus-mark"
+                />
+              </label>
+              <p className="text-label text-fg-faint">
+                Use a stable name and revision, not a local Lavish session URL.
+              </p>
               <label className="block text-label text-fg-muted" htmlFor="wayfinder-approval-scope">
                 Approval scope
                 <textarea
@@ -399,9 +446,15 @@ function ReviewRecord({ record }: { record: WayfinderReviewRecord }) {
         </div>
       )}
       {record.kind === 'approval' && (
-        <p className="mt-1">
-          Explicitly approved: <span className="text-fg">{record.scope}</span>
-        </p>
+        <div className="mt-1 space-y-1">
+          <p>
+            Target: <span className="text-fg">{record.target}</span> · Revision:{' '}
+            <span className="text-fg">{record.revision}</span>
+          </p>
+          <p>
+            Explicitly approved: <span className="text-fg">{record.scope}</span>
+          </p>
+        </div>
       )}
     </article>
   );

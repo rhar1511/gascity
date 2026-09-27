@@ -12,6 +12,8 @@ export type WayfinderReviewRecord =
   | (WayfinderReviewRecordBase & { kind: 'answer'; prompt: string; answer: string })
   | (WayfinderReviewRecordBase & {
       kind: 'approval';
+      target: string;
+      revision: string;
       scope: string;
       explicitly_confirmed: true;
     });
@@ -24,7 +26,13 @@ export interface WayfinderReviewHistory {
 export type WayfinderReviewDraft =
   | { kind: 'annotation'; text: string }
   | { kind: 'answer'; prompt: string; answer: string }
-  | { kind: 'approval'; scope: string; explicitly_confirmed: true };
+  | {
+      kind: 'approval';
+      target: string;
+      revision: string;
+      scope: string;
+      explicitly_confirmed: true;
+    };
 
 export interface WayfinderReviewRecordOptions {
   id?: string;
@@ -88,10 +96,18 @@ export function createWayfinderReviewRecord(
     if (draft.explicitly_confirmed !== true) {
       throw new Error('explicit confirmation is required to record approval');
     }
+    const target = requiredText(draft.target, 'artifact target', 1000);
+    const revision = requiredText(draft.revision, 'artifact revision', 256);
+    const scope = requiredText(draft.scope, 'approval scope', 2000);
+    if (containsLocalReviewSessionUrl(`${target}\n${revision}\n${scope}`)) {
+      throw new Error('approval must not include a local review session URL');
+    }
     return {
       ...base,
       kind: 'approval',
-      scope: requiredText(draft.scope, 'approval scope', 2000),
+      target,
+      revision,
+      scope,
       explicitly_confirmed: true,
     };
   }
@@ -129,12 +145,16 @@ function parseRecord(value: string): WayfinderReviewRecord | null {
   }
   if (
     parsed.kind === 'approval' &&
+    isNonEmptyString(parsed.target) &&
+    isNonEmptyString(parsed.revision) &&
     isNonEmptyString(parsed.scope) &&
     parsed.explicitly_confirmed === true
   ) {
     return {
       ...base,
       kind: 'approval',
+      target: parsed.target,
+      revision: parsed.revision,
       scope: parsed.scope,
       explicitly_confirmed: true,
     };
@@ -156,4 +176,21 @@ function requiredText(value: string, label: string, maxLength: number): string {
   if (trimmed.length > maxLength)
     throw new Error(`${label} must be ${maxLength} characters or fewer`);
   return trimmed;
+}
+
+function containsLocalReviewSessionUrl(value: string): boolean {
+  const urls = value.match(/https?:\/\/[^\s<>()]+/gi) ?? [];
+  return urls.some((candidate) => {
+    try {
+      const hostname = new URL(candidate).hostname.toLowerCase().replace(/^\[|\]$/g, '');
+      return (
+        hostname === 'localhost' ||
+        hostname.endsWith('.localhost') ||
+        hostname === '::1' ||
+        /^127(?:\.\d{1,3}){3}$/.test(hostname)
+      );
+    } catch {
+      return false;
+    }
+  });
 }

@@ -171,6 +171,11 @@ describe('WayfinderReviewWorkflow', () => {
     });
     expect(submit.hasAttribute('disabled')).toBe(true);
 
+    fireEvent.change(screen.getByLabelText('Artifact target'), {
+      target: { value: 'Prototype B' },
+    });
+    expect(submit.hasAttribute('disabled')).toBe(true);
+    fireEvent.change(screen.getByLabelText('Revision'), { target: { value: 'rev-42' } });
     fireEvent.click(screen.getByRole('checkbox', { name: /i explicitly approve this scope/i }));
     expect(submit.hasAttribute('disabled')).toBe(false);
     fireEvent.click(submit);
@@ -182,6 +187,8 @@ describe('WayfinderReviewWorkflow', () => {
     expect(record).toMatchObject({
       kind: 'approval',
       actor: 'ricky',
+      target: 'Prototype B',
+      revision: 'rev-42',
       scope: 'Prototype B for issues GC-12 and GC-13',
       explicitly_confirmed: true,
     });
