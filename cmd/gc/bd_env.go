@@ -316,7 +316,7 @@ func bdStoreForCityWithConfig(dir, cityPath string, cfg *config.City) *beads.BdS
 		dir,
 		bdCommandRunnerForCity(cityPath),
 		issuePrefixForScope(dir, cityPath, cfg),
-		bdStoreOptionsForConfig(cfg)...,
+		append(bdStoreOptionsForConfig(cfg), privateEvidenceOptionsForStore(cfg, dir, cityPath)...)...,
 	)
 }
 
@@ -338,7 +338,7 @@ func bdStoreForRig(rigDir, cityPath string, cfg *config.City, knownPrefix ...str
 		rigDir,
 		bdCommandRunnerForRig(cityPath, cfg, rigDir),
 		prefix,
-		bdStoreOptionsForConfig(cfg)...,
+		append(bdStoreOptionsForConfig(cfg), privateEvidenceOptionsForStore(cfg, rigDir, cityPath)...)...,
 	)
 }
 
@@ -355,6 +355,21 @@ func bdStoreOptionsForConfig(cfg *config.City) []beads.BdStoreOption {
 		opts = append(opts, beads.WithBdStoreRelocatedClasses(relocated...))
 	}
 	return opts
+}
+
+func privateEvidenceOptionsForStore(cfg *config.City, storeDir, cityPath string) []beads.BdStoreOption {
+	if cfg == nil || len(cfg.Beads.PrivateEvidence) == 0 {
+		return nil
+	}
+	storeRef := workflowStoreRefForDir(storeDir, cityPath, loadedCityName(cfg, cityPath), cfg)
+	entry, ok := cfg.Beads.PrivateEvidence[storeRef]
+	if !ok {
+		return nil
+	}
+	return []beads.BdStoreOption{beads.WithBdStorePrivateEvidenceHTTP(beads.PrivateEvidenceHTTPConfig{
+		Endpoint: entry.Endpoint, ProjectID: entry.ProjectID, Database: entry.Database,
+		ScopeRef: storeRef, TokenFile: entry.TokenFile,
+	})}
 }
 
 // reapStaleBdExportJSONL removes .beads/issues.jsonl best-effort when the
@@ -443,26 +458,18 @@ func controlBdStoreForCity(dir, cityPath string, cfg *config.City) *beads.BdStor
 		dir,
 		controlBdCommandRunnerForCity(cityPath),
 		issuePrefixForScope(dir, cityPath, cfg),
-		bdStoreOptionsForConfig(cfg)...,
+		append(bdStoreOptionsForConfig(cfg), privateEvidenceOptionsForStore(cfg, dir, cityPath)...)...,
 	)
 }
 
-func controlBdStoreForRig(rigDir, cityPath string, cfg *config.City, knownPrefix ...string) *beads.BdStore {
+func controlBdStoreForRig(rigDir, cityPath string, cfg *config.City) *beads.BdStore {
 	prefix := issuePrefixForScope(rigDir, cityPath, cfg)
-	if prefix == "" {
-		for _, candidate := range knownPrefix {
-			if strings.TrimSpace(candidate) != "" {
-				prefix = candidate
-				break
-			}
-		}
-	}
 	reapStaleBdExportJSONL(rigDir)
 	return beads.NewBdStoreWithPrefix(
 		rigDir,
 		controlBdCommandRunnerForRig(cityPath, cfg, rigDir),
 		prefix,
-		bdStoreOptionsForConfig(cfg)...,
+		append(bdStoreOptionsForConfig(cfg), privateEvidenceOptionsForStore(cfg, rigDir, cityPath)...)...,
 	)
 }
 

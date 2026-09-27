@@ -35,6 +35,44 @@ var (
 	_ conditionalWriteCapabilityProber = (*CachingStore)(nil)
 )
 
+type cachingPrivateEvidenceMetadataCASWriter struct {
+	cache  *CachingStore
+	writer PrivateEvidenceMetadataCASWriter
+}
+
+func (w cachingPrivateEvidenceMetadataCASWriter) CompareAndSetPrivateEvidenceMetadataKey(id, key, expected, next string) (bool, error) {
+	swapped, err := w.writer.CompareAndSetPrivateEvidenceMetadataKey(id, key, expected, next)
+	if err != nil {
+		w.cache.applyConditionalWriteFailure(id, err)
+		return swapped, err
+	}
+	// Never refresh the complete row here: it contains the opaque evidence
+	// payload, and BdStore's ordinary read path may expose stdout to telemetry.
+	w.cache.evictForConditionalWrite(id)
+	return swapped, nil
+}
+
+func (w cachingPrivateEvidenceMetadataCASWriter) ReadPrivateEvidenceMetadataKey(id, key string) (string, bool, error) {
+	return w.writer.ReadPrivateEvidenceMetadataKey(id, key)
+}
+
+// PrivateEvidenceMetadataCASWriterHandle preserves the cache's invalidation
+// and notification behavior while keeping private CAS on the backing's own
+// capability path.
+func (c *CachingStore) PrivateEvidenceMetadataCASWriterHandle() (PrivateEvidenceMetadataCASWriter, bool) {
+	writer, ok := PrivateEvidenceMetadataCASWriterFor(c.backing)
+	if !ok {
+		return nil, false
+	}
+	return cachingPrivateEvidenceMetadataCASWriter{cache: c, writer: writer}, true
+}
+
+// PrivateEvidenceArchiveReaderHandle delegates body-only evidence reads to
+// the backing store without inserting private rows into the ordinary cache.
+func (c *CachingStore) PrivateEvidenceArchiveReaderHandle() (PrivateEvidenceArchiveReader, bool) {
+	return PrivateEvidenceArchiveReaderFor(c.backing)
+}
+
 // cachingAtomicConditionalCloser preserves cache eviction and notification
 // while exposing the capability only for a backing that actually supports it.
 type cachingAtomicConditionalCloser struct{ cache *CachingStore }

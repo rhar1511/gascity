@@ -7,6 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
+	"github.com/gastownhall/gascity/internal/beads"
 )
 
 func withTestStdin(t *testing.T, input string, fn func()) {
@@ -28,6 +31,39 @@ func withTestStdin(t *testing.T, input string, fn func()) {
 		_ = r.Close()
 	}()
 	fn()
+}
+
+func TestBdStoreBridgeBeadRedactsAttemptEvidenceMetadata(t *testing.T) {
+	const privateValue = "private-attempt-evidence-payload"
+	metadata := map[string]string{
+		beadmeta.AttemptEvidenceArchiveAttemptIDMetadataKey:  "ae-private",
+		beadmeta.AttemptEvidenceArchiveOwnerIDMetadataKey:    "gc-owner",
+		beadmeta.AttemptEvidenceArchivePayloadMetadataKey:    privateValue,
+		beadmeta.AttemptEvidenceArchiveDigestMetadataKey:     "private-digest",
+		beadmeta.AttemptEvidenceIndexPrefix + "attempt-hash": privateValue,
+		"gc.attempt": "3",
+	}
+	projected := bridgeBead(beads.Bead{ID: "gc-owner", Metadata: metadata})
+	encoded, err := json.Marshal(projected)
+	if err != nil {
+		t.Fatalf("marshal bridge bead: %v", err)
+	}
+	if strings.Contains(string(encoded), privateValue) {
+		t.Fatalf("bridge JSON exposed private attempt evidence: %s", encoded)
+	}
+	for key := range metadata {
+		if isBridgePrivateAttemptEvidenceMetadataKey(key) {
+			if _, present := projected.Metadata[key]; present {
+				t.Errorf("bridge metadata retained private key %q", key)
+			}
+		}
+	}
+	if projected.Metadata["gc.attempt"] != "3" {
+		t.Fatalf("ordinary metadata = %v, want gc.attempt preserved", projected.Metadata)
+	}
+	if metadata[beadmeta.AttemptEvidenceArchivePayloadMetadataKey] != privateValue {
+		t.Fatal("bridge projection mutated the store-owned metadata map")
+	}
 }
 
 func writeFakeBdBridgeScript(t *testing.T, binDir, envFile, argsFile string) {

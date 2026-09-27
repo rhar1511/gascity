@@ -36,8 +36,10 @@ type beadPolicyGraphStore struct {
 }
 
 var (
-	_ beads.ConditionalAssignmentReleaser    = (*beadPolicyStore)(nil)
-	_ beads.ConditionalWritesResolveTargeter = (*beadPolicyStore)(nil)
+	_ beads.ConditionalAssignmentReleaser                  = (*beadPolicyStore)(nil)
+	_ beads.ConditionalWritesResolveTargeter               = (*beadPolicyStore)(nil)
+	_ beads.PrivateEvidenceMetadataCASWriterHandleProvider = (*beadPolicyStore)(nil)
+	_ beads.PrivateEvidenceArchiveReaderHandleProvider     = (*beadPolicyStore)(nil)
 )
 
 // ConditionalWritesResolveTarget declares the wrapped store as the
@@ -53,6 +55,16 @@ func (s *beadPolicyStore) ConditionalWritesResolveTarget() beads.Store { return 
 // PrivatePayloadValueTransportTarget lets evidence capture inspect the actual
 // store rather than assuming the policy wrapper's command transport is safe.
 func (s *beadPolicyStore) PrivatePayloadValueTransportTarget() beads.Store { return s.Store }
+
+// PrivateEvidenceMetadataCASWriterHandle preserves the inner transport and
+// write-owner wrapper path for immutable attempt evidence.
+func (s *beadPolicyStore) PrivateEvidenceMetadataCASWriterHandle() (beads.PrivateEvidenceMetadataCASWriter, bool) {
+	return beads.PrivateEvidenceMetadataCASWriterFor(s.Store)
+}
+
+func (s *beadPolicyStore) PrivateEvidenceArchiveReaderHandle() (beads.PrivateEvidenceArchiveReader, bool) {
+	return beads.PrivateEvidenceArchiveReaderFor(s.Store)
+}
 
 var (
 	_ beads.BatchDeleter      = (*beadPolicyStore)(nil)

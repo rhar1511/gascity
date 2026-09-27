@@ -19,6 +19,7 @@ go_test(
     name = "attemptevidence_test",
     srcs = [
         "evidence_test.go",
+        "private_evidence_installed_test.go",
         "testenv_import_test.go",
     ],
     embed = [":attemptevidence"],

@@ -301,6 +301,7 @@ BeadsConfig holds bead store settings.
 | `bd_compatibility` | string |  |  | BDCompatibility selects the bd CLI semantics Gas City may rely on. Empty defaults to "bd-1.0.4", which keeps claimable work history-backed and avoids bd ready/list flags that are unavailable or incomplete in bd 1.0.4. Enum: `bd-1.0.4`, `bd-1.0.5` |
 | `conditional_writes` | string |  |  | ConditionalWrites selects the bead-write discipline: "off" (legacy, byte-identical), "auto" (compare-and-swap where the store is capable, loud degrade otherwise), or "require" (CAS or a typed refusal). Empty defaults to "off". Any other value fails config load. Enum: `off`, `auto`, `require` |
 | `guarded_release` | string |  |  | GuardedRelease selects the ownership-release discipline for work beads: "off" (legacy, owner-blind bd update/unclaim), "auto" (fence-guarded release verbs where the bd binary is capable, loud degrade otherwise), or "require" (guarded release or a typed refusal). Empty defaults to "off". Any other value fails config load. Enum: `off`, `auto`, `require` |
+| `private_evidence` | map[string]PrivateEvidenceTransportConfig |  |  | PrivateEvidence opts selected canonical city/rig Beads scopes into the controller-only HTTP body transport for attempt evidence. An absent map keeps the capability disabled. Keys are canonical refs such as "city:town" and "rig:api"; tokens stay in protected files. |
 | `policies` | map[string]BeadPolicyConfig |  |  | Policies defines per-bead-use storage and garbage-collection defaults. Policy names are interpreted by higher-level systems; unknown names are preserved so packs can stage future policy classes without breaking load. |
 
 ## ChatSessionsConfig
@@ -685,6 +686,17 @@ PoolOverride modifies legacy [pool] fields that map to session scaling.
 | `drain_timeout` | string |  |  | DrainTimeout overrides the drain timeout. Duration string (e.g., "5m", "30m", "1h"). |
 | `on_death` | string |  |  | OnDeath overrides the on_death command template. Supports the same Go template placeholders as Agent.on_death. |
 | `on_boot` | string |  |  | OnBoot overrides the on_boot command template. Supports the same Go template placeholders as Agent.on_boot. |
+
+## PrivateEvidenceTransportConfig
+
+PrivateEvidenceTransportConfig opts one canonical Beads store scope into the body-only HTTP transport for immutable attempt evidence.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `endpoint` | string | **yes** |  |  |
+| `project_id` | string | **yes** |  |  |
+| `database` | string | **yes** |  |  |
+| `token_file` | string | **yes** |  |  |
 
 ## ProviderOption
 

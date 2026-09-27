@@ -1433,6 +1433,11 @@ type BeadsConfig struct {
 	// "require" (guarded release or a typed refusal). Empty defaults to "off".
 	// Any other value fails config load.
 	GuardedRelease string `toml:"guarded_release,omitempty" jsonschema:"enum=off,enum=auto,enum=require"`
+	// PrivateEvidence opts selected canonical city/rig Beads scopes into the
+	// controller-only HTTP body transport for attempt evidence. An absent map
+	// keeps the capability disabled. Keys are canonical refs such as
+	// "city:town" and "rig:api"; tokens stay in protected files.
+	PrivateEvidence map[string]PrivateEvidenceTransportConfig `toml:"private_evidence,omitempty"`
 	// Policies defines per-bead-use storage and garbage-collection defaults.
 	// Policy names are interpreted by higher-level systems; unknown names are
 	// preserved so packs can stage future policy classes without breaking load.
@@ -4758,6 +4763,9 @@ func Parse(data []byte) (*City, error) {
 		return nil, err
 	}
 	if err := validateGuardedRelease(cfg.Beads.GuardedRelease); err != nil {
+		return nil, err
+	}
+	if err := validatePrivateEvidenceTransports(cfg.Beads.PrivateEvidence); err != nil {
 		return nil, err
 	}
 	if err := validateLifecycleConfig(cfg.Lifecycle); err != nil {

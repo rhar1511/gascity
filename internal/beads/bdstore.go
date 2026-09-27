@@ -247,13 +247,13 @@ func recordBDExecTelemetry(name, dir string, args []string, start time.Time, out
 // rather than a bare "exit status 1".
 func classifyBDExecResult(parent, ctx context.Context, name string, timeout time.Duration, start time.Time, out []byte, stderr string, runErr error) (status string, traceErr, resultErr error) {
 	if runErr == nil && name == "bd" && bdOutputIndicatesSilentFallback(stderr) {
-		fallbackErr := fmt.Errorf("%w: %s", ErrBDSilentFallback, strings.TrimSpace(stderr))
+		fallbackErr := fmt.Errorf("%w: %s", ErrBDSilentFallback, redactPrivateEvidenceDiagnostic(strings.TrimSpace(stderr)))
 		return "error", fallbackErr, fallbackErr
 	}
 	if ctx.Err() == context.DeadlineExceeded {
 		timeoutErr := bdExecTimeoutError(parent, timeout, start)
 		if stderr != "" {
-			return "timeout", timeoutErr, fmt.Errorf("%w: %s", timeoutErr, stderr)
+			return "timeout", timeoutErr, fmt.Errorf("%w: %s", timeoutErr, redactPrivateEvidenceDiagnostic(stderr))
 		}
 		return "timeout", timeoutErr, timeoutErr
 	}
@@ -285,6 +285,12 @@ func bdFailureDetail(name string, out []byte, stderr string) string {
 	detail := strings.TrimSpace(stderr)
 	if name != "bd" {
 		return detail
+	}
+	if redacted := redactPrivateEvidenceDiagnostic(string(out)); redacted != string(out) {
+		return redacted
+	}
+	if redacted := redactPrivateEvidenceDiagnostic(detail); redacted != detail {
+		return redacted
 	}
 	if detail == "" {
 		// bd writes structured errors to stdout under --json while stderr is
@@ -491,6 +497,13 @@ type BdStore struct {
 	inlineDeps inlineDependencyProjection
 
 	localStrings *localSidecar // clone-local data; see Store.SetLocalString
+
+	// privateEvidenceHTTP is an explicitly configured, context-verified body
+	// transport for attempt-evidence values. It is separate from the bd argv
+	// runner because evidence payloads must never be placed in process args.
+	privateEvidenceHTTP           *privateEvidenceHTTPClient
+	privateEvidenceHTTPInitErr    error
+	privateEvidenceHTTPConfigured bool
 }
 
 const (
@@ -1273,6 +1286,15 @@ func (s *BdStore) CreateWithStorage(b Bead, storage StorageClass) (Bead, error) 
 	if effectiveEphemeral && effectiveNoHistory {
 		return Bead{}, fmt.Errorf("bd create: ephemeral and no-history storage are mutually exclusive")
 	}
+	if hasPrivateEvidenceValueMetadata(b.Metadata) {
+		if _, ownerIndex := b.Metadata[beadmeta.AttemptEvidenceArchivePayloadMetadataKey]; !ownerIndex {
+			return Bead{}, fmt.Errorf("bd create: owner-index evidence must use the dedicated metadata CAS")
+		}
+		if s.privateEvidenceHTTP == nil || s.privateEvidenceHTTPInitErr != nil {
+			return Bead{}, ErrPrivateEvidenceHTTPUnavailable
+		}
+		return s.privateEvidenceHTTP.createEvidenceArchive(context.Background(), b, effectiveEphemeral, effectiveNoHistory)
+	}
 	typ := b.Type
 	if typ == "" {
 		typ = "task"
@@ -1375,6 +1397,12 @@ func effectiveStorageFlags(b Bead, storage StorageClass) (ephemeral bool, noHist
 
 // Get retrieves a bead by ID via bd show.
 func (s *BdStore) Get(id string) (Bead, error) {
+	if s.privateEvidenceHTTPConfigured {
+		if s.privateEvidenceHTTP == nil || s.privateEvidenceHTTPInitErr != nil {
+			return Bead{}, ErrPrivateEvidenceHTTPUnavailable
+		}
+		return s.privateEvidenceHTTP.getBead(context.Background(), id)
+	}
 	// Read via the transient-retry wrapper so a Get that races a managed-Dolt
 	// restart (SIGKILL + port rebind) recovers instead of surfacing a one-shot
 	// "invalid connection"/"i/o timeout" transport error. The runner performs a
@@ -1479,6 +1507,9 @@ func bdUpdateArgs(id string, opts UpdateOpts) []string {
 
 // Update modifies fields of an existing bead via bd update.
 func (s *BdStore) Update(id string, opts UpdateOpts) error {
+	if err := rejectPrivateEvidenceArgvMetadata("bd update", opts.Metadata); err != nil {
+		return err
+	}
 	args := bdUpdateArgs(id, opts)
 	// No fields to update — no-op (bd errors on empty update).
 	if len(args) == 3 {
@@ -1879,6 +1910,9 @@ func (s *BdStore) UpdateAll(ids []string, opts UpdateOpts) (int, error) {
 	if len(ids) == 0 {
 		return 0, nil
 	}
+	if err := rejectPrivateEvidenceArgvMetadata("bd update all", opts.Metadata); err != nil {
+		return 0, err
+	}
 	if bdUpdateMayReopenOrClearLifecycleEvidence(opts) {
 		for _, id := range ids {
 			current, err := s.Get(id)
@@ -2015,6 +2049,9 @@ func beadSliceContains(items []Bead, id string) bool {
 // SetMetadata sets a key-value metadata pair on a bead via bd update.
 func (s *BdStore) SetMetadata(id, key, value string) error {
 	metadata := map[string]string{key: value}
+	if err := rejectPrivateEvidenceArgvMetadata("bd set metadata", metadata); err != nil {
+		return err
+	}
 	if bdUpdateMayReopenOrClearLifecycleEvidence(UpdateOpts{Metadata: metadata}) {
 		current, err := s.Get(id)
 		if err != nil {
@@ -2041,6 +2078,9 @@ func (s *BdStore) SetMetadata(id, key, value string) error {
 func (s *BdStore) SetMetadataBatch(id string, kvs map[string]string) error {
 	if len(kvs) == 0 {
 		return nil
+	}
+	if err := rejectPrivateEvidenceArgvMetadata("bd set metadata batch", kvs); err != nil {
+		return err
 	}
 	if bdUpdateMayReopenOrClearLifecycleEvidence(UpdateOpts{Metadata: kvs}) {
 		current, err := s.Get(id)
@@ -2574,6 +2614,9 @@ func (s *BdStore) CloseAll(ids []string, metadata map[string]string) (int, error
 	if len(ids) == 0 {
 		return 0, nil
 	}
+	if err := rejectPrivateEvidenceArgvMetadata("bd close all", metadata); err != nil {
+		return 0, err
+	}
 	if err := s.validateLifecycleCloseTargets(ids, metadata); err != nil {
 		return 0, err
 	}
@@ -2612,6 +2655,9 @@ func (s *BdStore) CloseAll(ids []string, metadata map[string]string) (int, error
 func (s *BdStore) setMetadataBatchAll(ids []string, kvs map[string]string) error {
 	if len(ids) == 0 || len(kvs) == 0 {
 		return nil
+	}
+	if err := rejectPrivateEvidenceArgvMetadata("bd set metadata batch", kvs); err != nil {
+		return err
 	}
 	args := []string{"update", "--json"}
 	args = append(args, ids...)

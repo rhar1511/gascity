@@ -294,6 +294,9 @@ func Capture(ctx context.Context, store beads.Store, spec CaptureSpec) (Evidence
 	if store == nil {
 		return Evidence{}, errors.New("capturing attempt evidence: bead store is unavailable")
 	}
+	if !beads.SupportsPrivatePayloadValues(store) {
+		return Evidence{}, ErrPrivatePayloadTransportUnsupported
+	}
 	if prior, found, err := readOwnerIndex(store, spec.Identity.OwnerBeadID, attemptID); err != nil {
 		return Evidence{}, err
 	} else if found {
@@ -341,11 +344,11 @@ func Seal(store beads.Store, proposed Evidence) (Evidence, error) {
 		return Evidence{}, fmt.Errorf("attempt %s: %w (%d > %d bytes)", proposed.AttemptID, ErrCaptureTooLarge, len(encoded), maxEvidenceBytes)
 	}
 	key := ownerIndexKey(proposed.AttemptID)
-	owner, err := store.Get(proposed.Identity.OwnerBeadID)
+	existingValue, _, err := beads.ReadPrivateEvidenceMetadataKey(store, proposed.Identity.OwnerBeadID, key)
 	if err != nil {
 		return Evidence{}, fmt.Errorf("reading attempt evidence owner %q: %w", proposed.Identity.OwnerBeadID, err)
 	}
-	if existing := strings.TrimSpace(owner.Metadata[key]); existing != "" {
+	if existing := strings.TrimSpace(existingValue); existing != "" {
 		sealed, err := decodeEvidence([]byte(existing))
 		if err != nil {
 			return Evidence{}, fmt.Errorf("reading sealed attempt evidence %s: %w", proposed.AttemptID, err)
@@ -360,7 +363,7 @@ func Seal(store beads.Store, proposed Evidence) (Evidence, error) {
 	}
 
 	encodedValue := string(encoded)
-	outcome, casErr := beads.ApplyMetadataCAS(store, proposed.Identity.OwnerBeadID, key, "", encodedValue)
+	outcome, casErr := beads.ApplyPrivateEvidenceMetadataCAS(store, proposed.Identity.OwnerBeadID, key, "", encodedValue)
 	if casErr != nil || outcome == beads.MetadataCASConflict {
 		// A backend error may have happened after commit. Readback resolves that
 		// ambiguity; an unavailable/empty read remains a hard failure.
@@ -399,6 +402,9 @@ func Read(store beads.Store, ownerBeadID, attemptID string) (Evidence, error) {
 	if ownerBeadID == "" || attemptID == "" {
 		return Evidence{}, ErrNotFound
 	}
+	if !supportsPrivateEvidenceReads(store) {
+		return Evidence{}, ErrPrivatePayloadTransportUnsupported
+	}
 	if evidence, found, err := readOwnerIndex(store, ownerBeadID, attemptID); err != nil {
 		return Evidence{}, err
 	} else if found {
@@ -421,11 +427,17 @@ func List(store beads.Store, ownerBeadID string) ([]Evidence, error) {
 	if strings.TrimSpace(ownerBeadID) == "" {
 		return nil, ErrNotFound
 	}
+	if !supportsPrivateEvidenceReads(store) {
+		return nil, ErrPrivatePayloadTransportUnsupported
+	}
 	byID := make(map[string]Evidence)
-	owner, ownerErr := store.Get(ownerBeadID)
-	if ownerErr == nil {
-		for key, value := range owner.Metadata {
-			if !strings.HasPrefix(key, beadmeta.AttemptEvidenceIndexPrefix) || value == "" {
+	indexes, bodyOnly, indexErr := beads.ListPrivateEvidenceOwnerIndexes(store, ownerBeadID)
+	if indexErr != nil {
+		return nil, fmt.Errorf("reading attempt evidence owner %s: %w", ownerBeadID, indexErr)
+	}
+	if bodyOnly {
+		for _, value := range indexes {
+			if value == "" {
 				continue
 			}
 			evidence, err := decodeEvidence([]byte(value))
@@ -437,11 +449,28 @@ func List(store beads.Store, ownerBeadID string) ([]Evidence, error) {
 			}
 			byID[evidence.AttemptID] = evidence
 		}
-	} else if !errors.Is(ownerErr, beads.ErrNotFound) {
-		return nil, fmt.Errorf("reading attempt evidence owner %s: %w", ownerBeadID, ownerErr)
+	} else {
+		owner, ownerErr := store.Get(ownerBeadID)
+		if ownerErr == nil {
+			for key, value := range owner.Metadata {
+				if !strings.HasPrefix(key, beadmeta.AttemptEvidenceIndexPrefix) || value == "" {
+					continue
+				}
+				evidence, err := decodeEvidence([]byte(value))
+				if err != nil {
+					return nil, fmt.Errorf("reading attempt evidence index on %s: %w", ownerBeadID, err)
+				}
+				if evidence.Identity.OwnerBeadID != ownerBeadID {
+					return nil, fmt.Errorf("attempt evidence index on %s points to owner %s", ownerBeadID, evidence.Identity.OwnerBeadID)
+				}
+				byID[evidence.AttemptID] = evidence
+			}
+		} else if !errors.Is(ownerErr, beads.ErrNotFound) {
+			return nil, fmt.Errorf("reading attempt evidence owner %s: %w", ownerBeadID, ownerErr)
+		}
 	}
 
-	archives, err := store.ListByMetadata(map[string]string{beadmeta.AttemptEvidenceArchiveOwnerIDMetadataKey: ownerBeadID}, 0, beads.IncludeClosed)
+	archives, err := listEvidenceArchives(store, ownerBeadID, "")
 	if err != nil {
 		return nil, fmt.Errorf("listing attempt evidence archive for %s: %w", ownerBeadID, err)
 	}
@@ -527,14 +556,14 @@ func ownerIndexKey(attemptID string) string {
 }
 
 func readOwnerIndex(store beads.Store, ownerID, attemptID string) (Evidence, bool, error) {
-	owner, err := store.Get(ownerID)
+	value, _, err := beads.ReadPrivateEvidenceMetadataKey(store, ownerID, ownerIndexKey(attemptID))
 	if errors.Is(err, beads.ErrNotFound) {
 		return Evidence{}, false, nil
 	}
 	if err != nil {
 		return Evidence{}, false, fmt.Errorf("reading attempt evidence owner %s: %w", ownerID, err)
 	}
-	value := strings.TrimSpace(owner.Metadata[ownerIndexKey(attemptID)])
+	value = strings.TrimSpace(value)
 	if value == "" {
 		return Evidence{}, false, nil
 	}
@@ -549,10 +578,7 @@ func readOwnerIndex(store beads.Store, ownerID, attemptID string) (Evidence, boo
 }
 
 func readArchive(store beads.Store, ownerID, attemptID string) (Evidence, bool, error) {
-	rows, err := store.ListByMetadata(map[string]string{
-		beadmeta.AttemptEvidenceArchiveOwnerIDMetadataKey:   ownerID,
-		beadmeta.AttemptEvidenceArchiveAttemptIDMetadataKey: attemptID,
-	}, 0, beads.IncludeClosed)
+	rows, err := listEvidenceArchives(store, ownerID, attemptID)
 	if err != nil {
 		return Evidence{}, false, fmt.Errorf("listing archive for attempt %s: %w", attemptID, err)
 	}
@@ -580,6 +606,27 @@ func readArchive(store beads.Store, ownerID, attemptID string) (Evidence, bool, 
 	return *found, true, nil
 }
 
+func listEvidenceArchives(store beads.Store, ownerID, attemptID string) ([]beads.Bead, error) {
+	if reader, ok := beads.PrivateEvidenceArchiveReaderFor(store); ok {
+		return reader.ListPrivateEvidenceArchives(ownerID, attemptID)
+	}
+	if !beads.SupportsPrivatePayloadValues(store) {
+		return nil, beads.ErrPrivateEvidenceTransportUnsupported
+	}
+	filters := map[string]string{beadmeta.AttemptEvidenceArchiveOwnerIDMetadataKey: ownerID}
+	if attemptID != "" {
+		filters[beadmeta.AttemptEvidenceArchiveAttemptIDMetadataKey] = attemptID
+	}
+	return store.ListByMetadata(filters, 0, beads.IncludeClosed)
+}
+
+func supportsPrivateEvidenceReads(store beads.Store) bool {
+	if _, ok := beads.PrivateEvidenceArchiveReaderFor(store); ok {
+		return true
+	}
+	return beads.SupportsPrivatePayloadValues(store)
+}
+
 func ensureArchive(store beads.Store, evidence Evidence) error {
 	if !beads.SupportsPrivatePayloadValues(store) {
 		return ErrPrivatePayloadTransportUnsupported
@@ -593,10 +640,7 @@ func ensureArchive(store beads.Store, evidence Evidence) error {
 	}
 	archiveDigest := sha256.Sum256(encoded)
 	digest := hex.EncodeToString(archiveDigest[:])
-	rows, err := store.ListByMetadata(map[string]string{
-		beadmeta.AttemptEvidenceArchiveOwnerIDMetadataKey:   evidence.Identity.OwnerBeadID,
-		beadmeta.AttemptEvidenceArchiveAttemptIDMetadataKey: evidence.AttemptID,
-	}, 0, beads.IncludeClosed)
+	rows, err := listEvidenceArchives(store, evidence.Identity.OwnerBeadID, evidence.AttemptID)
 	if err != nil {
 		return fmt.Errorf("checking archive for attempt %s: %w", evidence.AttemptID, err)
 	}

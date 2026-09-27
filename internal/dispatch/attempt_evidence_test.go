@@ -17,7 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
-func TestRetryEvidenceCaptureFailureBlocksSpawnAndKeepsBothAttempts(t *testing.T) {
+func TestRetryEvidenceUnsupportedTransportBlocksSpawnUntilCaptureWorks(t *testing.T) {
 	store, err := beads.OpenFileStore(fsys.OSFS{}, filepath.Join(t.TempDir(), "beads.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -45,7 +45,7 @@ func TestRetryEvidenceCaptureFailureBlocksSpawnAndKeepsBothAttempts(t *testing.T
 	callback := func(ctx context.Context, control, attempt beads.Bead, attemptNum int, outcome string) error {
 		if firstFailure {
 			firstFailure = false
-			return errors.New("archive write failed")
+			return attemptevidence.ErrPrivatePayloadTransportUnsupported
 		}
 		evidence, err := attemptevidence.Capture(ctx, store, attemptevidence.CaptureSpec{
 			Identity: attemptevidence.Identity{Kind: attemptevidence.KindRetry, OwnerBeadID: control.ID, ExecutionBeadID: attempt.ID},
@@ -60,7 +60,7 @@ func TestRetryEvidenceCaptureFailureBlocksSpawnAndKeepsBothAttempts(t *testing.T
 	}
 	opts := ProcessOptions{CaptureAttemptEvidence: callback}
 	if _, err := processRetryControl(store, mustGet(t, store, control.ID), opts); !errors.Is(err, ErrControlPending) {
-		t.Fatalf("capture failure error = %v, want ErrControlPending", err)
+		t.Fatalf("unsupported evidence transport error = %v, want ErrControlPending", err)
 	}
 	if got := mustGet(t, store, control.ID); got.Status != "open" || got.Metadata[beadmeta.AttemptLogMetadataKey] != "" {
 		t.Fatalf("control advanced after capture failure: status=%s log=%q", got.Status, got.Metadata[beadmeta.AttemptLogMetadataKey])

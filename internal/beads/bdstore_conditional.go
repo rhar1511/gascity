@@ -388,6 +388,9 @@ func conditionalWriteBackoff(attempt int) time.Duration {
 // ErrConditionalWriteUnsupported rather than falling through to an
 // unconditional write.
 func (s *BdStore) UpdateIfMatch(id string, expectedRevision int64, opts UpdateOpts) error {
+	if err := rejectPrivateEvidenceArgvMetadata("bd conditional update", opts.Metadata); err != nil {
+		return err
+	}
 	if err := validateConditionalUpdateOpts(opts); err != nil {
 		return fmt.Errorf("conditional update %s: %w", id, err)
 	}

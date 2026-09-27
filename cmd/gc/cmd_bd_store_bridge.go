@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/worklifecycle"
 	"github.com/spf13/cobra"
@@ -422,6 +423,18 @@ func bridgeBeads(items []beads.Bead) []bdStoreBridgeBead {
 }
 
 func bridgeBead(item beads.Bead) bdStoreBridgeBead {
+	metadata := item.Metadata
+	for key := range item.Metadata {
+		if isBridgePrivateAttemptEvidenceMetadataKey(key) {
+			metadata = make(map[string]string, len(item.Metadata))
+			for key, value := range item.Metadata {
+				if !isBridgePrivateAttemptEvidenceMetadataKey(key) {
+					metadata[key] = value
+				}
+			}
+			break
+		}
+	}
 	return bdStoreBridgeBead{
 		ID:          item.ID,
 		Title:       item.Title,
@@ -436,6 +449,14 @@ func bridgeBead(item beads.Bead) bdStoreBridgeBead {
 		Needs:       item.Needs,
 		Description: item.Description,
 		Labels:      item.Labels,
-		Metadata:    item.Metadata,
+		Metadata:    metadata,
 	}
+}
+
+func isBridgePrivateAttemptEvidenceMetadataKey(key string) bool {
+	return key == beadmeta.AttemptEvidenceArchiveAttemptIDMetadataKey ||
+		key == beadmeta.AttemptEvidenceArchiveOwnerIDMetadataKey ||
+		key == beadmeta.AttemptEvidenceArchivePayloadMetadataKey ||
+		key == beadmeta.AttemptEvidenceArchiveDigestMetadataKey ||
+		strings.HasPrefix(key, beadmeta.AttemptEvidenceIndexPrefix)
 }

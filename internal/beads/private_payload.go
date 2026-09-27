@@ -11,6 +11,10 @@ import (
 // would remove an immutable attempt-evidence archive row.
 var ErrProtectedAttemptEvidenceArchive = errors.New("attempt-evidence archive rows cannot be deleted")
 
+// ErrPrivateEvidenceTransportUnsupported reports that a store cannot safely
+// read private attempt-evidence values through its available transport.
+var ErrPrivateEvidenceTransportUnsupported = errors.New("private attempt-evidence transport unsupported")
+
 // IsAttemptEvidenceArchive reports whether b is a fully formed archive row.
 // Requiring all identifying and payload fields avoids treating partial legacy
 // metadata as a protected evidence record.
@@ -36,8 +40,9 @@ type PrivatePayloadValueTransportTargeter interface {
 
 // SupportsPrivatePayloadValues reports whether evidence bytes can be stored in
 // a durable backend without exposing them through an argv-style transport.
-// The explicit allow-list is intentional: BdStore currently sends metadata
-// values through `bd` command arguments, so it cannot safely persist evidence.
+// The explicit allow-list is intentional: an unconfigured BdStore still sends
+// metadata values through `bd` arguments, so only its verified HTTP transport
+// can enable this capability.
 func SupportsPrivatePayloadValues(store Store) bool {
 	for depth := 0; store != nil && depth < 16; depth++ {
 		if targeter, ok := store.(PrivatePayloadValueTransportTargeter); ok {
@@ -47,6 +52,9 @@ func SupportsPrivatePayloadValues(store Store) bool {
 			}
 			store = target
 			continue
+		}
+		if verifier, ok := store.(PrivateEvidencePayloadTransportReady); ok {
+			return verifier.PrivateEvidencePayloadTransportReady()
 		}
 		switch store.(type) {
 		case *FileStore, *SQLiteStore, *NativeDoltStore:

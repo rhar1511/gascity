@@ -1094,6 +1094,13 @@
           ],
           "description": "GuardedRelease selects the ownership-release discipline for work beads:\n\"off\" (legacy, owner-blind bd update/unclaim), \"auto\" (fence-guarded\nrelease verbs where the bd binary is capable, loud degrade otherwise), or\n\"require\" (guarded release or a typed refusal). Empty defaults to \"off\".\nAny other value fails config load."
         },
+        "private_evidence": {
+          "additionalProperties": {
+            "$ref": "#/$defs/PrivateEvidenceTransportConfig"
+          },
+          "type": "object",
+          "description": "PrivateEvidence opts selected canonical city/rig Beads scopes into the\ncontroller-only HTTP body transport for attempt evidence. An absent map\nkeeps the capability disabled. Keys are canonical refs such as\n\"city:town\" and \"rig:api\"; tokens stay in protected files."
+        },
         "policies": {
           "additionalProperties": {
             "$ref": "#/$defs/BeadPolicyConfig"
@@ -2332,6 +2339,31 @@
       "additionalProperties": false,
       "type": "object",
       "description": "PoolOverride modifies legacy [pool] fields that map to session scaling."
+    },
+    "PrivateEvidenceTransportConfig": {
+      "properties": {
+        "endpoint": {
+          "type": "string"
+        },
+        "project_id": {
+          "type": "string"
+        },
+        "database": {
+          "type": "string"
+        },
+        "token_file": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "endpoint",
+        "project_id",
+        "database",
+        "token_file"
+      ],
+      "description": "PrivateEvidenceTransportConfig opts one canonical Beads store scope into the body-only HTTP transport for immutable attempt evidence."
     },
     "ProviderOption": {
       "properties": {
