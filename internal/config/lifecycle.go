@@ -46,6 +46,9 @@ func validateLifecycleConfig(cfg LifecycleConfig) error {
 	if cfg.AdmissionEnabled && len(cfg.AdmissionAuthorities) == 0 {
 		return fmt.Errorf("lifecycle.admission_enabled requires at least one admission authority")
 	}
+	if cfg.AdmissionEnabled && len(cfg.AcceptanceAuthorities) == 0 {
+		return fmt.Errorf("lifecycle.admission_enabled requires at least one acceptance authority")
+	}
 	if cfg.RecoveryEnabled {
 		if !cfg.AdmissionEnabled {
 			return fmt.Errorf("lifecycle.recovery_enabled requires lifecycle.admission_enabled")

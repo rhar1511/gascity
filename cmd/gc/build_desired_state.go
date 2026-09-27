@@ -489,6 +489,13 @@ func buildDesiredStateWithSessionBeadsAt(
 
 	// Pre-compute suspended rig paths (config + runtime state).
 	suspendedRigPaths := buildSuspendedRigPathsForCity(cfg, cityPath)
+	// Lifecycle admission is the only route for explicitly enrolled, signed
+	// roots. It uses the existing sling engine so default worktree/workflow and
+	// merge behavior stays attached before this tick measures routed demand.
+	// The gate is disabled by default; a partial or unreadable admission simply
+	// leaves that one item untouched for a later reconciliation.
+	reconcileLifecycleAdmission(cityName, cityPath, cfg, store, rigStores, suspendedRigPaths, stderr)
+	reconcileLifecycleCompletions(cityName, cityPath, cfg, store, rigStores, suspendedRigPaths, stderr)
 	bp.sessionCensusRigStores = cloneSessionCensusRigStores(rigStores)
 	bp.sessionCensusSuspendedRigPaths = cloneSessionCensusSuspendedRigPaths(suspendedRigPaths)
 
@@ -2023,7 +2030,7 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 			// A routed epic, a bead on a dispatch hold, or a slot-suffixed route
 			// is not capacity demand — it is a seat that spawns, reads empty and
 			// drains, every tick, forever. See demand_serve_predicate.go.
-			template, servable := demandServableForTemplates(cfg, b, group.templates)
+			template, servable := demandServableForTemplates(cfg, b, group.templates, lifecycleScopeForDemand(censusCityName(cfg), cfg, group.storeKey))
 			if !servable {
 				continue
 			}

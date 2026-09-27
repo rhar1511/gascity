@@ -288,6 +288,11 @@ func releaseOrphanedPoolAssignments(
 		if wb.Status != "open" && wb.Status != "in_progress" {
 			continue
 		}
+		if lifecycleProtectedWork(wb, cfg) {
+			// The lifecycle controller owns enrolled work's recovery budget and
+			// owner decision. A generic orphan sweep cannot release or replace it.
+			continue
+		}
 		workStoreRef := ""
 		if storeRefAware {
 			workStoreRef = assignedWorkStoreRefs[i]
@@ -459,6 +464,11 @@ func releaseConfirmedOrphanSessionWork(
 	var released []releasedPoolAssignment
 	for i, wb := range assignedWorkBeads {
 		if wb.Status != "open" && wb.Status != "in_progress" {
+			continue
+		}
+		if lifecycleProtectedWork(wb, cfg) {
+			// This path runs only after the runtime is confirmed dead, but release
+			// still needs the explicit lifecycle recovery authorization and budget.
 			continue
 		}
 		assignee := strings.TrimSpace(wb.Assignee)

@@ -2977,6 +2977,17 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						holdsClaim = has
 					}
 				}
+				lifecycleWorkOwned := false
+				if !exempt && cfg != nil && cfg.Lifecycle.AdmissionEnabled {
+					var lifecycleErr error
+					lifecycleWorkOwned, lifecycleErr = sessionHasLifecycleEnrolledAssignedWorkForConfig(cityPath, cfg, store, rigStores, infoByID[id])
+					if lifecycleErr != nil {
+						// An unreadable lifecycle ownership scan must not let the legacy
+						// progress recycler stop a possibly enrolled live owner.
+						fmt.Fprintf(stderr, "session reconciler: checking lifecycle-owned work before progress-stall recycle for %s: %v\n", name, lifecycleErr) //nolint:errcheck
+						lifecycleWorkOwned = true
+					}
+				}
 				providerHealthy := true
 				if !exempt && (!floorExempt || holdsClaim) && tp.ResolvedProvider != nil {
 					// Reuse the per-tick provider-health snapshot (#2962). Gate 1
@@ -2988,7 +2999,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						providerHealthy = h
 					}
 				}
-				if sessionProgressStalled(claimlessThreshold, holdsClaim, providerHealthy, exempt || floorExempt, lastActivity, clk.Now()) {
+				if !lifecycleWorkOwned && sessionProgressStalled(claimlessThreshold, holdsClaim, providerHealthy, exempt || floorExempt, lastActivity, clk.Now()) {
 					// Record the restart request on the typed snapshot only. This
 					// marker is decision-state consumed by the restart-request block
 					// below (which reads Info.RestartRequested off infoByID) and never
@@ -3000,7 +3011,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					tick.apply(id, sessionpkg.MetadataPatch{"restart_requested": "true"})
 					fmt.Fprintf(stderr, "session reconciler: %s progress-stalled (no progress for >%s, no open claim, provider healthy); requesting fresh restart\n", name, claimlessThreshold) //nolint:errcheck
 				}
-				if claimKnown && sessionClaimHolderStalled(claimHolderThreshold, holdsClaim, providerHealthy, exempt, lastActivity, clk.Now()) {
+				if !lifecycleWorkOwned && claimKnown && sessionClaimHolderStalled(claimHolderThreshold, holdsClaim, providerHealthy, exempt, lastActivity, clk.Now()) {
 					// A confirmed holder can wedge mid-work on a provider condition it
 					// will not self-clear. This remains opt-in and uses a separate,
 					// more conservative timeout because it interrupts in-progress work.
@@ -3025,6 +3036,27 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			}
 			beadRequested := infoByID[id].RestartRequested == "true"
 			if tmuxRequested || beadRequested {
+				explicitControllerReset := strings.TrimSpace(infoByID[id].ContinuationResetPending) == "true"
+				if cfg != nil && cfg.Lifecycle.AdmissionEnabled && !explicitControllerReset {
+					lifecycleWorkOwned, lifecycleErr := sessionHasLifecycleEnrolledAssignedWorkForConfig(cityPath, cfg, store, rigStores, infoByID[id])
+					if lifecycleErr != nil {
+						// restart_requested has several producers, including the legacy
+						// progress-health policy. If the authoritative assigned-work
+						// census is unavailable, do not let this shared consumer turn an
+						// ambiguous request into a stop/restart of a possible lifecycle
+						// owner.
+						fmt.Fprintf(stderr, "session reconciler: checking lifecycle-owned work before restart-requested action for %s: %v\n", name, lifecycleErr) //nolint:errcheck
+						continue
+					}
+					if lifecycleWorkOwned {
+						// Older health and worker paths share this request bit and do not
+						// carry an authorized lifecycle recovery request or its budget.
+						// Keep the owner and defer this legacy action until the enrolled
+						// work is completed or the controller has an explicit reset.
+						fmt.Fprintf(stderr, "session reconciler: holding restart-requested action for %s while lifecycle work remains assigned\n", name) //nolint:errcheck
+						continue
+					}
+				}
 				// A pinned configured named session is an operator-declared
 				// critical conversation (for example, the mayor). Do not let
 				// collateral reconciler restart flags (progress-stall, stale
@@ -3032,7 +3064,6 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				// kill it. Explicit controller resets set
 				// continuation_reset_pending through SessionHandle.Reset and
 				// still proceed so planned graceful recycle remains possible.
-				explicitControllerReset := strings.TrimSpace(infoByID[id].ContinuationResetPending) == "true"
 				if runtimeRunning && pinnedConfiguredNamedSessionKillProtected(infoByID[id]) && !explicitControllerReset {
 					if tmuxRequested && dops != nil {
 						if err := dops.clearRestartRequested(name); err != nil && !runtime.IsSessionGone(err) {
@@ -4255,7 +4286,21 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			if fold := recordCurrentBeadIDOnWake(target.info, sessFront, decision.AssignedWorkBeadID, stderr); fold != nil {
 				tick.apply(target.info.ID, fold)
 			}
-			beganIdleRespawn, idleRespawnFold, observationErr := beginIdleRespawnDrainIfIdle(info, eval, dt, sp, sessFront, clk)
+			lifecycleWorkOwned := false
+			var lifecycleErr error
+			lifecycleWorkOwned, lifecycleErr = sessionHasLifecycleEnrolledAssignedWorkForConfig(cityPath, cfg, store, rigStores, info)
+			if lifecycleErr != nil {
+				// Do not let the legacy idle-respawn policy recycle a possibly
+				// enrolled owner when its assigned-work evidence is unreadable.
+				lifecycleWorkOwned = true
+				fmt.Fprintf(stderr, "session reconciler: checking lifecycle-owned work before idle-respawn for %s: %v\n", name, lifecycleErr) //nolint:errcheck
+			}
+			var beganIdleRespawn bool
+			var idleRespawnFold sessionpkg.MetadataPatch
+			var observationErr error
+			if !lifecycleWorkOwned {
+				beganIdleRespawn, idleRespawnFold, observationErr = beginIdleRespawnDrainIfIdle(info, eval, dt, sp, sessFront, clk)
+			}
 			tick.apply(target.info.ID, idleRespawnFold)
 			if observationErr != nil {
 				fmt.Fprintf(stderr, "session reconciler: deferring idle-respawn drain for %s after activity observation failure: %v\n", name, observationErr) //nolint:errcheck
@@ -4636,6 +4681,55 @@ func sessionHasOpenAssignedWorkForConfigInfo(cityPath string, cfg *config.City, 
 // not suppress claim-less parked-session recovery.
 func sessionHasInProgressAssignedWorkForConfig(cityPath string, cfg *config.City, store beads.Store, rigStores map[string]beads.Store, info sessionpkg.Info) (bool, error) {
 	return sessionHasAssignedWorkInStoresForStatuses(cityPath, cfg, store, rigStores, sessionAssignmentIdentifiersForConfigInfo(info, cfg), []string{"in_progress"})
+}
+
+// sessionHasLifecycleEnrolledAssignedWorkForConfig protects an enrolled owner
+// from the legacy progress-stall restart policy. It checks both open
+// preassigned work and in-progress claims across the authoritative work legs;
+// unreadable legs are returned as errors so callers can fail closed.
+func sessionHasLifecycleEnrolledAssignedWorkForConfig(cityPath string, cfg *config.City, store beads.Store, rigStores map[string]beads.Store, info sessionpkg.Info) (bool, error) {
+	if cfg == nil || !cfg.Lifecycle.AdmissionEnabled {
+		return false, nil
+	}
+	identifiers := sessionAssignmentIdentifiersForConfigInfo(info, cfg)
+	plan, err := assignedWorkSweepPlan(cityPath, cfg, store, rigStores, identifiers)
+	if err != nil {
+		return false, err
+	}
+	var found bool
+	res, err := storeref.Walk(plan, func(leg storeref.Leg) (bool, error) {
+		if leg.Store == nil {
+			return false, nil
+		}
+		wa := workAssignmentForStore(beads.WorkStore{Store: leg.Store})
+		for _, status := range []string{"open", "in_progress"} {
+			for _, assignee := range identifiers {
+				items, err := wa.OpenAssignedTo(assignee, status, beads.TierBoth, true)
+				if err != nil {
+					return false, err
+				}
+				for _, item := range items {
+					if sessionpkg.IsSessionBeadOrRepairable(item) {
+						continue
+					}
+					if lifecycleProtectedWork(item, cfg) {
+						found = true
+						return true, nil
+					}
+				}
+			}
+		}
+		return false, nil
+	})
+	if err != nil {
+		return false, err
+	}
+	if !found {
+		if err := assignedWorkScanComplete(res); err != nil {
+			return false, err
+		}
+	}
+	return found, nil
 }
 
 // idleRespawnAckUnsafeToStop revalidates the two facts that can change after

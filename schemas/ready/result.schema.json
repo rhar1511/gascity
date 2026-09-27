@@ -70,6 +70,14 @@
           "type": "string"
         }
       },
+      "source_store_ref": {
+        "type": "string",
+        "description": "Canonical store reference that supplied this federated row. Populated by gc ready, never read from bead metadata."
+      },
+      "lifecycle_scope": {
+        "type": "string",
+        "description": "City-namespaced canonical store scope for verifying signed lifecycle receipts. Populated by gc ready, never read from bead metadata."
+      },
       "dependencies": {
         "type": "array",
         "items": {

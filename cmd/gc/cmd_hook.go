@@ -472,23 +472,29 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	routeTargets := hookClaimRouteTargets(hookClaimPrimaryRouteTarget(&a), resolvedAgentName, strings.TrimSpace(overrides["GC_TEMPLATE"]))
 	if opts.Claim {
 		claimOpts := hookClaimOptions{
-			Assignee:           assignee,
-			SessionID:          sessionID,
-			IdentityCandidates: identityCandidates,
-			RouteTargets:       routeTargets,
-			Env:                queryEnv,
-			DrainAck:           opts.DrainAck,
-			JSON:               opts.JSON,
-			RuntimeActor:       strings.TrimSpace(os.Getenv("BEADS_ACTOR")),
+			Assignee:              assignee,
+			SessionID:             sessionID,
+			IdentityCandidates:    identityCandidates,
+			RouteTargets:          routeTargets,
+			Env:                   queryEnv,
+			DrainAck:              opts.DrainAck,
+			JSON:                  opts.JSON,
+			Lifecycle:             cfg.Lifecycle,
+			LifecycleCity:         cfg,
+			TrustedLifecycleScope: cfg.Lifecycle.AdmissionEnabled && a.WorkQuery == "",
+			RuntimeActor:          strings.TrimSpace(os.Getenv("BEADS_ACTOR")),
 		}
 		return claimHookWork(cityPath, workQuery, workDir, queryEnv, stores, claimOpts, emitQueryFailure, stdout, stderr)
 	}
 	// The discovery door is fenced too: a draining seat must not be handed its
 	// preassigned continuation sibling by the packs' post-close `gc hook`.
 	return doHookDiscovery(workQuery, workDir, false, hookClaimOptions{
-		Env:      queryEnv,
-		DrainAck: opts.DrainAck,
-		JSON:     opts.JSON,
+		Env:                   queryEnv,
+		DrainAck:              opts.DrainAck,
+		JSON:                  opts.JSON,
+		Lifecycle:             cfg.Lifecycle,
+		LifecycleCity:         cfg,
+		TrustedLifecycleScope: cfg.Lifecycle.AdmissionEnabled && a.WorkQuery == "",
 	}, hookClaimOps{}, runner, stdout, stderr, hookVisibility{
 		Identities:   identityCandidates,
 		RouteTargets: routeTargets,

@@ -34,6 +34,11 @@ func TestParseLifecycleValidatesTrustedAuthorities(t *testing.T) {
 			want: "must be a base64-encoded Ed25519 public key",
 		},
 		{
+			name: "admission gate requires acceptance authority",
+			toml: "[lifecycle]\nadmission_enabled = true\n[lifecycle.admission_authorities]\ntriage = \"" + key + "\"\n",
+			want: "requires at least one acceptance authority",
+		},
+		{
 			name: "recovery needs admission and acceptance gates",
 			toml: "[lifecycle]\nrecovery_enabled = true\nescalation_target = \"ops\"\n",
 			want: "requires lifecycle.admission_enabled",

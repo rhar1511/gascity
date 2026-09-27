@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -380,6 +381,78 @@ func TestReconcileSessionBeads_ClaimHolderStallRecyclesConfirmedHolder(t *testin
 	}
 	if !strings.Contains(env.stderr.String(), "claim-holder-stalled") {
 		t.Fatalf("stderr = %q, want claim-holder-stalled diagnostic", env.stderr.String())
+	}
+}
+
+func TestReconcileSessionBeads_ClaimHolderStallPreservesLifecycleOwner(t *testing.T) {
+	env, session, sessionName := newProgressStallTestEnv(t)
+	env.cfg.Session.ProgressStallTimeout = ""
+	env.cfg.Session.ClaimHolderStallTimeout = "20m"
+	env.cfg.Lifecycle.AdmissionEnabled = true
+
+	work, err := env.store.Create(beads.Bead{
+		Title:    "lifecycle-enrolled claimed work",
+		Type:     "task",
+		Assignee: sessionName,
+		Metadata: map[string]string{beadmeta.LifecycleAdmissionReceiptMetadataKey: "signed enrollment evidence"},
+	})
+	if err != nil {
+		t.Fatalf("Create(work): %v", err)
+	}
+	status := "in_progress"
+	if err := env.store.Update(work.ID, beads.UpdateOpts{Status: &status}); err != nil {
+		t.Fatalf("Update(work): %v", err)
+	}
+
+	env.reconcileAtPath(t.TempDir(), []beads.Bead{session})
+
+	if !env.sp.IsRunning(sessionName) {
+		t.Fatalf("session %q was recycled despite owning lifecycle-enrolled work", sessionName)
+	}
+	gotWork, err := env.store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", work.ID, err)
+	}
+	if gotWork.Status != "in_progress" || gotWork.Assignee != sessionName {
+		t.Fatalf("lifecycle work changed during progress-stall reconcile: status=%q assignee=%q", gotWork.Status, gotWork.Assignee)
+	}
+	if strings.Contains(env.stderr.String(), "claim-holder-stalled") || strings.Contains(env.stderr.String(), "progress-stalled") {
+		t.Fatalf("stderr = %q, want no legacy progress-stall recovery action", env.stderr.String())
+	}
+}
+
+func TestReconcileSessionBeads_RestartRequestPreservesLifecycleOwner(t *testing.T) {
+	env, session, sessionName := newProgressStallTestEnv(t)
+	env.cfg.Session.ProgressStallTimeout = ""
+	env.cfg.Session.ClaimHolderStallTimeout = ""
+	env.cfg.Lifecycle.AdmissionEnabled = true
+	env.setSessionMetadata(&session, map[string]string{"restart_requested": "true"})
+
+	work, err := env.store.Create(beads.Bead{
+		Title:    "lifecycle-enrolled work",
+		Type:     "task",
+		Status:   "open",
+		Assignee: sessionName,
+		Metadata: map[string]string{beadmeta.LifecycleAdmissionReceiptMetadataKey: "signed enrollment evidence"},
+	})
+	if err != nil {
+		t.Fatalf("Create(work): %v", err)
+	}
+
+	env.reconcileAtPath(t.TempDir(), []beads.Bead{session})
+
+	if !env.sp.IsRunning(sessionName) {
+		t.Fatalf("session %q was stopped despite owning lifecycle-enrolled work", sessionName)
+	}
+	gotWork, err := env.store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", work.ID, err)
+	}
+	if gotWork.Status != "open" || gotWork.Assignee != sessionName {
+		t.Fatalf("lifecycle work changed during restart-request reconcile: status=%q assignee=%q", gotWork.Status, gotWork.Assignee)
+	}
+	if !strings.Contains(env.stderr.String(), "holding restart-requested action") {
+		t.Fatalf("stderr = %q, want lifecycle restart hold diagnostic", env.stderr.String())
 	}
 }
 

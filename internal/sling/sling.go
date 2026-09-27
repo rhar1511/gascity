@@ -48,15 +48,25 @@ type SlingOpts struct {
 	IsFormula     bool
 	OnFormula     string
 	NoFormula     bool
-	SkipPoke      bool
-	Title         string
-	Vars          []string
-	Merge         string // "", "direct", "mr", "local"
-	NoConvoy      bool
-	Owned         bool
-	Nudge         bool
-	Force         bool
-	DryRun        bool
+	// RequireFormulaAttach prevents the implicit default-formula path from
+	// falling back to a plain route when an existing workflow or molecule
+	// conflicts. Controller-owned lifecycle admission uses it to preserve the
+	// signed workflow contract rather than silently routing around it.
+	RequireFormulaAttach bool
+	// BeforeFormulaAttach runs immediately before formula materialization, under
+	// the source-workflow lock for graph.v2 formulas. Controller admission uses
+	// it to re-read the signed contract and current eligibility at the effect
+	// boundary. It must be read-only and must not acquire the source lock.
+	BeforeFormulaAttach func() error
+	SkipPoke            bool
+	Title               string
+	Vars                []string
+	Merge               string // "", "direct", "mr", "local"
+	NoConvoy            bool
+	Owned               bool
+	Nudge               bool
+	Force               bool
+	DryRun              bool
 	// Reassign clears any existing human assignee on the bead before
 	// routing so the target pool/agent can claim it. Without this, a
 	// bead claimed by a human (`bd update --claim`) stays invisible

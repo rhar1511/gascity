@@ -74,12 +74,19 @@ var ErrBDSilentFallback = errors.New("bd silent fallback to on-disk auto-import"
 // Bead is a single unit of work in Gas City. Everything is a bead: tasks,
 // mail, molecules, convoys.
 type Bead struct {
-	ID        string    `json:"id"`
-	Title     string    `json:"title"`
-	Status    string    `json:"status"`     // "open", "in_progress", "closed"
-	Type      string    `json:"issue_type"` // "task" default; matches bd wire format
-	Priority  *int      `json:"priority,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
+	ID string `json:"id"`
+	// SourceStoreRef is populated only by federated readers that know which
+	// authoritative store supplied a row. It is transient read provenance and
+	// is never persisted by a bead store.
+	SourceStoreRef string `json:"-"`
+	// LifecycleScope is a city-namespaced scope carried only by gc ready's
+	// trusted wire projection. It is never persisted by a bead store.
+	LifecycleScope string    `json:"-"`
+	Title          string    `json:"title"`
+	Status         string    `json:"status"`     // "open", "in_progress", "closed"
+	Type           string    `json:"issue_type"` // "task" default; matches bd wire format
+	Priority       *int      `json:"priority,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
 	// UpdatedAt is zero for legacy beads; UpdatedBefore falls back to CreatedAt.
 	UpdatedAt time.Time `json:"updated_at,omitempty,omitzero"`
 	Assignee  string    `json:"assignee,omitempty"`

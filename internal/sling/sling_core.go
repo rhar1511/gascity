@@ -58,6 +58,9 @@ func DoSling(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult, 
 		return SlingResult{}, err
 	}
 	a := opts.Target
+	if opts.RequireFormulaAttach && (opts.NoFormula || (!opts.IsFormula && opts.OnFormula == "" && a.EffectiveDefaultSlingFormula() == "")) {
+		return SlingResult{}, errors.New("sling: formula attachment is required but the target has no configured formula")
+	}
 	result, preErr := preflight(opts, deps, querier)
 	if preErr != nil {
 		return result, preErr
@@ -486,7 +489,7 @@ func attachedBeadInstructionsDroppedHint(querier BeadQuerier, beadID string, use
 
 // slingDefaultFormula handles the default formula attachment path.
 func slingDefaultFormula(opts SlingOpts, deps SlingDeps, querier BeadQuerier, beadID string, result SlingResult) (SlingResult, error) {
-	result, err := attachFormulaToBead(opts, deps, querier, beadID, opts.Target.EffectiveDefaultSlingFormula(), "default-on-formula", "default formula", true, result)
+	result, err := attachFormulaToBead(opts, deps, querier, beadID, opts.Target.EffectiveDefaultSlingFormula(), "default-on-formula", "default formula", !opts.RequireFormulaAttach, result)
 	if err == nil {
 		if hint := attachedBeadInstructionsDroppedHint(querier, beadID, opts.Vars); hint != "" {
 			result.BeadWarnings = append(result.BeadWarnings, hint)
@@ -555,6 +558,11 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 		}
 		var fellBackToPlainRoute bool
 		lockedResult, lockedErr := withGraphV2SourceWorkflowLock(context.Background(), deps, beadID, func() (SlingResult, error) {
+			if opts.BeforeFormulaAttach != nil {
+				if err := opts.BeforeFormulaAttach(); err != nil {
+					return result, fmt.Errorf("formula attach preflight: %w", err)
+				}
+			}
 			if err := CheckNoMoleculeChildrenAllowLiveWorkflow(querier, beadID, deps.Store, &result); err != nil {
 				var molErr *MoleculeAttachedError
 				if fallbackToPlainOnMoleculeConflict && errors.As(err, &molErr) {
@@ -620,6 +628,12 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 			// not gc.source_bead_id), so doStartGraphWorkflow's own restamp
 			// never covers it. Stamp the work bead here instead.
 			restampWorkBeadRouting(deps, beadID, a, &wfResult)
+			if opts.Merge != "" && deps.Store != nil {
+				if err := deps.Store.SetMetadata(beadID, beadmeta.MergeStrategyMetadataKey, opts.Merge); err != nil {
+					wfResult.MetadataErrors = append(wfResult.MetadataErrors,
+						fmt.Sprintf("setting merge strategy: %v", err))
+				}
+			}
 			return wfResult, wfErr
 		})
 		if lockedErr != nil || fellBackToPlainRoute {
@@ -668,6 +682,11 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 		return result, fmt.Errorf("%w", err)
 	}
 	run := func() (SlingResult, error) {
+		if opts.BeforeFormulaAttach != nil {
+			if err := opts.BeforeFormulaAttach(); err != nil {
+				return result, fmt.Errorf("formula attach preflight: %w", err)
+			}
+		}
 		mResult, err := InstantiateSlingFormula(context.Background(), formulaName, SlingFormulaSearchPaths(deps, a), molecule.Options{
 			Title:            opts.Title,
 			Vars:             formulaVars,

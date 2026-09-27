@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/splittest"
 	"github.com/gastownhall/gascity/internal/config"
@@ -175,6 +176,27 @@ func TestDrainAckReleasesUnexecutedClaims(t *testing.T) {
 			t.Errorf("%s: bead %s is status=%q assignee=%q after drain-ack, want open and unassigned; stderr=%s",
 				tc.name, tc.id, status, assignee, stderr.String())
 		}
+	}
+}
+
+func TestDrainAckRetainsLifecycleWorkWithoutControllerAuthorization(t *testing.T) {
+	store := beads.NewMemStore()
+	work := mustCreateDrainAckBead(t, store, beads.Bead{
+		Title:    "lifecycle-enrolled work",
+		Type:     "task",
+		Metadata: map[string]string{beadmeta.LifecycleAdmissionReceiptMetadataKey: "signed enrollment evidence"},
+	}, "in_progress", "worker-1")
+	cfg := &config.City{Lifecycle: config.LifecycleConfig{AdmissionEnabled: true}}
+	var stderr bytes.Buffer
+
+	releaseUnexecutedClaimsOnDrainAck("", cfg, store, nil, drainAckSessionBead(), time.Minute, &stderr)
+
+	status, assignee := drainAckBeadStatus(t, store, work.ID)
+	if status != "in_progress" || assignee != "worker-1" {
+		t.Fatalf("drain-ack detached lifecycle work without authorization: status=%q assignee=%q; stderr=%s", status, assignee, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "controller authorization is required") {
+		t.Fatalf("stderr = %q, want lifecycle hold explanation", stderr.String())
 	}
 }
 
