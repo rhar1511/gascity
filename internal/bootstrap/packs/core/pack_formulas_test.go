@@ -447,9 +447,6 @@ func TestRSIStoryFormulaResolvesFiveStepGraph(t *testing.T) {
 		if len(step.Needs) != 3 || step.Metadata["gc.rsi_story_benchmark_required"] != "true" {
 			t.Fatalf("resolved gate does not depend on benchmark: %+v", step)
 		}
-		previous := formula.IsFormulaV2Enabled()
-		formula.SetFormulaV2Enabled(true)
-		defer formula.SetFormulaV2Enabled(previous)
 		_, err := formula.Compile(context.Background(), "mol-rsi-story-candidate", []string{dir}, map[string]string{
 			"objective": "improve night session stopping cue", "work_dir": "/tmp/bead-worktree",
 			"rig_root": "/tmp/rig", "current_bundle_id": "bundle-1",
