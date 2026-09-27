@@ -1,36 +1,34 @@
 # Workbench
 
-The Workbench is a Gas City Control Centre tab that projects durable work
-state from Beads. The first slice is read-only: a Work Queue whose entries
-open the corresponding real Bead.
+Workbench (`/workbench`) is the operational companion to Beads Canvas. It
+projects the same Beads into a searchable work queue, status and priority
+boards, rig groups, and a needs-attention view. Selecting a Bead keeps its
+details, attempt output, diff, preview, and follow-up controls side by side.
+Workbench does not create a second task record. Status and priority moves go
+through Gas City's typed supervisor API; starting an attempt delegates to Gas
+City's sling operation. PR actions remain unavailable until Gas City supplies
+queue, policy, and conflict verdicts.
 
-## What it does
+## Wayfinder review
 
-- The **Workbench** tab (`/workbench`) lists open Beads as a Work Queue.
-- Selecting a Work Queue entry opens that real Bead in the shared bead
-  detail view (title, description, status, dependencies, related entities).
-- Displayed work state comes from Beads through the typed supervisor REST
-  client (`listSupervisorBeads` / `fetchSupervisorBead`) and refreshes
-  through the established SSE event path (the `bead.*` prefix via
-  `useGcEventRefresh`).
-- Deep links work: `/workbench?bead=<id>` opens that Bead directly.
+For a Wayfinder epic whose Notes say `Review: Lavish AXI`, or a Bead labeled
+`wayfinder:prototype`, Workbench shows a compact review sequence inside the
+selected Bead. A producer may publish these optional Bead metadata fields:
 
-## Read-only guarantee
+| Field | Meaning |
+| --- | --- |
+| `gc.prototype_url` | Allowlisted app route with A/B/C variants selected by `?variant=A`, `B`, or `C`. Existing query parameters are preserved. |
+| `gc.wayfinder_review_url` | URL of an already-running local Lavish AXI review session. Only loopback HTTP(S) links without credentials are opened. |
+| `gc.wayfinder_review_mode` | `lavish` marks an epic as using Lavish when its Notes have not yet been projected into the Bead description. |
 
-The first slice cannot create a second durable task record:
+The prototype route is for comparing real app context; Lavish reviews a
+standalone HTML document in a separate tab. If the local review URL has not
+been published on the Bead, the operator can paste it into the panel for this
+view only; it is not saved as a decision or sent to Gas City. Workbench does not
+embed Lavish, start its CLI, poll its transcript, or share artifacts. The owning agent runs
+the local review loop and updates the Beads map after the human explicitly
+approves the named ticket rollout. An annotation alone is not approval.
+Missing or blocked links remain visible as such, never as a successful review.
 
-- It imports no bead write helpers (`beadWrites`) and renders no
-  create/close/claim controls.
-- Vibe's native task database, scheduler, session/worktree ownership, and
-  message queue are not authorities here — Beads are the only durable
-  work state, reached through Gas City's typed API.
-
-## States
-
-- **Loading** — the queue fetch is in flight ("Loading work queue.").
-- **Unavailable** — the bead store cannot be reached; the page names the
-  failure and offers a Retry.
-- **Unknown bead** — a deep link to a bead that no longer exists renders
-  the calm "resolved or removed" state, not a hard failure.
-
-All three are covered by automated tests in `Workbench.test.tsx`.
+The repository's `engdocs/research/lavish-axi-integration.md` records the
+security and ownership boundary.
