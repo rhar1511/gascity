@@ -16,11 +16,12 @@ const attempt: ExecutionAttempt = {
 };
 
 function ctx(over: Partial<PullRequestContext> = {}): PullRequestContext {
+  const revision = 'a'.repeat(40);
   return {
     bead: { id: 'gascity-1' } as SupervisorBead,
     attempt,
-    attemptRevision: 'abc123',
-    policyRevision: 'abc123',
+    attemptRevision: revision,
+    policyRevision: revision,
     queueAvailable: true,
     policyRejected: false,
     hasConflict: false,
