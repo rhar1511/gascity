@@ -313,6 +313,34 @@ func TestFindKimiSessionFileFollowsSymlinkedRoots(t *testing.T) {
 	}
 }
 
+func TestFindKimiSessionFileRejectsEscapingTranscriptSymlink(t *testing.T) {
+	isolateKimiSearchRoots(t)
+	root := t.TempDir()
+	outside := t.TempDir()
+	workDir := "/tmp/gascity/phase1/kimi-symlink-escape"
+	workHash := kimiWorkDirHash(workDir)
+	const sessionID = "session-escape"
+	sessionDir := filepath.Join(root, workHash, sessionID)
+	if err := os.MkdirAll(sessionDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	secret := filepath.Join(outside, "secret.jsonl")
+	if err := os.WriteFile(secret, []byte(`{"role":"user","content":"outside root"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	transcript := filepath.Join(sessionDir, "context.jsonl")
+	if err := os.Symlink(secret, transcript); err != nil {
+		t.Skipf("symlink unsupported on this platform: %v", err)
+	}
+
+	if got := FindKimiSessionFile([]string{root}, workDir); got != "" {
+		t.Errorf("FindKimiSessionFile() = %q, want no escaping transcript", got)
+	}
+	if got := FindKimiSessionFileByID([]string{root}, workDir, sessionID); got != "" {
+		t.Errorf("FindKimiSessionFileByID() = %q, want no escaping transcript", got)
+	}
+}
+
 // isolateKimiSearchRoots pins every ambient variable DefaultKimiSearchPaths
 // reads, so a discovery test sees only the roots it creates. Pinning HOME alone
 // is insufficient: KIMI_CODE_HOME contributes a root independently of HOME, and

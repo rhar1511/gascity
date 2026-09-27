@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -32,8 +33,11 @@ func ReadCodexFile(path string, _ int) (*Session, error) {
 		return nil, err
 	}
 	defer f.Close() //nolint:errcheck
+	return readCodexFileFrom(path, f, 0)
+}
 
-	scanner := bufio.NewScanner(f)
+func readCodexFileFrom(path string, source io.Reader, _ int) (*Session, error) {
+	scanner := bufio.NewScanner(source)
 	scanner.Buffer(make([]byte, 0, 256*1024), 50*1024*1024)
 
 	var entries []codexEntry

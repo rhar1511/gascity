@@ -84,6 +84,45 @@ func TestFindZCodeSessionFileMatchesMirrorDirectory(t *testing.T) {
 	}
 }
 
+func TestFindZCodeSessionFileByScopeRejectsCandidateSymlinkEscape(t *testing.T) {
+	root := t.TempDir()
+	workDir := filepath.Join(t.TempDir(), "project")
+	scope := ZCodeMirrorScope("worker", "1")
+	scopeDir := filepath.Join(root, scope)
+	if err := os.MkdirAll(scopeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"info":{"id":"outside","directory":"` + filepath.ToSlash(workDir) + `"},"messages":[]}`
+	outsideMirror := filepath.Join(t.TempDir(), "outside-mirror.json")
+	if err := os.WriteFile(outsideMirror, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outsideMirror, filepath.Join(scopeDir, "session.json")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	if got := FindZCodeSessionFileByScope([]string{root}, workDir, "worker", "", "1"); got != "" {
+		t.Fatalf("FindZCodeSessionFileByScope() = %q, want no match for escaping candidate symlink", got)
+	}
+}
+
+func TestFindZCodeSessionFileByIDRejectsCandidateSymlinkEscape(t *testing.T) {
+	root := t.TempDir()
+	workDir := filepath.Join(t.TempDir(), "project")
+	outsideMirror := filepath.Join(t.TempDir(), "outside-mirror.json")
+	body := `{"info":{"id":"outside","directory":"` + filepath.ToSlash(workDir) + `"},"messages":[]}`
+	if err := os.WriteFile(outsideMirror, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outsideMirror, filepath.Join(root, "outside.json")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	if got := FindZCodeSessionFileByID([]string{root}, workDir, "outside"); got != "" {
+		t.Fatalf("FindZCodeSessionFileByID() = %q, want no match for escaping candidate symlink", got)
+	}
+}
+
 func TestFindZCodeSessionFileIgnoresOtherDirectories(t *testing.T) {
 	root := t.TempDir()
 	body := `{"info":{"id":"sess_other","directory":"/somewhere/else"},"messages":[]}`

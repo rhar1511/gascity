@@ -24,6 +24,20 @@ import (
 	"github.com/gastownhall/gascity/internal/worklifecycle"
 )
 
+func TestLifecycleRecoveryAttemptBindingPreservesSignedRevision(t *testing.T) {
+	request := worklifecycle.RecoveryRequest{
+		WorkItemID: "gc-work-1", ExpectedRevision: -17, Owner: "worker",
+		ClaimGeneration: "claim-1", SessionID: "gc-session-1", SessionGeneration: "2",
+	}
+	binding, err := lifecycleRecoveryAttemptBinding(request, "city:test")
+	if err != nil {
+		t.Fatalf("lifecycleRecoveryAttemptBinding: %v", err)
+	}
+	if binding.WorkRevision != "-17" {
+		t.Fatalf("WorkRevision = %q, want -17", binding.WorkRevision)
+	}
+}
+
 func TestLifecycleRecoveryControllerNudgesOnlyTheCASWinnerAndObservesReplay(t *testing.T) {
 	fixture := newLifecycleRecoveryFixture(t)
 	request := fixture.newRequest(t, "nudge-1", fixture.work.Revision)

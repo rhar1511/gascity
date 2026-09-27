@@ -288,6 +288,106 @@ func TestFindKiroSessionFileByIDAndWorkDir(t *testing.T) {
 	}
 }
 
+func TestFindKiroSessionFileRejectsEscapingTranscriptSymlink(t *testing.T) {
+	root := t.TempDir()
+	workDir := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatalf("mkdir workdir: %v", err)
+	}
+	outside := writeKiroJSONL(t,
+		`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session-escape","cwd":`+jsonString(workDir)+`,"update":{"sessionUpdate":"agent_message_chunk","content":{"text":"outside"}}}}`,
+	)
+	if err := os.Symlink(outside, filepath.Join(root, "session-escape.jsonl")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	if got := FindKiroSessionFileByID([]string{root}, workDir, "session-escape"); got != "" {
+		t.Fatalf("FindKiroSessionFileByID() = %q, want escaping transcript rejected", got)
+	}
+	if got := FindKiroSessionFile([]string{root}, workDir); got != "" {
+		t.Fatalf("FindKiroSessionFile() = %q, want escaping transcript rejected", got)
+	}
+}
+
+func TestFindKiroSessionFileSupportsConfiguredRootSymlink(t *testing.T) {
+	physicalRoot := t.TempDir()
+	rootAlias := filepath.Join(t.TempDir(), "kiro-sessions")
+	if err := os.Symlink(physicalRoot, rootAlias); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	workDir := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatalf("mkdir workdir: %v", err)
+	}
+	path := filepath.Join(rootAlias, "session-123.jsonl")
+	writeFile(t, path, `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session-123","cwd":`+jsonString(workDir)+`,"update":{"sessionUpdate":"agent_message_chunk","content":{"text":"hello"}}}}`+"\n")
+
+	if got := FindKiroSessionFileByID([]string{rootAlias}, workDir, "session-123"); got != path {
+		t.Fatalf("FindKiroSessionFileByID() = %q, want lexical path %q through configured root", got, path)
+	}
+	if got := FindKiroSessionFile([]string{rootAlias}, workDir); got != path {
+		t.Fatalf("FindKiroSessionFile() = %q, want lexical path %q through configured root", got, path)
+	}
+}
+
+func TestFindKiroSessionFileRejectsEscapingMetadataSidecarSymlink(t *testing.T) {
+	root := t.TempDir()
+	workDir := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatalf("mkdir workdir: %v", err)
+	}
+	writeFile(t, filepath.Join(root, "session-sidecar.jsonl"),
+		`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session-sidecar","update":{"sessionUpdate":"agent_message_chunk","content":{"text":"inside"}}}}`+"\n")
+	outside := filepath.Join(t.TempDir(), "session-sidecar.json")
+	writeFile(t, outside, fmt.Sprintf(`{"cwd":%s}`, jsonString(workDir)))
+	if err := os.Symlink(outside, filepath.Join(root, "session-sidecar.json")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	if got := FindKiroSessionFileByID([]string{root}, workDir, "session-sidecar"); got != "" {
+		t.Fatalf("FindKiroSessionFileByID() = %q, want escaping sidecar rejected", got)
+	}
+	if got := FindKiroSessionFile([]string{root}, workDir); got != "" {
+		t.Fatalf("FindKiroSessionFile() = %q, want escaping sidecar rejected", got)
+	}
+}
+
+func TestReadKiroTranscriptUsesOpenedDescriptorAfterPathReplacement(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "session-123.jsonl")
+	writeFile(t, path,
+		`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"inside-session","update":{"sessionUpdate":"agent_message_chunk","content":{"text":"inside transcript"}}}}`+"\n",
+	)
+	transcript, err := OpenTranscript("kiro", []string{root}, path)
+	if err != nil {
+		t.Fatalf("open Kiro transcript: %v", err)
+	}
+	defer transcript.Close() //nolint:errcheck
+
+	outside := filepath.Join(t.TempDir(), "outside-session.jsonl")
+	writeFile(t, outside,
+		`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"outside-session","update":{"sessionUpdate":"agent_message_chunk","content":{"text":"outside transcript"}}}}`+"\n",
+	)
+	if err := os.Rename(path, path+".opened"); err != nil {
+		t.Fatalf("rename opened transcript: %v", err)
+	}
+	if err := os.Symlink(outside, path); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	session, err := transcript.Read(0)
+	if err != nil {
+		t.Fatalf("read opened Kiro transcript: %v", err)
+	}
+	if session.ID != "inside-session" || len(session.Messages) != 1 {
+		t.Fatalf("read returned session %#v, want content from the already-open descriptor", session)
+	}
+	blocks := session.Messages[0].ContentBlocks()
+	if len(blocks) != 1 || blocks[0].Text != "inside transcript" {
+		t.Fatalf("read returned session %#v, want content from the already-open descriptor", session)
+	}
+}
+
 func writeKiroJSONL(t *testing.T, lines ...string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "session.jsonl")

@@ -4,8 +4,182 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+func TestOpenTranscriptKeepsOpenedDescriptorAcrossSymlinkSwap(t *testing.T) {
+	root := t.TempDir()
+	inside := filepath.Join(root, "inside.jsonl")
+	outside := filepath.Join(t.TempDir(), "outside.jsonl")
+	link := filepath.Join(root, "current.jsonl")
+	insideData := `{"uuid":"safe-1","type":"user","message":{"role":"user","content":"inside"}}` + "\n"
+	outsideData := `{"uuid":"outside-1","type":"user","message":{"role":"user","content":"outside secret"}}` + "\n"
+	if err := os.WriteFile(inside, []byte(insideData), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(outside, []byte(outsideData), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Base(inside), link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	opened, err := OpenTranscript("claude", []string{root}, link)
+	if err != nil {
+		t.Fatalf("OpenTranscript: %v", err)
+	}
+	defer opened.Close() //nolint:errcheck
+
+	if got, want := opened.Path(), filepath.Clean(link); got != want {
+		t.Fatalf("Path() = %q, want caller's lexical path %q", got, want)
+	}
+
+	// Swap the discovered link only after the secure open. A path-based parser
+	// would now read the outside fixture; parsing the opened descriptor must not.
+	if err := os.Remove(link); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, link); err != nil {
+		t.Fatal(err)
+	}
+
+	info, err := opened.Stat()
+	if err != nil {
+		t.Fatalf("Stat opened transcript: %v", err)
+	}
+	if info.Size() != int64(len(insideData)) {
+		t.Fatalf("opened descriptor size = %d, want original file size %d", info.Size(), len(insideData))
+	}
+	sess, err := opened.ReadRaw(0)
+	if err != nil {
+		t.Fatalf("ReadRaw from opened transcript: %v", err)
+	}
+	if sess.ID != "current" {
+		t.Fatalf("session ID = %q, want lexical transcript basename %q", sess.ID, "current")
+	}
+	if len(sess.Messages) != 1 || sess.Messages[0].TextContent() != "inside" {
+		t.Fatalf("parsed messages = %#v, want the already-opened inside transcript", sess.Messages)
+	}
+	if strings.Contains(sess.Messages[0].TextContent(), "outside secret") {
+		t.Fatal("parser followed the replacement symlink")
+	}
+}
+
+func TestOpenTranscriptRejectsEscapingFileSymlink(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside.jsonl")
+	if err := os.WriteFile(outside, []byte(`{"uuid":"x","type":"user"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "escape.jsonl")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if opened, err := OpenTranscript("claude", []string{root}, link); err == nil {
+		opened.Close() //nolint:errcheck
+		t.Fatal("OpenTranscript accepted a symlink escaping the configured root")
+	}
+}
+
+func TestOpenTranscriptPreservesConfiguredAndProviderSymlinkRoots(t *testing.T) {
+	physicalRoot := t.TempDir()
+	rootAlias := filepath.Join(t.TempDir(), "configured-root")
+	if err := os.Symlink(physicalRoot, rootAlias); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	claudePath := filepath.Join(rootAlias, "session.jsonl")
+	if err := os.WriteFile(filepath.Join(physicalRoot, "session.jsonl"), []byte(`{"uuid":"x","type":"user"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opened, err := OpenTranscript("claude", []string{rootAlias}, claudePath)
+	if err != nil {
+		t.Fatalf("open through configured-root symlink: %v", err)
+	}
+	if err := opened.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		provider string
+	}{
+		{provider: "codex"},
+		{provider: "kimi"},
+	} {
+		t.Run(tc.provider, func(t *testing.T) {
+			searchRoot := t.TempDir()
+			if tc.provider == "kimi" {
+				searchRoot = filepath.Join(searchRoot, "sessions")
+				if err := os.MkdirAll(searchRoot, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			accountTarget := t.TempDir()
+			accountLink := filepath.Join(searchRoot, "account-a")
+			if err := os.Symlink(accountTarget, accountLink); err != nil {
+				t.Skipf("symlinks unavailable: %v", err)
+			}
+			transcript := filepath.Join(accountTarget, "session.jsonl")
+			if err := os.WriteFile(transcript, []byte(`{"uuid":"x","type":"user"}`+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			// Discovery may return the physical target path; the opener must map
+			// it back to the provider-recognized linked account root.
+			opened, err := OpenTranscript(tc.provider, []string{searchRoot}, transcript)
+			if err != nil {
+				t.Fatalf("open provider account symlink root: %v", err)
+			}
+			defer opened.Close() //nolint:errcheck
+			if _, err := opened.Stat(); err != nil {
+				t.Fatalf("Stat provider account transcript: %v", err)
+			}
+		})
+	}
+}
+
+func TestOpenTranscriptAutoIncludesKimiSymlinkRoots(t *testing.T) {
+	searchRoot := t.TempDir()
+	sessionsRoot := filepath.Join(searchRoot, "sessions")
+	if err := os.MkdirAll(sessionsRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	accountRoot := t.TempDir()
+	if err := os.Symlink(accountRoot, filepath.Join(sessionsRoot, "account-a")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	path := filepath.Join(accountRoot, "session.jsonl")
+	if err := os.WriteFile(path, []byte(`{"uuid":"x","type":"user"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opened, err := OpenTranscript("auto", []string{searchRoot}, path)
+	if err != nil {
+		t.Fatalf("OpenTranscript(auto) through Kimi session root: %v", err)
+	}
+	defer opened.Close() //nolint:errcheck
+	if _, err := opened.Stat(); err != nil {
+		t.Fatalf("stat Kimi transcript through auto provider: %v", err)
+	}
+}
+
+func TestOpenTranscriptDoesNotExpandArbitraryNestedSymlinkRoots(t *testing.T) {
+	root := t.TempDir()
+	nested := filepath.Join(root, "nested")
+	if err := os.Mkdir(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	transcript := filepath.Join(outside, "session.jsonl")
+	if err := os.WriteFile(transcript, []byte(`{"uuid":"x","type":"user"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(nested, "account-a")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if opened, err := OpenTranscript("codex", []string{root}, transcript); err == nil {
+		opened.Close() //nolint:errcheck
+		t.Fatal("OpenTranscript accepted an arbitrary nested symlink root")
+	}
+}
 
 func TestExtractTailMetaBasic(t *testing.T) {
 	dir := t.TempDir()

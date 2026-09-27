@@ -518,6 +518,47 @@ func TestAgentOutputStreamNotRunning(t *testing.T) {
 	}
 }
 
+func TestAgentOutputStreamTreatsTranscriptSymlinkOutsideSearchRootsAsAbsent(t *testing.T) {
+	state := newFakeState(t)
+	rigDir := t.TempDir()
+	state.cfg.Rigs = []config.Rig{{Name: "myrig", Path: rigDir}}
+
+	searchBase := t.TempDir()
+	slug := strings.NewReplacer("/", "-", ".", "-").Replace(rigDir)
+	transcriptDir := filepath.Join(searchBase, slug)
+	if err := os.MkdirAll(transcriptDir, 0o755); err != nil {
+		t.Fatalf("mkdir transcript dir: %v", err)
+	}
+	outsidePath := filepath.Join(t.TempDir(), "private.jsonl")
+	if err := os.WriteFile(outsidePath, []byte(
+		`{"uuid":"secret","type":"user","message":{"role":"user","content":"outside secret"}}`+"\n",
+	), 0o600); err != nil {
+		t.Fatalf("write outside transcript: %v", err)
+	}
+	linkPath := filepath.Join(transcriptDir, "escaped.jsonl")
+	if err := os.Symlink(outsidePath, linkPath); err != nil {
+		t.Skipf("symlinks not supported: %v", err)
+	}
+
+	srv := newServerWithSearchPaths(state, searchBase)
+	if safePath, err := srv.resolveSafeStreamTranscriptPath("claude", linkPath); err == nil {
+		t.Fatalf("resolveSafeStreamTranscriptPath() = %q, want rejection for an escaping transcript symlink", safePath)
+	}
+	h := newTestCityHandlerWith(t, state, srv)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	req := httptest.NewRequest("GET", cityURL(state, "/agent/myrig/worker/output/stream"), nil).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d when the escaping transcript is treated as absent and the agent is not running; body: %s", rec.Code, http.StatusNotFound, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "outside secret") {
+		t.Fatalf("stream exposed content from outside the configured search root: %s", rec.Body.String())
+	}
+}
+
 func TestAgentOutputStreamNewTurns(t *testing.T) {
 	state := newFakeState(t)
 	rigDir := t.TempDir()

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -57,9 +58,100 @@ type AgentTranscriptResult struct {
 // sessionlog as the only production transcript parser in Phase 1.
 type SessionLogAdapter struct {
 	SearchPaths []string
+	// requireRoots makes factory-created adapters fail closed when roots are
+	// empty. Only the zero-value adapter used by offline tools/tests retains
+	// direct explicit-path reads.
+	requireRoots bool
 	// activity memoizes derived tail activity across the per-request handles a
 	// Factory hands out. Nil (the zero adapter) derives on every call.
 	activity *DerivedActivityMemo
+}
+
+// openedSessionTranscript keeps authorization and all transcript reads on the
+// same file descriptor. Configured adapters use OpenTranscript's root-confined
+// open; the zero-value adapter retains its explicit-path behavior for tests
+// and offline tools.
+type openedSessionTranscript struct {
+	provider string
+	path     string
+	opened   *sessionlog.OpenedTranscript
+	file     *os.File
+}
+
+func (a SessionLogAdapter) openTranscript(provider, path string) (*openedSessionTranscript, error) {
+	path = filepath.Clean(strings.TrimSpace(path))
+	if path == "." || path == "" {
+		return nil, fmt.Errorf("transcript path is required")
+	}
+	if len(a.SearchPaths) > 0 || a.requireRoots {
+		opened, err := sessionlog.OpenTranscript(provider, a.SearchPaths, path)
+		if err != nil {
+			return nil, fmt.Errorf("opening transcript: %w", err)
+		}
+		return &openedSessionTranscript{provider: provider, path: opened.Path(), opened: opened}, nil
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	return &openedSessionTranscript{provider: provider, path: path, file: file}, nil
+}
+
+func (t *openedSessionTranscript) Close() error {
+	if t == nil {
+		return nil
+	}
+	if t.opened != nil {
+		return t.opened.Close()
+	}
+	if t.file != nil {
+		return t.file.Close()
+	}
+	return nil
+}
+
+func (t *openedSessionTranscript) read(raw bool, tailCompactions int) (*sessionlog.Session, error) {
+	if t.opened != nil {
+		if raw {
+			return t.opened.ReadRaw(tailCompactions)
+		}
+		return t.opened.Read(tailCompactions)
+	}
+	if raw {
+		return sessionlog.ReadProviderFileRawFrom(t.provider, t.path, t.file, tailCompactions)
+	}
+	return sessionlog.ReadProviderFileFrom(t.provider, t.path, t.file, tailCompactions)
+}
+
+func (t *openedSessionTranscript) stat() (os.FileInfo, error) {
+	if t.opened != nil {
+		return t.opened.Stat()
+	}
+	return t.file.Stat()
+}
+
+func (t *openedSessionTranscript) tailMeta() (*sessionlog.TailMeta, error) {
+	if t.opened != nil {
+		return t.opened.TailMeta()
+	}
+	if sessionlog.ProviderFamily(t.provider) == "codex" {
+		return sessionlog.ExtractCodexTailMetaFrom(t.file)
+	}
+	return sessionlog.ExtractTailMetaFrom(t.file)
+}
+
+func (t *openedSessionTranscript) codexTailUsage() ([]sessionlog.TailUsage, error) {
+	if t.opened != nil {
+		return sessionlog.ExtractCodexTailUsageFrom(t.opened.ReadSeeker())
+	}
+	return sessionlog.ExtractCodexTailUsageFrom(t.file)
+}
+
+func (t *openedSessionTranscript) readSeeker() io.ReadSeeker {
+	if t.opened != nil {
+		return t.opened.ReadSeeker()
+	}
+	return t.file
 }
 
 // DiscoverTranscript returns the best available transcript path for a worker.
@@ -191,7 +283,15 @@ func (a SessionLogAdapter) TailActivity(path string) (TailActivity, error) {
 
 // AgentMappings lists subagent transcript mappings for a parent transcript.
 func (a SessionLogAdapter) AgentMappings(path string) ([]sessionlog.AgentMapping, error) {
-	return sessionlog.FindAgentMappings(strings.TrimSpace(path))
+	if len(a.SearchPaths) == 0 && !a.requireRoots {
+		return sessionlog.FindAgentMappings(strings.TrimSpace(path))
+	}
+	source, err := a.openTranscript("auto", path)
+	if err != nil {
+		return nil, err
+	}
+	defer source.Close() //nolint:errcheck // read-only transcript
+	return source.opened.FindAgentMappings()
 }
 
 // TranscriptRecords returns every raw transcript record in file order,
@@ -199,7 +299,19 @@ func (a SessionLogAdapter) AgentMappings(path string) ([]sessionlog.AgentMapping
 // queue-operation task notifications — are pruned by BuildDag and are
 // therefore invisible to ReadTranscript.
 func (a SessionLogAdapter) TranscriptRecords(path string) ([]json.RawMessage, error) {
-	entries, err := sessionlog.ReadFileRecords(strings.TrimSpace(path))
+	if len(a.SearchPaths) == 0 && !a.requireRoots {
+		entries, err := sessionlog.ReadFileRecords(strings.TrimSpace(path))
+		if err != nil {
+			return nil, err
+		}
+		return rawMessagesFromEntries(entries), nil
+	}
+	source, err := a.openTranscript("auto", path)
+	if err != nil {
+		return nil, err
+	}
+	defer source.Close() //nolint:errcheck // read-only transcript
+	entries, err := sessionlog.ReadFileRecordsFrom(source.readSeeker())
 	if err != nil {
 		return nil, err
 	}
@@ -209,9 +321,23 @@ func (a SessionLogAdapter) TranscriptRecords(path string) ([]json.RawMessage, er
 // ReadAgentTranscript loads a subagent transcript while preserving raw
 // message fidelity for worker-owned API surfaces.
 func (a SessionLogAdapter) ReadAgentTranscript(path, agentID string) (*AgentTranscriptResult, error) {
-	sess, err := sessionlog.ReadAgentSession(strings.TrimSpace(path), strings.TrimSpace(agentID))
-	if err != nil {
-		return nil, err
+	var sess *sessionlog.AgentSession
+	if len(a.SearchPaths) == 0 && !a.requireRoots {
+		var err error
+		sess, err = sessionlog.ReadAgentSession(strings.TrimSpace(path), strings.TrimSpace(agentID))
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		source, err := a.openTranscript("auto", path)
+		if err != nil {
+			return nil, err
+		}
+		defer source.Close() //nolint:errcheck // read-only transcript
+		sess, err = source.opened.ReadAgentSession(strings.TrimSpace(agentID))
+		if err != nil {
+			return nil, err
+		}
 	}
 	result := &AgentTranscriptResult{
 		TranscriptPath: filepath.Clean(path),
@@ -233,20 +359,19 @@ func (a SessionLogAdapter) ReadTranscript(req TranscriptRequest) (*TranscriptRes
 	if err != nil {
 		return nil, err
 	}
+	source, err := a.openTranscript(req.Provider, path)
+	if err != nil {
+		return nil, err
+	}
+	defer source.Close() //nolint:errcheck // read-only transcript
 	var sess *sessionlog.Session
-	switch {
-	case req.Raw && afterID != "":
-		sess, err = sessionlog.ReadProviderFileRawNewer(req.Provider, path, req.TailCompactions, afterID)
-	case req.Raw && beforeID != "":
-		sess, err = sessionlog.ReadProviderFileRawOlder(req.Provider, path, req.TailCompactions, beforeID)
-	case req.Raw:
-		sess, err = sessionlog.ReadProviderFileRaw(req.Provider, path, req.TailCompactions)
-	case afterID != "":
-		sess, err = sessionlog.ReadProviderFileNewer(req.Provider, path, req.TailCompactions, afterID)
-	case beforeID != "":
-		sess, err = sessionlog.ReadProviderFileOlder(req.Provider, path, req.TailCompactions, beforeID)
-	default:
-		sess, err = sessionlog.ReadProviderFile(req.Provider, path, req.TailCompactions)
+	if beforeID != "" || afterID != "" {
+		sess, err = source.read(req.Raw, 0)
+		if err == nil {
+			sess, err = sessionlog.PageSession(sess, req.TailCompactions, beforeID, afterID)
+		}
+	} else {
+		sess, err = source.read(req.Raw, req.TailCompactions)
 	}
 	if err != nil {
 		return nil, err
@@ -254,7 +379,7 @@ func (a SessionLogAdapter) ReadTranscript(req TranscriptRequest) (*TranscriptRes
 
 	result := &TranscriptResult{
 		Provider:       req.Provider,
-		TranscriptPath: filepath.Clean(path),
+		TranscriptPath: source.path,
 		Session:        sess,
 	}
 	if req.Raw && sess != nil {
@@ -287,12 +412,18 @@ func (a SessionLogAdapter) LoadHistory(req LoadRequest) (*HistorySnapshot, error
 	if path == "" {
 		return nil, fmt.Errorf("transcript path is required")
 	}
+	source, err := a.openTranscript(req.Provider, path)
+	if err != nil {
+		return nil, err
+	}
+	defer source.Close() //nolint:errcheck // read-only transcript
+	path = source.path
 
 	beforeID, afterID, err := transcriptPageEntryIDs(req.BeforeEntryID, req.AfterEntryID)
 	if err != nil {
 		return nil, err
 	}
-	fullSession, err := sessionlog.ReadProviderFileRaw(req.Provider, path, 0)
+	fullSession, err := source.read(true, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -305,7 +436,7 @@ func (a SessionLogAdapter) LoadHistory(req LoadRequest) (*HistorySnapshot, error
 		}
 	}
 
-	info, err := os.Stat(path)
+	info, err := source.stat()
 	if err != nil {
 		return nil, fmt.Errorf("stat transcript: %w", err)
 	}
@@ -326,14 +457,14 @@ func (a SessionLogAdapter) LoadHistory(req LoadRequest) (*HistorySnapshot, error
 		// "before" page the tail usages are for newer, off-page turns and would
 		// be mis-attributed onto earlier assistants, so skip attachment there;
 		// those older turns have no tail-extractable usage to show anyway.
-		entries, err = attachDetachedProviderUsage(req.Provider, path, entries)
+		entries, err = attachDetachedProviderUsage(req.Provider, source, entries)
 		if err != nil {
 			return nil, err
 		}
 	}
 	compactionCount, lastEntryID, pendingIDs := transcriptGlobalFacts(fullSession.Messages)
 
-	tailMeta, err := sessionlog.ExtractTailMeta(path)
+	tailMeta, err := source.tailMeta()
 	if err != nil {
 		return nil, err
 	}
@@ -500,12 +631,12 @@ func historySystemEventFromSessionLog(event *sessionlog.SystemEvent) *HistorySys
 	}
 }
 
-func attachDetachedProviderUsage(provider, path string, entries []HistoryEntry) ([]HistoryEntry, error) {
+func attachDetachedProviderUsage(provider string, source *openedSessionTranscript, entries []HistoryEntry) ([]HistoryEntry, error) {
 	family, supported := InvocationUsageFamily(provider)
 	if !supported || family != "codex" {
 		return entries, nil
 	}
-	usages, err := sessionlog.ExtractCodexTailUsage(path)
+	usages, err := source.codexTailUsage()
 	if err != nil {
 		return nil, fmt.Errorf("extract codex tail usage: %w", err)
 	}

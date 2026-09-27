@@ -6,10 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -23,7 +23,16 @@ var ErrAmbiguousPiSessionFile = errors.New("ambiguous pi session file")
 // ReadPiFile reads a Pi Coding Agent native JSONL session file and converts it
 // to the standard Session format used by gc session logs.
 func ReadPiFile(path string, tailCompactions int) (*Session, error) {
-	entries, sessionID, diagnostics, err := parsePiFileDetailed(path)
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close() //nolint:errcheck
+	return readPiFileFrom(path, f, tailCompactions)
+}
+
+func readPiFileFrom(path string, source io.Reader, tailCompactions int) (*Session, error) {
+	entries, sessionID, diagnostics, err := parsePiFileDetailedFrom(source)
 	if err != nil {
 		return nil, err
 	}
@@ -52,16 +61,27 @@ func ReadPiFile(path string, tailCompactions int) (*Session, error) {
 }
 
 // ResetPiInterruptedTurn removes Pi's interrupted tail before a replacement
-// prompt is sent. Native transcript reset failures are returned; the optional
-// mirror update is best effort and logs path-bearing diagnostics on failure.
-func ResetPiInterruptedTurn(path, mirrorDir string) error {
-	data, err := os.ReadFile(path)
+// prompt is sent. It reads and stats the already-authorized transcript
+// descriptor so discovery cannot be swapped for an escaping symlink before
+// the reset or mirror update. Native transcript reset failures are returned;
+// the optional mirror update is best effort and logs path-bearing diagnostics
+// on failure.
+func ResetPiInterruptedTurn(transcript *OpenedTranscript, mirrorDir string) error {
+	if transcript == nil || transcript.ReadSeeker() == nil {
+		return os.ErrInvalid
+	}
+	path := transcript.Path()
+	source := transcript.ReadSeeker()
+	if _, err := source.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("rewinding pi session file: %w", err)
+	}
+	data, err := io.ReadAll(source)
 	if err != nil {
 		return err
 	}
 	truncated, changed := truncatePiSessionAfterLastUserMessage(data)
 	perm := os.FileMode(0o600)
-	if info, err := os.Stat(path); err == nil {
+	if info, err := transcript.Stat(); err == nil {
 		perm = info.Mode().Perm()
 	}
 	if changed {
@@ -106,86 +126,119 @@ func FindPiSessionFile(searchPaths []string, workDir string) string {
 // FindPiSessionFileStrict searches Pi JSONL session directories for one
 // unambiguous session whose header cwd matches workDir.
 func FindPiSessionFileStrict(searchPaths []string, workDir string) (string, error) {
-	candidates := findPiSessionCandidates(searchPaths, workDir)
-	switch len(candidates) {
-	case 0:
-		return "", nil
-	case 1:
-		return candidates[0].path, nil
-	default:
-		return "", ErrAmbiguousPiSessionFile
+	transcript, err := findPiSessionTranscript(searchPaths, workDir, "", true, true)
+	if err != nil || transcript == nil {
+		return "", err
 	}
+	defer transcript.Close() //nolint:errcheck
+	return transcript.Path(), nil
+}
+
+// FindPiSessionTranscriptStrict returns the one unambiguous Pi transcript for
+// workDir, keeping its root-confined descriptor open for a caller that must
+// read or mutate the selected file after discovery.
+func FindPiSessionTranscriptStrict(searchPaths []string, workDir string) (*OpenedTranscript, error) {
+	return findPiSessionTranscript(searchPaths, workDir, "", true, false)
 }
 
 // FindPiSessionFileByID searches Pi JSONL session directories for the session
 // whose header cwd and provider session ID match the supplied values.
 func FindPiSessionFileByID(searchPaths []string, workDir, sessionID string) string {
-	sessionID = strings.TrimSpace(sessionID)
-	if sessionID == "" {
+	transcript, err := findPiSessionTranscript(searchPaths, workDir, strings.TrimSpace(sessionID), false, true)
+	if err != nil || transcript == nil {
 		return ""
 	}
-	for _, candidate := range findPiSessionCandidates(searchPaths, workDir) {
-		if candidate.sessionID == sessionID {
-			return candidate.path
-		}
+	defer transcript.Close() //nolint:errcheck
+	return transcript.Path()
+}
+
+// FindPiSessionTranscriptByID returns the matching Pi transcript with its
+// root-confined descriptor open. The caller owns the returned descriptor.
+func FindPiSessionTranscriptByID(searchPaths []string, workDir, sessionID string) (*OpenedTranscript, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil, nil
 	}
-	return ""
+	return findPiSessionTranscript(searchPaths, workDir, sessionID, false, false)
 }
 
-type piSessionCandidate struct {
-	path      string
-	sessionID string
-	modTime   time.Time
-}
-
-func findPiSessionCandidates(searchPaths []string, workDir string) []piSessionCandidate {
+func findPiSessionTranscript(searchPaths []string, workDir, sessionID string, requireUnique, useHeaderCache bool) (*OpenedTranscript, error) {
 	workDir = cleanPiWorkDir(workDir)
 	if workDir == "" {
-		return nil
+		return nil, nil
 	}
 
-	var candidates []piSessionCandidate
-	for _, root := range mergePiSearchPaths(searchPaths) {
-		candidates = append(candidates, findPiSessionCandidatesIn(root, workDir)...)
-	}
-	sort.Slice(candidates, func(i, j int) bool {
-		return candidates[i].modTime.After(candidates[j].modTime)
-	})
-	return candidates
-}
-
-func findPiSessionCandidatesIn(root, workDir string) []piSessionCandidate {
-	info, err := os.Stat(root)
-	if err != nil || !info.IsDir() {
-		return nil
-	}
-
-	var candidates []piSessionCandidate
-	err = filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
-		if walkErr != nil || entry.IsDir() {
-			return nil
+	roots := mergePiSearchPaths(searchPaths)
+	var selected *OpenedTranscript
+	var selectedModTime time.Time
+	matches := 0
+	for _, root := range roots {
+		info, err := os.Stat(root)
+		if err != nil || !info.IsDir() {
+			continue
 		}
-		if !strings.HasSuffix(strings.ToLower(entry.Name()), ".jsonl") {
+		err = filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+			if walkErr != nil || entry.IsDir() {
+				return nil
+			}
+			if !strings.HasSuffix(strings.ToLower(entry.Name()), ".jsonl") {
+				return nil
+			}
+			transcript, err := OpenTranscript("pi", roots, path)
+			if err != nil {
+				return nil
+			}
+			openedInfo, err := transcript.Stat()
+			if err != nil {
+				_ = transcript.Close()
+				return nil
+			}
+			var foundID, cwd string
+			if useHeaderCache {
+				foundID, cwd = cachedPiSessionHeader(path, openedInfo, transcript.ReadSeeker())
+			} else {
+				if _, err := transcript.ReadSeeker().Seek(0, io.SeekStart); err != nil {
+					_ = transcript.Close()
+					return nil
+				}
+				foundID, cwd, _ = piSessionHeaderFrom(transcript.ReadSeeker())
+			}
+			if foundID == "" {
+				foundID = piSessionID(path)
+			}
+			if cleanPiWorkDir(cwd) != workDir || (sessionID != "" && foundID != sessionID) {
+				_ = transcript.Close()
+				return nil
+			}
+			matches++
+			if requireUnique && matches > 1 {
+				_ = transcript.Close()
+				_ = selected.Close()
+				selected = nil
+				return ErrAmbiguousPiSessionFile
+			}
+			if selected == nil || openedInfo.ModTime().After(selectedModTime) {
+				if selected != nil {
+					_ = selected.Close()
+				}
+				selected = transcript
+				selectedModTime = openedInfo.ModTime()
+			} else {
+				_ = transcript.Close()
+			}
 			return nil
-		}
-		info, err := entry.Info()
+		})
 		if err != nil {
-			return nil
+			if selected != nil {
+				_ = selected.Close()
+			}
+			if errors.Is(err, ErrAmbiguousPiSessionFile) {
+				return nil, ErrAmbiguousPiSessionFile
+			}
+			return nil, fmt.Errorf("walking pi session root %q: %w", root, err)
 		}
-		sessionID, cwd := cachedPiSessionHeader(path, info)
-		if cleanPiWorkDir(cwd) != workDir {
-			return nil
-		}
-		if sessionID == "" {
-			sessionID = piSessionID(path)
-		}
-		candidates = append(candidates, piSessionCandidate{path: path, sessionID: sessionID, modTime: info.ModTime()})
-		return nil
-	})
-	if err != nil {
-		return nil
 	}
-	return candidates
+	return selected, nil
 }
 
 // piHeaderCacheEntry memoizes the parsed first-line header of a pi session
@@ -211,7 +264,7 @@ var (
 // caching. Real eviction is out of scope here and tracked in ga-gn1gf.
 const piHeaderCacheMaxEntries = 16384
 
-func cachedPiSessionHeader(path string, info os.FileInfo) (string, string) {
+func cachedPiSessionHeader(path string, info os.FileInfo, source io.ReadSeeker) (string, string) {
 	size := info.Size()
 	modTimeNS := info.ModTime().UnixNano()
 
@@ -222,7 +275,10 @@ func cachedPiSessionHeader(path string, info os.FileInfo) (string, string) {
 		return entry.sessionID, entry.cwd
 	}
 
-	sessionID, cwd, read := piSessionHeader(path)
+	if _, err := source.Seek(0, io.SeekStart); err != nil {
+		return "", ""
+	}
+	sessionID, cwd, read := piSessionHeaderFrom(source)
 	if !read {
 		// The read failed rather than finding no header. Storing that would
 		// freeze a transient fault into an authoritative "no transcript" answer
@@ -253,10 +309,10 @@ func storePiHeaderCacheEntry(path string, entry piHeaderCacheEntry, maxEntries i
 	piHeaderCache[path] = entry
 }
 
-func parsePiFileDetailed(path string) ([]piEntry, string, SessionDiagnostics, error) {
-	data, err := os.ReadFile(path)
+func parsePiFileDetailedFrom(source io.Reader) ([]piEntry, string, SessionDiagnostics, error) {
+	data, err := io.ReadAll(source)
 	if err != nil {
-		return nil, "", SessionDiagnostics{}, fmt.Errorf("opening pi session file: %w", err)
+		return nil, "", SessionDiagnostics{}, fmt.Errorf("reading pi session file: %w", err)
 	}
 
 	lines, diagnostics := parsePiEntryLines(data)
@@ -769,23 +825,17 @@ func parsePiTimestamp(raw string) time.Time {
 	return ts
 }
 
-// piSessionHeader parses the session ID and cwd from a pi transcript's first
-// line. read reports whether the file was actually read: false means the read
-// failed (the open errored, or the scan errored, which includes a first line
+// piSessionHeaderFrom parses the session ID and cwd from a pi transcript's
+// first line. read reports whether the file was actually read: false means the read
+// failed (the scan errored, which includes a first line
 // past the buffer limit), so the header is simply unknown. true means the file
 // was read, so empty return values are content-derived (an empty file, an
 // unparsable or non-session first record, or a session record carrying no id
 // or cwd) rather than a read failure. Callers that memoize the result must
 // store only read results, so a transient failure is retried instead of frozen
 // as an authoritative absence.
-func piSessionHeader(path string) (sessionID, cwd string, read bool) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", "", false
-	}
-	defer f.Close() //nolint:errcheck // read-only
-
-	scanner := bufio.NewScanner(f)
+func piSessionHeaderFrom(source io.Reader) (sessionID, cwd string, read bool) {
+	scanner := bufio.NewScanner(source)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	if !scanner.Scan() {
 		// Scan reports an empty file and a failed read the same way, so

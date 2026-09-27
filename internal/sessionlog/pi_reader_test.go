@@ -360,7 +360,12 @@ func TestResetPiInterruptedTurnIgnoresMirrorWriteFailureAfterNativeReset(t *test
 	log.SetOutput(&logs)
 	defer log.SetOutput(oldLogOutput)
 
-	if err := ResetPiInterruptedTurn(path, mirrorDir); err != nil {
+	transcript, err := OpenTranscript("pi", []string{filepath.Dir(path)}, path)
+	if err != nil {
+		t.Fatalf("OpenTranscript: %v", err)
+	}
+	defer transcript.Close() //nolint:errcheck
+	if err := ResetPiInterruptedTurn(transcript, mirrorDir); err != nil {
 		t.Fatalf("ResetPiInterruptedTurn: %v", err)
 	}
 	got, err := os.ReadFile(path)

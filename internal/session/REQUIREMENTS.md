@@ -72,6 +72,12 @@ unless the row names how they map to the canonical projection.
 
 ## Scenario Ledger
 
+### Transcript Discovery And Reads
+
+| ID | Scenario | Required behavior | Evidence |
+|---|---|---|---|
+| SESSION-TRANSCRIPT-001 | Discovered transcript symlink confinement | A discovered transcript is readable only when its resolved file remains beneath an allowed provider search root. A configured root may itself be a symlink; Codex and Kimi's supported symlinked account roots remain searchable. A transcript-file symlink resolving outside those roots is treated as absent. | `internal/session/chat.go`; `internal/sessionlog/tail.go`; `internal/worker/sessionlog_adapter_test.go`; `internal/session/manager_test.go` |
+
 ### Lifecycle Projection
 
 | ID | Scenario | Required behavior | Evidence |

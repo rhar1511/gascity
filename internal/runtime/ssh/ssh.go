@@ -164,6 +164,12 @@ func (c *Conn) execScript(ctx context.Context, script []byte) ([]byte, int, erro
 type shellRunner struct{}
 
 func (shellRunner) run(ctx context.Context, ep Endpoint, remoteArgv []string, stdin []byte) ([]byte, int, error) {
+	// This provider deliberately executes the requested argv on the configured
+	// remote host. Locally the executable is the fixed "ssh" binary; sshArgs
+	// ends option parsing before the destination and quotes every remote argv
+	// element as a POSIX-shell token. TestShellQuotePreservesMetacharactersAsData
+	// exercises the secondary shell boundary that CodeQL cannot model here.
+	// codeql[go/command-injection]
 	cmd := exec.CommandContext(ctx, "ssh", sshArgs(ep, remoteArgv)...)
 	cmd.WaitDelay = 2 * time.Second
 	var stdout, stderr bytes.Buffer

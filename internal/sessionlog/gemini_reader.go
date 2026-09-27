@@ -3,6 +3,7 @@ package sessionlog
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -20,7 +21,16 @@ import (
 // array. Current CLI files are JSONL mutation streams with an initial session
 // header, top-level message objects, and "$set.messages" snapshots.
 func ReadGeminiFile(path string, _ int) (*Session, error) {
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close() //nolint:errcheck
+	return readGeminiFileFrom(path, f, 0)
+}
+
+func readGeminiFileFrom(path string, source io.Reader, _ int) (*Session, error) {
+	data, err := io.ReadAll(source)
 	if err != nil {
 		return nil, err
 	}
@@ -348,7 +358,7 @@ func FindGeminiSessionFile(searchPaths []string, workDir string) string {
 		if path == "" {
 			continue
 		}
-		info, err := os.Stat(path)
+		info, err := geminiFileInfoBeneath(root, path)
 		if err != nil {
 			continue
 		}
@@ -374,11 +384,14 @@ func FindGeminiSessionFileByID(searchPaths []string, workDir, sessionID string) 
 	)
 	for _, root := range mergeGeminiSearchPaths(searchPaths) {
 		for _, path := range geminiSessionCandidatesIn(root, workDir) {
-			if geminiSessionIDFromFile(path) != sessionID {
+			f, err := openGeminiFileBeneath(root, path)
+			if err != nil {
 				continue
 			}
-			info, err := os.Stat(path)
-			if err != nil {
+			gotID := geminiSessionIDFromReader(path, f)
+			info, statErr := f.Stat()
+			_ = f.Close()
+			if statErr != nil || info.IsDir() || gotID != sessionID {
 				continue
 			}
 			if bestPath == "" || info.ModTime().After(bestTime) {
@@ -396,7 +409,7 @@ func findGeminiSessionFileIn(root, workDir string) string {
 		bestTime time.Time
 	)
 	for _, path := range geminiSessionCandidatesIn(root, workDir) {
-		info, err := os.Stat(path)
+		info, err := geminiFileInfoBeneath(root, path)
 		if err != nil {
 			continue
 		}
@@ -419,7 +432,7 @@ func geminiSessionCandidatesIn(root, workDir string) []string {
 		candidates = append(candidates, candidate)
 	}
 
-	if geminiProjectRootMatches(root, workDir) {
+	if geminiProjectRootMatches(root, root, workDir) {
 		candidates = append(candidates, root)
 	}
 
@@ -430,7 +443,7 @@ func geminiSessionCandidatesIn(root, workDir string) []string {
 				continue
 			}
 			dir := filepath.Join(root, entry.Name())
-			if geminiProjectRootMatches(dir, workDir) {
+			if geminiProjectRootMatches(root, dir, workDir) {
 				candidates = append(candidates, dir)
 			}
 		}
@@ -440,15 +453,21 @@ func geminiSessionCandidatesIn(root, workDir string) []string {
 
 	var paths []string
 	for _, candidate := range candidates {
-		paths = append(paths, geminiSessionsInChats(filepath.Join(candidate, "chats"))...)
+		paths = append(paths, geminiSessionsInChats(root, filepath.Join(candidate, "chats"))...)
 	}
 
 	return paths
 }
 
 func geminiProjectDir(root, workDir string) string {
-	projectsPath := filepath.Join(filepath.Dir(root), "projects.json")
-	data, err := os.ReadFile(projectsPath)
+	indexRoot := filepath.Dir(root)
+	projectsPath := filepath.Join(indexRoot, "projects.json")
+	f, err := openGeminiFileBeneath(indexRoot, projectsPath)
+	if err != nil {
+		return ""
+	}
+	defer f.Close() //nolint:errcheck
+	data, err := io.ReadAll(f)
 	if err != nil {
 		return ""
 	}
@@ -475,24 +494,65 @@ func geminiProjectDir(root, workDir string) string {
 	return filepath.Join(root, dirName)
 }
 
-func geminiProjectRoot(dir string) string {
-	data, err := os.ReadFile(filepath.Join(dir, ".project_root"))
+func geminiProjectRoot(root, dir string) string {
+	sidecarPath := filepath.Join(dir, ".project_root")
+	f, err := openGeminiFileBeneath(root, sidecarPath)
+	if err != nil {
+		return ""
+	}
+	defer f.Close() //nolint:errcheck
+	data, err := io.ReadAll(f)
 	if err != nil {
 		return ""
 	}
 	return strings.TrimSpace(string(data))
 }
 
-func geminiProjectRootMatches(dir, workDir string) bool {
-	projectRoot := geminiProjectRoot(dir)
+func geminiProjectRootMatches(root, dir, workDir string) bool {
+	projectRoot := geminiProjectRoot(root, dir)
 	if projectRoot == "" || workDir == "" {
 		return false
 	}
 	return pathutil.SamePath(projectRoot, workDir)
 }
 
-func geminiSessionsInChats(chatsDir string) []string {
-	entries, err := os.ReadDir(chatsDir)
+func openGeminiFileBeneath(rootPath, path string) (*os.File, error) {
+	relative, err := filepath.Rel(filepath.Clean(rootPath), filepath.Clean(path))
+	if err != nil || relative == "." || filepath.IsAbs(relative) || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return nil, os.ErrPermission
+	}
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		return nil, err
+	}
+	f, err := root.Open(relative)
+	rootErr := root.Close()
+	if err != nil {
+		return nil, err
+	}
+	if rootErr != nil {
+		_ = f.Close()
+		return nil, rootErr
+	}
+	return f, nil
+}
+
+func geminiFileInfoBeneath(rootPath, path string) (os.FileInfo, error) {
+	f, err := openGeminiFileBeneath(rootPath, path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close() //nolint:errcheck
+	return f.Stat()
+}
+
+func geminiSessionsInChats(root, chatsDir string) []string {
+	dir, err := openGeminiFileBeneath(root, chatsDir)
+	if err != nil {
+		return nil
+	}
+	defer dir.Close() //nolint:errcheck
+	entries, err := dir.ReadDir(-1)
 	if err != nil {
 		return nil
 	}
@@ -511,8 +571,13 @@ func geminiSessionsInChats(chatsDir string) []string {
 			continue
 		}
 		path := filepath.Join(chatsDir, name)
-		info, err := entry.Info()
+		f, err := openGeminiFileBeneath(root, path)
 		if err != nil {
+			continue
+		}
+		info, statErr := f.Stat()
+		_ = f.Close()
+		if statErr != nil || info.IsDir() {
 			continue
 		}
 		files = append(files, candidate{path: path, modTime: info.ModTime()})
@@ -531,8 +596,8 @@ func geminiSessionsInChats(chatsDir string) []string {
 	return paths
 }
 
-func geminiSessionIDFromFile(path string) string {
-	data, err := os.ReadFile(path)
+func geminiSessionIDFromReader(path string, source io.Reader) string {
+	data, err := io.ReadAll(source)
 	if err != nil {
 		return ""
 	}

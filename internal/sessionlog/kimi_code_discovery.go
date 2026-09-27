@@ -3,7 +3,6 @@ package sessionlog
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -54,7 +53,7 @@ func kimiSessionCandidates(searchPaths []string, workDir string) []kimiContextCa
 func logKimiMissingWorkDir(searchPaths []string, workDir string) {
 	legacyKey, codeKey := kimiWorkDirHash(workDir), kimiCodeWorkDirKey(workDir)
 	for _, root := range mergeKimiSearchPaths(searchPaths) {
-		if kimiDirectoryExists(filepath.Join(root, legacyKey)) || kimiDirectoryExists(filepath.Join(root, codeKey)) {
+		if kimiDirectoryExists(root, legacyKey) || kimiDirectoryExists(root, codeKey) {
 			return
 		}
 	}
@@ -62,7 +61,7 @@ func logKimiMissingWorkDir(searchPaths []string, workDir string) {
 	// naming the other CLI's key sends triage after a bucket that CLI never
 	// mints, which is the opposite of the message's own hashing advice.
 	for _, root := range mergeKimiSearchPaths(searchPaths) {
-		entries, err := os.ReadDir(root)
+		entries, err := readKimiDirectory(root, ".")
 		if err != nil {
 			continue
 		}

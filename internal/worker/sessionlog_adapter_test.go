@@ -38,6 +38,15 @@ func TestSessionLogAdapterTailMetaForProviderUsesCodexSchema(t *testing.T) {
 	}
 }
 
+func TestFactoryStyleAdapterRejectsUnconfinedTranscriptRead(t *testing.T) {
+	outside := filepath.Join(t.TempDir(), "outside.jsonl")
+	writeLines(t, outside, `{"uuid":"secret","type":"user","message":{"role":"user","content":"outside"}}`)
+	adapter := SessionLogAdapter{requireRoots: true}
+	if _, err := adapter.ReadTranscript(TranscriptRequest{Provider: "claude", TranscriptPath: outside}); err == nil {
+		t.Fatal("factory-style adapter read a transcript without a configured search root")
+	}
+}
+
 func TestSessionLogAdapterLoadHistoryClaude(t *testing.T) {
 	t.Parallel()
 
@@ -107,6 +116,172 @@ func TestSessionLogAdapterLoadHistoryClaude(t *testing.T) {
 	}
 	if snapshot.Cursor.AfterEntryID != "a2" {
 		t.Fatalf("Cursor.AfterEntryID = %q, want a2", snapshot.Cursor.AfterEntryID)
+	}
+}
+
+func TestSessionLogAdapterReadTranscriptRejectsDiscoveredFileSymlinkOutsideRoots(t *testing.T) {
+	t.Parallel()
+
+	workDir := "/tmp/project"
+	searchRoot := t.TempDir()
+	transcriptDir := filepath.Join(searchRoot, strings.NewReplacer("/", "-", ".", "-").Replace(workDir))
+	if err := os.MkdirAll(transcriptDir, 0o755); err != nil {
+		t.Fatalf("mkdir transcript dir: %v", err)
+	}
+
+	outside := filepath.Join(t.TempDir(), "private.jsonl")
+	writeLines(t, outside, `{"uuid":"secret","type":"user","message":{"role":"user","content":"outside secret"}}`)
+	link := filepath.Join(transcriptDir, "sess-escape.jsonl")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlinks not supported: %v", err)
+	}
+
+	adapter := SessionLogAdapter{SearchPaths: []string{searchRoot}}
+	discovered := adapter.DiscoverTranscript("claude", workDir, "sess-escape")
+	if discovered != "" {
+		t.Fatalf("DiscoverTranscript() = %q, want empty for an escaping symlink", discovered)
+	}
+
+	_, err := adapter.ReadTranscript(TranscriptRequest{
+		Provider:       "claude",
+		TranscriptPath: link,
+	})
+	if err == nil {
+		t.Fatal("ReadTranscript() accepted an escaping transcript symlink outside the configured roots")
+	}
+}
+
+func TestSessionLogAdapterReadTranscriptAllowsConfiguredRootSymlink(t *testing.T) {
+	t.Parallel()
+
+	workDir := "/tmp/project"
+	physicalRoot := t.TempDir()
+	rootAlias := filepath.Join(t.TempDir(), "configured-transcripts")
+	if err := os.Symlink(physicalRoot, rootAlias); err != nil {
+		t.Skipf("symlinks not supported: %v", err)
+	}
+	transcriptDir := filepath.Join(physicalRoot, strings.NewReplacer("/", "-", ".", "-").Replace(workDir))
+	if err := os.MkdirAll(transcriptDir, 0o755); err != nil {
+		t.Fatalf("mkdir transcript dir: %v", err)
+	}
+	path := filepath.Join(transcriptDir, "sess-root-alias.jsonl")
+	writeLines(t, path, `{"uuid":"inside","type":"user","message":{"role":"user","content":"inside configured root"}}`)
+
+	adapter := SessionLogAdapter{SearchPaths: []string{rootAlias}}
+	discovered := adapter.DiscoverTranscript("claude", workDir, "sess-root-alias")
+	if discovered == "" || !samePath(discovered, path) {
+		t.Fatalf("DiscoverTranscript() = %q, want configured-root alias of %q", discovered, path)
+	}
+	transcript, err := adapter.ReadTranscript(TranscriptRequest{Provider: "claude", TranscriptPath: discovered})
+	if err != nil {
+		t.Fatalf("ReadTranscript() through configured root symlink: %v", err)
+	}
+	if transcript == nil || transcript.Session == nil || len(transcript.Session.Messages) == 0 {
+		t.Fatal("ReadTranscript() through configured root symlink returned no transcript")
+	}
+}
+
+func TestSessionLogAdapterReadTranscriptAllowsCodexSymlinkedSessionRoot(t *testing.T) {
+	searchRoot := t.TempDir()
+	accountRoot := t.TempDir()
+	if err := os.Symlink(accountRoot, filepath.Join(searchRoot, "aimux-account")); err != nil {
+		t.Skipf("symlinks not supported: %v", err)
+	}
+	workDir := t.TempDir()
+	const sessionID = "session-aimux"
+	path := writeCodexSessionMetaRollout(t, accountRoot, "2026", "09", "28", workDir, sessionID)
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("open codex transcript for append: %v", err)
+	}
+	_, writeErr := fmt.Fprintln(file, `{"timestamp":"2026-09-28T10:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"inside aimux root"}]}}`)
+	closeErr := file.Close()
+	if writeErr != nil {
+		t.Fatalf("append codex transcript: %v", writeErr)
+	}
+	if closeErr != nil {
+		t.Fatalf("close codex transcript: %v", closeErr)
+	}
+
+	adapter := SessionLogAdapter{SearchPaths: []string{searchRoot}}
+	discovered := adapter.DiscoverTranscript("codex", workDir, sessionID)
+	if discovered == "" || !samePath(discovered, path) {
+		t.Fatalf("DiscoverTranscript() = %q, want transcript under intentional symlinked account root %q", discovered, path)
+	}
+	transcript, err := adapter.ReadTranscript(TranscriptRequest{Provider: "codex", TranscriptPath: discovered})
+	if err != nil {
+		t.Fatalf("ReadTranscript() through Codex account-root symlink: %v", err)
+	}
+	if transcript == nil || transcript.Session == nil || len(transcript.Session.Messages) == 0 {
+		t.Fatal("ReadTranscript() through Codex account-root symlink returned no transcript")
+	}
+	blocks := transcript.Session.Messages[0].ContentBlocks()
+	if len(blocks) != 1 || blocks[0].Text != "inside aimux root" {
+		t.Fatalf("transcript content blocks = %+v, want content from intentional symlinked account root", blocks)
+	}
+}
+
+func TestSessionLogAdapterReadTranscriptAllowsKimiSymlinkedSessionRoot(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("KIMI_CODE_HOME", "")
+	searchRoot := t.TempDir()
+	accountRoot := t.TempDir()
+	sessionsRoot := filepath.Join(searchRoot, "sessions")
+	if err := os.MkdirAll(sessionsRoot, 0o755); err != nil {
+		t.Fatalf("mkdir sessions root: %v", err)
+	}
+	if err := os.Symlink(accountRoot, filepath.Join(sessionsRoot, "account-a")); err != nil {
+		t.Skipf("symlinks not supported: %v", err)
+	}
+	const (
+		workDir   = "/tmp/gascity/phase1/kimi"
+		workHash  = "5decc6790b1207964f31266c8258989e"
+		sessionID = "session-key"
+	)
+	path := filepath.Join(accountRoot, workHash, sessionID, "context.jsonl")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir Kimi transcript dir: %v", err)
+	}
+	writeLines(t, path, `{"role":"user","content":"via Kimi account root"}`)
+
+	adapter := SessionLogAdapter{SearchPaths: []string{searchRoot}}
+	discovered := adapter.DiscoverTranscript("kimi", workDir, sessionID)
+	if discovered == "" || !samePath(discovered, path) {
+		t.Fatalf("DiscoverTranscript() = %q, want transcript under intentional symlinked Kimi account root %q", discovered, path)
+	}
+	transcript, err := adapter.ReadTranscript(TranscriptRequest{Provider: "kimi", TranscriptPath: discovered})
+	if err != nil {
+		t.Fatalf("ReadTranscript() through Kimi account-root symlink: %v", err)
+	}
+	if transcript == nil || transcript.Session == nil || len(transcript.Session.Messages) != 1 {
+		t.Fatalf("ReadTranscript() through Kimi account-root symlink = %#v, want one message", transcript)
+	}
+	if got := transcript.Session.Messages[0].TextContent(); got != "via Kimi account root" {
+		t.Fatalf("transcript content = %q, want content from intentional symlinked account root", got)
+	}
+}
+
+func TestSessionLogAdapterRejectsEscapingAgentTranscriptSymlink(t *testing.T) {
+	root := t.TempDir()
+	parentPath := filepath.Join(root, "project", "parent-session.jsonl")
+	if err := os.MkdirAll(filepath.Dir(parentPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeLines(t, parentPath, `{"uuid":"parent","type":"user","message":{"role":"user","content":"parent"}}`)
+
+	agentDir := filepath.Join(root, "project", "parent-session", "subagents")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), "agent.jsonl")
+	writeLines(t, outside, `{"uuid":"outside","type":"assistant","message":{"role":"assistant","content":"outside secret"}}`)
+	if err := os.Symlink(outside, filepath.Join(agentDir, "agent-helper.jsonl")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	adapter := SessionLogAdapter{SearchPaths: []string{root}}
+	if _, err := adapter.ReadAgentTranscript(parentPath, "helper"); err == nil {
+		t.Fatal("ReadAgentTranscript accepted an agent symlink that escapes the configured root")
 	}
 }
 

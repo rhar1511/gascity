@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -111,11 +112,14 @@ func readAntigravityFile(path string, rawMode bool) (*Session, error) {
 		return nil, err
 	}
 	defer f.Close() //nolint:errcheck // read-only file
+	return readAntigravityFileFrom(path, f, rawMode)
+}
 
+func readAntigravityFileFrom(path string, source io.Reader, rawMode bool) (*Session, error) {
 	var messages []*Entry
 	var diagnostics SessionDiagnostics
 
-	scanner := bufio.NewScanner(f)
+	scanner := bufio.NewScanner(source)
 	scanner.Buffer(make([]byte, 0, 256*1024), 50*1024*1024)
 
 	var lastNonEmptyLineMalformed bool
@@ -495,8 +499,7 @@ func FindAntigravitySessionFile(searchPaths []string, workDir string) string {
 	}
 
 	for _, brainRoot := range mergeAntigravitySearchPaths(searchPaths) {
-		cachePath := filepath.Join(filepath.Dir(brainRoot), "cache", "last_conversations.json")
-		if id := scanAntigravityLastConversation(cachePath, workDir); id != "" {
+		if id := scanAntigravityLastConversation(brainRoot, workDir); id != "" {
 			if path := findAntigravitySessionFileByIDInRoot(brainRoot, id); path != "" {
 				return path
 			}
@@ -513,7 +516,7 @@ func FindAntigravitySessionFile(searchPaths []string, workDir string) string {
 	// still resolves the real home-directory index.
 	for _, brainRoot := range mergeAntigravitySearchPaths(searchPaths) {
 		var matchedWorkDir bool
-		bestID, bestTime, matchedWorkDir = scanAntigravityHistory(filepath.Join(filepath.Dir(brainRoot), "history.jsonl"), workDir, bestID, bestTime)
+		bestID, bestTime, matchedWorkDir = scanAntigravityHistory(brainRoot, workDir, bestID, bestTime)
 		if matchedWorkDir {
 			fallbackRoots = append(fallbackRoots, brainRoot)
 		}
@@ -531,14 +534,43 @@ func findAntigravitySessionFileByIDInRoot(root, sessionID string) string {
 		return ""
 	}
 	path := filepath.Join(root, sessionID, ".system_generated", "logs", "transcript.jsonl")
-	if info, err := os.Stat(path); err == nil && !info.IsDir() {
+	if antigravityTranscriptExists(root, path) {
 		return path
 	}
 	return ""
 }
 
-func scanAntigravityLastConversation(cachePath, workDir string) string {
-	data, err := os.ReadFile(cachePath)
+func antigravityTranscriptExists(root, path string) bool {
+	transcript, err := OpenTranscript("antigravity", []string{root}, path)
+	if err != nil {
+		return false
+	}
+	defer transcript.Close() //nolint:errcheck // read-only transcript handle
+	info, err := transcript.Stat()
+	return err == nil && !info.IsDir()
+}
+
+func openAntigravitySidecar(brainRoot, relative string) (*os.File, error) {
+	resolvedBrainRoot, err := filepath.EvalSymlinks(filepath.Clean(brainRoot))
+	if err != nil {
+		return nil, err
+	}
+	cliRoot := filepath.Dir(resolvedBrainRoot)
+	root, err := os.OpenRoot(cliRoot)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close() //nolint:errcheck // root is used only to open a confined sidecar
+	return root.Open(relative)
+}
+
+func scanAntigravityLastConversation(brainRoot, workDir string) string {
+	cache, err := openAntigravitySidecar(brainRoot, filepath.Join("cache", "last_conversations.json"))
+	if err != nil {
+		return ""
+	}
+	defer cache.Close() //nolint:errcheck // read-only sidecar
+	data, err := io.ReadAll(cache)
 	if err != nil {
 		return ""
 	}
@@ -574,7 +606,7 @@ func findUnambiguousAntigravitySessionFile(searchPaths []string) string {
 				continue
 			}
 			path := filepath.Join(root, entry.Name(), ".system_generated", "logs", "transcript.jsonl")
-			if info, err := os.Stat(path); err != nil || info.IsDir() {
+			if !antigravityTranscriptExists(root, path) {
 				continue
 			}
 			matches++
@@ -596,8 +628,9 @@ func findUnambiguousAntigravitySessionFile(searchPaths []string) string {
 // scanAntigravityHistory reads one history index file and returns the
 // conversation id with the newest timestamp matching workDir, preserving any
 // better match already found in a prior index.
-func scanAntigravityHistory(historyPath, workDir, bestID string, bestTime int64) (string, int64, bool) {
-	f, err := os.Open(historyPath)
+func scanAntigravityHistory(brainRoot, workDir, bestID string, bestTime int64) (string, int64, bool) {
+	historyPath := filepath.Join(filepath.Dir(brainRoot), "history.jsonl")
+	f, err := openAntigravitySidecar(brainRoot, "history.jsonl")
 	if err != nil {
 		return bestID, bestTime, false
 	}
