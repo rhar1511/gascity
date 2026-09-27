@@ -269,6 +269,14 @@ export type AsyncAcceptedResponse = {
     request_id: string;
 };
 
+export type Authorization = {
+    identity_sha256?: string;
+    reason?: string;
+    record_id?: string;
+    release_request_sha256?: string;
+    status: string;
+};
+
 export type BackendCredentialResolvedPayload = {
     backend: string;
     host: string;
@@ -478,6 +486,17 @@ export type BoundEventPayload = {
     conversation_id: string;
     provider: string;
     session_id: string;
+};
+
+export type BuildIdentity = {
+    artifact_sha256?: string;
+    artifact_status: string;
+    build_id?: string;
+    reason?: string;
+    source_dirty: boolean;
+    source_revision?: string;
+    status: string;
+    version?: string;
 };
 
 export type CityCreateRequest = {
@@ -1475,6 +1494,18 @@ export type HealthOutputBody = {
      */
     city?: string;
     /**
+     * Source and running artifact identity; values are unavailable when the process cannot prove them.
+     */
+    controller_build: BuildIdentity;
+    /**
+     * Versioned hash identity for the effective loaded config and input closure. Unavailable when provenance is incomplete.
+     */
+    qualification: Snapshot;
+    /**
+     * Result from a trusted release authority. Unavailable when no authority is configured.
+     */
+    release_authorization: Authorization;
+    /**
      * Health status.
      */
     status: string;
@@ -1525,6 +1556,17 @@ export type InboundResult = {
     TargetAgentName: string;
     TargetSessionID: string;
     TranscriptEntry: ConversationTranscriptRecord;
+};
+
+export type InputRoot = {
+    id: string;
+    input_count: number;
+    inputs_sha256: string;
+    kind: string;
+    pin?: string;
+    pin_status: string;
+    resolved_path_sha256: string;
+    unavailable_reason?: string;
 };
 
 export type ListBodyAgentPatch = {
@@ -4919,6 +4961,17 @@ export type SlingResponse = {
     target: string;
     warnings?: Array<string> | null;
     workflow_id?: string;
+};
+
+export type Snapshot = {
+    effective_config_identity_sha256?: string;
+    effective_config_input_closure_sha256?: string;
+    effective_config_sha256?: string;
+    input_environment_sha256?: string;
+    input_roots: Array<InputRoot> | null;
+    reason?: string;
+    schema_version: number;
+    status: string;
 };
 
 export type Status = {

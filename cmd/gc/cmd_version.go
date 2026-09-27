@@ -1,12 +1,18 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
+	"os"
 	"regexp"
+	"runtime"
 	"runtime/debug"
 	"strings"
+	"sync"
 
+	"github.com/gastownhall/gascity/internal/qualification"
 	"github.com/spf13/cobra"
 )
 
@@ -16,6 +22,8 @@ var (
 	version                  = "dev"
 	commit                   = "unknown"
 	date                     = "unknown"
+	sourceRevision           = "unknown"
+	sourceDirty              = "unknown"
 	goPseudoVersionSuffixRes = []*regexp.Regexp{
 		regexp.MustCompile(`^(.*)\.0\.\d{14}-[0-9a-f]{12,}(?:\+\S*)?$`),
 		regexp.MustCompile(`^(.*)-0\.\d{14}-[0-9a-f]{12,}(?:\+\S*)?$`),
@@ -37,6 +45,135 @@ const (
 func init() {
 	info, ok := debug.ReadBuildInfo()
 	version, commit, date = resolveBuildMetadata(version, commit, date, ok, info)
+	sourceRevision, sourceDirty = resolveSourceMetadata(sourceRevision, sourceDirty, ok, info)
+}
+
+const maxRunningExecutableBytes = 1 << 30
+
+var (
+	controllerBuildIdentityOnce sync.Once
+	controllerBuild             qualification.BuildIdentity
+)
+
+// currentControllerBuildIdentity reports the source/build stamps embedded in
+// this process and hashes the executable image once. A missing, abbreviated,
+// dirty, or unreadable identity remains explicit; callers must not infer a
+// release identity from the short compatibility commit string.
+func currentControllerBuildIdentity() qualification.BuildIdentity {
+	controllerBuildIdentityOnce.Do(func() {
+		controllerBuild = buildIdentityFromStamps(sourceRevision, sourceDirty, version)
+		digest, err := hashRunningExecutable()
+		if err != nil {
+			controllerBuild.ArtifactStatus = qualification.StatusUnavailable
+			if controllerBuild.Status == qualification.StatusAvailable {
+				controllerBuild.Status = qualification.StatusUnavailable
+				controllerBuild.Reason = "artifact_digest_unavailable"
+			}
+			return
+		}
+		controllerBuild.ArtifactStatus = qualification.StatusAvailable
+		controllerBuild.ArtifactSHA256 = digest
+	})
+	return controllerBuild
+}
+
+func buildIdentityFromStamps(revision, dirty, version string) qualification.BuildIdentity {
+	identity := qualification.BuildIdentity{
+		SourceRevision: strings.TrimSpace(revision),
+		Version:        strings.TrimSpace(version),
+		Status:         qualification.StatusUnavailable,
+		ArtifactStatus: qualification.StatusUnavailable,
+	}
+	if strings.TrimSpace(strings.ToLower(dirty)) == "true" {
+		identity.SourceDirty = true
+		identity.Reason = "controller_build_dirty"
+		if isFullSourceRevision(identity.SourceRevision) {
+			identity.BuildID = identity.SourceRevision
+		}
+		return identity
+	}
+	if !isFullSourceRevision(identity.SourceRevision) {
+		identity.Reason = "source_revision_unavailable"
+		return identity
+	}
+	identity.BuildID = identity.SourceRevision
+	switch strings.TrimSpace(strings.ToLower(dirty)) {
+	case "false":
+		identity.Status = qualification.StatusAvailable
+	default:
+		identity.Reason = "source_cleanliness_unavailable"
+	}
+	if identity.Version == "" {
+		identity.Status = qualification.StatusUnavailable
+		identity.Reason = "version_unavailable"
+	}
+	return identity
+}
+
+func isFullSourceRevision(revision string) bool {
+	if len(revision) != 40 {
+		return false
+	}
+	for _, r := range revision {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func hashRunningExecutable() (string, error) {
+	// Linux /proc/self/exe names the image mapped into this process even if the
+	// installed path has since been replaced. A path-based fallback cannot prove
+	// the bytes executing after replacement, so unsupported platforms fail closed.
+	if runtime.GOOS != "linux" {
+		return "", fmt.Errorf("running image identity is unsupported on %s", runtime.GOOS)
+	}
+	file, err := os.Open("/proc/self/exe")
+	if err != nil {
+		return "", err
+	}
+	defer file.Close() //nolint:errcheck // read-only identity probe
+	info, err := file.Stat()
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > maxRunningExecutableBytes {
+		return "", fmt.Errorf("running executable has an unsupported size or file type")
+	}
+	h := sha256.New()
+	n, err := io.Copy(h, io.LimitReader(file, maxRunningExecutableBytes+1))
+	if err != nil {
+		return "", err
+	}
+	if n != info.Size() || n > maxRunningExecutableBytes {
+		return "", fmt.Errorf("running executable changed while being hashed")
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func resolveSourceMetadata(linkerRevision, linkerDirty string, ok bool, info *debug.BuildInfo) (string, string) {
+	revision := strings.TrimSpace(linkerRevision)
+	dirty := strings.TrimSpace(strings.ToLower(linkerDirty))
+	var vcsRevision string
+	var vcsDirty string
+	if ok && info != nil {
+		for _, setting := range info.Settings {
+			switch setting.Key {
+			case "vcs.revision":
+				vcsRevision = strings.TrimSpace(setting.Value)
+			case "vcs.modified":
+				vcsDirty = strings.TrimSpace(strings.ToLower(setting.Value))
+			}
+		}
+	}
+	if revision == "" || revision == "unknown" {
+		revision = vcsRevision
+	}
+	if dirty == "" || dirty == "unknown" {
+		dirty = vcsDirty
+	}
+	return revision, dirty
 }
 
 func resolveBuildMetadata(

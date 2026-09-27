@@ -963,7 +963,7 @@ func tryReloadConfig(tomlPath, lockedWorkspaceName, cityRoot string) (*reloadRes
 	if err := ensureBuiltinPacksForConfigLoad(fsys.OSFS{}, tomlPath, resolveLoadCityConfigWarningWriter()); err != nil {
 		return nil, err
 	}
-	newCfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath, extraConfigFiles...)
+	newCfg, prov, err := config.LoadWithIncludesOptions(fsys.OSFS{}, tomlPath, config.LoadOptions{CaptureQualificationInputs: true}, extraConfigFiles...)
 	if err != nil {
 		return nil, fmt.Errorf("parsing city.toml: %w", err)
 	}
@@ -1013,6 +1013,11 @@ func tryReloadConfig(tomlPath, lockedWorkspaceName, cityRoot string) (*reloadRes
 	if newName != lockedWorkspaceName {
 		return failWithWarnings(fmt.Errorf("workspace.name changed from %q to %q (restart controller to apply)", lockedWorkspaceName, newName))
 	}
+	// Validate the parsed identity before replacing it with the controller's
+	// runtime identity. Otherwise a changed workspace.name would be hidden by
+	// this normalization and the reload would be accepted.
+	applyRuntimeCityIdentity(newCfg, lockedWorkspaceName)
+	resolveRigPathsAndRefreshQualification(cityRoot, newCfg, prov)
 	rev := config.Revision(fsys.OSFS{}, prov, newCfg, cityRoot)
 	return &reloadResult{Cfg: newCfg, Prov: prov, Revision: rev, Warnings: reloadWarnings}, nil
 }

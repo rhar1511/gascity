@@ -2012,6 +2012,11 @@ func (cr *CityRuntime) reloadConfigTraced(
 	for _, warning := range result.Warnings {
 		appendWarning(warning)
 	}
+	// tryReloadConfig resolves the config name known to the loader. The city
+	// runtime may be registered under a different local name, so bind health to
+	// the final runtime identity before any same-revision config publication.
+	applyRuntimeCityIdentity(result.Cfg, cr.cityName)
+	resolveRigPathsAndRefreshQualification(cityRoot, result.Cfg, result.Prov)
 	if cr.configRev != "" && result.Revision == cr.configRev {
 		ordersChanged, orderSummary, orderErr := cr.rescanOrderDispatcher(ctx, cityRoot, result.Cfg, "gc reload: order scan", time.Now())
 		if orderErr != nil {
@@ -2076,7 +2081,6 @@ func (cr *CityRuntime) reloadConfigTraced(
 	oldRigCount := len(cr.cfg.Rigs)
 	oldRevision := cr.configRev
 	nextCfg := result.Cfg
-	applyRuntimeCityIdentity(nextCfg, cr.cityName)
 
 	// [storage] is decided once, at boot, and the engine it selected is open for
 	// the life of the process (storage_boot.go). Applying a config that names a
@@ -2130,7 +2134,6 @@ func (cr *CityRuntime) reloadConfigTraced(
 	for _, w := range config.ReservedPrefixWarnings(nextCfg.Rigs, config.EffectiveHQPrefix(nextCfg)) {
 		appendWarning(fmt.Sprintf("config reload: %s", w))
 	}
-	resolveRigPaths(cityRoot, nextCfg.Rigs)
 	var lifecycleErr error
 	for attempt := 1; attempt <= cityRuntimeReloadLifecycleRetryLimit; attempt++ {
 		lifecycleErr = cityRuntimeStartBeadsLifecycle(cityRoot, cr.cityName, nextCfg, cr.stderr)

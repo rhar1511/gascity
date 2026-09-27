@@ -36,6 +36,7 @@ import (
 	"github.com/gastownhall/gascity/internal/orderdispatch"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/pathutil"
+	"github.com/gastownhall/gascity/internal/qualification"
 	"github.com/gastownhall/gascity/internal/rig"
 	"github.com/gastownhall/gascity/internal/rollout"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
@@ -89,6 +90,8 @@ type controllerState struct {
 	cityName               string
 	cityPath               string
 	version                string
+	qualificationBuild     qualification.BuildIdentity
+	releaseAuthorizer      qualification.ReleaseAuthorizer
 	startedAt              time.Time
 	storeMetadataSignature string
 	ct                     crashTracker  // nil if crash tracking disabled
@@ -237,6 +240,7 @@ func newControllerStateWithRoutes(
 		cityName:            cityName,
 		cityPath:            cityPath,
 		version:             version,
+		qualificationBuild:  currentControllerBuildIdentity(),
 		startedAt:           time.Now(),
 		adapterReg:          extmsg.NewAdapterRegistry(),
 		beadEventStartSeq:   beadEventStartSeq,
@@ -1467,12 +1471,51 @@ func (cs *controllerState) Config() *config.City {
 	return cs.cfg
 }
 
+// QualificationSnapshot returns the immutable qualification snapshot paired
+// with the currently loaded config pointer. Both values swap under cs.mu.
+func (cs *controllerState) QualificationSnapshot() qualification.Snapshot {
+	return cs.QualificationReport().Qualification
+}
+
+func (cs *controllerState) QualificationBuildIdentity() qualification.BuildIdentity {
+	return cs.qualificationBuild
+}
+
+// ReleaseAuthorization remains unavailable until a trusted release authority
+// is composed into controller startup. A local packs.lock never authorizes a
+// compatibility action.
+func (cs *controllerState) ReleaseAuthorization() qualification.Authorization {
+	return cs.QualificationReport().ReleaseAuthorization
+}
+
+// QualificationReport reads one loaded config pointer and pairs its snapshot
+// with the immutable process build identity and the decision for that same
+// identity. The config pointer is swapped only after its snapshot is sealed.
+func (cs *controllerState) QualificationReport() qualification.ControllerReport {
+	cs.mu.RLock()
+	cfg := cs.cfg
+	build := cs.qualificationBuild
+	authorizer := cs.releaseAuthorizer
+	cs.mu.RUnlock()
+
+	snapshot := cfg.QualificationSnapshot()
+	authorization, _ := qualification.Authorize(context.Background(), authorizer, snapshot, build)
+	return qualification.ControllerReport{
+		Qualification:        snapshot,
+		ControllerBuild:      build,
+		ReleaseAuthorization: authorization,
+	}
+}
+
 // RolloutFlags returns the boot-latched rollout-gate snapshot (api.RolloutFlagsProvider).
 // Lock-free: rolloutFlags is written once at construction and never reassigned;
 // reloads record drift via noteRolloutDrift rather than re-latching.
 func (cs *controllerState) RolloutFlags() rollout.Flags { return cs.rolloutFlags }
 
-var _ api.RolloutFlagsProvider = (*controllerState)(nil)
+var (
+	_ api.RolloutFlagsProvider  = (*controllerState)(nil)
+	_ api.QualificationProvider = (*controllerState)(nil)
+)
 
 // SessionProvider returns the current session provider.
 func (cs *controllerState) SessionProvider() runtime.Provider {
@@ -2946,12 +2989,13 @@ func (cs *controllerState) refreshConfigSnapshot() (string, error) {
 }
 
 func (cs *controllerState) loadCurrentConfigSnapshot() (*config.City, string, error) {
-	nextCfg, prov, err := loadCityConfigWithBuiltinPacks(cs.cityPath, extraConfigFiles...)
+	nextCfg, prov, err := loadCityConfigWithBuiltinPacksOptions(cs.cityPath, config.LoadOptions{CaptureQualificationInputs: true}, extraConfigFiles...)
 	if err != nil {
 		return nil, "", err
 	}
 	applyFeatureFlags(nextCfg)
 	applyRuntimeCityIdentity(nextCfg, cs.cityName)
+	resolveRigPathsAndRefreshQualification(cs.cityPath, nextCfg, prov)
 	revision := config.Revision(fsys.OSFS{}, prov, nextCfg, cs.cityPath)
 	return nextCfg, revision, nil
 }

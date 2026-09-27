@@ -15,6 +15,7 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/gastownhall/gascity/internal/configedit"
+	"github.com/gastownhall/gascity/internal/qualification"
 )
 
 // --- Shared input mixins ---
@@ -191,10 +192,13 @@ type IndexOutput[T any] struct {
 // HealthOutput is the response body for GET /health.
 type HealthOutput struct {
 	Body struct {
-		Status    string `json:"status" doc:"Health status." example:"ok"`
-		Version   string `json:"version,omitempty" doc:"Server version."`
-		City      string `json:"city,omitempty" doc:"City name."`
-		UptimeSec int    `json:"uptime_sec" doc:"Server uptime in seconds."`
+		Status               string                      `json:"status" doc:"Health status." example:"ok"`
+		Version              string                      `json:"version,omitempty" doc:"Server version."`
+		City                 string                      `json:"city,omitempty" doc:"City name."`
+		UptimeSec            int                         `json:"uptime_sec" doc:"Server uptime in seconds."`
+		Qualification        qualification.Snapshot      `json:"qualification" doc:"Versioned hash identity for the effective loaded config and input closure. Unavailable when provenance is incomplete."`
+		ControllerBuild      qualification.BuildIdentity `json:"controller_build" doc:"Source and running artifact identity; values are unavailable when the process cannot prove them."`
+		ReleaseAuthorization qualification.Authorization `json:"release_authorization" doc:"Result from a trusted release authority. Unavailable when no authority is configured."`
 	}
 }
 

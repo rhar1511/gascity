@@ -1,0 +1,44 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "qualification",
+    srcs = [
+        "canonical.go",
+        "qualification.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/qualification",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "qualification_test",
+    srcs = [
+        "canonical_test.go",
+        "qualification_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":qualification"],
+    deps = ["//internal/testenv"],
+)
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

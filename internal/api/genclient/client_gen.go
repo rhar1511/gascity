@@ -278,19 +278,19 @@ func (e RunStepStatus) Valid() bool {
 
 // Defines values for SessionStreamStructuredMessageEventOperation.
 const (
-	Reset    SessionStreamStructuredMessageEventOperation = "reset"
-	Snapshot SessionStreamStructuredMessageEventOperation = "snapshot"
-	Upsert   SessionStreamStructuredMessageEventOperation = "upsert"
+	SessionStreamStructuredMessageEventOperationReset    SessionStreamStructuredMessageEventOperation = "reset"
+	SessionStreamStructuredMessageEventOperationSnapshot SessionStreamStructuredMessageEventOperation = "snapshot"
+	SessionStreamStructuredMessageEventOperationUpsert   SessionStreamStructuredMessageEventOperation = "upsert"
 )
 
 // Valid indicates whether the value is a known member of the SessionStreamStructuredMessageEventOperation enum.
 func (e SessionStreamStructuredMessageEventOperation) Valid() bool {
 	switch e {
-	case Reset:
+	case SessionStreamStructuredMessageEventOperationReset:
 		return true
-	case Snapshot:
+	case SessionStreamStructuredMessageEventOperationSnapshot:
 		return true
-	case Upsert:
+	case SessionStreamStructuredMessageEventOperationUpsert:
 		return true
 	default:
 		return false
@@ -1167,6 +1167,15 @@ type AsyncAcceptedResponse struct {
 	RequestId string `json:"request_id"`
 }
 
+// Authorization defines model for Authorization.
+type Authorization struct {
+	IdentitySha256       *string `json:"identity_sha256,omitempty"`
+	Reason               *string `json:"reason,omitempty"`
+	RecordId             *string `json:"record_id,omitempty"`
+	ReleaseRequestSha256 *string `json:"release_request_sha256,omitempty"`
+	Status               string  `json:"status"`
+}
+
 // BackendCredentialResolvedPayload defines model for BackendCredentialResolvedPayload.
 type BackendCredentialResolvedPayload struct {
 	Backend   string `json:"backend"`
@@ -1357,6 +1366,18 @@ type BoundEventPayload struct {
 	ConversationId string  `json:"conversation_id"`
 	Provider       string  `json:"provider"`
 	SessionId      string  `json:"session_id"`
+}
+
+// BuildIdentity defines model for BuildIdentity.
+type BuildIdentity struct {
+	ArtifactSha256 *string `json:"artifact_sha256,omitempty"`
+	ArtifactStatus string  `json:"artifact_status"`
+	BuildId        *string `json:"build_id,omitempty"`
+	Reason         *string `json:"reason,omitempty"`
+	SourceDirty    bool    `json:"source_dirty"`
+	SourceRevision *string `json:"source_revision,omitempty"`
+	Status         string  `json:"status"`
+	Version        *string `json:"version,omitempty"`
 }
 
 // CityCreateRequest defines model for CityCreateRequest.
@@ -2255,7 +2276,10 @@ type GroupRouteDecision struct {
 // HealthOutputBody defines model for HealthOutputBody.
 type HealthOutputBody struct {
 	// City City name.
-	City *string `json:"city,omitempty"`
+	City                 *string       `json:"city,omitempty"`
+	ControllerBuild      BuildIdentity `json:"controller_build"`
+	Qualification        Snapshot      `json:"qualification"`
+	ReleaseAuthorization Authorization `json:"release_authorization"`
 
 	// Status Health status.
 	Status string `json:"status"`
@@ -2307,6 +2331,18 @@ type InboundResult struct {
 	TargetAgentName string                       `json:"TargetAgentName"`
 	TargetSessionID string                       `json:"TargetSessionID"`
 	TranscriptEntry ConversationTranscriptRecord `json:"TranscriptEntry"`
+}
+
+// InputRoot defines model for InputRoot.
+type InputRoot struct {
+	Id                 string  `json:"id"`
+	InputCount         int64   `json:"input_count"`
+	InputsSha256       string  `json:"inputs_sha256"`
+	Kind               string  `json:"kind"`
+	Pin                *string `json:"pin,omitempty"`
+	PinStatus          string  `json:"pin_status"`
+	ResolvedPathSha256 string  `json:"resolved_path_sha256"`
+	UnavailableReason  *string `json:"unavailable_reason,omitempty"`
 }
 
 // ListBodyAgentPatch defines model for ListBodyAgentPatch.
@@ -5142,6 +5178,18 @@ type SlingResponse struct {
 	Target       string    `json:"target"`
 	Warnings     *[]string `json:"warnings,omitempty"`
 	WorkflowId   *string   `json:"workflow_id,omitempty"`
+}
+
+// Snapshot defines model for Snapshot.
+type Snapshot struct {
+	EffectiveConfigIdentitySha256     *string      `json:"effective_config_identity_sha256,omitempty"`
+	EffectiveConfigInputClosureSha256 *string      `json:"effective_config_input_closure_sha256,omitempty"`
+	EffectiveConfigSha256             *string      `json:"effective_config_sha256,omitempty"`
+	InputEnvironmentSha256            *string      `json:"input_environment_sha256,omitempty"`
+	InputRoots                        *[]InputRoot `json:"input_roots"`
+	Reason                            *string      `json:"reason,omitempty"`
+	SchemaVersion                     int64        `json:"schema_version"`
+	Status                            string       `json:"status"`
 }
 
 // Status defines model for Status.

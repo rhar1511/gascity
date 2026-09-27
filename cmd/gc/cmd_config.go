@@ -23,11 +23,15 @@ func loadConfigCommandCityConfig(cityPath string) (*config.City, *config.Provena
 // --config files); builtin packs themselves compose only through the explicit
 // city.toml includes written by gc init and repaired by gc doctor --fix.
 func loadCityConfigWithBuiltinPacks(cityPath string, includes ...string) (*config.City, *config.Provenance, error) {
+	return loadCityConfigWithBuiltinPacksOptions(cityPath, config.LoadOptions{}, includes...)
+}
+
+func loadCityConfigWithBuiltinPacksOptions(cityPath string, opts config.LoadOptions, includes ...string) (*config.City, *config.Provenance, error) {
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	if err := ensureBuiltinPacksForConfigLoad(fsys.OSFS{}, tomlPath, resolveLoadCityConfigWarningWriter()); err != nil {
 		return nil, nil, err
 	}
-	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath, includes...)
+	cfg, prov, err := config.LoadWithIncludesOptions(fsys.OSFS{}, tomlPath, opts, includes...)
 	if err != nil {
 		return nil, nil, err
 	}

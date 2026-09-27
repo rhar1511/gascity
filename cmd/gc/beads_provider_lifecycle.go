@@ -1167,6 +1167,18 @@ func resolveRigPaths(cityPath string, rigs []config.Rig) {
 	}
 }
 
+// resolveRigPathsAndRefreshQualification seals the effective config only after
+// runtime path normalization. Relative rig paths are part of the loaded
+// controller config and must not leave the snapshot bound to their raw TOML
+// spelling when the published config holds absolute paths.
+func resolveRigPathsAndRefreshQualification(cityPath string, cfg *config.City, prov *config.Provenance) {
+	if cfg == nil {
+		return
+	}
+	resolveRigPaths(cityPath, cfg.Rigs)
+	config.RefreshQualificationSnapshot(cfg, prov)
+}
+
 // ── Low-level provider operations ────────────────────────────────────────
 //
 // These are the building blocks. Prefer the consolidated functions above

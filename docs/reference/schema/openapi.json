@@ -862,6 +862,30 @@
         ],
         "type": "object"
       },
+      "Authorization": {
+        "additionalProperties": false,
+        "properties": {
+          "identity_sha256": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "record_id": {
+            "type": "string"
+          },
+          "release_request_sha256": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "type": "object"
+      },
       "BackendCredentialResolvedPayload": {
         "additionalProperties": false,
         "properties": {
@@ -1365,6 +1389,41 @@
           "provider",
           "conversation_id",
           "session_id"
+        ],
+        "type": "object"
+      },
+      "BuildIdentity": {
+        "additionalProperties": false,
+        "properties": {
+          "artifact_sha256": {
+            "type": "string"
+          },
+          "artifact_status": {
+            "type": "string"
+          },
+          "build_id": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "source_dirty": {
+            "type": "boolean"
+          },
+          "source_revision": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "source_dirty",
+          "artifact_status"
         ],
         "type": "object"
       },
@@ -4109,6 +4168,18 @@
             "description": "City name.",
             "type": "string"
           },
+          "controller_build": {
+            "$ref": "#/components/schemas/BuildIdentity",
+            "description": "Source and running artifact identity; values are unavailable when the process cannot prove them."
+          },
+          "qualification": {
+            "$ref": "#/components/schemas/Snapshot",
+            "description": "Versioned hash identity for the effective loaded config and input closure. Unavailable when provenance is incomplete."
+          },
+          "release_authorization": {
+            "$ref": "#/components/schemas/Authorization",
+            "description": "Result from a trusted release authority. Unavailable when no authority is configured."
+          },
           "status": {
             "description": "Health status.",
             "examples": [
@@ -4128,7 +4199,10 @@
         },
         "required": [
           "status",
-          "uptime_sec"
+          "uptime_sec",
+          "qualification",
+          "controller_build",
+          "release_authorization"
         ],
         "type": "object"
       },
@@ -4250,6 +4324,45 @@
           "TranscriptEntry",
           "TargetSessionID",
           "TargetAgentName"
+        ],
+        "type": "object"
+      },
+      "InputRoot": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "input_count": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "inputs_sha256": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "pin": {
+            "type": "string"
+          },
+          "pin_status": {
+            "type": "string"
+          },
+          "resolved_path_sha256": {
+            "type": "string"
+          },
+          "unavailable_reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "pin_status",
+          "resolved_path_sha256",
+          "inputs_sha256",
+          "input_count"
         ],
         "type": "object"
       },
@@ -12070,6 +12183,48 @@
         "required": [
           "status",
           "target"
+        ],
+        "type": "object"
+      },
+      "Snapshot": {
+        "additionalProperties": false,
+        "properties": {
+          "effective_config_identity_sha256": {
+            "type": "string"
+          },
+          "effective_config_input_closure_sha256": {
+            "type": "string"
+          },
+          "effective_config_sha256": {
+            "type": "string"
+          },
+          "input_environment_sha256": {
+            "type": "string"
+          },
+          "input_roots": {
+            "items": {
+              "$ref": "#/components/schemas/InputRoot"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "reason": {
+            "type": "string"
+          },
+          "schema_version": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "status",
+          "input_roots"
         ],
         "type": "object"
       },

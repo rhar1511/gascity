@@ -145,7 +145,7 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 		var rigImportPackDirs []string
 		var rigGlobals []ResolvedPackGlobal
 		for _, ref := range topoRefs {
-			topoDir, err := resolvePackRef(ref, cityRoot, cityRoot, opts.RepoCacheNonBlocking)
+			topoDir, err := resolvePackRefWithQualification(ref, cityRoot, cityRoot, opts.RepoCacheNonBlocking, opts.qualificationCapture)
 			if err != nil {
 				return fmt.Errorf("rig %q pack %q: %w", rig.Name, ref, err)
 			}
@@ -271,7 +271,7 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 					continue
 				}
 
-				impDir, err := resolveImportPackRef(imp.Source, imp.Version, cityRoot, cityRoot, opts.RepoCacheNonBlocking)
+				impDir, err := resolveImportPackRefWithQualification(imp.Source, imp.Version, cityRoot, cityRoot, opts.RepoCacheNonBlocking, opts.qualificationCapture)
 				if err != nil {
 					return fmt.Errorf("rig %q import %q: %w", rig.Name, bindingName, err)
 				}
@@ -589,7 +589,7 @@ func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) (
 	cache := &packLoadCache{results: make(map[string]*packLoadResult)}
 
 	for _, ref := range topos {
-		topoDir, err := resolvePackRef(ref, cityRoot, cityRoot, opts.RepoCacheNonBlocking)
+		topoDir, err := resolvePackRefWithQualification(ref, cityRoot, cityRoot, opts.RepoCacheNonBlocking, opts.qualificationCapture)
 		if err != nil {
 			// Pack directory may have been removed upstream (e.g. renamed/deleted
 			// in the remote repo). Skip gracefully so the rest of the city loads.
@@ -716,7 +716,7 @@ func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) (
 			// Unlike V1 includes (which skip gracefully for missing remote
 			// subpaths), V2 imports are always fatal on missing source.
 			// A typo in [imports.X].source should not be silently ignored.
-			impDir, err := resolveImportPackRef(imp.Source, imp.Version, cityRoot, cityRoot, opts.RepoCacheNonBlocking)
+			impDir, err := resolveImportPackRefWithQualification(imp.Source, imp.Version, cityRoot, cityRoot, opts.RepoCacheNonBlocking, opts.qualificationCapture)
 			if err != nil {
 				return nil, nil, nil, fmt.Errorf("city import %q: %w", bindingName, err)
 			}
@@ -978,9 +978,13 @@ func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) (
 // no-lock bundled fallback so a declared non-canonical pin never silently
 // composes the binary's embedded content.
 func resolveImportPackRef(ref, declaredVersion, declDir, cityRoot string, nonBlocking bool) (string, error) {
+	return resolveImportPackRefWithQualification(ref, declaredVersion, declDir, cityRoot, nonBlocking, nil)
+}
+
+func resolveImportPackRefWithQualification(ref, declaredVersion, declDir, cityRoot string, nonBlocking bool, capture *qualificationCapture) (string, error) {
 	if isGitHubTreeURL(ref) {
 		_, subpath, _ := parseGitHubTreeURL(ref)
-		cacheDir, err := resolveInstalledRemoteImport(ref, declaredVersion, cityRoot, nonBlocking)
+		cacheDir, err := resolveInstalledRemoteImportWithQualification(ref, declaredVersion, cityRoot, nonBlocking, capture)
 		if err != nil {
 			return "", err
 		}
@@ -991,7 +995,7 @@ func resolveImportPackRef(ref, declaredVersion, declDir, cityRoot string, nonBlo
 	}
 	if isRemoteInclude(ref) {
 		_, subpath, _ := parseRemoteInclude(ref)
-		cacheDir, err := resolveInstalledRemoteImport(ref, declaredVersion, cityRoot, nonBlocking)
+		cacheDir, err := resolveInstalledRemoteImportWithQualification(ref, declaredVersion, cityRoot, nonBlocking, capture)
 		if err != nil {
 			return "", err
 		}
@@ -1000,7 +1004,7 @@ func resolveImportPackRef(ref, declaredVersion, declDir, cityRoot string, nonBlo
 		}
 		return cacheDir, nil
 	}
-	return resolvePackRef(ref, declDir, cityRoot, nonBlocking)
+	return resolvePackRefWithQualification(ref, declDir, cityRoot, nonBlocking, capture)
 }
 
 // ComputeFormulaLayers builds the FormulaLayers from the resolved formula
@@ -1291,7 +1295,7 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 	includedUpstreams := make(map[string]UpstreamSpec)
 
 	for _, inc := range tc.Pack.Includes {
-		incTopoDir, err := resolvePackRef(inc, topoDir, cityRoot, opts.RepoCacheNonBlocking)
+		incTopoDir, err := resolvePackRefWithQualification(inc, topoDir, cityRoot, opts.RepoCacheNonBlocking, opts.qualificationCapture)
 		if err != nil {
 			return nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("include %q: %w", inc, err)
 		}
@@ -1349,7 +1353,7 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 		// remote sources, and a bundled source at its canonical pin
 		// self-heals from the binary's embedded content when the lock is
 		// absent or lacks the entry — matching city- and rig-scope imports.
-		impDir, err := resolveImportPackRef(imp.Source, imp.Version, topoDir, cityRoot, opts.RepoCacheNonBlocking)
+		impDir, err := resolveImportPackRefWithQualification(imp.Source, imp.Version, topoDir, cityRoot, opts.RepoCacheNonBlocking, opts.qualificationCapture)
 		if err != nil {
 			return nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("import %q: %w", bindingName, err)
 		}

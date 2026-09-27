@@ -88,6 +88,14 @@ export const zAsyncAcceptedResponse = z.object({
     request_id: z.string()
 });
 
+export const zAuthorization = z.object({
+    identity_sha256: z.string().optional(),
+    reason: z.string().optional(),
+    record_id: z.string().optional(),
+    release_request_sha256: z.string().optional(),
+    status: z.string()
+});
+
 export const zBackendCredentialResolvedPayload = z.object({
     backend: z.string(),
     host: z.string(),
@@ -170,6 +178,17 @@ export const zBoundEventPayload = z.object({
     conversation_id: z.string(),
     provider: z.string(),
     session_id: z.string()
+});
+
+export const zBuildIdentity = z.object({
+    artifact_sha256: z.string().optional(),
+    artifact_status: z.string(),
+    build_id: z.string().optional(),
+    reason: z.string().optional(),
+    source_dirty: z.boolean(),
+    source_revision: z.string().optional(),
+    status: z.string(),
+    version: z.string().optional()
 });
 
 export const zCityCreateRequest = z.object({
@@ -758,13 +777,6 @@ export const zGroupRouteDecision = z.object({
     UpdateCursor: z.boolean()
 });
 
-export const zHealthOutputBody = z.object({
-    city: z.string().optional(),
-    status: z.string(),
-    uptime_sec: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
-    version: z.string().optional()
-});
-
 export const zHeartbeatEvent = z.object({
     timestamp: z.string()
 });
@@ -790,6 +802,17 @@ export const zInboundEventPayload = z.object({
     provider: z.string(),
     target_agent: z.string().optional(),
     target_session: z.string()
+});
+
+export const zInputRoot = z.object({
+    id: z.string(),
+    input_count: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    inputs_sha256: z.string(),
+    kind: z.string(),
+    pin: z.string().optional(),
+    pin_status: z.string(),
+    resolved_path_sha256: z.string(),
+    unavailable_reason: z.string().optional()
 });
 
 export const zListBodyBead = z.object({
@@ -3034,6 +3057,27 @@ export const zSlingResponse = z.object({
     target: z.string(),
     warnings: z.array(z.string()).nullish(),
     workflow_id: z.string().optional()
+});
+
+export const zSnapshot = z.object({
+    effective_config_identity_sha256: z.string().optional(),
+    effective_config_input_closure_sha256: z.string().optional(),
+    effective_config_sha256: z.string().optional(),
+    input_environment_sha256: z.string().optional(),
+    input_roots: z.array(zInputRoot).nullable(),
+    reason: z.string().optional(),
+    schema_version: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    status: z.string()
+});
+
+export const zHealthOutputBody = z.object({
+    city: z.string().optional(),
+    controller_build: zBuildIdentity,
+    qualification: zSnapshot,
+    release_authorization: zAuthorization,
+    status: z.string(),
+    uptime_sec: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    version: z.string().optional()
 });
 
 export const zStatus = z.object({
