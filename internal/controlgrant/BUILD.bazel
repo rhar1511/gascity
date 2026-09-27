@@ -2,7 +2,10 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "controlgrant",
-    srcs = ["verifier.go"],
+    srcs = [
+        "ledger.go",
+        "verifier.go",
+    ],
     importpath = "github.com/gastownhall/gascity/internal/controlgrant",
     visibility = ["//:__subpackages__"],
 )
@@ -11,10 +14,15 @@ go_test(
     name = "controlgrant_test",
     srcs = [
         "testenv_import_test.go",
+        "ledger_test.go",
         "verifier_test.go",
     ],
     embed = [":controlgrant"],
-    deps = ["//internal/testenv"],
+    deps = [
+        "//internal/beads",
+        "//internal/fsys",
+        "//internal/testenv",
+    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
