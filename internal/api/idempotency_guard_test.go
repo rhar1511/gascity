@@ -47,6 +47,14 @@ var pendingIdempotency = map[string]bool{
 // be classified, so a new create at ANY status (201, 202, …) that is neither
 // wired nor triaged fails the test.
 var exemptFromIdempotency = map[string]bool{
+	// Signed recovery requests use the mandatory body request_id, work ID and
+	// authoritative scope to derive one durable intent ID. Exact replay returns
+	// that intent; different signed content with the same identity conflicts.
+	// Intake performs no runtime action. Proof:
+	// TestLifecycleRecoverySubmitPersistsHeldIntentWithoutAction and
+	// TestPersistRecoveryIntentIsStableHeldAndReplaySafe.
+	"submit-lifecycle-recovery-request": true,
+
 	// Tracked session delivery uses the mandatory body request_id as its durable
 	// identity. AcceptRequest rejects changed content/generation on replay and
 	// reserves delivery once; the HTTP replay test asserts one provider send.

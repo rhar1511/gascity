@@ -185,6 +185,8 @@ const (
 	CompletionFactsConvergedMetadataKey   = "gc.completion_facts_converged"
 	LifecycleAdmissionReceiptMetadataKey  = "gc.lifecycle.admission_receipt.v1"
 	LifecycleCompletionReceiptMetadataKey = "gc.lifecycle.completion_receipt.v1"
+	LifecycleHoldMetadataKey              = "gc.lifecycle.hold"
+	LifecycleHoldReasonMetadataKey        = "gc.lifecycle.hold_reason"
 	LifecycleRecoveryIntentMetadataKey    = "gc.lifecycle.recovery_intent.v1"
 	LifecycleRecoveryIntentDigestKey      = "gc.lifecycle.recovery_intent_digest.v1"
 	LifecycleRecoveryIntentWorkItemKey    = "gc.lifecycle.recovery_intent_work_item"
@@ -575,6 +577,8 @@ var KnownMetadataKeys = []string{
 	KindMetadataKey,
 	LifecycleAdmissionReceiptMetadataKey,
 	LifecycleCompletionReceiptMetadataKey,
+	LifecycleHoldMetadataKey,
+	LifecycleHoldReasonMetadataKey,
 	LifecycleRecoveryIntentMetadataKey,
 	LifecycleRecoveryIntentDigestKey,
 	LifecycleRecoveryIntentWorkItemKey,

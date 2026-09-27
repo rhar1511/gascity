@@ -327,5 +327,5 @@ func hasLifecycleHold(bead beads.Bead) bool {
 			return true
 		}
 	}
-	return strings.TrimSpace(bead.Metadata["gc.lifecycle.hold"]) != "" || strings.TrimSpace(bead.Metadata["gc.lifecycle.hold_reason"]) != ""
+	return strings.TrimSpace(bead.Metadata[beadmeta.LifecycleHoldMetadataKey]) != "" || strings.TrimSpace(bead.Metadata[beadmeta.LifecycleHoldReasonMetadataKey]) != ""
 }
