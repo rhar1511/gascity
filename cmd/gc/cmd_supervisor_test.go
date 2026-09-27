@@ -5028,11 +5028,11 @@ func TestStopManagedCityForcesCleanupAfterTimeout(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	start := time.Now()
 	err := stopManagedCity(mc, cityPath, &stderr)
-	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
-		t.Fatalf("stopManagedCity took %s, want bounded timeout", elapsed)
-	}
+	// The hung-runtime timing bound is asserted by
+	// TestStopManagedCityBoundsForcedShutdownWhenRuntimeHangs. This case
+	// additionally stops an exec Beads provider, whose independent teardown
+	// latency must not be mistaken for the runtime's grace/forced budget.
 	if err == nil {
 		t.Fatal("stopManagedCity err = nil, want non-nil because city never exited")
 	}
@@ -5133,11 +5133,10 @@ func TestStopManagedCityDoesNotUseStartupOrDriftTimeouts(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	start := time.Now()
-	err := stopManagedCity(mc, cityPath, &stderr)
-	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
-		t.Fatalf("stopManagedCity took %s, want shutdown-timeout bound", elapsed)
+	if got := managedCityStopTimeout(mc); got != 20*time.Millisecond {
+		t.Fatalf("managedCityStopTimeout = %s, want shutdown timeout 20ms", got)
 	}
+	err := stopManagedCity(mc, cityPath, &stderr)
 	if err == nil {
 		t.Fatal("stopManagedCity err = nil, want non-nil because city never exited")
 	}
