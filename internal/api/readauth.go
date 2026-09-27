@@ -1,16 +1,40 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/citywriteauth"
 )
+
+type cityReadPrincipalContextKey struct{}
+
+// VerifiedCityReadPrincipal carries claims authenticated by the request-bound
+// city-read grant. Subject and ReadScopes are permission-authority assertions;
+// a resource handler must still match its exact original scope. City access
+// alone does not grant access to retained private evidence.
+type VerifiedCityReadPrincipal struct {
+	KeyID         string
+	City          string
+	CID           string
+	Epoch         int64
+	RequestDigest string
+	Subject       string
+	ReadScopes    []string
+}
+
+func verifiedCityReadPrincipal(ctx context.Context) (VerifiedCityReadPrincipal, bool) {
+	principal, ok := ctx.Value(cityReadPrincipalContextKey{}).(VerifiedCityReadPrincipal)
+	principal.ReadScopes = slices.Clone(principal.ReadScopes)
+	return principal, ok && principal.KeyID != "" && principal.RequestDigest != ""
+}
 
 // Read-auth gates per-city reads on a signed, single-use, request-bound grant
 // when a verifying key is configured. It is the read-side twin of write-auth: it
@@ -96,13 +120,20 @@ func readAuthMiddleware(v *citywriteauth.Verifier, next http.Handler) http.Handl
 			City:      city,
 			ReqDigest: citywriteauth.ReqDigest(r.Method, r.URL.Path, r.URL.RawQuery, nil),
 		}
-		if _, err := v.Verify(token, expect); err != nil {
+		grant, err := v.Verify(token, expect)
+		if err != nil {
 			// Deliberately generic to the client (no verification oracle); the
 			// specific reason is for server-side audit, not the response.
 			problemReadAuthRejected.writeTo(w)
 			return
 		}
-		next.ServeHTTP(w, r)
+		principal := VerifiedCityReadPrincipal{
+			KeyID: grant.Kid, City: grant.City, CID: grant.CID,
+			Epoch: grant.Epoch, RequestDigest: grant.Req,
+			Subject: grant.Subject, ReadScopes: slices.Clone(grant.ReadScopes),
+		}
+		ctx := context.WithValue(r.Context(), cityReadPrincipalContextKey{}, principal)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
@@ -156,6 +187,7 @@ func ResolveReadAuthVerifier(configKey string, configRequired bool) (*citywritea
 	}
 	return citywriteauth.New(citywriteauth.Options{
 		Aud:        readAuthAudience,
+		CID:        strings.TrimSpace(os.Getenv("GC_CITY_READ_CID")),
 		Keys:       keys,
 		EpochFloor: epochFloor,
 		MaxTTL:     readAuthMaxTTL,

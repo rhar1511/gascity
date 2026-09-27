@@ -264,7 +264,7 @@ func TestPreservingTheStorageModeNeverChangesWhatAReadAnswers(t *testing.T) {
 // filtered reads below are answered by a store bd just handed rows for. A city
 // that migrated deliberately and kept the old directory — which is the state
 // `gc doctor`'s own fix hint tells operators to sit in — would have every one
-// of these turn into an error, and `federateBeadLegs` aborts the whole
+// of these turn into an error, and the ready federation aborts the whole
 // federation on any leg error, so `gc ready` exits non-zero for the city and
 // every worker's generated work query fails with it.
 //

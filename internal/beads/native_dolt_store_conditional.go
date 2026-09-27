@@ -50,6 +50,14 @@ func (s *NativeDoltStore) CloseWithMetadataIfMatch(id string, expectedRevision i
 					Raw:      "native row-version mismatch",
 				}
 			}
+			current, err := beadFromNativeIssue(issue)
+			if err != nil {
+				return err
+			}
+			closedStatus := "closed"
+			if err := ValidateLifecycleMutation(current, UpdateOpts{Status: &closedStatus, Metadata: metadata}); err != nil {
+				return fmt.Errorf("closing lifecycle bead %q: %w", id, err)
+			}
 			merged, err := metadataMapFromNative(issue.Metadata)
 			if err != nil {
 				return fmt.Errorf("parsing metadata for bead %q: %w", id, err)
@@ -117,6 +125,20 @@ func (s *NativeDoltStore) UpdateIfMatch(id string, expectedRevision int64, opts 
 	defer release()
 	ctx, cancel := nativeDoltOperationContext(context.TODO())
 	defer cancel()
+	issue, err := storage.GetIssue(ctx, id)
+	if err != nil {
+		return nativeStoreError(id, err)
+	}
+	if issue == nil {
+		return fmt.Errorf("bead %q: %w", id, ErrNotFound)
+	}
+	current, err := beadFromNativeIssue(issue)
+	if err != nil {
+		return err
+	}
+	if err := ValidateLifecycleMutation(current, opts); err != nil {
+		return fmt.Errorf("conditional update lifecycle bead %q: %w", id, err)
+	}
 
 	updates, err := s.nativeUpdates(ctx, storage, id, opts)
 	if err != nil {
@@ -201,6 +223,13 @@ func (s *NativeDoltStore) DeleteIfMatch(id string, expectedRevision int64) error
 					Current:  issue.RowVersion,
 					Raw:      "native row-version mismatch",
 				}
+			}
+			current, err := beadFromNativeIssue(issue)
+			if err != nil {
+				return err
+			}
+			if err := protectAttemptEvidenceDelete(current); err != nil {
+				return err
 			}
 			if err := tx.DeleteIssue(ctx, id); err != nil {
 				return nativeStoreError(id, err)

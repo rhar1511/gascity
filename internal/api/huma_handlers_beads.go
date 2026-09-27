@@ -7,7 +7,9 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api/apierr"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/worklifecycle"
 )
 
 // humaHandleBeadList is the Huma-typed handler for GET /v0/beads.
@@ -201,6 +203,11 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 				boundedCounts[i] = len(list)
 			}
 			for _, b := range list {
+				var visible bool
+				b, visible = publicAttemptEvidenceBead(b)
+				if !visible {
+					continue
+				}
 				if boundedMode && !legBounded && seek != nil && !seek.After(b, beads.SortCreatedDesc) {
 					// A hydrated leg carries no store-side seek boundary (that is
 					// what made its row count the un-seeked total), so the page
@@ -420,6 +427,12 @@ func beadListFanOut(state State, stores map[string]beads.Store, rigNames []strin
 // cannot, only that leg hydrates and the caller takes its exact total from the
 // rows it returned.
 func beadListBounding(ctx context.Context, legs []beadListLeg, assignee string, input *BeadListInput) (on bool, counts map[int]int, hydrate map[int]bool) {
+	// Archive rows are intentionally hidden from raw bead lists. A backend
+	// Count cannot apply that metadata predicate, so hydrate the matching broad
+	// and molecule queries before computing totals or page boundaries.
+	if input.Type == "" || input.Type == "molecule" {
+		return false, nil, nil
+	}
 	counts = make(map[int]int, len(legs))
 	for i, leg := range legs {
 		n, ok := beadListLegCount(ctx, leg.store, assignee, input)
@@ -547,6 +560,11 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 			pa.success()
 		}
 		for _, b := range ready {
+			var visible bool
+			b, visible = publicAttemptEvidenceBead(b)
+			if !visible {
+				continue
+			}
 			if seen[b.ID] {
 				// An id is one bead: legacy file mode can alias the city and rig
 				// stores, and a migrated split city holds the same infrastructure
@@ -585,6 +603,11 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 		}
 		pa.success()
 		for _, b := range ready {
+			var visible bool
+			b, visible = publicAttemptEvidenceBead(b)
+			if !visible {
+				continue
+			}
 			if seen[b.ID] {
 				continue
 			}
@@ -631,6 +654,17 @@ func (s *Server) humaHandleBeadGraph(_ context.Context, input *BeadGraphInput) (
 	if err != nil {
 		return nil, apierr.Internal.Msg(err.Error())
 	}
+	if beads.IsAttemptEvidenceArchive(root) {
+		return nil, apierr.BeadNotFound.Msg("bead " + rootID + " not found")
+	}
+	visibleGraph := make([]beads.Bead, 0, len(graphBeads))
+	for _, b := range graphBeads {
+		if sanitized, ok := publicAttemptEvidenceBead(b); ok {
+			visibleGraph = append(visibleGraph, sanitized)
+		}
+	}
+	graphBeads = visibleGraph
+	root, _ = publicAttemptEvidenceBead(root)
 	beadIndex := make(map[string]beads.Bead, len(graphBeads))
 	for _, b := range graphBeads {
 		beadIndex[b.ID] = b
@@ -666,6 +700,10 @@ func (s *Server) humaHandleBeadGet(_ context.Context, input *BeadGetInput) (*Ind
 	if err != nil {
 		return nil, err
 	}
+	if beads.IsAttemptEvidenceArchive(b) {
+		return nil, apierr.BeadNotFound.Msg("bead " + id + " not found")
+	}
+	b, _ = publicAttemptEvidenceBead(b)
 	return &IndexOutput[beads.Bead]{
 		Index:     s.latestIndex(),
 		CacheAgeS: cacheAgeSeconds(cityStore),
@@ -680,6 +718,9 @@ func (s *Server) humaHandleBeadDeps(_ context.Context, input *BeadDepsInput) (*I
 	if err != nil {
 		return nil, err
 	}
+	if beads.IsAttemptEvidenceArchive(parent) {
+		return nil, apierr.BeadNotFound.Msg("bead " + id + " not found")
+	}
 	children, err := store.List(beads.ListQuery{
 		ParentID: id,
 		Sort:     beads.SortCreatedAsc,
@@ -688,6 +729,13 @@ func (s *Server) humaHandleBeadDeps(_ context.Context, input *BeadDepsInput) (*I
 		return nil, apierr.Internal.Msg(err.Error())
 	}
 	children = appendMetadataAttachedChildren(store, parent, children)
+	visibleChildren := make([]beads.Bead, 0, len(children))
+	for _, child := range children {
+		if sanitized, ok := publicAttemptEvidenceBead(child); ok {
+			visibleChildren = append(visibleChildren, sanitized)
+		}
+	}
+	children = visibleChildren
 	if children == nil {
 		children = []beads.Bead{}
 	}
@@ -706,9 +754,12 @@ type BeadDepsResponse struct {
 // Title required via struct tag on BeadCreateInput.
 func (s *Server) humaHandleBeadCreate(ctx context.Context, input *BeadCreateInput) (*IndexOutput[beads.Bead], error) {
 	for key := range input.Body.Metadata {
-		if strings.HasPrefix(key, "gc.pr_action.") {
+		if strings.HasPrefix(key, beadmeta.PRActionMetadataPrefix) {
 			return nil, apierr.Forbidden.Msg("PR action ledger metadata is reserved for the controller")
 		}
+	}
+	if err := validateAttemptEvidenceMetadata(input.Body.Metadata); err != nil {
+		return nil, err
 	}
 	// Idempotency: run the create at most once per Idempotency-Key. The helper
 	// owns reserve/replay/mismatch/in-flight and guarantees the reservation is
@@ -750,6 +801,9 @@ func (s *Server) humaHandleBeadCreate(ctx context.Context, input *BeadCreateInpu
 	if err != nil {
 		return nil, err
 	}
+	if sanitized, ok := publicAttemptEvidenceBead(b); ok {
+		b = sanitized
+	}
 
 	return &IndexOutput[beads.Bead]{
 		Index: s.latestIndex(),
@@ -765,6 +819,12 @@ func (s *Server) humaHandleBeadClose(ctx context.Context, input *BeadCloseInput)
 		return nil, err
 	}
 	if err := rejectPRActionLedgerMutation(current); err != nil {
+		return nil, err
+	}
+	if err := beads.ValidateLifecycleClose(current); err != nil {
+		return nil, apierr.ConflictWrongState.Msg(err.Error())
+	}
+	if err := rejectAttemptEvidenceArchive(current); err != nil {
 		return nil, err
 	}
 	if err := s.gateWorkRecordClose(ctx, id, store, current, nil); err != nil {
@@ -792,8 +852,14 @@ func (s *Server) humaHandleBeadReopen(_ context.Context, input *BeadReopenInput)
 	if err := rejectPRActionLedgerMutation(b); err != nil {
 		return nil, err
 	}
+	if err := rejectAttemptEvidenceArchive(b); err != nil {
+		return nil, err
+	}
 	if b.Status != "closed" {
 		return nil, apierr.ConflictWrongState.Msg("conflict: bead " + id + " is not closed (status: " + b.Status + ")")
+	}
+	if worklifecycle.HasDurableEnrollment(b) {
+		return nil, apierr.ConflictWrongState.Msg(worklifecycle.ErrEnrolledWorkMutationBlocked.Error())
 	}
 	if err := store.Reopen(id); err != nil {
 		return nil, apierr.Internal.Msg(err.Error())
@@ -811,6 +877,9 @@ func (s *Server) humaHandleBeadAssign(ctx context.Context, input *BeadAssignInpu
 		return nil, err
 	}
 	if err := rejectPRActionLedgerMutation(current); err != nil {
+		return nil, err
+	}
+	if err := rejectAttemptEvidenceArchive(current); err != nil {
 		return nil, err
 	}
 	assignee, err := s.normalizeRawBeadAssignee(ctx, input.Body.Assignee)
@@ -847,6 +916,9 @@ func (s *Server) humaHandleBeadAssign(ctx context.Context, input *BeadAssignInpu
 func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInput) (*OKResponse, error) {
 	id := input.ID
 	body := input.Body
+	if err := validateAttemptEvidenceMetadata(body.Metadata); err != nil {
+		return nil, err
+	}
 
 	opts := beads.UpdateOpts{
 		Title:        body.Title,
@@ -873,12 +945,18 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 	if err := rejectPRActionLedgerMutation(current); err != nil {
 		return nil, err
 	}
+	if err := rejectAttemptEvidenceArchive(current); err != nil {
+		return nil, err
+	}
 	if body.Assignee != nil {
 		assignee, err := s.normalizeRawBeadAssignee(ctx, *body.Assignee)
 		if err != nil {
 			return nil, apierr.InvalidRequest.Msg(err.Error())
 		}
 		opts.Assignee = &assignee
+	}
+	if err := worklifecycle.ValidateEnrolledMutation(current, opts); err != nil {
+		return nil, apierr.ConflictWrongState.Msg(err.Error())
 	}
 	waitStatus := current.Status
 	if opts.Status != nil {
@@ -922,11 +1000,11 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 // status field for honest wire-contract semantics. Hard-delete is not
 // exposed through the API.
 //
-// The work-record close gate deliberately does not apply here. Delete says
-// "this bead should not exist", not "this work completed", so demanding a work
-// record would make an unwanted bead undeletable under enforcement; the CLI
-// plane draws the same line, gating `bd close` and `bd update --status closed`
-// but not `bd delete`.
+// The work-record validation gate deliberately does not apply here. Delete
+// says "this bead should not exist", not "this work completed", so demanding a
+// work record would make an unwanted bead undeletable under enforcement. A
+// persisted Workbench execution is still captured before this soft-delete so
+// its private attempt evidence survives owner removal.
 //
 // The same exclusion covers bulk teardown: the paths that close a whole
 // workflow root or scope at once through beads.Store.CloseAll rather than
@@ -940,7 +1018,7 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 // and requiring a work record would make a run uncancellable and a workflow
 // impossible to tear down under enforcement. None is an escape hatch for a
 // refused per-bead close: each tears down an entire subtree rather than one bead.
-func (s *Server) humaHandleBeadDelete(_ context.Context, input *BeadDeleteInput) (*OKResponse, error) {
+func (s *Server) humaHandleBeadDelete(ctx context.Context, input *BeadDeleteInput) (*OKResponse, error) {
 	id := input.ID
 	store, current, err := s.resolveBeadOwner(id)
 	if err != nil {
@@ -948,6 +1026,12 @@ func (s *Server) humaHandleBeadDelete(_ context.Context, input *BeadDeleteInput)
 	}
 	if err := rejectPRActionLedgerMutation(current); err != nil {
 		return nil, err
+	}
+	if err := rejectAttemptEvidenceArchive(current); err != nil {
+		return nil, err
+	}
+	if err := s.captureWorkbenchAttempt(ctx, store, current); err != nil {
+		return nil, apierr.ServiceUnavailable.Msg("attempt evidence capture is pending: " + err.Error())
 	}
 	if err := store.Close(id); err != nil {
 		if errors.Is(err, beads.ErrNotFound) {

@@ -1373,6 +1373,11 @@ func TestGcBdOnARefusedCitySeparatesWorkFromClassOwnedIDs(t *testing.T) {
 		capture := bdSQLRefusalCity(t, bdUnservableStorage)
 		resetCLIStorageRoutes(t)
 		captureCLIStorageStderr(t)
+		// The capture barrier must classify the target as an ordinary work
+		// row before the passthrough. Model a successful `bd show` rather than
+		// an unreadable store: unreadable close targets are intentionally
+		// fail-closed by the evidence gate.
+		t.Setenv("BD_STUB_STDOUT", `[{"id":"demo-abc123","title":"ordinary task","status":"open","issue_type":"task"}]`)
 
 		args := []string{"update", "demo-abc123", "--status", "closed"}
 		var stdout, stderr bytes.Buffer

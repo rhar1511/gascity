@@ -693,6 +693,9 @@ func TestBdStoreReopenUsesReopenCommand(t *testing.T) {
 		out []byte
 		err error
 	}{
+		`bd show --json bd-abc-123`: {
+			out: []byte(`[{"id":"bd-abc-123","status":"closed"}]`),
+		},
 		`bd reopen --json bd-abc-123`: {
 			out: []byte(`{"id":"bd-abc-123","status":"open"}`),
 		},

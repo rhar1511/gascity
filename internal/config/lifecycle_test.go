@@ -34,6 +34,11 @@ func TestParseLifecycleValidatesTrustedAuthorities(t *testing.T) {
 			want: "must be a base64-encoded Ed25519 public key",
 		},
 		{
+			name: "admission gate requires acceptance authority",
+			toml: "[lifecycle]\nadmission_enabled = true\n[lifecycle.admission_authorities]\ntriage = \"" + key + "\"\n",
+			want: "requires at least one acceptance authority",
+		},
+		{
 			name: "recovery needs admission and acceptance gates",
 			toml: "[lifecycle]\nrecovery_enabled = true\nescalation_target = \"ops\"\n",
 			want: "requires lifecycle.admission_enabled",
@@ -59,6 +64,30 @@ func TestParseLifecycleValidatesTrustedAuthorities(t *testing.T) {
 			}
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("Parse() error = %v, want containing %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestValidateCompletionFreshnessPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  LifecycleConfig
+		want string
+	}{
+		{name: "unset disables policy"},
+		{name: "both durations required", cfg: LifecycleConfig{CompletionReceiptMaxAge: "24h"}, want: "configured together"},
+		{name: "positive maximum age", cfg: LifecycleConfig{CompletionReceiptMaxAge: "0s", CompletionClockSkew: "0s"}, want: "positive duration"},
+		{name: "non-negative skew", cfg: LifecycleConfig{CompletionReceiptMaxAge: "24h", CompletionClockSkew: "-1s"}, want: "non-negative duration"},
+		{name: "valid explicit policy", cfg: LifecycleConfig{CompletionReceiptMaxAge: "168h", CompletionClockSkew: "5m"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateCompletionFreshnessConfig(tc.cfg)
+			if tc.want == "" && err != nil {
+				t.Fatalf("validateCompletionFreshnessConfig() = %v", err)
+			}
+			if tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)) {
+				t.Fatalf("validateCompletionFreshnessConfig() = %v, want containing %q", err, tc.want)
 			}
 		})
 	}

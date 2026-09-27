@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -238,10 +240,12 @@ func bdUpdateClosesStatus(bdArgs []string) bool {
 	return seen && strings.EqualFold(strings.TrimSpace(status), "closed")
 }
 
-// runWorkRecordCloseGate validates every bead a `gc bd close` (or
-// `gc bd update --status=closed`) invocation closes against the work-record
-// contract. Best-effort: it never blocks on its own read failure. Returns
-// whether the close should be blocked (only when enforcement is enabled).
+// runWorkRecordCloseGate captures each known Workbench execution before a
+// `gc bd close`, `gc bd update --status=closed`, or `gc bd delete` can retire
+// its source, then validates the typed work-record contract for close verbs.
+// Evidence capture and source-read failures block the mutation regardless of
+// work-record enforcement. Work-record violations block only when enforcement
+// is enabled.
 //
 // preOpened and preFetched let a caller that already opened the store and
 // fetched the target beads (e.g. the write-ID collision guard, which reads
@@ -249,17 +253,26 @@ func bdUpdateClosesStatus(bdArgs []string) bool {
 // them in instead of paying a second openStoreAtForCity + store.Get round
 // trip. Both are optional (nil is fine): preOpened falls back to opening its
 // own store, and any ID missing from preFetched falls back to store.Get.
-func runWorkRecordCloseGate(bdArgs []string, scopeRoot, cityPath string, cfg *config.City, preOpened beads.Store, preFetched map[string]beads.Bead, stderr io.Writer) bool {
-	if _, ok := workRecordCloseTargets(bdArgs); !ok {
-		return false
+func runWorkRecordCloseGate(bdArgs []string, scopeRoot, cityPath string, cfg *config.City, preOpened beads.Store, preFetched map[string]beads.Bead, stderr io.Writer) int {
+	closeIDs, closing := workRecordCloseTargets(bdArgs)
+	retirementIDs := closeIDs
+	if !closing && len(bdArgs) > 0 && bdArgs[0] == "delete" {
+		var ok, ambiguous bool
+		retirementIDs, ok, ambiguous = bdMutationWriteIDs(bdArgs)
+		if !ok || ambiguous {
+			return 0 // the earlier write-ID guard owns ambiguity refusal
+		}
+	}
+	if len(retirementIDs) == 0 {
+		return 0
 	}
 	store := preOpened
 	if store == nil {
 		var err error
 		store, err = openStoreAtForCityWithConfig(scopeRoot, cityPath, cfg)
 		if err != nil {
-			// Cannot verify — never block a close on our own read failure.
-			return false
+			fmt.Fprintf(stderr, "gc bd: attempt evidence capture pending: cannot open work store: %v\n", err) //nolint:errcheck
+			return 1
 		}
 	}
 	dirs := workRecordRepoDirs{
@@ -272,7 +285,29 @@ func runWorkRecordCloseGate(bdArgs []string, scopeRoot, cityPath string, cfg *co
 			return cfg.Rigs
 		},
 	}
-	return evaluateWorkRecordCloseGate(bdArgs, store, preFetched, dirs, workRecordEnforceEnabled(), stderr)
+	if err := captureWorkbenchCloseTargets(context.Background(), store, retirementIDs, preFetched, dirs, cityPath, cfg); err != nil {
+		return attemptEvidenceCaptureFailure(stderr, err)
+	}
+	if !closing {
+		return 0
+	}
+	if evaluateWorkRecordCloseGate(bdArgs, store, preFetched, dirs, workRecordEnforceEnabled(), stderr) {
+		return 1
+	}
+	return 0
+}
+
+// attemptEvidenceCaptureFailure maps a typed bd silent-fallback read failure
+// back to the public passthrough exit code. Capture still blocks the mutation;
+// preserving code 4 keeps the operator-facing persistence failure observable
+// without allowing the follow-up bd command to run.
+func attemptEvidenceCaptureFailure(stderr io.Writer, err error) int {
+	fmt.Fprintf(stderr, "gc bd: attempt evidence capture pending: %v\n", err) //nolint:errcheck
+	if errors.Is(err, beads.ErrBDSilentFallback) {
+		fmt.Fprintln(stderr, bdSilentFallbackUserMessage) //nolint:errcheck
+		return bdSilentFallbackExitCode
+	}
+	return 1
 }
 
 // evaluateWorkRecordCloseGate is the store-driven core of the close gate, split

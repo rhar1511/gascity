@@ -22,12 +22,18 @@ package api
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log"
+	"path/filepath"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/api/apierr"
+	"github.com/gastownhall/gascity/internal/attemptevidence"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/workrecord"
 )
 
@@ -86,6 +92,9 @@ var workRecordCommitReachable = workrecord.CommitReachableOnBranchContext
 // outcome is a close that recorded slightly less than it should, not a corrupted
 // row.
 func (s *Server) gateWorkRecordClose(ctx context.Context, id string, store beads.Store, stored beads.Bead, submitted map[string]string) error {
+	if err := s.captureWorkbenchAttempt(ctx, store, stored); err != nil {
+		return apierr.ServiceUnavailable.Msg("attempt evidence capture is pending: " + err.Error())
+	}
 	if !workrecord.Gated(stored) {
 		return nil
 	}
@@ -118,6 +127,75 @@ func (s *Server) gateWorkRecordClose(ctx context.Context, id string, store beads
 	}
 	if enforce && len(violations) > 0 {
 		return apierr.ConflictWrongState.Msg("conflict: bead " + id + " does not satisfy the work-record close contract: " + strings.Join(violations, "; "))
+	}
+	return nil
+}
+
+// captureWorkbenchAttempt seals one exact Workbench execution before any
+// close/update path can retire the source bead or make its worktree reusable.
+// It reads only the persisted claim identity. A missing worktree is sealed as
+// explicitly unavailable by attemptevidence; repository/read/write failures
+// are returned so the caller blocks the destructive transition.
+func (s *Server) captureWorkbenchAttempt(ctx context.Context, store beads.Store, stored beads.Bead) error {
+	if !attemptevidence.IsExecutionRecord(stored) {
+		return nil
+	}
+	sessionID := strings.TrimSpace(stored.Metadata[beadmeta.SessionIDMetadataKey])
+	sessionStore := s.state.SessionsBeadStore()
+	if sessionStore.Store == nil {
+		return errors.New("session bead store is unavailable")
+	}
+	info, err := session.NewStore(sessionStore).Get(sessionID)
+	if err != nil {
+		return fmt.Errorf("reading execution session %s: %w", sessionID, err)
+	}
+	if strings.TrimSpace(info.Generation) == "" {
+		return fmt.Errorf("execution session %s has no generation", sessionID)
+	}
+	storeRef := strings.TrimSpace(stored.Metadata[beadmeta.RootStoreRefMetadataKey])
+	if storeRef == "" {
+		rig, cityScope := s.slingStoreScopeForBead(stored.ID)
+		switch {
+		case cityScope:
+			storeRef = "city:" + s.state.CityName()
+		case strings.TrimSpace(rig) != "":
+			storeRef = "rig:" + rig
+		default:
+			return fmt.Errorf("cannot resolve exact store reference for work bead %s", stored.ID)
+		}
+	}
+	workDir := strings.TrimSpace(stored.Metadata[beadmeta.WorkDirMetadataKey])
+	if workDir == "" {
+		workDir = strings.TrimSpace(stored.Metadata[beadmeta.LegacyWorkDirMetadataKey])
+	}
+	if workDir != "" && !filepath.IsAbs(workDir) {
+		repoDir := s.workRecordRepoDir(store, stored)
+		if strings.TrimSpace(repoDir) == "" {
+			return fmt.Errorf("relative execution worktree %q has no known repository root", workDir)
+		}
+		workDir = filepath.Join(repoDir, workDir)
+	}
+	repoDir := s.workRecordRepoDir(store, stored)
+	spec := attemptevidence.CaptureSpec{
+		Identity: attemptevidence.Identity{
+			Kind:              attemptevidence.KindWorkbench,
+			OwnerBeadID:       stored.ID,
+			ExecutionBeadID:   stored.ID,
+			SessionID:         sessionID,
+			SessionGeneration: strings.TrimSpace(info.Generation),
+			ClaimGeneration:   strings.TrimSpace(stored.Metadata[beadmeta.ClaimGenerationMetadataKey]),
+		},
+		StoreRef: storeRef,
+		Permission: attemptevidence.PermissionScope{
+			StoreRef: storeRef, WorkID: stored.ID,
+			RepositoryRoot: strings.TrimSpace(repoDir), WorkspaceRoot: workDir,
+		},
+		WorkDir: workDir,
+		BaseSHA: strings.TrimSpace(stored.Metadata[beadmeta.WorktreeBaseSHAMetadataKey]),
+		Outcome: strings.TrimSpace(stored.Metadata[beadmeta.WorkOutcomeMetadataKey]),
+	}
+	if _, err := attemptevidence.Capture(ctx, store, spec); err != nil {
+		return fmt.Errorf("capturing work bead %s: %w", stored.ID, err)
 	}
 	return nil
 }

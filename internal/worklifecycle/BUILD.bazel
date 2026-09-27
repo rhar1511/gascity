@@ -1,0 +1,46 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "worklifecycle",
+    srcs = [
+        "receipt.go",
+        "recovery.go",
+        "scope.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/worklifecycle",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/beadmeta",
+        "//internal/beads",
+        "//internal/config",
+    ],
+)
+
+go_test(
+    name = "worklifecycle_test",
+    srcs = [
+        "receipt_test.go",
+        "recovery_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":worklifecycle"],
+    deps = [
+        "//internal/beadmeta",
+        "//internal/beads",
+        "//internal/config",
+        "//internal/fsys",
+        "//internal/testenv",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

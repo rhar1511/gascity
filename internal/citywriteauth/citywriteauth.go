@@ -20,9 +20,9 @@ import (
 // single-source it rather than repeating the literal.
 const AudienceCityWrite = "gc-city-write"
 
-// Grant is the claim set carried by an X-GC-City-Write token: a single-use,
-// request-bound authorization for exactly one city mutation, minted by a
-// configured trusted authority and verified here.
+// Grant is a single-use, request-bound authorization minted by a configured
+// trusted authority. Separate verifier audiences distinguish city read and
+// write grants; resource handlers enforce any signed read-scope assertions.
 type Grant struct {
 	Kid  string `json:"kid"`
 	Aud  string `json:"aud"`
@@ -37,6 +37,11 @@ type Grant struct {
 	Exp   int64  `json:"exp"`
 	JTI   string `json:"jti"`
 	Req   string `json:"req"`
+	// Subject and ReadScopes are optional assertions by the read permission
+	// authority. A city grant alone does not authorize a private resource;
+	// its handler must verify an exact scope after authenticating this payload.
+	Subject    string   `json:"sub,omitempty"`
+	ReadScopes []string `json:"read_scopes,omitempty"`
 }
 
 // Sentinel errors. Callers distinguish failures with errors.Is; every one of

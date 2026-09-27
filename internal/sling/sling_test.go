@@ -2636,6 +2636,48 @@ func TestSlingAttachGraphFormulaCreatesConvoyFirstRoot(t *testing.T) {
 	}
 }
 
+func TestDefaultGraphWorkflowRecordsSignedMergeStrategy(t *testing.T) {
+	formulaDir := t.TempDir()
+	writeGraphV2ConvoyFormula(t, formulaDir)
+	cfg := graphV2SlingTestConfig(t, formulaDir)
+	workflow := "graph-work"
+	cfg.Agents = append(cfg.Agents, config.Agent{
+		Name: "mayor", MaxActiveSessions: intPtr(1), DefaultSlingFormula: &workflow,
+	})
+	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	source, err := deps.Store.Create(beads.Bead{Title: "work", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := DoSling(SlingOpts{
+		Target:        config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1), DefaultSlingFormula: &workflow},
+		BeadOrFormula: source.ID, RequireFormulaAttach: true, Merge: "mr",
+	}, deps, deps.Store)
+	if err != nil {
+		t.Fatalf("DoSling default graph workflow: %v", err)
+	}
+	if result.WorkflowID == "" {
+		t.Fatalf("DoSling returned no workflow root: %+v", result)
+	}
+	attached, err := deps.Store.Get(source.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := attached.Metadata[beadmeta.ExecutionRoutedToMetadataKey]; got != "mayor" {
+		t.Fatalf("execution route = %q, want mayor", got)
+	}
+	if got := attached.Metadata[beadmeta.MergeStrategyMetadataKey]; got != "mr" {
+		t.Fatalf("merge strategy = %q, want mr", got)
+	}
+	root, err := deps.Store.Get(result.WorkflowID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := root.Metadata[beadmeta.FormulaNameMetadataKey]; got != workflow {
+		t.Fatalf("workflow formula = %q, want %q", got, workflow)
+	}
+}
+
 // TestRestampWorkBeadRoutingCollapsesPoolInstanceResolvedViaResolveAgent
 // guards the actual production resolution path for a pool-instance target.
 // An agent obtained via agentutil.ResolveAgent -- as the real CLI/API

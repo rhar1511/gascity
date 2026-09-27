@@ -489,6 +489,13 @@ func buildDesiredStateWithSessionBeadsAt(
 
 	// Pre-compute suspended rig paths (config + runtime state).
 	suspendedRigPaths := buildSuspendedRigPathsForCity(cfg, cityPath)
+	// Lifecycle admission is the only route for explicitly enrolled, signed
+	// roots. It uses the existing sling engine so default worktree/workflow and
+	// merge behavior stays attached before this tick measures routed demand.
+	// The gate is disabled by default; a partial or unreadable admission simply
+	// leaves that one item untouched for a later reconciliation.
+	reconcileLifecycleAdmission(cityName, cityPath, cfg, store, rigStores, suspendedRigPaths, stderr)
+	reconcileLifecycleCompletions(cityName, cityPath, cfg, store, rigStores, suspendedRigPaths, stderr)
 	bp.sessionCensusRigStores = cloneSessionCensusRigStores(rigStores)
 	bp.sessionCensusSuspendedRigPaths = cloneSessionCensusSuspendedRigPaths(suspendedRigPaths)
 
@@ -1851,7 +1858,7 @@ func convergedRoutedWorkBinding(
 	rigStores map[string]beads.Store,
 	suspendedRigPaths map[string]bool,
 ) beads.Store {
-	legs, err := routedWorkStoreCandidates(cityPath, cfg, store, rigStores, suspendedRigPaths, censusRefScoped)
+	legs, err := routedWorkStoreCandidates(cityPath, cfg, store, rigStores, suspendedRigPaths)
 	// An unresolvable topology takes the same conservative nil as a legacy city:
 	// fall back to the legacy target rather than guess a store. The error is not
 	// swallowed — collectOpenUnassignedRoutedWork resolves this same leg set later
@@ -2023,7 +2030,7 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 			// A routed epic, a bead on a dispatch hold, or a slot-suffixed route
 			// is not capacity demand — it is a seat that spawns, reads empty and
 			// drains, every tick, forever. See demand_serve_predicate.go.
-			template, servable := demandServableForTemplates(cfg, b, group.templates)
+			template, servable := demandServableForTemplates(cfg, b, group.templates, lifecycleScopeForDemand(censusCityName(cfg), cfg, group.storeKey))
 			if !servable {
 				continue
 			}
@@ -5464,7 +5471,7 @@ func collectOpenUnassignedRoutedWork(cityPath string, cfg *config.City, store be
 	// Refs are the canonical scoped spelling the rows' gc.root_store_ref is
 	// matched against; a binding keeps its own "class:*" ref, which reads back as
 	// city scope.
-	stores, legErr := routedWorkStoreCandidates(cityPath, cfg, store, rigStores, suspendedRigPaths, censusRefScoped)
+	stores, legErr := routedWorkStoreCandidates(cityPath, cfg, store, rigStores, suspendedRigPaths)
 	if legErr != nil {
 		// The only demand signal this set feeds is openControlDispatcherDemand,
 		// and a refused city reporting zero would drain a live dispatcher. Say so

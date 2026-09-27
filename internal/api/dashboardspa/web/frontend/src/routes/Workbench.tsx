@@ -17,6 +17,7 @@ import { resolveAttempts } from '../lib/workbenchAttempts';
 import { resolvePreview } from '../lib/workbenchPreview';
 import { AttemptChatPanel } from '../workbench/AttemptChatPanel';
 import { CentralPRActionPanel } from '../workbench/CentralPRActionPanel';
+import { HistoricalAttemptEvidencePanel } from '../workbench/HistoricalAttemptEvidencePanel';
 
 // Gas City Workbench: Canvas/Kanban/Priority/Work Queue as views over the same
 // Beads data.
@@ -354,11 +355,12 @@ export function WorkbenchPage() {
             {selectedBead ? (
               <>
                 <BeadBody bead={selectedBead} />
-                <AttemptPanel bead={selectedBead} sessions={sessions} cityKey={cityCacheKey} />
-                <CentralPRActionPanel
-                  key={cityCacheKey}
+                <AttemptPanel
+                  key={`${cityCacheKey}:${selectedBead.id}`}
+                  bead={selectedBead}
+                  sessions={sessions}
+                  cityKey={cityCacheKey}
                   cityName={cityName}
-                  beadId={selectedBead.id}
                 />
               </>
             ) : hasLoadedQueue ? (
@@ -565,9 +567,10 @@ function LaneBoard({ rows, view, selectedId, onOpen, onMove, onRequestClose }: L
   );
 }
 
-// AttemptPanel projects the selected Bead's newest ACTIVE Execution Attempt and
-// its prior attempts from the typed session read. Gas City owns the Session and
-// worktree; this only resolves and displays them (no new record).
+// AttemptPanel projects the selected Bead's newest ACTIVE Execution Attempt,
+// prior sessions, and exact immutable archives from typed supervisor reads.
+// Gas City owns the Session, worktree, and evidence archive; this only resolves
+// and displays them (no new record).
 //
 // The terminal is the Session's own live stream (LiveSessionPeek), keyed by the
 // attempt's session id: selecting a different attempt changes the key, so React
@@ -578,10 +581,12 @@ function AttemptPanel({
   bead,
   sessions,
   cityKey,
+  cityName,
 }: {
   bead: Row;
   sessions: NonNullable<Awaited<ReturnType<typeof listSupervisorSessions>>['items']>;
   cityKey: string;
+  cityName: string | null;
 }) {
   const attempts = resolveAttempts(bead, sessions);
   const [inspectedId, setInspectedId] = useState<string | null>(null);
@@ -611,10 +616,12 @@ function AttemptPanel({
             showCaption
           />
           {inspectingHistory ? (
-            <p className="text-label text-fg-muted">
-              Historical worktree diff and PR actions are unavailable; showing this session’s output
-              only.
-            </p>
+            <HistoricalAttemptEvidencePanel
+              key={`archive:${cityKey}:${bead.id}:${inspected.sessionId}:${inspected.executionGeneration ?? 'unavailable'}`}
+              cityName={cityName}
+              workID={bead.id}
+              attempt={inspected}
+            />
           ) : (
             <>
               <AttemptDiffPanel key={`diff:${inspected.sessionId}`} beadId={bead.id} />
@@ -655,6 +662,9 @@ function AttemptPanel({
         <Button size="sm" tone="quiet" onClick={() => setInspectedId(null)}>
           Return to current attempt
         </Button>
+      )}
+      {!inspectingHistory && (
+        <CentralPRActionPanel key={cityKey} cityName={cityName} beadId={bead.id} />
       )}
     </section>
   );

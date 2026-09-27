@@ -1429,6 +1429,20 @@ describe('supervisor client wrapper', () => {
     ).toThrow('Workbench does not support PR merge actions');
   });
 
+  it('reads immutable attempt evidence through the generated city-scoped endpoint', async () => {
+    const evidence = [{ attempt_id: 'ae-exact', identity: { owner_bead_id: 'work-1' } }];
+    const fetchSpy = vi.fn(async (_input: RequestInfo | URL) => jsonResponse(evidence));
+    const api = createSupervisorApi({
+      baseUrl: 'http://gc-supervisor.test',
+      fetch: fetchSpy as typeof fetch,
+    });
+
+    await expect(api.listAttemptEvidence('test-city', 'work-1')).resolves.toEqual(evidence);
+    expect(requestedUrl(fetchSpy.mock.calls[0]?.[0])).toBe(
+      'http://gc-supervisor.test/v0/city/test-city/bead/work-1/attempt-evidence',
+    );
+  });
+
   it('supports test injection without importing the dashboard api client', async () => {
     const fake = {
       baseUrl: 'test://supervisor',
@@ -1463,6 +1477,7 @@ describe('supervisor client wrapper', () => {
       mutationHeaders: vi.fn(() => GC_MUTATION_HEADERS),
       sessionTranscript: vi.fn(),
       prActionQueue: vi.fn(),
+      listAttemptEvidence: vi.fn(),
       executePRAction: vi.fn(),
       submitSessionRequest: vi.fn(),
       getSessionRequest: vi.fn(),

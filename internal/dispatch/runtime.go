@@ -49,6 +49,10 @@ type ProcessOptions struct {
 	// human-approval evidence for the RSI promotion gate. When nil, the gate
 	// fails closed.
 	ResolveRSIEvaluation rsipolicy.ResolveTrustedEvaluationFunc
+	// CaptureAttemptEvidence seals the closed execution attempt's immutable
+	// evidence before the control loop records its outcome, spawns a retry, or
+	// closes the logical control. A capture error leaves the control pending.
+	CaptureAttemptEvidence func(context.Context, beads.Bead, beads.Bead, int, string) error
 	// RequiredArtifactStat checks required-artifact files. When nil, the
 	// dispatcher uses os.Stat.
 	RequiredArtifactStat func(path string) (os.FileInfo, error)
@@ -1226,6 +1230,15 @@ func walkSourceBeadChain(rootStore beads.Store, rootID string, opts ProcessOptio
 				return nil
 			}
 			if !mutate {
+				return nil
+			}
+			if strings.TrimSpace(loaded.Metadata[beadmeta.LifecycleAdmissionReceiptMetadataKey]) != "" ||
+				strings.TrimSpace(loaded.Metadata[beadmeta.LifecycleMaterializationMetadataKey]) != "" {
+				// Workflow finalization is not acceptance of the deliverable.
+				// Enrolled source work closes only through the controller's
+				// signed, revision-conditional completion reconciliation.
+				opts.tracef("close-source-chain root=%s stop reason=lifecycle_acceptance_required source=%s ref=%s", rootID, nextID, sourceChainStoreLabel(effectiveRef))
+				stopWalk = true
 				return nil
 			}
 			if err := propagateSourceBeadTerminalMetadata(nextStore, loaded, current.Metadata); err != nil {

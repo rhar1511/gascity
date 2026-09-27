@@ -1,0 +1,44 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "attemptevidence",
+    srcs = [
+        "evidence.go",
+        "read_grant.go",
+        "snapshot.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/attemptevidence",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/beadmeta",
+        "//internal/beads",
+    ],
+)
+
+go_test(
+    name = "attemptevidence_test",
+    srcs = [
+        "evidence_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":attemptevidence"],
+    deps = [
+        "//internal/bazeltest",
+        "//internal/beadmeta",
+        "//internal/beads",
+        "//internal/fsys",
+        "//internal/testenv",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

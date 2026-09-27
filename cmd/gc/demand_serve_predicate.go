@@ -51,9 +51,18 @@ import (
 // THIS tick. Without the collapse, counting only exact forms would leave a "-N"
 // row counted by neither side — invisible dead work, the dead-drop
 // NormalizePoolRouteTarget exists to close.
-func demandServableForTemplates(cfg *config.City, b beads.Bead, templates map[string]struct{}) (string, bool) {
+func demandServableForTemplates(cfg *config.City, b beads.Bead, templates map[string]struct{}, lifecycleScopes ...string) (string, bool) {
 	if !demandRowServable(b) {
 		return "", false
+	}
+	if lifecycleAdmissionRequested(b, cfg) {
+		scope := ""
+		if len(lifecycleScopes) > 0 {
+			scope = lifecycleScopes[0]
+		}
+		if !lifecycleAdmissionRouteMatches(cfg, b, scope) {
+			return "", false
+		}
 	}
 	for _, candidate := range controllerDemandRouteCandidates(b) {
 		normalized := agentutil.NormalizePoolRouteTarget(cfg, candidate)

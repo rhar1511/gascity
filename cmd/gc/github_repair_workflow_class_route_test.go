@@ -48,7 +48,7 @@ func TestGitHubPRPreparePreservesLocalWorkAndGraphStores(t *testing.T) {
 			t.Setenv(productMetricsDirectChildEnvSpyPath, marker)
 			installProductMetricsDirectChildSpyCommand(t, "gc")
 			writes := 0
-			useCentralPRTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+			useCentralPRTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
 				if r.Method == http.MethodGet {
 					_ = json.NewEncoder(w).Encode(centralPRTestQueue())

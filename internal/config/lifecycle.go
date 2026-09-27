@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 )
 
 // LifecycleConfig controls controller-owned admission and recovery. The
@@ -34,9 +35,22 @@ type LifecycleConfig struct {
 	// EscalationTarget is the configured recipient for one exhaustion
 	// escalation per work item. Empty deliberately leaves recovery disabled.
 	EscalationTarget string `toml:"escalation_target,omitempty"`
+	// CompletionReceiptMaxAge bounds how long after signing an acceptance
+	// receipt may close work. Operators must choose this from their acceptance
+	// and rollout policy; no default is inferred. Empty disables completion
+	// reconciliation.
+	CompletionReceiptMaxAge string `toml:"completion_receipt_max_age,omitempty"`
+	// CompletionClockSkew is the largest accepted future timestamp allowance.
+	// Operators must choose this from expected signer/controller clock drift.
+	// It must be set with CompletionReceiptMaxAge; empty disables completion
+	// reconciliation rather than choosing a controller-specific default.
+	CompletionClockSkew string `toml:"completion_clock_skew,omitempty"`
 }
 
 func validateLifecycleConfig(cfg LifecycleConfig) error {
+	if err := validateCompletionFreshnessConfig(cfg); err != nil {
+		return err
+	}
 	if err := validateLifecycleAuthorities("lifecycle.admission_authorities", cfg.AdmissionAuthorities); err != nil {
 		return err
 	}
@@ -45,6 +59,9 @@ func validateLifecycleConfig(cfg LifecycleConfig) error {
 	}
 	if cfg.AdmissionEnabled && len(cfg.AdmissionAuthorities) == 0 {
 		return fmt.Errorf("lifecycle.admission_enabled requires at least one admission authority")
+	}
+	if cfg.AdmissionEnabled && len(cfg.AcceptanceAuthorities) == 0 {
+		return fmt.Errorf("lifecycle.admission_enabled requires at least one acceptance authority")
 	}
 	if cfg.RecoveryEnabled {
 		if !cfg.AdmissionEnabled {
@@ -56,6 +73,26 @@ func validateLifecycleConfig(cfg LifecycleConfig) error {
 		if len(cfg.AcceptanceAuthorities) == 0 {
 			return fmt.Errorf("lifecycle.recovery_enabled requires at least one acceptance authority")
 		}
+	}
+	return nil
+}
+
+func validateCompletionFreshnessConfig(cfg LifecycleConfig) error {
+	maxAge := strings.TrimSpace(cfg.CompletionReceiptMaxAge)
+	skew := strings.TrimSpace(cfg.CompletionClockSkew)
+	if maxAge == "" && skew == "" {
+		return nil
+	}
+	if maxAge == "" || skew == "" {
+		return fmt.Errorf("lifecycle.completion_receipt_max_age and lifecycle.completion_clock_skew must be configured together")
+	}
+	parsedMaxAge, err := time.ParseDuration(maxAge)
+	if err != nil || parsedMaxAge <= 0 {
+		return fmt.Errorf("lifecycle.completion_receipt_max_age must be a positive duration")
+	}
+	parsedSkew, err := time.ParseDuration(skew)
+	if err != nil || parsedSkew < 0 {
+		return fmt.Errorf("lifecycle.completion_clock_skew must be a non-negative duration")
 	}
 	return nil
 }

@@ -1159,6 +1159,9 @@ func (s *SQLiteStore) Update(id string, opts UpdateOpts) error {
 			return err
 		}
 		before := b
+		if err := ValidateLifecycleMutation(b, opts); err != nil {
+			return fmt.Errorf("updating lifecycle bead %q: %w", id, err)
+		}
 		b = applySQLiteUpdateOpts(b, opts)
 		b.UpdatedAt = time.Now()
 		if err := s.upsertBeadTx(ctx, tx, b); err != nil {
@@ -1253,6 +1256,20 @@ func (s *SQLiteStore) Reopen(id string) error {
 func (s *SQLiteStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
 	if err := s.ensureOpen(); err != nil {
 		return 0, err
+	}
+	closedStatus := "closed"
+	preflight := UpdateOpts{Status: &closedStatus, Metadata: maps.Clone(metadata)}
+	for _, id := range ids {
+		b, err := s.Get(id)
+		if errors.Is(err, ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return 0, err
+		}
+		if err := ValidateLifecycleMutation(b, preflight); err != nil {
+			return 0, fmt.Errorf("batch closing lifecycle bead %q: %w", id, err)
+		}
 	}
 	closed := 0
 	for _, id := range ids {
@@ -1711,6 +1728,9 @@ func (t *sqliteStoreTx) Update(id string, opts UpdateOpts) error {
 	if err != nil {
 		return err
 	}
+	if err := ValidateLifecycleMutation(b, opts); err != nil {
+		return fmt.Errorf("updating lifecycle bead %q: %w", id, err)
+	}
 	before := b
 	b = applySQLiteUpdateOpts(b, opts)
 	b.UpdatedAt = time.Now()
@@ -1735,6 +1755,9 @@ func (t *sqliteStoreTx) Close(id string) error {
 	if b.Status == "closed" {
 		return nil
 	}
+	if err := ValidateLifecycleClose(b); err != nil {
+		return fmt.Errorf("closing lifecycle bead %q: %w", id, err)
+	}
 	before := b
 	b.Status = "closed"
 	b.UpdatedAt = time.Now()
@@ -1755,6 +1778,13 @@ func (s *SQLiteStore) Delete(id string) error {
 			return fmt.Errorf("sqlite delete: begin tx: %w", err)
 		}
 		defer tx.Rollback() //nolint:errcheck
+		protected, err := sqliteAttemptEvidenceArchiveIDTx(context.Background(), tx, id)
+		if err != nil {
+			return fmt.Errorf("deleting bead %q: checking archive protection: %w", id, err)
+		}
+		if protected {
+			return fmt.Errorf("deleting bead %q: %w", id, ErrProtectedAttemptEvidenceArchive)
+		}
 		res, err := tx.Exec(`DELETE FROM beads WHERE id=?`, id)
 		if err != nil {
 			return fmt.Errorf("deleting bead %q: %w", id, err)
@@ -1779,6 +1809,23 @@ func (s *SQLiteStore) Delete(id string) error {
 		return fmt.Errorf("deleting bead %q: cleaning up local strings: %w", id, err)
 	}
 	return nil
+}
+
+func sqliteAttemptEvidenceArchiveIDTx(ctx context.Context, tx *sql.Tx, id string) (bool, error) {
+	var found int
+	err := tx.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM metadata a
+			JOIN metadata o ON o.bead_id=a.bead_id
+			JOIN metadata p ON p.bead_id=a.bead_id
+			WHERE a.bead_id=? AND a.meta_key=? AND a.meta_value<>''
+			  AND o.meta_key=? AND o.meta_value<>''
+			  AND p.meta_key=? AND p.meta_value<>''
+		)`, id,
+		beadmeta.AttemptEvidenceArchiveAttemptIDMetadataKey,
+		beadmeta.AttemptEvidenceArchiveOwnerIDMetadataKey,
+		beadmeta.AttemptEvidenceArchivePayloadMetadataKey).Scan(&found)
+	return found != 0, err
 }
 
 // DepAdd records a dependency edge.
@@ -1956,8 +2003,18 @@ func (s *SQLiteStore) purgeTerminal(ctx context.Context, olderThan time.Duration
 		WHERE tier='main'
 		  AND status IN ('closed','cancelled','canceled','expired')
 		  AND COALESCE(NULLIF(updated_at,0), created_at) < ?
+		  AND NOT EXISTS (
+			SELECT 1 FROM metadata m
+			WHERE m.bead_id=beads.id
+			  AND m.meta_key=? AND m.meta_value<>''
+		  AND EXISTS (SELECT 1 FROM metadata o WHERE o.bead_id=beads.id AND o.meta_key=? AND o.meta_value<>'')
+		  AND EXISTS (SELECT 1 FROM metadata p WHERE p.bead_id=beads.id AND p.meta_key=? AND p.meta_value<>'')
+		  )
 		ORDER BY updated_at ASC
-		LIMIT 1000`, cutoff)
+		LIMIT 1000`, cutoff,
+		beadmeta.AttemptEvidenceArchiveAttemptIDMetadataKey,
+		beadmeta.AttemptEvidenceArchiveOwnerIDMetadataKey,
+		beadmeta.AttemptEvidenceArchivePayloadMetadataKey)
 	if err != nil {
 		return 0, fmt.Errorf("sqlite purge terminal query: %w", err)
 	}

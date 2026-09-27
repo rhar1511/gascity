@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
@@ -117,6 +118,24 @@ func TestReconcileSessionBeads_IdleRespawnNeverDrainsClaimHolder(t *testing.T) {
 	}
 	if _, ok := env.dt.idleProbe(session.ID); ok {
 		t.Fatal("claimed in-progress work must not launch an idle-respawn probe")
+	}
+}
+
+func TestReconcileSessionBeads_IdleRespawnPreservesLifecycleOwner(t *testing.T) {
+	env, session, work := newIdleRespawnReconcilerTest(t, "open", 2*time.Minute)
+	env.cfg.Lifecycle.AdmissionEnabled = true
+	if err := env.store.SetMetadata(work.ID, beadmeta.LifecycleAdmissionReceiptMetadataKey, "signed enrollment evidence"); err != nil {
+		t.Fatalf("mark work lifecycle-enrolled: %v", err)
+	}
+
+	completeIdleRespawnProbe(t, env, session, work, true)
+
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Fatalf("lifecycle-enrolled owner must not be idle-respawned, got drain %+v", ds)
+	}
+	status, assignee := drainAckBeadStatus(t, env.store, work.ID)
+	if status != "open" || assignee != session.ID {
+		t.Fatalf("lifecycle work changed during idle-respawn reconcile: status=%q assignee=%q", status, assignee)
 	}
 }
 

@@ -384,13 +384,17 @@ func TestReadyWireFieldSetIsPinnedToTheHTTPBeadShape(t *testing.T) {
 	// computedReadyWireFields are emitted by gc ready but deliberately absent
 	// from beads.Bead. Every entry needs a stated reason above; the set is small
 	// on purpose.
-	computedReadyWireFields := map[string]bool{"blocked_by": true}
+	computedReadyWireFields := map[string]bool{
+		"blocked_by":       true,
+		"lifecycle_scope":  true,
+		"source_store_ref": true,
+	}
 
 	want := []string{
 		"assignee", "blocked_by", "created_at", "defer_until", "dependencies",
 		"description", "ephemeral", "from", "id", "is_blocked", "issue_type",
-		"labels", "metadata", "needs", "no_history", "parent", "priority",
-		"ref", "status", "title", "updated_at",
+		"labels", "lifecycle_scope", "metadata", "needs", "no_history", "parent", "priority",
+		"ref", "source_store_ref", "status", "title", "updated_at",
 	}
 	got := jsonFieldNames(reflect.TypeOf(readyBead{}))
 	if !reflect.DeepEqual(got, want) {
@@ -604,7 +608,7 @@ func TestRelocatedGraphLegIsGatedOnStoreIdentity(t *testing.T) {
 // answer assembled from the legs that happened to answer.
 //
 // A leg can break in TWO places, and the rule has to hold at both. The read half
-// is federateBeadLegs. The OPEN half is earlier and was the hole: the leg list is
+// is the federated read. The OPEN half is earlier and was the hole: the leg list is
 // built before a single read runs, so a rig whose store cannot be opened was
 // dropped by the builder and never reached the reader at all — exit 0, a
 // valid-looking short array, and the failure only on stderr, which no work query

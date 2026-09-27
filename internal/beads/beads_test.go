@@ -37,6 +37,45 @@ func TestIsContainerType(t *testing.T) {
 	}
 }
 
+func TestOrdinaryCloseRequiresVerifiedLifecycleCompletion(t *testing.T) {
+	store := NewMemStore()
+	created, err := store.Create(Bead{
+		Title: "admitted source", Type: "task", Status: "in_progress",
+		Metadata: map[string]string{beadmeta.LifecycleAdmissionReceiptMetadataKey: "malformed but durable"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inProgress := "in_progress"
+	if err := store.Update(created.ID, UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatal(err)
+	}
+	current, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed := "closed"
+	if err := store.Close(created.ID); !errors.Is(err, ErrLifecycleCompletionRequired) {
+		t.Fatalf("Close error = %v, want verified completion refusal", err)
+	}
+	if err := store.Update(created.ID, UpdateOpts{Status: &closed}); !errors.Is(err, ErrLifecycleCompletionRequired) {
+		t.Fatalf("Update(status=closed) error = %v, want verified completion refusal", err)
+	}
+	if err := store.UpdateIfMatch(created.ID, current.Revision, UpdateOpts{Status: &closed}); !errors.Is(err, ErrLifecycleCompletionRequired) {
+		t.Fatalf("UpdateIfMatch(status=closed) error = %v, want verified completion refusal", err)
+	}
+	if _, err := store.CloseAll([]string{created.ID}, nil); !errors.Is(err, ErrLifecycleCompletionRequired) {
+		t.Fatalf("CloseAll error = %v, want verified completion refusal", err)
+	}
+	after, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Status != "in_progress" {
+		t.Fatalf("status after refused ordinary closes = %q, want in_progress", after.Status)
+	}
+}
+
 func TestIsMoleculeType(t *testing.T) {
 	tests := []struct {
 		typ  string

@@ -50,6 +50,10 @@ var (
 // *beadPolicyStore.
 func (s *beadPolicyStore) ConditionalWritesResolveTarget() beads.Store { return s.Store }
 
+// PrivatePayloadValueTransportTarget lets evidence capture inspect the actual
+// store rather than assuming the policy wrapper's command transport is safe.
+func (s *beadPolicyStore) PrivatePayloadValueTransportTarget() beads.Store { return s.Store }
+
 var (
 	_ beads.BatchDeleter      = (*beadPolicyStore)(nil)
 	_ beads.BatchDeleter      = (*beadPolicyGraphStore)(nil)

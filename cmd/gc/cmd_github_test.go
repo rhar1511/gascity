@@ -13,6 +13,26 @@ import (
 	"github.com/gastownhall/gascity/internal/api"
 )
 
+const centralPRTestURL = "http://127.0.0.1"
+
+type centralPRProtocolTransport struct{ handler http.Handler }
+
+func (transport centralPRProtocolTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	recorder := httptest.NewRecorder()
+	transport.handler.ServeHTTP(recorder, request)
+	return recorder.Result(), nil
+}
+
+func useCentralPRRemoteTransport(t *testing.T, handler http.Handler) {
+	t.Helper()
+	original := remoteCityClientHook
+	t.Cleanup(func() { remoteCityClientHook = original })
+	remoteCityClientHook = func(baseURL, cityName string, opts api.RemoteOptions, clientOpts ...api.ClientOption) (*api.Client, error) {
+		clientOpts = append(clientOpts, api.WithHTTPTransport(centralPRProtocolTransport{handler: handler}))
+		return api.NewRemoteCityScopedClient(baseURL, cityName, opts, clientOpts...)
+	}
+}
+
 func centralPRTestQueue() api.PRActionQueue {
 	now := time.Now().UTC()
 	return api.PRActionQueue{
@@ -23,16 +43,16 @@ func centralPRTestQueue() api.PRActionQueue {
 	}
 }
 
-func useCentralPRTestServer(t *testing.T, handler http.HandlerFunc) string {
+func useCentralPRTestClient(t *testing.T, handler http.HandlerFunc) string {
 	t.Helper()
 	cityPath := writeBeadsTestCity(t)
 	t.Setenv("GC_NO_API", "")
-	srv := httptest.NewServer(handler)
-	t.Cleanup(srv.Close)
 	oldAlive, oldSupervisor := apiRouteControllerAliveHook, apiRouteSupervisorClientHook
 	t.Cleanup(func() { apiRouteControllerAliveHook, apiRouteSupervisorClientHook = oldAlive, oldSupervisor })
 	apiRouteControllerAliveHook = func(string) int { return 1 }
-	apiRouteSupervisorClientHook = func(string) *api.Client { return api.NewCityScopedClient(srv.URL, "test-city") }
+	apiRouteSupervisorClientHook = func(string) *api.Client {
+		return api.NewCityScopedClient(centralPRTestURL, "test-city", api.WithHTTPTransport(centralPRProtocolTransport{handler: handler}))
+	}
 	return cityPath
 }
 
@@ -51,7 +71,7 @@ func centralPRActionReceipt(request api.PRActionRequest) api.PRActionResult {
 func TestGitHubPRBackfillPrepareUsesExactServerVerdictAndStableKey(t *testing.T) {
 	queue := centralPRTestQueue()
 	var keys []string
-	cityPath := useCentralPRTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+	cityPath := useCentralPRTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.Method == http.MethodGet && r.URL.Path == "/v0/city/test-city/pr-actions/queue" {
 			_ = json.NewEncoder(w).Encode(queue)
@@ -106,7 +126,7 @@ func TestGitHubPRBackfillUnavailableSourcesDoNotPrepare(t *testing.T) {
 	queue.Availability = api.PRActionAvailabilityPartial
 	queue.Sources = append(queue.Sources, api.PRActionSource{Monitor: "missing", State: api.PRActionSourceUnavailable, Detail: "forge unavailable"})
 	writes := 0
-	cityPath := useCentralPRTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+	cityPath := useCentralPRTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writes++
 			w.WriteHeader(500)
@@ -133,7 +153,7 @@ func TestGitHubPRBackfillServerErrorsNeverUseLocalPolicy(t *testing.T) {
 	for _, status := range []int{404, 409, 503} {
 		t.Run(fmt.Sprint(status), func(t *testing.T) {
 			requests := 0
-			cityPath := useCentralPRTestServer(t, func(w http.ResponseWriter, _ *http.Request) {
+			cityPath := useCentralPRTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
 				requests++
 				w.Header().Set("Content-Type", "application/problem+json")
 				w.WriteHeader(status)
@@ -157,7 +177,7 @@ func TestGitHubPRActionPreservesExactAttemptAndRejectsUnknownOrMismatchedReceipt
 	for _, variant := range []string{"verified", "unknown", "wrong-base", "stale"} {
 		t.Run(variant, func(t *testing.T) {
 			requests := 0
-			cityPath := useCentralPRTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+			cityPath := useCentralPRTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 				requests++
 				if r.Method != http.MethodPost || r.URL.Path != "/v0/city/test-city/pr-actions" {
 					t.Error("action unexpectedly queried or changed its supplied revision")
@@ -215,7 +235,7 @@ func TestGitHubPRActionPreservesExactAttemptAndRejectsUnknownOrMismatchedReceipt
 
 func TestGitHubPRActionsRespectAPIDisableAndMergeDeferral(t *testing.T) {
 	requests := 0
-	cityPath := useCentralPRTestServer(t, func(w http.ResponseWriter, _ *http.Request) { requests++; w.WriteHeader(500) })
+	cityPath := useCentralPRTestClient(t, func(w http.ResponseWriter, _ *http.Request) { requests++; w.WriteHeader(500) })
 	t.Setenv("GC_NO_API", "1")
 	var out, errOut bytes.Buffer
 	if code := run([]string{"--city", cityPath, "github", "pr", "backfill", "--create-repair-beads"}, &out, &errOut); code == 0 {

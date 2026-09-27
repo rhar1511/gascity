@@ -288,6 +288,11 @@ func releaseOrphanedPoolAssignments(
 		if wb.Status != "open" && wb.Status != "in_progress" {
 			continue
 		}
+		if lifecycleProtectedWork(wb, cfg) {
+			// The lifecycle controller owns enrolled work's recovery budget and
+			// owner decision. A generic orphan sweep cannot release or replace it.
+			continue
+		}
 		workStoreRef := ""
 		if storeRefAware {
 			workStoreRef = assignedWorkStoreRefs[i]
@@ -387,6 +392,10 @@ func releaseOrphanedPoolAssignments(
 		if !allowsRelease {
 			continue
 		}
+		if err := captureWorkbenchBeforeAssignmentRelease(context.Background(), cityPath, cfg, ownerStore, sessionStore.Store, wb); err != nil {
+			log.Printf("releaseOrphanedPoolAssignments: leaving execution %s assigned because attempt evidence capture failed: %v", wb.ID, err)
+			continue
+		}
 		if !releaseOrphanedPoolAssignment(ownerStore, wb, clearDetached) {
 			continue
 		}
@@ -442,6 +451,7 @@ func releaseConfirmedOrphanSessionWork(
 	assignedWorkBeads []beads.Bead,
 	assignedWorkStores []beads.Store,
 	info session.Info,
+	cityPaths ...string,
 ) []releasedPoolAssignment {
 	if cfg == nil || store == nil || len(assignedWorkBeads) == 0 {
 		return nil
@@ -455,10 +465,19 @@ func releaseConfirmedOrphanSessionWork(
 	if len(identifiers) == 0 {
 		return nil
 	}
+	cityPath := ""
+	if len(cityPaths) > 0 {
+		cityPath = strings.TrimSpace(cityPaths[0])
+	}
 
 	var released []releasedPoolAssignment
 	for i, wb := range assignedWorkBeads {
 		if wb.Status != "open" && wb.Status != "in_progress" {
+			continue
+		}
+		if lifecycleProtectedWork(wb, cfg) {
+			// This path runs only after the runtime is confirmed dead, but release
+			// still needs the explicit lifecycle recovery authorization and budget.
 			continue
 		}
 		assignee := strings.TrimSpace(wb.Assignee)
@@ -488,6 +507,10 @@ func releaseConfirmedOrphanSessionWork(
 		}
 		allowsRelease, clearDetached := detachedProbeAllowsOrphanRelease(wb)
 		if !allowsRelease {
+			continue
+		}
+		if err := captureWorkbenchBeforeAssignmentRelease(context.Background(), cityPath, cfg, ownerStore, store, wb); err != nil {
+			log.Printf("releaseConfirmedOrphanSessionWork: leaving execution %s assigned because attempt evidence capture failed: %v", wb.ID, err)
 			continue
 		}
 		if !releaseOrphanedPoolAssignment(ownerStore, wb, clearDetached) {

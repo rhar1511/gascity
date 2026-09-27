@@ -23,6 +23,7 @@ import {
   getV0CityByCityNameStatus,
   getV0CityByCityNameUsage,
   getV0CityByCityNameWorkflowByWorkflowId,
+  listV0CityByCityNameBeadByIdAttemptEvidence,
   patchV0CityByCityNameBeadById,
   postV0CityByCityNameBeadByIdClose,
   postV0CityByCityNameSling,
@@ -38,6 +39,7 @@ import type {
   Bead,
   BeadCreateInputBody,
   BeadUpdateBody,
+  Evidence,
   FormulaFeedBody,
   GetV0CityByCityNameBeadsData,
   GetV0CityByCityNameEventsData,
@@ -180,6 +182,7 @@ export interface SupervisorApi {
     format?: SessionTranscriptFormat,
   ): Promise<SessionTranscriptGetResponse>;
   prActionQueue(cityName: string, signal?: AbortSignal): Promise<PrActionQueue>;
+  listAttemptEvidence(cityName: string, workID: string, signal?: AbortSignal): Promise<Evidence[]>;
   executePRAction(
     cityName: string,
     body: WorkbenchPRActionBody,
@@ -558,6 +561,20 @@ export function createSupervisorApi(options: CreateSupervisorApiOptions = {}): S
         }) as Promise<SupervisorResult<PrActionQueue>>,
         'gc supervisor PR action queue response was empty',
       );
+    },
+    async listAttemptEvidence(cityName, workID, signal) {
+      const rows = await unwrapSupervisorResult<Evidence[] | null>(
+        listV0CityByCityNameBeadByIdAttemptEvidence({
+          client,
+          path: { cityName, id: workID },
+          ...(signal === undefined ? {} : { signal }),
+        }) as Promise<SupervisorResult<Evidence[] | null>>,
+        'gc supervisor attempt-evidence list response was empty',
+      );
+      if (!Array.isArray(rows)) {
+        throw new SupervisorApiError(undefined, 'gc supervisor attempt-evidence list was malformed', undefined);
+      }
+      return rows;
     },
     executePRAction(cityName, body, idempotencyKey) {
       if ((body as PrActionExecuteBody).action === 'merge') {

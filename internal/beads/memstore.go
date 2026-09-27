@@ -292,6 +292,9 @@ func (m *MemStore) Update(id string, opts UpdateOpts) error {
 	if i < 0 {
 		return fmt.Errorf("updating bead %q: %w", id, ErrNotFound)
 	}
+	if err := ValidateLifecycleMutation(m.beads[i], opts); err != nil {
+		return fmt.Errorf("updating lifecycle bead %q: %w", id, err)
+	}
 	m.applyUpdateLocked(i, opts)
 	return nil
 }
@@ -328,6 +331,9 @@ func (m *MemStore) Close(id string) error {
 			if m.beads[i].Status == "closed" {
 				return nil
 			}
+			if err := ValidateLifecycleClose(m.beads[i]); err != nil {
+				return fmt.Errorf("closing lifecycle bead %q: %w", id, err)
+			}
 			setBeadStatus(&m.beads[i], "closed")
 			m.beads[i].UpdatedAt = time.Now()
 			m.beads[i].Revision++
@@ -346,6 +352,10 @@ func (m *MemStore) Reopen(id string) error {
 		if m.beads[i].ID == id {
 			if m.beads[i].Status == "open" && !m.beads[i].IndefinitelyDeferred {
 				return nil
+			}
+			open := "open"
+			if err := ValidateLifecycleMutation(m.beads[i], UpdateOpts{Status: &open}); err != nil {
+				return fmt.Errorf("reopening lifecycle bead %q: %w", id, err)
 			}
 			wasClosed := m.beads[i].Status == "closed"
 			setBeadStatus(&m.beads[i], "open")
@@ -370,6 +380,18 @@ func (m *MemStore) CloseAll(ids []string, metadata map[string]string) (int, erro
 	idSet := make(map[string]bool, len(ids))
 	for _, id := range ids {
 		idSet[id] = true
+	}
+	for i := range m.beads {
+		if !idSet[m.beads[i].ID] || m.beads[i].Status == "closed" {
+			continue
+		}
+		if err := ValidateLifecycleClose(m.beads[i]); err != nil {
+			return 0, fmt.Errorf("closing lifecycle bead %q: %w", m.beads[i].ID, err)
+		}
+		closedStatus := "closed"
+		if err := ValidateLifecycleMutation(m.beads[i], UpdateOpts{Status: &closedStatus, Metadata: metadata}); err != nil {
+			return 0, fmt.Errorf("closing lifecycle bead %q: %w", m.beads[i].ID, err)
+		}
 	}
 	closed := 0
 	for i := range m.beads {
@@ -582,6 +604,9 @@ func (m *MemStore) SetMetadata(id, key, value string) error {
 	defer m.mu.Unlock()
 	for i, b := range m.beads {
 		if b.ID == id {
+			if err := ValidateLifecycleMutation(b, UpdateOpts{Metadata: map[string]string{key: value}}); err != nil {
+				return fmt.Errorf("setting lifecycle metadata on %q: %w", id, err)
+			}
 			if b.Metadata == nil {
 				m.beads[i].Metadata = make(map[string]string)
 			}
@@ -603,6 +628,9 @@ func (m *MemStore) SetMetadataBatch(id string, kvs map[string]string) error {
 	defer m.mu.Unlock()
 	for i, b := range m.beads {
 		if b.ID == id {
+			if err := ValidateLifecycleMutation(b, UpdateOpts{Metadata: kvs}); err != nil {
+				return fmt.Errorf("setting lifecycle metadata batch on %q: %w", id, err)
+			}
 			if b.Metadata == nil {
 				m.beads[i].Metadata = make(map[string]string)
 			}
@@ -671,6 +699,9 @@ func (m *MemStore) Delete(id string) error {
 	defer m.mu.Unlock()
 	for i, b := range m.beads {
 		if b.ID == id {
+			if err := protectAttemptEvidenceDelete(b); err != nil {
+				return err
+			}
 			m.beads = append(m.beads[:i], m.beads[i+1:]...)
 			delete(m.localStrings, id)
 			return nil

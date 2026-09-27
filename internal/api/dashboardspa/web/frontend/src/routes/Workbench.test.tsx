@@ -7,7 +7,10 @@ import { invalidate } from '../api/cache';
 import { NowProvider } from '../contexts/NowContext';
 import type { SupervisorBead } from '../supervisor/beadReads';
 import type { WorkbenchPRActionBody } from '../supervisor/client';
+import { createHash } from 'node:crypto';
+import { gzipSync } from 'node:zlib';
 import type {
+  Evidence,
   PrActionQueue,
   PrActionResult,
   RequestReceipt,
@@ -29,6 +32,8 @@ let queueReadErrors = 0;
 let prActionResponses: Array<{ status: number; body: unknown }> = [];
 let sessionRequestResponses: Array<{ status: number; body: unknown }> = [];
 let sessionRequestReceipt: RequestReceipt | null = null;
+let attemptEvidenceRows: Evidence[] = [];
+let readPaths: string[] = [];
 const supervisorWrites: Array<{
   method: string;
   path: string;
@@ -50,14 +55,18 @@ beforeEach(() => {
   prActionResponses = [];
   sessionRequestResponses = [];
   sessionRequestReceipt = null;
+  attemptEvidenceRows = [];
+  readPaths = [];
   window.localStorage.clear();
   setStub({ kind: 'ok', beads: [sampleBead()] });
   invalidate('workbench:queue:');
+  invalidate('workbench:attempt-evidence:');
   vi.stubGlobal(
     'fetch',
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = parsedUrl(input);
       const method = requestMethod(input, init);
+      readPaths.push(url.pathname);
       const beadMatch = /^\/v0\/city\/test-city\/bead\/([^/]+)$/.exec(url.pathname);
       if (url.pathname === '/v0/city/test-city/pr-actions/queue' && method === 'GET') {
         if (queueReadErrors > 0) {
@@ -148,6 +157,19 @@ beforeEach(() => {
       }
       if (url.pathname === '/v0/city/test-city/sessions' && method === 'GET') {
         return jsonResponse({ items: stubSessions, total: stubSessions.length });
+      }
+      const transcriptMatch = /^\/v0\/city\/test-city\/session\/([^/]+)\/transcript$/.exec(
+        url.pathname,
+      );
+      if (transcriptMatch && method === 'GET') {
+        return jsonResponse({
+          session_id: decodeURIComponent(transcriptMatch[1] ?? ''),
+          format: 'conversation',
+          turns: [],
+        });
+      }
+      if (/^\/v0\/city\/test-city\/bead\/[^/]+\/attempt-evidence$/.test(url.pathname) && method === 'GET') {
+        return jsonResponse(attemptEvidenceRows);
       }
       if (/\/attempts\/diff$/.test(url.pathname) && method === 'GET') {
         return jsonResponse({
@@ -454,7 +476,97 @@ describe('WorkbenchPage', () => {
         running: true,
         active_bead: 'gascity-0001',
         created_at: '2026-01-02T00:00:00Z',
+        execution_generation: 7,
       },
+      {
+        id: 's-old',
+        session_name: 'worker-old',
+        state: 'completed',
+        running: false,
+        active_bead: 'gascity-0001',
+        created_at: '2026-01-01T00:00:00Z',
+        execution_generation: 3,
+      },
+    ];
+    attemptEvidenceRows = [
+      workbenchEvidence({
+        attemptId: 'ae-old-attempt',
+        sessionId: 's-old',
+        sessionGeneration: '3',
+        baseSha: 'base-old',
+        candidateSha: 'candidate-old',
+        patch: 'diff --git a/old.txt b/old.txt\n+archived old revision\n',
+        workspacePatch: 'mutable workspace edit must stay separate',
+      }),
+      workbenchEvidence({
+        attemptId: 'ae-current-attempt',
+        sessionId: 's-active',
+        sessionGeneration: '7',
+        baseSha: 'base-current',
+        candidateSha: 'candidate-current',
+        patch: 'diff --git a/current.txt b/current.txt\n+current revision\n',
+      }),
+    ];
+    renderPage('/workbench?bead=gascity-0001');
+    fireEvent.click(await screen.findByRole('button', { name: /inspect worker-old/i }));
+    const panel = screen.getByLabelText('Execution attempt');
+    expect(within(panel).getAllByText(/worker-old/).length).toBeGreaterThan(0);
+    expect(within(panel).queryByRole('button', { name: /send/i })).toBeNull();
+    expect(screen.queryByLabelText('Pull request actions')).toBeNull();
+    const archive = await within(panel).findByLabelText('Archived attempt evidence');
+    expect(readPaths).toContain('/v0/city/test-city/bead/gascity-0001/attempt-evidence');
+    expect(archive.textContent).toContain('ae-old-attempt');
+    expect(archive.textContent).toContain('base-old');
+    expect(archive.textContent).toContain('candidate-old');
+    expect(await within(archive).findByText(/\+archived old revision/)).toBeTruthy();
+    expect(archive.textContent).not.toContain('mutable workspace edit must stay separate');
+    const facets = within(archive).getByLabelText('Captured evidence facets');
+    expect(facets.textContent).toContain('Acknowledgements');
+    expect(facets.textContent).toContain('unavailable');
+    expect(archive.textContent).toContain('no_server_proven_attempt_attribution');
+    expect(readPaths.filter((path) => path.endsWith('/attempts/diff'))).toHaveLength(1);
+  });
+
+  it('requires an explicit choice when multiple archives match one exact session generation', async () => {
+    stubSessions = [
+      {
+        id: 's-old',
+        session_name: 'worker-old',
+        state: 'completed',
+        running: false,
+        active_bead: 'gascity-0001',
+        created_at: '2026-01-01T00:00:00Z',
+        execution_generation: 3,
+      },
+    ];
+    attemptEvidenceRows = [
+      workbenchEvidence({
+        attemptId: 'ae-choice-one',
+        executionBeadId: 'attempt-row-one',
+        sessionId: 's-old',
+        sessionGeneration: '3',
+        patch: 'first exact archive',
+      }),
+      workbenchEvidence({
+        attemptId: 'ae-choice-two',
+        executionBeadId: 'attempt-row-two',
+        sessionId: 's-old',
+        sessionGeneration: '3',
+        patch: 'second exact archive',
+      }),
+    ];
+    renderPage('/workbench?bead=gascity-0001');
+    fireEvent.click(await screen.findByRole('button', { name: /inspect worker-old/i }));
+    const selector = await screen.findByLabelText('Choose archived attempt');
+    expect(selector).toHaveProperty('value', '');
+    expect(screen.queryByText('first exact archive')).toBeNull();
+    fireEvent.change(selector, { target: { value: 'ae-choice-two' } });
+    expect(await screen.findByText(/second exact archive/)).toBeTruthy();
+    expect(screen.queryByText('first exact archive')).toBeNull();
+  });
+
+  it('does not infer a missing session generation when locating historical evidence', async () => {
+    stubSessions = [
       {
         id: 's-old',
         session_name: 'worker-old',
@@ -464,11 +576,18 @@ describe('WorkbenchPage', () => {
         created_at: '2026-01-01T00:00:00Z',
       },
     ];
+    attemptEvidenceRows = [
+      workbenchEvidence({
+        attemptId: 'ae-generation-required',
+        sessionId: 's-old',
+        sessionGeneration: '1',
+        patch: 'must not be selected by a guessed generation',
+      }),
+    ];
     renderPage('/workbench?bead=gascity-0001');
     fireEvent.click(await screen.findByRole('button', { name: /inspect worker-old/i }));
-    const panel = screen.getByLabelText('Execution attempt');
-    expect(within(panel).getAllByText(/worker-old/).length).toBeGreaterThan(0);
-    expect(within(panel).queryByRole('button', { name: /send/i })).toBeNull();
+    expect(await screen.findByText(/valid execution generation is unavailable/i)).toBeTruthy();
+    expect(screen.queryByText('must not be selected by a guessed generation')).toBeNull();
   });
 
   it('does not offer PR actions without a Gas City queue, policy and conflict verdict', async () => {
@@ -880,6 +999,76 @@ function sampleBead(): SupervisorBead {
     assignee: 'mayor',
     labels: [],
     created_at: '2026-01-01T00:00:00Z',
+  };
+}
+
+function workbenchEvidence(options: {
+  attemptId: string;
+  sessionId: string;
+  sessionGeneration: string;
+  patch: string;
+  workspacePatch?: string;
+  baseSha?: string;
+  candidateSha?: string;
+  executionBeadId?: string;
+}): Evidence {
+  const compressPatch = (patch: string) => {
+    const bundle = Buffer.from(
+      JSON.stringify({ tracked_patch: Buffer.from(patch).toString('base64') }),
+    );
+    const compressed = gzipSync(bundle);
+    return {
+      encoding: 'gzip+json',
+      payload: compressed.toString('base64'),
+      sha256: createHash('sha256').update(compressed).digest('hex'),
+      source: 'candidate_commit_delta',
+      status: 'available',
+      uncompressed_bytes: bundle.length,
+    };
+  };
+  const baseSha = options.baseSha ?? 'base-commit-sha';
+  const candidateSha = options.candidateSha ?? 'candidate-commit-sha';
+  return {
+    acknowledgements: {
+      status: 'unavailable',
+      reason: 'no_server_proven_attempt_attribution',
+    },
+    actions: { status: 'unavailable', reason: 'action_receipt_not_linked' },
+    attempt_id: options.attemptId,
+    base_sha: baseSha,
+    base_status: 'available',
+    candidate_sha: candidateSha,
+    candidate_status: 'available',
+    captured_at: '2026-01-03T00:00:00Z',
+    diff: compressPatch(options.patch),
+    identity: {
+      kind: 'workbench',
+      owner_bead_id: 'gascity-0001',
+      execution_bead_id: options.executionBeadId ?? 'execution-row',
+      session_id: options.sessionId,
+      session_generation: options.sessionGeneration,
+      claim_generation: `claim-${options.sessionGeneration}`,
+    },
+    outcome: 'completed',
+    permission_scope: {
+      store_ref: 'rig:gascity',
+      work_id: 'gascity-0001',
+      repository_root: '/repo',
+      workspace_root: '/repo/worktree',
+    },
+    policy: { status: 'unavailable', reason: 'policy_verdict_not_linked_to_attempt' },
+    redaction: { status: 'unavailable', reason: 'redaction_not_performed' },
+    schema_version: 1,
+    source_status: 'available',
+    store_ref: 'rig:gascity',
+    working_tree_status: options.workspacePatch === undefined ? 'clean' : 'dirty',
+    workspace_diff:
+      options.workspacePatch === undefined
+        ? { status: 'unavailable', source: 'working_tree', reason: 'no_mutable_workspace_diff' }
+        : {
+            ...compressPatch(options.workspacePatch),
+            source: 'working_tree',
+          },
   };
 }
 

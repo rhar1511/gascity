@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -13,6 +14,14 @@ import (
 
 // ErrNotFound is returned when a bead ID does not exist in the store.
 var ErrNotFound = errors.New("bead not found")
+
+// ErrLifecycleMutationBlocked reports an attempted generic update that would
+// reopen lifecycle-enrolled work or clear its durable controller evidence.
+var ErrLifecycleMutationBlocked = errors.New("lifecycle-enrolled work cannot be reopened or have controller evidence cleared")
+
+// ErrLifecycleCompletionRequired reports an ordinary close of lifecycle source
+// work that lacks the controller's verified conditional-completion path.
+var ErrLifecycleCompletionRequired = errors.New("lifecycle source work requires verified completion before close")
 
 // ErrIDCollision is returned when bd's fuzzy/substring resolver returns a bead
 // whose ID differs from the requested ID (e.g. "gcy-dv7" resolves to
@@ -74,12 +83,19 @@ var ErrBDSilentFallback = errors.New("bd silent fallback to on-disk auto-import"
 // Bead is a single unit of work in Gas City. Everything is a bead: tasks,
 // mail, molecules, convoys.
 type Bead struct {
-	ID        string    `json:"id"`
-	Title     string    `json:"title"`
-	Status    string    `json:"status"`     // "open", "in_progress", "closed"
-	Type      string    `json:"issue_type"` // "task" default; matches bd wire format
-	Priority  *int      `json:"priority,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
+	ID string `json:"id"`
+	// SourceStoreRef is populated only by federated readers that know which
+	// authoritative store supplied a row. It is transient read provenance and
+	// is never persisted by a bead store.
+	SourceStoreRef string `json:"-"`
+	// LifecycleScope is a city-namespaced scope carried only by gc ready's
+	// trusted wire projection. It is never persisted by a bead store.
+	LifecycleScope string    `json:"-"`
+	Title          string    `json:"title"`
+	Status         string    `json:"status"`     // "open", "in_progress", "closed"
+	Type           string    `json:"issue_type"` // "task" default; matches bd wire format
+	Priority       *int      `json:"priority,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
 	// UpdatedAt is zero for legacy beads; UpdatedBefore falls back to CreatedAt.
 	UpdatedAt time.Time `json:"updated_at,omitempty,omitzero"`
 	Assignee  string    `json:"assignee,omitempty"`
@@ -222,6 +238,81 @@ type UpdateOpts struct {
 	Labels       []string // append these labels (nil = no change)
 	RemoveLabels []string // remove these labels (nil = no change)
 	Metadata     map[string]string
+}
+
+// HasLifecycleEvidence reports controller lifecycle enrollment persisted on
+// the bead. It excludes the removable intent label by design.
+func HasLifecycleEvidence(b Bead) bool {
+	if HasLifecycleAdmissionReceipt(b) {
+		return true
+	}
+	for _, key := range []string{
+		beadmeta.LifecycleMaterializationMetadataKey,
+		beadmeta.LifecycleCompletionReceiptMetadataKey,
+		beadmeta.LifecycleRecoveryStateMetadataKey,
+	} {
+		if strings.TrimSpace(b.Metadata[key]) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// HasLifecycleAdmissionReceipt reports durable source enrollment. The receipt
+// need not parse or verify here: malformed non-empty evidence still protects
+// the source from ordinary close and mutation paths.
+func HasLifecycleAdmissionReceipt(b Bead) bool {
+	return b.Metadata[beadmeta.LifecycleAdmissionReceiptMetadataKey] != ""
+}
+
+// ValidateLifecycleClose rejects ordinary close operations on an enrolled
+// source bead. The controller's receipt-verified completion path uses
+// CloseIfMatch directly after verifying the signed receipt and expected row
+// revision; graph workflow roots and descendants do not carry the source
+// admission receipt and keep their normal step-completion behavior.
+func ValidateLifecycleClose(current Bead) error {
+	if !strings.EqualFold(strings.TrimSpace(current.Status), "closed") && HasLifecycleAdmissionReceipt(current) {
+		return ErrLifecycleCompletionRequired
+	}
+	return nil
+}
+
+// ValidateLifecycleMutation keeps generic updates from erasing durable
+// enrollment, reopening a lifecycle record, or closing source work without
+// verified acceptance. An intentional retry must be represented as a
+// separately authorized fresh work item.
+func ValidateLifecycleMutation(current Bead, opts UpdateOpts) error {
+	if opts.Status != nil && strings.EqualFold(strings.TrimSpace(*opts.Status), "closed") &&
+		!strings.EqualFold(strings.TrimSpace(current.Status), "closed") && HasLifecycleAdmissionReceipt(current) {
+		return ErrLifecycleCompletionRequired
+	}
+	if !HasLifecycleEvidence(current) {
+		return nil
+	}
+	if opts.Status != nil && strings.EqualFold(strings.TrimSpace(current.Status), "closed") &&
+		!strings.EqualFold(strings.TrimSpace(*opts.Status), "closed") {
+		return ErrLifecycleMutationBlocked
+	}
+	if opts.Status != nil && !strings.EqualFold(strings.TrimSpace(current.Status), "open") &&
+		strings.EqualFold(strings.TrimSpace(*opts.Status), "open") {
+		return ErrLifecycleMutationBlocked
+	}
+	for _, key := range []string{
+		beadmeta.LifecycleAdmissionReceiptMetadataKey,
+		beadmeta.LifecycleMaterializationMetadataKey,
+		beadmeta.LifecycleCompletionReceiptMetadataKey,
+		beadmeta.LifecycleRecoveryStateMetadataKey,
+	} {
+		currentValue := strings.TrimSpace(current.Metadata[key])
+		if key == beadmeta.LifecycleAdmissionReceiptMetadataKey && current.Metadata[key] != "" {
+			currentValue = current.Metadata[key]
+		}
+		if _, supplied := opts.Metadata[key]; supplied && currentValue != "" &&
+			strings.TrimSpace(opts.Metadata[key]) == "" {
+			return ErrLifecycleMutationBlocked
+		}
+	}
+	return nil
 }
 
 // ConditionalAssignmentReleaser is implemented by stores that can release an
