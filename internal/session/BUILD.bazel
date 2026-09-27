@@ -165,8 +165,8 @@ go_test(
     ],
     embed = [":session"],
     deps = [
-        "//internal/bazeltest",
         "//internal/attemptevidence",
+        "//internal/bazeltest",
         "//internal/beadmeta",
         "//internal/beads",
         "//internal/beads/beadstest",

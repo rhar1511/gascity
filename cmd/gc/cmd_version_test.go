@@ -1,8 +1,12 @@
 package main
 
 import (
+	"context"
 	"runtime/debug"
+	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/qualification"
 )
 
 func TestNormalizeVersion(t *testing.T) {
@@ -159,4 +163,73 @@ func TestResolveBuildMetadataDirtinessFollowsCommitIdentity(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestBuildIdentityFromStampsRequiresFullKnownSourceIdentity(t *testing.T) {
+	const revision = "0123456789abcdef0123456789abcdef01234567"
+	clean := buildIdentityFromStamps(revision, "false", "1.2.3")
+	if clean.Status != qualification.StatusAvailable || clean.SourceDirty || clean.BuildID != revision {
+		t.Fatalf("clean identity = %#v, want exact clean revision", clean)
+	}
+	dirty := buildIdentityFromStamps(revision, "true", "1.2.3")
+	if dirty.Status != qualification.StatusUnavailable || !dirty.SourceDirty || dirty.Reason != "controller_build_dirty" {
+		t.Fatalf("dirty identity = %#v, want unavailable identity marked dirty", dirty)
+	}
+	for _, tc := range []struct {
+		name     string
+		revision string
+		dirty    string
+		version  string
+	}{
+		{name: "abbreviated revision", revision: "0123456", dirty: "false", version: "1.2.3"},
+		{name: "missing version", revision: revision, dirty: "false"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			identity := buildIdentityFromStamps(tc.revision, tc.dirty, tc.version)
+			if identity.Status != qualification.StatusUnavailable {
+				t.Fatalf("identity = %#v, want unavailable", identity)
+			}
+		})
+	}
+	unknown := buildIdentityFromStamps(revision, "unknown", "1.2.3")
+	if unknown.Status != qualification.StatusUnavailable || unknown.SourceDirty || unknown.Reason != "source_cleanliness_unavailable" {
+		t.Fatalf("unknown cleanliness identity = %#v, want unavailable and not clean", unknown)
+	}
+
+	invalidArtifact := clean
+	invalidArtifact.ArtifactStatus = qualification.StatusAvailable
+	invalidArtifact.ArtifactSHA256 = strings.Repeat("a", 63)
+	if _, err := qualification.Authorize(context.Background(), staticQualificationAuthorizer{}, validQualificationSnapshot(t), invalidArtifact); err == nil {
+		t.Fatal("Authorize accepted a malformed running-artifact digest")
+	}
+}
+
+type staticQualificationAuthorizer struct{}
+
+func (staticQualificationAuthorizer) Authorize(_ context.Context, _ qualification.ReleaseRequest) (qualification.Authorization, error) {
+	return qualification.Authorization{Status: qualification.StatusAuthorized, IdentitySHA: strings.Repeat("b", 64), RecordID: "release-1"}, nil
+}
+
+func validQualificationSnapshot(t *testing.T) qualification.Snapshot {
+	t.Helper()
+	closure := qualification.InputClosure{
+		SchemaVersion:  qualification.SchemaVersion,
+		Status:         qualification.StatusAvailable,
+		EnvironmentSHA: strings.Repeat("c", 64),
+		Roots: []qualification.InputRoot{{
+			ID: "city", Kind: "city", PinStatus: "content",
+			ResolvedPathSHA256: strings.Repeat("a", 64),
+			InputsSHA256:       strings.Repeat("b", 64), InputCount: 1,
+		}},
+	}
+	var err error
+	closure.SHA256, err = qualification.InputClosureDigest(closure)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := qualification.NewSnapshot(map[string]string{"name": "city"}, closure)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return snapshot
 }

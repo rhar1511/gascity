@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/orderdispatch"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/qualification"
 	"github.com/gastownhall/gascity/internal/rollout"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/supervisor"
@@ -46,6 +47,13 @@ type MaintenanceProvider interface {
 	// is held it returns *supervisor.MaintenanceInProgressError so the
 	// POST handler can translate to 409 Conflict.
 	TriggerNow(ctx context.Context) (supervisor.MaintenanceRun, error)
+}
+
+// QualificationProvider is an optional controller capability used by the
+// per-city health endpoint. Keeping it separate from State leaves existing
+// State implementations compatible; absence is reported as unavailable.
+type QualificationProvider interface {
+	QualificationReport() qualification.ControllerReport
 }
 
 // State provides read access to controller-managed state.

@@ -1,50 +1,22 @@
 package core
 
 import (
+	"errors"
 	"io/fs"
-	"strings"
 	"testing"
-
-	"github.com/BurntSushi/toml"
 )
 
-func TestSoftwareFactoryFormulaCarriesIndependentGates(t *testing.T) {
-	data, err := fs.ReadFile(PackFS, "formulas/mol-software-factory.toml")
-	if err != nil {
-		t.Fatalf("read software-factory formula: %v", err)
-	}
-	var parsed formulaFile
-	if _, err := toml.Decode(string(data), &parsed); err != nil {
-		t.Fatalf("decode software-factory formula: %v", err)
-	}
-	if parsed.Formula != "mol-software-factory" {
-		t.Fatalf("formula = %q", parsed.Formula)
-	}
-	for _, step := range []string{
-		"collect-signals", "bounded-lookback", "human-digest", "implement-candidate",
-		"independent-review", "factory-gate", "deliver-authorized-change",
+// Private workflows are supplied only by an explicit consuming-city import.
+func TestFactoryWorkflowsRequireExplicitPackImport(t *testing.T) {
+	for _, path := range []string{
+		"formulas/mol-software-factory.toml",
+		"formulas/mol-rsi-candidate.toml",
+		"skills/gc-factory/SKILL.md",
 	} {
-		if !strings.Contains(string(data), `id = "`+step+`"`) {
-			t.Errorf("formula missing step %q", step)
-		}
-	}
-	if !strings.Contains(string(data), "fail closed if it equals the rig root") {
-		t.Error("implementation step does not enforce rig-root isolation")
-	}
-	if !strings.Contains(strings.Join(strings.Fields(string(data)), " "), "publish, approve, merge, deploy, close, reply, and notify") {
-		t.Error("formula does not preserve separate delivery gates")
-	}
-}
-
-func TestSoftwareFactorySkillIsEmbedded(t *testing.T) {
-	data, err := fs.ReadFile(PackFS, "skills/gc-factory/SKILL.md")
-	if err != nil {
-		t.Fatalf("read gc-factory skill: %v", err)
-	}
-	text := string(data)
-	for _, want := range []string{".agent-factory/config.yaml", "gc worktree verify", "independent", "Publish, approve, merge, deploy"} {
-		if !strings.Contains(text, want) {
-			t.Errorf("gc-factory skill missing %q", want)
-		}
+		t.Run(path, func(t *testing.T) {
+			if _, err := fs.Stat(PackFS, path); !errors.Is(err, fs.ErrNotExist) {
+				t.Fatalf("embedded private workflow %q: got %v, want missing until its pack is imported", path, err)
+			}
+		})
 	}
 }

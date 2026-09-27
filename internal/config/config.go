@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/pricing"
+	"github.com/gastownhall/gascity/internal/qualification"
 	"github.com/gastownhall/gascity/internal/remotesource"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 )
@@ -451,6 +452,9 @@ type City struct {
 	// CityPricing preserves the city-level pricing layer before Pricing is
 	// flattened for legacy callers. Runtime-only.
 	CityPricing []pricing.ModelPricing `toml:"-" json:"-"`
+
+	qualificationInputs   qualification.InputClosure `toml:"-" json:"-"`
+	qualificationSnapshot *qualification.Snapshot    `toml:"-" json:"-"`
 }
 
 // NamedSession defines a canonical persistent session backed by an agent

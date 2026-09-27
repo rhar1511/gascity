@@ -2198,6 +2198,9 @@ func startOneCity(
 		recordInitFailure(cityName, fmt.Sprintf("init: %v", err))
 		return
 	}
+	// prepareCityForSupervisor resolves relative rig paths before the config is
+	// published to the per-city controller and health endpoint.
+	config.RefreshQualificationSnapshot(cfg, prov)
 
 	runPostPrepareStep := func(status string, fn func() error) error {
 		cr.BatchUpdate(func(
@@ -2745,7 +2748,7 @@ func publishManagedCity(cr *cityRegistry, path string, mc *managedCity) bool {
 }
 
 func loadSupervisorCityConfig(cityPath string) (*config.City, *config.Provenance, error) {
-	return loadCityConfigWithBuiltinPacks(cityPath)
+	return loadCityConfigWithBuiltinPacksOptions(cityPath, config.LoadOptions{CaptureQualificationInputs: true})
 }
 
 // prepareCityForSupervisor runs the critical city initialization steps

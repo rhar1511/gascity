@@ -1750,7 +1750,12 @@ func TestDisableAndPurgeRejectsUnprovenPeerSuccessor(t *testing.T) {
 			}
 			deps.disableUploaderWait = 2 * testutil.GoroutineRaceTimeout
 			service := mustOpenTestService(t, deps)
+			attempts := make(chan struct{}, 1)
+			service.deps.beforeDisableUploaderLock = func() { attempts <- struct{}{} }
 			call := startDisableAndPurge(t, service)
+			// Wait for the disable token's exact read-back before replacing its state.
+			// The held uploader lock keeps cleanup behind the peer mutation below.
+			receiveUploaderAttempt(t, attempts)
 			owner := waitForMetricsState(t, home, func(state persistedState) bool {
 				return state.Preference == preferenceDisabled && state.CleanupKind == cleanupDisable
 			})

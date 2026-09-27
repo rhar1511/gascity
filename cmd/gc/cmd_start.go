@@ -742,6 +742,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		return 1
 	}
 	applyFeatureFlags(cfg)
+	applyRuntimeCityIdentity(cfg, loadedCityName(cfg, cityPath))
 	fatalWarnings, nonFatalWarnings := splitStrictConfigWarnings(prov.Warnings)
 	// Strict mode (default) promotes strict-eligible config warnings to errors.
 	if strictMode && len(fatalWarnings) > 0 {
@@ -787,7 +788,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 
 	// Resolve rig paths and run the full bead store lifecycle:
 	// probe → init+hooks(city) → init+hooks(rigs) → routes.
-	resolveRigPaths(cityPath, cfg.Rigs)
+	resolveRigPathsAndRefreshQualification(cityPath, cfg, prov)
 	if err := startBeadsLifecycle(cityPath, cityName, cfg, stderr); err != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", err)                      //nolint:errcheck // best-effort stderr
 		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
@@ -1115,7 +1116,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 }
 
 func loadStartCityConfig(cityPath string) (*config.City, *config.Provenance, error) {
-	return loadCityConfigWithBuiltinPacks(cityPath, extraConfigFiles...)
+	return loadCityConfigWithBuiltinPacksOptions(cityPath, config.LoadOptions{CaptureQualificationInputs: true}, extraConfigFiles...)
 }
 
 // printDryRunPreview prints what agents would be started without starting them.

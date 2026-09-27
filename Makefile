@@ -24,10 +24,14 @@ INSTALL_DIR := $(BIN_DIR)
 VERSION    := $(shell tag=$$(git describe --tags --exact-match 2>/dev/null || true); if [ -n "$$tag" ]; then printf '%s' "$$tag" | sed 's/^v//'; else echo "dev"; fi)
 COMMIT     := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 DIRTY      := $(shell test -n "$$(git status --porcelain 2>/dev/null)" && echo "-dirty" || true)
+SOURCE_REVISION := $(shell git rev-parse --verify HEAD^{commit} 2>/dev/null || echo "unknown")
+SOURCE_DIRTY    := $(shell status=$$(git status --porcelain 2>/dev/null); result=$$?; if [ $$result -ne 0 ]; then echo "unknown"; elif [ -n "$$status" ]; then echo "true"; else echo "false"; fi)
 BUILD_TIME := $(shell git show -s --format=%cI HEAD 2>/dev/null || echo unknown)
 
 LDFLAGS := -X main.version=$(VERSION) \
            -X main.commit=$(COMMIT)$(DIRTY) \
+           -X main.sourceRevision=$(SOURCE_REVISION) \
+           -X main.sourceDirty=$(SOURCE_DIRTY) \
            -X main.date=$(BUILD_TIME)
 
 unique_words = $(if $1,$(firstword $1) $(call unique_words,$(filter-out $(firstword $1),$1)))

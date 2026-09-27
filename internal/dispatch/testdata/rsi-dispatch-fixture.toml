@@ -1,0 +1,47 @@
+# Generic controller fixture for compiled retry, judge and promotion behavior.
+# Production workflow assets and their compilation checks belong to their pack.
+formula = "rsi-dispatch-fixture"
+
+[requires]
+formula_compiler = ">=2.0.0"
+
+[vars.improver_target]
+required = true
+
+[vars.correctness_target]
+required = true
+
+[vars.performance_target]
+required = true
+
+[[steps]]
+id = "produce-candidate"
+title = "Produce test candidate"
+metadata = { "gc.run_target" = "{{improver_target}}", "gc.rsi_role" = "improver", "gc.output_json_schema" = "rsi.candidate-proposal.v1", "gc.output_json_required" = "true" }
+[steps.retry]
+max_attempts = 3
+on_exhausted = "hard_fail"
+
+[[steps]]
+id = "judge-correctness"
+title = "Review test correctness"
+needs = ["produce-candidate"]
+metadata = { "gc.run_target" = "{{correctness_target}}", "gc.rsi_role" = "judge", "gc.output_json_schema" = "review-quorum.lane.v1", "gc.output_json_required" = "true", "gc.rsi_judge_kind" = "correctness" }
+[steps.retry]
+max_attempts = 2
+on_exhausted = "soft_fail"
+
+[[steps]]
+id = "judge-performance"
+title = "Review test performance"
+needs = ["produce-candidate"]
+metadata = { "gc.run_target" = "{{performance_target}}", "gc.rsi_role" = "judge", "gc.output_json_schema" = "review-quorum.lane.v1", "gc.output_json_required" = "true", "gc.rsi_judge_kind" = "performance" }
+[steps.retry]
+max_attempts = 2
+on_exhausted = "soft_fail"
+
+[[steps]]
+id = "promote-gate"
+title = "Evaluate signed test evidence"
+needs = ["produce-candidate", "judge-correctness", "judge-performance"]
+metadata = { "gc.kind" = "rsi-promotion-gate", "gc.rsi_role" = "gate", "gc.output_json_schema" = "rsi.decision.v1", "gc.output_json_required" = "true" }

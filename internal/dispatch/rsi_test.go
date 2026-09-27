@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -24,13 +25,21 @@ import (
 	"github.com/gastownhall/gascity/internal/rsipolicy"
 )
 
-func TestCompiledRSIFormulaWiresTrustedGateToCandidateAndBothJudges(t *testing.T) {
+// These test-only inputs let a workflow pack run the same controller
+// conformance assertions against its own exact formula source.
+var (
+	rsiTestFormulaDir    = flag.String("rsi-test-formula-dir", "testdata", "Directory containing the RSI conformance formula")
+	rsiTestFormulaName   = flag.String("rsi-test-formula-name", "rsi-dispatch-fixture", "RSI conformance formula name")
+	rsiTestFormulaSHA256 = flag.String("rsi-test-formula-sha256", "", "Required exact source digest when using an external RSI formula")
+)
+
+func TestRSIFormulaConformanceWiresTrustedGateToCandidateAndBothJudges(t *testing.T) {
 	recipe := compileRSIRecipe(t)
-	gateID := "mol-rsi-candidate.promote-gate"
+	gateID := recipe.Name + ".promote-gate"
 	want := []string{
-		"mol-rsi-candidate.produce-candidate",
-		"mol-rsi-candidate.judge-correctness",
-		"mol-rsi-candidate.judge-performance",
+		recipe.Name + ".produce-candidate",
+		recipe.Name + ".judge-correctness",
+		recipe.Name + ".judge-performance",
 	}
 	got := map[string]bool{}
 	for _, dep := range recipe.Deps {
@@ -45,7 +54,7 @@ func TestCompiledRSIFormulaWiresTrustedGateToCandidateAndBothJudges(t *testing.T
 	}
 }
 
-func TestCompiledFormulaRuntimePromotesOnlyFromSignedTrustedEvaluation(t *testing.T) {
+func TestRSIFormulaConformancePromotesOnlyFromSignedTrustedEvaluation(t *testing.T) {
 	recipe := compileRSIRecipe(t)
 	store := beads.NewMemStore()
 	result, err := molecule.Instantiate(context.Background(), store, recipe, molecule.Options{Vars: rsiFormulaVars()})
@@ -54,11 +63,11 @@ func TestCompiledFormulaRuntimePromotesOnlyFromSignedTrustedEvaluation(t *testin
 	}
 	pair := testBundlePair()
 	candidateRaw := forgedRSICandidateOutput(t, pair)
-	candidateControlID := result.IDMapping["mol-rsi-candidate.produce-candidate"]
-	candidateAttempt1ID := result.IDMapping["mol-rsi-candidate.produce-candidate.attempt.1"]
+	candidateControlID := result.IDMapping[recipe.Name+".produce-candidate"]
+	candidateAttempt1ID := result.IDMapping[recipe.Name+".produce-candidate.attempt.1"]
 	judges := []rsipolicy.JudgeRecord{
-		{BeadID: result.IDMapping["mol-rsi-candidate.judge-correctness.attempt.1"], ControlBeadID: result.IDMapping["mol-rsi-candidate.judge-correctness"], ActorID: "judge-correctness", SessionID: "session-correctness", Status: "closed", Outcome: "pass", Lane: passingRSILane("correctness", "judge-correctness")},
-		{BeadID: result.IDMapping["mol-rsi-candidate.judge-performance.attempt.1"], ControlBeadID: result.IDMapping["mol-rsi-candidate.judge-performance"], ActorID: "judge-performance", SessionID: "session-performance", Status: "closed", Outcome: "pass", Lane: passingRSILane("performance", "judge-performance")},
+		{BeadID: result.IDMapping[recipe.Name+".judge-correctness.attempt.1"], ControlBeadID: result.IDMapping[recipe.Name+".judge-correctness"], ActorID: "judge-correctness", SessionID: "session-correctness", Status: "closed", Outcome: "pass", Lane: passingRSILane("correctness", "judge-correctness")},
+		{BeadID: result.IDMapping[recipe.Name+".judge-performance.attempt.1"], ControlBeadID: result.IDMapping[recipe.Name+".judge-performance"], ActorID: "judge-performance", SessionID: "session-performance", Status: "closed", Outcome: "pass", Lane: passingRSILane("performance", "judge-performance")},
 	}
 	for i := range judges {
 		judges[i].RawOutput = mustJSON(t, judges[i].Lane)
@@ -67,10 +76,7 @@ func TestCompiledFormulaRuntimePromotesOnlyFromSignedTrustedEvaluation(t *testin
 	for _, judge := range judges {
 		setRSIWorkerEvidence(t, store, judge.BeadID, judge.ActorID, judge.SessionID, judge.RawOutput)
 	}
-	formulaDir, err := filepath.Abs(filepath.Join("..", "bootstrap", "packs", "core", "formulas"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	formulaDir := filepath.Dir(recipe.FormulaSource)
 	candidateID := processRSIRetryToSecondAttempt(t, store, candidateControlID, formulaDir, "improver", "session-improver", candidateRaw)
 	for _, controlID := range []string{judges[0].ControlBeadID, judges[1].ControlBeadID} {
 		processPassingRSIRetry(t, store, controlID)
@@ -104,7 +110,7 @@ func TestCompiledFormulaRuntimePromotesOnlyFromSignedTrustedEvaluation(t *testin
 	}, Judges: judges}); err != nil {
 		t.Fatalf("resolve signed evaluation before dispatch: %v", err)
 	}
-	gateID := result.IDMapping["mol-rsi-candidate.promote-gate"]
+	gateID := result.IDMapping[recipe.Name+".promote-gate"]
 	gate, err := store.Get(gateID)
 	if err != nil {
 		t.Fatalf("load compiled gate: %v", err)
@@ -317,14 +323,47 @@ func TestRSIGateRejectsUnknownEvaluatorAuthorityClass(t *testing.T) {
 
 func compileRSIRecipe(t *testing.T) *formula.Recipe {
 	t.Helper()
-	formulaDir, err := filepath.Abs(filepath.Join("..", "bootstrap", "packs", "core", "formulas"))
+	formulaDir, err := filepath.Abs(*rsiTestFormulaDir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	recipe, err := formula.CompileWithoutRuntimeVarValidation(context.Background(), "mol-rsi-candidate", []string{formulaDir}, rsiFormulaVars())
-	if err != nil {
-		t.Fatalf("compile mol-rsi-candidate: %v", err)
+	name := *rsiTestFormulaName
+	if name == "" || name == "." || name == ".." || filepath.Base(name) != name {
+		t.Fatal("RSI conformance formula must have a simple filename stem")
 	}
+	data, err := os.ReadFile(filepath.Join(formulaDir, name+".toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(data)
+	actualSHA := hex.EncodeToString(digest[:])
+	supplied := map[string]bool{}
+	flag.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "rsi-test-formula-dir", "rsi-test-formula-name", "rsi-test-formula-sha256":
+			supplied[f.Name] = true
+		}
+	})
+	if len(supplied) != 0 {
+		if len(supplied) != 3 || len(*rsiTestFormulaSHA256) != 64 || *rsiTestFormulaSHA256 != actualSHA {
+			t.Fatalf("RSI conformance formula digest = %s; external input requires explicit directory, name and matching canonical SHA256", actualSHA)
+		}
+	}
+	sourcePath := filepath.Join(formulaDir, name+".toml")
+	// Compile and retry from the verified bytes, so a later change to the
+	// caller's source path cannot change the recipe under qualification.
+	formulaDir = t.TempDir()
+	if err := os.WriteFile(filepath.Join(formulaDir, name+".toml"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	recipe, err := formula.CompileWithoutRuntimeVarValidation(context.Background(), name, []string{formulaDir}, rsiFormulaVars())
+	if err != nil {
+		t.Fatalf("compile RSI conformance formula %q: %v", name, err)
+	}
+	if recipe.Name != name || recipe.ContentHash != actualSHA {
+		t.Fatalf("compiled formula identity = %q/%s, want %q/%s", recipe.Name, recipe.ContentHash, name, actualSHA)
+	}
+	t.Logf("RSI conformance source=%s sha256=%s", sourcePath, actualSHA)
 	return recipe
 }
 
