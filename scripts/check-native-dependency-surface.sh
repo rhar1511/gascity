@@ -12,16 +12,22 @@ set -euo pipefail
 # of the OpenAPI stack links into gc -- only bd's internal/httpapi/apigen imports
 # it, which the root beads package never reaches.
 max_modules="${GC_NATIVE_DEP_MAX_MODULES:-737}"
-# max_binary_bytes re-baselined 2026-08-29 (ga-iuznq2). The build below now
-# adds -trimpath and CGO_ENABLED=0, which removes cross-host path-embedding
-# and native C-object (dolthub/gozstd, ICU) variance that previously made
-# this cap non-deterministic between machines. Measured 172,098,757 bytes on
-# this host, corroborating an independent 172,098,813 measured elsewhere
-# (within 56 bytes -- residual build-id/timestamp noise). First-party code
-# grows the binary ~90KB/day, so 180,000,000 gives ~88 days of headroom.
+# max_binary_bytes re-baselined 2026-09-27 (gp-olwhg.9). Matching Go 1.26.6
+# CGO_ENABLED=0 builds with -trimpath -buildvcs=false measured 177,910,874
+# bytes at fork baseline 284fd816f and 180,252,726 at 18943f295. The latter
+# is within 24 bytes of CI's normal VCS-stamped build (180,252,750).
+# go.mod/go.sum are identical across that comparison; the 2,341,852-byte
+# increase is primarily .text (1,068,672), .gopclntab (493,403), .rodata
+# (244,864), and debug/symbol tables for the new controller APIs/lifecycle.
+# The previous measured baseline was 172,098,757 on 2026-08-29 (ga-iuznq2).
+# Its 29-day growth to the pre-task fork baseline is about 200,418 bytes/day.
+# 187,000,000 leaves 6,747,250 bytes (~33.7 days at that observed rate),
+# rounding a 30-day planning allowance up to the next decimal MB. This
+# short-window historical rate is an estimate, not a forecast guarantee.
+# Keep -trimpath and CGO_ENABLED=0 below: they remove path/native-C variance.
 # Re-baseline with fresh measurement + growth-rate evidence, not an
 # arbitrary bump, when this next fails.
-max_binary_bytes="${GC_NATIVE_DEP_MAX_BINARY_BYTES:-180000000}"
+max_binary_bytes="${GC_NATIVE_DEP_MAX_BINARY_BYTES:-187000000}"
 max_aws_modules="${GC_NATIVE_DEP_MAX_AWS_MODULES:-25}"
 max_azure_modules="${GC_NATIVE_DEP_MAX_AZURE_MODULES:-9}"
 max_dolthub_modules="${GC_NATIVE_DEP_MAX_DOLTHUB_MODULES:-15}"
