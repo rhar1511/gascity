@@ -101,8 +101,9 @@ func TestCapturePreservesExactAttemptAfterOwnerDeleteAndStoreRestart(t *testing.
 	if !samePayload(first, got) {
 		t.Fatal("reopened archive did not return the exact sealed payload")
 	}
+	canonicalRepo := canonicalEvidenceTestPath(t, repo)
 	if first.Permission.StoreRef != spec.StoreRef || first.Permission.WorkID != owner.ID ||
-		first.Permission.RepositoryRoot != filepath.Join(repo, ".git") || first.Permission.WorkspaceRoot != repo {
+		first.Permission.RepositoryRoot != filepath.Join(canonicalRepo, ".git") || first.Permission.WorkspaceRoot != canonicalRepo {
 		t.Fatalf("captured permission scope = %+v, want exact repo/work/store scope", first.Permission)
 	}
 	backupDir := filepath.Join(t.TempDir(), "backup")
@@ -244,7 +245,7 @@ func TestMissingWorkspaceKeepsOnlyCanonicalRepositoryPermissionScope(t *testing.
 	if err != nil {
 		t.Fatalf("Capture missing worktree: %v", err)
 	}
-	if evidence.SourceStatus != StatusMissing || evidence.Permission.RepositoryRoot != filepath.Join(repo, ".git") || evidence.Permission.WorkspaceRoot != missingWorkspace {
+	if evidence.SourceStatus != StatusMissing || evidence.Permission.RepositoryRoot != filepath.Join(canonicalEvidenceTestPath(t, repo), ".git") || evidence.Permission.WorkspaceRoot != missingWorkspace {
 		t.Fatalf("missing-source status/scope = %q %+v", evidence.SourceStatus, evidence.Permission)
 	}
 }
@@ -452,12 +453,10 @@ func TestPermissionScopeUsesCanonicalSeparateGitDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Capture separate git directory: %v", err)
 	}
-	resolvedCommonDir, err := filepath.EvalSymlinks(commonDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if evidence.Permission.RepositoryRoot != resolvedCommonDir || evidence.Permission.WorkspaceRoot != workspace {
-		t.Fatalf("permission scope = %+v, want canonical common dir %q and worktree %q", evidence.Permission, resolvedCommonDir, workspace)
+	resolvedCommonDir := canonicalEvidenceTestPath(t, commonDir)
+	canonicalWorkspace := canonicalEvidenceTestPath(t, workspace)
+	if evidence.Permission.RepositoryRoot != resolvedCommonDir || evidence.Permission.WorkspaceRoot != canonicalWorkspace {
+		t.Fatalf("permission scope = %+v, want canonical common dir %q and worktree %q", evidence.Permission, resolvedCommonDir, canonicalWorkspace)
 	}
 }
 
@@ -478,8 +477,10 @@ func TestPermissionScopeMapsConfiguredRepositoryRootToLinkedWorktree(t *testing.
 	if err != nil {
 		t.Fatalf("Capture linked worktree: %v", err)
 	}
-	if evidence.Permission.RepositoryRoot != filepath.Join(repo, ".git") || evidence.Permission.WorkspaceRoot != workspace {
-		t.Fatalf("permission scope = %+v, want shared common dir %q and linked worktree %q", evidence.Permission, filepath.Join(repo, ".git"), workspace)
+	canonicalRepo := canonicalEvidenceTestPath(t, repo)
+	canonicalWorkspace := canonicalEvidenceTestPath(t, workspace)
+	if evidence.Permission.RepositoryRoot != filepath.Join(canonicalRepo, ".git") || evidence.Permission.WorkspaceRoot != canonicalWorkspace {
+		t.Fatalf("permission scope = %+v, want shared common dir %q and linked worktree %q", evidence.Permission, filepath.Join(canonicalRepo, ".git"), canonicalWorkspace)
 	}
 }
 
@@ -708,6 +709,15 @@ func TestArchiveRecordsAreNotReadyOrWorkflowCandidates(t *testing.T) {
 			t.Fatalf("archive %s entered Ready", row.ID)
 		}
 	}
+}
+
+func canonicalEvidenceTestPath(t *testing.T, path string) string {
+	t.Helper()
+	canonical, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatalf("canonicalize fixture path %q: %v", path, err)
+	}
+	return canonical
 }
 
 func newEvidenceRepo(t *testing.T) (string, string) {

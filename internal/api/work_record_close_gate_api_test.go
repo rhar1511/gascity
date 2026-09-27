@@ -272,7 +272,11 @@ func TestAPIBeadRetirementCapturesWorkbenchAttemptBeforeClosing(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read archived attempt after close: %v", err)
 			}
-			if evidence.Identity.SessionGeneration != "6" || evidence.Permission.RepositoryRoot != filepath.Join(repoDir, ".git") {
+			canonicalRepoDir, err := filepath.EvalSymlinks(repoDir)
+			if err != nil {
+				t.Fatalf("canonicalize fixture repository: %v", err)
+			}
+			if evidence.Identity.SessionGeneration != "6" || evidence.Permission.RepositoryRoot != filepath.Join(canonicalRepoDir, ".git") {
 				t.Fatalf("captured attempt identity/scope = %+v %+v", evidence.Identity, evidence.Permission)
 			}
 		})
