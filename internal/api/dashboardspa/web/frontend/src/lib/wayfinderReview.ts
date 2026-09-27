@@ -35,7 +35,7 @@ export function resolveWayfinderReview(bead: SupervisorBead): WayfinderReview {
   const metadata = (bead as { metadata?: Record<string, string> }).metadata ?? {};
   const optedIn =
     /\breview\s*:\s*lavish\s+axi\b/i.test(bead.description ?? '') ||
-    metadata['gc.wayfinder_review_mode'] === 'lavish' ||
+    metadata['gc.wayfinder_review_mode']?.toLowerCase() === 'lavish' ||
     metadata[WAYFINDER_REVIEW_URL_KEY] !== undefined ||
     metadata[PROTOTYPE_URL_KEY] !== undefined;
   const eligible =
@@ -43,6 +43,7 @@ export function resolveWayfinderReview(bead: SupervisorBead): WayfinderReview {
     (Array.isArray(bead.labels) && bead.labels.includes('wayfinder:prototype'));
   const mode =
     metadata['gc.wayfinder_review_mode']?.toLowerCase() === 'lavish' ||
+    metadata[WAYFINDER_REVIEW_URL_KEY] !== undefined ||
     /\breview\s*:\s*lavish\s+axi\b/i.test(bead.description ?? '')
       ? 'lavish'
       : 'conversation';

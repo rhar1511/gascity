@@ -34,6 +34,17 @@ describe('resolveWayfinderReview', () => {
     expect(result.reviewUrl).toBe('http://127.0.0.1:4173/session/abc');
   });
 
+  it('treats a published local review URL as Lavish mode without a separate flag', () => {
+    const result = resolveWayfinderReview({
+      ...epic,
+      description: 'A Wayfinder map without a review-mode note yet.',
+      metadata: { 'gc.wayfinder_review_url': 'http://localhost:4173/session/map' },
+    } as SupervisorBead);
+    expect(result.eligible).toBe(true);
+    expect(result.mode).toBe('lavish');
+    expect(result.reviewLinkState).toBe('ready');
+  });
+
   it('rejects remote and credentialed review links and unsafe prototype URLs', () => {
     const result = resolveWayfinderReview({
       ...epic,
