@@ -1,22 +1,28 @@
 package core
 
 import (
+	"context"
 	"io/fs"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/BurntSushi/toml"
+	"github.com/gastownhall/gascity/internal/formula"
 )
 
 // formulaFile is the subset of a formula TOML these tests inspect. Steps carry
 // the agent-facing instructions, so asserting on a step description is how the
 // pack pins behavior that lives in prompt text rather than in Go.
 type formulaFile struct {
-	Formula string `toml:"formula"`
+	Formula string   `toml:"formula"`
+	Extends []string `toml:"extends"`
 	Steps   []struct {
-		ID          string `toml:"id"`
-		Title       string `toml:"title"`
-		Description string `toml:"description"`
+		ID          string            `toml:"id"`
+		Title       string            `toml:"title"`
+		Description string            `toml:"description"`
+		Metadata    map[string]string `toml:"metadata"`
 	} `toml:"steps"`
 }
 
@@ -386,4 +392,76 @@ func TestRSIFormulaPinsCandidateJudgeAndGateSeparation(t *testing.T) {
 			t.Fatalf("promote-gate step missing %q", required)
 		}
 	}
+}
+
+func TestRSIStoryFormulaRequiresIndependentBenchmark(t *testing.T) {
+	formula := readFormula(t, "mol-rsi-story-candidate.toml")
+	if formula.Formula != "mol-rsi-story-candidate" || len(formula.Extends) != 1 || formula.Extends[0] != "mol-rsi-candidate" {
+		t.Fatalf("story formula inheritance = %+v", formula)
+	}
+	benchmark := formulaStep(t, formula, "judge-story-benchmark")
+	if !strings.Contains(benchmark, "harness independent") || !strings.Contains(benchmark, "{{benchmark_command}}") || !strings.Contains(benchmark, "candidate-authored scores") {
+		t.Fatalf("benchmark step lacks independent trace contract: %s", benchmark)
+	}
+	gate := formulaStep(t, formula, "promote-gate")
+	if !strings.Contains(gate, "story regression") || !strings.Contains(gate, "critical case") {
+		t.Fatalf("gate lacks story veto contract: %s", gate)
+	}
+	for _, step := range formula.Steps {
+		if step.ID == "promote-gate" && step.Metadata["gc.rsi_story_benchmark_required"] != "true" {
+			t.Fatalf("gate metadata does not require benchmark: %+v", step.Metadata)
+		}
+	}
+}
+
+func TestRSIStoryFormulaResolvesFiveStepGraph(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"mol-rsi-candidate.toml", "mol-rsi-story-candidate.toml"} {
+		raw, err := fs.ReadFile(PackFS, "formulas/"+name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	parser := formula.NewParser(dir)
+	child, err := parser.LoadByName("mol-rsi-story-candidate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := parser.Resolve(child)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resolved.Steps) != 5 {
+		t.Fatalf("resolved steps = %d, want 5", len(resolved.Steps))
+	}
+	if authority := resolved.Vars["authority_class"]; authority == nil || !authority.Required || authority.Default != nil {
+		t.Fatalf("story authority class must be explicit: %+v", authority)
+	}
+	for _, step := range resolved.Steps {
+		if step.ID != "promote-gate" {
+			continue
+		}
+		if len(step.Needs) != 3 || step.Metadata["gc.rsi_story_benchmark_required"] != "true" {
+			t.Fatalf("resolved gate does not depend on benchmark: %+v", step)
+		}
+		previous := formula.IsFormulaV2Enabled()
+		formula.SetFormulaV2Enabled(true)
+		defer formula.SetFormulaV2Enabled(previous)
+		_, err := formula.Compile(context.Background(), "mol-rsi-story-candidate", []string{dir}, map[string]string{
+			"objective": "improve night session stopping cue", "work_dir": "/tmp/bead-worktree",
+			"rig_root": "/tmp/rig", "current_bundle_id": "bundle-1",
+			"eval_suite_hash": "suite-hash", "improver_target": "improver",
+			"correctness_target": "correctness", "performance_target": "performance",
+			"story_suite_path": "/tmp/suite.json", "benchmark_target": "benchmark",
+			"benchmark_command": "/tmp/rsistorybench", "authority_class": "workflow",
+		})
+		if err != nil {
+			t.Fatalf("compile story formula: %v", err)
+		}
+		return
+	}
+	t.Fatal("resolved formula lost promote-gate")
 }

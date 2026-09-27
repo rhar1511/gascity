@@ -3,19 +3,27 @@ package dispatch
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/reviewquorum"
 	"github.com/gastownhall/gascity/internal/rsipolicy"
+	"github.com/gastownhall/gascity/internal/storybench"
 )
 
 const (
-	rsiCandidateEvidenceMissing   = "rsi_candidate_evidence_missing"
-	rsiCandidateEvidenceAmbiguous = "rsi_candidate_evidence_ambiguous"
-	rsiCandidateEvidenceMalformed = "rsi_candidate_evidence_malformed"
-	rsiJudgeEvidenceMalformed     = "rsi_judge_evidence_malformed"
+	rsiCandidateEvidenceMissing    = "rsi_candidate_evidence_missing"
+	rsiCandidateEvidenceAmbiguous  = "rsi_candidate_evidence_ambiguous"
+	rsiCandidateEvidenceMalformed  = "rsi_candidate_evidence_malformed"
+	rsiJudgeEvidenceMalformed      = "rsi_judge_evidence_malformed"
+	rsiBenchmarkEvidenceAmbiguous  = "rsi_benchmark_evidence_ambiguous"
+	rsiBenchmarkEvidenceMalformed  = "rsi_benchmark_evidence_malformed"
+	rsiBenchmarkRequirementInvalid = "rsi_benchmark_requirement_invalid"
+	rsiBenchmarkSuiteInvalid       = "rsi_benchmark_suite_invalid"
+	rsiBenchmarkEvidenceInvalid    = "rsi_benchmark_evidence_invalid"
 )
 
 // processRSIPromotionGate evaluates the durable candidate and independent judge
@@ -29,6 +37,7 @@ func processRSIPromotionGate(store beads.Store, bead beads.Bead, _ ProcessOption
 
 	candidateCount := 0
 	var candidate rsipolicy.CandidateEvidence
+	var benchmark *storybench.Evidence
 	var lanes []reviewquorum.LaneOutput
 	for _, dep := range deps {
 		if dep.Type != "blocks" && dep.Type != "" {
@@ -62,6 +71,19 @@ func processRSIPromotionGate(store beads.Store, bead beads.Bead, _ ProcessOption
 				}, beadmeta.OutcomeFail, "rsi-reject")
 			}
 			lanes = append(lanes, lane)
+		case beadmeta.RSIRoleBenchmark:
+			if benchmark != nil {
+				return closeRSIPromotionGate(store, bead, rsipolicy.Decision{
+					Reason: rsiBenchmarkEvidenceAmbiguous, Reasons: []string{rsiBenchmarkEvidenceAmbiguous},
+				}, beadmeta.OutcomeFail, "rsi-reject")
+			}
+			var evidence storybench.Evidence
+			if err := decodeRSIJSON(dependency, &evidence); err != nil {
+				return closeRSIPromotionGate(store, bead, rsipolicy.Decision{
+					Reason: rsiBenchmarkEvidenceMalformed, Reasons: []string{rsiBenchmarkEvidenceMalformed},
+				}, beadmeta.OutcomeFail, "rsi-reject")
+			}
+			benchmark = &evidence
 		}
 	}
 
@@ -73,6 +95,44 @@ func processRSIPromotionGate(store beads.Store, bead beads.Bead, _ ProcessOption
 	}
 
 	input := candidate.Input(lanes)
+	requirement := strings.TrimSpace(bead.Metadata[beadmeta.RSIStoryRequiredMetadataKey])
+	if requirement != "" && requirement != "true" && requirement != "false" {
+		return closeRSIPromotionGate(store, bead, rsipolicy.Decision{
+			Reason: rsiBenchmarkRequirementInvalid, Reasons: []string{rsiBenchmarkRequirementInvalid},
+		}, beadmeta.OutcomeFail, "rsi-reject")
+	}
+	input.StoryBenchmarkRequired = requirement == "true"
+	if input.StoryBenchmarkRequired {
+		suitePath := strings.TrimSpace(bead.Metadata[beadmeta.RSISuitePathMetadataKey])
+		expectedHash := strings.TrimSpace(bead.Metadata[beadmeta.RSISuiteHashMetadataKey])
+		expectedParent := strings.TrimSpace(bead.Metadata[beadmeta.RSIParentBundleMetadataKey])
+		if !filepath.IsAbs(suitePath) || expectedHash == "" || expectedParent == "" ||
+			input.Current.ID != expectedParent || input.Current.EvalSuiteHash != expectedHash ||
+			input.Candidate.EvalSuiteHash != expectedHash {
+			return closeRSIPromotionGate(store, bead, rsipolicy.Decision{
+				Reason: rsiBenchmarkSuiteInvalid, Reasons: []string{rsiBenchmarkSuiteInvalid},
+			}, beadmeta.OutcomeFail, "rsi-reject")
+		}
+		rawSuite, err := os.ReadFile(suitePath)
+		if err != nil || storybench.SuiteHash(rawSuite) != expectedHash {
+			return closeRSIPromotionGate(store, bead, rsipolicy.Decision{
+				Reason: rsiBenchmarkSuiteInvalid, Reasons: []string{rsiBenchmarkSuiteInvalid},
+			}, beadmeta.OutcomeFail, "rsi-reject")
+		}
+		if benchmark != nil {
+			result, err := storybench.Evaluate(rawSuite, benchmark.Baseline, benchmark.Candidate, candidate.Improver)
+			if err != nil {
+				return closeRSIPromotionGate(store, bead, rsipolicy.Decision{
+					Reason: rsiBenchmarkEvidenceInvalid, Reasons: []string{rsiBenchmarkEvidenceInvalid},
+				}, beadmeta.OutcomeFail, "rsi-reject")
+			}
+			input.StoryBenchmark = &result
+		}
+	} else if benchmark != nil {
+		return closeRSIPromotionGate(store, bead, rsipolicy.Decision{
+			Reason: rsiBenchmarkRequirementInvalid, Reasons: []string{rsiBenchmarkRequirementInvalid},
+		}, beadmeta.OutcomeFail, "rsi-reject")
+	}
 	// The gate metadata is the authoritative authority class. Candidate workers
 	// may report it for evidence, but they must not be able to downgrade a
 	// human-approval boundary in their own payload.

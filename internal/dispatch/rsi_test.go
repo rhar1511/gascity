@@ -2,12 +2,15 @@ package dispatch
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/reviewquorum"
 	"github.com/gastownhall/gascity/internal/rsipolicy"
+	"github.com/gastownhall/gascity/internal/storybench"
 )
 
 func TestProcessRSIPromotionGatePromotesFromDurableEvidence(t *testing.T) {
@@ -140,6 +143,91 @@ func TestProcessRSIPromotionGateRejectsMissingIndependentJudge(t *testing.T) {
 	after := mustGet(t, store, gate.ID)
 	if after.Metadata[beadmeta.RSIPromoteMetadataKey] != "false" || after.Metadata[beadmeta.RSIReasonMetadataKey] != rsipolicy.ReasonInsufficientJudges {
 		t.Fatalf("gate decision metadata = %v, want rejected for insufficient judges", after.Metadata)
+	}
+}
+
+func TestProcessRSIPromotionGateRequiresIndependentStoryBenchmark(t *testing.T) {
+	store := beads.NewMemStore()
+	evidence := passingRSICandidateEvidence()
+	suite := []byte(`{"version":1,"id":"pilot","cases":[{"id":"night-end","story_id":"INK-001","objective":"end bedtime session","prompt":"user reaches night arc end","required_actions":["end_session"],"max_actions":3}]}`)
+	hash := storybench.SuiteHash(suite)
+	evidence.Current.EvalSuiteHash = hash
+	evidence.Candidate.EvalSuiteHash = hash
+	suitePath := filepath.Join(t.TempDir(), "suite.json")
+	if err := os.WriteFile(suitePath, suite, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	candidate := mustCreate(t, store, beads.Bead{Title: "candidate", Metadata: map[string]string{
+		beadmeta.RSIRoleMetadataKey: beadmeta.RSIRoleImprover, beadmeta.OutputJSONMetadataKey: mustJSON(t, evidence),
+	}})
+	correctness := mustCreate(t, store, beads.Bead{Title: "correctness", Metadata: map[string]string{
+		beadmeta.RSIRoleMetadataKey: beadmeta.RSIRoleJudge, beadmeta.OutputJSONMetadataKey: mustJSON(t, passingRSILane("correctness", "judge-a")),
+	}})
+	performance := mustCreate(t, store, beads.Bead{Title: "performance", Metadata: map[string]string{
+		beadmeta.RSIRoleMetadataKey: beadmeta.RSIRoleJudge, beadmeta.OutputJSONMetadataKey: mustJSON(t, passingRSILane("performance", "judge-b")),
+	}})
+	gate := mustCreate(t, store, beads.Bead{Title: "story gate", Metadata: map[string]string{
+		beadmeta.KindMetadataKey:             beadmeta.KindRSIPromotionGate,
+		beadmeta.RSIStoryRequiredMetadataKey: "true",
+		beadmeta.RSISuitePathMetadataKey:     suitePath,
+		beadmeta.RSISuiteHashMetadataKey:     hash,
+		beadmeta.RSIParentBundleMetadataKey:  evidence.Current.ID,
+	}})
+	for _, child := range []beads.Bead{candidate, correctness, performance} {
+		mustDep(t, store, gate.ID, child.ID, "blocks")
+	}
+	result, err := ProcessControl(store, mustGet(t, store, gate.ID), ProcessOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Action != "rsi-reject" {
+		t.Fatalf("missing story benchmark: %+v", result)
+	}
+	after := mustGet(t, store, gate.ID)
+	if after.Metadata[beadmeta.RSIReasonMetadataKey] != rsipolicy.ReasonStoryBenchmarkMissing {
+		t.Fatalf("reason = %q", after.Metadata[beadmeta.RSIReasonMetadataKey])
+	}
+
+	benchmark := storybench.Evidence{
+		Baseline:  storybench.Run{SuiteSHA256: hash, BundleID: evidence.Current.ID, CapturedBy: "independent-harness", Cases: []storybench.Trace{{CaseID: "night-end"}}},
+		Candidate: storybench.Run{SuiteSHA256: hash, BundleID: evidence.Candidate.ID, CapturedBy: "independent-harness", Cases: []storybench.Trace{{CaseID: "night-end", Actions: []string{"end_session"}}}},
+	}
+	benchmarkBead := mustCreate(t, store, beads.Bead{Title: "story benchmark", Metadata: map[string]string{
+		beadmeta.RSIRoleMetadataKey: beadmeta.RSIRoleBenchmark, beadmeta.OutputJSONMetadataKey: mustJSON(t, benchmark),
+	}})
+	gate2 := mustCreate(t, store, beads.Bead{Title: "story gate with evidence", Metadata: map[string]string{
+		beadmeta.KindMetadataKey:             beadmeta.KindRSIPromotionGate,
+		beadmeta.RSIStoryRequiredMetadataKey: "true",
+		beadmeta.RSISuitePathMetadataKey:     suitePath,
+		beadmeta.RSISuiteHashMetadataKey:     hash,
+		beadmeta.RSIParentBundleMetadataKey:  evidence.Current.ID,
+	}})
+	for _, child := range []beads.Bead{candidate, correctness, performance, benchmarkBead} {
+		mustDep(t, store, gate2.ID, child.ID, "blocks")
+	}
+	result, err = ProcessControl(store, mustGet(t, store, gate2.ID), ProcessOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Action != "rsi-promote" {
+		t.Fatalf("passing story benchmark: %+v", result)
+	}
+	gate3 := mustCreate(t, store, beads.Bead{Title: "story gate with tampered suite pin", Metadata: map[string]string{
+		beadmeta.KindMetadataKey:             beadmeta.KindRSIPromotionGate,
+		beadmeta.RSIStoryRequiredMetadataKey: "true",
+		beadmeta.RSISuitePathMetadataKey:     suitePath,
+		beadmeta.RSISuiteHashMetadataKey:     "tampered",
+		beadmeta.RSIParentBundleMetadataKey:  evidence.Current.ID,
+	}})
+	for _, child := range []beads.Bead{candidate, correctness, performance, benchmarkBead} {
+		mustDep(t, store, gate3.ID, child.ID, "blocks")
+	}
+	result, err = ProcessControl(store, mustGet(t, store, gate3.ID), ProcessOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Action != "rsi-reject" || mustGet(t, store, gate3.ID).Metadata[beadmeta.RSIReasonMetadataKey] != rsiBenchmarkSuiteInvalid {
+		t.Fatalf("tampered suite pin was accepted: %+v", result)
 	}
 }
 
