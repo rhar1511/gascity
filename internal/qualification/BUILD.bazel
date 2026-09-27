@@ -21,16 +21,6 @@ go_test(
     deps = ["//internal/testenv"],
 )
 
-filegroup(
-    name = "bazel_repo_srcs",
-    srcs = glob(
-        ["**"],
-        allow_empty = True,
-        exclude = ["BUILD.bazel"],
-    ),
-    visibility = ["//visibility:public"],
-)
-
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
 
 filegroup(
