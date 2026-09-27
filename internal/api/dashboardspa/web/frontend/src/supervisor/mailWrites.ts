@@ -19,11 +19,12 @@ export interface MailActionTarget {
 export async function sendSupervisorMail(
   draft: MailComposeDraft,
   operatorWireAlias: string,
-): Promise<void> {
-  await supervisorApi().sendMail(activeCityOrThrow('send supervisor mail'), {
+): Promise<{ id: string }> {
+  const message = await supervisorApi().sendMail(activeCityOrThrow('send supervisor mail'), {
     ...draft,
     from: operatorWireAlias,
   });
+  return { id: message.id };
 }
 
 export async function markSupervisorMailRead(message: MailActionTarget): Promise<void> {

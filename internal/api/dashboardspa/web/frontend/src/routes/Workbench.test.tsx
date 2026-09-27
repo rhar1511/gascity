@@ -502,7 +502,9 @@ describe('WorkbenchPage', () => {
 
     const queue = await screen.findByLabelText('Queued messages');
     expect(queue.textContent).toContain('please continue');
-    await waitFor(() => expect(queue.textContent).toContain('awaiting session acknowledgement'));
+    await waitFor(() => expect(queue.textContent).toContain('Mail accepted'));
+    expect(queue.textContent).toContain('Active-session acknowledgement unavailable');
+    expect(queue.textContent).toContain('Mail-read event stream unavailable');
     expect(queue.textContent).not.toContain('delivered');
   });
 
