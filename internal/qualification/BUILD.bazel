@@ -4,6 +4,7 @@ go_library(
     name = "qualification",
     srcs = [
         "canonical.go",
+        "compatibility_action.go",
         "qualification.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/qualification",
@@ -14,6 +15,7 @@ go_test(
     name = "qualification_test",
     srcs = [
         "canonical_test.go",
+        "compatibility_action_test.go",
         "qualification_test.go",
         "testenv_import_test.go",
     ],
