@@ -983,46 +983,110 @@ func TestCopyTo_UsesThreadWorkDir(t *testing.T) {
 	if string(data) != "hello" {
 		t.Fatalf("copied file = %q, want hello", string(data))
 	}
+	if err := p.CopyTo("t3code--crew", srcDir, "tree"); err != nil {
+		t.Fatalf("CopyTo directory: %v", err)
+	}
+	data, err = os.ReadFile(filepath.Join(workDir, "tree", "note.txt"))
+	if err != nil || string(data) != "hello" {
+		t.Fatalf("directory copy = %q, %v; want hello", data, err)
+	}
+	if err := os.Symlink("nested", filepath.Join(workDir, "internal-link")); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.CopyTo("t3code--crew", srcFile, "internal-link/through.txt"); err != nil {
+		t.Fatalf("CopyTo contained relative symlink: %v", err)
+	}
+	data, err = os.ReadFile(filepath.Join(workDir, "nested", "through.txt"))
+	if err != nil || string(data) != "hello" {
+		t.Fatalf("contained symlink copy = %q, %v; want hello", data, err)
+	}
+
+	outsideFile := filepath.Join(t.TempDir(), "outside.txt")
+	if err := os.WriteFile(outsideFile, []byte("original"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	hardLink := filepath.Join(workDir, "nested", "hard-link.txt")
+	if err := os.Link(outsideFile, hardLink); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.CopyTo("t3code--crew", srcFile, "nested/hard-link.txt"); err != nil {
+		t.Fatalf("CopyTo existing hard link: %v", err)
+	}
+	data, err = os.ReadFile(outsideFile)
+	if err != nil || string(data) != "original" {
+		t.Fatalf("CopyTo changed outside hard-link target: data=%q err=%v", data, err)
+	}
+	data, err = os.ReadFile(hardLink)
+	if err != nil || string(data) != "hello" {
+		t.Fatalf("CopyTo did not replace destination entry: data=%q err=%v", data, err)
+	}
 }
 
 func TestCopyTo_RejectsRelDstEscapingWorkDir(t *testing.T) {
-	parent := t.TempDir()
-	workDir := filepath.Join(parent, "work")
-	if err := os.MkdirAll(workDir, 0o755); err != nil {
-		t.Fatalf("mkdir workDir: %v", err)
-	}
-	srcFile := filepath.Join(parent, "note.txt")
-	if err := os.WriteFile(srcFile, []byte("hello"), 0o644); err != nil {
-		t.Fatalf("write src file: %v", err)
-	}
-
-	server := newT3BridgeTestServer(t, map[string]interface{}{
-		"threads": []interface{}{
-			map[string]interface{}{
-				"id":        "thread-1",
-				"projectId": "project-1",
-				"customMetadata": map[string]interface{}{
-					"gc.agent":          "t3code/crew",
-					"gc.sessionName":    "t3code--crew",
-					"gc.startupWorkDir": workDir,
-				},
-			},
-		},
-	})
-	defer server.Close()
-	t.Setenv("T3_BEARER_TOKEN", "test-bearer")
-	t.Setenv("T3_WS_URL", server.wsURL())
-
-	p := &Provider{
-		watchers:     make(map[string]context.CancelFunc),
-		recentStarts: make(map[string]time.Time),
-	}
-
-	if err := p.CopyTo("t3code--crew", srcFile, "../outside.txt"); err != nil {
-		t.Fatalf("CopyTo: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(parent, "outside.txt")); !os.IsNotExist(err) {
-		t.Fatalf("outside file stat err = %v, want not exist", err)
+	for _, tc := range []struct {
+		name            string
+		relDst          string
+		link            string
+		directorySource bool
+	}{
+		{name: "lexical parent", relDst: "../outside/note.txt"},
+		{name: "file symlink", relDst: "file-link", link: "file"},
+		{name: "directory symlink", relDst: "dir-link/note.txt", link: "directory"},
+		{name: "directory destination root symlink", relDst: "dir-link", link: "directory", directorySource: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			parent := t.TempDir()
+			workDir := filepath.Join(parent, "work")
+			outsideDir := filepath.Join(parent, "outside")
+			srcDir := filepath.Join(parent, "input")
+			for _, dir := range []string{workDir, outsideDir, srcDir} {
+				if err := os.Mkdir(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			srcFile := filepath.Join(srcDir, "note.txt")
+			if err := os.WriteFile(srcFile, []byte("hello"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			outsideFile := filepath.Join(outsideDir, "note.txt")
+			if err := os.WriteFile(outsideFile, []byte("original"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			switch tc.link {
+			case "file":
+				if err := os.Symlink(outsideFile, filepath.Join(workDir, "file-link")); err != nil {
+					t.Fatal(err)
+				}
+			case "directory":
+				if err := os.Symlink(outsideDir, filepath.Join(workDir, "dir-link")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			server := newT3BridgeTestServer(t, map[string]interface{}{
+				"threads": []interface{}{map[string]interface{}{
+					"id": "thread-1", "projectId": "project-1",
+					"customMetadata": map[string]interface{}{
+						"gc.agent": "t3code/crew", "gc.sessionName": "t3code--crew", "gc.startupWorkDir": workDir,
+					},
+				}},
+			})
+			defer server.Close()
+			t.Setenv("T3_BEARER_TOKEN", "test-bearer")
+			t.Setenv("T3_WS_URL", server.wsURL())
+			p := &Provider{watchers: make(map[string]context.CancelFunc), recentStarts: make(map[string]time.Time)}
+			src := srcFile
+			if tc.directorySource {
+				src = srcDir
+			}
+			copyErr := p.CopyTo("t3code--crew", src, tc.relDst)
+			data, err := os.ReadFile(outsideFile)
+			if err != nil || string(data) != "original" {
+				t.Fatalf("CopyTo changed a file outside the work directory: data=%q err=%v", data, err)
+			}
+			if copyErr == nil {
+				t.Fatal("CopyTo returned success for a destination outside the work directory")
+			}
+		})
 	}
 }
 

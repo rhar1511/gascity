@@ -668,52 +668,100 @@ func resolveContainedPath(baseDir, relPath string) (string, error) {
 }
 
 func copyFileToPath(src, dstRoot, relDst string) error {
+	base, err := resolveContainedPath(dstRoot, "")
+	if err != nil {
+		return err
+	}
+	root, err := os.OpenRoot(base)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+	return copyFileInRoot(src, root, relDst)
+}
+
+func copyFileInRoot(src string, root *os.Root, relDst string) (retErr error) {
 	src = filepath.Clean(strings.TrimSpace(src))
 	if src == "" || src == "." {
 		return fmt.Errorf("empty source path")
 	}
-	dst, err := resolveContainedPath(dstRoot, relDst)
+	dst, err := resolveContainedPath(root.Name(), relDst)
 	if err != nil {
 		return err
 	}
-
+	rel, err := filepath.Rel(root.Name(), dst)
+	if err != nil {
+		return err
+	}
 	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = in.Close() }()
-
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return err
-	}
-	out, err := os.Create(dst)
+	info, err := in.Stat()
 	if err != nil {
 		return err
 	}
+	if err := root.MkdirAll(filepath.Dir(rel), 0o755); err != nil {
+		return err
+	}
+	// Validate an existing symlink before replacing the destination entry.
+	// Root.Stat rejects links that resolve outside the session work directory.
+	if _, err := root.Stat(rel); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	// Replacing the entry also leaves any hard-linked inode outside the work
+	// directory untouched. Keep the temporary file on the destination's
+	// filesystem so the final rename is atomic.
+	tempRel := filepath.Join(filepath.Dir(rel), ".gc-copy-"+uuid.NewString())
+	out, err := root.OpenFile(tempRel, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := root.Remove(tempRel); err != nil && !errors.Is(err, os.ErrNotExist) {
+			retErr = errors.Join(retErr, fmt.Errorf("removing temporary copy: %w", err))
+		}
+	}()
 	defer func() { _ = out.Close() }()
-
 	if _, err := io.Copy(out, in); err != nil {
+		return err
+	}
+	if err := out.Chmod(info.Mode().Perm()); err != nil {
 		return err
 	}
 	if err := out.Close(); err != nil {
 		return err
 	}
-	if info, err := os.Stat(src); err == nil {
-		_ = os.Chmod(dst, info.Mode())
-	}
-	return nil
+	return root.Rename(tempRel, rel)
 }
 
-func copyDirContents(srcDir, dstDir string) error {
+func copyDirContents(srcDir, dstDir, relDst string) error {
 	srcDir = filepath.Clean(strings.TrimSpace(srcDir))
 	if srcDir == "" || srcDir == "." {
 		return fmt.Errorf("empty source dir")
 	}
-	dstRoot, err := resolveContainedPath(dstDir, "")
+	base, err := resolveContainedPath(dstDir, "")
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(dstRoot, 0o755); err != nil {
+	dst, err := resolveContainedPath(base, relDst)
+	if err != nil {
+		return err
+	}
+	dstRel, err := filepath.Rel(base, dst)
+	if err != nil {
+		return err
+	}
+	// Keep the session work directory as the root even when relDst names a
+	// subdirectory. Opening that subdirectory as a new root would follow an
+	// existing symlink before confinement begins.
+	root, err := os.OpenRoot(base)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+	if err := root.MkdirAll(dstRel, 0o755); err != nil {
 		return err
 	}
 	return filepath.Walk(srcDir, func(path string, info os.FileInfo, err error) error {
@@ -727,14 +775,11 @@ func copyDirContents(srcDir, dstDir string) error {
 		if err != nil {
 			return err
 		}
-		target, err := resolveContainedPath(dstRoot, rel)
-		if err != nil {
-			return err
-		}
+		target := filepath.Join(dstRel, rel)
 		if info.IsDir() {
-			return os.MkdirAll(target, info.Mode())
+			return root.MkdirAll(target, info.Mode().Perm())
 		}
-		return copyFileToPath(path, dstRoot, rel)
+		return copyFileInRoot(path, root, target)
 	})
 }
 
@@ -2963,32 +3008,13 @@ func (p *Provider) CopyTo(name, src, relDst string) error {
 		return nil
 	}
 	if info.IsDir() {
-		dstRoot := workDir
-		if strings.TrimSpace(relDst) != "" {
-			var err error
-			dstRoot, err = resolveContainedPath(workDir, relDst)
-			if err != nil {
-				return nil
-			}
-		}
-		if err := copyDirContents(src, dstRoot); err != nil {
-			return nil
-		}
-		return nil
+		return copyDirContents(src, workDir, relDst)
 	}
-
 	fileRelDst := strings.TrimSpace(relDst)
-	if strings.TrimSpace(relDst) != "" {
-		if _, err := resolveContainedPath(workDir, fileRelDst); err != nil {
-			return nil
-		}
-	} else {
+	if fileRelDst == "" {
 		fileRelDst = filepath.Base(src)
 	}
-	if err := copyFileToPath(src, workDir, fileRelDst); err != nil {
-		return nil
-	}
-	return nil
+	return copyFileToPath(src, workDir, fileRelDst)
 }
 
 // SendKeys is a no-op; T3 sessions do not accept raw key input.
