@@ -224,7 +224,7 @@ func Evaluate(in Input) Decision {
 }
 
 func validStoryBenchmark(result storybench.Result, current, candidate Bundle, improver string) bool {
-	if !result.Eligible || strings.TrimSpace(result.SuiteID) == "" || result.SuiteHash != current.EvalSuiteHash ||
+	if !result.Eligible || strings.TrimSpace(improver) == "" || strings.TrimSpace(result.SuiteID) == "" || result.SuiteHash != current.EvalSuiteHash ||
 		result.SuiteHash != candidate.EvalSuiteHash ||
 		result.BaselineBundleID != current.ID || result.CandidateBundleID != candidate.ID ||
 		result.CriticalFailures != 0 || result.Regressions != 0 || len(result.Cases) == 0 ||

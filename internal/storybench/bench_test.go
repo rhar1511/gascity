@@ -69,6 +69,15 @@ func TestEvaluateFailsClosedOnMissingOrTamperedEvidence(t *testing.T) {
 	}
 }
 
+func TestEvaluateRejectsMissingImproverIdentity(t *testing.T) {
+	hash := SuiteHash([]byte(testSuite))
+	baseline := testRun(hash, "bundle-1", "judge", nil, []string{"offer_exit"})
+	candidate := testRun(hash, "bundle-2", "judge", []string{"end_session"}, []string{"offer_exit"})
+	if _, err := Evaluate([]byte(testSuite), baseline, candidate, ""); err == nil {
+		t.Fatal("missing improver identity accepted")
+	}
+}
+
 func TestEvaluateRejectsUnchangedOrRegressedStory(t *testing.T) {
 	hash := SuiteHash([]byte(testSuite))
 	passing := testRun(hash, "bundle-1", "judge", []string{"end_session"}, []string{"offer_exit"})

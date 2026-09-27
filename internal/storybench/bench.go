@@ -98,6 +98,9 @@ func SuiteHash(raw []byte) string {
 // Evaluate compares the same frozen cases on the accepted and candidate
 // bundles. Invalid or incomplete evidence is an error rather than a score.
 func Evaluate(rawSuite []byte, baseline, candidate Run, improver string) (Result, error) {
+	if strings.TrimSpace(improver) == "" {
+		return Result{}, fmt.Errorf("improver identity missing")
+	}
 	var suite Suite
 	if err := json.Unmarshal(rawSuite, &suite); err != nil {
 		return Result{}, fmt.Errorf("decode story suite: %w", err)
