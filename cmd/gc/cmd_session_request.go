@@ -68,7 +68,7 @@ func sessionRequestClient() (*api.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	client := apiClient(cityPath)
+	client, _ := supervisorFallthroughAPIClient(cityPath)
 	if client == nil {
 		return nil, fmt.Errorf("tracked session requests require the Gas City server")
 	}
