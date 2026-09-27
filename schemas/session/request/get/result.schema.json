@@ -41,6 +41,56 @@
     },
     "ok": {
       "const": true
+    },
+    "attempt": {
+      "additionalProperties": false,
+      "properties": {
+        "attempt_id": {
+          "type": "string"
+        },
+        "identity": {
+          "additionalProperties": false,
+          "properties": {
+            "claim_generation": {
+              "type": "string"
+            },
+            "execution_bead_id": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string"
+            },
+            "owner_bead_id": {
+              "type": "string"
+            },
+            "session_generation": {
+              "type": "string"
+            },
+            "session_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "owner_bead_id",
+            "execution_bead_id"
+          ],
+          "type": "object"
+        },
+        "store_ref": {
+          "type": "string"
+        },
+        "work_revision": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "store_ref",
+        "attempt_id",
+        "work_revision",
+        "identity"
+      ],
+      "type": "object"
     }
   },
   "required": [

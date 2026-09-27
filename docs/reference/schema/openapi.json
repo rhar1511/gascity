@@ -986,7 +986,7 @@
         "additionalProperties": false,
         "properties": {
           "acknowledgements": {
-            "$ref": "#/components/schemas/Facet"
+            "$ref": "#/components/schemas/AttemptRequestRecords"
           },
           "actions": {
             "$ref": "#/components/schemas/AttemptActionRecords"
@@ -995,6 +995,34 @@
         "required": [
           "actions",
           "acknowledgements"
+        ],
+        "type": "object"
+      },
+      "AttemptRequestRecords": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "type": "string"
+          },
+          "records": {
+            "items": {
+              "$ref": "#/components/schemas/RequestReceipt"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "status": {
+            "type": "string"
+          },
+          "unattributed_requests": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "status"
         ],
         "type": "object"
       },
@@ -7611,6 +7639,30 @@
         ],
         "type": "object"
       },
+      "RequestAttemptBinding": {
+        "additionalProperties": false,
+        "properties": {
+          "attempt_id": {
+            "type": "string"
+          },
+          "identity": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "store_ref": {
+            "type": "string"
+          },
+          "work_revision": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "store_ref",
+          "attempt_id",
+          "work_revision",
+          "identity"
+        ],
+        "type": "object"
+      },
       "RequestFailedPayload": {
         "additionalProperties": false,
         "properties": {
@@ -7657,6 +7709,9 @@
           "acknowledged_at": {
             "format": "date-time",
             "type": "string"
+          },
+          "attempt": {
+            "$ref": "#/components/schemas/RequestAttemptBinding"
           },
           "delivery": {
             "type": "string"

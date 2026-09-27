@@ -1154,11 +1154,6 @@ export const zAttemptActionRecords = z.object({
     status: z.string()
 });
 
-export const zAttemptRelatedRecords = z.object({
-    acknowledgements: zFacet,
-    actions: zAttemptActionRecords
-});
-
 export const zPrActionSource = z.object({
     detail: z.string().optional(),
     monitor: z.string(),
@@ -1281,32 +1276,6 @@ export const zPermissionScope = z.object({
     store_ref: z.string(),
     work_id: z.string(),
     workspace_root: z.string().optional()
-});
-
-export const zAttemptEvidenceRead = z.object({
-    acknowledgements: zFacet,
-    actions: zFacet,
-    attempt_id: z.string(),
-    base_reason: z.string().optional(),
-    base_sha: z.string().optional(),
-    base_status: z.string(),
-    candidate_reason: z.string().optional(),
-    candidate_sha: z.string().optional(),
-    candidate_status: z.string(),
-    captured_at: z.iso.datetime(),
-    diff: zDiffSnapshot,
-    identity: zIdentity,
-    outcome: z.string().optional(),
-    permission_scope: zPermissionScope,
-    policy: zFacet,
-    redaction: zFacet,
-    related_records: zAttemptRelatedRecords,
-    schema_version: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
-    source_reason: z.string().optional(),
-    source_status: z.string(),
-    store_ref: z.string().optional(),
-    working_tree_status: z.string(),
-    workspace_diff: zDiffSnapshot
 });
 
 export const zEvidence = z.object({
@@ -1619,6 +1588,13 @@ export const zRecord = z.object({
     source_pid: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional()
 });
 
+export const zRequestAttemptBinding = z.object({
+    attempt_id: z.string(),
+    identity: zIdentity,
+    store_ref: z.string(),
+    work_revision: z.string()
+});
+
 export const zRequestFailedPayload = z.object({
     error_code: z.string(),
     error_message: z.string(),
@@ -1636,6 +1612,7 @@ export const zRequestFailedPayload = z.object({
 export const zRequestReceipt = z.object({
     accepted_at: z.iso.datetime(),
     acknowledged_at: z.iso.datetime().optional(),
+    attempt: zRequestAttemptBinding.optional(),
     delivery: z.string(),
     delivery_attempted_at: z.iso.datetime().optional(),
     effect: z.string(),
@@ -1644,6 +1621,44 @@ export const zRequestReceipt = z.object({
     provider_result_at: z.iso.datetime().optional(),
     request_id: z.string(),
     session_id: z.string()
+});
+
+export const zAttemptRequestRecords = z.object({
+    reason: z.string().optional(),
+    records: z.array(zRequestReceipt).nullish(),
+    status: z.string(),
+    unattributed_requests: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional()
+});
+
+export const zAttemptRelatedRecords = z.object({
+    acknowledgements: zAttemptRequestRecords,
+    actions: zAttemptActionRecords
+});
+
+export const zAttemptEvidenceRead = z.object({
+    acknowledgements: zFacet,
+    actions: zFacet,
+    attempt_id: z.string(),
+    base_reason: z.string().optional(),
+    base_sha: z.string().optional(),
+    base_status: z.string(),
+    candidate_reason: z.string().optional(),
+    candidate_sha: z.string().optional(),
+    candidate_status: z.string(),
+    captured_at: z.iso.datetime(),
+    diff: zDiffSnapshot,
+    identity: zIdentity,
+    outcome: z.string().optional(),
+    permission_scope: zPermissionScope,
+    policy: zFacet,
+    redaction: zFacet,
+    related_records: zAttemptRelatedRecords,
+    schema_version: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    source_reason: z.string().optional(),
+    source_status: z.string(),
+    store_ref: z.string().optional(),
+    working_tree_status: z.string(),
+    workspace_diff: zDiffSnapshot
 });
 
 export const zRigActionBody = z.object({

@@ -1203,8 +1203,16 @@ type AttemptEvidenceRead struct {
 
 // AttemptRelatedRecords defines model for AttemptRelatedRecords.
 type AttemptRelatedRecords struct {
-	Acknowledgements Facet                `json:"acknowledgements"`
-	Actions          AttemptActionRecords `json:"actions"`
+	Acknowledgements AttemptRequestRecords `json:"acknowledgements"`
+	Actions          AttemptActionRecords  `json:"actions"`
+}
+
+// AttemptRequestRecords defines model for AttemptRequestRecords.
+type AttemptRequestRecords struct {
+	Reason               *string           `json:"reason,omitempty"`
+	Records              *[]RequestReceipt `json:"records,omitempty"`
+	Status               string            `json:"status"`
+	UnattributedRequests *int64            `json:"unattributed_requests,omitempty"`
 }
 
 // BackendCredentialResolvedPayload defines model for BackendCredentialResolvedPayload.
@@ -3532,6 +3540,14 @@ type Record struct {
 	SourcePid  *int64             `json:"source_pid,omitempty"`
 }
 
+// RequestAttemptBinding defines model for RequestAttemptBinding.
+type RequestAttemptBinding struct {
+	AttemptId    string   `json:"attempt_id"`
+	Identity     Identity `json:"identity"`
+	StoreRef     string   `json:"store_ref"`
+	WorkRevision string   `json:"work_revision"`
+}
+
 // RequestFailedPayload defines model for RequestFailedPayload.
 type RequestFailedPayload struct {
 	// ErrorCode Machine-readable error code.
@@ -3552,16 +3568,17 @@ type RequestFailedPayloadOperation string
 
 // RequestReceipt defines model for RequestReceipt.
 type RequestReceipt struct {
-	AcceptedAt          time.Time  `json:"accepted_at"`
-	AcknowledgedAt      *time.Time `json:"acknowledged_at,omitempty"`
-	Delivery            string     `json:"delivery"`
-	DeliveryAttemptedAt *time.Time `json:"delivery_attempted_at,omitempty"`
-	Effect              string     `json:"effect"`
-	Generation          int64      `json:"generation"`
-	MessageDigest       string     `json:"message_digest"`
-	ProviderResultAt    *time.Time `json:"provider_result_at,omitempty"`
-	RequestId           string     `json:"request_id"`
-	SessionId           string     `json:"session_id"`
+	AcceptedAt          time.Time              `json:"accepted_at"`
+	AcknowledgedAt      *time.Time             `json:"acknowledged_at,omitempty"`
+	Attempt             *RequestAttemptBinding `json:"attempt,omitempty"`
+	Delivery            string                 `json:"delivery"`
+	DeliveryAttemptedAt *time.Time             `json:"delivery_attempted_at,omitempty"`
+	Effect              string                 `json:"effect"`
+	Generation          int64                  `json:"generation"`
+	MessageDigest       string                 `json:"message_digest"`
+	ProviderResultAt    *time.Time             `json:"provider_result_at,omitempty"`
+	RequestId           string                 `json:"request_id"`
+	SessionId           string                 `json:"session_id"`
 }
 
 // RigActionBody defines model for RigActionBody.

@@ -17,6 +17,21 @@ import (
 // fences cooperating in-process incarnation changes; provider/credential
 // isolation is still required against external writers and runtime replacement.
 func (m *Manager) SubmitRequest(ctx context.Context, id, requestID string, generation int, message string) (RequestReceipt, error) {
+	return m.submitRequest(ctx, id, requestID, generation, message, nil)
+}
+
+// SubmitRequestForAttempt accepts controller-verified attempt attribution and
+// uses the same live-only, single-send protocol as SubmitRequest. The caller
+// must verify the authoritative work record before supplying the binding;
+// this method additionally fences the session generation and reciprocal claim.
+func (m *Manager) SubmitRequestForAttempt(ctx context.Context, id, requestID string, generation int, message string, binding RequestAttemptBinding) (RequestReceipt, error) {
+	if !validRequestAttemptBinding(binding, id, generation) {
+		return RequestReceipt{}, ErrRequestConflict
+	}
+	return m.submitRequest(ctx, id, requestID, generation, message, &binding)
+}
+
+func (m *Manager) submitRequest(ctx context.Context, id, requestID string, generation int, message string, binding *RequestAttemptBinding) (RequestReceipt, error) {
 	var result RequestReceipt
 	err := withSessionMutationLock(id, func() error {
 		b, name, err := m.sessionBead(id)
@@ -34,7 +49,7 @@ func (m *Manager) SubmitRequest(ctx context.Context, id, requestID string, gener
 			return err
 		}
 		front := NewStore(beads.SessionStore{Store: m.store})
-		accepted, err := front.AcceptRequest(id, requestID, generation, message, time.Now())
+		accepted, err := front.acceptRequest(id, requestID, generation, message, binding, time.Now())
 		if err != nil {
 			return err
 		}
@@ -43,6 +58,9 @@ func (m *Manager) SubmitRequest(ctx context.Context, id, requestID string, gener
 		result, err = front.mutateRequestReceipt(id, requestID, func(current beads.Bead, record *storedRequestReceipt) (bool, error) {
 			claimed = false
 			if current.Metadata["generation"] != strconv.Itoa(generation) || requestDigest(current.Metadata["instance_token"]) != record.ExecutionTokenDigest || current.Status == "closed" {
+				return false, ErrRequestConflict
+			}
+			if !requestAttemptClaimMatches(current, record.Attempt) {
 				return false, ErrRequestConflict
 			}
 			if record.Delivery != RequestDeliveryPending {
