@@ -89,7 +89,7 @@ func TestDoSessionLogsBasic(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doSessionLogs(path, "", false, 0, &stdout, &stderr)
+	code := doSessionLogs(path, "", []string{searchBase}, false, 0, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -106,6 +106,27 @@ func TestDoSessionLogsBasic(t *testing.T) {
 	}
 	if !strings.Contains(out, "world") {
 		t.Errorf("output should contain 'world', got: %s", out)
+	}
+}
+
+func TestDoSessionLogsRejectsTranscriptOutsideConfiguredSearchPaths(t *testing.T) {
+	searchBase := t.TempDir()
+	workDir := t.TempDir()
+	writeTestSession(t, searchBase, workDir,
+		`{"uuid":"1","parentUuid":"","type":"user","message":{"role":"user","content":"hello"},"timestamp":"2025-01-01T00:00:00Z"}`,
+	)
+	path := sessionlog.FindSessionFile([]string{searchBase}, workDir)
+	if path == "" {
+		t.Fatal("session file not found")
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doSessionLogs(path, "", []string{t.TempDir()}, false, 0, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("doSessionLogs accepted a transcript outside its configured search roots")
+	}
+	if !strings.Contains(stderr.String(), "outside configured search paths") {
+		t.Fatalf("stderr = %q, want confined-path diagnostic", stderr.String())
 	}
 }
 
@@ -137,7 +158,7 @@ func TestDoSessionLogsTailReturnsLastNEntries(t *testing.T) {
 
 	// --tail 2 must return the LAST 2 entries: "third" + "reply-3".
 	var stdout, stderr bytes.Buffer
-	code := doSessionLogs(path, "", false, 2, &stdout, &stderr)
+	code := doSessionLogs(path, "", []string{searchBase}, false, 2, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -185,7 +206,7 @@ func TestDoSessionLogsTailIgnoresCompactBoundaries(t *testing.T) {
 	// --tail 1 should print exactly the last entry ("reply2"), not "the last
 	// compaction segment."
 	var stdout, stderr bytes.Buffer
-	code := doSessionLogs(path, "", false, 1, &stdout, &stderr)
+	code := doSessionLogs(path, "", []string{searchBase}, false, 1, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -204,7 +225,7 @@ func TestDoSessionLogsTailIgnoresCompactBoundaries(t *testing.T) {
 	// dividers.
 	stdout.Reset()
 	stderr.Reset()
-	code = doSessionLogs(path, "", false, 0, &stdout, &stderr)
+	code = doSessionLogs(path, "", []string{searchBase}, false, 0, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("tail=0 code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -232,7 +253,7 @@ func TestDoSessionLogsToolUse(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doSessionLogs(path, "", false, 0, &stdout, &stderr)
+	code := doSessionLogs(path, "", []string{searchBase}, false, 0, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -262,7 +283,7 @@ func TestDoSessionLogsStringEncodedMessage(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doSessionLogs(path, "", false, 0, &stdout, &stderr)
+	code := doSessionLogs(path, "", []string{searchBase}, false, 0, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -287,7 +308,7 @@ func TestDoSessionLogsToolResultError(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doSessionLogs(path, "", false, 0, &stdout, &stderr)
+	code := doSessionLogs(path, "", []string{searchBase}, false, 0, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -336,7 +357,7 @@ func TestDoSessionLogsTailNeverRendersEmpty(t *testing.T) {
 
 			// --tail 1 lands entirely on the non-rendering last entry.
 			var stdout, stderr bytes.Buffer
-			code := doSessionLogs(path, "", false, 1, &stdout, &stderr)
+			code := doSessionLogs(path, "", []string{searchBase}, false, 1, &stdout, &stderr)
 			if code != 0 {
 				t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 			}
@@ -680,7 +701,7 @@ func TestCanFallbackStoredSessionLogByWorkDirIgnoresAsleepPeersForLiveTarget(t *
 
 func TestDoSessionLogsNegativeTail(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	code := doSessionLogs("/nonexistent", "", false, -1, &stdout, &stderr)
+	code := doSessionLogs("/nonexistent", "", nil, false, -1, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1 for negative tail", code)
 	}
@@ -921,7 +942,7 @@ observe_paths = [%q]
 
 func TestDoSessionLogsJSONRejectsFollow(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	code := doSessionLogsJSON("/ignored", "claude", "worker", true, 10, &stdout, &stderr)
+	code := doSessionLogsJSON("/ignored", "claude", nil, "worker", true, 10, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("doSessionLogsJSON(follow) = %d, want 1", code)
 	}
@@ -952,7 +973,7 @@ func TestPrintLogEntryTimestamp(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doSessionLogs(path, "", false, 0, &stdout, &stderr)
+	code := doSessionLogs(path, "", []string{searchBase}, false, 0, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}

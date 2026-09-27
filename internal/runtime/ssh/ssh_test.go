@@ -245,14 +245,19 @@ func TestConn_ExecOverRealLocalhost(t *testing.T) {
 		t.Skip("passwordless ssh to localhost unavailable")
 	}
 	c := New(Endpoint{Host: "localhost", KnownHostsPath: kh})
-	out, code, err := c.Exec(context.Background(), "", []string{"printf", "%s", "ok"})
+	marker := filepath.Join(t.TempDir(), "injected")
+	payload := "literal; $(touch " + marker + "); 'single quote'\nnext line"
+	out, code, err := c.Exec(context.Background(), "", []string{"printf", "%s", payload})
 	if err != nil {
 		t.Fatalf("Exec over localhost: %v", err)
 	}
 	if code != 0 {
 		t.Errorf("code = %d, want 0", code)
 	}
-	if string(out) != "ok" {
-		t.Errorf("out = %q, want %q", out, "ok")
+	if string(out) != payload {
+		t.Errorf("out = %q, want %q", out, payload)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("shell metacharacters executed instead of remaining data; marker stat error = %v", err)
 	}
 }
