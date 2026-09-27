@@ -64,6 +64,13 @@ type CompatibilityRuntimeIdentity struct {
 	Snapshot  qualification.Snapshot
 	Build     qualification.BuildIdentity
 	Authority qualification.CompatibilityAuthority
+
+	// GraphStore, GraphStoreRef, and GraphStoreGeneration identify the exact
+	// published graph route the formula action will mutate. A zero generation
+	// means the state implementation does not expose a pinned route identity.
+	GraphStore           beads.Store
+	GraphStoreRef        string
+	GraphStoreGeneration uint64
 }
 
 // CompatibilityRuntimeIdentityProvider optionally exposes the complete
@@ -71,6 +78,13 @@ type CompatibilityRuntimeIdentity struct {
 // config and build identity prevents a reload from mixing generations.
 type CompatibilityRuntimeIdentityProvider interface {
 	CompatibilityRuntimeIdentity() (CompatibilityRuntimeIdentity, error)
+}
+
+// CompatibilityActionLeaseProvider pins a published graph route until the
+// caller releases the lease. Updates and runtime shutdown wait for outstanding
+// leases before publishing or closing the route.
+type CompatibilityActionLeaseProvider interface {
+	AcquireFormulaActionLease(store beads.Store, storeRef string, generation uint64) (func(), error)
 }
 
 // State provides read access to controller-managed state.

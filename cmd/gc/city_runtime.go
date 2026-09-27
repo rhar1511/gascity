@@ -4227,9 +4227,16 @@ func (cr *CityRuntime) shutdown() {
 			// with an error instead of falling back to the one-shot funnel.
 			// Passing our OWN routes is what keeps this from dropping a
 			// registration a live replacement already installed.
-			unregisterResidencyRoutes(cr.cityPath, cr.storageRoutes)
-			if err := cr.storageRoutes.close(); err != nil {
-				fmt.Fprintf(cr.stderr, "%s: closing the storage binding: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+			closeRoutes := func() {
+				unregisterResidencyRoutes(cr.cityPath, cr.storageRoutes)
+				if err := cr.storageRoutes.close(); err != nil {
+					fmt.Fprintf(cr.stderr, "%s: closing the storage binding: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+				}
+			}
+			if cr.cs != nil {
+				cr.cs.closeCompatibilityRoutes(closeRoutes)
+			} else {
+				closeRoutes()
 			}
 		}()
 		asyncStartsDrained := cr.waitForAsyncStarts()
