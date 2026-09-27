@@ -224,6 +224,13 @@ func (s *NativeDoltStore) DeleteIfMatch(id string, expectedRevision int64) error
 					Raw:      "native row-version mismatch",
 				}
 			}
+			current, err := beadFromNativeIssue(issue)
+			if err != nil {
+				return err
+			}
+			if err := protectAttemptEvidenceDelete(current); err != nil {
+				return err
+			}
 			if err := tx.DeleteIssue(ctx, id); err != nil {
 				return nativeStoreError(id, err)
 			}

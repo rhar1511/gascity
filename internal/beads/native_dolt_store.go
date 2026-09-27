@@ -2423,6 +2423,13 @@ func (s *NativeDoltStore) Delete(id string) error {
 	if err := s.readOnlyGuard(); err != nil {
 		return err
 	}
+	current, err := s.Get(id)
+	if err != nil {
+		return err
+	}
+	if err := protectAttemptEvidenceDelete(current); err != nil {
+		return err
+	}
 	storage, release, err := s.acquireStorage()
 	if err != nil {
 		return err

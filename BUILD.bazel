@@ -227,6 +227,7 @@ filegroup(
         "//internal/api/dashboardbff:bazel_repo_srcs",
         "//internal/api/dashboardspa:bazel_repo_srcs",
         "//internal/api/genclient:bazel_repo_srcs",
+        "//internal/attemptevidence:bazel_repo_srcs",
         "//internal/bazeltest:bazel_repo_srcs",
         "//internal/bdflags:bazel_repo_srcs",
         "//internal/beadmeta:bazel_repo_srcs",

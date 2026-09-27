@@ -59,7 +59,10 @@ func (s *SQLiteStore) DeleteIfMatch(id string, expectedRevision int64) error {
 	if err := s.ensureOpen(); err != nil {
 		return err
 	}
-	return s.conditionalWrite(id, expectedRevision, func(ctx context.Context, tx *sql.Tx, _ Bead) error {
+	return s.conditionalWrite(id, expectedRevision, func(ctx context.Context, tx *sql.Tx, current Bead) error {
+		if err := protectAttemptEvidenceDelete(current); err != nil {
+			return err
+		}
 		if _, err := tx.Exec(`DELETE FROM beads WHERE id=?`, id); err != nil {
 			return fmt.Errorf("deleting bead %q: %w", id, err)
 		}
@@ -218,6 +221,15 @@ func (s *SQLiteStore) deleteBatchChunk(chunk []string) error {
 			return fmt.Errorf("sqlite delete batch: begin tx: %w", err)
 		}
 		defer tx.Rollback() //nolint:errcheck
+		for _, id := range chunk {
+			protected, err := sqliteAttemptEvidenceArchiveIDTx(ctx, tx, id)
+			if err != nil {
+				return fmt.Errorf("deleting batch bead %q: checking archive protection: %w", id, err)
+			}
+			if protected {
+				return fmt.Errorf("deleting batch bead %q: %w", id, ErrProtectedAttemptEvidenceArchive)
+			}
+		}
 		args := make([]any, 0, len(chunk))
 		placeholders := make([]string, 0, len(chunk))
 		for _, id := range chunk {

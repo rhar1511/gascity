@@ -2316,6 +2316,10 @@ type APIConfig struct {
 	// separated. The GC_CITY_READ_PUBKEY env var overrides this. Grant revocation
 	// via an epoch floor is an ops-plane control set only through the
 	// GC_CITY_READ_EPOCH_FLOOR env var; it has no config field.
+	// GC_CITY_READ_CID binds grants to the deployment's tenant-specific city
+	// identity; set it when signing keys are shared across tenants. Retained
+	// attempt evidence additionally requires the signed authenticated subject
+	// and exact original-scope read grants from that permission authority.
 	ReadAuthVerifyKey string `toml:"read_auth_verify_key,omitempty"`
 	// ReadAuthRequired makes a missing or empty ReadAuthVerifyKey a startup error
 	// instead of silently disabling the gate, so a config that intends to gate

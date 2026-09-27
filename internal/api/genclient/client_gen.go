@@ -1718,6 +1718,17 @@ type Diff struct {
 	Worktree  string  `json:"worktree"`
 }
 
+// DiffSnapshot defines model for DiffSnapshot.
+type DiffSnapshot struct {
+	Encoding          *string `json:"encoding,omitempty"`
+	Payload           *string `json:"payload,omitempty"`
+	Reason            *string `json:"reason,omitempty"`
+	Sha256            *string `json:"sha256,omitempty"`
+	Source            string  `json:"source"`
+	Status            string  `json:"status"`
+	UncompressedBytes *int64  `json:"uncompressed_bytes,omitempty"`
+}
+
 // ErrorDetail defines model for ErrorDetail.
 type ErrorDetail struct {
 	// Location Where the error occurred, e.g. 'body.items[3].tags' or 'path.thing-id'
@@ -1836,6 +1847,32 @@ type EventStreamEnvelope struct {
 	Ts               time.Time                `json:"ts"`
 	Type             string                   `json:"type"`
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// Evidence defines model for Evidence.
+type Evidence struct {
+	Acknowledgements  Facet           `json:"acknowledgements"`
+	Actions           Facet           `json:"actions"`
+	AttemptId         string          `json:"attempt_id"`
+	BaseReason        *string         `json:"base_reason,omitempty"`
+	BaseSha           *string         `json:"base_sha,omitempty"`
+	BaseStatus        string          `json:"base_status"`
+	CandidateReason   *string         `json:"candidate_reason,omitempty"`
+	CandidateSha      *string         `json:"candidate_sha,omitempty"`
+	CandidateStatus   string          `json:"candidate_status"`
+	CapturedAt        time.Time       `json:"captured_at"`
+	Diff              DiffSnapshot    `json:"diff"`
+	Identity          Identity        `json:"identity"`
+	Outcome           *string         `json:"outcome,omitempty"`
+	PermissionScope   PermissionScope `json:"permission_scope"`
+	Policy            Facet           `json:"policy"`
+	Redaction         Facet           `json:"redaction"`
+	SchemaVersion     int64           `json:"schema_version"`
+	SourceReason      *string         `json:"source_reason,omitempty"`
+	SourceStatus      string          `json:"source_status"`
+	StoreRef          *string         `json:"store_ref,omitempty"`
+	WorkingTreeStatus string          `json:"working_tree_status"`
+	WorkspaceDiff     DiffSnapshot    `json:"workspace_diff"`
 }
 
 // ExecutionClaimWindowExpiredPayload defines model for ExecutionClaimWindowExpiredPayload.
@@ -2045,6 +2082,13 @@ type ExtmsgAdapterInfo struct {
 	Provider string `json:"provider"`
 }
 
+// Facet defines model for Facet.
+type Facet struct {
+	Reason *string   `json:"reason,omitempty"`
+	Refs   *[]string `json:"refs,omitempty"`
+	Status string    `json:"status"`
+}
+
 // FanoutPolicy defines model for FanoutPolicy.
 type FanoutPolicy struct {
 	AllowUntargetedPublication bool  `json:"AllowUntargetedPublication"`
@@ -2234,6 +2278,16 @@ type HookClaimReclaimedStalePayload struct {
 	BeadId        string `json:"bead_id"`
 	NewAssignee   string `json:"new_assignee"`
 	PreviousOwner string `json:"previous_owner"`
+}
+
+// Identity defines model for Identity.
+type Identity struct {
+	ClaimGeneration   *string `json:"claim_generation,omitempty"`
+	ExecutionBeadId   string  `json:"execution_bead_id"`
+	Kind              string  `json:"kind"`
+	OwnerBeadId       string  `json:"owner_bead_id"`
+	SessionGeneration *string `json:"session_generation,omitempty"`
+	SessionId         *string `json:"session_id,omitempty"`
 }
 
 // InboundEventPayload defines model for InboundEventPayload.
@@ -3106,6 +3160,14 @@ type PendingInteraction struct {
 	Options   *[]string          `json:"options,omitempty"`
 	Prompt    *string            `json:"prompt,omitempty"`
 	RequestId string             `json:"request_id"`
+}
+
+// PermissionScope defines model for PermissionScope.
+type PermissionScope struct {
+	RepositoryRoot *string `json:"repository_root,omitempty"`
+	StoreRef       string  `json:"store_ref"`
+	WorkId         string  `json:"work_id"`
+	WorkspaceRoot  *string `json:"workspace_root,omitempty"`
 }
 
 // PoolOverride defines model for PoolOverride.
@@ -19973,6 +20035,12 @@ type ClientInterface interface {
 
 	PostV0CityByCityNameBeadByIdAssign(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdAssignParams, body PostV0CityByCityNameBeadByIdAssignJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// ListV0CityByCityNameBeadByIdAttemptEvidence request
+	ListV0CityByCityNameBeadByIdAttemptEvidence(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptId request
+	GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptId(ctx context.Context, cityName string, id string, attemptID string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// GetV0CityByCityNameBeadByIdAttemptsDiff request
 	GetV0CityByCityNameBeadByIdAttemptsDiff(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -20843,6 +20911,30 @@ func (c *Client) PostV0CityByCityNameBeadByIdAssignWithBody(ctx context.Context,
 
 func (c *Client) PostV0CityByCityNameBeadByIdAssign(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdAssignParams, body PostV0CityByCityNameBeadByIdAssignJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewPostV0CityByCityNameBeadByIdAssignRequest(c.Server, cityName, id, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ListV0CityByCityNameBeadByIdAttemptEvidence(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListV0CityByCityNameBeadByIdAttemptEvidenceRequest(c.Server, cityName, id)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptId(ctx context.Context, cityName string, id string, attemptID string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdRequest(c.Server, cityName, id, attemptID)
 	if err != nil {
 		return nil, err
 	}
@@ -24456,6 +24548,95 @@ func NewPostV0CityByCityNameBeadByIdAssignRequestWithBody(server string, cityNam
 
 		req.Header.Set("X-GC-Request", headerParam0)
 
+	}
+
+	return req, nil
+}
+
+// NewListV0CityByCityNameBeadByIdAttemptEvidenceRequest generates requests for ListV0CityByCityNameBeadByIdAttemptEvidence
+func NewListV0CityByCityNameBeadByIdAttemptEvidenceRequest(server string, cityName string, id string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/bead/%s/attempt-evidence", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewGetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdRequest generates requests for GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptId
+func NewGetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdRequest(server string, cityName string, id string, attemptID string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam2 string
+
+	pathParam2, err = runtime.StyleParamWithOptions("simple", false, "attemptID", attemptID, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/bead/%s/attempt-evidence/%s", pathParam0, pathParam1, pathParam2)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
 	}
 
 	return req, nil
@@ -33999,6 +34180,12 @@ type ClientWithResponsesInterface interface {
 
 	PostV0CityByCityNameBeadByIdAssignWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdAssignParams, body PostV0CityByCityNameBeadByIdAssignJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadByIdAssignResponse, error)
 
+	// ListV0CityByCityNameBeadByIdAttemptEvidenceWithResponse request
+	ListV0CityByCityNameBeadByIdAttemptEvidenceWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*ListV0CityByCityNameBeadByIdAttemptEvidenceResponse, error)
+
+	// GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdWithResponse request
+	GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdWithResponse(ctx context.Context, cityName string, id string, attemptID string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdResponse, error)
+
 	// GetV0CityByCityNameBeadByIdAttemptsDiffWithResponse request
 	GetV0CityByCityNameBeadByIdAttemptsDiffWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameBeadByIdAttemptsDiffResponse, error)
 
@@ -35132,6 +35319,60 @@ func (r PostV0CityByCityNameBeadByIdAssignResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r PostV0CityByCityNameBeadByIdAssignResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ListV0CityByCityNameBeadByIdAttemptEvidenceResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON200                   *[]Evidence
+	ApplicationproblemJSON403 *ErrorModel
+	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON422 *ErrorModel
+	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON503 *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r ListV0CityByCityNameBeadByIdAttemptEvidenceResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListV0CityByCityNameBeadByIdAttemptEvidenceResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON200                   *Evidence
+	ApplicationproblemJSON403 *ErrorModel
+	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON422 *ErrorModel
+	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON503 *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -39385,6 +39626,24 @@ func (c *ClientWithResponses) PostV0CityByCityNameBeadByIdAssignWithResponse(ctx
 	return ParsePostV0CityByCityNameBeadByIdAssignResponse(rsp)
 }
 
+// ListV0CityByCityNameBeadByIdAttemptEvidenceWithResponse request returning *ListV0CityByCityNameBeadByIdAttemptEvidenceResponse
+func (c *ClientWithResponses) ListV0CityByCityNameBeadByIdAttemptEvidenceWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*ListV0CityByCityNameBeadByIdAttemptEvidenceResponse, error) {
+	rsp, err := c.ListV0CityByCityNameBeadByIdAttemptEvidence(ctx, cityName, id, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListV0CityByCityNameBeadByIdAttemptEvidenceResponse(rsp)
+}
+
+// GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdWithResponse request returning *GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdResponse
+func (c *ClientWithResponses) GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdWithResponse(ctx context.Context, cityName string, id string, attemptID string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdResponse, error) {
+	rsp, err := c.GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptId(ctx, cityName, id, attemptID, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdResponse(rsp)
+}
+
 // GetV0CityByCityNameBeadByIdAttemptsDiffWithResponse request returning *GetV0CityByCityNameBeadByIdAttemptsDiffResponse
 func (c *ClientWithResponses) GetV0CityByCityNameBeadByIdAttemptsDiffWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameBeadByIdAttemptsDiffResponse, error) {
 	rsp, err := c.GetV0CityByCityNameBeadByIdAttemptsDiff(ctx, cityName, id, reqEditors...)
@@ -42403,6 +42662,128 @@ func ParsePostV0CityByCityNameBeadByIdAssignResponse(rsp *http.Response) (*PostV
 			return nil, err
 		}
 		response.ApplicationproblemJSON500 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseListV0CityByCityNameBeadByIdAttemptEvidenceResponse parses an HTTP response from a ListV0CityByCityNameBeadByIdAttemptEvidenceWithResponse call
+func ParseListV0CityByCityNameBeadByIdAttemptEvidenceResponse(rsp *http.Response) (*ListV0CityByCityNameBeadByIdAttemptEvidenceResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListV0CityByCityNameBeadByIdAttemptEvidenceResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest []Evidence
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON403 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdResponse parses an HTTP response from a GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdWithResponse call
+func ParseGetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdResponse(rsp *http.Response) (*GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest Evidence
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON403 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
 
 	}
 

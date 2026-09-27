@@ -179,6 +179,7 @@ package main
 // the plainest reason — it yields no ids to probe.
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1042,8 +1043,8 @@ func serveBdByIDResolved(door bdByIDClassDoor, op bdByIDOp, bdArgs []string, rig
 		// So neither is taken. See refuseRigScopedClassOwnedTarget.
 		return refuseRigScopedClassOwnedTarget(door, op.ID, rig, stderr)
 	}
-	if gateBdByIDClassClose(door, op, bdArgs, resolution, repoDirs, stderr) {
-		return 1, true
+	if gateExitCode := gateBdByIDClassClose(door, op, bdArgs, resolution, repoDirs, stderr); gateExitCode != 0 {
+		return gateExitCode, true
 	}
 	switch op.Verb {
 	case bdByIDShow:
@@ -1080,14 +1081,24 @@ func serveBdByIDResolved(door bdByIDClassDoor, op bdByIDOp, bdArgs []string, rig
 // not-a-close for show/claim/release/dep/reopen and for updates that do not set
 // status closed. The resolved bead is handed in as the preFetched value so the
 // gate reuses it rather than re-reading the class store, and door.Store answers
-// any other id the argv might name. Returns true only when the close must be
-// blocked (enforcement on and the work record invalid).
-func gateBdByIDClassClose(door bdByIDClassDoor, op bdByIDOp, bdArgs []string, resolution bdByIDResolution, repoDirs workRecordRepoDirs, stderr io.Writer) bool {
+// any other id the argv might name. It blocks when exact attempt evidence cannot
+// be sealed, or when work-record enforcement rejects the close.
+func gateBdByIDClassClose(door bdByIDClassDoor, op bdByIDOp, bdArgs []string, resolution bdByIDResolution, repoDirs workRecordRepoDirs, stderr io.Writer) int {
 	if op.Verb != bdByIDClose && op.Verb != bdByIDUpdate {
-		return false
+		return 0
 	}
 	preFetched := map[string]beads.Bead{op.ID: resolution.Bead}
-	return evaluateWorkRecordCloseGate(bdArgs, door.Store, preFetched, repoDirs, workRecordEnforceEnabled(), stderr)
+	ids, ok := workRecordCloseTargets(bdArgs)
+	if !ok {
+		return 0
+	}
+	if err := captureWorkbenchCloseTargets(context.Background(), door.Store, ids, preFetched, repoDirs, door.CityPath, nil); err != nil {
+		return attemptEvidenceCaptureFailure(stderr, err)
+	}
+	if evaluateWorkRecordCloseGate(bdArgs, door.Store, preFetched, repoDirs, workRecordEnforceEnabled(), stderr) {
+		return 1
+	}
+	return 0
 }
 
 // refuseRigScopedClassOwnedTarget refuses a by-ID invocation that pins a rig

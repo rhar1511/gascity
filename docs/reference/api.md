@@ -58,6 +58,44 @@ The spec is the full reference. A brief summary of the surfaces:
   prepares repair work, records an exact revision for review, or merges after
   separate human approval. See the trust requirements below.
 
+### Historical attempt reads
+
+`GET /v0/city/{cityName}/bead/{id}/attempt-evidence/{attemptID}` reads one
+immutable attempt; omitting the final attempt ID lists retained attempts.
+These routes use the archived original store, work, repository, and workspace
+scope even after the owner is deleted. They never resolve a latest-attempt alias.
+
+The default authorizer requires a verified `X-GC-City-Read` grant with a nonempty
+`sub` identifying the authenticated reader and a `read_scopes` array covering
+every returned attempt. A city-only grant is insufficient. The existing
+permission authority must authenticate the reader and check inherited access
+against trusted original permission records before signing. Caller-supplied
+paths, account names, or scope hashes are not permission evidence. Keep the
+issuer's private key out of worker environments; the controller verifies only.
+
+Each array entry is `gc-attempt-read.v1:` followed by the lowercase hexadecimal
+SHA-256 of these exact UTF-8 fields joined by NUL: `gc-attempt-read.v1`, archived
+store reference, work ID, repository root, workspace root, and attempt ID.
+Fields must be nonempty and contain no NUL. The controller's
+`attemptevidence.ReadGrantScope` helper implements this contract. Use the exact
+archived spellings, including the original scope when current ownership changes.
+A list grant must cover all listed archives; partial permission returns no list.
+
+The envelope retains `aud=gc-city-read`, exact method/path/query binding,
+single-use `jti`, the two-minute maximum lifetime, and the configured epoch floor.
+Retries require fresh grants. Set `GC_CITY_READ_CID` to the deployment's
+tenant-specific city identity when signers are shared across tenants; grants
+with missing or different CID are then rejected. An unbound CID claim is not
+proof of tenancy. `GC_CITY_READ_PUBKEY` or `read_auth_verify_key` installs the
+trusted read authority, and `GC_CITY_READ_REQUIRED=1` makes absent trust a startup
+error. Without verified read identity the historical routes remain unavailable.
+
+An explicitly composed `AttemptEvidenceReadAuthorizerProvider` can enforce a
+deployment's permission integration; returning no authorizer keeps reads disabled.
+The bundled clients do not mint grants. Their deployment must supply them through
+the permission authority. Configuring verification alone does not install or
+validate that issuer, backups, or the release's inherited-permission integration.
+
 ### Pull-request action trust
 
 The central controller computes the permitted actions; clients cannot submit a

@@ -38,6 +38,7 @@ go_test(
     name = "dispatch_test",
     srcs = [
         "attempt_control_routing_test.go",
+        "attempt_evidence_test.go",
         "control_attempt_iteration_test.go",
         "control_for_lineage_test.go",
         "control_integration_test.go",
@@ -67,6 +68,7 @@ go_test(
     ],
     embed = [":dispatch"],
     deps = [
+		"//internal/attemptevidence",
         "//internal/beadmeta",
         "//internal/beads",
         "//internal/config",

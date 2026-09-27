@@ -162,6 +162,8 @@ func (s *Server) prActions() *PRActionService {
 	if evidence == nil {
 		if provider, ok := s.state.(PRActionAttemptEvidenceProvider); ok {
 			evidence = provider.PRActionAttemptEvidenceReader()
+		} else {
+			evidence = archivedPRActionEvidenceReader{reader: s.attemptEvidenceReader()}
 		}
 	}
 	policy, _ := ResolvePRActionPolicy(os.Getenv(PRActionPolicyEnv), s.state.CityName(), s.prHumanVerifier)

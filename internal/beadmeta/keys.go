@@ -39,12 +39,16 @@ const Namespace = "gc."
 // cmd/. Keep this block sorted by identifier; the Go compiler rejects duplicate
 // identifiers, giving us a free compile-time uniqueness guarantee.
 const (
-	AttemptLogMetadataKey     = "gc.attempt_log"
-	AttemptMetadataKey        = "gc.attempt"
-	BondMetadataKey           = "gc.bond"
-	BondVarsMetadataKey       = "gc.bond_vars"
-	BoundStepIDMetadataKey    = "gc.bound_step_id"
-	BrainParentSIDMetadataKey = "gc.brain_parent_sid"
+	AttemptLogMetadataKey                      = "gc.attempt_log"
+	AttemptEvidenceArchiveAttemptIDMetadataKey = "gc.attempt_evidence.archive_attempt_id"
+	AttemptEvidenceArchiveOwnerIDMetadataKey   = "gc.attempt_evidence.archive_owner_id"
+	AttemptEvidenceArchivePayloadMetadataKey   = "gc.attempt_evidence.archive_payload.v1"
+	AttemptEvidenceArchiveDigestMetadataKey    = "gc.attempt_evidence.archive_digest"
+	AttemptMetadataKey                         = "gc.attempt"
+	BondMetadataKey                            = "gc.bond"
+	BondVarsMetadataKey                        = "gc.bond_vars"
+	BoundStepIDMetadataKey                     = "gc.bound_step_id"
+	BrainParentSIDMetadataKey                  = "gc.brain_parent_sid"
 	// BudgetDeferredUntilMetadataKey holds an RFC3339 timestamp stamped by the
 	// sling boundary (host/bin/gc in the outer city repo) when a claim attempt
 	// is refused for build-budget reasons; deacon-dispatch.sh clears it on
@@ -357,6 +361,11 @@ const FormulaVarPrefix = Namespace + "var."
 // so it is declared as a prefix here rather than re-enumerated in this file.
 const IdemPrefix = Namespace + "idem."
 
+// AttemptEvidenceIndexPrefix is the dynamic owner-bead metadata prefix for
+// immutable, first-write-sealed execution attempt records. The full record is
+// copied to a separate durable archive bead before a capture operation returns.
+const AttemptEvidenceIndexPrefix = Namespace + "attempt_evidence.index."
+
 // Directory keys: a deliberate non-"gc."-prefixed sibling family on bead
 // metadata, declared here so the vocabulary has one home. Their read/write
 // fallback semantics (canonical-then-legacy) live with their owner in
@@ -474,6 +483,10 @@ var KnownMetadataKeys = []string{
 	PRActionRouteProposalMetadataKey,
 
 	AttemptLogMetadataKey,
+	AttemptEvidenceArchiveAttemptIDMetadataKey,
+	AttemptEvidenceArchiveOwnerIDMetadataKey,
+	AttemptEvidenceArchivePayloadMetadataKey,
+	AttemptEvidenceArchiveDigestMetadataKey,
 	AttemptMetadataKey,
 	BondMetadataKey,
 	BondVarsMetadataKey,
@@ -662,6 +675,7 @@ var KnownMetadataPrefixes = []string{
 	SessionRequestReceiptPrefix,
 	FormulaVarPrefix,
 	IdemPrefix,
+	AttemptEvidenceIndexPrefix,
 }
 
 // SessionAffinityMetadataKeys are the metadata keys that pin a work bead to a
