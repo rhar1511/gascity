@@ -64,7 +64,11 @@ func TestCLICloseGateCapturesWorkbenchAttemptBeforeClose(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read attempt sealed before close: %v", err)
 	}
-	if evidence.Identity.Kind != attemptevidence.KindWorkbench || evidence.Identity.SessionGeneration != "3" || evidence.Permission.WorkspaceRoot != repo {
+	canonicalRepo, err := filepath.EvalSymlinks(repo)
+	if err != nil {
+		t.Fatalf("canonicalize fixture repository: %v", err)
+	}
+	if evidence.Identity.Kind != attemptevidence.KindWorkbench || evidence.Identity.SessionGeneration != "3" || evidence.Permission.WorkspaceRoot != canonicalRepo {
 		t.Fatalf("captured workbench identity/scope = %+v %+v", evidence.Identity, evidence.Permission)
 	}
 }
