@@ -1172,6 +1172,13 @@ is for a focused package or test, for example:
 go test -tags integration -run '^TestHumaBinary$' ./test/integration/
 ```
 
+For a contained local integration run, set
+`GC_INTEGRATION_RUN_OWNED=1`, `GC_SESSION=subprocess`, and
+`GC_INTEGRATION_DOLT_IDENTITY_MODE=isolated`. TestMain creates a private
+temporary parent for that process and skips cross-run startup, exit, and signal
+sweeps. If it cannot prove fixture shutdown or finds a preservation marker, it
+keeps the parent and prints its path for review.
+
 **Supervisor binary smoke test** (`test/integration/huma_binary_test.go`):
 builds `gc`, boots the supervisor against an isolated `GC_HOME`, waits
 for `/health`, fetches `/openapi.json`, and runs `gc cities` as a

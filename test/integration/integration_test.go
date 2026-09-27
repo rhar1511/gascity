@@ -8,10 +8,9 @@
 // provider instead (no tmux required).
 //
 // Session safety: no-guard test cities use randomized 6-letter lowercase
-// names (see uniqueCityName) so they spread across distinct Dolt DB
-// prefixes instead of all collapsing to "gc".
-// Three layers of cleanup (pre-sweep, per-test t.Cleanup, post-sweep)
-// prevent orphan tmux sessions on developer boxes.
+// names (see uniqueCityName) so they spread across distinct Dolt DB prefixes
+// instead of all collapsing to "gc". Legacy runs use shared pre/post sweeps;
+// run-owned mode uses only its private temporary root and per-test cleanup.
 package integration
 
 import (
@@ -29,6 +28,7 @@ import (
 	"os/signal"
 	"os/user"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -43,6 +43,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/testutil"
 	"github.com/gastownhall/gascity/test/dolttest"
+	"github.com/gastownhall/gascity/test/integration/runisolation"
 	"github.com/gastownhall/gascity/test/integration/subprocesssweep"
 	"github.com/gastownhall/gascity/test/tmuxtest"
 )
@@ -170,6 +171,19 @@ var tmuxSocketAliveSentinel *os.File
 // TestMain builds the gc binary and runs pre/post sweeps of orphan sessions.
 func TestMain(m *testing.M) {
 	flag.Parse()
+	runMode, err := runisolation.Resolve(
+		os.Getenv(runisolation.EnvName),
+		os.Getenv("GC_SESSION"),
+		os.Getenv(integrationDoltIdentityEnv),
+	)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "integration:", err)
+		os.Exit(2)
+	}
+	if err := os.Unsetenv(runisolation.EnvName); err != nil {
+		fmt.Fprintf(os.Stderr, "integration: clearing %s: %v\n", runisolation.EnvName, err)
+		os.Exit(2)
+	}
 	if listFlag := flag.Lookup("test.list"); listFlag != nil && listFlag.Value.String() != "" {
 		os.Exit(m.Run())
 	}
@@ -180,75 +194,125 @@ func TestMain(m *testing.M) {
 
 	subprocess := os.Getenv("GC_SESSION") == "subprocess"
 
-	// Build gc binary to a temp directory. The pid in the dir name lets a later
-	// run reap this run's dolt orphans if it dies abnormally (issue #3640).
-	tmpDir, err := os.MkdirTemp("", fmt.Sprintf("gc-integration-%d-*", os.Getpid()))
-	if err != nil {
-		panic("integration: creating temp dir: " + err.Error())
-	}
-	defer os.RemoveAll(tmpDir)
-
-	// Create the tmux socket root under /tmp rather than $TMPDIR.
-	// On macOS, $TMPDIR is ~80 chars (/private/var/folders/…/T/); nesting
-	// tmux sockets inside it pushes socket paths past macOS's 104-byte limit.
-	// /tmp is world-writable on macOS, Linux, and CI runners.
-	//
-	// NewSocketParentDir sweeps orphaned siblings left by a prior SIGKILL'd
-	// run before creating this run's own dir. tmuxSocketAliveSentinel must
-	// stay referenced for the process lifetime: the runtime finalizes
-	// unreachable os.Files, which would close the descriptor and release
-	// the lock, letting a concurrent sibling's sweep reclaim this still-
-	// active directory (ga-djbcqt). Normal and skip exits call os.Exit, which
-	// skips defers, so those paths remove the parent explicitly below; the
-	// deferred removal here additionally covers a setup panic (which unwinds
-	// through defers) so it cannot leak the parent until a later aged sweep.
-	tmuxSocketParent, tmuxSentinel, tmuxParentErr := tmuxtest.NewSocketParentDir("/tmp", io.Discard)
-	tmuxSocketAliveSentinel = tmuxSentinel
-	defer func() {
-		// Re-read tmuxSocketParent so the MkdirAll-failure path that clears it
-		// below is honored and this never double-removes on a normal exit.
+	var runParent, tmpDir, tmuxSocketParent string
+	var skipForMissingTmux bool
+	testsStarted := false
+	cleanupLegacy := func() error {
+		if testsStarted {
+			stopIntegrationSupervisorWithTimeout(integrationSupervisorStopTimeout)
+			if !subprocess {
+				tmuxtest.KillAllTestSessions(&mainTB{})
+			}
+			sweepSubprocessTestProcesses()
+		}
+		if tmpDir != "" {
+			if err := os.RemoveAll(tmpDir); err != nil {
+				return fmt.Errorf("remove integration temp dir %s: %w", tmpDir, err)
+			}
+		}
 		if tmuxSocketParent != "" {
-			_ = os.RemoveAll(tmuxSocketParent)
+			if err := os.RemoveAll(tmuxSocketParent); err != nil {
+				return fmt.Errorf("remove tmux socket parent %s: %w", tmuxSocketParent, err)
+			}
+		}
+		return nil
+	}
+	cleanupOwned := func() error {
+		gcHome := ""
+		if tmpDir != "" {
+			gcHome = filepath.Join(tmpDir, "gc-home")
+		}
+		return cleanupOwnedIntegrationRun(runParent, tmpDir, gcHome, func() {
+			if testsStarted {
+				stopIntegrationSupervisorWithTimeout(integrationSupervisorStopTimeout)
+			}
+		})
+	}
+	finish := func() {
+		if err := runisolation.Finish(runMode, cleanupLegacy, cleanupOwned); err != nil {
+			fmt.Fprintf(os.Stderr, "integration cleanup: %v\n", err)
+		}
+	}
+	finished := false
+	defer func() {
+		if !finished {
+			finish()
 		}
 	}()
-	tmuxSocketRoot := filepath.Join(tmpDir, "tmux")
-	if tmuxParentErr == nil {
-		tmuxSocketRoot = filepath.Join(tmuxSocketParent, "tmux")
-		if err := os.MkdirAll(tmuxSocketRoot, 0o700); err != nil {
-			_ = tmuxSocketAliveSentinel.Close()
-			tmuxSocketAliveSentinel = nil
-			os.RemoveAll(tmuxSocketParent)
-			tmuxSocketParent = ""
-			tmuxSocketRoot = filepath.Join(tmpDir, "tmux")
-		}
-	}
-	if err := tmuxtest.ConfigureProcessEnv(tmuxSocketRoot); err != nil {
-		panic("integration: configuring tmux test env: " + err.Error())
-	}
 
-	// Tmux check: skip all tests if tmux not available AND not using subprocess.
-	if !subprocess {
-		if _, err := exec.LookPath("tmux"); err != nil {
-			_ = os.RemoveAll(tmpDir)
-			if tmuxSocketParent != "" {
-				_ = os.RemoveAll(tmuxSocketParent)
+	startupErr := runisolation.Startup(runMode, func(mode runisolation.Mode) error {
+		var tmuxSocketRoot string
+		if mode == runisolation.Owned {
+			var err error
+			runParent, err = os.MkdirTemp("", fmt.Sprintf("gc-integration-run-%d-*", os.Getpid()))
+			if err != nil {
+				return fmt.Errorf("create private integration run parent: %w", err)
 			}
-			os.Exit(0)
+			runParent, err = filepath.Abs(runParent)
+			if err != nil {
+				return fmt.Errorf("resolve private integration run parent: %w", err)
+			}
+			if err := os.Setenv("TMPDIR", runParent); err != nil {
+				return fmt.Errorf("set private integration TMPDIR: %w", err)
+			}
+			tmpDir, err = os.MkdirTemp(runParent, fmt.Sprintf("gc-integration-%d-*", os.Getpid()))
+			if err != nil {
+				return fmt.Errorf("create integration tool dir: %w", err)
+			}
+			tmuxSocketRoot = filepath.Join(tmpDir, "tmux")
+		} else {
+			var err error
+			tmpDir, err = os.MkdirTemp("", fmt.Sprintf("gc-integration-%d-*", os.Getpid()))
+			if err != nil {
+				return fmt.Errorf("create integration temp dir: %w", err)
+			}
+			// Legacy tmux runs use a short socket parent because macOS's default
+			// TMPDIR can make Unix socket paths exceed the platform limit.
+			var tmuxSentinel *os.File
+			var tmuxParentErr error
+			tmuxSocketParent, tmuxSentinel, tmuxParentErr = tmuxtest.NewSocketParentDir("/tmp", io.Discard)
+			tmuxSocketAliveSentinel = tmuxSentinel
+			tmuxSocketRoot = filepath.Join(tmpDir, "tmux")
+			if tmuxParentErr == nil {
+				tmuxSocketRoot = filepath.Join(tmuxSocketParent, "tmux")
+				if err := os.MkdirAll(tmuxSocketRoot, 0o700); err != nil {
+					if tmuxSocketAliveSentinel != nil {
+						_ = tmuxSocketAliveSentinel.Close()
+					}
+					tmuxSocketAliveSentinel = nil
+					_ = os.RemoveAll(tmuxSocketParent)
+					tmuxSocketParent = ""
+					tmuxSocketRoot = filepath.Join(tmpDir, "tmux")
+				}
+			}
 		}
-		// Pre-sweep: kill this run's root plus stale sibling orphans.
-		tmuxtest.KillAllTestSessions(&mainTB{})
+		if err := tmuxtest.ConfigureProcessEnv(tmuxSocketRoot); err != nil {
+			return fmt.Errorf("configure tmux test environment: %w", err)
+		}
+		return nil
+	}, func() error {
+		// Shared-directory sweeps run only in legacy mode. Owned mode has a
+		// private TMPDIR and leaves other integration runs untouched.
+		if !subprocess {
+			if _, err := exec.LookPath("tmux"); err != nil {
+				skipForMissingTmux = true
+				return nil
+			}
+			tmuxtest.KillAllTestSessions(&mainTB{})
+		}
+		sweepSubprocessTestProcesses()
+		dolttest.SweepStale(filepath.Dir(tmpDir), "gc-integration-")
+		return nil
+	})
+	if startupErr != nil {
+		panic("integration startup: " + startupErr.Error())
 	}
-	// Best-effort pre-sweep of stale "gc supervisor run" / control-dispatcher
-	// processes left by a prior interrupted or timed-out run. This is not
-	// gated to the subprocess provider: both providers boot the same shared
-	// TestMain supervisor via gcBinary/testGCHome, and a `go test -timeout`
-	// panic bypasses per-test t.Cleanup for either one.
-	sweepSubprocessTestProcesses()
-	// Reap dolt sql-server orphans left by prior crashed runs (SIGKILL /
-	// timeout bypasses in-process cleanup); scoped by owner-pid liveness so
-	// concurrent runs are spared (issue #3640).
-	dolttest.SweepStale(filepath.Dir(tmpDir), "gc-integration-")
-	stopSignalSweeper := installIntegrationSignalSweeper(subprocess)
+	if skipForMissingTmux {
+		finish()
+		finished = true
+		os.Exit(0)
+	}
+	stopSignalSweeper := installIntegrationSignalSweeper(runMode, subprocess)
 	defer stopSignalSweeper()
 
 	testGCHome = filepath.Join(tmpDir, "gc-home")
@@ -344,33 +408,19 @@ func TestMain(m *testing.M) {
 	}
 
 	// Run tests.
+	testsStarted = true
 	code := m.Run()
-
-	// Best-effort: stop any isolated supervisor that survived test cleanup.
-	// Use --wait so the sweep blocks until the supervisor and its managed
-	// cities have actually shut down, avoiding a race with process-table
-	// cleanup below.
-	stopIntegrationSupervisorWithTimeout(integrationSupervisorStopTimeout)
-
-	// Post-sweep: clean up any sessions that survived individual test cleanup.
-	if !subprocess {
-		tmuxtest.KillAllTestSessions(&mainTB{})
-	}
-	sweepSubprocessTestProcesses()
-
-	_ = os.RemoveAll(tmpDir)
-	if tmuxSocketParent != "" {
-		_ = os.RemoveAll(tmuxSocketParent)
-	}
+	finish()
+	finished = true
 	os.Exit(code)
 }
 
-func installIntegrationSignalSweeper(subprocess bool) func() {
+func installIntegrationSignalSweeper(mode runisolation.Mode, subprocess bool) func() {
 	signals := make(chan os.Signal, 2)
 	done := make(chan struct{})
-	// Catches an external interrupt (Ctrl-C, `kill`, a CI job cancellation)
-	// so the run's supervisor/dolt/tmux state gets swept before the process
-	// exits.
+	// Catches an external interrupt (Ctrl-C, `kill`, a CI job cancellation).
+	// Legacy mode sweeps shared state; owned mode leaves its private root for
+	// per-fixture cleanup or later review.
 	// NOTE: `go test -timeout` does not normally reach this handler — the
 	// in-binary deadline fires a panic() from an internal timer goroutine and
 	// the runtime calls os.Exit(2) directly, so a timed-out run's orphans are
@@ -381,7 +431,9 @@ func installIntegrationSignalSweeper(subprocess bool) func() {
 	go func() {
 		select {
 		case sig := <-signals:
-			sweepIntegrationProcesses(subprocess)
+			runisolation.OnSignal(mode, func() {
+				sweepIntegrationProcesses(subprocess)
+			})
 			signal.Stop(signals)
 			if s, ok := sig.(syscall.Signal); ok {
 				signal.Reset(s)
@@ -407,6 +459,128 @@ func sweepIntegrationProcesses(subprocess bool) {
 		tmuxtest.KillAllTestSessions(&mainTB{})
 	}
 	sweepSubprocessTestProcesses()
+}
+
+// cleanupOwnedIntegrationRun removes only this TestMain run's private root.
+// Any preservation marker, unreadable process snapshot, or process that still
+// references the root leaves the full root in place for review.
+func cleanupOwnedIntegrationRun(runParent, tmpDir, gcHome string, stopSupervisor func()) error {
+	if runParent == "" {
+		return nil
+	}
+	parent, err := filepath.Abs(runParent)
+	if err != nil {
+		return fmt.Errorf("preserving private integration run root %s: resolve path: %w", runParent, err)
+	}
+	info, err := os.Lstat(parent)
+	if err != nil {
+		return fmt.Errorf("preserving private integration run root %s: inspect directory: %w", parent, err)
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {
+		return fmt.Errorf("preserving private integration run root because parent is not a private real directory: %s", parent)
+	}
+	parentReal, err := filepath.EvalSymlinks(parent)
+	if err != nil {
+		return fmt.Errorf("preserving private integration run root %s: resolve real path: %w", parent, err)
+	}
+	if marker, err := integrationPreservationPath(parent); err != nil {
+		return fmt.Errorf("preserving private integration run root %s: inspect markers and symlinks: %w", parent, err)
+	} else if marker != "" {
+		fmt.Fprintf(os.Stderr, "integration cleanup: preserving run root %s because marker or symlink exists at %s\n", parent, marker)
+		return nil
+	}
+
+	if stopSupervisor != nil {
+		stopSupervisor()
+	}
+	procs := readProcessSnapshot()
+	if procs == nil {
+		fmt.Fprintf(os.Stderr, "integration cleanup: preserving run root %s because process absence could not be checked\n", parent)
+		return nil
+	}
+	if pids := ownedIntegrationProcesses(procs, parent, gcHome); len(pids) != 0 {
+		fmt.Fprintf(os.Stderr, "integration cleanup: preserving run root %s because fixture processes remain: %v\n", parent, sortedIntegrationPIDs(pids))
+		return nil
+	}
+	if marker, err := integrationPreservationPath(parent); err != nil {
+		return fmt.Errorf("preserving private integration run root %s: recheck markers and symlinks: %w", parent, err)
+	} else if marker != "" {
+		fmt.Fprintf(os.Stderr, "integration cleanup: preserving run root %s because marker or symlink exists at %s\n", parent, marker)
+		return nil
+	}
+
+	if tmpDir != "" {
+		tmpPath, err := filepath.Abs(tmpDir)
+		if err != nil {
+			return fmt.Errorf("preserving private integration run root %s: resolve tool dir %s: %w", parent, tmpDir, err)
+		}
+		tmpInfo, err := os.Lstat(tmpPath)
+		if err != nil {
+			return fmt.Errorf("preserving private integration run root %s: inspect tool dir %s: %w", parent, tmpPath, err)
+		}
+		if !tmpInfo.IsDir() || tmpInfo.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("preserving private integration run root %s: tool path is not a real directory: %s", parent, tmpPath)
+		}
+		tmpReal, err := filepath.EvalSymlinks(tmpPath)
+		if err != nil {
+			return fmt.Errorf("preserving private integration run root %s: resolve tool dir %s: %w", parent, tmpPath, err)
+		}
+		rel, err := filepath.Rel(parentReal, tmpReal)
+		if err != nil || rel == "." || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.Dir(rel) != "." {
+			return fmt.Errorf("preserving private integration run root %s: tool dir %s is outside the root", parent, tmpReal)
+		}
+		if err := os.RemoveAll(tmpPath); err != nil {
+			return fmt.Errorf("preserving private integration run root %s: remove tool dir %s: %w", parent, tmpPath, err)
+		}
+	}
+	if err := os.Remove(parent); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("private integration run parent was not empty; preserving %s: %w", parent, err)
+	}
+	return nil
+}
+
+// integrationPreservationPath returns the first marker or symlink beneath the
+// run root; either condition makes recursive cleanup unsafe.
+func integrationPreservationPath(root string) (string, error) {
+	marker := ""
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.Name() == integrationPreserveRootMarker || entry.Type()&os.ModeSymlink != 0 {
+			marker = path
+		}
+		return nil
+	})
+	if os.IsNotExist(err) {
+		return "", nil
+	}
+	return marker, err
+}
+
+func ownedIntegrationProcesses(procs map[int]procSnapshot, runParent, gcHome string) map[int]bool {
+	owned := make(map[int]bool)
+	for pid, info := range procs {
+		if strings.Contains(info.cmd, runParent) {
+			owned[pid] = true
+		}
+	}
+	for pid := range integrationDoltSQLServerKillSet(procs, gcHome) {
+		owned[pid] = true
+	}
+	for pid := range subprocessTestKillSetUnder(procs, runParent) {
+		owned[pid] = true
+	}
+	return owned
+}
+
+func sortedIntegrationPIDs(pids map[int]bool) []int {
+	out := make([]int, 0, len(pids))
+	for pid := range pids {
+		out = append(out, pid)
+	}
+	sort.Ints(out)
+	return out
 }
 
 func stopIntegrationSupervisorWithTimeout(timeout time.Duration) {
@@ -442,6 +616,7 @@ func TestIntegrationTestListingSkipsRuntimeSetup(t *testing.T) {
 	env := os.Environ()
 	for _, name := range []string{
 		"GC_SESSION",
+		runisolation.EnvName,
 		"GC_INTEGRATION_SUPERVISOR_STOP_HELPER",
 		integrationGCBinaryEnv,
 		integrationRealBDBinaryEnv,
@@ -958,11 +1133,15 @@ func integrationPIDAlive(pid int) bool {
 }
 
 func subprocessTestKillSet(procs map[int]procSnapshot) map[int]bool {
+	return subprocessTestKillSetUnder(procs, os.TempDir())
+}
+
+func subprocessTestKillSetUnder(procs map[int]procSnapshot, tempParent string) map[int]bool {
 	owned := make(map[int]subprocesssweep.Process, len(procs))
 	for pid, info := range procs {
 		owned[pid] = subprocesssweep.Process{PPID: info.ppid, Cmd: info.cmd}
 	}
-	return subprocesssweep.KillSet(owned, os.TempDir(), os.Getpid(), integrationPIDAlive)
+	return subprocesssweep.KillSet(owned, tempParent, os.Getpid(), integrationPIDAlive)
 }
 
 // gc runs the gc binary with the given args. If dir is non-empty, it sets
@@ -1396,6 +1575,7 @@ func integrationEnvFor(gcHome, runtimeDir string, useDolt bool) []string {
 
 func integrationRuntimeEnv(base []string, gcHome, runtimeDir string, useDolt bool) []string {
 	env := filterEnv(base, "GC_BEADS")
+	env = filterEnv(env, runisolation.EnvName)
 	gitVars := append([]string(nil), integrationGitRepositoryVars...)
 	gitVars = append(gitVars,
 		integrationBuildGitDirEnv,
