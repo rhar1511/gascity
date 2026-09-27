@@ -42,6 +42,16 @@ func privateEvidenceHTTPStore(t *testing.T, endpoint string) *BdStore {
 	}))
 }
 
+type privateEvidenceHandlerTransport struct {
+	handler http.Handler
+}
+
+func (transport privateEvidenceHandlerTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	recorder := httptest.NewRecorder()
+	transport.handler.ServeHTTP(recorder, request)
+	return recorder.Result(), nil
+}
+
 func TestReadPrivateEvidenceMetadataKeyRefusesUnsupportedBdStoresBeforeRunner(t *testing.T) {
 	for _, config := range []struct {
 		name   string
@@ -139,7 +149,7 @@ func TestBdStorePrivateEvidenceCASPreservesAbsentEmptyAndNull(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var casCalls atomic.Int32
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.Header.Get("Authorization") != "Bearer controller-secret" {
 					http.Error(w, "unauthorized", http.StatusUnauthorized)
 					return
@@ -174,10 +184,10 @@ func TestBdStorePrivateEvidenceCASPreservesAbsentEmptyAndNull(t *testing.T) {
 					t.Errorf("unexpected HTTP request %s %s", r.Method, r.URL.Path)
 					http.NotFound(w, r)
 				}
-			}))
-			defer server.Close()
+			})
 
-			store := privateEvidenceHTTPStore(t, server.URL)
+			store := privateEvidenceHTTPStore(t, "http://127.0.0.1:1")
+			store.privateEvidenceHTTP.client.Transport = privateEvidenceHandlerTransport{handler: handler}
 			swapped, err := store.CompareAndSetPrivateEvidenceMetadataKey("gc-1", "gc.attempt_evidence.index.a1", "", "private-evidence")
 			if err != nil {
 				t.Fatalf("CompareAndSetPrivateEvidenceMetadataKey: %v", err)
@@ -208,7 +218,7 @@ func TestBdStorePrivateEvidenceCASPreservesAbsentEmptyAndNull(t *testing.T) {
 
 func TestBdStorePrivateEvidenceCASRejectsWrongContextBeforeWrite(t *testing.T) {
 	var casCalls atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer controller-secret" {
 			t.Errorf("Authorization header missing")
 		}
@@ -220,10 +230,9 @@ func TestBdStorePrivateEvidenceCASRejectsWrongContextBeforeWrite(t *testing.T) {
 			casCalls.Add(1)
 		}
 		http.Error(w, "private-evidence-must-not-appear-here", http.StatusBadRequest)
-	}))
-	defer server.Close()
-
-	store := privateEvidenceHTTPStore(t, server.URL)
+	})
+	store := privateEvidenceHTTPStore(t, "http://127.0.0.1:1")
+	store.privateEvidenceHTTP.client.Transport = privateEvidenceHandlerTransport{handler: handler}
 	_, err := store.CompareAndSetPrivateEvidenceMetadataKey("gc-1", "gc.attempt_evidence.index.a1", "", "private-evidence")
 	if err == nil {
 		t.Fatal("wrong database identity was accepted")
@@ -517,11 +526,11 @@ func TestBdFailureDetailRedactsPrivateEvidenceOutput(t *testing.T) {
 
 func newBdStoreWithPrivateEvidenceHTTPForTest(t *testing.T, runner CommandRunner, handler http.HandlerFunc) *BdStore {
 	t.Helper()
-	server := httptest.NewServer(handler)
-	t.Cleanup(server.Close)
-	return NewBdStoreWithPrefix(t.TempDir(), runner, "gc", WithBdStorePrivateEvidenceHTTP(PrivateEvidenceHTTPConfig{
-		Endpoint: server.URL, ProjectID: "project-a", Database: "gc_fixture", ScopeRef: "rig:fixture", TokenFile: privateEvidenceTokenFile(t),
+	store := NewBdStoreWithPrefix(t.TempDir(), runner, "gc", WithBdStorePrivateEvidenceHTTP(PrivateEvidenceHTTPConfig{
+		Endpoint: "http://127.0.0.1:1", ProjectID: "project-a", Database: "gc_fixture", ScopeRef: "rig:fixture", TokenFile: privateEvidenceTokenFile(t),
 	}))
+	store.privateEvidenceHTTP.client.Transport = privateEvidenceHandlerTransport{handler: handler}
+	return store
 }
 
 func writePrivateEvidenceTestContext(w http.ResponseWriter) {

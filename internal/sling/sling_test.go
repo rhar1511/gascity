@@ -9,7 +9,9 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/agentutil"
@@ -19,6 +21,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/molecule"
@@ -2127,6 +2130,156 @@ type fakeBeadRouter struct {
 func (r *fakeBeadRouter) Route(_ context.Context, req RouteRequest) error {
 	r.routed = append(r.routed, req)
 	return nil
+}
+
+var errFormulaActionRouteChanged = errors.New("formula action route changed")
+
+type reentrantFormulaActionLease struct {
+	routeMu    sync.RWMutex
+	stateMu    sync.Mutex
+	active     bool
+	generation uint64
+	expected   uint64
+}
+
+func (l *reentrantFormulaActionLease) Acquire() error {
+	l.stateMu.Lock()
+	defer l.stateMu.Unlock()
+	if l.active {
+		return nil
+	}
+	l.routeMu.RLock()
+	if l.generation != l.expected {
+		l.routeMu.RUnlock()
+		return errFormulaActionRouteChanged
+	}
+	l.active = true
+	return nil
+}
+
+func (l *reentrantFormulaActionLease) Release() {
+	l.stateMu.Lock()
+	if l.active {
+		l.active = false
+		l.routeMu.RUnlock()
+	}
+	l.stateMu.Unlock()
+}
+
+func (l *reentrantFormulaActionLease) publish() {
+	l.routeMu.Lock()
+	l.generation++
+	l.routeMu.Unlock()
+}
+
+type callbackAwareFormulaStore struct {
+	beads.Store
+	mu                         sync.Mutex
+	callbackComplete           bool
+	postCallbackMetadataWrites int
+}
+
+func (s *callbackAwareFormulaStore) SetMetadata(id, key, value string) error {
+	s.mu.Lock()
+	if s.callbackComplete {
+		s.postCallbackMetadataWrites++
+	}
+	s.mu.Unlock()
+	return s.Store.SetMetadata(id, key, value)
+}
+
+func (s *callbackAwareFormulaStore) markCallbackComplete() {
+	s.mu.Lock()
+	s.callbackComplete = true
+	s.mu.Unlock()
+}
+
+func (s *callbackAwareFormulaStore) postCallbackWrites() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.postCallbackMetadataWrites
+}
+
+type reentrantFormulaRouter struct {
+	lease   *reentrantFormulaActionLease
+	store   *callbackAwareFormulaStore
+	entered chan struct{}
+}
+
+func (r reentrantFormulaRouter) Route(context.Context, RouteRequest) error {
+	close(r.entered)
+	r.lease.publish()
+	r.store.markCallbackComplete()
+	return nil
+}
+
+type ordinaryFormulaActionGate struct{}
+
+func (ordinaryFormulaActionGate) AuthorizeRecipe(context.Context, *formula.Recipe, beads.Store) (molecule.FormulaActionAuthorization, error) {
+	return molecule.FormulaActionAuthorization{}, nil
+}
+
+func (ordinaryFormulaActionGate) AuthorizeFragment(context.Context, *formula.FragmentRecipe, beads.Store) (molecule.FormulaActionAuthorization, error) {
+	return molecule.FormulaActionAuthorization{}, nil
+}
+
+func (ordinaryFormulaActionGate) RevalidateRecipe(context.Context, *formula.Recipe, beads.Store, molecule.FormulaActionAuthorization) error {
+	return nil
+}
+
+func (ordinaryFormulaActionGate) RevalidateFragment(context.Context, *formula.FragmentRecipe, beads.Store, molecule.FormulaActionAuthorization) error {
+	return nil
+}
+
+func (ordinaryFormulaActionGate) RevalidateBead(context.Context, beads.Bead, beads.Store) error {
+	return nil
+}
+
+func TestFormulaActionRouteCallbackCanPublishAndStopsStaleFollowupWrites(t *testing.T) {
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
+	base := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	store := &callbackAwareFormulaStore{Store: base.Store}
+	lease := &reentrantFormulaActionLease{generation: 1, expected: 1}
+	router := reentrantFormulaRouter{lease: lease, store: store, entered: make(chan struct{})}
+	base.Store = store
+	base.Router = router
+	base.FormulaActionGate = ordinaryFormulaActionGate{}
+	base.RequireFormulaActionGate = true
+	base.FormulaActionLease = lease
+
+	type result struct {
+		sling SlingResult
+		err   error
+	}
+	done := make(chan result, 1)
+	go func() {
+		slung, err := DoSling(SlingOpts{
+			Target:        config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)},
+			BeadOrFormula: "test-formula",
+			IsFormula:     true,
+			Merge:         "mr",
+		}, base, base.Store)
+		done <- result{sling: slung, err: err}
+	}()
+
+	select {
+	case <-router.entered:
+	case outcome := <-done:
+		t.Fatalf("formula action returned before entering its route callback: result=%+v err=%v", outcome.sling, outcome.err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("formula action did not reach its route callback")
+	}
+	select {
+	case outcome := <-done:
+		if !errors.Is(outcome.err, errFormulaActionRouteChanged) {
+			t.Fatalf("DoSling() error = %v, want stale route refusal", outcome.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("route callback could not publish while formula action was active; lease was held across the callback")
+	}
+	if got := store.postCallbackWrites(); got != 0 {
+		t.Fatalf("post-callback store metadata writes = %d, want none after stale-route refusal", got)
+	}
 }
 
 func TestSlingRouteBeadWithTypedRouter(t *testing.T) {

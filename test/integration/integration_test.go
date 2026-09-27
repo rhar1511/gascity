@@ -17,6 +17,7 @@ package integration
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -42,6 +43,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/testutil"
 	"github.com/gastownhall/gascity/test/dolttest"
+	"github.com/gastownhall/gascity/test/integration/subprocesssweep"
 	"github.com/gastownhall/gascity/test/tmuxtest"
 )
 
@@ -78,16 +80,88 @@ const (
 )
 
 const (
-	integrationGCBinaryEnv     = "GC_INTEGRATION_GC_BINARY"
-	integrationRealBDBinaryEnv = "GC_INTEGRATION_REAL_BD"
-	integrationDoltBinaryEnv   = "GC_INTEGRATION_DOLT_BINARY"
-	integrationDoltIdentityEnv = "GC_INTEGRATION_DOLT_IDENTITY_MODE"
-	managedDoltTestModeEnv     = "GC_MANAGED_DOLT_TEST_MODE"
-	managedDoltTestParentEnv   = "GC_MANAGED_DOLT_TEST_PARENT_PID"
-	doltIdentityModeIsolated   = "isolated"
-	doltIdentityModeGlobal     = "global"
-	doltIdentityModeSkip       = "skip"
+	integrationGCBinaryEnv           = "GC_INTEGRATION_GC_BINARY"
+	integrationRealBDBinaryEnv       = "GC_INTEGRATION_REAL_BD"
+	integrationDoltBinaryEnv         = "GC_INTEGRATION_DOLT_BINARY"
+	integrationBuildGitDirEnv        = "GC_INTEGRATION_BUILD_GIT_DIR"
+	integrationBuildGitTreeEnv       = "GC_INTEGRATION_BUILD_GIT_WORK_TREE"
+	integrationDisposableBeadsDirEnv = "GC_INTEGRATION_DISPOSABLE_BEADS_DIR"
+	integrationDisposableCityDirEnv  = "GC_INTEGRATION_DISPOSABLE_CITY_DIR"
+	integrationDisposableDatabaseEnv = "GC_INTEGRATION_DISPOSABLE_DATABASE"
+	integrationDisposableProjectEnv  = "GC_INTEGRATION_DISPOSABLE_PROJECT_ID"
+	integrationRequireDisposableEnv  = "GC_INTEGRATION_REQUIRE_DISPOSABLE_BEADS_DIR"
+	integrationFixtureAuthorityFlag  = "--gc-integration-fixture-authority="
+	integrationDoltIdentityEnv       = "GC_INTEGRATION_DOLT_IDENTITY_MODE"
+	managedDoltTestModeEnv           = "GC_MANAGED_DOLT_TEST_MODE"
+	managedDoltTestParentEnv         = "GC_MANAGED_DOLT_TEST_PARENT_PID"
+	doltIdentityModeIsolated         = "isolated"
+	doltIdentityModeGlobal           = "global"
+	doltIdentityModeSkip             = "skip"
 )
+
+var integrationGitRepositoryVars = []string{
+	"GIT_DIR",
+	"GIT_WORK_TREE",
+	"GIT_INDEX_FILE",
+	"GIT_OBJECT_DIRECTORY",
+	"GIT_ALTERNATE_OBJECT_DIRECTORIES",
+	"GIT_COMMON_DIR",
+	"GIT_CEILING_DIRECTORIES",
+	"GIT_DISCOVERY_ACROSS_FILESYSTEM",
+	"GIT_PREFIX",
+	"GIT_IMPLICIT_WORK_TREE",
+}
+
+var integrationBeadsSelectorVars = []string{
+	"BD_DB",
+	"BEADS_DB",
+	"BEADS_CENTRAL_CONFIG",
+	"BEADS_DOLT_CREDENTIAL_COMMAND",
+	"BEADS_DOLT_REMOTESAPI_PORT",
+	"BEADS_DOLT_SERVER_TLS",
+	"BEADS_PROXIED_SERVER_PORT",
+	"BEADS_PROXIED_SERVER_EXTERNAL_HOST",
+	"BEADS_PROXIED_SERVER_EXTERNAL_PORT",
+	"BEADS_PROXIED_SERVER_EXTERNAL_SOCKET_PATH",
+	"BEADS_PROXIED_SERVER_ROOT_PATH",
+	"BEADS_PROXIED_SERVER_CONFIG",
+	"BEADS_PROXIED_SERVER_LOG",
+	"BEADS_DOLT_SHARED_SERVER",
+	"BEADS_SHARED_SERVER_DIR",
+	"BEADS_DOLT_DATA_DIR",
+	"BEADS_DOLT_DATABASE",
+	"BEADS_DOLT_HOST",
+	"BEADS_DOLT_PORT",
+	"BEADS_DOLT_SOCKET",
+	"BEADS_DOLT_USER",
+	"BEADS_DOLT_PASSWORD",
+	"BEADS_DOLT_SERVER_DATABASE",
+	"BEADS_DOLT_SERVER_MODE",
+	"BEADS_DOLT_SERVER_SOCKET",
+	"BEADS_DOLT_SERVER_HOST",
+	"BEADS_DOLT_SERVER_PORT",
+	"BEADS_DOLT_SERVER_USER",
+	"BEADS_DOLT_SERVER_PASSWORD",
+	"BEADS_DOLT_PROXIED_SERVER",
+	"GC_DOLT_DATA_DIR",
+	"GC_DOLT_DATABASE",
+	"GC_DOLT_HOST",
+	"GC_DOLT_PORT",
+	"GC_DOLT_USER",
+	"GC_DOLT_PASSWORD",
+	"GC_DOLT_STATE_FILE",
+	"GC_DOLT_PID_FILE",
+	"GC_DOLT_LOCK_FILE",
+	"GC_DOLT_CONFIG_FILE",
+	"GC_DOLT_LOG_FILE",
+	"GC_BEADS_TRANSPORT",
+	"GC_BEADS_TARGET",
+	"GC_BEADS_BACKEND",
+	"GC_BEADS_PROXY_EXTERNAL_HOST",
+	"GC_BEADS_PROXY_EXTERNAL_PORT",
+	"GC_BEADS_PROXY_EXTERNAL_SOCKET",
+	"BEADS_BACKEND",
+}
 
 // tmuxSocketAliveSentinel pins the alive-sentinel flock on this process's
 // tmux socket parent dir for the binary's lifetime; see TestMain.
@@ -201,7 +275,10 @@ func TestMain(m *testing.M) {
 		gcBinary = filepath.Join(integrationToolBinDir, "gc")
 		buildCmd := exec.Command("go", "build", "-o", gcBinary, "./cmd/gc")
 		buildCmd.Dir = findModuleRoot()
-		buildCmd.Env = append(os.Environ(), "CGO_ENABLED=0")
+		buildCmd.Env, err = integrationModuleBuildEnv(os.Environ())
+		if err != nil {
+			panic("integration: preparing gc build environment: " + err.Error())
+		}
 		if out, err := buildCmd.CombinedOutput(); err != nil {
 			panic("integration: building gc binary: " + err.Error() + "\n" + string(out))
 		}
@@ -221,9 +298,20 @@ func TestMain(m *testing.M) {
 	bdBinary = filepath.Join(integrationToolBinDir, "bd")
 	shimCmd := exec.Command("go", "build", "-o", bdBinary, "./test/integration/filebdshim")
 	shimCmd.Dir = findModuleRoot()
-	shimCmd.Env = append(os.Environ(), "CGO_ENABLED=0")
+	shimCmd.Env, err = integrationModuleBuildEnv(os.Environ())
+	if err != nil {
+		panic("integration: preparing bd shim build environment: " + err.Error())
+	}
 	if out, err := shimCmd.CombinedOutput(); err != nil {
 		panic("integration: building bd shim: " + err.Error() + "\n" + string(out))
+	}
+	// These values authorize VCS discovery only for module-local Go builds.
+	// Remove them before any test or fixture subprocess can inherit them.
+	if err := os.Unsetenv(integrationBuildGitDirEnv); err != nil {
+		panic("integration: clearing build-only Git directory override: " + err.Error())
+	}
+	if err := os.Unsetenv(integrationBuildGitTreeEnv); err != nil {
+		panic("integration: clearing build-only Git work-tree override: " + err.Error())
 	}
 	if err := os.Setenv(integrationRealBDBinaryEnv, realBDBinary); err != nil {
 		panic("integration: setting GC_INTEGRATION_REAL_BD: " + err.Error())
@@ -471,7 +559,7 @@ func buildPinnedIntegrationBDBinary(tmpDir string) (string, error) {
 	// INSTALLING.md): the pinned bd's `bd init` defaults to embedded Dolt,
 	// which a CGO_ENABLED=0 binary refuses at runtime.
 	cmd := exec.Command("go", "install", "-tags", "gms_pure_go", "github.com/steveyegge/beads/cmd/bd@"+version)
-	cmd.Env = append(os.Environ(), "CGO_ENABLED=1", "GOBIN="+binDir)
+	cmd.Env = append(integrationPinnedBdBuildEnv(os.Environ()), "CGO_ENABLED=1", "GOBIN="+binDir)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("go install github.com/steveyegge/beads/cmd/bd@%s: %w\n%s", version, err, out)
 	}
@@ -496,6 +584,7 @@ func pinnedBdStoreCommandRunner() beads.CommandRunner {
 func pinnedIntegrationBeadsModuleVersion() (string, error) {
 	cmd := exec.Command("go", "list", "-m", "-f", "{{.Version}}", "github.com/steveyegge/beads")
 	cmd.Dir = findModuleRoot()
+	cmd.Env = integrationPinnedBdBuildEnv(os.Environ())
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("resolve github.com/steveyegge/beads module version: %w\n%s", err, out)
@@ -505,6 +594,49 @@ func pinnedIntegrationBeadsModuleVersion() (string, error) {
 		return "", errors.New("github.com/steveyegge/beads module version is empty")
 	}
 	return version, nil
+}
+
+// integrationPinnedBdBuildEnv keeps repository and fixture selectors out of
+// the go list/install calls used to find and build pinned bd. Those commands
+// use the Go module cache; unlike the module-local gc and shim builds, they do
+// not need repository-location overrides for VCS stamping.
+func integrationPinnedBdBuildEnv(base []string) []string {
+	blocked := append([]string(nil), integrationGitRepositoryVars...)
+	blocked = append(blocked, integrationBeadsSelectorVars...)
+	blocked = append(blocked,
+		"GC_TESTENV_PASSTHROUGH",
+		"BEADS_DIR",
+		"BEADS_HOLDER_TOKEN",
+		"BEADS_ACTOR",
+		"DOLT_ROOT_PATH",
+		"GC_BEADS",
+		"GC_HOME",
+		"GC_DIR",
+		"GC_CITY",
+		"GC_CITY_PATH",
+		"GC_CITY_ROOT",
+		"GC_CITY_RUNTIME_DIR",
+		"GC_AGENT",
+		"GC_RIG",
+		"GC_RIG_ROOT",
+		"GC_SESSION_ID",
+		"GC_SESSION_NAME",
+		"GC_TMUX_SESSION",
+		integrationGCBinaryEnv,
+		integrationRealBDBinaryEnv,
+		integrationDoltBinaryEnv,
+		integrationBuildGitDirEnv,
+		integrationBuildGitTreeEnv,
+		integrationDisposableBeadsDirEnv,
+		integrationDisposableCityDirEnv,
+		integrationDisposableDatabaseEnv,
+		integrationDisposableProjectEnv,
+		integrationRequireDisposableEnv,
+		integrationDoltIdentityEnv,
+		managedDoltTestModeEnv,
+		managedDoltTestParentEnv,
+	)
+	return filterEnvMany(base, blocked...)
 }
 
 // wantPinnedBeadsModuleVersion is the beads module version this suite expects
@@ -559,8 +691,7 @@ func sweepSubprocessTestProcesses() {
 		return
 	}
 
-	agentScript := filepath.Join(findModuleRoot(), "test", "agents", "graph-dispatch.sh")
-	killSet := subprocessTestKillSet(procs, agentScript, integrationPIDAlive)
+	killSet := subprocessTestKillSet(procs)
 	if len(killSet) == 0 {
 		return
 	}
@@ -815,53 +946,6 @@ func parsePPid(status string) int {
 	return 0
 }
 
-func isSubprocessTestRoot(cmd, agentScript string) bool {
-	switch {
-	case strings.Contains(cmd, agentScript):
-		return true
-	case strings.Contains(cmd, "gc convoy control --serve --follow control-dispatcher") && strings.Contains(cmd, "gc-integration-"):
-		return true
-	case strings.Contains(cmd, "gc supervisor run") && strings.Contains(cmd, "gc-integration-"):
-		return true
-	default:
-		return false
-	}
-}
-
-func isSubprocessTestLeaf(cmd, agentScript string) bool {
-	switch {
-	case strings.Contains(cmd, "bd ready --label=pool:polecat --unassigned --json --limit=1"):
-		return true
-	case strings.Contains(cmd, "bd ready --assignee=worker --json --limit=1"):
-		return true
-	case strings.Contains(cmd, agentScript):
-		return true
-	default:
-		return false
-	}
-}
-
-// integrationOwnerPIDFromCmd parses the owning test-run pid out of a cmdline
-// that references a "gc-integration-<pid>-<rand>" run root, mirroring
-// dolttest's ownerPIDFromRunDir so both sweeps scope stale state the same way.
-func integrationOwnerPIDFromCmd(cmd string) (int, bool) {
-	const marker = "gc-integration-"
-	i := strings.Index(cmd, marker)
-	if i < 0 {
-		return 0, false
-	}
-	tok := cmd[i+len(marker):]
-	end := 0
-	for end < len(tok) && tok[end] >= '0' && tok[end] <= '9' {
-		end++
-	}
-	pid, err := strconv.Atoi(tok[:end])
-	if err != nil || pid <= 0 {
-		return 0, false
-	}
-	return pid, true
-}
-
 // integrationPIDAlive reports whether pid still exists. Signal 0 probes
 // existence without delivering a signal; EPERM means the process exists but
 // is not ours to signal — treat as alive (don't reap).
@@ -873,52 +957,12 @@ func integrationPIDAlive(pid int) bool {
 	return err == nil || err == syscall.EPERM
 }
 
-// subprocessTestRootIsReapable reports whether a matched root belongs to a
-// dead run or to this one. Roots matched by their run root in argv carry an
-// owner pid ("gc-integration-<pid>-<rand>"): reap only when that owner is gone
-// (a stale orphan) or is us (our own leftovers during the post-sweep), so a
-// live concurrent run's supervisor — and its descendant subtree — is spared
-// (issue #3640). Roots matched via agentScript carry no run root in argv, so
-// they keep the prior unscoped behavior.
-func subprocessTestRootIsReapable(cmd string, alive func(int) bool) bool {
-	owner, ok := integrationOwnerPIDFromCmd(cmd)
-	if !ok {
-		return true
-	}
-	return !alive(owner) || owner == os.Getpid()
-}
-
-func subprocessTestKillSet(procs map[int]procSnapshot, agentScript string, alive func(int) bool) map[int]bool {
-	roots := make(map[int]bool)
-	children := make(map[int][]int, len(procs))
+func subprocessTestKillSet(procs map[int]procSnapshot) map[int]bool {
+	owned := make(map[int]subprocesssweep.Process, len(procs))
 	for pid, info := range procs {
-		if isSubprocessTestRoot(info.cmd, agentScript) && subprocessTestRootIsReapable(info.cmd, alive) {
-			roots[pid] = true
-		}
-		children[info.ppid] = append(children[info.ppid], pid)
+		owned[pid] = subprocesssweep.Process{PPID: info.ppid, Cmd: info.cmd}
 	}
-
-	killSet := make(map[int]bool)
-	queue := make([]int, 0, len(roots))
-	for pid := range roots {
-		queue = append(queue, pid)
-	}
-	for len(queue) > 0 {
-		pid := queue[0]
-		queue = queue[1:]
-		if killSet[pid] {
-			continue
-		}
-		killSet[pid] = true
-		queue = append(queue, children[pid]...)
-	}
-
-	for pid, info := range procs {
-		if isSubprocessTestLeaf(info.cmd, agentScript) {
-			killSet[pid] = true
-		}
-	}
-	return killSet
+	return subprocesssweep.KillSet(owned, os.TempDir(), os.Getpid(), integrationPIDAlive)
 }
 
 // gc runs the gc binary with the given args. If dir is non-empty, it sets
@@ -1011,6 +1055,8 @@ func hasStandaloneBDWorkspace(dir string) bool {
 // env as integration gc commands plus the city's managed Dolt port.
 func bdDolt(dir string, args ...string) (string, error) {
 	env := commandEnvForDir(dir, true)
+	binary := bdBinary
+	fixturePinned := false
 	if dir != "" {
 		env = filterEnv(env, "GC_CITY")
 		env = filterEnv(env, "GC_CITY_PATH")
@@ -1021,26 +1067,50 @@ func bdDolt(dir string, args ...string) (string, error) {
 			"GC_CITY_PATH="+dir,
 			"GC_CITY_RUNTIME_DIR="+filepath.Join(dir, ".gc", "runtime"),
 		)
-		if port, ok := ensureManagedDoltPortForTest(dir); ok {
-			env = appendManagedDoltEndpointEnv(env, port)
+		if expectedBeadsDir := strings.TrimSpace(parseEnvList(env)[integrationDisposableBeadsDirEnv]); expectedBeadsDir != "" {
+			fixturePinned = true
+			if filepath.Clean(expectedBeadsDir) != filepath.Join(filepath.Clean(dir), ".beads") {
+				return "", errors.New("graph command Beads target does not match its disposable city")
+			}
+			binary = filepath.Join(filepath.Dir(dir), "fixture-bin", "bd")
+			info, err := os.Lstat(binary)
+			if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o111 == 0 {
+				return "", errors.New("graph command has no executable fixture-owned bd launcher")
+			}
+		}
+		var port string
+		var ok bool
+		if fixturePinned {
+			port, ok = graphFixtureProxyPortForTest(dir)
+			if !ok {
+				return "", errors.New("graph command has no verified fixture-owned Beads proxy and Dolt listener")
+			}
+		} else {
+			port, ok = ensureManagedDoltPortForTest(dir)
+			if ok {
+				env = appendManagedDoltEndpointEnv(env, port)
+			}
 		}
 	}
-	out, err := runCommand(dir, env, integrationBDCommandTimeout, bdBinary, args...)
+	out, err := runCommand(dir, env, integrationBDCommandTimeout, binary, args...)
 	if err == nil || dir == "" || !managedDoltTransportRetryable(out) {
+		return out, err
+	}
+	if fixturePinned {
 		return out, err
 	}
 	if _, readyErr := waitForManagedDoltCityReady(env, dir, 20*time.Second); readyErr == nil {
 		if port, ok := currentManagedDoltPortForTest(dir); ok {
 			env = appendManagedDoltEndpointEnv(env, port)
 		}
-		return runCommand(dir, env, integrationBDCommandTimeout, bdBinary, args...)
+		return runCommand(dir, env, integrationBDCommandTimeout, binary, args...)
 	}
 	if port, ok := ensureManagedDoltPortForTest(dir); ok {
 		env = appendManagedDoltEndpointEnv(env, port)
 		if delay := managedDoltRetryDelay(out); delay > 0 {
 			time.Sleep(delay)
 		}
-		return runCommand(dir, env, integrationBDCommandTimeout, bdBinary, args...)
+		return runCommand(dir, env, integrationBDCommandTimeout, binary, args...)
 	}
 	return out, err
 }
@@ -1321,7 +1391,23 @@ func integrationEnvDolt() []string {
 }
 
 func integrationEnvFor(gcHome, runtimeDir string, useDolt bool) []string {
-	env := filterEnv(os.Environ(), "GC_BEADS")
+	return integrationRuntimeEnv(os.Environ(), gcHome, runtimeDir, useDolt)
+}
+
+func integrationRuntimeEnv(base []string, gcHome, runtimeDir string, useDolt bool) []string {
+	env := filterEnv(base, "GC_BEADS")
+	gitVars := append([]string(nil), integrationGitRepositoryVars...)
+	gitVars = append(gitVars,
+		integrationBuildGitDirEnv,
+		integrationBuildGitTreeEnv,
+		integrationDisposableBeadsDirEnv,
+		integrationDisposableCityDirEnv,
+		integrationDisposableDatabaseEnv,
+		integrationDisposableProjectEnv,
+		integrationRequireDisposableEnv,
+	)
+	env = filterEnvMany(env, gitVars...)
+	env = filterEnvMany(env, integrationBeadsSelectorVars...)
 	env = filterEnv(env, "BEADS_DIR")
 	env = filterEnv(env, "GC_BEADS_SCOPE_ROOT")
 	env = filterEnv(env, "GC_DOLT")
@@ -1387,6 +1473,56 @@ func integrationEnvFor(gcHome, runtimeDir string, useDolt bool) []string {
 	return env
 }
 
+// integrationModuleBuildEnv scopes explicit Git repository overrides to Go
+// builds rooted in this module. Test and fixture processes use the scrubbed
+// runtime environment instead.
+func integrationModuleBuildEnv(base []string) ([]string, error) {
+	values := parseEnvList(base)
+	gitVars := append([]string(nil), integrationGitRepositoryVars...)
+	gitVars = append(gitVars,
+		integrationBuildGitDirEnv,
+		integrationBuildGitTreeEnv,
+		integrationDisposableBeadsDirEnv,
+		integrationDisposableCityDirEnv,
+		integrationDisposableDatabaseEnv,
+		integrationDisposableProjectEnv,
+		integrationRequireDisposableEnv,
+	)
+	gitVars = append(gitVars, integrationBeadsSelectorVars...)
+	env := filterEnvMany(base, gitVars...)
+	gitDir := strings.TrimSpace(values[integrationBuildGitDirEnv])
+	gitWorkTree := strings.TrimSpace(values[integrationBuildGitTreeEnv])
+	if gitDir == "" && gitWorkTree == "" {
+		return replaceEnv(env, "CGO_ENABLED", "0"), nil
+	}
+	if gitDir == "" || gitWorkTree == "" || !filepath.IsAbs(gitDir) || !filepath.IsAbs(gitWorkTree) {
+		return nil, fmt.Errorf("%s and %s must both be absolute paths when either is set", integrationBuildGitDirEnv, integrationBuildGitTreeEnv)
+	}
+	moduleRoot, err := filepath.Abs(findModuleRoot())
+	if err != nil {
+		return nil, fmt.Errorf("resolve integration module root: %w", err)
+	}
+	buildWorkTree, err := filepath.Abs(gitWorkTree)
+	if err != nil || filepath.Clean(buildWorkTree) != filepath.Clean(moduleRoot) {
+		return nil, fmt.Errorf("%s must name this integration module's worktree", integrationBuildGitTreeEnv)
+	}
+	env = replaceEnv(env, "GIT_DIR", gitDir)
+	env = replaceEnv(env, "GIT_WORK_TREE", gitWorkTree)
+	return replaceEnv(env, "CGO_ENABLED", "0"), nil
+}
+
+func integrationFixtureAuthorityArg(cityDir string, identity graphBeadsIdentity) (string, error) {
+	data, err := json.Marshal(struct {
+		CityDir  string `json:"city_dir"`
+		Database string `json:"database"`
+		Project  string `json:"project_id"`
+	}{CityDir: cityDir, Database: identity.database, Project: identity.projectID})
+	if err != nil {
+		return "", fmt.Errorf("encode fixture launcher authority: %w", err)
+	}
+	return integrationFixtureAuthorityFlag + base64.RawURLEncoding.EncodeToString(data), nil
+}
+
 // pinRealHomeEnv pins HOME to the real passwd-db home for the current uid.
 // Test runners (sandboxes, CI containers) commonly run with HOME pointed at
 // something other than the invoking user's real home; left unchanged, that
@@ -1429,6 +1565,14 @@ func newIsolatedToolEnv(t *testing.T, useDolt bool) []string {
 func newIsolatedCommandEnv(t *testing.T, useDolt bool) []string {
 	t.Helper()
 
+	gcHome, env := newIsolatedCommandEnvWithoutSupervisor(t, useDolt)
+	startIsolatedSupervisor(t, env, gcHome)
+	return env
+}
+
+func newIsolatedCommandEnvWithoutSupervisor(t *testing.T, useDolt bool) (string, []string) {
+	t.Helper()
+
 	gcHome, _, env := newIsolatedEnvRoot(t, useDolt)
 
 	root := filepath.Dir(gcHome)
@@ -1444,8 +1588,7 @@ func newIsolatedCommandEnv(t *testing.T, useDolt bool) []string {
 	}
 	envMap := parseEnvList(env)
 	env = replaceEnv(env, "PATH", prependPath(shimDir, envMap["PATH"]))
-	startIsolatedSupervisor(t, env, gcHome)
-	return env
+	return gcHome, env
 }
 
 func newIsolatedEnvRoot(t *testing.T, useDolt bool) (string, string, []string) {
@@ -1456,7 +1599,17 @@ func newIsolatedEnvRoot(t *testing.T, useDolt bool) (string, string, []string) {
 		t.Fatalf("creating isolated env root: %v", err)
 	}
 	t.Cleanup(func() {
-		_ = os.RemoveAll(root)
+		preserveMarker := filepath.Join(root, integrationPreserveRootMarker)
+		if _, err := os.Lstat(preserveMarker); err == nil {
+			t.Logf("preserving isolated integration environment root at %s", root)
+			return
+		} else if !os.IsNotExist(err) {
+			t.Errorf("inspect isolated integration environment preservation marker: %v; preserving %s", err, root)
+			return
+		}
+		if err := os.RemoveAll(root); err != nil {
+			t.Errorf("remove isolated integration environment root %s: %v", root, err)
+		}
 	})
 	registerIntegrationDoltSQLServerCleanup(t, root)
 	gcHome := filepath.Join(root, "gc-home")
@@ -1481,6 +1634,8 @@ func newIsolatedEnvRoot(t *testing.T, useDolt bool) (string, string, []string) {
 	env := integrationEnvFor(gcHome, runtimeDir, useDolt)
 	return gcHome, runtimeDir, env
 }
+
+const integrationPreserveRootMarker = ".gc-integration-preserve"
 
 func seedDoltIdentityForRoot(gcHome string) error {
 	switch mode := doltIdentityMode(); mode {
@@ -2041,6 +2196,138 @@ func TestIntegrationEnvForPinsRealHome(t *testing.T) {
 	}
 }
 
+func TestIntegrationBuildGitOverridesStayBuildScoped(t *testing.T) {
+	selectors := append(append([]string(nil), integrationGitRepositoryVars...), integrationBeadsSelectorVars...)
+	base := make([]string, 0, len(selectors)+7)
+	for _, name := range selectors {
+		base = append(base, name+"=/ambient/"+strings.ToLower(name))
+	}
+	base = append(base,
+		integrationBuildGitDirEnv+"=/fixture/repo.git",
+		integrationBuildGitTreeEnv+"="+findModuleRoot(),
+		integrationDisposableBeadsDirEnv+"=/fixture/city/.beads",
+		integrationDisposableCityDirEnv+"=/fixture/city",
+		integrationDisposableDatabaseEnv+"=fixture_db",
+		integrationDisposableProjectEnv+"=fixture-project",
+		integrationRequireDisposableEnv+"=1",
+	)
+	buildEnv, err := integrationModuleBuildEnv(base)
+	if err != nil {
+		t.Fatalf("integrationModuleBuildEnv() error = %v", err)
+	}
+	build := parseEnvList(buildEnv)
+	if build["GIT_DIR"] != "/fixture/repo.git" || build["GIT_WORK_TREE"] != findModuleRoot() {
+		t.Fatalf("module build Git env = (%q, %q), want the explicit build-only fixture paths", build["GIT_DIR"], build["GIT_WORK_TREE"])
+	}
+	for _, name := range selectors {
+		if name == "GIT_DIR" || name == "GIT_WORK_TREE" {
+			continue
+		}
+		if value, ok := build[name]; ok {
+			t.Errorf("%s=%q leaked into module build env", name, value)
+		}
+	}
+
+	runtime := parseEnvList(integrationRuntimeEnv(base, t.TempDir(), t.TempDir(), true))
+	runtimeVars := append(append([]string(nil), selectors...),
+		integrationBuildGitDirEnv,
+		integrationBuildGitTreeEnv,
+		integrationDisposableBeadsDirEnv,
+		integrationDisposableCityDirEnv,
+		integrationDisposableDatabaseEnv,
+		integrationDisposableProjectEnv,
+		integrationRequireDisposableEnv,
+	)
+	for _, name := range runtimeVars {
+		if value, ok := runtime[name]; ok {
+			t.Errorf("%s=%q leaked into fixture runtime env", name, value)
+		}
+	}
+}
+
+func TestIntegrationPinnedBdBuildEnvExcludesGitBeadsAndFixtureSelectors(t *testing.T) {
+	blocked := append([]string(nil), integrationGitRepositoryVars...)
+	blocked = append(blocked, integrationBeadsSelectorVars...)
+	blocked = append(blocked,
+		"GC_TESTENV_PASSTHROUGH",
+		"BEADS_DIR",
+		"BEADS_HOLDER_TOKEN",
+		"BEADS_ACTOR",
+		"DOLT_ROOT_PATH",
+		"GC_BEADS",
+		"GC_HOME",
+		"GC_DIR",
+		"GC_CITY",
+		"GC_CITY_PATH",
+		"GC_CITY_ROOT",
+		"GC_CITY_RUNTIME_DIR",
+		"GC_AGENT",
+		"GC_RIG",
+		"GC_RIG_ROOT",
+		"GC_SESSION_ID",
+		"GC_SESSION_NAME",
+		"GC_TMUX_SESSION",
+		integrationGCBinaryEnv,
+		integrationRealBDBinaryEnv,
+		integrationDoltBinaryEnv,
+		integrationBuildGitDirEnv,
+		integrationBuildGitTreeEnv,
+		integrationDisposableBeadsDirEnv,
+		integrationDisposableCityDirEnv,
+		integrationDisposableDatabaseEnv,
+		integrationDisposableProjectEnv,
+		integrationRequireDisposableEnv,
+		integrationDoltIdentityEnv,
+		managedDoltTestModeEnv,
+		managedDoltTestParentEnv,
+	)
+	base := make([]string, 0, len(blocked)+8)
+	for _, name := range blocked {
+		base = append(base, name+"=/ambient/"+strings.ToLower(name))
+	}
+	base = append(base,
+		"GC_TESTENV_PASSTHROUGH=GIT_DIR,BEADS_DIR",
+		"HOME=/go-home",
+		"PATH=/go-bin",
+		"TMPDIR=/go-tmp",
+		"GOMODCACHE=/go-mod-cache",
+		"GOCACHE=/go-build-cache",
+		"GOPROXY=https://proxy.example",
+		"GOSUMDB=sum.golang.org",
+	)
+
+	got := parseEnvList(integrationPinnedBdBuildEnv(base))
+	for _, name := range blocked {
+		if value, ok := got[name]; ok {
+			t.Errorf("%s=%q leaked into pinned bd Go command environment", name, value)
+		}
+	}
+	for name, want := range map[string]string{
+		"HOME":       "/go-home",
+		"PATH":       "/go-bin",
+		"TMPDIR":     "/go-tmp",
+		"GOMODCACHE": "/go-mod-cache",
+		"GOCACHE":    "/go-build-cache",
+		"GOPROXY":    "https://proxy.example",
+		"GOSUMDB":    "sum.golang.org",
+	} {
+		if got[name] != want {
+			t.Errorf("%s = %q, want %q in pinned bd Go command environment", name, got[name], want)
+		}
+	}
+}
+
+func TestIntegrationBuildGitOverridesRequireBothAbsolutePaths(t *testing.T) {
+	for _, base := range [][]string{
+		{integrationBuildGitDirEnv + "=/fixture/repo.git"},
+		{integrationBuildGitTreeEnv + "=relative"},
+	} {
+		if _, err := integrationModuleBuildEnv(base); err == nil {
+			t.Errorf("integrationModuleBuildEnv(%v) succeeded, want invalid Git override error", base)
+		}
+	}
+}
+
 func TestManagedDoltTransportRetryableRecognizesCircuitBreaker(t *testing.T) {
 	output := `{"error":"failed to open database: dolt circuit breaker is open: server appears down, failing fast (cooldown 5s)"}`
 	if !managedDoltTransportRetryable(output) {
@@ -2414,64 +2701,6 @@ func TestNewIsolatedToolEnvSkipIdentityModeSkipsConfigWrite(t *testing.T) {
 		t.Fatalf("expected no isolated dolt config at %s when %s=%s", cfgPath, integrationDoltIdentityEnv, doltIdentityModeSkip)
 	} else if !os.IsNotExist(err) {
 		t.Fatalf("stat isolated dolt config: %v", err)
-	}
-}
-
-func TestSubprocessTestKillSetIncludesRootsDescendantsAndLeaves(t *testing.T) {
-	agentScript := "/tmp/test/agents/graph-dispatch.sh"
-	procs := map[int]procSnapshot{
-		10: {pid: 10, ppid: 1, cmd: "/tmp/gc-integration-123/gc supervisor run"},
-		11: {pid: 11, ppid: 10, cmd: "child of supervisor"},
-		12: {pid: 12, ppid: 11, cmd: "grandchild of supervisor"},
-		20: {pid: 20, ppid: 1, cmd: "sh " + agentScript},
-		21: {pid: 21, ppid: 20, cmd: "child of graph dispatch"},
-		30: {pid: 30, ppid: 1, cmd: "bd ready --label=pool:polecat --unassigned --json --limit=1"},
-		40: {pid: 40, ppid: 1, cmd: "ordinary unrelated process"},
-	}
-
-	// Owner pid 123 is reported dead so the stale root is reapable; injecting
-	// the predicate keeps the fixture deterministic instead of depending on
-	// whether pid 123 happens to exist on the host.
-	got := subprocessTestKillSet(procs, agentScript, func(int) bool { return false })
-
-	for _, pid := range []int{10, 11, 12, 20, 21, 30} {
-		if !got[pid] {
-			t.Fatalf("kill set missing pid %d: %#v", pid, got)
-		}
-	}
-	if got[40] {
-		t.Fatalf("kill set unexpectedly included unrelated pid 40: %#v", got)
-	}
-}
-
-// TestSubprocessTestKillSetSparesLiveForeignIntegrationRun pins the ownership
-// scoping that makes the ungated sweep safe: the sweep now runs for both
-// providers, so a starting run's pre-sweep must not SIGTERM/SIGKILL the
-// supervisor of a live concurrent run. A root is reapable only when its owner
-// pid is dead (a stale orphan) or is this process (our own leftovers).
-func TestSubprocessTestKillSetSparesLiveForeignIntegrationRun(t *testing.T) {
-	agentScript := "/tmp/test/agents/graph-dispatch.sh"
-	self := os.Getpid()
-	procs := map[int]procSnapshot{
-		10: {pid: 10, ppid: 1, cmd: "/tmp/gc-integration-123-abc/bin/gc supervisor run"},
-		11: {pid: 11, ppid: 10, cmd: "child of stale supervisor"},
-		20: {pid: 20, ppid: 1, cmd: fmt.Sprintf("/tmp/gc-integration-%d-xyz/bin/gc supervisor run", self)},
-		30: {pid: 30, ppid: 1, cmd: "/tmp/gc-integration-999-def/bin/gc supervisor run"},
-		31: {pid: 31, ppid: 30, cmd: "child of live foreign supervisor"},
-	}
-	alive := func(pid int) bool { return pid == 999 || pid == self }
-
-	got := subprocessTestKillSet(procs, agentScript, alive)
-
-	for _, pid := range []int{10, 11, 20} {
-		if !got[pid] {
-			t.Fatalf("kill set missing pid %d (stale orphan or own run): %#v", pid, got)
-		}
-	}
-	for _, pid := range []int{30, 31} {
-		if got[pid] {
-			t.Fatalf("kill set included pid %d from a live concurrent run: %#v", pid, got)
-		}
 	}
 }
 

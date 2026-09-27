@@ -11,7 +11,9 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/extmsg"
+	"github.com/gastownhall/gascity/internal/qualification"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // messagingSplitRoutes builds the routes a converged split city runs on: work
@@ -45,6 +47,107 @@ func newRoutedControllerStateForTest(t *testing.T, routes *storageRoutes, work b
 	cityPath := t.TempDir()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 	return newControllerStateWithRoutes(context.Background(), routes, cfg, nil, nil, "test-city", cityPath)
+}
+
+func TestFormulaActionLeasePinsControllerPublication(t *testing.T) {
+	workStore := beads.NewMemStore()
+	graphStore := beads.NewMemStore()
+	routes := &storageRoutes{
+		stores:  map[coordclass.Class]beads.Store{coordclass.ClassGraph: graphStore},
+		binding: "graph",
+	}
+	cs := newRoutedControllerStateForTest(t, routes, workStore)
+	initial, err := cs.CompatibilityRuntimeIdentity()
+	if err != nil {
+		t.Fatalf("CompatibilityRuntimeIdentity(): %v", err)
+	}
+	if initial.GraphStore != graphStore || initial.GraphStoreRef != "class:g" || initial.GraphStoreGeneration == 0 {
+		t.Fatalf("initial graph route = (%v, %q, %d), want exact graph binding/class:g/nonzero generation", initial.GraphStore, initial.GraphStoreRef, initial.GraphStoreGeneration)
+	}
+	release, err := cs.AcquireFormulaActionLease(initial.GraphStore, initial.GraphStoreRef, initial.GraphStoreGeneration)
+	if err != nil {
+		t.Fatalf("AcquireFormulaActionLease(): %v", err)
+	}
+	t.Cleanup(release)
+
+	publicationDone := make(chan struct{})
+	go func() {
+		cs.updateConfigAndProviderOnly(&config.City{Workspace: config.Workspace{Name: "reloaded-city"}}, runtime.NewFake())
+		close(publicationDone)
+	}()
+	awaitCond(t, func() bool {
+		if cs.compatibilityActionMu.TryRLock() {
+			cs.compatibilityActionMu.RUnlock()
+			return false
+		}
+		return true
+	}, "config publication writer to queue behind formula action lease")
+	select {
+	case <-publicationDone:
+		t.Fatal("controller published a new generation while the formula action lease was held")
+	default:
+	}
+	release()
+	<-publicationDone
+
+	updated, err := cs.CompatibilityRuntimeIdentity()
+	if err != nil {
+		t.Fatalf("CompatibilityRuntimeIdentity() after publication: %v", err)
+	}
+	if updated.GraphStore != initial.GraphStore || updated.GraphStoreRef != initial.GraphStoreRef {
+		t.Fatalf("config-only reload changed route identity: before=(%p,%q) after=(%p,%q)", initial.GraphStore, initial.GraphStoreRef, updated.GraphStore, updated.GraphStoreRef)
+	}
+	if updated.GraphStoreGeneration == initial.GraphStoreGeneration {
+		t.Fatalf("config-only reload kept graph route generation %d", initial.GraphStoreGeneration)
+	}
+	if _, err := cs.AcquireFormulaActionLease(initial.GraphStore, initial.GraphStoreRef, initial.GraphStoreGeneration); !errors.Is(err, qualification.ErrUnavailable) {
+		t.Fatalf("stale formula route lease error = %v, want unavailable", err)
+	}
+
+	shutdownRelease, err := cs.AcquireFormulaActionLease(updated.GraphStore, updated.GraphStoreRef, updated.GraphStoreGeneration)
+	if err != nil {
+		t.Fatalf("AcquireFormulaActionLease() before close: %v", err)
+	}
+	t.Cleanup(shutdownRelease)
+	closeDone := make(chan struct{})
+	go func() {
+		cs.closeCompatibilityRoutes(func() { close(closeDone) })
+	}()
+	awaitCond(t, func() bool {
+		if cs.compatibilityActionMu.TryRLock() {
+			cs.compatibilityActionMu.RUnlock()
+			return false
+		}
+		return true
+	}, "shutdown writer to queue behind formula action lease")
+	select {
+	case <-closeDone:
+		t.Fatal("runtime closed graph routes while the formula action lease was held")
+	default:
+	}
+	shutdownRelease()
+	<-closeDone
+	if _, err := cs.CompatibilityRuntimeIdentity(); !errors.Is(err, qualification.ErrUnavailable) {
+		t.Fatalf("CompatibilityRuntimeIdentity() after close = %v, want unavailable", err)
+	}
+}
+
+func TestCompatibilityRuntimeIdentityUsesRuntimeCityNameForWorkGraphRef(t *testing.T) {
+	workStore := beads.NewMemStore()
+	stubControllerCityStore(t, workStore)
+	cs := newControllerStateWithRoutes(
+		context.Background(), nil, &config.City{}, nil, nil, "runtime-city-name", t.TempDir(),
+	)
+	identity, err := cs.CompatibilityRuntimeIdentity()
+	if err != nil {
+		t.Fatalf("CompatibilityRuntimeIdentity(): %v", err)
+	}
+	if identity.GraphStore == nil {
+		t.Fatal("CompatibilityRuntimeIdentity() returned no work graph store")
+	}
+	if identity.GraphStoreRef != "city:runtime-city-name" {
+		t.Fatalf("GraphStoreRef = %q, want runtime city-name fallback", identity.GraphStoreRef)
+	}
 }
 
 func appendTestTranscript(t *testing.T, svc *extmsg.Services) extmsg.ConversationTranscriptRecord {

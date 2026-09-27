@@ -24,6 +24,7 @@ import (
 	beadsexec "github.com/gastownhall/gascity/internal/beads/exec"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/emergency"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/executionevent"
@@ -43,6 +44,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/ssrf"
+	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/gastownhall/gascity/internal/usage"
@@ -59,8 +61,12 @@ const cacheReconcileActor = "cache-reconcile"
 // Protected by an RWMutex for hot-reload: readers take RLock,
 // the controller loop takes Lock when updating cfg/sp/stores.
 type controllerState struct {
-	mu  sync.RWMutex
-	cfg *config.City
+	mu sync.RWMutex
+	// compatibilityActionMu pins published stores for bounded formula actions.
+	// Writers take it only around route publication/close, never around I/O or
+	// external callbacks.
+	compatibilityActionMu sync.RWMutex
+	cfg                   *config.City
 	// rawCfg is the raw (pre-expansion, site-bound) config snapshot captured
 	// at the same generation as cfg. It is the basis the mutation gate uses
 	// (Editor.UpdateAgent → AgentOrigin), cached here so provenance reads
@@ -81,30 +87,32 @@ type controllerState struct {
 	// built from it there. Nil for every city that authors no [storage] section,
 	// and for an API state built without a runtime — both route every class at
 	// the work store.
-	storageRoutes          *storageRoutes
-	cityBeadsDiagnostic    *beads.BeadsDiagnostic
-	cityMailProv           mail.Provider // city-level mail provider (all mail is city-scoped)
-	eventProv              events.Provider
-	usageSink              usage.Sink
-	editor                 *configedit.Editor
-	cityName               string
-	cityPath               string
-	version                string
-	qualificationBuild     qualification.BuildIdentity
-	releaseAuthorizer      qualification.ReleaseAuthorizer
-	compatibilityAuthority qualification.CompatibilityAuthority
-	startedAt              time.Time
-	storeMetadataSignature string
-	ct                     crashTracker  // nil if crash tracking disabled
-	pokeCh                 chan struct{} // nil when poke is not available; triggers immediate reconciler tick
-	configDirty            *atomic.Bool  // optional dirty flag shared with the reconciler reload path
-	services               workspacesvc.Registry
-	extmsgSvc              *extmsg.Services
-	adapterReg             *extmsg.AdapterRegistry
-	maintenanceLoop        *supervisor.StoreMaintenanceLoop // nil when [maintenance.dolt] enabled=false
-	updateMu               sync.Mutex                       // serializes rebuild+swap so stale reloads cannot overtake newer mutations
-	beadEventStartSeq      uint64
-	beadEventStartSeqOK    bool // false when LatestSeq errored at construction; 0+true = genuinely empty log
+	storageRoutes             *storageRoutes
+	cityBeadsDiagnostic       *beads.BeadsDiagnostic
+	cityMailProv              mail.Provider // city-level mail provider (all mail is city-scoped)
+	eventProv                 events.Provider
+	usageSink                 usage.Sink
+	editor                    *configedit.Editor
+	cityName                  string
+	cityPath                  string
+	version                   string
+	qualificationBuild        qualification.BuildIdentity
+	releaseAuthorizer         qualification.ReleaseAuthorizer
+	compatibilityAuthority    qualification.CompatibilityAuthority
+	startedAt                 time.Time
+	storeMetadataSignature    string
+	graphStoreGeneration      uint64        // guarded by mu; incremented on every state publication
+	compatibilityRoutesClosed bool          // guarded by mu; set before runtime storage close
+	ct                        crashTracker  // nil if crash tracking disabled
+	pokeCh                    chan struct{} // nil when poke is not available; triggers immediate reconciler tick
+	configDirty               *atomic.Bool  // optional dirty flag shared with the reconciler reload path
+	services                  workspacesvc.Registry
+	extmsgSvc                 *extmsg.Services
+	adapterReg                *extmsg.AdapterRegistry
+	maintenanceLoop           *supervisor.StoreMaintenanceLoop // nil when [maintenance.dolt] enabled=false
+	updateMu                  sync.Mutex                       // serializes rebuild+swap so stale reloads cannot overtake newer mutations
+	beadEventStartSeq         uint64
+	beadEventStartSeqOK       bool // false when LatestSeq errored at construction; 0+true = genuinely empty log
 
 	// completionsDeltaIndex is the tick delta pass's warm completion-fact
 	// idempotency record: loaded from the journal once, then kept current by the
@@ -231,22 +239,23 @@ func newControllerStateWithRoutes(
 		fmt.Fprintf(os.Stderr, "api: rollout gates: %v (using zero Flags; legacy paths)\n", rolloutErr)
 	}
 	cs := &controllerState{
-		cfg:                 cfg,
-		sp:                  sp,
-		cacheCtx:            ctx,
-		storageRoutes:       routes,
-		eventProv:           ep,
-		usageSink:           usageSinkForCity(cfg, cityPath),
-		editor:              configedit.NewEditor(fsys.OSFS{}, tomlPath),
-		cityName:            cityName,
-		cityPath:            cityPath,
-		version:             version,
-		qualificationBuild:  currentControllerBuildIdentity(),
-		startedAt:           time.Now(),
-		adapterReg:          extmsg.NewAdapterRegistry(),
-		beadEventStartSeq:   beadEventStartSeq,
-		beadEventStartSeqOK: beadEventStartSeqOK,
-		rolloutFlags:        rolloutFlags,
+		cfg:                  cfg,
+		graphStoreGeneration: 1,
+		sp:                   sp,
+		cacheCtx:             ctx,
+		storageRoutes:        routes,
+		eventProv:            ep,
+		usageSink:            usageSinkForCity(cfg, cityPath),
+		editor:               configedit.NewEditor(fsys.OSFS{}, tomlPath),
+		cityName:             cityName,
+		cityPath:             cityPath,
+		version:              version,
+		qualificationBuild:   currentControllerBuildIdentity(),
+		startedAt:            time.Now(),
+		adapterReg:           extmsg.NewAdapterRegistry(),
+		beadEventStartSeq:    beadEventStartSeq,
+		beadEventStartSeqOK:  beadEventStartSeqOK,
+		rolloutFlags:         rolloutFlags,
 	}
 	// Boot-resolved rollout notices are retained on the Flags value; echo
 	// them once at startup so an env override contradicting explicit config
@@ -987,6 +996,7 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	// Swap under short critical section.
 	var oldCityStore beads.Store
 	var oldRigStores map[string]beads.Store
+	cs.compatibilityActionMu.Lock()
 	cs.mu.Lock()
 	cs.cfg = cfg
 	if rawCfg != nil {
@@ -1006,8 +1016,10 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	if extSvc != nil {
 		cs.extmsgSvc = extSvc
 	}
+	cs.graphStoreGeneration++
 	// Keep prior non-nil store/provider if reopen fails.
 	cs.mu.Unlock()
+	cs.compatibilityActionMu.Unlock()
 	if cityStore != nil && oldCityStore != nil && oldCityStore != cityStore {
 		scheduleCloseBeadStoreHandle("city bead store", oldCityStore)
 	}
@@ -1120,6 +1132,7 @@ func (cs *controllerState) updateConfigAndProviderOnly(cfg *config.City, sp runt
 	// the store-reuse reload path.
 	usageSink := usageSinkForCity(cfg, cs.cityPath)
 	rawCfg := cs.loadRawSnapshot()
+	cs.compatibilityActionMu.Lock()
 	cs.mu.Lock()
 	cs.cfg = cfg
 	if rawCfg != nil {
@@ -1127,7 +1140,9 @@ func (cs *controllerState) updateConfigAndProviderOnly(cfg *config.City, sp runt
 	}
 	cs.sp = sp
 	cs.usageSink = usageSink
+	cs.graphStoreGeneration++
 	cs.mu.Unlock()
+	cs.compatibilityActionMu.Unlock()
 }
 
 // noteRolloutDrift level-compares the effective beads.conditional_writes gate a
@@ -1487,19 +1502,105 @@ func (cs *controllerState) QualificationBuildIdentity() qualification.BuildIdent
 // only by supervisor startup and cannot be changed by city config reloads.
 func (cs *controllerState) CompatibilityRuntimeIdentity() (api.CompatibilityRuntimeIdentity, error) {
 	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	if cs.compatibilityRoutesClosed {
+		return api.CompatibilityRuntimeIdentity{}, qualification.ErrUnavailable
+	}
 	cfg := cs.cfg
 	build := cs.qualificationBuild
 	authority := cs.compatibilityAuthority
-	cs.mu.RUnlock()
 	if cfg == nil {
 		return api.CompatibilityRuntimeIdentity{}, qualification.ErrUnavailable
 	}
+	graphStore, graphStoreRef, _ := cs.graphStoreRouteLocked()
 	return api.CompatibilityRuntimeIdentity{
-		Config:    cfg,
-		Snapshot:  cfg.QualificationSnapshot(),
-		Build:     build,
-		Authority: authority,
+		Config:               cfg,
+		Snapshot:             cfg.QualificationSnapshot(),
+		Build:                build,
+		Authority:            authority,
+		GraphStore:           graphStore,
+		GraphStoreRef:        graphStoreRef,
+		GraphStoreGeneration: cs.graphStoreGeneration,
 	}, nil
+}
+
+// graphStoreRouteLocked derives the graph store and stable scope ref from one
+// controller-state snapshot. The caller holds cs.mu for reading or writing.
+func (cs *controllerState) graphStoreRouteLocked() (beads.Store, string, error) {
+	if cs.cfg == nil {
+		return nil, "", qualification.ErrUnavailable
+	}
+	store := resolveGraphStore(cs.storageRoutes, cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv)
+	if store == nil {
+		return nil, "", qualification.ErrUnavailable
+	}
+	bindings, err := residencyBindingsFromRoutes(cs.storageRoutes)
+	if err != nil {
+		return nil, "", err
+	}
+	topology := assembleResidencyTopology(cs.cfg, cs.cityBeadStore, cs.beadStores, bindings, nil)
+	plan, err := storeref.Plan(storeref.Class{C: coordclass.ClassGraph}, topology)
+	if err != nil {
+		return nil, "", err
+	}
+	leg, err := storeref.ResolvePlacement(plan)
+	if err != nil || leg.Store != store {
+		if err != nil {
+			return nil, "", err
+		}
+		return nil, "", qualification.ErrUnavailable
+	}
+	storeRef := strings.TrimSpace(string(leg.Ref))
+	if storeRef == "" {
+		// The API materialization scope uses the runtime city's name for the
+		// work-store leg. Keep that convention exact, including when legacy
+		// configs omit workspace.name and the supervisor derives the city name
+		// from its runtime entry/path.
+		storeRef = "city:" + strings.TrimSpace(cs.cityName)
+	}
+	return store, storeRef, nil
+}
+
+// AcquireFormulaActionLease pins the currently published graph route only when
+// its handle, ref, and generation still match the API's captured identity.
+// Publication and shutdown writers wait until the returned idempotent release
+// function runs.
+func (cs *controllerState) AcquireFormulaActionLease(store beads.Store, storeRef string, generation uint64) (func(), error) {
+	if store == nil || strings.TrimSpace(storeRef) == "" || generation == 0 {
+		return nil, qualification.ErrUnavailable
+	}
+	cs.compatibilityActionMu.RLock()
+	cs.mu.RLock()
+	currentStore, currentRef, routeErr := cs.graphStoreRouteLocked()
+	valid := !cs.compatibilityRoutesClosed && cs.graphStoreGeneration == generation &&
+		currentStore == store && currentRef == storeRef && routeErr == nil
+	cs.mu.RUnlock()
+	if !valid {
+		cs.compatibilityActionMu.RUnlock()
+		return nil, qualification.ErrUnavailable
+	}
+	var once sync.Once
+	return func() { once.Do(cs.compatibilityActionMu.RUnlock) }, nil
+}
+
+// closeCompatibilityRoutes stops new action leases and drains existing ones
+// before the runtime closes its opened storage engines.
+func (cs *controllerState) closeCompatibilityRoutes(closeRoutes func()) {
+	if cs == nil {
+		if closeRoutes != nil {
+			closeRoutes()
+		}
+		return
+	}
+	cs.compatibilityActionMu.Lock()
+	defer cs.compatibilityActionMu.Unlock()
+	cs.mu.Lock()
+	cs.compatibilityRoutesClosed = true
+	cs.graphStoreGeneration++
+	cs.mu.Unlock()
+	if closeRoutes != nil {
+		closeRoutes()
+	}
 }
 
 // setCompatibilityAuthority captures a supervisor-owned authority before
@@ -1546,6 +1647,7 @@ var (
 	_ api.RolloutFlagsProvider                 = (*controllerState)(nil)
 	_ api.QualificationProvider                = (*controllerState)(nil)
 	_ api.CompatibilityRuntimeIdentityProvider = (*controllerState)(nil)
+	_ api.CompatibilityActionLeaseProvider     = (*controllerState)(nil)
 )
 
 // SessionProvider returns the current session provider.

@@ -147,6 +147,10 @@ run_pkg_tests() {
   regex="^($(join_regex "${tests[@]}"))$"
   echo "Running shard ${shard} against ${test_pkg} (${#tests[@]} tests)"
   go_test_args=(-tags integration -timeout "$timeout")
+  # Retain individual test progress if the outer CI deadline stops a smoke run.
+  if [[ "$shard" == rest-smoke || "$shard" =~ ^rest-smoke-[0-9]+-of-[0-9]+$ ]]; then
+    go_test_args+=(-v)
+  fi
   if [[ -n "${GO_TEST_COVERPROFILE:-}" ]]; then
     go_test_args+=(-coverpkg=./... -coverprofile "$GO_TEST_COVERPROFILE")
   fi

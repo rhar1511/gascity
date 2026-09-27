@@ -12,7 +12,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/formula"
-	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/molecule"
 )
 
@@ -71,7 +70,6 @@ type fanoutAuthorizationFixture struct {
 
 func newFanoutAuthorizationFixture(t *testing.T, state string) fanoutAuthorizationFixture {
 	t.Helper()
-	formulatest.EnableV2ForTest(t)
 
 	dir := t.TempDir()
 	expansion := `

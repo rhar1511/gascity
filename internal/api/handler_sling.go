@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/agentutil"
@@ -45,20 +46,81 @@ type slingBody struct {
 	NoFormula      bool              `json:"no_formula"`
 }
 
+type graphFormulaActionRoute struct {
+	config       *config.City
+	store        beads.Store
+	storeRef     string
+	generation   uint64
+	gate         molecule.FormulaActionGate
+	acquireLease func() (func(), error)
+}
+
+// formulaActionLeaseScope owns one captured route lease and permits a sling to
+// release it around arbitrary callbacks, then reacquire the same identity
+// before making further store writes.
+type formulaActionLeaseScope struct {
+	mu      sync.Mutex
+	acquire func() (func(), error)
+	release func()
+}
+
+func (l *formulaActionLeaseScope) Acquire() error {
+	if l == nil || l.acquire == nil {
+		return qualification.ErrUnavailable
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.release != nil {
+		return nil
+	}
+	release, err := l.acquire()
+	if err != nil {
+		return err
+	}
+	if release == nil {
+		return qualification.ErrUnavailable
+	}
+	l.release = release
+	return nil
+}
+
+func (l *formulaActionLeaseScope) Release() {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	release := l.release
+	l.release = nil
+	l.mu.Unlock()
+	if release != nil {
+		release()
+	}
+}
+
 // graphFormulaCompatibility composes the generic pre-write gate for API sling
-// requests. It derives the graph StoreRef from opened API topology and reads
-// config/build/authority identity again at each pre-write check so a reload
-// cannot reuse an authorization from stale runtime state. The host authority
-// is supplied only by trusted supervisor startup.
-func (s *Server) graphFormulaCompatibility() (*config.City, string, molecule.FormulaActionGate) {
+// requests. It captures one published graph route and rejects both stale
+// generations and replacement handles before formula writes. The host
+// authority is supplied only by trusted supervisor startup.
+func (s *Server) graphFormulaCompatibility() graphFormulaActionRoute {
 	cfg := s.state.Config()
 	var build qualification.BuildIdentity
 	var authority qualification.CompatibilityAuthority
-	if provider, ok := s.state.(CompatibilityRuntimeIdentityProvider); ok {
-		if identity, err := provider.CompatibilityRuntimeIdentity(); err == nil {
+	var graphStore beads.Store
+	var storeRef string
+	var generation uint64
+	routeIdentityPresent := false
+	identityProvider, hasIdentityProvider := s.state.(CompatibilityRuntimeIdentityProvider)
+	if hasIdentityProvider {
+		if identity, err := identityProvider.CompatibilityRuntimeIdentity(); err == nil {
 			cfg = identity.Config
 			build = identity.Build
 			authority = identity.Authority
+			if identity.GraphStoreGeneration != 0 || identity.GraphStoreRef != "" || identity.GraphStore != nil {
+				routeIdentityPresent = true
+				graphStore = identity.GraphStore
+				storeRef = identity.GraphStoreRef
+				generation = identity.GraphStoreGeneration
+			}
 		} else {
 			cfg = nil
 		}
@@ -78,25 +140,31 @@ func (s *Server) graphFormulaCompatibility() (*config.City, string, molecule.For
 	}
 	cityPath := s.state.CityPath()
 	serverID, _ := compatibility.ControllerScopeID(cityPath)
-	graphStore := s.state.GraphBeadStore().Store
-	storeRef := ""
-	if cfg != nil && graphStore != nil {
-		plan, err := storeref.Plan(storeref.Class{C: coordclass.ClassGraph}, s.residencyTopologyForConfig(cfg))
-		if err == nil {
-			if leg, err := storeref.ResolvePlacement(plan); err == nil && leg.Store == graphStore {
-				storeRef = string(leg.Ref)
-				if storeRef == "" {
-					storeRef = "city:" + cityName
-				}
-			}
-		}
+	if graphStore == nil && !routeIdentityPresent {
+		graphStore = s.state.GraphBeadStore().Store
+	}
+	if storeRef == "" && !routeIdentityPresent {
+		storeRef = s.graphFormulaStoreRef(cfg, cityName, graphStore)
 	}
 	gate := compatibility.NewMaterializationGate(cfg, cityName, serverID, storeRef, build, authority)
 	gate.Current = func() (*config.City, qualification.Snapshot, qualification.BuildIdentity, qualification.CompatibilityAuthority, error) {
-		if provider, ok := s.state.(CompatibilityRuntimeIdentityProvider); ok {
-			identity, err := provider.CompatibilityRuntimeIdentity()
+		if hasIdentityProvider {
+			identity, err := identityProvider.CompatibilityRuntimeIdentity()
 			if err != nil {
 				return nil, qualification.Snapshot{}, qualification.BuildIdentity{}, nil, err
+			}
+			currentStore := identity.GraphStore
+			currentRef := identity.GraphStoreRef
+			currentGeneration := identity.GraphStoreGeneration
+			if !routeIdentityPresent {
+				currentStore = s.state.GraphBeadStore().Store
+				currentRef = s.graphFormulaStoreRef(identity.Config, cityName, currentStore)
+			} else if currentStore == nil || currentRef == "" || currentGeneration == 0 {
+				return nil, qualification.Snapshot{}, qualification.BuildIdentity{}, nil, qualification.ErrUnavailable
+			}
+			if currentStore != graphStore || currentRef != storeRef ||
+				(routeIdentityPresent && currentGeneration != generation) {
+				return nil, qualification.Snapshot{}, qualification.BuildIdentity{}, nil, qualification.ErrUnavailable
 			}
 			return identity.Config, identity.Snapshot, identity.Build, identity.Authority, nil
 		}
@@ -116,7 +184,43 @@ func (s *Server) graphFormulaCompatibility() (*config.City, string, molecule.For
 		}
 		return currentConfig, snapshot, currentBuild, nil, nil
 	}
-	return cfg, storeRef, gate
+	var acquireLease func() (func(), error)
+	if routeIdentityPresent {
+		if provider, ok := s.state.(CompatibilityActionLeaseProvider); ok && graphStore != nil && storeRef != "" && generation != 0 {
+			acquireLease = func() (func(), error) {
+				return provider.AcquireFormulaActionLease(graphStore, storeRef, generation)
+			}
+		} else {
+			acquireLease = func() (func(), error) { return nil, qualification.ErrUnavailable }
+		}
+	} else if cfg != nil && cfg.HasRequiredCompatibilityPacks() {
+		// Legacy State implementations can serve formula requests in cities
+		// without required packs, but required-pack actions must have a coherent
+		// published route identity and a controller-owned lease provider.
+		acquireLease = func() (func(), error) { return nil, qualification.ErrUnavailable }
+	}
+	return graphFormulaActionRoute{
+		config: cfg, store: graphStore, storeRef: storeRef, generation: generation,
+		gate: gate, acquireLease: acquireLease,
+	}
+}
+
+func (s *Server) graphFormulaStoreRef(cfg *config.City, cityName string, graphStore beads.Store) string {
+	if cfg == nil || graphStore == nil {
+		return ""
+	}
+	plan, err := storeref.Plan(storeref.Class{C: coordclass.ClassGraph}, s.residencyTopologyForConfig(cfg))
+	if err != nil {
+		return ""
+	}
+	leg, err := storeref.ResolvePlacement(plan)
+	if err != nil || leg.Store != graphStore {
+		return ""
+	}
+	if leg.Ref == "" {
+		return "city:" + cityName
+	}
+	return string(leg.Ref)
 }
 
 // routeOptsFromBody builds the domain RouteOpts from the wire body for a plain
@@ -163,7 +267,8 @@ var apiSlingStderr = func() io.Writer { return os.Stderr }
 //     (*slingResponse, int, string, string) shape every non-conflict
 //     caller already consumes.
 func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slingResponse, int, string, string, *sourceworkflow.ConflictError) {
-	cfg := s.state.Config()
+	formulaRoute := s.graphFormulaCompatibility()
+	cfg := formulaRoute.config
 	agentCfg, _ := findAgent(cfg, body.Target)
 
 	formulaName := strings.TrimSpace(body.Formula)
@@ -194,17 +299,27 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 	// degraded cross-store conflict coverage.
 	sourceWorkflowScanWarnings := make(map[string]struct{})
 	var sourceWorkflowScanMessages []string
-	formulaConfig, graphStoreRef, formulaActionGate := s.graphFormulaCompatibility()
+	needsFormulaActionGate := formulaName != "" || attachedBeadID != "" ||
+		(!body.NoFormula && agentCfg.EffectiveDefaultSlingFormula() != "")
+	var formulaLease *formulaActionLeaseScope
+	if needsFormulaActionGate && formulaRoute.acquireLease != nil {
+		formulaLease = &formulaActionLeaseScope{acquire: formulaRoute.acquireLease}
+	}
+	var formulaActionLease sling.FormulaActionLease
+	if formulaLease != nil {
+		formulaActionLease = formulaLease
+	}
 	deps := sling.SlingDeps{
 		CityName:                 s.state.CityName(),
 		CityPath:                 s.state.CityPath(),
-		Cfg:                      formulaConfig,
+		Cfg:                      formulaRoute.config,
 		SP:                       s.state.SessionProvider(),
 		Store:                    store,
-		GraphStore:               s.state.GraphBeadStore().Store,
-		GraphStoreRef:            graphStoreRef,
-		FormulaActionGate:        formulaActionGate,
+		GraphStore:               formulaRoute.store,
+		GraphStoreRef:            formulaRoute.storeRef,
+		FormulaActionGate:        formulaRoute.gate,
 		RequireFormulaActionGate: true,
+		FormulaActionLease:       formulaActionLease,
 		Events:                   s.state.EventProvider(),
 		StoreRef:                 storeRef,
 		SourceWorkflowStores: func() ([]sling.SourceWorkflowStore, error) {
@@ -222,8 +337,10 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 			sourceWorkflowScanMessages = append(sourceWorkflowScanMessages, message)
 			fmt.Fprintf(apiSlingStderr(), "warning: %s\n", message) //nolint:errcheck
 		},
-		Runner:   s.slingRunner(),
-		Router:   apiBeadRouter{server: s, store: store},
+		Runner: s.slingRunner(),
+		Router: apiBeadRouter{
+			server: s, cfg: formulaRoute.config, store: store, formulaActionLease: formulaLease,
+		},
 		Resolver: apiAgentResolver{},
 		Branches: apiBranchResolver{cityPath: s.state.CityPath()},
 		Notify:   &apiNotifier{state: s.state},
@@ -584,15 +701,17 @@ func (n *apiNotifier) PokeControlDispatch(_ string) {
 }
 
 type apiBeadRouter struct {
-	server *Server
-	store  beads.Store
+	server             *Server
+	cfg                *config.City
+	store              beads.Store
+	formulaActionLease *formulaActionLeaseScope
 }
 
 func (r apiBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 	if r.server == nil {
 		return fmt.Errorf("sling router: missing server")
 	}
-	cfg := r.server.state.Config()
+	cfg := r.cfg
 	if cfg != nil {
 		if agentCfg, ok := findAgentByQualifiedTemplate(cfg, req.Target); ok && sling.IsCustomSlingQuery(agentCfg) {
 			runner := r.server.slingRunner()
@@ -606,6 +725,15 @@ func (r apiBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 			_, err := runner(req.WorkDir, slingCmd, req.Env)
 			return err
 		}
+	}
+	// The built-in metadata write needs the selected store to remain open until
+	// SetMetadata completes. This callback is bounded to the store operation;
+	// configured shell routing returned above without holding the lease.
+	if r.formulaActionLease != nil {
+		if err := r.formulaActionLease.Acquire(); err != nil {
+			return fmt.Errorf("pinning formula route for built-in routing: %w", err)
+		}
+		defer r.formulaActionLease.Release()
 	}
 	if r.store == nil {
 		return fmt.Errorf("built-in sling routing requires a store")

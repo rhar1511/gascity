@@ -80,6 +80,63 @@ func TestMetricsOptOutVarsAreLeakVectors(t *testing.T) {
 	}
 }
 
+func TestGitRepositoryOverrideVarsAreLeakVectors(t *testing.T) {
+	for _, name := range []string{
+		"GIT_DIR",
+		"GIT_WORK_TREE",
+		"GIT_INDEX_FILE",
+		"GIT_OBJECT_DIRECTORY",
+		"GIT_ALTERNATE_OBJECT_DIRECTORIES",
+		"GIT_COMMON_DIR",
+		"GIT_CEILING_DIRECTORIES",
+		"GIT_DISCOVERY_ACROSS_FILESYSTEM",
+		"GIT_PREFIX",
+		"GIT_IMPLICIT_WORK_TREE",
+	} {
+		if !slices.Contains(testenv.LeakVectorVars, name) {
+			t.Errorf("%s missing from LeakVectorVars; ambient repository overrides can redirect fixture Git commands", name)
+		}
+	}
+}
+
+func TestFixtureBeadsEndpointSelectorVarsAreLeakVectors(t *testing.T) {
+	for _, name := range []string{
+		"BD_DB",
+		"BEADS_DB",
+		"BEADS_CENTRAL_CONFIG",
+		"BEADS_DOLT_DATA_DIR",
+		"BEADS_DOLT_DATABASE",
+		"BEADS_DOLT_HOST",
+		"BEADS_DOLT_USER",
+		"BEADS_DOLT_SERVER_PASSWORD",
+		"BEADS_PROXIED_SERVER_ROOT_PATH",
+		"BEADS_DOLT_SHARED_SERVER",
+		"BEADS_SHARED_SERVER_DIR",
+		"BEADS_DOLT_SERVER_DATABASE",
+		"BEADS_DOLT_SERVER_MODE",
+		"BEADS_DOLT_SERVER_SOCKET",
+		"BEADS_DOLT_SERVER_TLS",
+		"BEADS_DOLT_REMOTESAPI_PORT",
+		"BEADS_DOLT_CREDENTIAL_COMMAND",
+		"BEADS_DOLT_PROXIED_SERVER",
+		"BEADS_PROXIED_SERVER_PORT",
+		"BEADS_PROXIED_SERVER_EXTERNAL_HOST",
+		"BEADS_PROXIED_SERVER_EXTERNAL_PORT",
+		"BEADS_PROXIED_SERVER_EXTERNAL_SOCKET_PATH",
+		"GC_BEADS_TRANSPORT",
+		"GC_BEADS_TARGET",
+		"GC_BEADS_BACKEND",
+		"GC_BEADS_PROXY_EXTERNAL_HOST",
+		"GC_BEADS_PROXY_EXTERNAL_PORT",
+		"GC_BEADS_PROXY_EXTERNAL_SOCKET",
+		"BEADS_BACKEND",
+	} {
+		if !slices.Contains(testenv.LeakVectorVars, name) {
+			t.Errorf("%s missing from LeakVectorVars; ambient selectors can redirect a disposable Beads fixture", name)
+		}
+	}
+}
+
 // TestInitPassthroughPreservesNamed verifies that GC_TESTENV_PASSTHROUGH
 // preserves the named leak-vector vars, scrubs the rest, and unsets itself.
 func TestInitPassthroughPreservesNamed(t *testing.T) {

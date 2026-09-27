@@ -4,6 +4,7 @@ package integration
 
 import (
 	"bufio"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -691,6 +692,43 @@ func pollUntil(timeout, interval time.Duration, fn func() bool) bool {
 			return false
 		}
 		time.Sleep(interval)
+	}
+}
+
+// pollUntilContext is for black-box boundaries with no completion event. The
+// caller names the boundary and reports only a sanitized last state; the
+// context bounds both the wait and each probe.
+func pollUntilContext(
+	ctx context.Context,
+	owner string,
+	interval time.Duration,
+	check func(context.Context) (done bool, lastState string, err error),
+) (string, error) {
+	if interval <= 0 {
+		return "", fmt.Errorf("%s: poll interval must be positive", owner)
+	}
+	if check == nil {
+		return "", fmt.Errorf("%s: poll check is required", owner)
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	lastState := "no observation yet"
+	for {
+		done, observed, err := check(ctx)
+		if observed != "" {
+			lastState = observed
+		}
+		if err != nil {
+			return lastState, fmt.Errorf("%s: %w (last state: %s)", owner, err, lastState)
+		}
+		if done {
+			return lastState, nil
+		}
+		select {
+		case <-ctx.Done():
+			return lastState, fmt.Errorf("%s: %w (last state: %s)", owner, ctx.Err(), lastState)
+		case <-ticker.C:
+		}
 	}
 }
 

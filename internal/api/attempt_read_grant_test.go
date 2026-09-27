@@ -21,6 +21,13 @@ func TestAttemptReadGrantRequiresSignedReaderAndOriginalScope(t *testing.T) {
 		t.Fatal(err)
 	}
 	state.cityBeadStore = store
+	// Every configured work store must support the archive census before the
+	// signed grant can authorize a historical read, even when that store is empty.
+	rigStore, err := beads.OpenFileStore(fsys.OSFS{}, filepath.Join(t.TempDir(), "rig-beads.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.stores["myrig"] = rigStore
 	work, err := store.Create(beads.Bead{Title: "private work", Type: "task"})
 	if err != nil {
 		t.Fatal(err)

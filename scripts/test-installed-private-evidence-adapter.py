@@ -184,7 +184,7 @@ def main():
             "GC_PRIVATE_EVIDENCE_PROBE_ROOT": str(root),
             "GC_PRIVATE_EVIDENCE_PROBE_BD_BINARY": str(Path(bd).resolve()),
         })
-        command = [go, "test", "./internal/attemptevidence", "-run",
+        command = [go, "test", "-tags", "integration", "./internal/attemptevidence", "-run",
                    "^TestInstalledBdPrivateEvidenceAdapter$", "-count=1", "-v"]
         result = subprocess.run(command, cwd=repo, env=test_env, capture_output=True,
                                 text=True, timeout=600)

@@ -29,6 +29,7 @@ go_test(
         "gate_test.go",
         "host_authority_test.go",
         "store_prover_test.go",
+        "testenv_import_test.go",
     ],
     embed = [":compatibility"],
     deps = [
@@ -37,6 +38,7 @@ go_test(
         "//internal/formula",
         "//internal/fsys",
         "//internal/qualification",
+        "//internal/testenv",
     ],
 )
 

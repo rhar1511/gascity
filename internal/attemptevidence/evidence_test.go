@@ -2,13 +2,7 @@ package attemptevidence
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
-	"io"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -145,8 +139,13 @@ func TestCapturePreservesExactAttemptAfterOwnerDeleteAndStoreRestart(t *testing.
 	}
 }
 
-func TestConfiguredHTTPReadsArchivedAttemptsAfterOwnerDeletion(t *testing.T) {
-	identity := Identity{Kind: KindRetry, OwnerBeadID: "gc-owner", ExecutionBeadID: "gc-attempt"}
+func TestFileStoreReadsArchivedAttemptsAfterOwnerDeletion(t *testing.T) {
+	store := newAttemptEvidenceStore(t)
+	owner, err := store.Create(beads.Bead{Title: "disposable owner", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := Identity{Kind: KindRetry, OwnerBeadID: owner.ID, ExecutionBeadID: "gc-attempt"}
 	attemptID, err := AttemptID(identity)
 	if err != nil {
 		t.Fatal(err)
@@ -154,6 +153,7 @@ func TestConfiguredHTTPReadsArchivedAttemptsAfterOwnerDeletion(t *testing.T) {
 	evidence := Evidence{
 		SchemaVersion: SchemaVersion, AttemptID: attemptID, Identity: identity,
 		StoreRef: "rig:fixture", CapturedAt: time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC),
+		Permission:   PermissionScope{StoreRef: "rig:fixture", WorkID: owner.ID},
 		SourceStatus: StatusUnavailable, SourceReason: "source_unavailable",
 		BaseStatus: StatusUnavailable, BaseReason: "base_unavailable",
 		CandidateStatus: StatusUnavailable, CandidateReason: "candidate_unavailable",
@@ -163,72 +163,29 @@ func TestConfiguredHTTPReadsArchivedAttemptsAfterOwnerDeletion(t *testing.T) {
 		Policy:            unavailableFacet("not_linked"), Actions: unavailableFacet("not_linked"),
 		Acknowledgements: unavailableFacet("not_linked"), Redaction: unavailableFacet("not_performed"),
 	}
-	payload, err := json.Marshal(evidence)
+	sealed, err := Seal(store, evidence)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("Seal: %v", err)
 	}
-	digest := sha256.Sum256(payload)
-	metadata := map[string]string{
-		beadmeta.AttemptEvidenceArchiveOwnerIDMetadataKey:   identity.OwnerBeadID,
-		beadmeta.AttemptEvidenceArchiveAttemptIDMetadataKey: attemptID,
-		beadmeta.AttemptEvidenceArchiveDigestMetadataKey:    hex.EncodeToString(digest[:]),
-		beadmeta.AttemptEvidenceArchivePayloadMetadataKey:   string(payload),
+	if !samePayload(sealed, evidence) {
+		t.Fatal("Seal returned a different archive than the proposed evidence")
 	}
-	metadataJSON, err := json.Marshal(metadata)
-	if err != nil {
-		t.Fatal(err)
+	if err := store.Delete(owner.ID); err != nil {
+		t.Fatalf("delete owner before archive read: %v", err)
 	}
-	listItem, err := json.Marshal(map[string]any{
-		"id": "gc-archive", "title": "Immutable execution attempt evidence", "status": "closed",
-		"issue_type": "molecule", "labels": []string{"gc:attempt-evidence"}, "metadata": json.RawMessage(metadataJSON),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer controller-secret" || r.Header.Get("Bd-Project-Id") != "project-a" {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-		switch r.URL.Path {
-		case "/v0/beads/context":
-			_, _ = io.WriteString(w, `{"api_version":"v0","backend":"dolt","bd_version":"1.3.0","capabilities":["issues.casMetadata","issues.create","issues.get","project.enforce"],"database":"gc_fixture","dolt_mode":"server","project_id":"project-a"}`)
-		case "/v0/beads/issues/gc-owner":
-			http.NotFound(w, r)
-		case "/v0/beads/issues":
-			if len(r.URL.Query()["metadata_field"]) == 0 {
-				t.Errorf("archive read omitted metadata filters: %v", r.URL.Query())
-			}
-			_, _ = w.Write([]byte(`{"items":[` + string(listItem) + `],"has_more":false}`))
-		default:
-			t.Errorf("unexpected HTTP request %s %s", r.Method, r.URL.Path)
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
-	tokenPath := filepath.Join(t.TempDir(), "controller-token")
-	if err := os.WriteFile(tokenPath, []byte("controller-secret\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	store := beads.NewBdStore(t.TempDir(), func(_, _ string, _ ...string) ([]byte, error) {
-		t.Fatal("configured HTTP evidence path invoked bd command runner")
-		return nil, nil
-	}, beads.WithBdStorePrivateEvidenceHTTP(beads.PrivateEvidenceHTTPConfig{
-		Endpoint: server.URL, ProjectID: "project-a", Database: "gc_fixture", ScopeRef: "rig:fixture", TokenFile: tokenPath,
-	}))
 
 	listed, err := List(store, identity.OwnerBeadID)
 	if err != nil {
 		t.Fatalf("List after owner deletion: %v", err)
 	}
-	if len(listed) != 1 || listed[0].AttemptID != attemptID {
+	if len(listed) != 1 || !samePayload(listed[0], evidence) {
 		t.Fatalf("List after owner deletion = %#v, want exact archive %s", listed, attemptID)
 	}
 	read, err := Read(store, identity.OwnerBeadID, attemptID)
 	if err != nil {
 		t.Fatalf("Read after owner deletion: %v", err)
 	}
-	if read.AttemptID != attemptID || read.Identity != identity {
+	if !samePayload(read, evidence) {
 		t.Fatalf("Read after owner deletion = %#v, want exact archived attempt", read)
 	}
 }

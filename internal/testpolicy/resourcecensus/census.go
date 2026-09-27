@@ -125,8 +125,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeAll,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   701,
-			BaselineFiles:   202,
+			BaselineCalls:   702,
+			BaselineFiles:   203,
 			ReportedCalls:   495,
 			ReportedFiles:   135,
 			OwnerBead:       "ga-cp3hwi",
@@ -138,7 +138,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeAll,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   488,
+			BaselineCalls:   487,
 			BaselineFiles:   177,
 			ReportedCalls:   447,
 			ReportedFiles:   157,
@@ -231,8 +231,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceHTTPTestServer,
-			BaselineCalls:   318,
-			BaselineFiles:   66,
+			BaselineCalls:   321,
+			BaselineFiles:   68,
 			ReportedCalls:   255,
 			ReportedFiles:   56,
 			OwnerBead:       "ga-cp3hwi",
@@ -322,6 +322,17 @@ var bootstrapPolicy = Ledger{
 	},
 	Medium: []MediumOwner{
 		{
+			PackageDir:      "internal/compatibility",
+			PackageName:     "compatibility",
+			Owner:           "TestStoreCapabilityProverUsesConfiguredBdStoreThroughOuterClassWrapper",
+			Resources:       []Resource{ResourceHTTPTestServer},
+			OwnerBead:       "gp-olwhg.14",
+			Invariant:       "configured private-evidence store proof is a checked Medium HTTP boundary owner",
+			ResourceOwner:   "the single httptest.NewServer call in TestStoreCapabilityProverUsesConfiguredBdStoreThroughOuterClassWrapper verifies the configured authenticated BdStore through its GraphStore wrapper and closes the loopback server",
+			MigrationTarget: "P0.4c",
+			Expires:         "2026-10-01",
+		},
+		{
 			PackageDir:      "internal/api",
 			PackageName:     "api",
 			Owner:           "TestEveryEmittedErrorCodeIsRegistered",
@@ -341,6 +352,17 @@ var bootstrapPolicy = Ledger{
 			Invariant:       "the ADR-0009 commit-reachability oracle is a checked Medium subprocess owner",
 			ResourceOwner:   "the git processes are confined to TestCommitReachableOnBranch, which exists to ask a real repository whether a commit is an ancestor of a branch: CommitReachableOnBranch is that git invocation, so a fake oracle would only prove itself",
 			MigrationTarget: "P0.4b",
+			Expires:         "2026-10-01",
+		},
+		{
+			PackageDir:      "cmd/gc",
+			PackageName:     "main",
+			Owner:           "TestBdStoreConstructorsSelectPrivateEvidenceByExactCityAndRigScope",
+			Resources:       []Resource{ResourceHTTPTestServer},
+			OwnerBead:       "gp-olwhg.17",
+			Invariant:       "city/rig private-evidence constructor selection is a checked Medium HTTP boundary owner",
+			ResourceOwner:   "the two httptest.NewServer calls are confined to TestBdStoreConstructorsSelectPrivateEvidenceByExactCityAndRigScope, which proves the six real city/rig constructors select the authenticated configured endpoint and closes both loopback servers",
+			MigrationTarget: "P0.4c",
 			Expires:         "2026-10-01",
 		},
 		{

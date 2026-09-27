@@ -41,6 +41,15 @@ type BeadChildQuerier interface {
 	List(query beads.ListQuery) ([]beads.Bead, error)
 }
 
+// FormulaActionLease pins the published store route used by a required
+// formula action. Implementations must make Acquire idempotent while held and
+// Release idempotent while unheld so the sling can drop the pin around an
+// external callback and reacquire it before making any later store writes.
+type FormulaActionLease interface {
+	Acquire() error
+	Release()
+}
+
 // SlingOpts captures the user's intent for a sling operation.
 type SlingOpts struct {
 	Target        config.Agent
@@ -153,6 +162,10 @@ type SlingDeps struct {
 	// RequireFormulaActionGate makes a missing gate fail closed at this
 	// production materialization boundary.
 	RequireFormulaActionGate bool
+	// FormulaActionLease pins the published graph route while a required
+	// formula action is prepared and materialized. It is released around external
+	// routing callbacks and reacquired before later store writes.
+	FormulaActionLease FormulaActionLease
 	// LifecycleRecipeMetadata is set only by the controller's signed lifecycle
 	// admission path. It is copied onto every graph.v2 recipe bead before the
 	// graph is materialized, so descendants are held while admission is still

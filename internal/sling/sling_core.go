@@ -58,6 +58,12 @@ func DoSling(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult, 
 		return SlingResult{}, err
 	}
 	a := opts.Target
+	if (opts.IsFormula || usesFormulaBackedRoute(opts)) && deps.RequireFormulaActionGate && deps.FormulaActionLease != nil {
+		if err := deps.FormulaActionLease.Acquire(); err != nil {
+			return SlingResult{Target: a.QualifiedName()}, fmt.Errorf("pinning formula action route: %w", err)
+		}
+		defer deps.FormulaActionLease.Release()
+	}
 	if opts.RequireFormulaAttach && (opts.NoFormula || (!opts.IsFormula && opts.OnFormula == "" && a.EffectiveDefaultSlingFormula() == "")) {
 		return SlingResult{}, errors.New("sling: formula attachment is required but the target has no configured formula")
 	}
@@ -761,11 +767,27 @@ func finalize(opts SlingOpts, deps SlingDeps, beadID, method string, result Slin
 			Env:     slingEnv,
 			Force:   opts.Force,
 		}
+		// Router is an external callback. Release before entering it so a
+		// custom route hook cannot deadlock a controller config mutation against
+		// this request's publication lease. A successful route must reacquire the
+		// captured generation before finalize performs any further store writes.
+		if deps.FormulaActionLease != nil {
+			deps.FormulaActionLease.Release()
+		}
 		if err := deps.Router.Route(context.Background(), req); err != nil {
 			telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), method, err)
 			return result, fmt.Errorf("%w", err)
 		}
+		if deps.FormulaActionLease != nil {
+			if err := deps.FormulaActionLease.Acquire(); err != nil {
+				telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), method, err)
+				return result, fmt.Errorf("formula action route changed during routing: %w", err)
+			}
+		}
 	} else {
+		if deps.FormulaActionLease != nil {
+			deps.FormulaActionLease.Release()
+		}
 		slingCmd, slingWarn := BuildSlingCommandForAgent("sling_query", a.EffectiveSlingQuery(), beadID, deps.CityPath, deps.CityName, a, deps.Cfg.Rigs)
 		if slingWarn != "" {
 			depsTracef(deps, "sling-core: %s", slingWarn)
@@ -773,6 +795,12 @@ func finalize(opts SlingOpts, deps SlingDeps, beadID, method string, result Slin
 		if _, err := deps.Runner(rigDir, slingCmd, slingEnv); err != nil {
 			telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), method, err)
 			return result, fmt.Errorf("%w", err)
+		}
+		if deps.FormulaActionLease != nil {
+			if err := deps.FormulaActionLease.Acquire(); err != nil {
+				telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), method, err)
+				return result, fmt.Errorf("formula action route changed during routing: %w", err)
+			}
 		}
 	}
 	telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), method, nil)
@@ -892,6 +920,9 @@ func finalize(opts SlingOpts, deps SlingDeps, beadID, method string, result Slin
 	result.Method = method
 
 	// Poke controller.
+	if deps.FormulaActionLease != nil {
+		deps.FormulaActionLease.Release()
+	}
 	if !opts.SkipPoke && deps.Notify != nil {
 		deps.Notify.PokeController(deps.CityPath)
 	}
