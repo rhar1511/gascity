@@ -1,4 +1,4 @@
-load("@rules_go//go:def.bazel", "go_library", "go_test")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "runisolation",
@@ -16,6 +16,8 @@ go_test(
     embed = [":runisolation"],
     deps = ["//internal/testenv"],
 )
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
 
 filegroup(
     name = "bazel_repo_srcs",
