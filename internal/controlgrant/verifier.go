@@ -1,11 +1,13 @@
 // Package controlgrant verifies operation-specific grants for centrally
-// executed workflow controls. It does not execute controls, load trust from
-// city/pack state, or persist invocation and effect reservations.
+// executed workflow controls and persists invocation/effect reservations. It
+// does not execute controls or load trust from city/pack state.
 package controlgrant
 
 import (
 	"bytes"
 	"crypto/ed25519"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -159,6 +161,29 @@ type VerifiedGrant struct {
 	Claims    Claims
 	Principal Principal
 	Budget    Budget
+	seal      [sha256.Size]byte
+}
+
+const verifiedGrantSealDomain = "gascity.verified-workflow-control-grant.v1\n"
+
+// verifiedGrantSeal binds the exported grant fields to a value emitted by
+// Verifier.Verify. The ledger uses it to reject caller-constructed or mutated
+// VerifiedGrant values before they can reserve durable budget.
+func verifiedGrantSeal(grant VerifiedGrant) [sha256.Size]byte {
+	canonical, _ := json.Marshal(struct {
+		Claims    Claims    `json:"claims"`
+		Principal Principal `json:"principal"`
+		Budget    Budget    `json:"budget"`
+	}{Claims: grant.Claims, Principal: grant.Principal, Budget: grant.Budget})
+	return sha256.Sum256(append([]byte(verifiedGrantSealDomain), canonical...))
+}
+
+func validVerifiedGrant(grant VerifiedGrant) bool {
+	if grant.seal == ([sha256.Size]byte{}) {
+		return false
+	}
+	expected := verifiedGrantSeal(grant)
+	return subtle.ConstantTimeCompare(grant.seal[:], expected[:]) == 1
 }
 
 type authorityIdentity struct {
@@ -307,11 +332,13 @@ func (v *Verifier) Verify(token string, want Expectation) (VerifiedGrant, error)
 		return VerifiedGrant{}, ErrTargetMismatch
 	}
 	unit, _ := effectUnitFor(claims.Kind)
-	return VerifiedGrant{
+	verified := VerifiedGrant{
 		Claims:    claims,
 		Principal: Principal{KeyID: claims.KeyID, Issuer: claims.Issuer, Subject: claims.Subject},
 		Budget:    Budget{InvocationLimit: claims.InvocationLimit, EffectLimit: claims.EffectLimit, EffectUnit: unit},
-	}, nil
+	}
+	verified.seal = verifiedGrantSeal(verified)
+	return verified, nil
 }
 
 func decodeToken(token string) (Claims, []byte, []byte, error) {
