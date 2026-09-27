@@ -47,16 +47,17 @@ const requestReceiptPrefix = beadmeta.SessionRequestReceiptPrefix
 // and effect evidence separate. An acknowledgement never verifies an effect.
 // Execution credentials are deliberately absent from this read model.
 type RequestReceipt struct {
-	RequestID           string          `json:"request_id"`
-	SessionID           string          `json:"session_id"`
-	Generation          int             `json:"generation"`
-	MessageDigest       string          `json:"message_digest"`
-	AcceptedAt          time.Time       `json:"accepted_at"`
-	Delivery            RequestDelivery `json:"delivery"`
-	DeliveryAttemptedAt *time.Time      `json:"delivery_attempted_at,omitempty"`
-	ProviderResultAt    *time.Time      `json:"provider_result_at,omitempty"`
-	AcknowledgedAt      *time.Time      `json:"acknowledged_at,omitempty"`
-	Effect              string          `json:"effect"`
+	RequestID           string                 `json:"request_id"`
+	SessionID           string                 `json:"session_id"`
+	Generation          int                    `json:"generation"`
+	MessageDigest       string                 `json:"message_digest"`
+	AcceptedAt          time.Time              `json:"accepted_at"`
+	Delivery            RequestDelivery        `json:"delivery"`
+	DeliveryAttemptedAt *time.Time             `json:"delivery_attempted_at,omitempty"`
+	ProviderResultAt    *time.Time             `json:"provider_result_at,omitempty"`
+	AcknowledgedAt      *time.Time             `json:"acknowledged_at,omitempty"`
+	Effect              string                 `json:"effect"`
+	Attempt             *RequestAttemptBinding `json:"attempt,omitempty"`
 }
 
 type storedRequestReceipt struct {
@@ -77,6 +78,10 @@ type RequestAcceptance struct {
 // the same generation and message. Conditional storage is mandatory: there is
 // no legacy unconditional implementation of this protocol.
 func (s *Store) AcceptRequest(sessionID, requestID string, generation int, message string, now time.Time) (RequestAcceptance, error) {
+	return s.acceptRequest(sessionID, requestID, generation, message, nil, now)
+}
+
+func (s *Store) acceptRequest(sessionID, requestID string, generation int, message string, binding *RequestAttemptBinding, now time.Time) (RequestAcceptance, error) {
 	if generation <= 0 || now.IsZero() || strings.TrimSpace(message) == "" {
 		return RequestAcceptance{}, ErrRequestConflict
 	}
@@ -93,7 +98,13 @@ func (s *Store) AcceptRequest(sessionID, requestID string, generation int, messa
 			if record.Generation != generation || record.MessageDigest != digest || record.ExecutionTokenDigest != tokenDigest {
 				return false, ErrRequestConflict
 			}
+			if (binding != nil && !sameRequestAttempt(record.Attempt, binding)) || !requestAttemptClaimMatches(b, record.Attempt) {
+				return false, ErrRequestConflict
+			}
 			return false, nil
+		}
+		if !requestAttemptClaimMatches(b, binding) {
+			return false, ErrRequestConflict
 		}
 		*record = storedRequestReceipt{
 			Version: 1,
@@ -101,6 +112,7 @@ func (s *Store) AcceptRequest(sessionID, requestID string, generation int, messa
 				RequestID: requestID, SessionID: sessionID, Generation: generation,
 				MessageDigest: digest, AcceptedAt: now.UTC(),
 				Delivery: RequestDeliveryPending, Effect: "unverified",
+				Attempt: binding,
 			},
 			ExecutionTokenDigest: tokenDigest,
 		}
@@ -306,6 +318,9 @@ func decodeRequestReceipt(raw, sessionID, requestID string) (storedRequestReceip
 		return record, fmt.Errorf("invalid stored session request: %w", err)
 	}
 	if record.Version != 1 || record.SessionID != sessionID || record.RequestID != requestID || record.Generation <= 0 || record.AcceptedAt.IsZero() || record.Effect != "unverified" || !validRequestDigest(record.MessageDigest) || !validRequestDigest(record.ExecutionTokenDigest) {
+		return record, ErrRequestConflict
+	}
+	if record.Attempt != nil && !validRequestAttemptBinding(*record.Attempt, sessionID, record.Generation) {
 		return record, ErrRequestConflict
 	}
 	switch record.Delivery {

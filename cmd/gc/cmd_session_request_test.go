@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -36,6 +37,27 @@ func TestSessionRequestJSONSchemas(t *testing.T) {
 			if err := writeSessionRequestReceiptJSON(&out, api.SessionRequestReceipt{RequestId: "req-1", SessionId: "gc-1", Generation: 2, AcceptedAt: time.Now().UTC(), Delivery: "pending", Effect: "unverified", MessageDigest: strings.Repeat("a", 64)}); err != nil {
 				t.Fatal(err)
 			}
+			validateJSONResultSchema(t, []string{"session", "request", action}, out.Bytes())
+		})
+	}
+}
+
+func TestSessionRequestAttributedJSONSchemas(t *testing.T) {
+	// Decode the server wire format through the same generated type as the
+	// client, then verify the CLI preserves attribution in its public output.
+	var receipt api.SessionRequestReceipt
+	if err := json.Unmarshal([]byte(`{"request_id":"req-1","session_id":"gc-1","generation":2,"accepted_at":"2026-09-27T00:00:00Z","delivery":"accepted","effect":"unverified","message_digest":"digest","attempt":{"store_ref":"city:test","attempt_id":"attempt-1","work_revision":"9223372036854775807","identity":{"kind":"workbench","owner_bead_id":"work-1","execution_bead_id":"work-1","session_id":"gc-1","session_generation":"2","claim_generation":"claim-1"}}}`), &receipt); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := writeSessionRequestReceiptJSON(&out, receipt); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), `"work_revision":"9223372036854775807"`) {
+		t.Fatalf("CLI discarded or rounded server attribution: %s", &out)
+	}
+	for _, action := range []string{"submit", "get", "ack"} {
+		t.Run(action, func(t *testing.T) {
 			validateJSONResultSchema(t, []string{"session", "request", action}, out.Bytes())
 		})
 	}

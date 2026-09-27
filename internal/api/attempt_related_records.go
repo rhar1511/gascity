@@ -19,7 +19,7 @@ type AttemptEvidenceRead struct {
 // AttemptRelatedRecords contains only records attributed to this exact attempt.
 type AttemptRelatedRecords struct {
 	Actions          AttemptActionRecords  `json:"actions"`
-	Acknowledgements attemptevidence.Facet `json:"acknowledgements"`
+	Acknowledgements AttemptRequestRecords `json:"acknowledgements"`
 }
 
 // AttemptActionRecords makes incomplete ledger reads distinguishable from
@@ -43,7 +43,7 @@ type HistoricalPRActionRecord struct {
 func (s *Server) attemptRelatedRecords(evidence attemptevidence.Evidence) AttemptRelatedRecords {
 	result := AttemptRelatedRecords{
 		Actions:          AttemptActionRecords{Status: attemptevidence.StatusUnavailable, Reason: "action_ledger_unavailable", Records: []HistoricalPRActionRecord{}},
-		Acknowledgements: attemptevidence.Facet{Status: attemptevidence.StatusUnavailable, Reason: "session_requests_lack_verified_work_attempt_attribution"},
+		Acknowledgements: s.attemptAcknowledgements(evidence),
 	}
 	var store beads.Store
 	switch {

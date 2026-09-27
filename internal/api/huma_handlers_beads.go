@@ -757,6 +757,9 @@ func (s *Server) humaHandleBeadCreate(ctx context.Context, input *BeadCreateInpu
 	if err := validateAttemptEvidenceMetadata(input.Body.Metadata); err != nil {
 		return nil, err
 	}
+	if err := validateSessionRequestMetadata(input.Body.Metadata); err != nil {
+		return nil, err
+	}
 	// Idempotency: run the create at most once per Idempotency-Key. The helper
 	// owns reserve/replay/mismatch/in-flight and guarantees the reservation is
 	// released on any error, so every fallible step lives in the closure.
@@ -913,6 +916,9 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 	id := input.ID
 	body := input.Body
 	if err := validateAttemptEvidenceMetadata(body.Metadata); err != nil {
+		return nil, err
+	}
+	if err := validateSessionRequestMetadata(body.Metadata); err != nil {
 		return nil, err
 	}
 

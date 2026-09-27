@@ -33,6 +33,7 @@ go_library(
         "persisted_response.go",
         "poller_key.go",
         "provider_resolution.go",
+        "request_attempt.go",
         "request_delivery.go",
         "request_receipt.go",
         "resolve.go",
@@ -55,6 +56,7 @@ go_library(
     visibility = ["//:__subpackages__"],
     deps = [
         "//internal/agent",
+        "//internal/attemptevidence",
         "//internal/beadmeta",
         "//internal/beads",
         "//internal/citylayout",
@@ -123,6 +125,7 @@ go_test(
         "priming_markers_test.go",
         "productmetrics_child_env_test.go",
         "provider_resolution_test.go",
+        "request_attempt_test.go",
         "request_delivery_test.go",
         "request_receipt_test.go",
         "resolve_test.go",
@@ -163,6 +166,7 @@ go_test(
     embed = [":session"],
     deps = [
         "//internal/bazeltest",
+        "//internal/attemptevidence",
         "//internal/beadmeta",
         "//internal/beads",
         "//internal/beads/beadstest",
