@@ -1240,14 +1240,14 @@ func InstantiateFragment(ctx context.Context, store beads.Store, recipe *formula
 	if len(recipe.Steps) == 0 {
 		return &FragmentResult{IDMapping: map[string]string{}}, nil
 	}
-	recipe = fragmentRecipeWithNativeStepDependencies(recipe)
-	if err := applyExternalNativeStepDependencies(store, opts.RootID, recipe.Steps, opts.ExternalDeps); err != nil {
+	prepared, err := prepareFragmentForStore(store, recipe, opts.RootID, opts.ExternalDeps)
+	if err != nil {
 		return nil, err
 	}
+	recipe = prepared
 	if opts.ActionGateForStore != nil {
 		opts.ActionGate = opts.ActionGateForStore(store)
 	}
-	var err error
 	opts.actionAuthorization, err = authorizeFragmentAction(ctx, opts.ActionGate, recipe, store, opts.RequireActionGate)
 	if err != nil {
 		return nil, fmt.Errorf("authorizing fragment %q: %w", recipe.Name, err)
@@ -1448,6 +1448,14 @@ func InstantiateFragment(ctx context.Context, store beads.Store, recipe *formula
 		IDMapping: idMapping,
 		Created:   len(createdIDs),
 	}, nil
+}
+
+func prepareFragmentForStore(store beads.Store, recipe *formula.FragmentRecipe, rootID string, externalDeps []ExternalDep) (*formula.FragmentRecipe, error) {
+	prepared := fragmentRecipeWithNativeStepDependencies(recipe)
+	if err := applyExternalNativeStepDependencies(store, rootID, prepared.Steps, externalDeps); err != nil {
+		return nil, err
+	}
+	return prepared, nil
 }
 
 func recipeParentDeps(deps []formula.RecipeDep) map[string]string {

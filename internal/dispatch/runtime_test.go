@@ -7780,6 +7780,20 @@ on_exhausted = "hard_fail"
 }
 
 func TestProcessFanoutResumesExistingFragmentsWithoutDuplicates(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		state string
+	}{
+		{name: "blank-state"},
+		{name: "spawning-state", state: beadmeta.SpawnStateSpawning},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			testProcessFanoutResumesExistingFragmentsWithoutDuplicates(t, tc.state)
+		})
+	}
+}
+
+func testProcessFanoutResumesExistingFragmentsWithoutDuplicates(t *testing.T, fanoutState string) {
 	formulatest.EnableV2ForTest(t)
 
 	dir := t.TempDir()
@@ -7833,7 +7847,7 @@ needs = ["{target}.review"]
 			"gc.bond":         "expansion-review",
 			"gc.bond_vars":    `{"reviewer":"{item.name}"}`,
 			"gc.fanout_mode":  "parallel",
-			"gc.fanout_state": "spawning",
+			"gc.fanout_state": fanoutState,
 		},
 	})
 	mustDepAdd(t, store, fanout.ID, source.ID, "blocks")

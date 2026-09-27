@@ -392,6 +392,11 @@ func syncControlEpochToAttempt(store beads.Store, control, attempt beads.Bead) e
 }
 
 func markControllerSpawnError(store beads.Store, beadID string, err error, opts ProcessOptions) bool {
+	var actionErr *molecule.FormulaActionError
+	if errors.As(err, &actionErr) {
+		opts.tracef("controller-spawn-error bead=%s formula action refused; preserving controller state", beadID)
+		return false
+	}
 	metadata := map[string]string{
 		beadmeta.ControllerErrorMetadataKey: err.Error(),
 	}

@@ -428,6 +428,10 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	// work_query, where both forms are the same string.
 	stores = scopeFederatedHookStores(stores, workQuery, singleStoreHookWorkQuery(cityPath, cityName, cfg, &a, topo, stderr))
 	formulaActionCheck := controllerFormulaActionCandidateCheck(cityPath, cfg, a.WorkQuery != "")
+	var discoveryStore hookStore
+	discoveryFormulaActionCheck := func(ctx context.Context, candidate beads.Bead) (formulaActionCandidate, error) {
+		return hookStoreFormulaActionCheck(formulaActionCheck, discoveryStore, false)(ctx, candidate)
+	}
 
 	// emitQueryFailure surfaces a killed/timed-out work query on the event bus
 	// so the reconciler can escalate instead of silently treating the strand as
@@ -441,7 +445,10 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 			os.Getenv("GC_SESSION_ID"), failureTemplate, command, err)
 	}
 	runner := func(command, _ string) (string, error) {
-		out, _, err := bestStoreWithWork(command, stores, stores[0], shellWorkQueryWithEnv)
+		out, selected, err := bestStoreWithWork(command, stores, stores[0], shellWorkQueryWithEnv)
+		if err == nil {
+			discoveryStore = selected
+		}
 		emitQueryFailure(command, err)
 		return out, err
 	}
@@ -499,11 +506,11 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 		LifecycleCity:         cfg,
 		ResolveLifecycleStore: func(ref string) (beads.Store, error) { return lifecycleStoreForRef(cityPath, cfg, ref) },
 		TrustedLifecycleScope: cfg.Lifecycle.AdmissionEnabled && a.WorkQuery == "",
-		CheckFormulaAction:    formulaActionCheck,
+		CheckFormulaAction:    discoveryFormulaActionCheck,
 	}, hookClaimOps{}, runner, stdout, stderr, hookVisibility{
 		Identities:                         identityCandidates,
 		RouteTargets:                       routeTargets,
-		CheckFormulaAction:                 formulaActionCheck,
+		CheckFormulaAction:                 discoveryFormulaActionCheck,
 		RequireStructuredFormulaCandidates: cfg.HasRequiredCompatibilityPacks(),
 	})
 }
@@ -752,6 +759,7 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 		if len(claimStore.env) > 0 {
 			storeOpts.Env = claimStore.env
 		}
+		storeOpts.CheckFormulaAction = hookStoreFormulaActionCheck(storeOpts.CheckFormulaAction, claimStore, true)
 		storeDir := workDir
 		if dir := strings.TrimSpace(claimStore.dir); dir != "" {
 			storeDir = dir

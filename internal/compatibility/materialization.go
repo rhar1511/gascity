@@ -98,7 +98,7 @@ func (g MaterializationGate) RevalidateBead(ctx context.Context, bead beads.Bead
 		}
 		root, err := store.Get(rootID)
 		if err != nil {
-			return fmt.Errorf("checking formula compatibility on workflow root %s: %w", rootID, qualification.ErrUnavailable)
+			return fmt.Errorf("checking formula compatibility on workflow root %s: %w: %w", rootID, qualification.ErrUnavailable, err)
 		}
 		source = strings.TrimSpace(root.Metadata[beadmeta.FormulaSourceMetadataKey])
 	}

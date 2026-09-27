@@ -3164,6 +3164,42 @@ func TestQuarantineControlFailureBeadToleratesRootCloseFailure(t *testing.T) {
 	}
 }
 
+func TestRunControlDispatcherCompatibilityRefusalDoesNotMutate(t *testing.T) {
+	clearGCEnv(t)
+	store := beads.NewMemStore()
+	control, err := store.Create(beads.Bead{
+		Title: "unapproved control",
+		Type:  "task",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:                 beadmeta.KindFanout,
+			beadmeta.CompatibilityRequestMetadataKey: `{}`,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true, TierMode: beads.TierBoth})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	err = runControlDispatcherWithStoreAndConfig(t.TempDir(), t.TempDir(), store, control.ID, cfg, &stdout, &stderr)
+	if err == nil || !strings.Contains(err.Error(), "compatibility approval metadata is incomplete") {
+		t.Errorf("dispatch error = %v, want compatibility refusal", err)
+	}
+	after, err := store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true, TierMode: beads.TierBoth})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(before, after) {
+		t.Errorf("compatibility refusal mutated store: before=%#v after=%#v", before, after)
+	}
+	if stdout.Len() != 0 || strings.Contains(stderr.String(), "quarantined") {
+		t.Errorf("refused dispatch reported a mutation: stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
 func TestRunControlDispatcherReturnsTransientControlErrorWithoutQuarantine(t *testing.T) {
 	clearGCEnv(t)
 

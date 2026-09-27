@@ -1667,6 +1667,17 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 	if err != nil {
 		return nil, err
 	}
+	// BdStore.List and the class GraphStore return persisted rows and therefore
+	// do not carry the transient SourceStoreRef that gc ready adds to federated
+	// candidates. The selected claim has already passed the exact canonical
+	// store check; the continuation query is issued against that same owner (or
+	// the class route records its own ref), so preserve that proven provenance
+	// for the sibling canonical checks below.
+	for i := range siblings {
+		if strings.TrimSpace(siblings[i].SourceStoreRef) == "" {
+			siblings[i].SourceStoreRef = strings.TrimSpace(bead.SourceStoreRef)
+		}
+	}
 	pinAssignee := continuationPinAssignee(opts)
 	assigned := make([]string, 0, len(siblings))
 	for _, sibling := range siblings {

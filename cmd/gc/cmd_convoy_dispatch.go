@@ -26,6 +26,7 @@ import (
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/graphv2"
+	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/rsipolicy"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
@@ -389,6 +390,10 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 // returns nil once the bead is quarantined and the (possibly quiet-wrapped)
 // cause when the bead should be retried.
 func handleControlDispatchError(cityPath, storePath string, graphStore beads.Store, bead beads.Bead, beadID string, cause error, stderr io.Writer) error {
+	var actionErr *molecule.FormulaActionError
+	if errors.As(cause, &actionErr) {
+		return cause
+	}
 	if errors.Is(cause, dispatch.ErrControlPending) {
 		return cause
 	}

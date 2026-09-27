@@ -1,12 +1,16 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 // hookStore is one store the hook work_query runs against: a working dir and
@@ -14,6 +18,13 @@ import (
 type hookStore struct {
 	dir string
 	env []string
+	// sourceStoreRef is derived from the controller-built scope environment,
+	// never from work-query output. Custom work queries that omit the transient
+	// per-row source_store_ref may use this exact scope for canonical lookup.
+	sourceStoreRef string
+	// inferMissingSourceStoreRef is set only for a configured custom work_query.
+	// Default gc ready output can span stores and must carry its own provenance.
+	inferMissingSourceStoreRef bool
 	// command overrides the shared work query for this store, and is empty on
 	// every store production builds: one command is run against each leg in
 	// turn. It was set by scopeFederatedHookStores when that pinned the
@@ -105,7 +116,7 @@ type hookStoreRunner func(command, dir string, env []string) (string, error)
 // (conformanceClaimRouting); closing the gap makes the claim stop being a bd
 // subprocess call, and I15 pins the see-but-cannot-claim asymmetry until it does.
 func hookWorkQueryStores(cityPath string, cfg *config.City, a *config.Agent, agentForQuery, workDir string, queryEnv []string, identityOverrides map[string]string) []hookStore {
-	stores := []hookStore{{dir: workDir, env: queryEnv}}
+	stores := []hookStore{newHookStore(cityPath, cfg, a, workDir, queryEnv)}
 	if agentIsCrossStoreEligible(a) {
 		return appendRigHookStores(stores, cityPath, cfg, a, identityOverrides)
 	}
@@ -182,10 +193,7 @@ func appendOneRigHookStore(stores []hookStore, cityPath string, cfg *config.City
 			rigEnv[k] = v
 		}
 	}
-	return append(stores, hookStore{
-		dir: agentCommandDir(cityPath, &view, cfg.Rigs),
-		env: mergeRuntimeEnv(os.Environ(), rigEnv),
-	})
+	return append(stores, newHookStore(cityPath, cfg, a, agentCommandDir(cityPath, &view, cfg.Rigs), mergeRuntimeEnv(os.Environ(), rigEnv)))
 }
 
 // appendCityHookStore appends the CITY store as a best-effort federated entry
@@ -216,10 +224,71 @@ func appendCityHookStore(stores []hookStore, cityPath string, cfg *config.City, 
 			cityEnv[k] = v
 		}
 	}
-	return append(stores, hookStore{
-		dir: cityPath,
-		env: mergeRuntimeEnv(os.Environ(), cityEnv),
-	})
+	return append(stores, newHookStore(cityPath, cfg, a, cityPath, mergeRuntimeEnv(os.Environ(), cityEnv)))
+}
+
+func newHookStore(cityPath string, cfg *config.City, a *config.Agent, dir string, env []string) hookStore {
+	customQuery := a != nil && strings.TrimSpace(a.WorkQuery) != ""
+	return hookStore{
+		dir:                        dir,
+		env:                        env,
+		sourceStoreRef:             hookStoreSourceStoreRef(cityPath, cfg, env),
+		inferMissingSourceStoreRef: customQuery,
+	}
+}
+
+// hookStoreSourceStoreRef translates only the controller-generated city/rig
+// scope into the durable reference used by canonical readers. A scope is
+// unavailable if its root is not exactly the city or one of its configured
+// rigs, or if the scope kind disagrees with that root.
+func hookStoreSourceStoreRef(cityPath string, cfg *config.City, env []string) string {
+	if cfg == nil {
+		return ""
+	}
+	root := hookStoreEnvString(env, "GC_STORE_ROOT")
+	scope := strings.TrimSpace(hookStoreEnvString(env, "GC_STORE_SCOPE"))
+	ref := workflowStoreRefForDir(root, cityPath, loadedCityName(cfg, cityPath), cfg)
+	switch scope {
+	case "city":
+		if strings.HasPrefix(ref, "city:") {
+			return ref
+		}
+	case "rig":
+		if strings.HasPrefix(ref, "rig:") {
+			return ref
+		}
+	}
+	return ""
+}
+
+func hookStoreEnvString(env []string, key string) string {
+	value := ""
+	for _, entry := range env {
+		if name, v, ok := strings.Cut(entry, "="); ok && name == key {
+			value = v
+		}
+	}
+	return value
+}
+
+// hookStoreFormulaActionCheck adds a missing source ref only when the selected
+// query leg is an explicitly configured custom work query. Its fallback is
+// controller-derived from that leg's scope. Claim callers also require any
+// explicit ordinary city/rig ref to match the store that will receive the
+// write; class refs remain eligible for the dedicated class-routing path.
+func hookStoreFormulaActionCheck(check formulaActionCandidateCheck, store hookStore, forClaim bool) formulaActionCandidateCheck {
+	if check == nil || !store.inferMissingSourceStoreRef {
+		return check
+	}
+	return func(ctx context.Context, candidate beads.Bead) (formulaActionCandidate, error) {
+		ref := strings.TrimSpace(candidate.SourceStoreRef)
+		if ref == "" {
+			candidate.SourceStoreRef = store.sourceStoreRef
+		} else if forClaim && !storeref.IsClassRef(ref) && ref != store.sourceStoreRef {
+			return formulaActionCandidate{Bead: candidate}, fmt.Errorf("custom work-query store reference %q does not match selected claim store %q", ref, store.sourceStoreRef)
+		}
+		return check(ctx, candidate)
+	}
 }
 
 // rigScopedHookRig returns the rig whose store a rig-scoped agent must ALSO

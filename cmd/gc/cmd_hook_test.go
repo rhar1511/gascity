@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/dispatch"
 	"github.com/gastownhall/gascity/internal/events"
 )
@@ -40,6 +41,111 @@ func TestNewHookCmdUsesRoutedWorkHelp(t *testing.T) {
 	}
 	if !strings.Contains(cmd.Long, "Finds routed work using the agent's work_query config.") {
 		t.Fatalf("Long = %q, want routed-work description", cmd.Long)
+	}
+}
+
+func TestHookStoreSourceStoreRefRequiresKnownMatchingControllerScope(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "riga")
+	cfg := &config.City{Rigs: []config.Rig{{Name: "riga", Path: "riga"}}}
+	tests := []struct {
+		name  string
+		root  string
+		scope string
+		want  string
+	}{
+		{name: "city scope", root: cityDir, scope: "city", want: "city:" + filepath.Base(cityDir)},
+		{name: "rig scope", root: rigDir, scope: "rig", want: "rig:riga"},
+		{name: "unknown root", root: filepath.Join(cityDir, "unknown"), scope: "rig"},
+		{name: "city root marked rig", root: cityDir, scope: "rig"},
+		{name: "rig root marked city", root: rigDir, scope: "city"},
+		{name: "missing root", scope: "city"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			env := []string{"GC_STORE_ROOT=" + tc.root, "GC_STORE_SCOPE=" + tc.scope}
+			if got := hookStoreSourceStoreRef(cityDir, cfg, env); got != tc.want {
+				t.Fatalf("hookStoreSourceStoreRef() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestHookStoreFormulaActionCheckUsesOnlySelectedScope(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		ref  string
+	}{
+		{name: "city", ref: "city:city"},
+		{name: "rig", ref: "rig:riga"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			called := false
+			check := func(_ context.Context, candidate beads.Bead) (formulaActionCandidate, error) {
+				called = true
+				return formulaActionCandidate{Bead: candidate}, nil
+			}
+			store := hookStore{sourceStoreRef: tc.ref, inferMissingSourceStoreRef: true}
+			got, err := hookStoreFormulaActionCheck(check, store, true)(context.Background(), beads.Bead{ID: "ga-hook"})
+			if err != nil {
+				t.Fatalf("check returned error: %v", err)
+			}
+			if !called {
+				t.Fatal("canonical check was not called")
+			}
+			if got.Bead.SourceStoreRef != tc.ref {
+				t.Fatalf("source ref = %q, want selected scope %q", got.Bead.SourceStoreRef, tc.ref)
+			}
+		})
+	}
+
+	called := false
+	check := func(_ context.Context, candidate beads.Bead) (formulaActionCandidate, error) {
+		called = true
+		return formulaActionCandidate{Bead: candidate}, nil
+	}
+	store := hookStore{sourceStoreRef: "city:city", inferMissingSourceStoreRef: true}
+	_, err := hookStoreFormulaActionCheck(check, store, true)(context.Background(), beads.Bead{
+		ID: "ga-hook", SourceStoreRef: "rig:riga",
+	})
+	if err == nil || !strings.Contains(err.Error(), "does not match selected claim store") {
+		t.Fatalf("mismatched explicit ref error = %v, want selected-store refusal", err)
+	}
+	if called {
+		t.Fatal("canonical checker ran for a mismatched explicit store ref")
+	}
+}
+
+func TestHookClaimClassRouteContinuationListCarriesBindingRef(t *testing.T) {
+	store := newClaimRouteClassStore(t)
+	route, err := newHookClaimClassRoute(store)
+	if err != nil {
+		t.Fatalf("newHookClaimClassRoute: %v", err)
+	}
+	if _, err := store.Create(beads.Bead{
+		ID:     "gcg-continuation",
+		Status: "open",
+		Type:   "task",
+		Metadata: map[string]string{
+			"gc.root_bead_id":       "gcg-root",
+			"gc.continuation_group": "body",
+		},
+	}); err != nil {
+		t.Fatalf("Create continuation: %v", err)
+	}
+	siblings, err := route.listContinuation("gcg-root", "body")
+	if err != nil {
+		t.Fatalf("listContinuation: %v", err)
+	}
+	if len(siblings) != 1 || siblings[0].ID != "gcg-continuation" {
+		t.Fatalf("continuation rows = %+v, want the seeded sibling", siblings)
+	}
+	if len(route.topology.Bindings) != 1 {
+		t.Fatalf("class bindings = %d, want one whole-split binding", len(route.topology.Bindings))
+	}
+	wantRef := string(route.topology.Bindings[0].Leg.Ref)
+	if siblings[0].SourceStoreRef != wantRef {
+		t.Fatalf("continuation source ref = %q, want actual binding ref %q", siblings[0].SourceStoreRef, wantRef)
 	}
 }
 
@@ -245,6 +351,12 @@ work_query = "printf '[{\"id\":\"ga-pool1\",\"status\":\"open\",\"title\":\"work
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	fakeBin := t.TempDir()
+	fakeBD := fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = \"show\" ]; then printf '%%s' %q; exit 0; fi\nprintf '[]'\n", `[{"id":"ga-pool1","status":"open","title":"work item"}]`)
+	if err := os.WriteFile(filepath.Join(fakeBin, "bd"), []byte(fakeBD), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("GC_CITY", cityDir)
 	// Pool instance env: GC_AGENT/GC_ALIAS = instance name, GC_TEMPLATE = binding.
 	t.Setenv("GC_AGENT", "polecat-adhoc-abc123")
@@ -1624,6 +1736,12 @@ work_query = "printf '[{\"id\":\"hw-1\",\"title\":\"Fix the bug\"}]'"
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	fakeBin := t.TempDir()
+	fakeBD := fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = \"show\" ]; then printf '%%s' %q; exit 0; fi\nprintf '[]'\n", `[{"id":"hw-1","status":"open","title":"Fix the bug"}]`)
+	if err := os.WriteFile(filepath.Join(fakeBin, "bd"), []byte(fakeBD), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("GC_CITY", cityDir)
 
 	run := func(args ...string) (string, string, error) {
@@ -1681,6 +1799,12 @@ case "$*" in
   *"show --json hw-claim"*)
     printf '[{"id":"hw-claim","status":"in_progress","assignee":"%%s","metadata":{"gc.routed_to":"worker","gc.root_bead_id":"root-1","gc.continuation_group":"body"}}]' "${BEADS_ACTOR:-}"
     ;;
+  *"show --json hw-next"*)
+    printf '[{"id":"hw-next","status":"open","metadata":{"gc.routed_to":"worker","gc.root_bead_id":"root-1","gc.continuation_group":"body"}}]'
+    ;;
+  *"show --json root-1"*)
+    printf '[{"id":"root-1","status":"open","metadata":{}}]'
+    ;;
   *"list --json --status=open"*"gc.continuation_group=body"*"gc.root_bead_id=root-1"*)
     printf '[{"id":"hw-claim","status":"open","metadata":{"gc.routed_to":"worker","gc.root_bead_id":"root-1","gc.continuation_group":"body"}},{"id":"hw-next","status":"open","metadata":{"gc.routed_to":"worker","gc.root_bead_id":"root-1","gc.continuation_group":"body"}},{"id":"hw-other","status":"open","metadata":{"gc.routed_to":"other","gc.root_bead_id":"root-1","gc.continuation_group":"body"}}]'
     ;;
@@ -1691,7 +1815,7 @@ case "$*" in
     printf '[]'
     ;;
   *"gc.routed_to=worker"* )
-    printf '[{"id":"hw-claim","status":"open","metadata":{"gc.routed_to":"worker","gc.root_bead_id":"root-1","gc.continuation_group":"body"}}]'
+    printf '[{"id":"hw-claim","status":"open","source_store_ref":"city:test-city","metadata":{"gc.routed_to":"worker","gc.root_bead_id":"root-1","gc.continuation_group":"body"}}]'
     ;;
   *)
     printf '[]'
@@ -2081,14 +2205,17 @@ mode = "on_demand"
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
 		t.Fatal(err)
 	}
-
 	fakeBin := t.TempDir()
 	logPath := filepath.Join(t.TempDir(), "bd.log")
-	script := fmt.Sprintf(`#!/bin/sh
+	canonicalRow := `[{"id":"ga-frpt4k","status":"in_progress","assignee":"builder","metadata":{"gc.routed_to":"builder"}}]`
+	claimScript := fmt.Sprintf(`#!/bin/sh
 printf '%%s\n' "$*" >> %q
-printf '[]'
-`, logPath)
-	if err := os.WriteFile(filepath.Join(fakeBin, "bd"), []byte(script), 0o755); err != nil {
+case "$*" in
+  *"show --json ga-frpt4k"*) printf '%%s' %q ;;
+  *) printf '[]' ;;
+esac
+`, logPath, canonicalRow)
+	if err := os.WriteFile(filepath.Join(fakeBin, "bd"), []byte(claimScript), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2161,7 +2288,9 @@ mode = "on_demand"
 	}
 
 	fakeBin := t.TempDir()
-	if err := os.WriteFile(filepath.Join(fakeBin, "bd"), []byte("#!/bin/sh\nprintf '[]'\n"), 0o755); err != nil {
+	canonicalRow := `[{"id":"ga-frpt4k","status":"in_progress","assignee":"builder","metadata":{"gc.routed_to":"builder"}}]`
+	fakeBD := fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = \"show\" ]; then printf '%%s' %q; exit 0; fi\nprintf '[]'\n", canonicalRow)
+	if err := os.WriteFile(filepath.Join(fakeBin, "bd"), []byte(fakeBD), 0o755); err != nil {
 		t.Fatal(err)
 	}
 

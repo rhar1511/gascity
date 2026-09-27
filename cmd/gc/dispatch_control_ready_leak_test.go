@@ -258,17 +258,20 @@ func TestRunControlDispatcherInStoreClosesScopeStoreOnSuccess(t *testing.T) {
 	}
 
 	fake := newCloseCountingStore(t, false)
-	// An orphaned scope-check is the cheapest control bead that dispatches all
-	// the way to a processed result: gc.root_bead_id names a root the store
-	// does not hold, so ProcessControl closes the control bead and reports
-	// Processed without an error, and scope-check needs no city-config
-	// resolution. Status is forced to "open" by Create, which is what keeps
-	// this off ProcessControl's not-open skip.
+	// A settled workflow lets dispatch verify the canonical root and process
+	// its remaining control bead through the successful close path.
+	root, err := fake.Create(beads.Bead{Type: "task", Title: "settled workflow"})
+	if err != nil {
+		t.Fatalf("seed workflow root: %v", err)
+	}
+	if err := fake.Close(root.ID); err != nil {
+		t.Fatalf("settle workflow root: %v", err)
+	}
 	control, err := fake.Create(beads.Bead{
 		Type: "task",
 		Metadata: map[string]string{
 			beadmeta.KindMetadataKey:         beadmeta.KindScopeCheck,
-			beadmeta.RootBeadIDMetadataKey:   "ga-missing-root",
+			beadmeta.RootBeadIDMetadataKey:   root.ID,
 			beadmeta.RootStoreRefMetadataKey: "city:test-city",
 		},
 	})
@@ -290,7 +293,7 @@ func TestRunControlDispatcherInStoreClosesScopeStoreOnSuccess(t *testing.T) {
 	// the test would still pass if the bead stopped qualifying and ProcessControl
 	// returned a nil error from an early skip, which would silently stop
 	// covering the success path it is named for.
-	if !strings.Contains(stdout.String(), "action=orphaned-workflow") {
+	if !strings.Contains(stdout.String(), "action=settled-workflow") {
 		t.Fatalf("stdout = %q, want a processed control dispatch (stderr=%q)", stdout.String(), stderr.String())
 	}
 	if got := fake.closes(); got != 1 {

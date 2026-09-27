@@ -185,7 +185,7 @@ func ProcessControl(store beads.Store, bead beads.Bead, opts ProcessOptions) (Co
 		return ControlResult{}, nil
 	}
 	if opts.RequireFormulaActionGate && opts.FormulaActionGate == nil {
-		return ControlResult{}, fmt.Errorf("controller formula compatibility gate is unavailable")
+		return ControlResult{}, &molecule.FormulaActionError{Err: fmt.Errorf("controller formula compatibility gate is unavailable")}
 	}
 	if opts.FormulaActionGate != nil {
 		ctx := opts.Context
@@ -193,7 +193,7 @@ func ProcessControl(store beads.Store, bead beads.Bead, opts ProcessOptions) (Co
 			ctx = context.Background()
 		}
 		if err := opts.FormulaActionGate.RevalidateBead(ctx, bead, store); err != nil {
-			return ControlResult{}, fmt.Errorf("revalidating control %s formula compatibility before dispatch: %w", bead.ID, err)
+			return ControlResult{}, &molecule.FormulaActionError{Err: fmt.Errorf("revalidating control %s formula compatibility before dispatch: %w", bead.ID, err)}
 		}
 	}
 	if result, handled, err := closeOrphanedControl(store, bead, opts); handled || err != nil {

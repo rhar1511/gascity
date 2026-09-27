@@ -1079,8 +1079,9 @@ func TestBeadsProxiedDefault(t *testing.T) {
 		}
 
 		// A rig added to it joins that one server rather than acquiring a
-		// lifecycle owner of its own.
-		if out, err := helpers.RunGC(env, legacyRoot, "rig", "add", legacyRig); err != nil {
+		// lifecycle owner of its own. Only this command receives migration
+		// consent for the fixture-owned throwaway legacy server.
+		if out, err := helpers.RunGC(helpers.LegacyInitEnv(env), legacyRoot, "rig", "add", legacyRig); err != nil {
 			t.Fatalf("gc rig add on a grandfathered city: %v\n%s", err, out)
 		}
 		var journal scopeOwnershipDoc
