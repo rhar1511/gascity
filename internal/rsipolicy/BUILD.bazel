@@ -8,7 +8,10 @@ go_library(
     ],
     importpath = "github.com/gastownhall/gascity/internal/rsipolicy",
     visibility = ["//:__subpackages__"],
-    deps = ["//internal/reviewquorum", "//internal/storybench"],
+    deps = [
+        "//internal/reviewquorum",
+        "//internal/storybench",
+    ],
 )
 
 go_test(

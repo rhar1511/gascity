@@ -9,7 +9,10 @@ go_library(
 
 go_test(
     name = "storybench_test",
-    srcs = ["bench_test.go", "testenv_import_test.go"],
+    srcs = [
+        "bench_test.go",
+        "testenv_import_test.go",
+    ],
     embed = [":storybench"],
     deps = ["//internal/testenv"],
 )

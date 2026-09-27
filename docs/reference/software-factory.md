@@ -56,3 +56,6 @@ result mandatory at the promotion gate. Supply the frozen suite path and its
 raw-file SHA-256 as `eval_suite_hash`. The project-owned pilot suite is at
 `benchmarks/inktree-story-agency-v1/suite.json`; the operator guide is at
 `engdocs/benchmarks/inktree-story-agency-v1.md` in the repository.
+The separate `benchmarks/inktree-story-agency-v1/suiteV2.json` covers all 50
+source stories but requires a new, independently captured baseline and human
+approval before use as a promotion gate.

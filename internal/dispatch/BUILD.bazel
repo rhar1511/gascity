@@ -29,10 +29,10 @@ go_library(
         "//internal/pathutil",
         "//internal/reviewquorum",
         "//internal/rsipolicy",
-        "//internal/storybench",
         "//internal/session",
         "//internal/sourceworkflow",
         "//internal/storeref",
+        "//internal/storybench",
     ],
 )
 
@@ -80,9 +80,9 @@ go_test(
         "//internal/reviewquorum",
         "//internal/rollout/gate",
         "//internal/rsipolicy",
-        "//internal/storybench",
         "//internal/session",
         "//internal/sourceworkflow",
+        "//internal/storybench",
         "//internal/testenv",
         "@com_github_steveyegge_beads//:beads",
     ],

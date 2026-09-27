@@ -1,21 +1,42 @@
 load("@rules_go//go:def.bzl", "go_test")
 
-go_test(
-    name = "suite_test",
-    srcs = ["suite_test.go", "testenv_import_test.go"],
-    data = ["suite.json", "baseline.example.json", "candidate.example.json"],
-    deps = ["//internal/storybench", "//internal/testenv"],
-)
-
 filegroup(
     name = "suite",
     srcs = ["suite.json"],
     visibility = ["//visibility:public"],
 )
 
+filegroup(
+    name = "suite_v2",
+    srcs = ["suiteV2.json"],
+    visibility = ["//visibility:public"],
+)
+
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
 filegroup(
     name = "bazel_repo_srcs",
-    srcs = glob(["**"], allow_empty = True, exclude = ["BUILD.bazel"]),
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
     visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "inktree-story-agency-v1_test",
+    srcs = [
+        "suite_test.go",
+        "testenv_import_test.go",
+    ],
+    embedsrcs = [
+        "baseline.example.json",
+        "candidate.example.json",
+        "suite.json",
+        "suiteV2.json",
+    ],
+    deps = [
+        "//internal/storybench",
+        "//internal/testenv",
+    ],
 )
