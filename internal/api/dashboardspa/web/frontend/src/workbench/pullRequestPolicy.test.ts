@@ -35,6 +35,12 @@ describe('pullRequestPolicy', () => {
     expect(pullRequestPolicy(ctx({ attempt: null })).blocked).toBe('no_active_attempt');
   });
 
+  it('blocks for a completed attempt even when a queue is available', () => {
+    expect(pullRequestPolicy(ctx({ attempt: { ...attempt, active: false } })).blocked).toBe(
+      'no_active_attempt',
+    );
+  });
+
   it('blocks on policy rejection', () => {
     expect(pullRequestPolicy(ctx({ policyRejected: true })).blocked).toBe('policy_rejected');
   });

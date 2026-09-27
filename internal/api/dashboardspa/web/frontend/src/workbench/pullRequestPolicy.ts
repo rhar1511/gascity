@@ -52,7 +52,8 @@ function revisionOf(bead: SupervisorBead): string {
  * grants merge/force-push authority.
  */
 export function pullRequestPolicy(ctx: PullRequestContext): PullRequestPolicy {
-  if (ctx.attempt === null) return { allowed: [], blocked: 'no_active_attempt' };
+  if (ctx.attempt === null || !ctx.attempt.active)
+    return { allowed: [], blocked: 'no_active_attempt' };
   if (ctx.policyRejected) return { allowed: [], blocked: 'policy_rejected' };
   if (ctx.hasConflict) return { allowed: [], blocked: 'conflict' };
   if (!ctx.queueAvailable) return { allowed: [], blocked: 'queue_unavailable' };
