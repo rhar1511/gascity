@@ -13,6 +13,8 @@ export type PullRequestAction = 'prepare' | 'queue';
 export type PullRequestBlockedReason =
   | 'no_active_attempt'
   | 'stale_revision'
+  | 'missing_revision'
+  | 'missing_policy_revision'
   | 'policy_rejected'
   | 'conflict'
   | 'queue_unavailable';
@@ -57,8 +59,10 @@ export function pullRequestPolicy(ctx: PullRequestContext): PullRequestPolicy {
 
   const attemptRevision = (ctx.attemptRevision ?? revisionOf(ctx.bead)).trim();
   const policyRevision = (ctx.policyRevision ?? '').trim();
+  if (attemptRevision.length === 0) return { allowed: [], blocked: 'missing_revision' };
+  if (policyRevision.length === 0) return { allowed: [], blocked: 'missing_policy_revision' };
   // The queued PR must target the exact revision the attempt produced.
-  if (policyRevision.length > 0 && attemptRevision.length > 0 && policyRevision !== attemptRevision) {
+  if (policyRevision !== attemptRevision) {
     return { allowed: [], blocked: 'stale_revision' };
   }
 
@@ -72,6 +76,10 @@ export function blockedReasonLabel(reason: PullRequestBlockedReason): string {
       return 'No active attempt to prepare a pull request from.';
     case 'stale_revision':
       return 'The attempt revision has moved; refresh before queueing.';
+    case 'missing_revision':
+      return 'This attempt has no verified revision; PR actions are unavailable.';
+    case 'missing_policy_revision':
+      return 'Gas City has not provided a revision-bound PR verdict.';
     case 'policy_rejected':
       return 'Gas City policy rejected this pull request.';
     case 'conflict':

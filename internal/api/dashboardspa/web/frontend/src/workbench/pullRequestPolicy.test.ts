@@ -51,6 +51,16 @@ describe('pullRequestPolicy', () => {
     expect(pullRequestPolicy(ctx({ policyRevision: 'def456' })).blocked).toBe('stale_revision');
   });
 
+  it('blocks when the attempt revision is missing, even if the queue reports available', () => {
+    expect(pullRequestPolicy(ctx({ attemptRevision: null })).blocked).toBe('missing_revision');
+  });
+
+  it('blocks when Gas City did not provide a policy revision', () => {
+    expect(pullRequestPolicy(ctx({ policyRevision: null })).blocked).toBe(
+      'missing_policy_revision',
+    );
+  });
+
   it('never offers a merge or bypass action', () => {
     const { allowed } = pullRequestPolicy(ctx());
     expect(allowed).not.toContain('merge');
