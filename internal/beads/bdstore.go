@@ -2695,9 +2695,10 @@ func (s *BdStore) Close(id string) error {
 	return s.close(id, strings.TrimSpace(b.Metadata["close_reason"]))
 }
 
-// CloseWithReason closes a bead with an explicit reason without first reading
-// the bead metadata. Callers that need close_reason persisted for audit trails
-// should write metadata before calling this method.
+// CloseWithReason closes a bead with an explicit reason. It reads the current
+// row to enforce lifecycle source-close restrictions; callers that need
+// close_reason persisted for audit trails should write metadata before calling
+// this method.
 func (s *BdStore) CloseWithReason(id, reason string) error {
 	return s.close(id, strings.TrimSpace(reason))
 }

@@ -5058,11 +5058,21 @@ func TestOpenControlStoreDisablesAutoExportWithoutSandboxingWrites(t *testing.T)
 	prevRunner := beadsExecCommandRunnerWithEnv
 	beadsExecCommandRunnerWithEnv = func(env map[string]string) beads.CommandRunner {
 		envs = append(envs, maps.Clone(env))
+		expectedID := "ga-city-control"
+		if filepath.Clean(env["BEADS_DIR"]) == filepath.Join(rigDir, ".beads") {
+			expectedID = "ga-rig-control"
+		}
 		return func(_ string, name string, args ...string) ([]byte, error) {
 			if name != "bd" {
 				return nil, fmt.Errorf("unexpected command %q", name)
 			}
 			calls = append(calls, append([]string(nil), args...))
+			if len(args) >= 1 && args[0] == "show" {
+				if len(args) != 3 || args[1] != "--json" || args[2] != expectedID {
+					return nil, fmt.Errorf("unexpected bd show for control scope %q: %v", expectedID, args)
+				}
+				return []byte(fmt.Sprintf(`[{"id":%q,"title":"control","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`, expectedID)), nil
+			}
 			return []byte(`[]`), nil
 		}
 	}
@@ -5084,20 +5094,25 @@ func TestOpenControlStoreDisablesAutoExportWithoutSandboxingWrites(t *testing.T)
 		t.Fatalf("rig control update: %v", err)
 	}
 
-	if len(calls) != 2 {
-		t.Fatalf("bd calls = %#v, want two update calls", calls)
+	if len(calls) != 4 {
+		t.Fatalf("bd calls = %#v, want a show and update for each control store", calls)
 	}
-	if len(envs) != 2 {
-		t.Fatalf("bd envs = %#v, want two command environments", envs)
+	if len(envs) != len(calls) {
+		t.Fatalf("bd envs = %#v, want one command environment per call", envs)
 	}
-	for i, call := range calls {
-		if len(call) < 1 || call[0] != "update" {
-			t.Fatalf("bd call = %#v, want update ...", call)
+	for _, call := range calls {
+		if len(call) < 1 || (call[0] != "show" && call[0] != "update") {
+			t.Fatalf("bd call = %#v, want show or update ...", call)
 		}
-		if slices.Contains(call, "--sandbox") {
+		if call[0] == "show" && (len(call) != 3 || call[1] != "--json") {
+			t.Fatalf("bd read call = %#v, want show --json <id>", call)
+		}
+		if call[0] == "update" && slices.Contains(call, "--sandbox") {
 			t.Fatalf("bd call = %#v, write-capable control stores must not use --sandbox", call)
 		}
-		if got := envs[i]["BD_EXPORT_AUTO"]; got != "false" {
+	}
+	for i, env := range envs {
+		if got := env["BD_EXPORT_AUTO"]; got != "false" {
 			t.Fatalf("bd env %d BD_EXPORT_AUTO = %q, want false", i, got)
 		}
 	}
@@ -5189,6 +5204,9 @@ func TestOpenControlStoreAtForCityUsesControlRunnerForStaleBdScope(t *testing.T)
 				return nil, fmt.Errorf("unexpected command %q", name)
 			}
 			calls = append(calls, append([]string(nil), args...))
+			if len(args) == 3 && args[0] == "show" && args[1] == "--json" && args[2] == "ga-stale-control" {
+				return []byte(`[{"id":"ga-stale-control","title":"control","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
+			}
 			return []byte(`[]`), nil
 		}
 	}
@@ -5203,17 +5221,20 @@ func TestOpenControlStoreAtForCityUsesControlRunnerForStaleBdScope(t *testing.T)
 		t.Fatalf("stale rig control update: %v", err)
 	}
 
-	if len(calls) != 1 {
-		t.Fatalf("bd calls = %#v, want one update call", calls)
+	if len(calls) != 2 {
+		t.Fatalf("bd calls = %#v, want a show and update call", calls)
 	}
-	if len(envs) != 1 {
-		t.Fatalf("bd envs = %#v, want one command environment", envs)
+	if len(envs) != len(calls) {
+		t.Fatalf("bd envs = %#v, want one command environment per call", envs)
 	}
-	if call := calls[0]; len(call) < 1 || call[0] != "update" {
-		t.Fatalf("bd call = %#v, want update ...", calls[0])
+	if call := calls[0]; len(call) != 3 || call[0] != "show" || call[1] != "--json" {
+		t.Fatalf("bd read call = %#v, want show --json <id>", calls[0])
 	}
-	if slices.Contains(calls[0], "--sandbox") {
-		t.Fatalf("bd call = %#v, write-capable control stores must not use --sandbox", calls[0])
+	if call := calls[1]; len(call) < 1 || call[0] != "update" {
+		t.Fatalf("bd write call = %#v, want update ...", calls[1])
+	}
+	if slices.Contains(calls[1], "--sandbox") {
+		t.Fatalf("bd call = %#v, write-capable control stores must not use --sandbox", calls[1])
 	}
 	if got := envs[0]["BD_EXPORT_AUTO"]; got != "false" {
 		t.Fatalf("BD_EXPORT_AUTO = %q, want false", got)

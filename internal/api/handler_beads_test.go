@@ -1818,14 +1818,29 @@ func TestBeadReopenNotClosed(t *testing.T) {
 func TestBeadReopenCannotEraseLifecycleEnrollmentFirst(t *testing.T) {
 	state := newFakeState(t)
 	store := state.stores["myrig"]
-	bead, err := store.Create(beads.Bead{Title: "Enrolled task", Metadata: map[string]string{
+	bead, err := store.Create(beads.Bead{Title: "Enrolled task", Status: "open", Metadata: map[string]string{
 		beadmeta.LifecycleAdmissionReceiptMetadataKey: "signed admission evidence",
 	}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Close(bead.ID); err != nil {
+	writer, ok := beads.ConditionalWriterFor(store)
+	if !ok {
+		t.Fatal("fixture store lacks the trusted conditional completion path")
+	}
+	current, err := store.Get(bead.ID)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if err := writer.CloseIfMatch(bead.ID, current.Revision); err != nil {
+		t.Fatalf("seed controller-completed enrolled row: %v", err)
+	}
+	closed, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closed.Status != "closed" {
+		t.Fatalf("fixture status = %q, want closed", closed.Status)
 	}
 	h := newTestCityHandler(t, state)
 
