@@ -117,6 +117,27 @@ func (e EventRotateArchiveCompressionStatus) Valid() bool {
 	}
 }
 
+// Defines values for PRActionExecuteBodyAction.
+const (
+	Merge       PRActionExecuteBodyAction = "merge"
+	Prepare     PRActionExecuteBodyAction = "prepare"
+	QueueReview PRActionExecuteBodyAction = "queue_review"
+)
+
+// Valid indicates whether the value is a known member of the PRActionExecuteBodyAction enum.
+func (e PRActionExecuteBodyAction) Valid() bool {
+	switch e {
+	case Merge:
+		return true
+	case Prepare:
+		return true
+	case QueueReview:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for RequestFailedPayloadOperation.
 const (
 	CityCreate     RequestFailedPayloadOperation = "city.create"
@@ -2842,6 +2863,144 @@ type OutputTurn struct {
 	Role      string  `json:"role"`
 	Text      string  `json:"text"`
 	Timestamp *string `json:"timestamp,omitempty"`
+}
+
+// PRActionAttemptReference defines model for PRActionAttemptReference.
+type PRActionAttemptReference struct {
+	AttemptId         string `json:"attempt_id"`
+	BaseSha           string `json:"base_sha"`
+	CandidateSha      string `json:"candidate_sha"`
+	DiffSha256        string `json:"diff_sha256"`
+	DiffSource        string `json:"diff_source"`
+	StoreRef          string `json:"store_ref"`
+	WorkId            string `json:"work_id"`
+	WorkingTreeStatus string `json:"working_tree_status"`
+}
+
+// PRActionExecuteBody defines model for PRActionExecuteBody.
+type PRActionExecuteBody struct {
+	// Action Requested action from the current server queue.
+	Action PRActionExecuteBodyAction `json:"action"`
+
+	// AttemptId Exact immutable attempt ID from the server queue.
+	AttemptId *string `json:"attempt_id,omitempty"`
+
+	// BaseSha Exact base commit SHA from the current queue item.
+	BaseSha string `json:"base_sha"`
+
+	// HeadSha Exact candidate commit SHA from the current queue item.
+	HeadSha string `json:"head_sha"`
+
+	// HumanGrant Separate authority-signed exact merge approval; required for merge.
+	HumanGrant *string `json:"human_grant,omitempty"`
+
+	// Monitor Configured PR monitor name.
+	Monitor string `json:"monitor"`
+
+	// Owner Repository owner from the server queue.
+	Owner string `json:"owner"`
+
+	// PolicyVersion Policy version copied from the current queue.
+	PolicyVersion string `json:"policy_version"`
+	PullRequest   int64  `json:"pull_request"`
+
+	// Repo Repository name from the server queue.
+	Repo string `json:"repo"`
+
+	// WorkId Exact durable repair-work bead when the action needs one.
+	WorkId *string `json:"work_id,omitempty"`
+}
+
+// PRActionExecuteBodyAction Requested action from the current server queue.
+type PRActionExecuteBodyAction string
+
+// PRActionOption defines model for PRActionOption.
+type PRActionOption struct {
+	Action                string `json:"action"`
+	Available             bool   `json:"available"`
+	Reason                string `json:"reason"`
+	RequiresHumanApproval bool   `json:"requires_human_approval"`
+}
+
+// PRActionQueue defines model for PRActionQueue.
+type PRActionQueue struct {
+	Availability  string               `json:"availability"`
+	FreshUntil    time.Time            `json:"fresh_until"`
+	Items         *[]PRActionQueueItem `json:"items"`
+	ObservedAt    time.Time            `json:"observed_at"`
+	PolicyDetail  *string              `json:"policy_detail,omitempty"`
+	PolicyState   string               `json:"policy_state"`
+	PolicyVersion string               `json:"policy_version"`
+	Sources       *[]PRActionSource    `json:"sources"`
+}
+
+// PRActionQueueItem defines model for PRActionQueueItem.
+type PRActionQueueItem struct {
+	ActionReceipts  *[]PRActionResult           `json:"action_receipts"`
+	Actions         *[]PRActionOption           `json:"actions"`
+	AttemptEvidence *[]PRActionAttemptReference `json:"attempt_evidence"`
+	BaseRefName     string                      `json:"base_ref_name"`
+	BaseSha         string                      `json:"base_sha"`
+	EvidenceState   string                      `json:"evidence_state"`
+	FreshUntil      time.Time                   `json:"fresh_until"`
+	HeadRefName     *string                     `json:"head_ref_name,omitempty"`
+	HeadSha         string                      `json:"head_sha"`
+	IsDraft         bool                        `json:"is_draft"`
+	MergeState      string                      `json:"merge_state"`
+	Monitor         string                      `json:"monitor"`
+	ObservedAt      time.Time                   `json:"observed_at"`
+	Owner           string                      `json:"owner"`
+	PolicyVersion   string                      `json:"policy_version"`
+	PullRequest     int64                       `json:"pull_request"`
+	Repo            string                      `json:"repo"`
+	Title           string                      `json:"title"`
+	Url             *string                     `json:"url,omitempty"`
+	WorkRecords     *[]PRActionWorkRecord       `json:"work_records"`
+}
+
+// PRActionResult defines model for PRActionResult.
+type PRActionResult struct {
+	Action         string     `json:"action"`
+	ActorIssuer    *string    `json:"actor_issuer,omitempty"`
+	ActorKeyId     string     `json:"actor_key_id"`
+	ActorSubject   *string    `json:"actor_subject,omitempty"`
+	AttemptId      *string    `json:"attempt_id,omitempty"`
+	BaseSha        string     `json:"base_sha"`
+	CreatedAt      time.Time  `json:"created_at"`
+	Detail         *string    `json:"detail,omitempty"`
+	HeadSha        string     `json:"head_sha"`
+	Id             string     `json:"id"`
+	IdempotencyKey string     `json:"idempotency_key"`
+	MergeCommitSha *string    `json:"merge_commit_sha,omitempty"`
+	Monitor        string     `json:"monitor"`
+	Outcome        *string    `json:"outcome,omitempty"`
+	Owner          string     `json:"owner"`
+	PolicyVersion  string     `json:"policy_version"`
+	PullRequest    int64      `json:"pull_request"`
+	Repo           string     `json:"repo"`
+	Status         string     `json:"status"`
+	VerifiedAt     *time.Time `json:"verified_at,omitempty"`
+	WorkId         *string    `json:"work_id,omitempty"`
+}
+
+// PRActionSource defines model for PRActionSource.
+type PRActionSource struct {
+	Detail  *string `json:"detail,omitempty"`
+	Monitor string  `json:"monitor"`
+	Owner   string  `json:"owner"`
+	Repo    string  `json:"repo"`
+	Rig     string  `json:"rig"`
+	State   string  `json:"state"`
+}
+
+// PRActionWorkRecord defines model for PRActionWorkRecord.
+type PRActionWorkRecord struct {
+	Assignee        *string `json:"assignee,omitempty"`
+	BaseSha         string  `json:"base_sha"`
+	CandidateSha    string  `json:"candidate_sha"`
+	CurrentRevision bool    `json:"current_revision"`
+	Id              string  `json:"id"`
+	Status          string  `json:"status"`
 }
 
 // PackAddInputBody defines model for PackAddInputBody.
@@ -9857,6 +10016,15 @@ type PutV0CityByCityNamePatchesRigsParams struct {
 	XGCRequest string `json:"X-GC-Request"`
 }
 
+// ExecutePrActionParams defines parameters for ExecutePrAction.
+type ExecutePrActionParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+
+	// IdempotencyKey Stable key for this exact action request.
+	IdempotencyKey string `json:"Idempotency-Key"`
+}
+
 // GetV0CityByCityNameProviderReadinessParams defines parameters for GetV0CityByCityNameProviderReadiness.
 type GetV0CityByCityNameProviderReadinessParams struct {
 	// Providers Comma-separated provider names to check (default: claude,codex,gemini).
@@ -10318,6 +10486,9 @@ type PutV0CityByCityNamePatchesProvidersJSONRequestBody = ProviderPatchSetInputB
 
 // PutV0CityByCityNamePatchesRigsJSONRequestBody defines body for PutV0CityByCityNamePatchesRigs for application/json ContentType.
 type PutV0CityByCityNamePatchesRigsJSONRequestBody = RigPatchSetInputBody
+
+// ExecutePrActionJSONRequestBody defines body for ExecutePrAction for application/json ContentType.
+type ExecutePrActionJSONRequestBody = PRActionExecuteBody
 
 // PatchV0CityByCityNameProviderByNameJSONRequestBody defines body for PatchV0CityByCityNameProviderByName for application/json ContentType.
 type PatchV0CityByCityNameProviderByNameJSONRequestBody = ProviderUpdateInputBody
@@ -20104,6 +20275,14 @@ type ClientInterface interface {
 	// GetV0CityByCityNamePending request
 	GetV0CityByCityNamePending(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// ExecutePrActionWithBody request with any body
+	ExecutePrActionWithBody(ctx context.Context, cityName string, params *ExecutePrActionParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	ExecutePrAction(ctx context.Context, cityName string, params *ExecutePrActionParams, body ExecutePrActionJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetV0CityByCityNamePrActionsQueue request
+	GetV0CityByCityNamePrActionsQueue(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// GetV0CityByCityNameProviderReadiness request
 	GetV0CityByCityNameProviderReadiness(ctx context.Context, cityName string, params *GetV0CityByCityNameProviderReadinessParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -21995,6 +22174,42 @@ func (c *Client) PutV0CityByCityNamePatchesRigs(ctx context.Context, cityName st
 
 func (c *Client) GetV0CityByCityNamePending(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetV0CityByCityNamePendingRequest(c.Server, cityName)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ExecutePrActionWithBody(ctx context.Context, cityName string, params *ExecutePrActionParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewExecutePrActionRequestWithBody(c.Server, cityName, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ExecutePrAction(ctx context.Context, cityName string, params *ExecutePrActionParams, body ExecutePrActionJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewExecutePrActionRequest(c.Server, cityName, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetV0CityByCityNamePrActionsQueue(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetV0CityByCityNamePrActionsQueueRequest(c.Server, cityName)
 	if err != nil {
 		return nil, err
 	}
@@ -29907,6 +30122,109 @@ func NewGetV0CityByCityNamePendingRequest(server string, cityName string) (*http
 	return req, nil
 }
 
+// NewExecutePrActionRequest calls the generic ExecutePrAction builder with application/json body
+func NewExecutePrActionRequest(server string, cityName string, params *ExecutePrActionParams, body ExecutePrActionJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewExecutePrActionRequestWithBody(server, cityName, params, "application/json", bodyReader)
+}
+
+// NewExecutePrActionRequestWithBody generates requests for ExecutePrAction with any type of body
+func NewExecutePrActionRequestWithBody(server string, cityName string, params *ExecutePrActionParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/pr-actions", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+		var headerParam1 string
+
+		headerParam1, err = runtime.StyleParamWithOptions("simple", false, "Idempotency-Key", params.IdempotencyKey, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("Idempotency-Key", headerParam1)
+
+	}
+
+	return req, nil
+}
+
+// NewGetV0CityByCityNamePrActionsQueueRequest generates requests for GetV0CityByCityNamePrActionsQueue
+func NewGetV0CityByCityNamePrActionsQueueRequest(server string, cityName string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/pr-actions/queue", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewGetV0CityByCityNameProviderReadinessRequest generates requests for GetV0CityByCityNameProviderReadiness
 func NewGetV0CityByCityNameProviderReadinessRequest(server string, cityName string, params *GetV0CityByCityNameProviderReadinessParams) (*http.Request, error) {
 	var err error
@@ -33927,6 +34245,14 @@ type ClientWithResponsesInterface interface {
 	// GetV0CityByCityNamePendingWithResponse request
 	GetV0CityByCityNamePendingWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNamePendingResponse, error)
 
+	// ExecutePrActionWithBodyWithResponse request with any body
+	ExecutePrActionWithBodyWithResponse(ctx context.Context, cityName string, params *ExecutePrActionParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ExecutePrActionResponse, error)
+
+	ExecutePrActionWithResponse(ctx context.Context, cityName string, params *ExecutePrActionParams, body ExecutePrActionJSONRequestBody, reqEditors ...RequestEditorFn) (*ExecutePrActionResponse, error)
+
+	// GetV0CityByCityNamePrActionsQueueWithResponse request
+	GetV0CityByCityNamePrActionsQueueWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNamePrActionsQueueResponse, error)
+
 	// GetV0CityByCityNameProviderReadinessWithResponse request
 	GetV0CityByCityNameProviderReadinessWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameProviderReadinessParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameProviderReadinessResponse, error)
 
@@ -37135,6 +37461,62 @@ func (r GetV0CityByCityNamePendingResponse) StatusCode() int {
 	return 0
 }
 
+type ExecutePrActionResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON200                   *PRActionResult
+	ApplicationproblemJSON400 *ErrorModel
+	ApplicationproblemJSON401 *ErrorModel
+	ApplicationproblemJSON403 *ErrorModel
+	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON409 *ErrorModel
+	ApplicationproblemJSON422 *ErrorModel
+	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON503 *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r ExecutePrActionResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ExecutePrActionResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type GetV0CityByCityNamePrActionsQueueResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON200                   *PRActionQueue
+	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON422 *ErrorModel
+	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON503 *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r GetV0CityByCityNamePrActionsQueueResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetV0CityByCityNamePrActionsQueueResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type GetV0CityByCityNameProviderReadinessResponse struct {
 	Body                      []byte
 	HTTPResponse              *http.Response
@@ -39890,6 +40272,32 @@ func (c *ClientWithResponses) GetV0CityByCityNamePendingWithResponse(ctx context
 		return nil, err
 	}
 	return ParseGetV0CityByCityNamePendingResponse(rsp)
+}
+
+// ExecutePrActionWithBodyWithResponse request with arbitrary body returning *ExecutePrActionResponse
+func (c *ClientWithResponses) ExecutePrActionWithBodyWithResponse(ctx context.Context, cityName string, params *ExecutePrActionParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ExecutePrActionResponse, error) {
+	rsp, err := c.ExecutePrActionWithBody(ctx, cityName, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseExecutePrActionResponse(rsp)
+}
+
+func (c *ClientWithResponses) ExecutePrActionWithResponse(ctx context.Context, cityName string, params *ExecutePrActionParams, body ExecutePrActionJSONRequestBody, reqEditors ...RequestEditorFn) (*ExecutePrActionResponse, error) {
+	rsp, err := c.ExecutePrAction(ctx, cityName, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseExecutePrActionResponse(rsp)
+}
+
+// GetV0CityByCityNamePrActionsQueueWithResponse request returning *GetV0CityByCityNamePrActionsQueueResponse
+func (c *ClientWithResponses) GetV0CityByCityNamePrActionsQueueWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNamePrActionsQueueResponse, error) {
+	rsp, err := c.GetV0CityByCityNamePrActionsQueue(ctx, cityName, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetV0CityByCityNamePrActionsQueueResponse(rsp)
 }
 
 // GetV0CityByCityNameProviderReadinessWithResponse request returning *GetV0CityByCityNameProviderReadinessResponse
@@ -47339,6 +47747,142 @@ func ParseGetV0CityByCityNamePendingResponse(rsp *http.Response) (*GetV0CityByCi
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest ListBodyCityPendingEntry
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseExecutePrActionResponse parses an HTTP response from a ExecutePrActionWithResponse call
+func ParseExecutePrActionResponse(rsp *http.Response) (*ExecutePrActionResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ExecutePrActionResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest PRActionResult
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 400:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON400 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON401 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON403 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON409 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetV0CityByCityNamePrActionsQueueResponse parses an HTTP response from a GetV0CityByCityNamePrActionsQueueWithResponse call
+func ParseGetV0CityByCityNamePrActionsQueueResponse(rsp *http.Response) (*GetV0CityByCityNamePrActionsQueueResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetV0CityByCityNamePrActionsQueueResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest PRActionQueue
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

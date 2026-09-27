@@ -233,6 +233,7 @@
               "reference/rsi-trusted-evaluation",
               "reference/api",
               "reference/session-request-receipts",
+              "reference/pr-action-cli",
               "reference/events",
               "reference/schema/index",
               "reference/system-packs",

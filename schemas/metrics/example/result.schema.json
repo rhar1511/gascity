@@ -223,7 +223,8 @@
               "factory-validate",
               "session-request-ack",
               "session-request-get",
-              "session-request-submit"
+              "session-request-submit",
+              "github-pr-action"
             ]
           },
           "event_id": {

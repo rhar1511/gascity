@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api/apierr"
@@ -704,6 +705,11 @@ type BeadDepsResponse struct {
 // humaHandleBeadCreate is the Huma-typed handler for POST /v0/beads.
 // Title required via struct tag on BeadCreateInput.
 func (s *Server) humaHandleBeadCreate(ctx context.Context, input *BeadCreateInput) (*IndexOutput[beads.Bead], error) {
+	for key := range input.Body.Metadata {
+		if strings.HasPrefix(key, "gc.pr_action.") {
+			return nil, apierr.Forbidden.Msg("PR action ledger metadata is reserved for the controller")
+		}
+	}
 	// Idempotency: run the create at most once per Idempotency-Key. The helper
 	// owns reserve/replay/mismatch/in-flight and guarantees the reservation is
 	// released on any error, so every fallible step lives in the closure.
@@ -758,6 +764,9 @@ func (s *Server) humaHandleBeadClose(ctx context.Context, input *BeadCloseInput)
 	if err != nil {
 		return nil, err
 	}
+	if err := rejectPRActionLedgerMutation(current); err != nil {
+		return nil, err
+	}
 	if err := s.gateWorkRecordClose(ctx, id, store, current, nil); err != nil {
 		return nil, err
 	}
@@ -780,6 +789,9 @@ func (s *Server) humaHandleBeadReopen(_ context.Context, input *BeadReopenInput)
 	if err != nil {
 		return nil, err
 	}
+	if err := rejectPRActionLedgerMutation(b); err != nil {
+		return nil, err
+	}
 	if b.Status != "closed" {
 		return nil, apierr.ConflictWrongState.Msg("conflict: bead " + id + " is not closed (status: " + b.Status + ")")
 	}
@@ -794,8 +806,11 @@ func (s *Server) humaHandleBeadReopen(_ context.Context, input *BeadReopenInput)
 // humaHandleBeadAssign is the Huma-typed handler for POST /v0/bead/{id}/assign.
 func (s *Server) humaHandleBeadAssign(ctx context.Context, input *BeadAssignInput) (*IndexOutput[map[string]string], error) {
 	id := input.ID
-	store, _, err := s.resolveBeadOwner(id)
+	store, current, err := s.resolveBeadOwner(id)
 	if err != nil {
+		return nil, err
+	}
+	if err := rejectPRActionLedgerMutation(current); err != nil {
 		return nil, err
 	}
 	assignee, err := s.normalizeRawBeadAssignee(ctx, input.Body.Assignee)
@@ -853,6 +868,9 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 
 	store, current, err := s.resolveBeadOwner(id)
 	if err != nil {
+		return nil, err
+	}
+	if err := rejectPRActionLedgerMutation(current); err != nil {
 		return nil, err
 	}
 	if body.Assignee != nil {
@@ -924,8 +942,11 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 // refused per-bead close: each tears down an entire subtree rather than one bead.
 func (s *Server) humaHandleBeadDelete(_ context.Context, input *BeadDeleteInput) (*OKResponse, error) {
 	id := input.ID
-	store, _, err := s.resolveBeadOwner(id)
+	store, current, err := s.resolveBeadOwner(id)
 	if err != nil {
+		return nil, err
+	}
+	if err := rejectPRActionLedgerMutation(current); err != nil {
 		return nil, err
 	}
 	if err := store.Close(id); err != nil {

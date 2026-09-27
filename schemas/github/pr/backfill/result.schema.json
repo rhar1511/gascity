@@ -1,170 +1,413 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
+  "additionalProperties": false,
   "required": [
     "schema_version",
     "ok",
-    "city_path",
-    "monitor_count",
-    "result_count",
-    "actionable_count",
-    "results"
+    "target",
+    "queue",
+    "actions"
   ],
   "properties": {
     "schema_version": {
-      "const": "1"
+      "const": "2"
     },
     "ok": {
       "const": true
     },
-    "city_path": {
+    "target": {
       "type": "string"
     },
-    "monitor_count": {
-      "type": "integer",
-      "minimum": 0
+    "queue": {
+      "$ref": "#/$defs/PRActionQueue"
     },
-    "result_count": {
-      "type": "integer",
-      "minimum": 0
-    },
-    "actionable_count": {
-      "type": "integer",
-      "minimum": 0
-    },
-    "results": {
+    "actions": {
       "type": "array",
       "items": {
-        "type": "object",
-        "required": [
-          "monitor",
-          "owner",
-          "repo",
-          "number",
-          "base_ref_name",
-          "state",
-          "actionable",
-          "rig",
-          "repair_route"
-        ],
-        "properties": {
-          "monitor": {
-            "type": "string"
-          },
-          "owner": {
-            "type": "string"
-          },
-          "repo": {
-            "type": "string"
-          },
-          "number": {
-            "type": "integer"
-          },
-          "title": {
-            "type": "string"
-          },
-          "url": {
-            "type": "string"
-          },
-          "base_ref_name": {
-            "type": "string"
-          },
-          "head_ref_name": {
-            "type": "string"
-          },
-          "head_sha": {
-            "type": "string"
-          },
-          "merge_state_status": {
-            "type": "string"
-          },
-          "state": {
-            "type": "string"
-          },
-          "failure_kind": {
-            "type": "string"
-          },
-          "actionable": {
-            "type": "boolean"
-          },
-          "failed_checks": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "pending_checks": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "rig": {
-            "type": "string"
-          },
-          "repair_route": {
-            "type": "string"
-          },
-          "notify": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          }
-        },
-        "additionalProperties": true
+        "$ref": "#/$defs/PRActionResult"
       }
-    },
-    "repair_beads": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "required": ["id", "pr", "created"],
-        "properties": {
-          "id": {
-            "type": "string"
-          },
-          "pr": {
-            "type": "integer"
-          },
-          "url": {
-            "type": "string"
-          },
-          "created": {
-            "type": "boolean"
-          },
-          "updated": {
-            "type": "boolean"
-          },
-          "dispatched": {
-            "type": "boolean"
-          },
-          "route": {
-            "type": "string"
-          },
-          "workflow": {
-            "type": "string"
-          }
-        },
-        "additionalProperties": true
-      }
-    },
-    "existing_repairs": {
-      "type": "integer",
-      "minimum": 0
-    },
-    "created_repairs": {
-      "type": "integer",
-      "minimum": 0
-    },
-    "updated_repairs": {
-      "type": "integer",
-      "minimum": 0
-    },
-    "dispatched_repairs": {
-      "type": "integer",
-      "minimum": 0
     }
   },
-  "additionalProperties": true
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "PRActionQueue": {
+      "additionalProperties": false,
+      "properties": {
+        "availability": {
+          "type": "string"
+        },
+        "fresh_until": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "items": {
+          "items": {
+            "$ref": "#/$defs/PRActionQueueItem"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "observed_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "policy_detail": {
+          "type": "string"
+        },
+        "policy_state": {
+          "type": "string"
+        },
+        "policy_version": {
+          "type": "string"
+        },
+        "sources": {
+          "items": {
+            "$ref": "#/$defs/PRActionSource"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "availability",
+        "policy_state",
+        "policy_version",
+        "observed_at",
+        "fresh_until",
+        "sources",
+        "items"
+      ],
+      "type": "object"
+    },
+    "PRActionQueueItem": {
+      "additionalProperties": false,
+      "properties": {
+        "action_receipts": {
+          "items": {
+            "$ref": "#/$defs/PRActionResult"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "actions": {
+          "items": {
+            "$ref": "#/$defs/PRActionOption"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "attempt_evidence": {
+          "items": {
+            "$ref": "#/$defs/PRActionAttemptReference"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "base_ref_name": {
+          "type": "string"
+        },
+        "base_sha": {
+          "type": "string"
+        },
+        "evidence_state": {
+          "type": "string"
+        },
+        "fresh_until": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "head_ref_name": {
+          "type": "string"
+        },
+        "head_sha": {
+          "type": "string"
+        },
+        "is_draft": {
+          "type": "boolean"
+        },
+        "merge_state": {
+          "type": "string"
+        },
+        "monitor": {
+          "type": "string"
+        },
+        "observed_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "owner": {
+          "type": "string"
+        },
+        "policy_version": {
+          "type": "string"
+        },
+        "pull_request": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "repo": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        },
+        "work_records": {
+          "items": {
+            "$ref": "#/$defs/PRActionWorkRecord"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "monitor",
+        "owner",
+        "repo",
+        "pull_request",
+        "title",
+        "base_ref_name",
+        "head_sha",
+        "base_sha",
+        "merge_state",
+        "is_draft",
+        "policy_version",
+        "observed_at",
+        "fresh_until",
+        "work_records",
+        "evidence_state",
+        "attempt_evidence",
+        "action_receipts",
+        "actions"
+      ],
+      "type": "object"
+    },
+    "PRActionResult": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "actor_issuer": {
+          "type": "string"
+        },
+        "actor_key_id": {
+          "type": "string"
+        },
+        "actor_subject": {
+          "type": "string"
+        },
+        "attempt_id": {
+          "type": "string"
+        },
+        "base_sha": {
+          "type": "string"
+        },
+        "created_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "detail": {
+          "type": "string"
+        },
+        "head_sha": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "idempotency_key": {
+          "type": "string"
+        },
+        "merge_commit_sha": {
+          "type": "string"
+        },
+        "monitor": {
+          "type": "string"
+        },
+        "outcome": {
+          "type": "string"
+        },
+        "owner": {
+          "type": "string"
+        },
+        "policy_version": {
+          "type": "string"
+        },
+        "pull_request": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "repo": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "verified_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "work_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "action",
+        "status",
+        "idempotency_key",
+        "monitor",
+        "owner",
+        "repo",
+        "pull_request",
+        "head_sha",
+        "base_sha",
+        "policy_version",
+        "actor_key_id",
+        "created_at"
+      ],
+      "type": "object"
+    },
+    "PRActionOption": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "available": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "requires_human_approval": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "action",
+        "available",
+        "requires_human_approval",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "PRActionAttemptReference": {
+      "additionalProperties": false,
+      "properties": {
+        "attempt_id": {
+          "type": "string"
+        },
+        "base_sha": {
+          "type": "string"
+        },
+        "candidate_sha": {
+          "type": "string"
+        },
+        "diff_sha256": {
+          "type": "string"
+        },
+        "diff_source": {
+          "type": "string"
+        },
+        "store_ref": {
+          "type": "string"
+        },
+        "work_id": {
+          "type": "string"
+        },
+        "working_tree_status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "store_ref",
+        "work_id",
+        "attempt_id",
+        "base_sha",
+        "candidate_sha",
+        "diff_sha256",
+        "diff_source",
+        "working_tree_status"
+      ],
+      "type": "object"
+    },
+    "PRActionWorkRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "assignee": {
+          "type": "string"
+        },
+        "base_sha": {
+          "type": "string"
+        },
+        "candidate_sha": {
+          "type": "string"
+        },
+        "current_revision": {
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "status",
+        "candidate_sha",
+        "base_sha",
+        "current_revision"
+      ],
+      "type": "object"
+    },
+    "PRActionSource": {
+      "additionalProperties": false,
+      "properties": {
+        "detail": {
+          "type": "string"
+        },
+        "monitor": {
+          "type": "string"
+        },
+        "owner": {
+          "type": "string"
+        },
+        "repo": {
+          "type": "string"
+        },
+        "rig": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "monitor",
+        "owner",
+        "repo",
+        "rig",
+        "state"
+      ],
+      "type": "object"
+    }
+  }
 }

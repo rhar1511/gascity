@@ -59,6 +59,7 @@ go_library(
         "schemas/formula/cook/result.schema.json",
         "schemas/formula/list/result.schema.json",
         "schemas/formula/show/result.schema.json",
+        "schemas/github/pr/action/result.schema.json",
         "schemas/github/pr/backfill/result.schema.json",
         "schemas/graph/result.schema.json",
         "schemas/handoff/result.schema.json",
