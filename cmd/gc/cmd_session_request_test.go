@@ -40,3 +40,24 @@ func TestSessionRequestJSONSchemas(t *testing.T) {
 		})
 	}
 }
+
+func TestSessionRequestClientUsesSupervisorForAliveCityWithoutStandalonePort(t *testing.T) {
+	cityPath := writeBeadsTestCity(t)
+	t.Setenv("GC_CITY", cityPath)
+	t.Setenv("GC_NO_API", "")
+	oldAlive, oldSupervisor := apiRouteControllerAliveHook, apiRouteSupervisorClientHook
+	t.Cleanup(func() {
+		apiRouteControllerAliveHook, apiRouteSupervisorClientHook = oldAlive, oldSupervisor
+	})
+	want := api.NewCityScopedClient("http://127.0.0.1:1", "test-city")
+	apiRouteControllerAliveHook = func(string) int { return 1 }
+	apiRouteSupervisorClientHook = func(string) *api.Client { return want }
+	got, err := sessionRequestClient()
+	if err != nil || got != want {
+		t.Fatalf("supervisor-managed session request client = %v, %v; want supervisor client", got, err)
+	}
+	t.Setenv("GC_NO_API", "1")
+	if got, err := sessionRequestClient(); err == nil || got != nil {
+		t.Fatal("disabled API must reject tracked request without a local fallback")
+	}
+}
