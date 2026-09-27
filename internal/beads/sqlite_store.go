@@ -1986,8 +1986,17 @@ func (s *SQLiteStore) purgeTerminal(ctx context.Context, olderThan time.Duration
 		WHERE tier='main'
 		  AND status IN ('closed','cancelled','canceled','expired')
 		  AND COALESCE(NULLIF(updated_at,0), created_at) < ?
+		  AND NOT EXISTS (
+			SELECT 1 FROM metadata m
+			WHERE m.bead_id=beads.id
+			  AND m.meta_key IN (?,?,?)
+			  AND TRIM(m.meta_value) <> ''
+		  )
 		ORDER BY updated_at ASC
-		LIMIT 1000`, cutoff)
+		LIMIT 1000`, cutoff,
+		beadmeta.LifecycleRecoveryStateMetadataKey,
+		beadmeta.LifecycleRecoveryIntentMetadataKey,
+		beadmeta.LifecycleRecoveryIntentDigestKey)
 	if err != nil {
 		return 0, fmt.Errorf("sqlite purge terminal query: %w", err)
 	}

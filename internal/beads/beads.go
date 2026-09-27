@@ -367,12 +367,22 @@ func HasLifecycleRecoveryIntent(b Bead) bool {
 		strings.TrimSpace(b.Metadata[beadmeta.LifecycleRecoveryIntentDigestKey]) != ""
 }
 
+// HasLifecycleRecoveryState treats any non-empty recovery ledger as durable
+// evidence. Malformed state remains protected so corruption cannot reset the
+// bounded recovery budget by making the row appear uninitialized.
+func HasLifecycleRecoveryState(b Bead) bool {
+	return strings.TrimSpace(b.Metadata[beadmeta.LifecycleRecoveryStateMetadataKey]) != ""
+}
+
 // ValidateLifecycleDelete prevents ordinary and conditional store delete
-// paths from erasing a durable recovery authorization before its outcome can
-// be reconciled.
+// paths from erasing a durable recovery authorization or its bounded action
+// history before the outcome can be reconciled.
 func ValidateLifecycleDelete(current Bead) error {
 	if HasLifecycleRecoveryIntent(current) {
 		return ErrLifecycleIntentImmutable
+	}
+	if HasLifecycleRecoveryState(current) {
+		return ErrLifecycleMutationBlocked
 	}
 	return nil
 }

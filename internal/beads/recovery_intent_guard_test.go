@@ -2,6 +2,7 @@ package beads
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -96,10 +97,16 @@ func createRecoveryBudgetFixture(t *testing.T, store Store, id, recoveryState st
 	t.Helper()
 	work, err := store.Create(Bead{
 		ID: id, Title: "admitted work", Type: "task", Status: "in_progress",
-		Metadata: StringMap{beadmeta.LifecycleRecoveryStateMetadataKey: recoveryState},
 	})
 	if err != nil {
 		return Bead{}, err
+	}
+	current, err := store.Get(work.ID)
+	if err != nil {
+		return Bead{}, err
+	}
+	if err := UpdateLifecycleRecoveryStateIfMatch(store, work.ID, current.Revision, "", recoveryState); err != nil {
+		return Bead{}, fmt.Errorf("setting lifecycle recovery state: %w", err)
 	}
 	if err := store.SetMetadata(id, "fixture.revision", "advanced"); err != nil {
 		return Bead{}, err

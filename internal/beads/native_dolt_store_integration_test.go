@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -499,6 +500,22 @@ func TestNativeDoltStoreRealBackendRoundTrip(t *testing.T) {
 		t.Fatalf("ParentID = %q, want %q", got.ParentID, parent.ID)
 	}
 	assertNativeDependency(t, got.Dependencies, child.ID, blocker.ID, "blocks")
+	if err := store.Close(child.ID); err == nil || !strings.Contains(strings.ToLower(err.Error()), "blocked issue") {
+		t.Fatalf("Close blocked child = %v, want provider blocked-issue refusal", err)
+	}
+	stillOpen, err := store.Get(child.ID)
+	if err != nil {
+		t.Fatalf("Get child after refused close: %v", err)
+	}
+	if stillOpen.Status != "open" {
+		t.Fatalf("child status after refused close = %q, want open", stillOpen.Status)
+	}
+	// The checked close path enforces live blocker dependencies. Resolve the
+	// child's blocker before closing it so this round-trip exercises a valid
+	// close, rather than depending on the unchecked legacy close behavior.
+	if err := store.Close(blocker.ID); err != nil {
+		t.Fatalf("Close blocker: %v", err)
+	}
 	if err := store.Close(child.ID); err != nil {
 		t.Fatalf("Close child: %v", err)
 	}

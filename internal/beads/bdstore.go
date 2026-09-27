@@ -2808,10 +2808,37 @@ func (s *BdStore) validateLifecycleCloseTargets(ids []string, metadata map[strin
 	return nil
 }
 
+// preflightLifecycleDelete refuses lifecycle records whose durable authorization
+// or recovery budget would be erased. BdStore's read and delete are separate
+// CLI commands, so this is a conservative guard, not a revision fence: a writer
+// racing between the two commands can still change the row. The deployed bd
+// CLI does not expose a conditional delete revision flag, so callers must not
+// treat this provider as enforcing an atomic lifecycle delete boundary.
+func (s *BdStore) preflightLifecycleDelete(id string) error {
+	current, err := s.Get(id)
+	if err != nil {
+		if errors.Is(err, ErrIDCollision) {
+			return fmt.Errorf("checking lifecycle delete target %q: %w", id, err)
+		}
+		if errors.Is(err, ErrNotFound) {
+			// Preserve bd's existing delete behavior for an already absent row.
+			return nil
+		}
+		return fmt.Errorf("checking lifecycle delete target %q: %w", id, err)
+	}
+	if err := ValidateLifecycleDelete(current); err != nil {
+		return fmt.Errorf("deleting lifecycle bead %q: %w", id, err)
+	}
+	return nil
+}
+
 // Delete permanently removes a bead from the store via bd delete.
 func (s *BdStore) Delete(id string) error {
 	// Internal callers supply canonical full IDs; exact-ID guard lives at the
 	// CLI/API entry points (gcy-g4o).
+	if err := s.preflightLifecycleDelete(id); err != nil {
+		return err
+	}
 	err := s.runBDTransientWrite("delete", "--force", "--json", id)
 	if err != nil {
 		if isBdNotFound(err) {
@@ -2846,6 +2873,13 @@ const bdDeleteBatchChunk = 256
 // returns a *BatchDeleteError carrying the ids from the fully-committed earlier
 // chunks, letting a caching layer reconcile exactly those instead of treating
 // the whole batch as untouched.
+//
+// Each chunk is preflighted with `bd show` before its delete command. These are
+// separate subprocesses and are not atomic: the bd backend cannot fence the
+// delete to the revision returned by show. Protected rows are refused when
+// observed, but a concurrent writer can change a row between preflight and
+// delete. This path therefore does not certify backend-enforced lifecycle
+// deletion.
 func (s *BdStore) DeleteBatch(ids []string) error {
 	for start := 0; start < len(ids); start += bdDeleteBatchChunk {
 		end := start + bdDeleteBatchChunk
@@ -2853,6 +2887,14 @@ func (s *BdStore) DeleteBatch(ids []string) error {
 			end = len(ids)
 		}
 		chunk := ids[start:end]
+		for _, id := range chunk {
+			if err := s.preflightLifecycleDelete(id); err != nil {
+				return &BatchDeleteError{
+					Committed: append([]string(nil), ids[:start]...),
+					Err:       fmt.Errorf("preflighting batch delete of %q: %w", id, err),
+				}
+			}
+		}
 		args := make([]string, 0, len(chunk)+2)
 		args = append(args, "delete")
 		args = append(args, chunk...)

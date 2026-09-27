@@ -1,16 +1,19 @@
 package beads
 
 import (
+	"encoding/json"
 	"errors"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
 func recordingBdRunner(calls *[][]string) CommandRunner {
 	return func(_, name string, args ...string) ([]byte, error) {
 		*calls = append(*calls, append([]string{name}, args...))
-		if len(args) > 0 && (args[0] == "list" || args[0] == "query") {
+		if len(args) > 0 && (args[0] == "list" || args[0] == "query" || args[0] == "show") {
 			return []byte("[]"), nil
 		}
 		return []byte("{}"), nil
@@ -25,6 +28,106 @@ func deleteCallCount(calls [][]string) int {
 		}
 	}
 	return count
+}
+
+func TestBdStoreDeletePreflightProtectsRecoveryEvidence(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		metadata StringMap
+		wantErr  error
+	}{
+		{
+			name: "budget",
+			metadata: StringMap{
+				beadmeta.LifecycleRecoveryStateMetadataKey: `{"version":1,"work_item_id":"gc-budget","attempts":[]}`,
+			},
+			wantErr: ErrLifecycleMutationBlocked,
+		},
+		{
+			name: "signed intent",
+			metadata: StringMap{
+				beadmeta.LifecycleRecoveryIntentMetadataKey: `{"request_id":"request-1"}`,
+				beadmeta.LifecycleRecoveryIntentDigestKey:   "digest",
+			},
+			wantErr: ErrLifecycleIntentImmutable,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls [][]string
+			row, err := json.Marshal([]map[string]any{{"id": "gc-protected", "status": "in_progress", "metadata": tc.metadata}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			runner := func(_, name string, args ...string) ([]byte, error) {
+				calls = append(calls, append([]string{name}, args...))
+				if len(args) > 0 && args[0] == "show" {
+					return row, nil
+				}
+				return []byte("{}"), nil
+			}
+			store := NewBdStore("/city", runner)
+			if err := store.Delete("gc-protected"); !errors.Is(err, tc.wantErr) {
+				t.Fatalf("Delete protected row = %v, want %v", err, tc.wantErr)
+			}
+			if deletes := deleteCallCount(calls); deletes != 0 {
+				t.Fatalf("preflight refusal invoked %d delete command(s): %v", deletes, calls)
+			}
+		})
+	}
+}
+
+func TestBdStoreDeleteBatchPreflightsProtectedRowsBeforeChunkDelete(t *testing.T) {
+	var calls [][]string
+	protected, err := json.Marshal([]map[string]any{{"id": "gc-protected", "status": "open", "metadata": StringMap{
+		beadmeta.LifecycleRecoveryStateMetadataKey: `{"version":1,"attempts":[{"request_id":"request-1"}]}`,
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		calls = append(calls, append([]string{name}, args...))
+		if len(args) > 0 && args[0] == "show" {
+			if args[len(args)-1] == "gc-protected" {
+				return protected, nil
+			}
+			return []byte("[]"), nil
+		}
+		return []byte("{}"), nil
+	}
+	store := NewBdStore("/city", runner)
+	err = store.DeleteBatch([]string{"gc-ordinary", "gc-protected"})
+	if !errors.Is(err, ErrLifecycleMutationBlocked) {
+		t.Fatalf("DeleteBatch protected row = %v, want ErrLifecycleMutationBlocked", err)
+	}
+	var batchErr *BatchDeleteError
+	if !errors.As(err, &batchErr) || len(batchErr.Committed) != 0 {
+		t.Fatalf("DeleteBatch error = %#v, want no-commit BatchDeleteError", err)
+	}
+	if deletes := deleteCallCount(calls); deletes != 0 {
+		t.Fatalf("preflight refusal invoked %d delete command(s): %v", deletes, calls)
+	}
+}
+
+func TestBdStoreDeletePreflightLeavesOrdinaryDeleteAvailable(t *testing.T) {
+	var calls [][]string
+	ordinary, err := json.Marshal([]map[string]any{{"id": "gc-ordinary", "status": "open"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		calls = append(calls, append([]string{name}, args...))
+		if len(args) > 0 && args[0] == "show" {
+			return ordinary, nil
+		}
+		return []byte("{}"), nil
+	}
+	store := NewBdStore("/city", runner)
+	if err := store.Delete("gc-ordinary"); err != nil {
+		t.Fatalf("Delete ordinary row = %v", err)
+	}
+	if deletes := deleteCallCount(calls); deletes != 1 {
+		t.Fatalf("ordinary delete commands = %d, want 1: %v", deletes, calls)
+	}
 }
 
 func TestBdStoreDeleteBatchBatchesInOneCall(t *testing.T) {
@@ -91,8 +194,11 @@ func TestBdStoreDeleteBatchEmptyIsNoop(t *testing.T) {
 func TestBdStoreDeleteBatchReportsCommittedOnLaterChunkFailure(t *testing.T) {
 	var call int
 	runner := func(_, _ string, args ...string) ([]byte, error) {
-		if len(args) > 0 && (args[0] == "list" || args[0] == "query") {
+		if len(args) > 0 && (args[0] == "list" || args[0] == "query" || args[0] == "show") {
 			return []byte("[]"), nil
+		}
+		if len(args) == 0 || args[0] != "delete" {
+			return []byte("{}"), nil
 		}
 		call++
 		if call == 2 { // second chunk fails after the first committed
@@ -127,8 +233,11 @@ func TestBdStoreDeleteBatchReportsCommittedOnLaterChunkFailure(t *testing.T) {
 // empty and a caching layer leaves the cache untouched.
 func TestBdStoreDeleteBatchReportsNoCommittedOnFirstChunkFailure(t *testing.T) {
 	runner := func(_, _ string, args ...string) ([]byte, error) {
-		if len(args) > 0 && (args[0] == "list" || args[0] == "query") {
+		if len(args) > 0 && (args[0] == "list" || args[0] == "query" || args[0] == "show") {
 			return []byte("[]"), nil
+		}
+		if len(args) == 0 || args[0] != "delete" {
+			return []byte("{}"), nil
 		}
 		return nil, errors.New("bd delete: backend unavailable")
 	}
