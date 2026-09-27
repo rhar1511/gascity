@@ -49,7 +49,7 @@ func (s *Server) humaHandleBeadAttemptHistory(_ context.Context, input *BeadAtte
 	if store == nil {
 		return nil, apierr.ServiceUnavailable.Msg("session bead store unavailable")
 	}
-	sessionBead, _, err := session.ResolveSessionBeadByExactID(store, input.SessionID)
+	sessionInfo, _, err := session.ResolveSessionRecordByExactID(store, input.SessionID)
 	if err != nil {
 		switch {
 		case errors.Is(err, session.ErrSessionNotFound), errors.Is(err, beads.ErrNotFound):
@@ -59,11 +59,11 @@ func (s *Server) humaHandleBeadAttemptHistory(_ context.Context, input *BeadAtte
 		}
 	}
 
-	linked := strings.TrimSpace(bead.Metadata[beadmeta.SessionIDMetadataKey]) == sessionBead.ID ||
-		strings.TrimSpace(bead.Metadata[beadmeta.SessionIDCamelMetadataKey]) == sessionBead.ID ||
-		strings.TrimSpace(bead.Metadata["isolation.session"]) == sessionBead.ID ||
-		strings.TrimSpace(sessionBead.Metadata[session.CurrentBeadIDKey]) == bead.ID
-	inspection := workbench.NewAttemptInspection(bead.ID, sessionBead.ID, linked)
+	linked := strings.TrimSpace(bead.Metadata[beadmeta.SessionIDMetadataKey]) == sessionInfo.ID ||
+		strings.TrimSpace(bead.Metadata[beadmeta.SessionIDCamelMetadataKey]) == sessionInfo.ID ||
+		strings.TrimSpace(bead.Metadata["isolation.session"]) == sessionInfo.ID ||
+		strings.TrimSpace(sessionInfo.CurrentlyProcessingBeadID) == bead.ID
+	inspection := workbench.NewAttemptInspection(bead.ID, sessionInfo.ID, linked)
 	return &IndexOutput[workbench.AttemptInspection]{
 		Index: s.latestIndex(),
 		Body:  inspection,
