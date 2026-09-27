@@ -119,6 +119,61 @@ describe('WorkbenchPage', () => {
     expect(screen.queryByRole('dialog')).toBeNull();
   });
 
+  it('keeps Wayfinder review beside the epic and opens published artifacts externally', async () => {
+    setStub({
+      kind: 'ok',
+      beads: [
+        {
+          ...sampleBead(),
+          issue_type: 'epic',
+          description: '## Notes\n\nReview: Lavish AXI',
+          metadata: {
+            'gc.prototype_url': 'http://localhost:3000/prototype?bead=gascity-0001',
+            'gc.wayfinder_review_url': 'http://127.0.0.1:4173/session/abc',
+          },
+        } as SupervisorBead,
+      ],
+    });
+    renderPage('/workbench?bead=gascity-0001');
+
+    const review = await screen.findByRole('region', { name: 'Wayfinder review' });
+    expect(within(review).getByText(/lavish selected/i)).toBeTruthy();
+    expect(within(review).getByRole('link', { name: 'Prototype A' }).getAttribute('href')).toBe(
+      'http://localhost:3000/prototype?bead=gascity-0001&variant=A',
+    );
+    const lavish = within(review).getByRole('link', { name: /open lavish review/i });
+    expect(lavish.getAttribute('target')).toBe('_blank');
+    expect(lavish.getAttribute('rel')).toContain('noopener');
+    expect(supervisorWrites).toEqual([]);
+  });
+
+  it('explains an unlaunched Lavish review without claiming that prompts are approved', async () => {
+    setStub({
+      kind: 'ok',
+      beads: [
+        {
+          ...sampleBead(),
+          issue_type: 'epic',
+          description: 'Review: Lavish AXI',
+        } as SupervisorBead,
+      ],
+    });
+    renderPage('/workbench?bead=gascity-0001');
+    const review = await screen.findByRole('region', { name: 'Wayfinder review' });
+    expect(within(review).getByText(/no local review link published/i)).toBeTruthy();
+    expect(within(review).getByText(/explicit approval/i)).toBeTruthy();
+    expect(within(review).queryByRole('link', { name: /open lavish review/i })).toBeNull();
+    fireEvent.change(within(review).getByRole('textbox', { name: 'Local Lavish URL' }), {
+      target: { value: 'http://example.com/session/abc' },
+    });
+    expect(within(review).queryByRole('link', { name: /open lavish review/i })).toBeNull();
+    fireEvent.change(within(review).getByRole('textbox', { name: 'Local Lavish URL' }), {
+      target: { value: 'http://127.0.0.1:4173/session/abc' },
+    });
+    expect(within(review).getByRole('link', { name: /open lavish review/i })).toBeTruthy();
+    expect(supervisorWrites).toEqual([]);
+  });
+
   it('is read-only: renders no create, close, or claim controls and performs no writes', async () => {
     renderPage('/workbench?bead=gascity-0001');
 

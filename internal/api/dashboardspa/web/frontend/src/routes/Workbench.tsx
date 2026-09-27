@@ -17,6 +17,7 @@ import { sendSupervisorMail } from '../supervisor/mailWrites';
 import { useOperatorConfig } from '../contexts/OperatorConfigContext';
 import { resolveAttempts, type ExecutionAttempt } from '../lib/workbenchAttempts';
 import { resolvePreview } from '../lib/workbenchPreview';
+import { WayfinderReviewPanel } from '../workbench/WayfinderReviewPanel';
 
 // Gas City Workbench: Canvas/Kanban/Priority/Work Queue as views over the same
 // Beads data.
@@ -354,6 +355,7 @@ export function WorkbenchPage() {
             {selectedBead ? (
               <>
                 <BeadBody bead={selectedBead} />
+                <WayfinderReviewPanel key={selectedBead.id} bead={selectedBead} />
                 <AttemptPanel bead={selectedBead} sessions={sessions} />
               </>
             ) : hasLoadedQueue ? (
