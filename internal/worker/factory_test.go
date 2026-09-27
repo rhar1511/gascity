@@ -7,9 +7,11 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/attemptevidence"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -63,6 +65,52 @@ func TestFactorySessionAndCatalogShareWorkerBoundary(t *testing.T) {
 	}
 	if got.Template != "probe" {
 		t.Fatalf("catalog.Get(%q).Template = %q, want probe", info.ID, got.Template)
+	}
+}
+
+func TestFactorySubmitsBoundRequestThroughWorkerBoundary(t *testing.T) {
+	store := beads.NewMemStore()
+	provider := runtime.NewFake()
+	manager := sessionpkg.NewManagerWithOptions(store, provider)
+	info, err := manager.CreateSession(context.Background(), sessionpkg.CreateOptions{
+		Template: "worker", Command: "claude", WorkDir: t.TempDir(), Provider: "claude",
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	generation, err := strconv.Atoi(info.Generation)
+	if err != nil {
+		t.Fatalf("parse session generation %q: %v", info.Generation, err)
+	}
+	factory, err := NewFactory(FactoryConfig{Store: store, Provider: provider, CityPath: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewFactory: %v", err)
+	}
+	if _, err := sessionpkg.NewStore(beads.SessionStore{Store: store}).SetCurrentClaim(info.ID, "work-one"); err != nil {
+		t.Fatalf("SetCurrentClaim: %v", err)
+	}
+	identity := attemptevidence.Identity{
+		Kind: attemptevidence.KindWorkbench, OwnerBeadID: "work-one", ExecutionBeadID: "work-one",
+		SessionID: info.ID, SessionGeneration: info.Generation, ClaimGeneration: "claim-one",
+	}
+	attemptID, err := attemptevidence.AttemptID(identity)
+	if err != nil {
+		t.Fatalf("AttemptID: %v", err)
+	}
+	binding := sessionpkg.RequestAttemptBinding{
+		StoreRef: "city:test", AttemptID: attemptID, WorkRevision: "17", Identity: identity,
+	}
+	for range 2 {
+		receipt, err := factory.SubmitRequestForAttempt(context.Background(), info.ID, "bound-request", generation, "report progress", binding)
+		if err != nil {
+			t.Fatalf("SubmitRequestForAttempt: %v", err)
+		}
+		if receipt.Attempt == nil || *receipt.Attempt != binding || receipt.Delivery != sessionpkg.RequestDeliveryAccepted || receipt.AcknowledgedAt != nil || receipt.Effect != "unverified" {
+			t.Fatalf("receipt=%+v, want exact binding and provider acceptance only", receipt)
+		}
+	}
+	if got := provider.CountCalls("Nudge", info.SessionName); got != 1 {
+		t.Fatalf("provider sends=%d, want one durable send across replay", got)
 	}
 }
 

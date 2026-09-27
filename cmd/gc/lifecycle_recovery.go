@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/attemptevidence"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -19,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
+	"github.com/gastownhall/gascity/internal/worker"
 	"github.com/gastownhall/gascity/internal/worklifecycle"
 )
 
@@ -61,7 +63,13 @@ func reconcileLifecycleRecoveryRequests(
 		}
 	}
 	front := session.NewStore(sessionStore)
-	manager := session.NewManagerWithOptions(sessionStore.Store, provider, session.WithCityPath(cityPath))
+	workerFactory, err := worker.NewFactory(worker.FactoryConfig{
+		Store: sessionStore.Store, Provider: provider, CityPath: cityPath,
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "lifecycle recovery: constructing worker request service: %v\n", err) //nolint:errcheck
+		return
+	}
 	now := time.Now().UTC()
 	seen := make(map[string]struct{})
 	for _, leg := range legs {
@@ -101,13 +109,18 @@ func reconcileLifecycleRecoveryRequests(
 				fmt.Fprintf(stderr, "lifecycle recovery: intent %s failed exact readback: %v\n", intentBead.ID, err) //nolint:errcheck
 				continue
 			}
+			binding, err := lifecycleRecoveryAttemptBinding(request, leg.ref)
+			if err != nil {
+				fmt.Fprintf(stderr, "lifecycle recovery: intent %s has no verified execution-store binding: %v\n", intentBead.ID, err) //nolint:errcheck
+				continue
+			}
 			state, attempt, reserved, err := worklifecycle.RecoveryRequestAttempt(leg.store, request, intent.Digest)
 			if err != nil {
 				fmt.Fprintf(stderr, "lifecycle recovery: reading reservation for %s: %v\n", request.WorkItemID, err) //nolint:errcheck
 				continue
 			}
 			if reserved {
-				recoveryObserveReceipt(front, request, attempt, stderr)
+				recoveryObserveReceipt(front, request, binding, attempt, stderr)
 				if len(state.Attempts) >= worklifecycle.MaxRecoveryAttempts {
 					requestRecoveryEscalation(leg.store, request.WorkItemID, scope, cfg.Lifecycle.EscalationTarget, outbox, stderr)
 				}
@@ -123,6 +136,7 @@ func reconcileLifecycleRecoveryRequests(
 			}
 			work, err := leg.store.Get(request.WorkItemID)
 			if err != nil || work.Revision != request.ExpectedRevision || worklifecycle.ValidateRecoveryTargetTuple(work, request) != nil ||
+				!recoveryAttemptBindingMatchesWork(binding, work) ||
 				worklifecycle.ValidateRecoveryWorkEvidence(work, cfg.Lifecycle, scope) != nil ||
 				!lifecycleRecoveryAttachedWorkflowMatches(work, leg.ref, leg.store, storesByRef, cfg, scope) {
 				fmt.Fprintf(stderr, "lifecycle recovery: target %s changed or lost attached-workflow evidence; no attempt reserved\n", request.WorkItemID) //nolint:errcheck
@@ -139,7 +153,7 @@ func reconcileLifecycleRecoveryRequests(
 				continue
 			}
 			if receipt, err := front.GetRequest(request.SessionID, request.RequestID); err == nil {
-				if recoveryReceiptMatches(receipt, request) {
+				if recoveryReceiptMatches(receipt, request, binding) {
 					fmt.Fprintf(stderr, "lifecycle recovery: request %s already has a session receipt; observing without sending\n", request.RequestID) //nolint:errcheck
 				} else {
 					fmt.Fprintf(stderr, "lifecycle recovery: request %s conflicts with an existing session receipt; holding\n", request.RequestID) //nolint:errcheck
@@ -160,7 +174,7 @@ func reconcileLifecycleRecoveryRequests(
 			}
 			if !won {
 				if attempt, ok, findErr := recoveryAttemptFromState(reservedState, request.RequestID, intent.Digest); findErr == nil && ok {
-					recoveryObserveReceipt(front, request, attempt, stderr)
+					recoveryObserveReceipt(front, request, binding, attempt, stderr)
 				} else if findErr != nil {
 					fmt.Fprintf(stderr, "lifecycle recovery: reservation state conflicts for %s: %v\n", request.WorkItemID, findErr) //nolint:errcheck
 				}
@@ -170,13 +184,13 @@ func reconcileLifecycleRecoveryRequests(
 				fmt.Fprintf(stderr, "lifecycle recovery: reserved request %s has unknown outcome after tick cancellation; it will not be replayed\n", request.RequestID) //nolint:errcheck
 				continue
 			}
-			if !recoveryEffectRecheck(leg.store, leg.ref, storesByRef, front, provider, work, request, cfg, scope, reservedRevision, time.Now().UTC()) {
+			if !recoveryEffectRecheck(leg.store, leg.ref, storesByRef, front, provider, work, request, binding, cfg, scope, reservedRevision, time.Now().UTC()) {
 				fmt.Fprintf(stderr, "lifecycle recovery: reserved request %s lost a prerequisite before delivery; slot remains consumed\n", request.RequestID) //nolint:errcheck
 				continue
 			}
-			_, sendErr := manager.SubmitRequest(ctx, request.SessionID, request.RequestID, generation, request.Message)
+			_, sendErr := workerFactory.SubmitRequestForAttempt(ctx, request.SessionID, request.RequestID, generation, request.Message, binding)
 			readback, readErr := front.GetRequest(request.SessionID, request.RequestID)
-			if readErr == nil && recoveryReceiptMatches(readback, request) {
+			if readErr == nil && recoveryReceiptMatches(readback, request, binding) {
 				fmt.Fprintf(stderr, "lifecycle recovery: request %s provider delivery=%s acknowledged=%t effect=%s (not useful-progress evidence)\n", request.RequestID, readback.Delivery, readback.AcknowledgedAt != nil, readback.Effect) //nolint:errcheck
 			} else {
 				fmt.Fprintf(stderr, "lifecycle recovery: request %s outcome unknown (submit=%v, receipt=%v); reservation prevents replay\n", request.RequestID, sendErr, readErr) //nolint:errcheck
@@ -201,6 +215,36 @@ func verifyRecoveryIntentStore(store beads.Store, bead beads.Bead, intent workli
 		return worklifecycle.ErrRecoveryRequestConflict
 	}
 	return nil
+}
+
+func lifecycleRecoveryAttemptBinding(request worklifecycle.RecoveryRequest, physicalStoreRef string) (session.RequestAttemptBinding, error) {
+	physicalStoreRef = strings.TrimSpace(physicalStoreRef)
+	if !strings.HasPrefix(physicalStoreRef, "city:") && !strings.HasPrefix(physicalStoreRef, "rig:") {
+		return session.RequestAttemptBinding{}, fmt.Errorf("unsupported physical work-store reference %q", physicalStoreRef)
+	}
+	if request.ExpectedRevision <= 0 {
+		return session.RequestAttemptBinding{}, worklifecycle.ErrRecoveryRequestInvalid
+	}
+	identity := attemptevidence.Identity{
+		Kind: attemptevidence.KindWorkbench, OwnerBeadID: request.WorkItemID,
+		ExecutionBeadID: request.WorkItemID, SessionID: request.SessionID,
+		SessionGeneration: request.SessionGeneration, ClaimGeneration: request.ClaimGeneration,
+	}
+	attemptID, err := attemptevidence.AttemptID(identity)
+	if err != nil {
+		return session.RequestAttemptBinding{}, fmt.Errorf("derive Workbench attempt identity: %w", err)
+	}
+	return session.RequestAttemptBinding{
+		StoreRef: physicalStoreRef, AttemptID: attemptID,
+		WorkRevision: strconv.FormatInt(request.ExpectedRevision, 10), Identity: identity,
+	}, nil
+}
+
+func recoveryAttemptBindingMatchesWork(binding session.RequestAttemptBinding, work beads.Bead) bool {
+	identity := binding.Identity
+	return attemptevidence.IsExecutionRecord(work) && work.ID == identity.OwnerBeadID && work.ID == identity.ExecutionBeadID &&
+		strings.TrimSpace(work.Metadata[beadmeta.SessionIDMetadataKey]) == identity.SessionID &&
+		strings.TrimSpace(work.Metadata[beadmeta.ClaimGenerationMetadataKey]) == identity.ClaimGeneration
 }
 
 func lifecycleRecoveryAttachedWorkflowMatches(work beads.Bead, sourceRef string, sourceStore beads.Store, storesByRef map[string]beads.Store, cfg *config.City, scope string) bool {
@@ -265,7 +309,7 @@ func recoverySessionTupleMatches(front *session.Store, request worklifecycle.Rec
 	return err == nil && claim == work.ID
 }
 
-func recoveryEffectRecheck(store beads.Store, sourceRef string, storesByRef map[string]beads.Store, front *session.Store, provider runtime.Provider, previous beads.Bead, request worklifecycle.RecoveryRequest, cfg *config.City, scope string, reservedRevision int64, now time.Time) bool {
+func recoveryEffectRecheck(store beads.Store, sourceRef string, storesByRef map[string]beads.Store, front *session.Store, provider runtime.Provider, previous beads.Bead, request worklifecycle.RecoveryRequest, binding session.RequestAttemptBinding, cfg *config.City, scope string, reservedRevision int64, now time.Time) bool {
 	if store == nil || front == nil || provider == nil || now.IsZero() {
 		return false
 	}
@@ -274,6 +318,7 @@ func recoveryEffectRecheck(store beads.Store, sourceRef string, storesByRef map[
 	}
 	current, err := store.Get(request.WorkItemID)
 	if err != nil || current.Revision != reservedRevision || worklifecycle.ValidateRecoveryTargetTuple(current, request) != nil ||
+		!recoveryAttemptBindingMatchesWork(binding, current) ||
 		worklifecycle.ValidateRecoveryWorkEvidence(current, cfg.Lifecycle, scope) != nil ||
 		!lifecycleRecoveryAttachedWorkflowMatches(current, sourceRef, store, storesByRef, cfg, scope) {
 		return false
@@ -284,13 +329,14 @@ func recoveryEffectRecheck(store beads.Store, sourceRef string, storesByRef map[
 		previous.ID == current.ID
 }
 
-func recoveryReceiptMatches(receipt session.RequestReceipt, request worklifecycle.RecoveryRequest) bool {
+func recoveryReceiptMatches(receipt session.RequestReceipt, request worklifecycle.RecoveryRequest, binding session.RequestAttemptBinding) bool {
 	digest := sha256.Sum256([]byte(request.Message))
 	return receipt.RequestID == request.RequestID && receipt.SessionID == request.SessionID &&
-		strconv.Itoa(receipt.Generation) == request.SessionGeneration && receipt.MessageDigest == hex.EncodeToString(digest[:])
+		strconv.Itoa(receipt.Generation) == request.SessionGeneration && receipt.MessageDigest == hex.EncodeToString(digest[:]) &&
+		receipt.Attempt != nil && *receipt.Attempt == binding
 }
 
-func recoveryObserveReceipt(front *session.Store, request worklifecycle.RecoveryRequest, attempt worklifecycle.RecoveryAttempt, stderr io.Writer) {
+func recoveryObserveReceipt(front *session.Store, request worklifecycle.RecoveryRequest, binding session.RequestAttemptBinding, attempt worklifecycle.RecoveryAttempt, stderr io.Writer) {
 	if front == nil {
 		return
 	}
@@ -299,7 +345,7 @@ func recoveryObserveReceipt(front *session.Store, request worklifecycle.Recovery
 		fmt.Fprintf(stderr, "lifecycle recovery: reserved request %s has no readable receipt; outcome remains unknown and is not replayed (reservation %s)\n", request.RequestID, attempt.ID) //nolint:errcheck
 		return
 	}
-	if !recoveryReceiptMatches(receipt, request) {
+	if !recoveryReceiptMatches(receipt, request, binding) {
 		fmt.Fprintf(stderr, "lifecycle recovery: reserved request %s receipt does not match its signed tuple; holding\n", request.RequestID) //nolint:errcheck
 		return
 	}
