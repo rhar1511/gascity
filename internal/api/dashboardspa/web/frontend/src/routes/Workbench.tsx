@@ -18,6 +18,7 @@ import { useOperatorConfig } from '../contexts/OperatorConfigContext';
 import { resolveAttempts, type ExecutionAttempt } from '../lib/workbenchAttempts';
 import { resolvePreview } from '../lib/workbenchPreview';
 import { WayfinderReviewPanel } from '../workbench/WayfinderReviewPanel';
+import { HistoricalAttemptArtifacts } from '../workbench/HistoricalAttemptArtifacts';
 
 // Gas City Workbench: Canvas/Kanban/Priority/Work Queue as views over the same
 // Beads data.
@@ -606,10 +607,12 @@ function AttemptPanel({
             showCaption
           />
           {inspectingHistory ? (
-            <p className="text-label text-fg-muted">
-              Historical worktree diff and PR actions are unavailable; showing this session’s output
-              only.
-            </p>
+            <HistoricalAttemptArtifacts
+              key={`${bead.id}:${inspected.sessionId}`}
+              beadId={bead.id}
+              sessionId={inspected.sessionId}
+              sessionLabel={inspected.sessionName}
+            />
           ) : (
             <>
               <AttemptDiffPanel key={`diff:${inspected.sessionId}`} beadId={bead.id} />

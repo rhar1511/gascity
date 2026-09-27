@@ -78,6 +78,17 @@ beforeEach(() => {
           },
         });
       }
+      if (/\/attempts\/s-old\/history$/.test(url.pathname) && method === 'GET') {
+        return jsonResponse({
+          body: {
+            bead_id: 'gascity-0001',
+            session_id: 's-old',
+            association: { state: 'available' },
+            diff: { state: 'unavailable', reason: 'historical_diff_not_recorded' },
+            pull_request: { state: 'unavailable', reason: 'attempt_pr_state_not_recorded' },
+          },
+        });
+      }
       if (beadMatch) {
         const id = decodeURIComponent(beadMatch[1] ?? '');
         const bead =
@@ -441,6 +452,12 @@ describe('WorkbenchPage', () => {
     const panel = screen.getByLabelText('Execution attempt');
     expect(within(panel).getAllByText(/worker-old/).length).toBeGreaterThan(0);
     expect(within(panel).queryByRole('button', { name: /send/i })).toBeNull();
+    const artifacts = await within(panel).findByRole('region', {
+      name: /historical attempt artifacts/i,
+    });
+    expect(within(artifacts).getByText(/did not save a diff snapshot/i)).toBeTruthy();
+    expect(within(artifacts).getByText(/did not save PR state/i)).toBeTruthy();
+    expect(within(artifacts).queryByText(/\+new/)).toBeNull();
   });
 
   it('does not offer PR actions without a Gas City queue, policy and conflict verdict', async () => {

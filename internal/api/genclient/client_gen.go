@@ -1125,6 +1125,12 @@ type AnnotatedProviderResponse struct {
 	ReadyDelayMs *int64  `json:"ready_delay_ms,omitempty"`
 }
 
+// ArtifactAvailability defines model for ArtifactAvailability.
+type ArtifactAvailability struct {
+	Reason *string `json:"reason,omitempty"`
+	State  string  `json:"state"`
+}
+
 // AsyncAcceptedBody defines model for AsyncAcceptedBody.
 type AsyncAcceptedBody struct {
 	// EventCursor City event-stream sequence captured before the async request was accepted. Pass this value as after_seq to /v0/city/{cityName}/events/stream to receive the request result without replaying unrelated historical backlog. A value of 0 can also mean no event provider is configured or the event log is empty.
@@ -1144,6 +1150,15 @@ type AsyncAcceptedResponse struct {
 
 	// RequestId Correlation ID. Watch /v0/events/stream for request.result.city.create, request.result.city.unregister, or request.failed with this request_id.
 	RequestId string `json:"request_id"`
+}
+
+// AttemptInspection defines model for AttemptInspection.
+type AttemptInspection struct {
+	Association ArtifactAvailability  `json:"association"`
+	BeadId      string                `json:"bead_id"`
+	Diff        HistoricalDiff        `json:"diff"`
+	PullRequest HistoricalPullRequest `json:"pull_request"`
+	SessionId   string                `json:"session_id"`
 }
 
 // BackendCredentialResolvedPayload defines model for BackendCredentialResolvedPayload.
@@ -2206,6 +2221,24 @@ type HealthOutputBody struct {
 type HeartbeatEvent struct {
 	// Timestamp ISO 8601 timestamp when the heartbeat was sent.
 	Timestamp string `json:"timestamp"`
+}
+
+// HistoricalDiff defines model for HistoricalDiff.
+type HistoricalDiff struct {
+	Binary    *bool   `json:"binary,omitempty"`
+	Bytes     *int64  `json:"bytes,omitempty"`
+	Reason    *string `json:"reason,omitempty"`
+	State     string  `json:"state"`
+	Text      *string `json:"text,omitempty"`
+	Truncated *bool   `json:"truncated,omitempty"`
+}
+
+// HistoricalPullRequest defines model for HistoricalPullRequest.
+type HistoricalPullRequest struct {
+	Reason *string `json:"reason,omitempty"`
+	State  string  `json:"state"`
+	Status *string `json:"status,omitempty"`
+	Url    *string `json:"url,omitempty"`
 }
 
 // HookClaimReclaimedStalePayload defines model for HookClaimReclaimedStalePayload.
@@ -19752,6 +19785,9 @@ type ClientInterface interface {
 	// GetV0CityByCityNameBeadByIdAttemptsDiff request
 	GetV0CityByCityNameBeadByIdAttemptsDiff(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// GetV0CityByCityNameBeadByIdAttemptsBySessionIdHistory request
+	GetV0CityByCityNameBeadByIdAttemptsBySessionIdHistory(ctx context.Context, cityName string, id string, sessionID string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// PostV0CityByCityNameBeadByIdClose request
 	PostV0CityByCityNameBeadByIdClose(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdCloseParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -20610,6 +20646,18 @@ func (c *Client) PostV0CityByCityNameBeadByIdAssign(ctx context.Context, cityNam
 
 func (c *Client) GetV0CityByCityNameBeadByIdAttemptsDiff(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetV0CityByCityNameBeadByIdAttemptsDiffRequest(c.Server, cityName, id)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetV0CityByCityNameBeadByIdAttemptsBySessionIdHistory(ctx context.Context, cityName string, id string, sessionID string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetV0CityByCityNameBeadByIdAttemptsBySessionIdHistoryRequest(c.Server, cityName, id, sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -24144,6 +24192,54 @@ func NewGetV0CityByCityNameBeadByIdAttemptsDiffRequest(server string, cityName s
 	}
 
 	operationPath := fmt.Sprintf("/v0/city/%s/bead/%s/attempts/diff", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewGetV0CityByCityNameBeadByIdAttemptsBySessionIdHistoryRequest generates requests for GetV0CityByCityNameBeadByIdAttemptsBySessionIdHistory
+func NewGetV0CityByCityNameBeadByIdAttemptsBySessionIdHistoryRequest(server string, cityName string, id string, sessionID string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam2 string
+
+	pathParam2, err = runtime.StyleParamWithOptions("simple", false, "sessionID", sessionID, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/bead/%s/attempts/%s/history", pathParam0, pathParam1, pathParam2)
 	if operationPath[0] == '/' {
 		operationPath = "." + operationPath
 	}
@@ -33358,6 +33454,9 @@ type ClientWithResponsesInterface interface {
 	// GetV0CityByCityNameBeadByIdAttemptsDiffWithResponse request
 	GetV0CityByCityNameBeadByIdAttemptsDiffWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameBeadByIdAttemptsDiffResponse, error)
 
+	// GetV0CityByCityNameBeadByIdAttemptsBySessionIdHistoryWithResponse request
+	GetV0CityByCityNameBeadByIdAttemptsBySessionIdHistoryWithResponse(ctx context.Context, cityName string, id string, sessionID string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameBeadByIdAttemptsBySessionIdHistoryResponse, error)
+
 	// PostV0CityByCityNameBeadByIdCloseWithResponse request
 	PostV0CityByCityNameBeadByIdCloseWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdCloseParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadByIdCloseResponse, error)
 
@@ -34493,6 +34592,32 @@ func (r GetV0CityByCityNameBeadByIdAttemptsDiffResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r GetV0CityByCityNameBeadByIdAttemptsDiffResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type GetV0CityByCityNameBeadByIdAttemptsBySessionIdHistoryResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON200                   *AttemptInspection
+	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON422 *ErrorModel
+	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON503 *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r GetV0CityByCityNameBeadByIdAttemptsBySessionIdHistoryResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetV0CityByCityNameBeadByIdAttemptsBySessionIdHistoryResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -38588,6 +38713,15 @@ func (c *ClientWithResponses) GetV0CityByCityNameBeadByIdAttemptsDiffWithRespons
 	return ParseGetV0CityByCityNameBeadByIdAttemptsDiffResponse(rsp)
 }
 
+// GetV0CityByCityNameBeadByIdAttemptsBySessionIdHistoryWithResponse request returning *GetV0CityByCityNameBeadByIdAttemptsBySessionIdHistoryResponse
+func (c *ClientWithResponses) GetV0CityByCityNameBeadByIdAttemptsBySessionIdHistoryWithResponse(ctx context.Context, cityName string, id string, sessionID string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameBeadByIdAttemptsBySessionIdHistoryResponse, error) {
+	rsp, err := c.GetV0CityByCityNameBeadByIdAttemptsBySessionIdHistory(ctx, cityName, id, sessionID, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetV0CityByCityNameBeadByIdAttemptsBySessionIdHistoryResponse(rsp)
+}
+
 // PostV0CityByCityNameBeadByIdCloseWithResponse request returning *PostV0CityByCityNameBeadByIdCloseResponse
 func (c *ClientWithResponses) PostV0CityByCityNameBeadByIdCloseWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdCloseParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadByIdCloseResponse, error) {
 	rsp, err := c.PostV0CityByCityNameBeadByIdClose(ctx, cityName, id, params, reqEditors...)
@@ -41550,6 +41684,60 @@ func ParseGetV0CityByCityNameBeadByIdAttemptsDiffResponse(rsp *http.Response) (*
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest Diff
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetV0CityByCityNameBeadByIdAttemptsBySessionIdHistoryResponse parses an HTTP response from a GetV0CityByCityNameBeadByIdAttemptsBySessionIdHistoryWithResponse call
+func ParseGetV0CityByCityNameBeadByIdAttemptsBySessionIdHistoryResponse(rsp *http.Response) (*GetV0CityByCityNameBeadByIdAttemptsBySessionIdHistoryResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetV0CityByCityNameBeadByIdAttemptsBySessionIdHistoryResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest AttemptInspection
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

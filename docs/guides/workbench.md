@@ -9,6 +9,11 @@ through Gas City's typed supervisor API; starting an attempt delegates to Gas
 City's sling operation. PR actions remain unavailable until Gas City supplies
 queue, policy, and conflict verdicts.
 
+Selecting an earlier attempt shows that Session's output and an attempt-scoped
+artifact read. Gas City currently does not retain a frozen per-attempt diff or
+PR-state snapshot, so both are shown as unavailable. Workbench never substitutes
+the selected Bead's current, mutable worktree diff for historical evidence.
+
 ## Wayfinder review
 
 For a Wayfinder epic whose Notes say `Review: Lavish AXI`, or a Bead labeled

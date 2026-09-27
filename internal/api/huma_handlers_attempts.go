@@ -2,9 +2,13 @@ package api
 
 import (
 	"context"
+	"errors"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/beadmeta"
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/workbench"
 )
 
@@ -29,5 +33,39 @@ func (s *Server) humaHandleBeadAttemptsDiff(ctx context.Context, input *BeadAtte
 	return &IndexOutput[workbench.Diff]{
 		Index: s.latestIndex(),
 		Body:  diff,
+	}, nil
+}
+
+// humaHandleBeadAttemptHistory reads attempt-scoped artifacts from Gas City's
+// durable bead/session records. Session work_dir is intentionally not passed to
+// WorktreeDiff: it is a mutable location, not a historical snapshot.
+func (s *Server) humaHandleBeadAttemptHistory(_ context.Context, input *BeadAttemptHistoryInput) (*IndexOutput[workbench.AttemptInspection], error) {
+	_, bead, err := s.resolveBeadOwner(input.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	store := s.state.SessionsBeadStore().Store
+	if store == nil {
+		return nil, apierr.ServiceUnavailable.Msg("session bead store unavailable")
+	}
+	sessionBead, _, err := session.ResolveSessionBeadByExactID(store, input.SessionID)
+	if err != nil {
+		switch {
+		case errors.Is(err, session.ErrSessionNotFound), errors.Is(err, beads.ErrNotFound):
+			return nil, apierr.SessionNotFound.Msg("not_found: " + err.Error())
+		default:
+			return nil, humaStoreError(err)
+		}
+	}
+
+	linked := strings.TrimSpace(bead.Metadata[beadmeta.SessionIDMetadataKey]) == sessionBead.ID ||
+		strings.TrimSpace(bead.Metadata[beadmeta.SessionIDCamelMetadataKey]) == sessionBead.ID ||
+		strings.TrimSpace(bead.Metadata["isolation.session"]) == sessionBead.ID ||
+		strings.TrimSpace(sessionBead.Metadata[session.CurrentBeadIDKey]) == bead.ID
+	inspection := workbench.NewAttemptInspection(bead.ID, sessionBead.ID, linked)
+	return &IndexOutput[workbench.AttemptInspection]{
+		Index: s.latestIndex(),
+		Body:  inspection,
 	}, nil
 }

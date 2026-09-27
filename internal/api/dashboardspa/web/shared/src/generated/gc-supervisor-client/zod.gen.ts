@@ -77,6 +77,11 @@ export const zAnnotatedProviderResponse = z.object({
     ready_delay_ms: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional()
 });
 
+export const zArtifactAvailability = z.object({
+    reason: z.string().optional(),
+    state: z.string()
+});
+
 export const zAsyncAcceptedBody = z.object({
     event_cursor: z.string(),
     request_id: z.string(),
@@ -751,6 +756,30 @@ export const zHealthOutputBody = z.object({
 
 export const zHeartbeatEvent = z.object({
     timestamp: z.string()
+});
+
+export const zHistoricalDiff = z.object({
+    binary: z.boolean().optional(),
+    bytes: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    reason: z.string().optional(),
+    state: z.string(),
+    text: z.string().optional(),
+    truncated: z.boolean().optional()
+});
+
+export const zHistoricalPullRequest = z.object({
+    reason: z.string().optional(),
+    state: z.string(),
+    status: z.string().optional(),
+    url: z.string().optional()
+});
+
+export const zAttemptInspection = z.object({
+    association: zArtifactAvailability,
+    bead_id: z.string(),
+    diff: zHistoricalDiff,
+    pull_request: zHistoricalPullRequest,
+    session_id: z.string()
 });
 
 export const zHookClaimReclaimedStalePayload = z.object({
@@ -7838,6 +7867,17 @@ export const zGetV0CityByCityNameBeadByIdAttemptsDiffPath = z.object({
  * OK
  */
 export const zGetV0CityByCityNameBeadByIdAttemptsDiffResponse = zDiff;
+
+export const zGetV0CityByCityNameBeadByIdAttemptsBySessionIdHistoryPath = z.object({
+    cityName: z.string().min(1).regex(/\S/),
+    id: z.string().min(1),
+    sessionID: z.string().min(1)
+});
+
+/**
+ * OK
+ */
+export const zGetV0CityByCityNameBeadByIdAttemptsBySessionIdHistoryResponse = zAttemptInspection;
 
 export const zPostV0CityByCityNameBeadByIdCloseHeaders = z.object({
     'X-GC-Request': z.string().min(1)

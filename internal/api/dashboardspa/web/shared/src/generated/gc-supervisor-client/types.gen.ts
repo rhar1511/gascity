@@ -243,6 +243,11 @@ export type AnnotatedProviderResponse = {
     ready_delay_ms?: number;
 };
 
+export type ArtifactAvailability = {
+    reason?: string;
+    state: string;
+};
+
 export type AsyncAcceptedBody = {
     /**
      * City event-stream sequence captured before the async request was accepted. Pass this value as after_seq to /v0/city/{cityName}/events/stream to receive the request result without replaying unrelated historical backlog. A value of 0 can also mean no event provider is configured or the event log is empty.
@@ -267,6 +272,14 @@ export type AsyncAcceptedResponse = {
      * Correlation ID. Watch /v0/events/stream for request.result.city.create, request.result.city.unregister, or request.failed with this request_id.
      */
     request_id: string;
+};
+
+export type AttemptInspection = {
+    association: ArtifactAvailability;
+    bead_id: string;
+    diff: HistoricalDiff;
+    pull_request: HistoricalPullRequest;
+    session_id: string;
 };
 
 export type BackendCredentialResolvedPayload = {
@@ -1452,6 +1465,22 @@ export type HeartbeatEvent = {
      * ISO 8601 timestamp when the heartbeat was sent.
      */
     timestamp: string;
+};
+
+export type HistoricalDiff = {
+    binary?: boolean;
+    bytes?: number;
+    reason?: string;
+    state: string;
+    text?: string;
+    truncated?: boolean;
+};
+
+export type HistoricalPullRequest = {
+    reason?: string;
+    state: string;
+    status?: string;
+    url?: string;
 };
 
 export type HookClaimReclaimedStalePayload = {
@@ -11281,6 +11310,56 @@ export type GetV0CityByCityNameBeadByIdAttemptsDiffResponses = {
 };
 
 export type GetV0CityByCityNameBeadByIdAttemptsDiffResponse = GetV0CityByCityNameBeadByIdAttemptsDiffResponses[keyof GetV0CityByCityNameBeadByIdAttemptsDiffResponses];
+
+export type GetV0CityByCityNameBeadByIdAttemptsBySessionIdHistoryData = {
+    body?: never;
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Bead ID.
+         */
+        id: string;
+        /**
+         * Session bead ID for the selected execution attempt.
+         */
+        sessionID: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/bead/{id}/attempts/{sessionID}/history';
+};
+
+export type GetV0CityByCityNameBeadByIdAttemptsBySessionIdHistoryErrors = {
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type GetV0CityByCityNameBeadByIdAttemptsBySessionIdHistoryError = GetV0CityByCityNameBeadByIdAttemptsBySessionIdHistoryErrors[keyof GetV0CityByCityNameBeadByIdAttemptsBySessionIdHistoryErrors];
+
+export type GetV0CityByCityNameBeadByIdAttemptsBySessionIdHistoryResponses = {
+    /**
+     * OK
+     */
+    200: AttemptInspection;
+};
+
+export type GetV0CityByCityNameBeadByIdAttemptsBySessionIdHistoryResponse = GetV0CityByCityNameBeadByIdAttemptsBySessionIdHistoryResponses[keyof GetV0CityByCityNameBeadByIdAttemptsBySessionIdHistoryResponses];
 
 export type PostV0CityByCityNameBeadByIdCloseData = {
     body?: never;

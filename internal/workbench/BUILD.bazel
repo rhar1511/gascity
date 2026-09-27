@@ -2,7 +2,10 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "workbench",
-    srcs = ["diff.go"],
+    srcs = [
+        "attempt_history.go",
+        "diff.go",
+    ],
     importpath = "github.com/gastownhall/gascity/internal/workbench",
     visibility = ["//:__subpackages__"],
 )
@@ -10,6 +13,7 @@ go_library(
 go_test(
     name = "workbench_test",
     srcs = [
+        "attempt_history_test.go",
         "diff_test.go",
         "testenv_import_test.go",
     ],
