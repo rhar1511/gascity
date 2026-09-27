@@ -110,7 +110,7 @@ function WayfinderReviewWorkflowForBead({ bead }: { bead: SupervisorBead }) {
   };
 
   return (
-    <section aria-label="Wayfinder review" className="mt-5 border-t border-rule pt-4">
+    <section aria-label="Wayfinder review" className="space-y-1">
       <div className="mb-3 flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
         <h3 className="text-label font-semibold uppercase tracking-wider text-fg">
           Wayfinder review

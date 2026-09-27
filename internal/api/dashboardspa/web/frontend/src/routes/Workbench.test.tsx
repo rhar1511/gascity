@@ -130,6 +130,43 @@ describe('WorkbenchPage', () => {
     expect(screen.queryByRole('dialog')).toBeNull();
   });
 
+  it('puts attempt controls before a collapsed Wayfinder disclosure', async () => {
+    setStub({
+      kind: 'ok',
+      beads: [
+        {
+          ...sampleBead(),
+          issue_type: 'epic',
+          description: 'Review: Lavish AXI',
+        } as SupervisorBead,
+      ],
+    });
+    renderPage('/workbench?bead=gascity-0001');
+
+    const detail = await screen.findByRole('region', { name: /selected bead/i });
+    const attempt = within(detail).getByLabelText('Execution attempt');
+    const disclosure = detail.querySelector<HTMLDetailsElement>(
+      'details[aria-label="Wayfinder review details"]',
+    );
+
+    expect(disclosure).not.toBeNull();
+    if (!disclosure) return;
+
+    expect(disclosure.open).toBe(false);
+    expect(
+      attempt.compareDocumentPosition(disclosure) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(disclosure.querySelector('[aria-label="Wayfinder review"]')).not.toBeNull();
+
+    const summary = disclosure.querySelector('summary');
+    expect(summary).not.toBeNull();
+    if (!summary) return;
+
+    fireEvent.click(summary);
+    expect(disclosure.open).toBe(true);
+    expect(within(detail).getByRole('region', { name: 'Wayfinder review' })).toBeTruthy();
+  });
+
   it('keeps Wayfinder review beside the epic and opens published artifacts externally', async () => {
     setStub({
       kind: 'ok',
@@ -146,6 +183,12 @@ describe('WorkbenchPage', () => {
       ],
     });
     renderPage('/workbench?bead=gascity-0001');
+
+    const detail = await screen.findByRole('region', { name: /selected bead/i });
+    const summary = detail.querySelector('summary');
+    expect(summary).not.toBeNull();
+    if (!summary) return;
+    fireEvent.click(summary);
 
     const review = await screen.findByRole('region', { name: 'Wayfinder review' });
     expect(within(review).getByText(/lavish axi.*local document review/i)).toBeTruthy();
@@ -171,6 +214,12 @@ describe('WorkbenchPage', () => {
       ],
     });
     renderPage('/workbench?bead=gascity-0001');
+    const detail = await screen.findByRole('region', { name: /selected bead/i });
+    const summary = detail.querySelector('summary');
+    expect(summary).not.toBeNull();
+    if (!summary) return;
+    fireEvent.click(summary);
+
     const review = await screen.findByRole('region', { name: 'Wayfinder review' });
     expect(within(review).getByText(/no lavish session is linked/i)).toBeTruthy();
     expect(within(review).getByText(/explicit approval/i)).toBeTruthy();

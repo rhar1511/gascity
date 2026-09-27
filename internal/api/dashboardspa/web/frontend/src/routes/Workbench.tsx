@@ -358,8 +358,21 @@ export function WorkbenchPage() {
             {selectedBead ? (
               <>
                 <BeadBody bead={selectedBead} />
-                <WayfinderReviewWorkflow bead={selectedBead} />
                 <AttemptPanel bead={selectedBead} sessions={sessions} />
+                <details
+                  aria-label="Wayfinder review details"
+                  className="mt-4 border-t border-rule pt-3"
+                >
+                  <summary className="cursor-pointer text-label font-semibold text-fg focus-mark">
+                    Design review
+                    <span className="ml-2 font-normal text-fg-muted">
+                      Prototypes, document notes, and approvals
+                    </span>
+                  </summary>
+                  <div className="mt-3">
+                    <WayfinderReviewWorkflow bead={selectedBead} />
+                  </div>
+                </details>
               </>
             ) : hasLoadedQueue ? (
               <p className="text-body text-fg-muted">This bead was resolved or removed.</p>
