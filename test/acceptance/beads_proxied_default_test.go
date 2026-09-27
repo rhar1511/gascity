@@ -1079,8 +1079,11 @@ func TestBeadsProxiedDefault(t *testing.T) {
 		}
 
 		// A rig added to it joins that one server rather than acquiring a
-		// lifecycle owner of its own. Only this command receives migration
-		// consent for the fixture-owned throwaway legacy server.
+		// lifecycle owner of its own. Its new database is served by this
+		// fixture's temporary shared server, so pass the same narrowly scoped
+		// migration consent as legacy init; CI can otherwise time out during
+		// bd's upgrade and the shared-server safety gate refuses the add. Only
+		// this command receives that consent.
 		if out, err := helpers.RunGC(helpers.LegacyInitEnv(env), legacyRoot, "rig", "add", legacyRig); err != nil {
 			t.Fatalf("gc rig add on a grandfathered city: %v\n%s", err, out)
 		}
