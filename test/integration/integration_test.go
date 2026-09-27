@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"net"
@@ -39,6 +40,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/testutil"
 	"github.com/gastownhall/gascity/test/dolttest"
 	"github.com/gastownhall/gascity/test/tmuxtest"
 )
@@ -93,6 +95,11 @@ var tmuxSocketAliveSentinel *os.File
 
 // TestMain builds the gc binary and runs pre/post sweeps of orphan sessions.
 func TestMain(m *testing.M) {
+	flag.Parse()
+	if listFlag := flag.Lookup("test.list"); listFlag != nil && listFlag.Value.String() != "" {
+		os.Exit(m.Run())
+	}
+
 	if os.Getenv("GC_INTEGRATION_SUPERVISOR_STOP_HELPER") == "1" {
 		select {}
 	}
@@ -340,6 +347,57 @@ func TestIntegrationSupervisorStopHelperProcess(t *testing.T) {
 		return
 	}
 	select {}
+}
+
+func TestIntegrationTestListingSkipsRuntimeSetup(t *testing.T) {
+	missing := t.TempDir()
+	env := os.Environ()
+	for _, name := range []string{
+		"GC_SESSION",
+		"GC_INTEGRATION_SUPERVISOR_STOP_HELPER",
+		integrationGCBinaryEnv,
+		integrationRealBDBinaryEnv,
+		integrationDoltBinaryEnv,
+	} {
+		env = filterEnv(env, name)
+	}
+	env = append(env,
+		"GC_SESSION=subprocess",
+		integrationGCBinaryEnv+"="+filepath.Join(missing, "gc"),
+		integrationRealBDBinaryEnv+"="+filepath.Join(missing, "bd"),
+		integrationDoltBinaryEnv+"="+filepath.Join(missing, "dolt"),
+	)
+
+	const want = "TestE2E_Hook_WithWork"
+	cases := []struct {
+		name             string
+		args             []string
+		wantSetupFailure bool
+	}{
+		{name: "equals", args: []string{"-test.list=^" + want + "$"}},
+		{name: "separate", args: []string{"-test.list", "^" + want + "$"}},
+		{name: "empty list runs setup", args: []string{"-test.list="}, wantSetupFailure: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			output, err := runCommand("", env, testutil.ExecRaceTimeout, os.Args[0], tc.args...)
+			if tc.wantSetupFailure {
+				if err == nil {
+					t.Fatalf("listing with empty regexp succeeded despite unavailable runtime binaries:\n%s", output)
+				}
+				if !strings.Contains(output, "resolving GC override") || !strings.Contains(output, integrationGCBinaryEnv) {
+					t.Fatalf("empty list failed before expected runtime setup check: %v\n%s", err, output)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("listing integration tests with args %q and unavailable runtime binaries: %v\n%s", tc.args, err, output)
+			}
+			if got := strings.TrimSpace(output); got != want {
+				t.Fatalf("listed tests with args %q = %q, want only %q", tc.args, got, want)
+			}
+		})
+	}
 }
 
 func TestStopIntegrationSupervisorWithTimeoutReturnsAfterDeadline(t *testing.T) {

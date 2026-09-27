@@ -58,13 +58,35 @@ or unavailable record returns an error. Session plus generation alone is not
 enough to attribute a request to a work attempt, because a persistent session
 can serve several attempts.
 
+When the session has a current work claim, the controller derives an optional
+`attempt` binding from that work's authoritative store, owner, session and claim
+generation. It records the original work revision as a decimal string. The
+submit body cannot supply this binding. Acceptance and delivery check the
+session's reciprocal work claim; a changed claim rejects the request.
+
+The binding records an observation. It does not grant ownership, establish an
+atomic transaction across the work and session stores, or authorize an effect.
+Replays preserve the original binding and revision. Requests accepted without
+a binding remain unattributed, including after a later work claim.
+
+An authorized exact attempt read includes matching receipts under
+`related_records.acknowledgements.records`. The join checks the attempt ID,
+original store and full execution identity. It works after the work row is
+deleted, while the session receipt ledger is retained. Unattributed requests
+are counted separately and never assigned to an attempt by inference. Missing
+receipts and unavailable or corrupt evidence remain distinct.
+
+Generic bead create/update endpoints reject session receipt metadata. Receipt
+creation and acknowledgement must use the tracked session protocol.
+
 ## Deployment requirements
 
 Writes require a backend with conditional row updates. The protocol refuses
 an unconditional fallback. Runtime credentials must be isolated: an actor
 that can read another execution's token can impersonate it. The in-process
 session lock coordinates normal incarnation changes but does not fence an
-arbitrary external writer or runtime replacement. These deployment boundaries
+arbitrary external writer or runtime replacement. Direct backend write access
+can alter receipt metadata and must be restricted. These deployment boundaries
 must be verified before using receipts as recovery evidence.
 
 Receipts live on the durable session record. The session close/delete API refuses

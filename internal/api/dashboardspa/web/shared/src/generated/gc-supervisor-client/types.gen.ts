@@ -302,8 +302,15 @@ export type AttemptEvidenceRead = {
 };
 
 export type AttemptRelatedRecords = {
-    acknowledgements: Facet;
+    acknowledgements: AttemptRequestRecords;
     actions: AttemptActionRecords;
+};
+
+export type AttemptRequestRecords = {
+    reason?: string;
+    records?: Array<RequestReceipt> | null;
+    status: string;
+    unattributed_requests?: number;
 };
 
 export type BackendCredentialResolvedPayload = {
@@ -2935,6 +2942,13 @@ export type Record = {
     source_pid?: number;
 };
 
+export type RequestAttemptBinding = {
+    attempt_id: string;
+    identity: Identity;
+    store_ref: string;
+    work_revision: string;
+};
+
 export type RequestFailedPayload = {
     /**
      * Machine-readable error code.
@@ -2957,6 +2971,7 @@ export type RequestFailedPayload = {
 export type RequestReceipt = {
     accepted_at: string;
     acknowledged_at?: string;
+    attempt?: RequestAttemptBinding;
     delivery: string;
     delivery_attempted_at?: string;
     effect: string;

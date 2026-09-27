@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { WorkbenchPage } from './Workbench';
@@ -10,7 +10,9 @@ import type { WorkbenchPRActionBody } from '../supervisor/client';
 import { createHash } from 'node:crypto';
 import { gzipSync } from 'node:zlib';
 import type {
+  AttemptEvidenceRead,
   Evidence,
+  HistoricalPrActionRecord,
   PrActionQueue,
   PrActionResult,
   RequestReceipt,
@@ -33,6 +35,8 @@ let prActionResponses: Array<{ status: number; body: unknown }> = [];
 let sessionRequestResponses: Array<{ status: number; body: unknown }> = [];
 let sessionRequestReceipt: RequestReceipt | null = null;
 let attemptEvidenceRows: Evidence[] = [];
+type AttemptEvidenceReadStub = { status: number; body: unknown } | (() => Promise<Response>);
+let attemptEvidenceReadResponses = new Map<string, AttemptEvidenceReadStub>();
 let readPaths: string[] = [];
 const supervisorWrites: Array<{
   method: string;
@@ -56,6 +60,7 @@ beforeEach(() => {
   sessionRequestResponses = [];
   sessionRequestReceipt = null;
   attemptEvidenceRows = [];
+  attemptEvidenceReadResponses = new Map();
   readPaths = [];
   window.localStorage.clear();
   setStub({ kind: 'ok', beads: [sampleBead()] });
@@ -168,7 +173,25 @@ beforeEach(() => {
           turns: [],
         });
       }
-      if (/^\/v0\/city\/test-city\/bead\/[^/]+\/attempt-evidence$/.test(url.pathname) && method === 'GET') {
+      const exactEvidenceMatch =
+        /^\/v0\/city\/test-city\/bead\/([^/]+)\/attempt-evidence\/([^/]+)$/.exec(url.pathname);
+      if (exactEvidenceMatch && method === 'GET') {
+        const workID = decodeURIComponent(exactEvidenceMatch[1] ?? '');
+        const attemptID = decodeURIComponent(exactEvidenceMatch[2] ?? '');
+        const stub = attemptEvidenceReadResponses.get(attemptID);
+        if (typeof stub === 'function') return stub();
+        if (stub) return jsonResponse(stub.body, { status: stub.status });
+        const row = attemptEvidenceRows.find(
+          (candidate) =>
+            candidate.attempt_id === attemptID && candidate.identity.owner_bead_id === workID,
+        );
+        if (row) return jsonResponse(attemptEvidenceRead(row));
+        return jsonResponse({ error: 'attempt evidence not found' }, { status: 404 });
+      }
+      if (
+        /^\/v0\/city\/test-city\/bead\/[^/]+\/attempt-evidence$/.test(url.pathname) &&
+        method === 'GET'
+      ) {
         return jsonResponse(attemptEvidenceRows);
       }
       if (/\/attempts\/diff$/.test(url.pathname) && method === 'GET') {
@@ -555,6 +578,30 @@ describe('WorkbenchPage', () => {
         patch: 'second exact archive',
       }),
     ];
+    const selectedRow = attemptEvidenceRows[1];
+    if (!selectedRow) throw new Error('selected archive fixture is missing');
+    const mismatchedReceipt = historicalRequestReceipt(selectedRow, 'wrong-attempt-request');
+    mismatchedReceipt.attempt = {
+      ...mismatchedReceipt.attempt!,
+      attempt_id: 'ae-choice-one',
+    };
+    attemptEvidenceReadResponses.set('ae-choice-two', {
+      status: 200,
+      body: attemptEvidenceRead(selectedRow, {
+        actions: {
+          status: 'available',
+          records: [historicalActionRecord('ae-choice-two', 'selected-action-only')],
+        },
+        acknowledgements: {
+          status: 'available',
+          records: [
+            historicalRequestReceipt(selectedRow, 'selected-attempt-request'),
+            mismatchedReceipt,
+          ],
+          unattributed_requests: 1,
+        },
+      }),
+    });
     renderPage('/workbench?bead=gascity-0001');
     fireEvent.click(await screen.findByRole('button', { name: /inspect worker-old/i }));
     const selector = await screen.findByLabelText('Choose archived attempt');
@@ -563,6 +610,226 @@ describe('WorkbenchPage', () => {
     fireEvent.change(selector, { target: { value: 'ae-choice-two' } });
     expect(await screen.findByText(/second exact archive/)).toBeTruthy();
     expect(screen.queryByText('first exact archive')).toBeNull();
+    expect(await screen.findByText(/selected-action-only/)).toBeTruthy();
+    const laterRecords = screen.getByLabelText('Later attempt records');
+    expect(laterRecords.textContent).toContain('verified');
+    expect(laterRecords.textContent).toContain('selected-action-only');
+    expect(laterRecords.textContent).toContain('policy_verdict_not_captured');
+    expect(laterRecords.textContent).toContain('selected-attempt-request');
+    expect(laterRecords.textContent).toContain('Accepted at');
+    expect(laterRecords.textContent).toContain('Delivery attempted at');
+    expect(laterRecords.textContent).toContain('Provider result recorded at');
+    expect(laterRecords.textContent).toContain('Acknowledged at');
+    expect(laterRecords.textContent).toContain('Delivery: accepted');
+    expect(laterRecords.textContent).toContain('Recorded effect: unverified');
+    expect(laterRecords.textContent).toContain('work revision 15');
+    expect(laterRecords.textContent).toContain('Unattributed requests: 1');
+    expect(laterRecords.textContent).toContain('withheld because their exact attempt binding');
+    expect(
+      within(laterRecords).queryByLabelText('Session request receipt wrong-attempt-request'),
+    ).toBeNull();
+    expect(laterRecords.textContent).not.toContain('request body');
+    expect(readPaths).toContain(
+      '/v0/city/test-city/bead/gascity-0001/attempt-evidence/ae-choice-two',
+    );
+    expect(readPaths).not.toContain(
+      '/v0/city/test-city/bead/gascity-0001/attempt-evidence/ae-choice-one',
+    );
+  });
+
+  it('ignores an exact-read reply after switching to a different historical attempt', async () => {
+    stubSessions = [
+      {
+        id: 's-active',
+        session_name: 'worker-current',
+        state: 'active',
+        running: true,
+        active_bead: 'gascity-0001',
+        created_at: '2026-01-03T00:00:00Z',
+        execution_generation: 7,
+      },
+      {
+        id: 's-first',
+        session_name: 'worker-first',
+        state: 'completed',
+        running: false,
+        active_bead: 'gascity-0001',
+        created_at: '2026-01-02T00:00:00Z',
+        execution_generation: 3,
+      },
+      {
+        id: 's-second',
+        session_name: 'worker-second',
+        state: 'completed',
+        running: false,
+        active_bead: 'gascity-0001',
+        created_at: '2026-01-01T00:00:00Z',
+        execution_generation: 2,
+      },
+    ];
+    attemptEvidenceRows = [
+      workbenchEvidence({
+        attemptId: 'ae-first',
+        sessionId: 's-first',
+        sessionGeneration: '3',
+        patch: 'first attempt archived diff',
+      }),
+      workbenchEvidence({
+        attemptId: 'ae-second',
+        sessionId: 's-second',
+        sessionGeneration: '2',
+        patch: 'second attempt archived diff',
+      }),
+    ];
+    let resolveFirst!: (response: Response) => void;
+    const delayedFirstRead = new Promise<Response>((resolve) => {
+      resolveFirst = resolve;
+    });
+    const secondRow = attemptEvidenceRows[1];
+    if (!secondRow) throw new Error('second archive fixture is missing');
+    attemptEvidenceReadResponses.set('ae-first', () => delayedFirstRead);
+    attemptEvidenceReadResponses.set('ae-second', {
+      status: 200,
+      body: attemptEvidenceRead(secondRow, {
+        actions: {
+          status: 'available',
+          records: [historicalActionRecord('ae-second', 'second-attempt-action')],
+        },
+        acknowledgements: {
+          status: 'available',
+          records: [historicalRequestReceipt(secondRow, 'second-attempt-request')],
+          unattributed_requests: 0,
+        },
+      }),
+    });
+
+    renderPage('/workbench?bead=gascity-0001');
+    fireEvent.click(await screen.findByRole('button', { name: /inspect worker-first/i }));
+    await waitFor(() => {
+      expect(readPaths).toContain('/v0/city/test-city/bead/gascity-0001/attempt-evidence/ae-first');
+    });
+    fireEvent.click(screen.getByRole('button', { name: /inspect worker-second/i }));
+    expect(await screen.findByText(/second-attempt-action/)).toBeTruthy();
+    await act(async () => {
+      resolveFirst(
+        jsonResponse(
+          attemptEvidenceRead(attemptEvidenceRows[0]!, {
+            actions: {
+              status: 'available',
+              records: [historicalActionRecord('ae-first', 'stale-first-attempt-action')],
+            },
+            acknowledgements: {
+              status: 'available',
+              records: [
+                historicalRequestReceipt(attemptEvidenceRows[0]!, 'stale-first-attempt-request'),
+              ],
+              unattributed_requests: 0,
+            },
+          }),
+        ),
+      );
+      await delayedFirstRead;
+    });
+
+    expect(screen.getByText(/second-attempt-action/)).toBeTruthy();
+    expect(screen.getByText(/second-attempt-request/)).toBeTruthy();
+    expect(screen.queryByText('stale-first-attempt-action')).toBeNull();
+    expect(screen.queryByText('stale-first-attempt-request')).toBeNull();
+    expect(await screen.findByText(/second attempt archived diff/)).toBeTruthy();
+  });
+
+  it('keeps sealed capture visible while later action records are unreadable', async () => {
+    stubSessions = [
+      {
+        id: 's-old',
+        session_name: 'worker-old',
+        state: 'completed',
+        running: false,
+        active_bead: 'gascity-0001',
+        created_at: '2026-01-01T00:00:00Z',
+        execution_generation: 3,
+      },
+    ];
+    attemptEvidenceRows = [
+      workbenchEvidence({
+        attemptId: 'ae-ledger-unavailable',
+        sessionId: 's-old',
+        sessionGeneration: '3',
+        patch: 'sealed diff remains available',
+      }),
+    ];
+    const row = attemptEvidenceRows[0];
+    if (!row) throw new Error('archive fixture is missing');
+    attemptEvidenceReadResponses.set('ae-ledger-unavailable', {
+      status: 200,
+      body: attemptEvidenceRead(row, {
+        actions: {
+          status: 'unavailable',
+          reason: 'action_ledger_validation_failed',
+          records: [],
+        },
+        acknowledgements: {
+          status: 'unavailable',
+          reason: 'session_requests_lack_verified_work_attempt_attribution',
+          records: [historicalRequestReceipt(row, 'receipt-with-unavailable-status')],
+          unattributed_requests: 1,
+        },
+      }),
+    });
+
+    renderPage('/workbench?bead=gascity-0001');
+    fireEvent.click(await screen.findByRole('button', { name: /inspect worker-old/i }));
+    const archive = await screen.findByLabelText('Archived attempt evidence');
+    expect(await within(archive).findByText(/sealed diff remains available/)).toBeTruthy();
+    const laterRecords = within(archive).getByLabelText('Later attempt records');
+    expect(laterRecords.textContent).toContain('unavailable');
+    expect(laterRecords.textContent).toContain('action_ledger_validation_failed');
+    expect(laterRecords.textContent).toContain(
+      'session_requests_lack_verified_work_attempt_attribution',
+    );
+    expect(laterRecords.textContent).not.toContain('No PR action records');
+    expect(laterRecords.textContent).not.toContain('No attributed session request receipts');
+    expect(laterRecords.textContent).toContain(
+      'were withheld because acknowledgement records are unavailable',
+    );
+    expect(laterRecords.textContent).not.toContain('receipt-with-unavailable-status');
+    expect(laterRecords.textContent).not.toContain('Unattributed requests: 1');
+  });
+
+  it('keeps acknowledgement availability explicit for legacy exact reads without later-record fields', async () => {
+    stubSessions = [
+      {
+        id: 's-legacy',
+        session_name: 'worker-legacy',
+        state: 'completed',
+        running: false,
+        active_bead: 'gascity-0001',
+        created_at: '2026-01-01T00:00:00Z',
+        execution_generation: 2,
+      },
+    ];
+    attemptEvidenceRows = [
+      workbenchEvidence({
+        attemptId: 'ae-legacy-read',
+        sessionId: 's-legacy',
+        sessionGeneration: '2',
+        patch: 'legacy exact archive remains visible',
+      }),
+    ];
+    const row = attemptEvidenceRows[0];
+    if (!row) throw new Error('legacy archive fixture is missing');
+    attemptEvidenceReadResponses.set('ae-legacy-read', {
+      status: 200,
+      body: { ...row },
+    });
+
+    renderPage('/workbench?bead=gascity-0001');
+    fireEvent.click(await screen.findByRole('button', { name: /inspect worker-legacy/i }));
+    const archive = await screen.findByLabelText('Archived attempt evidence');
+    expect(await within(archive).findByText(/legacy exact archive remains visible/)).toBeTruthy();
+    const laterRecords = within(archive).getByLabelText('Later attempt records');
+    expect(laterRecords.textContent).toContain('related_acknowledgements_not_returned');
+    expect(laterRecords.textContent).not.toContain('No attributed session request receipts');
   });
 
   it('does not infer a missing session generation when locating historical evidence', async () => {
@@ -1069,6 +1336,67 @@ function workbenchEvidence(options: {
             ...compressPatch(options.workspacePatch),
             source: 'working_tree',
           },
+  };
+}
+
+function attemptEvidenceRead(
+  evidence: Evidence,
+  relatedRecords: AttemptEvidenceRead['related_records'] = {
+    actions: { status: 'missing', reason: 'no_attributed_pr_action_records', records: [] },
+    acknowledgements: {
+      status: 'unavailable',
+      reason: 'session_requests_lack_verified_work_attempt_attribution',
+    },
+  },
+): AttemptEvidenceRead {
+  return { ...evidence, related_records: relatedRecords };
+}
+
+function historicalActionRecord(attemptID: string, marker: string): HistoricalPrActionRecord {
+  const receipt: PrActionResult = {
+    action: 'queue_review',
+    actor_key_id: 'human-grant-key',
+    attempt_id: attemptID,
+    base_sha: 'base-commit-sha',
+    created_at: '2026-01-03T00:00:00Z',
+    head_sha: 'candidate-commit-sha',
+    id: marker,
+    idempotency_key: `idempotency-${attemptID}`,
+    monitor: 'pull-request-monitor',
+    outcome: marker,
+    owner: 'owner',
+    policy_version: 'policy-v1',
+    pull_request: 42,
+    repo: 'repo',
+    status: 'verified',
+    work_id: 'gascity-0001',
+  };
+  return {
+    receipt,
+    admission_policy: { status: 'missing', reason: 'policy_verdict_not_captured' },
+    execution_policy: { status: 'missing', reason: 'policy_verdict_not_captured' },
+  };
+}
+
+function historicalRequestReceipt(evidence: Evidence, requestID: string): RequestReceipt {
+  const identity = evidence.identity;
+  return {
+    accepted_at: '2026-01-03T01:00:00Z',
+    acknowledged_at: '2026-01-03T01:00:04Z',
+    attempt: {
+      attempt_id: evidence.attempt_id,
+      identity,
+      store_ref: evidence.store_ref ?? '',
+      work_revision: '15',
+    },
+    delivery: 'accepted',
+    delivery_attempted_at: '2026-01-03T01:00:01Z',
+    effect: 'unverified',
+    generation: Number(identity.session_generation),
+    message_digest: 'sha256:request-body-digest',
+    provider_result_at: '2026-01-03T01:00:02Z',
+    request_id: requestID,
+    session_id: identity.session_id ?? '',
   };
 }
 

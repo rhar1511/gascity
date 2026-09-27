@@ -93,7 +93,7 @@ func (s *Server) humaHandleSessionRequestSubmit(_ context.Context, input *Sessio
 	if err != nil {
 		return nil, humaResolveError(err)
 	}
-	accepted, err := session.NewStore(store).AcceptRequest(input.ID, input.Body.RequestID, input.Body.Generation, input.Body.Message, time.Now())
+	accepted, err := s.acceptAttributedSessionRequest(session.NewStore(store), input.ID, input.Body.RequestID, input.Body.Generation, input.Body.Message, time.Now())
 	if err != nil {
 		return nil, sessionRequestError(err)
 	}

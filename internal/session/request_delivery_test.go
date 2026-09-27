@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/attemptevidence"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -94,4 +95,95 @@ func TestSessionRequestUncertainProviderOutcomeIsNeverRetried(t *testing.T) {
 	if got := sp.CountCalls("Nudge", info.SessionName); got != 1 {
 		t.Fatalf("provider calls = %d", got)
 	}
+}
+
+func TestSessionRequestDeliveryForAttemptPreservesAttributionAndSendReservation(t *testing.T) {
+	for _, uncertain := range []bool{false, true} {
+		name := "accepted"
+		if uncertain {
+			name = "unknown"
+		}
+		t.Run(name, func(t *testing.T) {
+			mgr, front, sp, info, binding, generation := requestDeliveryAttemptFixture(t)
+			if uncertain {
+				sp.NudgeErrors = map[string]error{info.SessionName: errors.New("connection lost after send")}
+			}
+			original := binding
+			for attempt := range 2 {
+				receipt, err := mgr.SubmitRequestForAttempt(context.Background(), info.ID, "bound-request", generation, "report progress", binding)
+				if (err != nil) != (uncertain && attempt == 0) {
+					t.Fatalf("submit %d error = %v", attempt, err)
+				}
+				wantDelivery := RequestDeliveryAccepted
+				if uncertain {
+					wantDelivery = RequestDeliveryUnknown
+				}
+				if receipt.Attempt == nil || *receipt.Attempt != original || receipt.Delivery != wantDelivery || receipt.AcknowledgedAt != nil || receipt.Effect != "unverified" {
+					t.Fatalf("submit %d rewrote attribution or invented evidence: %+v", attempt, receipt)
+				}
+				delete(sp.NudgeErrors, info.SessionName)
+				binding.WorkRevision = "8"
+			}
+			if got := sp.CountCalls("Nudge", info.SessionName); got != 1 {
+				t.Fatalf("provider calls = %d, want one reserved send", got)
+			}
+			if _, err := front.SetCurrentClaim(info.ID, "different-work"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := mgr.SubmitRequestForAttempt(context.Background(), info.ID, "bound-request", generation, "report progress", binding); !errors.Is(err, ErrRequestConflict) {
+				t.Fatalf("old work claim accepted: %v", err)
+			}
+			if got := sp.CountCalls("Nudge", info.SessionName); got != 1 {
+				t.Fatalf("changed claim caused another provider call: %d", got)
+			}
+		})
+	}
+}
+
+func TestSessionRequestDeliveryForAttemptCannotRetrofitLegacyAcceptance(t *testing.T) {
+	mgr, front, sp, info, binding, generation := requestDeliveryAttemptFixture(t)
+	if _, err := front.AcceptRequest(info.ID, "legacy-request", generation, "report progress", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mgr.SubmitRequestForAttempt(context.Background(), info.ID, "legacy-request", generation, "report progress", binding); !errors.Is(err, ErrRequestConflict) {
+		t.Fatalf("legacy request was rebound: %v", err)
+	}
+	if got := sp.CountCalls("Nudge", info.SessionName); got != 0 {
+		t.Fatalf("legacy rebind reached provider: %d calls", got)
+	}
+	receipt, err := front.GetRequest(info.ID, "legacy-request")
+	if err != nil || receipt.Attempt != nil || receipt.Delivery != RequestDeliveryPending {
+		t.Fatalf("legacy acceptance changed: %+v, %v", receipt, err)
+	}
+}
+
+func requestDeliveryAttemptFixture(t *testing.T) (*Manager, *Store, *runtime.Fake, Info, RequestAttemptBinding, int) {
+	t.Helper()
+	backing := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(backing, sp)
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: t.TempDir(), Provider: "claude"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	front := NewStore(beads.SessionStore{Store: backing})
+	persisted, err := front.Get(info.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	generation, err := strconv.Atoi(persisted.Generation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := requestAttemptFixture(t, "work-one", "claim-one")
+	binding.Identity.SessionID = info.ID
+	binding.Identity.SessionGeneration = persisted.Generation
+	binding.AttemptID, err = attemptevidence.AttemptID(binding.Identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := front.SetCurrentClaim(info.ID, binding.Identity.ExecutionBeadID); err != nil {
+		t.Fatal(err)
+	}
+	return mgr, front, sp, info, binding, generation
 }
