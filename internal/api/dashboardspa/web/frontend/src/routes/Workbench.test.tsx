@@ -148,7 +148,8 @@ describe('WorkbenchPage', () => {
     renderPage('/workbench?bead=gascity-0001');
 
     const review = await screen.findByRole('region', { name: 'Wayfinder review' });
-    expect(within(review).getByText(/lavish selected/i)).toBeTruthy();
+    expect(within(review).getByText(/lavish axi.*local document review/i)).toBeTruthy();
+    expect(within(review).getByRole('button', { name: 'Record annotation' })).toBeTruthy();
     expect(within(review).getByRole('link', { name: 'Prototype A' }).getAttribute('href')).toBe(
       'http://localhost:3000/prototype?bead=gascity-0001&variant=A',
     );
@@ -171,7 +172,7 @@ describe('WorkbenchPage', () => {
     });
     renderPage('/workbench?bead=gascity-0001');
     const review = await screen.findByRole('region', { name: 'Wayfinder review' });
-    expect(within(review).getByText(/no local review link published/i)).toBeTruthy();
+    expect(within(review).getByText(/no lavish session is linked/i)).toBeTruthy();
     expect(within(review).getByText(/explicit approval/i)).toBeTruthy();
     expect(within(review).queryByRole('link', { name: /open lavish review/i })).toBeNull();
     fireEvent.change(within(review).getByRole('textbox', { name: 'Local Lavish URL' }), {

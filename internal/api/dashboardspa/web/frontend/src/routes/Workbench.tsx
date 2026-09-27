@@ -17,7 +17,7 @@ import { sendSupervisorMail } from '../supervisor/mailWrites';
 import { useOperatorConfig } from '../contexts/OperatorConfigContext';
 import { resolveAttempts, type ExecutionAttempt } from '../lib/workbenchAttempts';
 import { resolvePreview } from '../lib/workbenchPreview';
-import { WayfinderReviewPanel } from '../workbench/WayfinderReviewPanel';
+import { WayfinderReviewWorkflow } from '../workbench/WayfinderReviewWorkflow';
 import { HistoricalAttemptArtifacts } from '../workbench/HistoricalAttemptArtifacts';
 import { FollowUpDeliveryStatus } from '../workbench/FollowUpDeliveryStatus';
 import { startFollowUpDelivery, type FollowUpDeliveryState } from '../workbench/followUpDelivery';
@@ -358,7 +358,7 @@ export function WorkbenchPage() {
             {selectedBead ? (
               <>
                 <BeadBody bead={selectedBead} />
-                <WayfinderReviewPanel key={selectedBead.id} bead={selectedBead} />
+                <WayfinderReviewWorkflow bead={selectedBead} />
                 <AttemptPanel bead={selectedBead} sessions={sessions} />
               </>
             ) : hasLoadedQueue ? (

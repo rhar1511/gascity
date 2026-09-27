@@ -31,8 +31,12 @@ standalone HTML document in a separate tab. If the local review URL has not
 been published on the Bead, the operator can paste it into the panel for this
 view only; it is not saved as a decision or sent to Gas City. Workbench does not
 embed Lavish, start its CLI, poll its transcript, or share artifacts. The owning agent runs
-the local review loop and updates the Beads map after the human explicitly
-approves the named ticket rollout. An annotation alone is not approval.
+the local review loop. The operator can explicitly record annotations, prompt
+answers, and approval on the selected Bead through Gas City's typed API. Each
+entry is retained as a separate `gc.wayfinder_review.event.*` metadata record
+with actor and timestamp. Approval requires an artifact target, its revision,
+scope, and confirmation; an annotation or answer is never approval. Recording
+approval does not publish an artifact, approve a PR, or start ticket rollout.
 Missing or blocked links remain visible as such, never as a successful review.
 
 The repository's `engdocs/research/lavish-axi-integration.md` records the
