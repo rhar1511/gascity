@@ -117,6 +117,7 @@ type SupervisorMux struct {
 	allowAnyHost    bool
 	writeAuth       *citywriteauth.Verifier
 	readAuth        *citywriteauth.Verifier
+	prHumanVerifier *PRHumanGrantVerifier
 	dashboardBase   func() string
 	runCensusSource RunCensusSource
 	server          *http.Server
@@ -351,6 +352,15 @@ func (sm *SupervisorMux) WithWriteAuth(v *citywriteauth.Verifier) *SupervisorMux
 	return sm
 }
 
+// WithPRHumanGrantVerifier installs the separate exact-subject authority used
+// by privileged PR actions. Production composition should prefer
+// InstallWriteAuth, which loads this trust set separately and rejects key
+// overlap with the city-write verifier.
+func (sm *SupervisorMux) WithPRHumanGrantVerifier(v *PRHumanGrantVerifier) *SupervisorMux {
+	sm.prHumanVerifier = v
+	return sm
+}
+
 // WithReadAuth installs the read-auth verifier so city-scoped reads (GET/HEAD)
 // are gated on a signed grant, and rebuilds the internal http.Server handler. A
 // nil verifier leaves read-auth disabled. Must be called before Serve.
@@ -478,6 +488,7 @@ func (sm *SupervisorMux) getCityServer(name string, state State) *Server {
 	// cached server observes the final provider.
 	srv.dashboardBase = sm.dashboardBase
 	srv.runCensusSource = sm.runCensusSource
+	srv.prHumanVerifier = sm.prHumanVerifier
 
 	sm.cacheMu.Lock()
 	defer sm.cacheMu.Unlock()

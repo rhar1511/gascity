@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "next_id": 214,
+  "next_id": 215,
   "permanent_ids": [
     {
       "name": "help",
@@ -662,7 +662,7 @@
       "notice_policy": "eligible",
       "classification": "controller-reconcile",
       "owner": "immediate",
-      "id": 209
+      "id": 210
     },
     {
       "path": "gc converge",
@@ -1650,7 +1650,7 @@
       "notice_policy": "eligible",
       "classification": "factory-validate",
       "owner": "immediate",
-      "id": 210
+      "id": 209
     },
     {
       "path": "gc formula",
@@ -1804,6 +1804,21 @@
       "canonical_target": "@help",
       "owner": "immediate",
       "id": 1
+    },
+    {
+      "path": "gc github pr action",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "github-pr-action",
+      "owner": "immediate",
+      "id": 214
     },
     {
       "path": "gc github pr backfill",

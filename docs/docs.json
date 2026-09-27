@@ -192,7 +192,8 @@
               "guides/gastown-config-recipes",
               "guides/using-json-from-gc",
               "guides/connected-clients",
-              "guides/multi-agent-engineering-environment"
+              "guides/multi-agent-engineering-environment",
+              "guides/workbench"
             ]
           }
         ]
@@ -233,10 +234,11 @@
               "reference/rsi-trusted-evaluation",
               "reference/api",
               "reference/session-request-receipts",
+              "reference/pr-action-cli",
               "reference/events",
               "reference/schema/index",
               "reference/system-packs",
-            "reference/software-factory",
+              "reference/software-factory",
               "reference/exec-session-provider",
               "reference/exec-beads-provider",
               "reference/tmux-agent-slice",

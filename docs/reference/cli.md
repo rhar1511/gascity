@@ -1929,11 +1929,11 @@ gc github
 
 | Subcommand | Description |
 |------------|-------------|
-| [gc github pr](#gc-github-pr) | GitHub pull-request monitor commands |
+| [gc github pr](#gc-github-pr) | Read and act on the central PR queue |
 
 ## gc github pr
 
-GitHub pull-request monitor commands
+Read and act on the central PR queue
 
 ```
 gc github pr
@@ -1941,17 +1941,43 @@ gc github pr
 
 | Subcommand | Description |
 |------------|-------------|
-| [gc github pr backfill](#gc-github-pr-backfill) | Query configured GitHub PR readiness monitors |
+| [gc github pr action](#gc-github-pr-action) | Submit an exact revision to the central PR action API |
+| [gc github pr backfill](#gc-github-pr-backfill) | Read the Gas City server's PR queue and policy verdicts |
+
+## gc github pr action
+
+Submit a prepare or queue_review action using revisions and policy from
+backfill --all --json. Reuse the same idempotency key and exact arguments after
+an uncertain response. queue_review requires --work-id and --attempt-id from the
+server queue. GitHub merge actions remain unavailable. Output is JSON.
+
+```
+gc github pr action <prepare|queue_review> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--attempt-id` | string |  | exact immutable attempt from the queue |
+| `--base-sha` | string |  | exact base revision |
+| `--head-sha` | string |  | exact candidate revision |
+| `--idempotency-key` | string |  | stable key reused for retries of this exact request |
+| `--monitor` | string |  | server monitor name |
+| `--policy-version` | string |  | server policy version |
+| `--pr` | int |  | pull request number |
+| `--repo` | string |  | exact owner/repository from server queue |
+| `--timeout` | duration | `45s` | server request timeout |
+| `--work-id` | string |  | exact work record from the queue |
 
 ## gc github pr backfill
 
-Query configured GitHub PR readiness monitors.
+Read the Gas City server's PR queue and policy verdicts.
 
-The command reads [[github.pr_monitor]] entries from the resolved city
-configuration, queries open pull requests from GitHub, and reports PRs that
-need repair: failed checks, merge conflicts, blocked mergeability, or branches
-behind their base. By default clean and pending-only PRs are omitted; pass
---all to include every observed PR.
+The server supplies repository revisions, policy versions, evidence and permitted
+actions. By default, show items with an available action; --all includes blocked
+items. --create-repair-beads submits only server-permitted prepare actions with
+stable revision-specific idempotency keys. Prepared work is not dispatched by
+this command. A server failure never falls back to local policy or ledger writes.
+JSON schema version 2 contains the server queue and verified action receipts.
 
 ```
 gc github pr backfill [monitor-name] [flags]
@@ -1959,10 +1985,10 @@ gc github pr backfill [monitor-name] [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--all` | bool |  | include clean and pending-only PRs |
-| `--create-repair-beads` | bool |  | create deduped repair beads for actionable PRs |
+| `--all` | bool |  | include items without available actions |
+| `--create-repair-beads` | bool |  | submit server-permitted prepare actions |
 | `--json` | bool |  | emit JSON |
-| `--timeout` | duration | `45s` | GitHub query timeout |
+| `--timeout` | duration | `45s` | server request timeout |
 
 ## gc graph
 

@@ -61,3 +61,34 @@ func TestSessionRequestClientUsesSupervisorForAliveCityWithoutStandalonePort(t *
 		t.Fatal("disabled API must reject tracked request without a local fallback")
 	}
 }
+
+func TestSessionRequestFailuresReportDiagnosticsThroughRoot(t *testing.T) {
+	cityPath := writeBeadsTestCity(t)
+	t.Setenv("GC_NO_API", "1")
+	t.Setenv("GC_SESSION_ID", "")
+	t.Setenv("GC_RUNTIME_EPOCH", "2")
+	t.Setenv("GC_INSTANCE_TOKEN", "private-credential")
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"get", []string{"get", "gc-test", "req-test"}, "require the Gas City server"},
+		{"submit", []string{"submit", "gc-test", "req-test", "message"}, "positive --generation"},
+		{"ack", []string{"ack", "req-test"}, "requires this execution"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out, errOut bytes.Buffer
+			args := append([]string{"--city", cityPath, "session", "request"}, tc.args...)
+			if code := run(args, &out, &errOut); code == 0 {
+				t.Fatal("invalid request reported success")
+			}
+			if !strings.Contains(errOut.String(), tc.want) {
+				t.Fatalf("missing diagnostic: stdout=%s stderr=%s", &out, &errOut)
+			}
+			if strings.Contains(out.String()+errOut.String(), "private-credential") {
+				t.Fatal("execution credential leaked")
+			}
+		})
+	}
+}

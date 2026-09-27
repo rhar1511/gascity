@@ -847,6 +847,15 @@ export type Dep = {
     type: string;
 };
 
+export type Diff = {
+    binary: boolean;
+    bytes: number;
+    state: string;
+    text?: string;
+    truncated: boolean;
+    worktree: string;
+};
+
 export type ErrorDetail = {
     /**
      * Where the error occurred, e.g. 'body.items[3].tags' or 'path.thing-id'
@@ -2208,6 +2217,144 @@ export type OutputTurn = {
     role: string;
     text: string;
     timestamp?: string;
+};
+
+export type PrActionAttemptReference = {
+    attempt_id: string;
+    base_sha: string;
+    candidate_sha: string;
+    diff_sha256: string;
+    diff_source: string;
+    store_ref: string;
+    work_id: string;
+    working_tree_status: string;
+};
+
+export type PrActionExecuteBody = {
+    /**
+     * Requested action from the current server queue.
+     */
+    action: 'prepare' | 'queue_review' | 'merge';
+    /**
+     * Exact immutable attempt ID from the server queue.
+     */
+    attempt_id?: string;
+    /**
+     * Exact base commit SHA from the current queue item.
+     */
+    base_sha: string;
+    /**
+     * Exact candidate commit SHA from the current queue item.
+     */
+    head_sha: string;
+    /**
+     * Separate authority-signed exact merge approval; required for merge.
+     */
+    human_grant?: string;
+    /**
+     * Configured PR monitor name.
+     */
+    monitor: string;
+    /**
+     * Repository owner from the server queue.
+     */
+    owner: string;
+    /**
+     * Policy version copied from the current queue.
+     */
+    policy_version: string;
+    pull_request: number;
+    /**
+     * Repository name from the server queue.
+     */
+    repo: string;
+    /**
+     * Exact durable repair-work bead when the action needs one.
+     */
+    work_id?: string;
+};
+
+export type PrActionOption = {
+    action: string;
+    available: boolean;
+    reason: string;
+    requires_human_approval: boolean;
+};
+
+export type PrActionQueue = {
+    availability: string;
+    fresh_until: string;
+    items: Array<PrActionQueueItem> | null;
+    observed_at: string;
+    policy_detail?: string;
+    policy_state: string;
+    policy_version: string;
+    sources: Array<PrActionSource> | null;
+};
+
+export type PrActionQueueItem = {
+    action_receipts: Array<PrActionResult> | null;
+    actions: Array<PrActionOption> | null;
+    attempt_evidence: Array<PrActionAttemptReference> | null;
+    base_ref_name: string;
+    base_sha: string;
+    evidence_state: string;
+    fresh_until: string;
+    head_ref_name?: string;
+    head_sha: string;
+    is_draft: boolean;
+    merge_state: string;
+    monitor: string;
+    observed_at: string;
+    owner: string;
+    policy_version: string;
+    pull_request: number;
+    repo: string;
+    title: string;
+    url?: string;
+    work_records: Array<PrActionWorkRecord> | null;
+};
+
+export type PrActionResult = {
+    action: string;
+    actor_issuer?: string;
+    actor_key_id: string;
+    actor_subject?: string;
+    attempt_id?: string;
+    base_sha: string;
+    created_at: string;
+    detail?: string;
+    head_sha: string;
+    id: string;
+    idempotency_key: string;
+    merge_commit_sha?: string;
+    monitor: string;
+    outcome?: string;
+    owner: string;
+    policy_version: string;
+    pull_request: number;
+    repo: string;
+    status: string;
+    verified_at?: string;
+    work_id?: string;
+};
+
+export type PrActionSource = {
+    detail?: string;
+    monitor: string;
+    owner: string;
+    repo: string;
+    rig: string;
+    state: string;
+};
+
+export type PrActionWorkRecord = {
+    assignee?: string;
+    base_sha: string;
+    candidate_sha: string;
+    current_revision: boolean;
+    id: string;
+    status: string;
 };
 
 export type PackAddInputBody = {
@@ -11262,6 +11409,52 @@ export type PostV0CityByCityNameBeadByIdAssignResponses = {
 
 export type PostV0CityByCityNameBeadByIdAssignResponse = PostV0CityByCityNameBeadByIdAssignResponses[keyof PostV0CityByCityNameBeadByIdAssignResponses];
 
+export type GetV0CityByCityNameBeadByIdAttemptsDiffData = {
+    body?: never;
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Bead ID.
+         */
+        id: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/bead/{id}/attempts/diff';
+};
+
+export type GetV0CityByCityNameBeadByIdAttemptsDiffErrors = {
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type GetV0CityByCityNameBeadByIdAttemptsDiffError = GetV0CityByCityNameBeadByIdAttemptsDiffErrors[keyof GetV0CityByCityNameBeadByIdAttemptsDiffErrors];
+
+export type GetV0CityByCityNameBeadByIdAttemptsDiffResponses = {
+    /**
+     * OK
+     */
+    200: Diff;
+};
+
+export type GetV0CityByCityNameBeadByIdAttemptsDiffResponse = GetV0CityByCityNameBeadByIdAttemptsDiffResponses[keyof GetV0CityByCityNameBeadByIdAttemptsDiffResponses];
+
 export type PostV0CityByCityNameBeadByIdCloseData = {
     body?: never;
     headers: {
@@ -16217,6 +16410,116 @@ export type GetV0CityByCityNamePendingResponses = {
 };
 
 export type GetV0CityByCityNamePendingResponse = GetV0CityByCityNamePendingResponses[keyof GetV0CityByCityNamePendingResponses];
+
+export type ExecutePrActionData = {
+    body: PrActionExecuteBody;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+        /**
+         * Stable key for this exact action request.
+         */
+        'Idempotency-Key': string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/pr-actions';
+};
+
+export type ExecutePrActionErrors = {
+    /**
+     * Bad Request
+     */
+    400: ErrorModel;
+    /**
+     * Unauthorized
+     */
+    401: ErrorModel;
+    /**
+     * Forbidden
+     */
+    403: ErrorModel;
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type ExecutePrActionError = ExecutePrActionErrors[keyof ExecutePrActionErrors];
+
+export type ExecutePrActionResponses = {
+    /**
+     * OK
+     */
+    200: PrActionResult;
+};
+
+export type ExecutePrActionResponse = ExecutePrActionResponses[keyof ExecutePrActionResponses];
+
+export type GetV0CityByCityNamePrActionsQueueData = {
+    body?: never;
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/pr-actions/queue';
+};
+
+export type GetV0CityByCityNamePrActionsQueueErrors = {
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type GetV0CityByCityNamePrActionsQueueError = GetV0CityByCityNamePrActionsQueueErrors[keyof GetV0CityByCityNamePrActionsQueueErrors];
+
+export type GetV0CityByCityNamePrActionsQueueResponses = {
+    /**
+     * OK
+     */
+    200: PrActionQueue;
+};
+
+export type GetV0CityByCityNamePrActionsQueueResponse = GetV0CityByCityNamePrActionsQueueResponses[keyof GetV0CityByCityNamePrActionsQueueResponses];
 
 export type GetV0CityByCityNameProviderReadinessData = {
     body?: never;

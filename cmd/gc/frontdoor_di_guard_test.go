@@ -466,8 +466,11 @@ var graphRelocationRoutedFiles = []string{
 	"wisp_autoclose.go",     // bd on_close hook: attached molecule/workflow reaping
 	"molecule_autoclose.go", // bd on_close hook: molecule completion
 	"wisp_step_inject.go",   // hook injection: the agent's current step bead
-	"cmd_github.go",         // PR-monitor repair: the workflow cooked onto the repair bead
 }
+
+// cmd_github.go is intentionally absent: it delegates PR actions to the central
+// API, whose placement contract is covered by
+// TestPRActionExecuteKeepsLedgerAndPreparedWorkOnMonitorRig.
 
 // TestGraphRelocationRootsRouteThroughGraphClassStore pins that the CLI roots
 // reaching graph-class beads still derive the leg through cliGraphStore rather

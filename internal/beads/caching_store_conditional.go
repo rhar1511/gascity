@@ -82,6 +82,12 @@ func (c *CachingStore) conditionalBacking() Store {
 	return followConditionalWritesResolveTarget(c.backing)
 }
 
+// StableCreateIDResolveTarget exposes the durable create-ID backing without
+// bypassing other cache-aware conditional-write handles.
+func (c *CachingStore) StableCreateIDResolveTarget() Store {
+	return c.conditionalBacking()
+}
+
 // stampConditionalWritesMode forwards the factory stamp to the backing store
 // and reports whether it landed there; false (carrier-less backing) tells the
 // factory the mode was dropped so the miss is logged, never silently believed.

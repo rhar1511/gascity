@@ -2396,6 +2396,38 @@
         ],
         "type": "object"
       },
+      "Diff": {
+        "additionalProperties": false,
+        "properties": {
+          "binary": {
+            "type": "boolean"
+          },
+          "bytes": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "state": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "worktree": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "worktree",
+          "state",
+          "truncated",
+          "binary",
+          "bytes"
+        ],
+        "type": "object"
+      },
       "ErrorDetail": {
         "additionalProperties": false,
         "properties": {
@@ -5591,6 +5623,459 @@
         "required": [
           "role",
           "text"
+        ],
+        "type": "object"
+      },
+      "PRActionAttemptReference": {
+        "additionalProperties": false,
+        "properties": {
+          "attempt_id": {
+            "type": "string"
+          },
+          "base_sha": {
+            "type": "string"
+          },
+          "candidate_sha": {
+            "type": "string"
+          },
+          "diff_sha256": {
+            "type": "string"
+          },
+          "diff_source": {
+            "type": "string"
+          },
+          "store_ref": {
+            "type": "string"
+          },
+          "work_id": {
+            "type": "string"
+          },
+          "working_tree_status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "store_ref",
+          "work_id",
+          "attempt_id",
+          "base_sha",
+          "candidate_sha",
+          "diff_sha256",
+          "diff_source",
+          "working_tree_status"
+        ],
+        "type": "object"
+      },
+      "PRActionExecuteBody": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "description": "Requested action from the current server queue.",
+            "enum": [
+              "prepare",
+              "queue_review",
+              "merge"
+            ],
+            "type": "string"
+          },
+          "attempt_id": {
+            "description": "Exact immutable attempt ID from the server queue.",
+            "type": "string"
+          },
+          "base_sha": {
+            "description": "Exact base commit SHA from the current queue item.",
+            "maxLength": 40,
+            "minLength": 40,
+            "type": "string"
+          },
+          "head_sha": {
+            "description": "Exact candidate commit SHA from the current queue item.",
+            "maxLength": 40,
+            "minLength": 40,
+            "type": "string"
+          },
+          "human_grant": {
+            "description": "Separate authority-signed exact merge approval; required for merge.",
+            "type": "string"
+          },
+          "monitor": {
+            "description": "Configured PR monitor name.",
+            "minLength": 1,
+            "type": "string"
+          },
+          "owner": {
+            "description": "Repository owner from the server queue.",
+            "minLength": 1,
+            "type": "string"
+          },
+          "policy_version": {
+            "description": "Policy version copied from the current queue.",
+            "minLength": 1,
+            "type": "string"
+          },
+          "pull_request": {
+            "format": "int64",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "repo": {
+            "description": "Repository name from the server queue.",
+            "minLength": 1,
+            "type": "string"
+          },
+          "work_id": {
+            "description": "Exact durable repair-work bead when the action needs one.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "monitor",
+          "owner",
+          "repo",
+          "pull_request",
+          "action",
+          "head_sha",
+          "base_sha",
+          "policy_version"
+        ],
+        "type": "object"
+      },
+      "PRActionOption": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "available": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "requires_human_approval": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "action",
+          "available",
+          "requires_human_approval",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "PRActionQueue": {
+        "additionalProperties": false,
+        "properties": {
+          "availability": {
+            "type": "string"
+          },
+          "fresh_until": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/PRActionQueueItem"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "observed_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "policy_detail": {
+            "type": "string"
+          },
+          "policy_state": {
+            "type": "string"
+          },
+          "policy_version": {
+            "type": "string"
+          },
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/PRActionSource"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "availability",
+          "policy_state",
+          "policy_version",
+          "observed_at",
+          "fresh_until",
+          "sources",
+          "items"
+        ],
+        "type": "object"
+      },
+      "PRActionQueueItem": {
+        "additionalProperties": false,
+        "properties": {
+          "action_receipts": {
+            "items": {
+              "$ref": "#/components/schemas/PRActionResult"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "actions": {
+            "items": {
+              "$ref": "#/components/schemas/PRActionOption"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "attempt_evidence": {
+            "items": {
+              "$ref": "#/components/schemas/PRActionAttemptReference"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "base_ref_name": {
+            "type": "string"
+          },
+          "base_sha": {
+            "type": "string"
+          },
+          "evidence_state": {
+            "type": "string"
+          },
+          "fresh_until": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "head_ref_name": {
+            "type": "string"
+          },
+          "head_sha": {
+            "type": "string"
+          },
+          "is_draft": {
+            "type": "boolean"
+          },
+          "merge_state": {
+            "type": "string"
+          },
+          "monitor": {
+            "type": "string"
+          },
+          "observed_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "owner": {
+            "type": "string"
+          },
+          "policy_version": {
+            "type": "string"
+          },
+          "pull_request": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "repo": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "work_records": {
+            "items": {
+              "$ref": "#/components/schemas/PRActionWorkRecord"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "monitor",
+          "owner",
+          "repo",
+          "pull_request",
+          "title",
+          "base_ref_name",
+          "head_sha",
+          "base_sha",
+          "merge_state",
+          "is_draft",
+          "policy_version",
+          "observed_at",
+          "fresh_until",
+          "work_records",
+          "evidence_state",
+          "attempt_evidence",
+          "action_receipts",
+          "actions"
+        ],
+        "type": "object"
+      },
+      "PRActionResult": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "actor_issuer": {
+            "type": "string"
+          },
+          "actor_key_id": {
+            "type": "string"
+          },
+          "actor_subject": {
+            "type": "string"
+          },
+          "attempt_id": {
+            "type": "string"
+          },
+          "base_sha": {
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "detail": {
+            "type": "string"
+          },
+          "head_sha": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "idempotency_key": {
+            "type": "string"
+          },
+          "merge_commit_sha": {
+            "type": "string"
+          },
+          "monitor": {
+            "type": "string"
+          },
+          "outcome": {
+            "type": "string"
+          },
+          "owner": {
+            "type": "string"
+          },
+          "policy_version": {
+            "type": "string"
+          },
+          "pull_request": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "repo": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "verified_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "work_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "action",
+          "status",
+          "idempotency_key",
+          "monitor",
+          "owner",
+          "repo",
+          "pull_request",
+          "head_sha",
+          "base_sha",
+          "policy_version",
+          "actor_key_id",
+          "created_at"
+        ],
+        "type": "object"
+      },
+      "PRActionSource": {
+        "additionalProperties": false,
+        "properties": {
+          "detail": {
+            "type": "string"
+          },
+          "monitor": {
+            "type": "string"
+          },
+          "owner": {
+            "type": "string"
+          },
+          "repo": {
+            "type": "string"
+          },
+          "rig": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "monitor",
+          "owner",
+          "repo",
+          "rig",
+          "state"
+        ],
+        "type": "object"
+      },
+      "PRActionWorkRecord": {
+        "additionalProperties": false,
+        "properties": {
+          "assignee": {
+            "type": "string"
+          },
+          "base_sha": {
+            "type": "string"
+          },
+          "candidate_sha": {
+            "type": "string"
+          },
+          "current_revision": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "candidate_sha",
+          "base_sha",
+          "current_revision"
         ],
         "type": "object"
       },
@@ -29680,6 +30165,128 @@
         "summary": "Post v0 city by city name bead by ID assign"
       }
     },
+    "/v0/city/{cityName}/bead/{id}/attempts/diff": {
+      "get": {
+        "operationId": "get-v0-city-by-city-name-bead-by-id-attempts-diff",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Bead ID.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Bead ID.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Diff"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "description": "Age in seconds of the CachingStore snapshot that served this response (0 if not applicable).",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
+              "X-GC-Index": {
+                "schema": {
+                  "description": "Latest event sequence number.",
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Not Found",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Service Unavailable",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          }
+        },
+        "summary": "Get v0 city by city name bead by ID attempts diff"
+      }
+    },
     "/v0/city/{cityName}/bead/{id}/close": {
       "post": {
         "operationId": "post-v0-city-by-city-name-bead-by-id-close",
@@ -42349,6 +42956,292 @@
           }
         },
         "summary": "Get v0 city by city name pending"
+      }
+    },
+    "/v0/city/{cityName}/pr-actions": {
+      "post": {
+        "description": "Prepares durable repair work, queues an exact evidenced revision for review, or merges it after separate exact human approval. The controller rechecks forge state and records an idempotent action before any effect.",
+        "operationId": "execute-pr-action",
+        "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Stable key for this exact action request.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "description": "Stable key for this exact action request.",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PRActionExecuteBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PRActionResult"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Bad Request",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unauthorized",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Forbidden",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Not Found",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Conflict",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Service Unavailable",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          }
+        },
+        "summary": "Execute a revision-bound pull-request action"
+      }
+    },
+    "/v0/city/{cityName}/pr-actions/queue": {
+      "get": {
+        "operationId": "get-v0-city-by-city-name-pr-actions-queue",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PRActionQueue"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Not Found",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Service Unavailable",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          }
+        },
+        "summary": "Get v0 city by city name pr actions queue"
       }
     },
     "/v0/city/{cityName}/provider-readiness": {
