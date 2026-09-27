@@ -436,6 +436,15 @@ export const zConvoyGetResponse = z.object({
     progress: zConvoyProgress.optional()
 });
 
+export const zDiff = z.object({
+    binary: z.boolean(),
+    bytes: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    state: z.string(),
+    text: z.string().optional(),
+    truncated: z.boolean(),
+    worktree: z.string()
+});
+
 export const zErrorDetail = z.object({
     location: z.string().optional(),
     message: z.string().optional(),
@@ -758,6 +767,12 @@ export const zInboundEventPayload = z.object({
     target_session: z.string()
 });
 
+export const zLifecycleRecoverySubmitOutputBody = z.object({
+    intent_id: z.string(),
+    request_id: z.string(),
+    status: z.string()
+});
+
 export const zListBodyBead = z.object({
     items: z.array(zBead).nullable(),
     next_cursor: z.string().optional(),
@@ -1027,6 +1042,118 @@ export const zOutputTurn = z.object({
     role: z.string(),
     text: z.string(),
     timestamp: z.string().optional()
+});
+
+export const zPrActionAttemptReference = z.object({
+    attempt_id: z.string(),
+    base_sha: z.string(),
+    candidate_sha: z.string(),
+    diff_sha256: z.string(),
+    diff_source: z.string(),
+    store_ref: z.string(),
+    work_id: z.string(),
+    working_tree_status: z.string()
+});
+
+export const zPrActionExecuteBody = z.object({
+    action: z.enum([
+        'prepare',
+        'queue_review',
+        'merge'
+    ]),
+    attempt_id: z.string().optional(),
+    base_sha: z.string().length(40),
+    head_sha: z.string().length(40),
+    human_grant: z.string().optional(),
+    monitor: z.string().min(1),
+    owner: z.string().min(1),
+    policy_version: z.string().min(1),
+    pull_request: z.coerce.bigint().gte(BigInt(1)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    repo: z.string().min(1),
+    work_id: z.string().optional()
+});
+
+export const zPrActionOption = z.object({
+    action: z.string(),
+    available: z.boolean(),
+    reason: z.string(),
+    requires_human_approval: z.boolean()
+});
+
+export const zPrActionResult = z.object({
+    action: z.string(),
+    actor_issuer: z.string().optional(),
+    actor_key_id: z.string(),
+    actor_subject: z.string().optional(),
+    attempt_id: z.string().optional(),
+    base_sha: z.string(),
+    created_at: z.iso.datetime(),
+    detail: z.string().optional(),
+    head_sha: z.string(),
+    id: z.string(),
+    idempotency_key: z.string(),
+    merge_commit_sha: z.string().optional(),
+    monitor: z.string(),
+    outcome: z.string().optional(),
+    owner: z.string(),
+    policy_version: z.string(),
+    pull_request: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    repo: z.string(),
+    status: z.string(),
+    verified_at: z.iso.datetime().optional(),
+    work_id: z.string().optional()
+});
+
+export const zPrActionSource = z.object({
+    detail: z.string().optional(),
+    monitor: z.string(),
+    owner: z.string(),
+    repo: z.string(),
+    rig: z.string(),
+    state: z.string()
+});
+
+export const zPrActionWorkRecord = z.object({
+    assignee: z.string().optional(),
+    base_sha: z.string(),
+    candidate_sha: z.string(),
+    current_revision: z.boolean(),
+    id: z.string(),
+    status: z.string()
+});
+
+export const zPrActionQueueItem = z.object({
+    action_receipts: z.array(zPrActionResult).nullable(),
+    actions: z.array(zPrActionOption).nullable(),
+    attempt_evidence: z.array(zPrActionAttemptReference).nullable(),
+    base_ref_name: z.string(),
+    base_sha: z.string(),
+    evidence_state: z.string(),
+    fresh_until: z.iso.datetime(),
+    head_ref_name: z.string().optional(),
+    head_sha: z.string(),
+    is_draft: z.boolean(),
+    merge_state: z.string(),
+    monitor: z.string(),
+    observed_at: z.iso.datetime(),
+    owner: z.string(),
+    policy_version: z.string(),
+    pull_request: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    repo: z.string(),
+    title: z.string(),
+    url: z.string().optional(),
+    work_records: z.array(zPrActionWorkRecord).nullable()
+});
+
+export const zPrActionQueue = z.object({
+    availability: z.string(),
+    fresh_until: z.iso.datetime(),
+    items: z.array(zPrActionQueueItem).nullable(),
+    observed_at: z.iso.datetime(),
+    policy_detail: z.string().optional(),
+    policy_state: z.string(),
+    policy_version: z.string(),
+    sources: z.array(zPrActionSource).nullable()
 });
 
 export const zPackAddInputBody = z.object({
@@ -1379,6 +1506,24 @@ export const zRecord = z.object({
     source_pid: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional()
 });
 
+export const zRecoveryRequest = z.object({
+    action: z.string(),
+    authorized_by: z.string(),
+    claim_generation: z.string(),
+    expected_revision: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    expires_at: z.string(),
+    issued_at: z.string(),
+    message: z.string(),
+    owner: z.string(),
+    request_id: z.string(),
+    scope: z.string(),
+    session_generation: z.string(),
+    session_id: z.string(),
+    signature: z.string(),
+    version: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    work_item_id: z.string()
+});
+
 export const zRequestFailedPayload = z.object({
     error_code: z.string(),
     error_message: z.string(),
@@ -1391,6 +1536,19 @@ export const zRequestFailedPayload = z.object({
         'rig.create'
     ]),
     request_id: z.string()
+});
+
+export const zRequestReceipt = z.object({
+    accepted_at: z.iso.datetime(),
+    acknowledged_at: z.iso.datetime().optional(),
+    delivery: z.string(),
+    delivery_attempted_at: z.iso.datetime().optional(),
+    effect: z.string(),
+    generation: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    message_digest: z.string(),
+    provider_result_at: z.iso.datetime().optional(),
+    request_id: z.string(),
+    session_id: z.string()
 });
 
 export const zRigActionBody = z.object({
@@ -1758,6 +1916,16 @@ export const zSessionRawMessageFrame = z.unknown();
 
 export const zSessionRenameInputBody = z.object({
     title: z.string().min(1)
+});
+
+export const zSessionRequestAcknowledgementInputBody = z.object({
+    generation: z.coerce.bigint().gte(BigInt(1)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' })
+});
+
+export const zSessionRequestSubmitInputBody = z.object({
+    generation: z.coerce.bigint().gte(BigInt(1)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    message: z.string().min(1),
+    request_id: z.string().min(1).max(200)
 });
 
 export const zSessionResetStalledPayload = z.object({
@@ -7820,6 +7988,16 @@ export const zPostV0CityByCityNameBeadByIdAssignPath = z.object({
  */
 export const zPostV0CityByCityNameBeadByIdAssignResponse = z.record(z.string(), z.string());
 
+export const zGetV0CityByCityNameBeadByIdAttemptsDiffPath = z.object({
+    cityName: z.string().min(1).regex(/\S/),
+    id: z.string()
+});
+
+/**
+ * OK
+ */
+export const zGetV0CityByCityNameBeadByIdAttemptsDiffResponse = zDiff;
+
 export const zPostV0CityByCityNameBeadByIdCloseHeaders = z.object({
     'X-GC-Request': z.string().min(1)
 });
@@ -8534,6 +8712,21 @@ export const zGetV0CityByCityNameHealthPath = z.object({
  */
 export const zGetV0CityByCityNameHealthResponse = zHealthOutputBody;
 
+export const zSubmitLifecycleRecoveryRequestBody = zRecoveryRequest;
+
+export const zSubmitLifecycleRecoveryRequestHeaders = z.object({
+    'X-GC-Request': z.string().min(1)
+});
+
+export const zSubmitLifecycleRecoveryRequestPath = z.object({
+    cityName: z.string().min(1).regex(/\S/)
+});
+
+/**
+ * Accepted
+ */
+export const zSubmitLifecycleRecoveryRequestResponse = zLifecycleRecoverySubmitOutputBody;
+
 export const zGetV0CityByCityNameMailPath = z.object({
     cityName: z.string().min(1).regex(/\S/)
 });
@@ -9068,6 +9261,31 @@ export const zGetV0CityByCityNamePendingPath = z.object({
  */
 export const zGetV0CityByCityNamePendingResponse = zListBodyCityPendingEntry;
 
+export const zExecutePrActionBody = zPrActionExecuteBody;
+
+export const zExecutePrActionHeaders = z.object({
+    'X-GC-Request': z.string().min(1),
+    'Idempotency-Key': z.string()
+});
+
+export const zExecutePrActionPath = z.object({
+    cityName: z.string().min(1).regex(/\S/)
+});
+
+/**
+ * OK
+ */
+export const zExecutePrActionResponse = zPrActionResult;
+
+export const zGetV0CityByCityNamePrActionsQueuePath = z.object({
+    cityName: z.string().min(1).regex(/\S/)
+});
+
+/**
+ * OK
+ */
+export const zGetV0CityByCityNamePrActionsQueueResponse = zPrActionQueue;
+
 export const zGetV0CityByCityNameProviderReadinessPath = z.object({
     cityName: z.string().min(1).regex(/\S/)
 });
@@ -9495,6 +9713,51 @@ export const zPostV0CityByCityNameSessionByIdRenamePath = z.object({
  * OK
  */
 export const zPostV0CityByCityNameSessionByIdRenameResponse = zSessionResponse;
+
+export const zPostV0CityByCityNameSessionByIdRequestsBody = zSessionRequestSubmitInputBody;
+
+export const zPostV0CityByCityNameSessionByIdRequestsHeaders = z.object({
+    'X-GC-Request': z.string().min(1)
+});
+
+export const zPostV0CityByCityNameSessionByIdRequestsPath = z.object({
+    cityName: z.string().min(1).regex(/\S/),
+    id: z.string()
+});
+
+/**
+ * Accepted
+ */
+export const zPostV0CityByCityNameSessionByIdRequestsResponse = zRequestReceipt;
+
+export const zGetV0CityByCityNameSessionByIdRequestsByRequestIdPath = z.object({
+    cityName: z.string().min(1).regex(/\S/),
+    id: z.string(),
+    request_id: z.string()
+});
+
+/**
+ * OK
+ */
+export const zGetV0CityByCityNameSessionByIdRequestsByRequestIdResponse = zRequestReceipt;
+
+export const zPostV0CityByCityNameSessionByIdRequestsByRequestIdAckBody = zSessionRequestAcknowledgementInputBody;
+
+export const zPostV0CityByCityNameSessionByIdRequestsByRequestIdAckHeaders = z.object({
+    'X-GC-Request': z.string().min(1),
+    'X-GC-Session-Token': z.string().optional()
+});
+
+export const zPostV0CityByCityNameSessionByIdRequestsByRequestIdAckPath = z.object({
+    cityName: z.string().min(1).regex(/\S/),
+    id: z.string(),
+    request_id: z.string()
+});
+
+/**
+ * OK
+ */
+export const zPostV0CityByCityNameSessionByIdRequestsByRequestIdAckResponse = zRequestReceipt;
 
 export const zRespondSessionBody = zSessionRespondInputBody;
 

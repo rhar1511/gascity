@@ -143,13 +143,16 @@ const (
 
 // MessageRequest submits a user turn to the worker.
 type MessageRequest struct {
-	Text     string         `json:"text"`
-	Delivery DeliveryIntent `json:"delivery,omitempty"`
+	RequestID  string         `json:"request_id,omitempty"`
+	Generation int            `json:"generation,omitempty"`
+	Text       string         `json:"text"`
+	Delivery   DeliveryIntent `json:"delivery,omitempty"`
 }
 
 // MessageResult reports whether a worker turn was queued or delivered now.
 type MessageResult struct {
-	Queued bool `json:"queued"`
+	Receipt *sessionpkg.RequestReceipt `json:"receipt,omitempty"`
+	Queued  bool                       `json:"queued"`
 }
 
 // CreateMode controls how a worker session should be materialized.

@@ -595,6 +595,13 @@ func (s *Store) Tx(_ string, fn func(beads.Tx) error) error {
 
 // Delete permanently removes a bead by calling the "delete" subcommand.
 func (s *Store) Delete(id string) error {
+	current, err := s.Get(id)
+	if err != nil {
+		return err
+	}
+	if err := beads.ValidateLifecycleDelete(current); err != nil {
+		return fmt.Errorf("deleting lifecycle bead %q: %w", id, err)
+	}
 	if _, err := s.run(nil, "delete", "--force", id); err != nil {
 		return err
 	}

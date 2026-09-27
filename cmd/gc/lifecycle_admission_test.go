@@ -18,8 +18,8 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/formulatest"
-	"github.com/gastownhall/gascity/internal/molecule"
+	"github.com/gastownhall/gascity/internal/featureflags"
+	"github.com/gastownhall/gascity/internal/rollout"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 	"github.com/gastownhall/gascity/internal/worklifecycle"
 )
@@ -254,11 +254,7 @@ func TestLifecycleGraphDescendantAssignmentProtectsLiveSessionFromLegacyRestart(
 	if err := os.WriteFile(filepath.Join(formulaDir, "review.toml"), []byte("formula = \"review\"\nversion = 2\ncontract = \"graph.v2\"\n\n[[steps]]\nid = \"work\"\ntitle = \"Review work\"\ntype = \"task\"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	formulatest.EnableV2ForTest(t)
-	oldGraphApply := molecule.IsGraphApplyEnabled()
-	molecule.SetGraphApplyEnabled(true)
-	t.Cleanup(func() { molecule.SetGraphApplyEnabled(oldGraphApply) })
-	applyFeatureFlags(env.cfg)
+	withLifecycleFormulaV2ForTest(t, env.cfg)
 	addTestControlDispatcherAgents(env.cfg, "")
 
 	_, admissionKey, err := ed25519.GenerateKey(rand.Reader)
@@ -429,11 +425,7 @@ func materializeLifecycleGraphV2(t *testing.T, store beads.Store, cfg *config.Ci
 	workflow := "review"
 	cfg.Agents[0].DefaultSlingFormula = &workflow
 	cfg.Daemon.FormulaV2 = boolPtr(true)
-	formulatest.EnableV2ForTest(t)
-	oldGraphApply := molecule.IsGraphApplyEnabled()
-	molecule.SetGraphApplyEnabled(true)
-	t.Cleanup(func() { molecule.SetGraphApplyEnabled(oldGraphApply) })
-	applyFeatureFlags(cfg)
+	withLifecycleFormulaV2ForTest(t, cfg)
 	addTestControlDispatcherAgents(cfg, "")
 	var stderr bytes.Buffer
 	reconcileLifecycleAdmission(censusCityName(cfg), cityPath, cfg, store, nil, nil, &stderr)
@@ -464,6 +456,14 @@ func materializeLifecycleGraphV2(t *testing.T, store beads.Store, cfg *config.Ci
 	}
 	t.Fatalf("graph root %s has no routed descendant carrying attached lifecycle lineage: %+v", root.ID, children)
 	return beads.Bead{}, beads.Bead{}
+}
+
+func withLifecycleFormulaV2ForTest(t *testing.T, cfg *config.City) {
+	t.Helper()
+	previous := featureflags.Snapshot()
+	formulaV2 := rollout.ForTest(rollout.WithFormulaV2(cfg != nil && cfg.Daemon.FormulaV2Enabled())).FormulaV2()
+	featureflags.Apply(featureflags.Flags{FormulaV2: formulaV2, GraphApply: formulaV2})
+	t.Cleanup(func() { featureflags.Apply(previous) })
 }
 
 func lifecycleReadyWireJSON(t *testing.T, candidate beads.Bead, storeRef, scope string) string {

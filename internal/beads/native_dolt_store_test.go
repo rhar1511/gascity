@@ -2827,6 +2827,40 @@ func newNativeDoltMemStorage() *nativeDoltMemStorage {
 	return &nativeDoltMemStorage{store: NewMemStore()}
 }
 
+// IssueLifecycle supplies the public lifecycle role needed by reopenOnce in
+// tests that use this in-memory native-storage adapter. Production storage
+// provides the full implementation; this fixture implements only Reopen,
+// which is the operation exercised by the cache notification regression.
+func (s *nativeDoltMemStorage) IssueLifecycle() (beadops.Lifecycle, error) {
+	return nativeDoltMemLifecycle{Lifecycle: nil, storage: s}, nil
+}
+
+type nativeDoltMemLifecycle struct {
+	beadops.Lifecycle
+	storage *nativeDoltMemStorage
+}
+
+func (l nativeDoltMemLifecycle) Reopen(ctx context.Context, request beadops.ReopenRequest) (beadops.ReopenResult, error) {
+	current, err := l.storage.GetIssue(ctx, request.IssueID)
+	if err != nil || current == nil {
+		return beadops.ReopenResult{}, err
+	}
+	if request.ExpectedVersion != nil && current.RowVersion != *request.ExpectedVersion {
+		return beadops.ReopenResult{}, beadops.ErrVersionMismatch
+	}
+	if current.Status != beadslib.StatusClosed {
+		return beadops.ReopenResult{Issue: current}, nil
+	}
+	if err := l.storage.store.Reopen(request.IssueID); err != nil {
+		return beadops.ReopenResult{}, err
+	}
+	reopened, err := l.storage.GetIssue(ctx, request.IssueID)
+	if err != nil {
+		return beadops.ReopenResult{}, err
+	}
+	return beadops.ReopenResult{Issue: reopened, Changed: true}, nil
+}
+
 func (s *nativeDoltMemStorage) RunInTransaction(_ context.Context, _ string, fn func(beadslib.Transaction) error) error {
 	return runNativeDoltMemStorageTransactionForTest(s, func() error {
 		return fn(nativeDoltTransactionForTest{storage: s})

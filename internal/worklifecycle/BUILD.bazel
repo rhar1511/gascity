@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "receipt.go",
         "recovery.go",
+        "recovery_request.go",
         "scope.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/worklifecycle",
@@ -21,6 +22,7 @@ go_test(
     srcs = [
         "receipt_test.go",
         "recovery_test.go",
+        "recovery_request_test.go",
         "testenv_import_test.go",
     ],
     embed = [":worklifecycle"],

@@ -180,6 +180,13 @@ func (s *NativeDoltStore) CloseIfMatch(id string, expectedRevision int64) error 
 	if current == nil {
 		return fmt.Errorf("bead %q: %w", id, ErrNotFound)
 	}
+	currentBead, err := beadFromNativeIssue(current)
+	if err != nil {
+		return err
+	}
+	if current.RowVersion == expectedRevision && HasLifecycleRecoveryIntent(currentBead) {
+		return ErrLifecycleIntentImmutable
+	}
 	// See UpdateIfMatch: wrap only the checked write so a transient
 	// serialization conflict is retried while a version mismatch still
 	// short-circuits through conditionalWriteError. The pre-read close reason is
@@ -223,6 +230,13 @@ func (s *NativeDoltStore) DeleteIfMatch(id string, expectedRevision int64) error
 					Current:  issue.RowVersion,
 					Raw:      "native row-version mismatch",
 				}
+			}
+			current, err := beadFromNativeIssue(issue)
+			if err != nil {
+				return err
+			}
+			if err := ValidateLifecycleDelete(current); err != nil {
+				return err
 			}
 			if err := tx.DeleteIssue(ctx, id); err != nil {
 				return nativeStoreError(id, err)
@@ -322,6 +336,13 @@ func (s *NativeDoltStore) CompareAndSetMetadataKey(id, key, expected, next strin
 			// A genuine lost race. Returning nil commits an empty transaction
 			// and leaves swapped false, which the caller reads as (false, nil).
 			return nil
+		}
+		bead, err := beadFromNativeIssue(issue)
+		if err != nil {
+			return err
+		}
+		if err := ValidateLifecycleMutation(bead, UpdateOpts{Metadata: map[string]string{key: next}}); err != nil {
+			return err
 		}
 		rawMetadata, err := metadataRawValuesFromNative(issue.Metadata)
 		if err != nil {

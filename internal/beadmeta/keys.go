@@ -181,6 +181,11 @@ const (
 	CompletionFactsConvergedMetadataKey   = "gc.completion_facts_converged"
 	LifecycleAdmissionReceiptMetadataKey  = "gc.lifecycle.admission_receipt.v1"
 	LifecycleCompletionReceiptMetadataKey = "gc.lifecycle.completion_receipt.v1"
+	LifecycleRecoveryIntentMetadataKey    = "gc.lifecycle.recovery_intent.v1"
+	LifecycleRecoveryIntentDigestKey      = "gc.lifecycle.recovery_intent_digest.v1"
+	LifecycleRecoveryIntentWorkItemKey    = "gc.lifecycle.recovery_intent_work_item"
+	LifecycleRecoveryIntentScopeKey       = "gc.lifecycle.recovery_intent_scope"
+	LifecycleRecoveryIntentRequestIDKey   = "gc.lifecycle.recovery_intent_request_id"
 	LifecycleRecoveryStateMetadataKey     = "gc.lifecycle.recovery_state.v1"
 	LifecycleMaterializationMetadataKey   = "gc.lifecycle.materialization.v1"
 	LastFailureClassMetadataKey           = "gc.last_failure_class"
@@ -442,10 +447,37 @@ const (
 // key-shape rule only covers the gc. namespace.
 const OptionMetadataPrefix = "opt_"
 
+// PRActionMetadataPrefix reserves the controller-owned PR action ledger namespace.
+const PRActionMetadataPrefix = Namespace + "pr_action."
+
+// PR action metadata binds durable queue records and idempotent action receipts.
+const (
+	PRActionSourceMetadataKey        = PRActionMetadataPrefix + "source"
+	PRActionQueueIndexMetadataKey    = PRActionMetadataPrefix + "queue_index"
+	PRActionIdempotencyMetadataKey   = PRActionMetadataPrefix + "idempotency_key"
+	PRActionFingerprintMetadataKey   = PRActionMetadataPrefix + "fingerprint"
+	PRActionRecordMetadataKey        = PRActionMetadataPrefix + "record"
+	PRActionTargetMetadataKey        = PRActionMetadataPrefix + "target_key"
+	PRActionClaimMetadataKey         = PRActionMetadataPrefix + "claim"
+	PRActionRouteProposalMetadataKey = PRActionMetadataPrefix + "proposed_route"
+)
+
+// SessionRequestReceiptPrefix stores execution-bound receipts keyed by request digest.
+const SessionRequestReceiptPrefix = Namespace + "session_request.v1."
+
 // KnownMetadataKeys lists every engine-owned bead-metadata key this package
 // declares. The guard test asserts every gc.* metadata literal used in non-test
 // Go resolves to a member of this slice (or a KnownMetadataPrefixes entry).
 var KnownMetadataKeys = []string{
+	PRActionSourceMetadataKey,
+	PRActionQueueIndexMetadataKey,
+	PRActionIdempotencyMetadataKey,
+	PRActionFingerprintMetadataKey,
+	PRActionRecordMetadataKey,
+	PRActionTargetMetadataKey,
+	PRActionClaimMetadataKey,
+	PRActionRouteProposalMetadataKey,
+
 	AttemptLogMetadataKey,
 	AttemptMetadataKey,
 	BondMetadataKey,
@@ -530,6 +562,11 @@ var KnownMetadataKeys = []string{
 	KindMetadataKey,
 	LifecycleAdmissionReceiptMetadataKey,
 	LifecycleCompletionReceiptMetadataKey,
+	LifecycleRecoveryIntentMetadataKey,
+	LifecycleRecoveryIntentDigestKey,
+	LifecycleRecoveryIntentWorkItemKey,
+	LifecycleRecoveryIntentScopeKey,
+	LifecycleRecoveryIntentRequestIDKey,
 	LifecycleRecoveryStateMetadataKey,
 	LifecycleMaterializationMetadataKey,
 	LastFailureClassMetadataKey,
@@ -632,6 +669,7 @@ var KnownMetadataKeys = []string{
 // begins with one of these is considered declared even though its full key is
 // not enumerable.
 var KnownMetadataPrefixes = []string{
+	SessionRequestReceiptPrefix,
 	FormulaVarPrefix,
 	IdemPrefix,
 }

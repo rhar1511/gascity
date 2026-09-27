@@ -46,8 +46,11 @@ var (
 // reused. Random ID collisions are possible in theory but negligible at this
 // size.
 type RecoveryAttempt struct {
-	ID         string `json:"id"`
-	ReservedAt string `json:"reserved_at"`
+	ID               string `json:"id"`
+	ReservedAt       string `json:"reserved_at"`
+	RequestID        string `json:"request_id,omitempty"`
+	RequestDigest    string `json:"request_digest,omitempty"`
+	ExpectedRevision int64  `json:"expected_revision,omitempty"`
 }
 
 // RecoveryEscalation is a durable request for human attention. It does not
@@ -98,7 +101,7 @@ func ReserveRecoveryAttempt(store beads.Store, beadID, scope string) (state Reco
 	}
 
 	for range maxRecoveryCASAttempts {
-		state, raw, err := readRecoveryState(store, beadID, scope)
+		bead, state, raw, err := readRecoveryStateBead(store, beadID, scope)
 		if err != nil {
 			return RecoveryState{}, false, err
 		}
@@ -116,20 +119,17 @@ func ReserveRecoveryAttempt(store beads.Store, beadID, scope string) (state Reco
 			return state, false, fmt.Errorf("encode recovery state: %w", err)
 		}
 
-		outcome, err := beads.ApplyMetadataCAS(store, beadID, beadmeta.LifecycleRecoveryStateMetadataKey, raw, string(encoded))
+		err = beads.UpdateLifecycleRecoveryStateIfMatch(store, beadID, bead.Revision, raw, string(encoded))
 		if err != nil {
+			if beads.IsPreconditionFailed(err) {
+				// Another writer changed the row or state. Re-read it and claim a
+				// remaining slot only if the durable count is still below the fixed
+				// limit.
+				continue
+			}
 			return state, false, fmt.Errorf("reserve recovery attempt for %q: %w", beadID, err)
 		}
-		switch outcome {
-		case beads.MetadataCASSwapped, beads.MetadataCASAlreadyNext:
-			return next, true, nil
-		case beads.MetadataCASConflict:
-			// Another caller changed the state. Re-read it and claim a remaining
-			// slot only if the durable count is still below the fixed limit.
-			continue
-		default:
-			return state, false, fmt.Errorf("reserve recovery attempt for %q: unexpected metadata CAS outcome %q", beadID, outcome)
-		}
+		return next, true, nil
 	}
 
 	return RecoveryState{}, false, ErrRecoveryCASContention
@@ -158,7 +158,7 @@ func RequestRecoveryEscalation(store beads.Store, beadID, scope, target string) 
 	}
 
 	for range maxRecoveryCASAttempts {
-		state, raw, err := readRecoveryState(store, beadID, scope)
+		bead, state, raw, err := readRecoveryStateBead(store, beadID, scope)
 		if err != nil {
 			return RecoveryState{}, false, err
 		}
@@ -184,25 +184,168 @@ func RequestRecoveryEscalation(store beads.Store, beadID, scope, target string) 
 			return state, false, fmt.Errorf("encode recovery escalation: %w", err)
 		}
 
-		outcome, err := beads.ApplyMetadataCAS(store, beadID, beadmeta.LifecycleRecoveryStateMetadataKey, raw, string(encoded))
+		err = beads.UpdateLifecycleRecoveryStateIfMatch(store, beadID, bead.Revision, raw, string(encoded))
 		if err != nil {
+			if beads.IsPreconditionFailed(err) {
+				continue
+			}
 			return state, false, fmt.Errorf("request recovery escalation for %q: %w", beadID, err)
 		}
-		switch outcome {
-		case beads.MetadataCASSwapped:
-			return next, true, nil
-		case beads.MetadataCASAlreadyNext:
-			// The same request is already durable. Callers should still observe
-			// and publish state.Escalation when delivery is pending.
-			return next, false, nil
-		case beads.MetadataCASConflict:
-			continue
-		default:
-			return state, false, fmt.Errorf("request recovery escalation for %q: unexpected metadata CAS outcome %q", beadID, outcome)
-		}
+		return next, true, nil
 	}
 
 	return RecoveryState{}, false, ErrRecoveryCASContention
+}
+
+// ReserveRecoveryRequestAttempt binds one intervention reservation to the
+// signed work revision. Exact request replay returns the persisted reservation
+// without authorizing another side effect. A changed request digest conflicts.
+// Only the invocation that wins UpdateIfMatch may submit the nudge; a later
+// replay must inspect the session request receipt and preserve unknown outcomes.
+func ReserveRecoveryRequestAttempt(store beads.Store, request RecoveryRequest, digest string) (state RecoveryState, reserved bool, err error) {
+	state, reserved, _, err = ReserveRecoveryRequestAttemptWithFence(store, request, digest)
+	return state, reserved, err
+}
+
+// ReserveRecoveryRequestAttemptWithFence is ReserveRecoveryRequestAttempt and,
+// for the unique successful CAS caller, also returns the exact revision read
+// back after the reservation. Revisions are opaque; callers must not infer this
+// value by incrementing ExpectedRevision. Replays and uncertain writes return
+// reserved=false and no revision authority.
+func ReserveRecoveryRequestAttemptWithFence(store beads.Store, request RecoveryRequest, digest string) (state RecoveryState, reserved bool, reservedRevision int64, err error) {
+	if err := validateRecoveryIdentity(store, request.WorkItemID, request.Scope); err != nil {
+		return RecoveryState{}, false, 0, err
+	}
+	if !validRecoveryToken(request.RequestID, 200) || !validDigest(digest) || request.ExpectedRevision <= 0 {
+		return RecoveryState{}, false, 0, ErrRecoveryRequestInvalid
+	}
+	current, state, raw, err := readRecoveryStateBead(store, request.WorkItemID, request.Scope)
+	if err != nil {
+		return RecoveryState{}, false, 0, err
+	}
+	if _, ok, err := recoveryAttemptForRequest(state, request.RequestID, digest); err != nil {
+		return state, false, 0, err
+	} else if ok {
+		return state, false, 0, nil
+	}
+	if current.Revision != request.ExpectedRevision {
+		return state, false, 0, ErrRecoveryWorkStale
+	}
+	if err := validateRecoveryTargetRowFromBead(current, request); err != nil {
+		return state, false, 0, err
+	}
+	if len(state.Attempts) >= MaxRecoveryAttempts {
+		return state, false, 0, nil
+	}
+	_, ok := beads.ConditionalWriterFor(store)
+	if !ok {
+		return state, false, 0, beads.ErrConditionalWriteUnsupported
+	}
+	attemptID, err := newRecoveryID()
+	if err != nil {
+		return state, false, 0, fmt.Errorf("create recovery attempt ID: %w", err)
+	}
+	next := cloneRecoveryState(state)
+	expectedAttempt := RecoveryAttempt{
+		ID: attemptID, ReservedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		RequestID: request.RequestID, RequestDigest: digest, ExpectedRevision: request.ExpectedRevision,
+	}
+	next.Attempts = append(next.Attempts, expectedAttempt)
+	encoded, err := json.Marshal(next)
+	if err != nil {
+		return state, false, 0, fmt.Errorf("encode recovery state: %w", err)
+	}
+	writeErr := beads.UpdateLifecycleRecoveryStateIfMatch(store, request.WorkItemID, request.ExpectedRevision, raw, string(encoded))
+	readbackBead, readback, readbackRaw, readErr := readRecoveryStateBead(store, request.WorkItemID, request.Scope)
+	if readErr == nil {
+		gotAttempt, found, findErr := recoveryAttemptForRequest(readback, request.RequestID, digest)
+		if findErr != nil {
+			return readback, false, 0, findErr
+		}
+		if writeErr == nil {
+			if !found || readbackBead.ID != request.WorkItemID || readbackRaw != string(encoded) || gotAttempt != expectedAttempt {
+				return readback, false, 0, fmt.Errorf("conditional recovery reservation readback differs from the winning write: %w", ErrRecoveryStateInvalid)
+			}
+			return readback, true, readbackBead.Revision, nil
+		}
+		if found {
+			// A maybe-committed or raced write is durable but its caller did not
+			// prove it won. Preserve the reservation and expose no side effect.
+			return readback, false, 0, nil
+		}
+	}
+	if writeErr != nil {
+		if beads.IsPreconditionFailed(writeErr) {
+			return state, false, 0, ErrRecoveryWorkStale
+		}
+		return state, false, 0, errors.Join(writeErr, readErr)
+	}
+	if readErr != nil {
+		return next, false, 0, fmt.Errorf("verify recovery reservation readback: %w", readErr)
+	}
+	// An unrelated row mutation may have committed after the reservation. The
+	// exact state readback above is required before the caller can submit.
+	return readback, false, 0, ErrRecoveryStateInvalid
+}
+
+// RecoveryRequestAttempt reports whether the exact signed request has already
+// consumed a durable reservation. It is read-only and does not authorize an
+// effect. It supports receipt inspection after expiry or controller restart.
+func RecoveryRequestAttempt(store beads.Store, request RecoveryRequest, digest string) (RecoveryState, RecoveryAttempt, bool, error) {
+	if err := validateRecoveryIdentity(store, request.WorkItemID, request.Scope); err != nil {
+		return RecoveryState{}, RecoveryAttempt{}, false, err
+	}
+	if !validRecoveryToken(request.RequestID, 200) || !validDigest(digest) {
+		return RecoveryState{}, RecoveryAttempt{}, false, ErrRecoveryRequestInvalid
+	}
+	state, _, err := readRecoveryState(store, request.WorkItemID, request.Scope)
+	if err != nil {
+		return RecoveryState{}, RecoveryAttempt{}, false, err
+	}
+	attempt, found, err := recoveryAttemptForRequest(state, request.RequestID, digest)
+	return state, attempt, found, err
+}
+
+// ValidateRecoveryTargetTuple verifies the live owner/session tuple and holds
+// without comparing the revision. Use only after a successful reservation
+// whose exact readback revision is separately checked.
+func ValidateRecoveryTargetTuple(work beads.Bead, request RecoveryRequest) error {
+	if work.ID != request.WorkItemID || work.Status != "in_progress" || work.Assignee != request.Owner ||
+		work.Metadata[beadmeta.ClaimGenerationMetadataKey] != request.ClaimGeneration ||
+		work.Metadata[beadmeta.SessionIDMetadataKey] != request.SessionID || hasLifecycleHold(work) {
+		return ErrRecoveryWorkStale
+	}
+	return nil
+}
+
+func recoveryAttemptForRequest(state RecoveryState, requestID, digest string) (RecoveryAttempt, bool, error) {
+	for _, attempt := range state.Attempts {
+		if attempt.RequestID != requestID {
+			continue
+		}
+		if attempt.RequestDigest != digest {
+			return RecoveryAttempt{}, false, ErrRecoveryRequestConflict
+		}
+		return attempt, true, nil
+	}
+	return RecoveryAttempt{}, false, nil
+}
+
+func validateRecoveryTargetRowFromBead(work beads.Bead, request RecoveryRequest) error {
+	if work.ID != request.WorkItemID || work.Revision != request.ExpectedRevision || work.Status != "in_progress" ||
+		work.Assignee != request.Owner || work.Metadata[beadmeta.ClaimGenerationMetadataKey] != request.ClaimGeneration ||
+		work.Metadata[beadmeta.SessionIDMetadataKey] != request.SessionID || hasLifecycleHold(work) {
+		return ErrRecoveryWorkStale
+	}
+	return nil
+}
+
+func validDigest(digest string) bool {
+	if len(digest) != sha256.Size*2 {
+		return false
+	}
+	_, err := hex.DecodeString(digest)
+	return err == nil
 }
 
 func validateRecoveryIdentity(store beads.Store, beadID, scope string) error {
@@ -219,13 +362,18 @@ func validateRecoveryIdentity(store beads.Store, beadID, scope string) error {
 }
 
 func readRecoveryState(store beads.Store, beadID, scope string) (RecoveryState, string, error) {
+	_, state, raw, err := readRecoveryStateBead(store, beadID, scope)
+	return state, raw, err
+}
+
+func readRecoveryStateBead(store beads.Store, beadID, scope string) (beads.Bead, RecoveryState, string, error) {
 	bead, err := store.Get(beadID)
 	if err != nil {
-		return RecoveryState{}, "", fmt.Errorf("read recovery state for %q: %w", beadID, err)
+		return beads.Bead{}, RecoveryState{}, "", fmt.Errorf("read recovery state for %q: %w", beadID, err)
 	}
 	raw := bead.Metadata[beadmeta.LifecycleRecoveryStateMetadataKey]
 	if raw == "" {
-		return RecoveryState{
+		return bead, RecoveryState{
 			Version:    recoveryStateVersion,
 			WorkItemID: beadID,
 			Scope:      scope,
@@ -234,9 +382,9 @@ func readRecoveryState(store beads.Store, beadID, scope string) (RecoveryState, 
 	}
 	state, err := decodeRecoveryState(raw, beadID, scope)
 	if err != nil {
-		return RecoveryState{}, raw, err
+		return bead, RecoveryState{}, raw, err
 	}
-	return state, raw, nil
+	return bead, state, raw, nil
 }
 
 func decodeRecoveryState(raw, beadID, scope string) (RecoveryState, error) {
@@ -264,6 +412,7 @@ func validateRecoveryState(state RecoveryState, beadID, scope string) error {
 		return fmt.Errorf("recovery state for %q has scope %q, want %q: %w", beadID, state.Scope, scope, ErrRecoveryScopeMismatch)
 	}
 	seen := make(map[string]struct{}, len(state.Attempts))
+	seenRequests := make(map[string]string, len(state.Attempts))
 	for _, attempt := range state.Attempts {
 		if !validRecoveryID(attempt.ID) {
 			return fmt.Errorf("recovery state for %q: %w: attempt ID is invalid", beadID, ErrRecoveryStateInvalid)
@@ -274,6 +423,18 @@ func validateRecoveryState(state RecoveryState, beadID, scope string) error {
 		seen[attempt.ID] = struct{}{}
 		if _, err := time.Parse(time.RFC3339Nano, attempt.ReservedAt); err != nil {
 			return fmt.Errorf("recovery state for %q: %w: attempt timestamp is invalid", beadID, ErrRecoveryStateInvalid)
+		}
+		if attempt.RequestID != "" || attempt.RequestDigest != "" || attempt.ExpectedRevision != 0 {
+			if !validRecoveryToken(attempt.RequestID, 200) || !validDigest(attempt.RequestDigest) || attempt.ExpectedRevision <= 0 {
+				return fmt.Errorf("recovery state for %q: %w: request-bound attempt is incomplete", beadID, ErrRecoveryStateInvalid)
+			}
+			if previous, duplicate := seenRequests[attempt.RequestID]; duplicate {
+				if previous != attempt.RequestDigest {
+					return fmt.Errorf("recovery state for %q: %w: request ID has conflicting digests", beadID, ErrRecoveryStateInvalid)
+				}
+				return fmt.Errorf("recovery state for %q: %w: duplicate request ID", beadID, ErrRecoveryStateInvalid)
+			}
+			seenRequests[attempt.RequestID] = attempt.RequestDigest
 		}
 	}
 	if state.Escalation == nil {

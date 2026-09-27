@@ -2430,7 +2430,27 @@ func (s *NativeDoltStore) Delete(id string) error {
 	defer release()
 	ctx, cancel := nativeDoltOperationContext(context.TODO())
 	defer cancel()
-	if err := nativeStoreError(id, storage.DeleteIssue(ctx, id)); err != nil {
+	commitMsg := fmt.Sprintf("gc: delete bead %s", id)
+	err = retryOnNativeDoltSerializationConflict(func() error {
+		return storage.RunInTransaction(ctx, commitMsg, func(tx beadslib.Transaction) error {
+			issue, getErr := tx.GetIssue(ctx, id)
+			if getErr != nil {
+				return nativeStoreError(id, getErr)
+			}
+			if issue == nil {
+				return fmt.Errorf("bead %q: %w", id, ErrNotFound)
+			}
+			current, convertErr := beadFromNativeIssue(issue)
+			if convertErr != nil {
+				return convertErr
+			}
+			if guardErr := ValidateLifecycleDelete(current); guardErr != nil {
+				return fmt.Errorf("deleting lifecycle bead %q: %w", id, guardErr)
+			}
+			return nativeStoreError(id, tx.DeleteIssue(ctx, id))
+		})
+	})
+	if err != nil {
 		return err
 	}
 	if sidecarErr := s.localStrings.DeleteBead(id); sidecarErr != nil {

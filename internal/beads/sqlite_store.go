@@ -1778,6 +1778,13 @@ func (s *SQLiteStore) Delete(id string) error {
 			return fmt.Errorf("sqlite delete: begin tx: %w", err)
 		}
 		defer tx.Rollback() //nolint:errcheck
+		current, err := s.getTx(context.Background(), tx, id)
+		if err != nil {
+			return fmt.Errorf("deleting bead %q: %w", id, err)
+		}
+		if err := ValidateLifecycleDelete(current); err != nil {
+			return fmt.Errorf("deleting lifecycle bead %q: %w", id, err)
+		}
 		res, err := tx.Exec(`DELETE FROM beads WHERE id=?`, id)
 		if err != nil {
 			return fmt.Errorf("deleting bead %q: %w", id, err)

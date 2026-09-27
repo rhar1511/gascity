@@ -419,6 +419,13 @@ func (s *BdStore) CloseIfMatch(id string, expectedRevision int64) error {
 	if capable, _ := s.conditionalWritesCapable(); !capable {
 		return ErrConditionalWriteUnsupported
 	}
+	current, err := s.Get(id)
+	if err != nil {
+		return err
+	}
+	if current.Revision == expectedRevision && HasLifecycleRecoveryIntent(current) {
+		return ErrLifecycleIntentImmutable
+	}
 	args := append(bdCloseArgs("", id), conditionalWriteFlag, strconv.FormatInt(expectedRevision, 10))
 	return s.runConditionalWrite(id, expectedRevision, args...)
 }
@@ -427,6 +434,15 @@ func (s *BdStore) CloseIfMatch(id string, expectedRevision int64) error {
 func (s *BdStore) DeleteIfMatch(id string, expectedRevision int64) error {
 	if capable, _ := s.conditionalWritesCapable(); !capable {
 		return ErrConditionalWriteUnsupported
+	}
+	current, err := s.Get(id)
+	if err != nil {
+		return err
+	}
+	if current.Revision == expectedRevision {
+		if err := ValidateLifecycleDelete(current); err != nil {
+			return err
+		}
 	}
 	args := []string{"delete", "--force", "--json", id, conditionalWriteFlag, strconv.FormatInt(expectedRevision, 10)}
 	return s.runConditionalWrite(id, expectedRevision, args...)
@@ -549,6 +565,9 @@ func (s *BdStore) CompareAndSetMetadataKey(id, key, expected, next string) (bool
 		// those.
 		if b.Metadata[key] != expected {
 			return false, nil
+		}
+		if err := ValidateLifecycleMutation(b, UpdateOpts{Metadata: map[string]string{key: next}}); err != nil {
+			return false, err
 		}
 		// Build the fenced set through bdUpdateArgs so the metadata write carries
 		// the same --json envelope (and future flag handling) as the *IfMatch

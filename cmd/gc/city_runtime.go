@@ -2547,6 +2547,17 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		cr.startHistoricalTranscriptMetaReconcile(ctx)
 	}
 	rigStores := cr.rigBeadStores()
+	recoveryPhaseStart := time.Now()
+	mailProviderName := ""
+	if cr.cfg != nil {
+		mailProviderName = strings.TrimSpace(cr.cfg.Mail.Provider)
+	}
+	if override := strings.TrimSpace(os.Getenv("GC_MAIL")); override != "" {
+		mailProviderName = override
+	}
+	recoveryOutbox := lifecycleRecoveryOutbox{store: cr.mailBeadStore().Store, sessionStore: sessStore.Store, providerName: mailProviderName}
+	reconcileLifecycleRecoveryRequests(ctx, cr.cityName, cr.cityPath, cr.cfg, store, rigStores, sessStore, cr.sp, cr.stderr, recoveryOutbox)
+	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.lifecycle_recovery_requests", recoveryPhaseStart, nil)
 	assignedWorkBeads := result.AssignedWorkBeads
 	assignedWorkStoreRefs := result.AssignedWorkStoreRefs
 	assignedWorkStores := result.AssignedWorkStores

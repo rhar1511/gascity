@@ -20,7 +20,7 @@ func reconcileLifecycleCompletions(cityName, cityPath string, cfg *config.City, 
 	if cfg == nil || !cfg.Lifecycle.AdmissionEnabled || !cfg.Lifecycle.RecoveryEnabled || strings.TrimSpace(cfg.Lifecycle.EscalationTarget) == "" {
 		return
 	}
-	legs, err := routedWorkStoreCandidates(cityPath, cfg, store, rigStores, suspendedRigPaths, censusRefScoped)
+	legs, err := routedWorkStoreCandidates(cityPath, cfg, store, rigStores, suspendedRigPaths)
 	if err != nil {
 		fmt.Fprintf(stderr, "lifecycle completion: resolving stores: %v\n", err) //nolint:errcheck
 		return

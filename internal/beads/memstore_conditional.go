@@ -72,6 +72,9 @@ func (m *MemStore) CloseIfMatch(id string, expectedRevision int64) error {
 	if m.beads[i].Revision != expectedRevision {
 		return &PreconditionFailedError{ID: id, Expected: expectedRevision, Current: m.beads[i].Revision}
 	}
+	if HasLifecycleRecoveryIntent(m.beads[i]) {
+		return ErrLifecycleIntentImmutable
+	}
 	if m.beads[i].Status == "closed" {
 		return nil
 	}
@@ -96,6 +99,9 @@ func (m *MemStore) DeleteIfMatch(id string, expectedRevision int64) error {
 	if m.beads[i].Revision != expectedRevision {
 		return &PreconditionFailedError{ID: id, Expected: expectedRevision, Current: m.beads[i].Revision}
 	}
+	if err := ValidateLifecycleDelete(m.beads[i]); err != nil {
+		return err
+	}
 	m.beads = append(m.beads[:i], m.beads[i+1:]...)
 	return nil
 }
@@ -116,6 +122,9 @@ func (m *MemStore) CompareAndSetMetadataKey(id, key, expected, next string) (boo
 	}
 	if m.beads[i].Metadata[key] != expected {
 		return false, nil
+	}
+	if err := ValidateLifecycleMutation(m.beads[i], UpdateOpts{Metadata: map[string]string{key: next}}); err != nil {
+		return false, err
 	}
 	if m.beads[i].Metadata == nil {
 		m.beads[i].Metadata = make(StringMap)

@@ -40,7 +40,7 @@ func reconcileLifecycleAdmission(
 		return
 	}
 	runner := sling.SlingRunner(shellSlingRunner)
-	legs, err := routedWorkStoreCandidates(cityPath, cfg, store, rigStores, suspendedRigPaths, censusRefScoped)
+	legs, err := routedWorkStoreCandidates(cityPath, cfg, store, rigStores, suspendedRigPaths)
 	if err != nil {
 		fmt.Fprintf(stderr, "lifecycle admission: resolving work stores: %v\n", err) //nolint:errcheck
 		return
@@ -478,12 +478,12 @@ func lifecycleSlingDeps(
 		if err != nil {
 			return sling.SlingDeps{}, "", fmt.Errorf("resolving graph workflow store: %w", err)
 		}
-		storeref.EachLeg(graphPlan, func(leg storeref.Leg, _ storeref.Role, _ storeref.ErrPolicy) {
-			if graphStore == nil {
-				graphStore = leg.Store
-				graphStoreRef = censusRef(cfg, leg.Ref, censusRefScoped)
-			}
-		})
+		graphLeg, err := storeref.ResolvePlacement(graphPlan)
+		if err != nil {
+			return sling.SlingDeps{}, "", fmt.Errorf("resolving graph workflow placement: %w", err)
+		}
+		graphStore = graphLeg.Store
+		graphStoreRef = censusRef(cfg, graphLeg.Ref, censusRefScoped)
 	}
 	if graphStore == nil {
 		return sling.SlingDeps{}, "", fmt.Errorf("graph workflow store is unavailable")
@@ -577,14 +577,12 @@ func lifecycleStoreForRef(cityPath string, cfg *config.City, ref string) (beads.
 		if err != nil {
 			return nil, fmt.Errorf("resolve class %s while looking for %s: %w", class, ref, err)
 		}
-		var exact beads.Store
-		storeref.EachLeg(plan, func(leg storeref.Leg, _ storeref.Role, _ storeref.ErrPolicy) {
-			if exact == nil && censusRef(cfg, leg.Ref, censusRefScoped) == ref {
-				exact = leg.Store
-			}
-		})
-		if exact != nil {
-			return exact, nil
+		leg, err := storeref.ResolvePlacement(plan)
+		if err != nil {
+			return nil, fmt.Errorf("resolve class %s placement while looking for %s: %w", class, ref, err)
+		}
+		if censusRef(cfg, leg.Ref, censusRefScoped) == ref {
+			return leg.Store, nil
 		}
 	}
 	return nil, fmt.Errorf("configured topology has no store named %q", ref)

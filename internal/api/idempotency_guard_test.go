@@ -25,6 +25,7 @@ var requireIdempotency = map[string]bool{
 	"register-extmsg-adapter": true,
 	"emit-event":              true,
 	"post-v0-city":            true,
+	"execute-pr-action":       true,
 }
 
 // pendingIdempotency lists known create operations that are deliberately NOT
@@ -46,6 +47,17 @@ var pendingIdempotency = map[string]bool{
 // be classified, so a new create at ANY status (201, 202, …) that is neither
 // wired nor triaged fails the test.
 var exemptFromIdempotency = map[string]bool{
+	// Tracked session delivery uses the mandatory body request_id as its durable
+	// identity. AcceptRequest rejects changed content/generation on replay and
+	// reserves delivery once; the HTTP replay test asserts one provider send.
+	// Acknowledgement conditionally updates that same request for the exact
+	// session execution. Its path request_id and generation/token checks make
+	// retries idempotent without a second, competing Idempotency-Key identity.
+	// Proof: TestSessionRequestSubmitHTTPPreservesAcceptanceAndSendsOnce and
+	// TestSessionRequestReadAndAcknowledgementHTTP, plus the session CAS tests.
+	"post-v0-city-by-city-name-session-by-id-requests":                   true,
+	"post-v0-city-by-city-name-session-by-id-requests-by-request-id-ack": true,
+
 	// ensure-extmsg-group is identity-idempotent by design: the ensure
 	// semantics (same group in → same group out) make a retry safe without a
 	// key, so wiring one would be dead weight (owner decision, 2026-07-11).

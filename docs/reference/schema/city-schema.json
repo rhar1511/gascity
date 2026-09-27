@@ -1224,6 +1224,10 @@
           "$ref": "#/$defs/LifecycleConfig",
           "description": "Lifecycle configures the opt-in, evidence-backed work admission and\nrecovery contract. Both gates default to disabled; see LifecycleConfig."
         },
+        "rsi": {
+          "$ref": "#/$defs/RSIConfig",
+          "description": "RSI points the controller at trusted signed evaluation and human\napproval records. An unset evaluator leaves promotion fail-closed."
+        },
         "orders": {
           "$ref": "#/$defs/OrdersConfig",
           "description": "Orders configures order settings: skip list, max_timeout cap, and\nper-order overrides."
@@ -1931,6 +1935,13 @@
           "type": "object",
           "description": "AcceptanceAuthorities maps trusted completion authorities to their\nEd25519 public keys. Keys are base64-encoded 32-byte public keys."
         },
+        "recovery_authorities": {
+          "additionalProperties": {
+            "$ref": "#/$defs/LifecycleRecoveryAuthority"
+          },
+          "type": "object",
+          "description": "RecoveryAuthorities maps separately authorized recovery identities to\npublic keys and exact action/store scopes. These keys must differ from\nadmission and acceptance keys. Private recovery keys stay outside city\nconfiguration and the bead store."
+        },
         "escalation_target": {
           "type": "string",
           "description": "EscalationTarget is the configured recipient for one exhaustion\nescalation per work item. Empty deliberately leaves recovery disabled."
@@ -1947,6 +1958,33 @@
       "additionalProperties": false,
       "type": "object",
       "description": "LifecycleConfig controls controller-owned admission and recovery."
+    },
+    "LifecycleRecoveryAuthority": {
+      "properties": {
+        "public_key": {
+          "type": "string"
+        },
+        "actions": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "scopes": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "public_key",
+        "actions",
+        "scopes"
+      ],
+      "description": "LifecycleRecoveryAuthority grants one signing identity exact recovery actions in exact city/store scopes."
     },
     "LocalDoctorCheck": {
       "properties": {
@@ -2636,6 +2674,31 @@
       "additionalProperties": false,
       "type": "object",
       "description": "ProviderSpec defines a named provider's startup parameters."
+    },
+    "RSIConfig": {
+      "properties": {
+        "evaluation_file": {
+          "type": "string"
+        },
+        "evaluation_key_id": {
+          "type": "string"
+        },
+        "evaluation_public_key": {
+          "type": "string"
+        },
+        "human_approval_file": {
+          "type": "string"
+        },
+        "human_approval_key_id": {
+          "type": "string"
+        },
+        "human_approval_public_key": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "RSIConfig points the controller at signed, controller-owned evaluation and human-approval records."
     },
     "Rig": {
       "properties": {

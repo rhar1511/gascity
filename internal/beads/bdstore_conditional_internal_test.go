@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 )
 
@@ -637,6 +638,28 @@ func TestUpdateIfMatchSuccessAppliesFence(t *testing.T) {
 	}
 	if !argvContains(w.writeArgv, "update", "--json", "ga-1", "--title", "renamed", conditionalWriteFlag, "1") {
 		t.Fatalf("fenced update argv missing expected flags: %v", w.writeArgv)
+	}
+}
+
+func TestBdStoreUpdateIfMatchCannotResetRecoveryState(t *testing.T) {
+	const initial = `{"version":1,"work_item_id":"ga-1","scope":"city:pilot/city:pilot","attempts":[{"id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","reserved_at":"2026-09-27T12:00:00Z","request_id":"request-1","request_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","expected_revision":1}]}`
+	const reset = `{"version":1,"work_item_id":"ga-1","scope":"city:pilot/city:pilot","attempts":[]}`
+	w := &scriptedBd{
+		id:       "ga-1",
+		revision: 1,
+		status:   "in_progress",
+		metadata: map[string]string{beadmeta.LifecycleRecoveryStateMetadataKey: initial},
+	}
+	s := NewBdStore("/city", w.runner)
+
+	err := s.UpdateIfMatch("ga-1", 1, UpdateOpts{Metadata: map[string]string{
+		beadmeta.LifecycleRecoveryStateMetadataKey: reset,
+	}})
+	if !errors.Is(err, ErrLifecycleMutationBlocked) {
+		t.Fatalf("UpdateIfMatch recovery-state replacement: got %v, want ErrLifecycleMutationBlocked", err)
+	}
+	if w.writeCalls != 0 {
+		t.Fatalf("blocked recovery-state replacement issued %d writes, want 0", w.writeCalls)
 	}
 }
 

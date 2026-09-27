@@ -17,7 +17,10 @@ func TestParseLifecycleDefaultsDisabled(t *testing.T) {
 }
 
 func TestParseLifecycleValidatesTrustedAuthorities(t *testing.T) {
-	key := base64.StdEncoding.EncodeToString(make([]byte, 32))
+	key := lifecycleTestPublicKey(1)
+	otherKey := lifecycleTestPublicKey(2)
+	recoveryKey := lifecycleTestPublicKey(3)
+	recoveryTable := "[lifecycle.recovery_authorities]\noperator = { public_key = \"" + recoveryKey + "\", actions = [\"nudge\"], scopes = [\"city:test/city:test\"] }\n"
 	cases := []struct {
 		name string
 		toml string
@@ -45,12 +48,27 @@ func TestParseLifecycleValidatesTrustedAuthorities(t *testing.T) {
 		},
 		{
 			name: "recovery requires escalation recipient",
-			toml: "[lifecycle]\nadmission_enabled = true\nrecovery_enabled = true\n[lifecycle.admission_authorities]\ntriage = \"" + key + "\"\n[lifecycle.acceptance_authorities]\nreviewer = \"" + key + "\"\n",
+			toml: "[lifecycle]\nadmission_enabled = true\nrecovery_enabled = true\n[lifecycle.admission_authorities]\ntriage = \"" + key + "\"\n[lifecycle.acceptance_authorities]\nreviewer = \"" + otherKey + "\"\n" + recoveryTable,
 			want: "requires lifecycle.escalation_target",
 		},
 		{
+			name: "recovery requires a separate recovery authority",
+			toml: "[lifecycle]\nadmission_enabled = true\nrecovery_enabled = true\nescalation_target = \"ops\"\n[lifecycle.admission_authorities]\ntriage = \"" + key + "\"\n[lifecycle.acceptance_authorities]\nreviewer = \"" + otherKey + "\"\n",
+			want: "requires at least one recovery authority",
+		},
+		{
+			name: "recovery authority credential is separate",
+			toml: "[lifecycle]\nadmission_enabled = true\nrecovery_enabled = true\nescalation_target = \"ops\"\n[lifecycle.admission_authorities]\ntriage = \"" + key + "\"\n[lifecycle.acceptance_authorities]\nreviewer = \"" + otherKey + "\"\n[lifecycle.recovery_authorities]\noperator = { public_key = \"" + key + "\", actions = [\"nudge\"], scopes = [\"city:test/city:test\"] }\n",
+			want: "credentials separate",
+		},
+		{
+			name: "recovery authority requires explicit scope",
+			toml: "[lifecycle]\nadmission_enabled = true\nrecovery_enabled = true\nescalation_target = \"ops\"\n[lifecycle.admission_authorities]\ntriage = \"" + key + "\"\n[lifecycle.acceptance_authorities]\nreviewer = \"" + otherKey + "\"\n[lifecycle.recovery_authorities]\noperator = { public_key = \"" + recoveryKey + "\", actions = [\"nudge\"], scopes = [\"*\"] }\n",
+			want: "cannot contain wildcards",
+		},
+		{
 			name: "valid opt-in config",
-			toml: "[lifecycle]\nadmission_enabled = true\nrecovery_enabled = true\nescalation_target = \"ops\"\n[lifecycle.admission_authorities]\ntriage = \"" + key + "\"\n[lifecycle.acceptance_authorities]\nreviewer = \"" + key + "\"\n",
+			toml: "[lifecycle]\nadmission_enabled = true\nrecovery_enabled = true\nescalation_target = \"ops\"\n[lifecycle.admission_authorities]\ntriage = \"" + key + "\"\n[lifecycle.acceptance_authorities]\nreviewer = \"" + otherKey + "\"\n" + recoveryTable,
 		},
 	}
 	for _, tc := range cases {
@@ -67,6 +85,12 @@ func TestParseLifecycleValidatesTrustedAuthorities(t *testing.T) {
 			}
 		})
 	}
+}
+
+func lifecycleTestPublicKey(last byte) string {
+	key := make([]byte, 32)
+	key[len(key)-1] = last
+	return base64.StdEncoding.EncodeToString(key)
 }
 
 func TestValidateCompletionFreshnessPolicy(t *testing.T) {

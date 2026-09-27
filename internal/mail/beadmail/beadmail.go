@@ -158,6 +158,73 @@ func (p *Provider) Send(from, to, subject, body string) (mail.Message, error) {
 	return p.sendWithExtraMetadata(from, to, subject, body, nil)
 }
 
+// SendStableID creates one durable outbox message under a caller-supplied ID.
+// It reads archived rows directly from the backing store so restart/archive
+// replay returns the original exact message instead of creating another one.
+func (p *Provider) SendStableID(messageID, from, to, subject, body, key string) (mail.Message, bool, error) {
+	messageID = strings.TrimSpace(messageID)
+	key = strings.TrimSpace(key)
+	if p == nil || p.store == nil || !beads.StableCreateIDFor(p.store) {
+		return mail.Message{}, false, mail.ErrStableIDSendUnsupported
+	}
+	if messageID == "" || key == "" || strings.TrimSpace(to) == "" || strings.TrimSpace(from) == "" {
+		return mail.Message{}, false, fmt.Errorf("beadmail stable send: id, key, sender, and recipient are required: %w", mail.ErrStableIDSendUnsupported)
+	}
+	want := stableOutboxBead(messageID, from, to, subject, body, key)
+	if existing, err := p.store.Get(messageID); err == nil {
+		if !matchesStableOutbox(existing, want) {
+			return mail.Message{}, false, fmt.Errorf("beadmail stable send %q: %w", messageID, mail.ErrStableIDSendConflict)
+		}
+		return beadToMessage(existing), false, nil
+	} else if !errors.Is(err, beads.ErrNotFound) {
+		return mail.Message{}, false, fmt.Errorf("beadmail stable send: read existing %q: %w", messageID, err)
+	}
+	created, createErr := p.store.Create(want)
+	if createErr != nil {
+		readback, readErr := p.store.Get(messageID)
+		if readErr == nil && matchesStableOutbox(readback, want) {
+			return beadToMessage(readback), false, nil
+		}
+		if readErr == nil {
+			readErr = mail.ErrStableIDSendConflict
+		}
+		return mail.Message{}, false, fmt.Errorf("beadmail stable send: create/readback %q: %w", messageID, errors.Join(createErr, readErr))
+	}
+	if !matchesStableOutbox(created, want) {
+		return mail.Message{}, false, fmt.Errorf("beadmail stable send %q: created row changed identity or content: %w", messageID, mail.ErrStableIDSendConflict)
+	}
+	readback, err := p.store.Get(messageID)
+	if err != nil || !matchesStableOutbox(readback, want) {
+		return mail.Message{}, false, fmt.Errorf("beadmail stable send %q: readback failed: %w", messageID, errors.Join(err, mail.ErrStableIDSendConflict))
+	}
+	return beadToMessage(readback), true, nil
+}
+
+func stableOutboxBead(messageID, from, to, subject, body, key string) beads.Bead {
+	return beads.Bead{
+		ID:          messageID,
+		Title:       subject,
+		Description: body,
+		Type:        messageBeadType,
+		Assignee:    to,
+		From:        from,
+		Labels:      []string{"thread:" + messageID},
+		Metadata: map[string]string{
+			mail.StableOutboxMetadataKey: key,
+			mail.DedupKeyMetadataKey:     key,
+		},
+		Ephemeral: false,
+	}
+}
+
+func matchesStableOutbox(got, want beads.Bead) bool {
+	return got.ID == want.ID && got.Type == messageBeadType && got.From == want.From &&
+		got.Assignee == want.Assignee && got.Title == want.Title && got.Description == want.Description &&
+		got.Metadata[mail.StableOutboxMetadataKey] == want.Metadata[mail.StableOutboxMetadataKey] &&
+		got.Metadata[mail.DedupKeyMetadataKey] == want.Metadata[mail.DedupKeyMetadataKey] &&
+		hasLabel(got.Labels, "thread:"+want.ID) && !got.Ephemeral
+}
+
 // sendWithExtraMetadata is the shared body of Send and SendDeduped: resolve
 // the sender route, derive title and thread label, merge extra metadata (the
 // dedup key), and create the message bead.

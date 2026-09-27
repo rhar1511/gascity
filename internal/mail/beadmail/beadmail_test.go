@@ -43,6 +43,23 @@ type messageListProbeStore struct {
 	messageQueries []beads.ListQuery
 }
 
+type stableIDLostCreateResponseStore struct {
+	beads.Store
+	base beads.Store
+}
+
+func (s stableIDLostCreateResponseStore) StableCreateIDResolveTarget() beads.Store {
+	return s.base
+}
+
+func (s stableIDLostCreateResponseStore) Create(b beads.Bead) (beads.Bead, error) {
+	_, err := s.Store.Create(b)
+	if err != nil {
+		return beads.Bead{}, err
+	}
+	return beads.Bead{}, errors.New("simulated lost create response")
+}
+
 func (s *messageListProbeStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 	if query.Type == "message" {
 		s.messageQueries = append(s.messageQueries, query)
@@ -99,6 +116,81 @@ func TestMessageCreatedInWispTier(t *testing.T) {
 	}
 	if !items[0].Ephemeral {
 		t.Fatalf("sent message Ephemeral = false, want true")
+	}
+}
+
+func TestSendStableIDReadbackSurvivesArchiveAndStoreRestart(t *testing.T) {
+	path := t.TempDir()
+	store, err := beads.OpenSQLiteStore(path, beads.WithSQLiteStoreIDPrefix("mail"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := NewWithStores(store, store)
+	want := struct {
+		id, from, to, subject, body, key string
+	}{"mail-lifecycle-one", "gc-controller", "oncall", "Recovery needed", "work item needs review", "recovery-scope-work-request"}
+	created, isNew, err := first.SendStableID(want.id, want.from, want.to, want.subject, want.body, want.key)
+	if err != nil || !isNew {
+		t.Fatalf("first stable send = (%+v, %t, %v), want a new durable row", created, isNew, err)
+	}
+	row, err := store.Get(want.id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.Ephemeral || row.Metadata[mail.StableOutboxMetadataKey] != want.key {
+		t.Fatalf("stable outbox row is not durable or marked: %+v", row)
+	}
+	if err := first.Archive(want.id); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.(interface{ CloseStore() error }).CloseStore(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = beads.OpenSQLiteStore(path, beads.WithSQLiteStoreIDPrefix("mail"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.(interface{ CloseStore() error }).CloseStore() //nolint:errcheck
+	second := NewWithStores(store, store)
+	replayed, isNew, err := second.SendStableID(want.id, want.from, want.to, want.subject, want.body, want.key)
+	if err != nil || isNew || replayed.ID != created.ID {
+		t.Fatalf("archived/restarted replay = (%+v, %t, %v), want same existing message", replayed, isNew, err)
+	}
+	rows, err := store.List(beads.ListQuery{Type: messageBeadType, Status: "closed", TierMode: beads.TierBoth, AllowScan: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].ID != want.id || rows[0].Status != "closed" {
+		t.Fatalf("archived stable outbox rows = %+v, want exactly one retained closed row", rows)
+	}
+	if _, _, err := second.SendStableID(want.id, want.from, want.to, want.subject, "changed", want.key); !errors.Is(err, mail.ErrStableIDSendConflict) {
+		t.Fatalf("changed replay error = %v, want ErrStableIDSendConflict", err)
+	}
+}
+
+func TestSendStableIDResolvesAmbiguousCreateByExactReadback(t *testing.T) {
+	base := &beads.MemStore{IDPrefix: "mail", HonorExplicitIDs: true}
+	store := stableIDLostCreateResponseStore{Store: base, base: base}
+	provider := NewWithStores(store, base)
+	message, created, err := provider.SendStableID("mail-lifecycle-ambiguous", "gc-controller", "oncall", "Recovery needed", "body", "dedup-1")
+	if err != nil || created || message.ID != "mail-lifecycle-ambiguous" {
+		t.Fatalf("ambiguous create = (%+v, %t, %v), want exact readback with created=false", message, created, err)
+	}
+	row, err := base.Get(message.ID)
+	if err != nil || row.Ephemeral {
+		t.Fatalf("ambiguous stable outbox row = (%+v, %v), want durable persisted row", row, err)
+	}
+}
+
+func TestSendStableIDFailsClosedWithoutDurableIDCapability(t *testing.T) {
+	store := beads.NewMemStore()
+	provider := New(store)
+	_, _, err := provider.SendStableID("mail-lifecycle-unsupported", "gc-controller", "oncall", "subject", "body", "key")
+	if !errors.Is(err, mail.ErrStableIDSendUnsupported) {
+		t.Fatalf("unsupported stable send error = %v, want ErrStableIDSendUnsupported", err)
+	}
+	if rows, err := store.List(beads.ListQuery{Type: messageBeadType, TierMode: beads.TierBoth, AllowScan: true}); err != nil || len(rows) != 0 {
+		t.Fatalf("unsupported stable send wrote rows=%+v err=%v", rows, err)
 	}
 }
 

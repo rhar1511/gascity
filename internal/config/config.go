@@ -277,6 +277,9 @@ type City struct {
 	// Lifecycle configures the opt-in, evidence-backed work admission and
 	// recovery contract. Both gates default to disabled; see LifecycleConfig.
 	Lifecycle LifecycleConfig `toml:"lifecycle,omitempty"`
+	// RSI points the controller at trusted signed evaluation and human
+	// approval records. An unset evaluator leaves promotion fail-closed.
+	RSI RSIConfig `toml:"rsi,omitempty"`
 	// Orders configures order settings: skip list, max_timeout cap, and
 	// per-order overrides.
 	Orders OrdersConfig `toml:"orders,omitempty"`
@@ -4750,6 +4753,9 @@ func Parse(data []byte) (*City, error) {
 		return nil, err
 	}
 	if err := validateLifecycleConfig(cfg.Lifecycle); err != nil {
+		return nil, err
+	}
+	if err := validateRSIConfig(cfg.RSI); err != nil {
 		return nil, err
 	}
 	// Parse sees one layer. Cross-layer storage invariants (six-class

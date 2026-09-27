@@ -10,8 +10,21 @@ import (
 func recordingBdRunner(calls *[][]string) CommandRunner {
 	return func(_, name string, args ...string) ([]byte, error) {
 		*calls = append(*calls, append([]string{name}, args...))
+		if len(args) > 0 && (args[0] == "list" || args[0] == "query") {
+			return []byte("[]"), nil
+		}
 		return []byte("{}"), nil
 	}
+}
+
+func deleteCallCount(calls [][]string) int {
+	count := 0
+	for _, call := range calls {
+		if len(call) > 1 && call[1] == "delete" {
+			count++
+		}
+	}
+	return count
 }
 
 func TestBdStoreDeleteBatchBatchesInOneCall(t *testing.T) {
@@ -20,10 +33,15 @@ func TestBdStoreDeleteBatchBatchesInOneCall(t *testing.T) {
 	if err := s.DeleteBatch([]string{"a", "b", "c"}); err != nil {
 		t.Fatalf("DeleteBatch: %v", err)
 	}
-	if len(calls) != 1 {
-		t.Fatalf("want 1 batched bd call, got %d: %v", len(calls), calls)
+	if deleteCallCount(calls) != 1 {
+		t.Fatalf("want 1 batched delete command, got calls=%v", calls)
 	}
-	got := strings.Join(calls[0], " ")
+	var got string
+	for _, call := range calls {
+		if len(call) > 1 && call[1] == "delete" {
+			got = strings.Join(call, " ")
+		}
+	}
 	for _, want := range []string{"bd", "delete", "a", "b", "c", "--force"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("batched call %q missing %q", got, want)
@@ -48,8 +66,8 @@ func TestBdStoreDeleteBatchChunksLargeSets(t *testing.T) {
 	if err := s.DeleteBatch(ids); err != nil {
 		t.Fatalf("DeleteBatch: %v", err)
 	}
-	if len(calls) != 2 {
-		t.Fatalf("want 2 chunked calls for %d ids (chunk=%d), got %d", n, bdDeleteBatchChunk, len(calls))
+	if deleteCallCount(calls) != 2 {
+		t.Fatalf("want 2 chunked delete commands for %d ids (chunk=%d), got calls=%d: %v", n, bdDeleteBatchChunk, deleteCallCount(calls), calls)
 	}
 }
 
@@ -72,7 +90,10 @@ func TestBdStoreDeleteBatchEmptyIsNoop(t *testing.T) {
 // treating the whole batch as untouched.
 func TestBdStoreDeleteBatchReportsCommittedOnLaterChunkFailure(t *testing.T) {
 	var call int
-	runner := func(_, _ string, _ ...string) ([]byte, error) {
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		if len(args) > 0 && (args[0] == "list" || args[0] == "query") {
+			return []byte("[]"), nil
+		}
 		call++
 		if call == 2 { // second chunk fails after the first committed
 			return nil, errors.New("bd delete: backend unavailable")
@@ -105,7 +126,10 @@ func TestBdStoreDeleteBatchReportsCommittedOnLaterChunkFailure(t *testing.T) {
 // A first-chunk failure has committed nothing, so the reported committed set is
 // empty and a caching layer leaves the cache untouched.
 func TestBdStoreDeleteBatchReportsNoCommittedOnFirstChunkFailure(t *testing.T) {
-	runner := func(_, _ string, _ ...string) ([]byte, error) {
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		if len(args) > 0 && (args[0] == "list" || args[0] == "query") {
+			return []byte("[]"), nil
+		}
 		return nil, errors.New("bd delete: backend unavailable")
 	}
 	s := NewBdStore("/city", runner)
