@@ -364,6 +364,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 
 	// Sessions (non-stream — stream is the SSE registration below).
 	registerSessionRequestRoutes(sm)
+	registerLifecycleRecoveryRoutes(sm)
 	cityRegister(sm, huma.Operation{
 		OperationID:   "create-session",
 		Method:        http.MethodPost,

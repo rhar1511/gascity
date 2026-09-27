@@ -702,6 +702,9 @@ func (m *MemStore) Delete(id string) error {
 			if err := protectAttemptEvidenceDelete(b); err != nil {
 				return err
 			}
+			if err := ValidateLifecycleDelete(b); err != nil {
+				return fmt.Errorf("deleting lifecycle bead %q: %w", id, err)
+			}
 			m.beads = append(m.beads[:i], m.beads[i+1:]...)
 			delete(m.localStrings, id)
 			return nil

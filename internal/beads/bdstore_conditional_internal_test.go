@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 )
 
@@ -640,6 +641,28 @@ func TestUpdateIfMatchSuccessAppliesFence(t *testing.T) {
 	}
 }
 
+func TestBdStoreUpdateIfMatchCannotResetRecoveryState(t *testing.T) {
+	const initial = `{"version":1,"work_item_id":"ga-1","scope":"city:pilot/city:pilot","attempts":[{"id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","reserved_at":"2026-09-27T12:00:00Z","request_id":"request-1","request_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","expected_revision":1}]}`
+	const reset = `{"version":1,"work_item_id":"ga-1","scope":"city:pilot/city:pilot","attempts":[]}`
+	w := &scriptedBd{
+		id:       "ga-1",
+		revision: 1,
+		status:   "in_progress",
+		metadata: map[string]string{beadmeta.LifecycleRecoveryStateMetadataKey: initial},
+	}
+	s := NewBdStore("/city", w.runner)
+
+	err := s.UpdateIfMatch("ga-1", 1, UpdateOpts{Metadata: map[string]string{
+		beadmeta.LifecycleRecoveryStateMetadataKey: reset,
+	}})
+	if !errors.Is(err, ErrLifecycleMutationBlocked) {
+		t.Fatalf("UpdateIfMatch recovery-state replacement: got %v, want ErrLifecycleMutationBlocked", err)
+	}
+	if w.writeCalls != 0 {
+		t.Fatalf("blocked recovery-state replacement issued %d writes, want 0", w.writeCalls)
+	}
+}
+
 func TestUpdateIfMatchEmptyOptsIsTypedErrorNoWrite(t *testing.T) {
 	// Pinned cross-store contract: an empty fenced update is invalid input
 	// (ErrEmptyConditionalUpdate) — never a silent nil, never a fence write.
@@ -719,6 +742,17 @@ func TestUpdateIfMatchRuntimeUnsupportedLatches(t *testing.T) {
 	}
 	if w.writeCalls != 1 {
 		t.Fatalf("latched store attempted another write: writeCalls = %d, want 1", w.writeCalls)
+	}
+}
+
+func TestBdStoreDeleteIfMatchProtectsAttemptArchive(t *testing.T) {
+	w := &scriptedBd{id: "ga-archive", revision: 4, status: "closed", metadata: protectedAttemptEvidenceBead().Metadata}
+	s := NewBdStore("/city", w.runner)
+	if err := s.DeleteIfMatch(w.id, w.revision); !errors.Is(err, ErrProtectedAttemptEvidenceArchive) {
+		t.Fatalf("DeleteIfMatch archive = %v, want protected archive", err)
+	}
+	if w.deleted || w.writeCalls != 0 {
+		t.Fatalf("archive deletion reached writer: deleted=%v writes=%d", w.deleted, w.writeCalls)
 	}
 }
 

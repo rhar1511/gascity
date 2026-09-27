@@ -1619,6 +1619,12 @@ export type InputRoot = {
     unavailable_reason?: string;
 };
 
+export type LifecycleRecoverySubmitOutputBody = {
+    intent_id: string;
+    request_id: string;
+    status: string;
+};
+
 export type ListBodyAgentPatch = {
     /**
      * The list of items.
@@ -2982,6 +2988,24 @@ export type Record = {
     severity: string;
     source_path?: string;
     source_pid?: number;
+};
+
+export type RecoveryRequest = {
+    action: string;
+    authorized_by: string;
+    claim_generation: string;
+    expected_revision: number;
+    expires_at: string;
+    issued_at: string;
+    message: string;
+    owner: string;
+    request_id: string;
+    scope: string;
+    session_generation: string;
+    session_id: string;
+    signature: string;
+    version: number;
+    work_item_id: string;
 };
 
 export type RequestAttemptBinding = {
@@ -14564,6 +14588,66 @@ export type GetV0CityByCityNameHealthResponses = {
 };
 
 export type GetV0CityByCityNameHealthResponse = GetV0CityByCityNameHealthResponses[keyof GetV0CityByCityNameHealthResponses];
+
+export type SubmitLifecycleRecoveryRequestData = {
+    body: RecoveryRequest;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/lifecycle/recovery-requests';
+};
+
+export type SubmitLifecycleRecoveryRequestErrors = {
+    /**
+     * Bad Request
+     */
+    400: ErrorModel;
+    /**
+     * Forbidden
+     */
+    403: ErrorModel;
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type SubmitLifecycleRecoveryRequestError = SubmitLifecycleRecoveryRequestErrors[keyof SubmitLifecycleRecoveryRequestErrors];
+
+export type SubmitLifecycleRecoveryRequestResponses = {
+    /**
+     * Accepted
+     */
+    202: LifecycleRecoverySubmitOutputBody;
+};
+
+export type SubmitLifecycleRecoveryRequestResponse = SubmitLifecycleRecoveryRequestResponses[keyof SubmitLifecycleRecoveryRequestResponses];
 
 export type GetV0CityByCityNameMailData = {
     body?: never;

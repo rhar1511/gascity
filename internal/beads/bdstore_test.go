@@ -3510,6 +3510,9 @@ func TestBdStoreDeleteRemovesLocalStrings(t *testing.T) {
 		if name != "bd" {
 			return nil, fmt.Errorf("unexpected command name %q", name)
 		}
+		if len(args) > 0 && args[0] == "show" {
+			return []byte(`[{"id":"bd-1","title":"one","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
+		}
 		if len(args) == 0 || args[0] != "delete" {
 			return nil, fmt.Errorf("unexpected command: bd %s", strings.Join(args, " "))
 		}

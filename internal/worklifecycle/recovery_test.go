@@ -123,7 +123,7 @@ func TestAmbiguousRecoveryReservationConsumesBudgetWithoutAuthorizingEffect(t *t
 	store := beads.NewMemStore()
 	beadID := recoveryWorkItem(t, store)
 	ambiguous := errors.New("CAS committed but response was lost")
-	wrapped := &ambiguousRecoveryCASStore{Store: store, writer: store, err: ambiguous}
+	wrapped := &ambiguousRecoveryCASStore{Store: store, ConditionalWriter: store, err: ambiguous}
 
 	state, reserved, err := ReserveRecoveryAttempt(wrapped, beadID, recoveryTestScope)
 	if reserved || !errors.Is(err, ambiguous) {
@@ -306,8 +306,12 @@ func TestRecoveryCASUnsupportedFailsClosed(t *testing.T) {
 func TestMalformedRecoveryStateFailsClosed(t *testing.T) {
 	store := beads.NewMemStore()
 	beadID := recoveryWorkItem(t, store)
-	if swapped, err := store.CompareAndSetMetadataKey(beadID, beadmeta.LifecycleRecoveryStateMetadataKey, "", `{"version":1,"work_item_id":"wrong-item","attempts":[]}`); err != nil || !swapped {
-		t.Fatalf("seed malformed state = (%v, %v)", swapped, err)
+	bead, err := store.Get(beadID)
+	if err != nil {
+		t.Fatalf("read seed bead: %v", err)
+	}
+	if err := beads.UpdateLifecycleRecoveryStateIfMatch(store, beadID, bead.Revision, "", `{"version":1,"work_item_id":"wrong-item","attempts":[]}`); err != nil {
+		t.Fatalf("seed malformed state through trusted lifecycle writer: %v", err)
 	}
 	state, reserved, err := ReserveRecoveryAttempt(store, beadID, recoveryTestScope)
 	if reserved || !errors.Is(err, ErrRecoveryStateInvalid) {
@@ -372,20 +376,20 @@ type recoveryNoCASStore struct{ beads.Store }
 
 type ambiguousRecoveryCASStore struct {
 	beads.Store
-	writer beads.MetadataCASWriter
-	err    error
-	once   sync.Once
+	beads.ConditionalWriter
+	err  error
+	once sync.Once
 }
 
-func (s *ambiguousRecoveryCASStore) CompareAndSetMetadataKey(id, key, expected, next string) (bool, error) {
-	swapped, err := s.writer.CompareAndSetMetadataKey(id, key, expected, next)
-	if err != nil || !swapped {
-		return swapped, err
+func (s *ambiguousRecoveryCASStore) UpdateIfMatch(id string, expectedRevision int64, opts beads.UpdateOpts) error {
+	err := s.ConditionalWriter.UpdateIfMatch(id, expectedRevision, opts)
+	if err != nil {
+		return err
 	}
 	var result error
 	s.once.Do(func() { result = s.err })
 	if result != nil {
-		return false, result
+		return result
 	}
-	return swapped, nil
+	return nil
 }

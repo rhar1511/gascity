@@ -1,6 +1,7 @@
 package exec //nolint:revive // internal package, always imported with alias
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -9,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
@@ -67,6 +69,35 @@ case "$op" in
   *) exit 2 ;;  # unknown operation
 esac
 `
+}
+
+func TestDeleteProtectsAttemptArchive(t *testing.T) {
+	dir := t.TempDir()
+	archive := beads.Bead{ID: "EX-archive", Status: "closed", Metadata: beads.StringMap{
+		beadmeta.AttemptEvidenceArchiveAttemptIDMetadataKey: "attempt-1",
+		beadmeta.AttemptEvidenceArchiveOwnerIDMetadataKey:   "work-1",
+		beadmeta.AttemptEvidenceArchivePayloadMetadataKey:   "{}",
+	}}
+	data, err := json.Marshal(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "archive.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	script := writeScript(t, dir, `
+case "$1" in
+  get) cat "$(dirname "$0")/archive.json" ;;
+  delete) touch "$(dirname "$0")/deleted" ;;
+  *) exit 2 ;;
+esac
+`)
+	if err := NewStore(script).Delete(archive.ID); !errors.Is(err, beads.ErrProtectedAttemptEvidenceArchive) {
+		t.Fatalf("Delete archive = %v, want protected archive", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "deleted")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("archive deletion reached script: %v", err)
+	}
 }
 
 func TestCreate(t *testing.T) {

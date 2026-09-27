@@ -48,6 +48,9 @@ func (s *SQLiteStore) CloseIfMatch(id string, expectedRevision int64) error {
 		return err
 	}
 	return s.conditionalWrite(id, expectedRevision, func(ctx context.Context, tx *sql.Tx, b Bead) error {
+		if HasLifecycleRecoveryIntent(b) {
+			return ErrLifecycleIntentImmutable
+		}
 		b.Status = "closed"
 		b.UpdatedAt = time.Now()
 		return s.upsertBeadTx(ctx, tx, b)
@@ -61,6 +64,9 @@ func (s *SQLiteStore) DeleteIfMatch(id string, expectedRevision int64) error {
 	}
 	return s.conditionalWrite(id, expectedRevision, func(ctx context.Context, tx *sql.Tx, current Bead) error {
 		if err := protectAttemptEvidenceDelete(current); err != nil {
+			return err
+		}
+		if err := ValidateLifecycleDelete(current); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(`DELETE FROM beads WHERE id=?`, id); err != nil {
@@ -107,6 +113,9 @@ func (s *SQLiteStore) CompareAndSetMetadataKey(id, key, expected, next string) (
 		}
 		if b.Metadata[key] != expected {
 			return tx.Commit() // genuine mismatch: caller lost, not an error
+		}
+		if err := ValidateLifecycleMutation(b, UpdateOpts{Metadata: map[string]string{key: next}}); err != nil {
+			return err
 		}
 		if b.Metadata == nil {
 			b.Metadata = make(map[string]string, 1)
@@ -233,6 +242,14 @@ func (s *SQLiteStore) deleteBatchChunk(chunk []string) error {
 		args := make([]any, 0, len(chunk))
 		placeholders := make([]string, 0, len(chunk))
 		for _, id := range chunk {
+			current, getErr := s.getTx(ctx, tx, id)
+			if getErr == nil {
+				if err := ValidateLifecycleDelete(current); err != nil {
+					return fmt.Errorf("deleting lifecycle bead %q: %w", id, err)
+				}
+			} else if !errors.Is(getErr, ErrNotFound) {
+				return fmt.Errorf("reading bead %q before batch delete: %w", id, getErr)
+			}
 			args = append(args, id)
 			placeholders = append(placeholders, "?")
 		}

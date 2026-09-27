@@ -536,9 +536,20 @@ LifecycleConfig controls controller-owned admission and recovery.
 | `recovery_enabled` | boolean |  |  | RecoveryEnabled permits the controller lifecycle recovery policy. It is separately gated because an admission authority does not grant permission to recover work. Defaults to false. |
 | `admission_authorities` | map[string]string |  |  | AdmissionAuthorities maps trusted triage/contract authors to their Ed25519 public keys. Keys are base64-encoded 32-byte public keys. |
 | `acceptance_authorities` | map[string]string |  |  | AcceptanceAuthorities maps trusted completion authorities to their Ed25519 public keys. Keys are base64-encoded 32-byte public keys. |
+| `recovery_authorities` | map[string]LifecycleRecoveryAuthority |  |  | RecoveryAuthorities maps separately authorized recovery identities to public keys and exact action/store scopes. These keys must differ from admission and acceptance keys. Private recovery keys stay outside city configuration and the bead store. |
 | `escalation_target` | string |  |  | EscalationTarget is the configured recipient for one exhaustion escalation per work item. Empty deliberately leaves recovery disabled. |
 | `completion_receipt_max_age` | string |  |  | CompletionReceiptMaxAge bounds how long after signing an acceptance receipt may close work. Operators must choose this from their acceptance and rollout policy; no default is inferred. Empty disables completion reconciliation. |
 | `completion_clock_skew` | string |  |  | CompletionClockSkew is the largest accepted future timestamp allowance. Operators must choose this from expected signer/controller clock drift. It must be set with CompletionReceiptMaxAge; empty disables completion reconciliation rather than choosing a controller-specific default. |
+
+## LifecycleRecoveryAuthority
+
+LifecycleRecoveryAuthority grants one signing identity exact recovery actions in exact city/store scopes.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `public_key` | string | **yes** |  |  |
+| `actions` | []string | **yes** |  |  |
+| `scopes` | []string | **yes** |  |  |
 
 ## LocalDoctorCheck
 

@@ -23,6 +23,10 @@ var ErrLifecycleMutationBlocked = errors.New("lifecycle-enrolled work cannot be 
 // work that lacks the controller's verified conditional-completion path.
 var ErrLifecycleCompletionRequired = errors.New("lifecycle source work requires verified completion before close")
 
+// ErrLifecycleIntentImmutable reports a generic mutation or deletion of a
+// durable signed recovery request.
+var ErrLifecycleIntentImmutable = errors.New("durable lifecycle recovery intents are immutable")
+
 // ErrIDCollision is returned when bd's fuzzy/substring resolver returns a bead
 // whose ID differs from the requested ID (e.g. "gcy-dv7" resolves to
 // "gcy-wisp-dv78"). This is a distinct sub-case of not-found: the requested
@@ -238,6 +242,10 @@ type UpdateOpts struct {
 	Labels       []string // append these labels (nil = no change)
 	RemoveLabels []string // remove these labels (nil = no change)
 	Metadata     map[string]string
+	// lifecycleRecoveryStateWrite is set only by
+	// UpdateLifecycleRecoveryStateIfMatch. Public mutation paths cannot write
+	// the durable recovery budget, even when they replace it with valid JSON.
+	lifecycleRecoveryStateWrite bool
 }
 
 // HasLifecycleEvidence reports controller lifecycle enrollment persisted on
@@ -271,6 +279,9 @@ func HasLifecycleAdmissionReceipt(b Bead) bool {
 // revision; graph workflow roots and descendants do not carry the source
 // admission receipt and keep their normal step-completion behavior.
 func ValidateLifecycleClose(current Bead) error {
+	if HasLifecycleRecoveryIntent(current) {
+		return ErrLifecycleIntentImmutable
+	}
 	if !strings.EqualFold(strings.TrimSpace(current.Status), "closed") && HasLifecycleAdmissionReceipt(current) {
 		return ErrLifecycleCompletionRequired
 	}
@@ -282,6 +293,12 @@ func ValidateLifecycleClose(current Bead) error {
 // verified acceptance. An intentional retry must be represented as a
 // separately authorized fresh work item.
 func ValidateLifecycleMutation(current Bead, opts UpdateOpts) error {
+	if HasLifecycleRecoveryIntent(current) {
+		return ErrLifecycleIntentImmutable
+	}
+	if _, writingRecoveryState := opts.Metadata[beadmeta.LifecycleRecoveryStateMetadataKey]; writingRecoveryState && !opts.lifecycleRecoveryStateWrite {
+		return ErrLifecycleMutationBlocked
+	}
 	if opts.Status != nil && strings.EqualFold(strings.TrimSpace(*opts.Status), "closed") &&
 		!strings.EqualFold(strings.TrimSpace(current.Status), "closed") && HasLifecycleAdmissionReceipt(current) {
 		return ErrLifecycleCompletionRequired
@@ -311,6 +328,61 @@ func ValidateLifecycleMutation(current Bead, opts UpdateOpts) error {
 			strings.TrimSpace(opts.Metadata[key]) == "" {
 			return ErrLifecycleMutationBlocked
 		}
+	}
+	return nil
+}
+
+// UpdateLifecycleRecoveryStateIfMatch is the trusted controller write path for
+// the durable recovery budget. Generic Update/SetMetadata/metadata-CAS paths
+// cannot replace that state. This method requires a conditional writer and
+// fences the update to the caller's opaque row revision and the exact metadata
+// value it read.
+func UpdateLifecycleRecoveryStateIfMatch(store Store, id string, expectedRevision int64, expectedState, nextState string) error {
+	if store == nil {
+		return errors.New("lifecycle recovery state store is required")
+	}
+	writer, ok := ConditionalWriterFor(store)
+	if !ok {
+		return ErrConditionalWriteUnsupported
+	}
+	current, err := store.Get(id)
+	if err != nil {
+		return err
+	}
+	if current.ID != id || current.Revision != expectedRevision || current.Metadata[beadmeta.LifecycleRecoveryStateMetadataKey] != expectedState {
+		return &PreconditionFailedError{ID: id, Expected: expectedRevision, Current: current.Revision}
+	}
+	return writer.UpdateIfMatch(id, expectedRevision, UpdateOpts{
+		Metadata:                    map[string]string{beadmeta.LifecycleRecoveryStateMetadataKey: nextState},
+		lifecycleRecoveryStateWrite: true,
+	})
+}
+
+// HasLifecycleRecoveryIntent treats any non-empty request or digest marker as
+// durable intent evidence. Malformed rows remain protected so corruption
+// cannot make a controller request editable or deletable through a generic
+// store operation.
+func HasLifecycleRecoveryIntent(b Bead) bool {
+	return strings.TrimSpace(b.Metadata[beadmeta.LifecycleRecoveryIntentMetadataKey]) != "" ||
+		strings.TrimSpace(b.Metadata[beadmeta.LifecycleRecoveryIntentDigestKey]) != ""
+}
+
+// HasLifecycleRecoveryState treats any non-empty recovery ledger as durable
+// evidence. Malformed state remains protected so corruption cannot reset the
+// bounded recovery budget by making the row appear uninitialized.
+func HasLifecycleRecoveryState(b Bead) bool {
+	return strings.TrimSpace(b.Metadata[beadmeta.LifecycleRecoveryStateMetadataKey]) != ""
+}
+
+// ValidateLifecycleDelete prevents ordinary and conditional store delete
+// paths from erasing a durable recovery authorization or its bounded action
+// history before the outcome can be reconciled.
+func ValidateLifecycleDelete(current Bead) error {
+	if HasLifecycleRecoveryIntent(current) {
+		return ErrLifecycleIntentImmutable
+	}
+	if HasLifecycleRecoveryState(current) {
+		return ErrLifecycleMutationBlocked
 	}
 	return nil
 }
@@ -675,6 +747,7 @@ var readyExcludeTypes = map[string]bool{
 	"role":                   true, // agent role definitions
 	"rig":                    true, // rig identity beads
 	"startup-health-episode": true, // per-session-name bookkeeping record, never actionable Ready work (ga-o04bfr.1.1)
+	"lifecycle-intent":       true, // signed controller requests are not actionable work
 }
 
 var readyBlockingDependencyTypes = map[string]bool{

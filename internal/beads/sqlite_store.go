@@ -1782,12 +1782,15 @@ func (s *SQLiteStore) Delete(id string) error {
 			return fmt.Errorf("sqlite delete: begin tx: %w", err)
 		}
 		defer tx.Rollback() //nolint:errcheck
-		protected, err := sqliteAttemptEvidenceArchiveIDTx(context.Background(), tx, id)
+		current, err := s.getTx(context.Background(), tx, id)
 		if err != nil {
-			return fmt.Errorf("deleting bead %q: checking archive protection: %w", id, err)
+			return fmt.Errorf("deleting bead %q: %w", id, err)
 		}
-		if protected {
-			return fmt.Errorf("deleting bead %q: %w", id, ErrProtectedAttemptEvidenceArchive)
+		if err := protectAttemptEvidenceDelete(current); err != nil {
+			return err
+		}
+		if err := ValidateLifecycleDelete(current); err != nil {
+			return fmt.Errorf("deleting lifecycle bead %q: %w", id, err)
 		}
 		res, err := tx.Exec(`DELETE FROM beads WHERE id=?`, id)
 		if err != nil {
@@ -2014,11 +2017,20 @@ func (s *SQLiteStore) purgeTerminal(ctx context.Context, olderThan time.Duration
 		  AND EXISTS (SELECT 1 FROM metadata o WHERE o.bead_id=beads.id AND o.meta_key=? AND o.meta_value<>'')
 		  AND EXISTS (SELECT 1 FROM metadata p WHERE p.bead_id=beads.id AND p.meta_key=? AND p.meta_value<>'')
 		  )
+		  AND NOT EXISTS (
+			SELECT 1 FROM metadata m
+			WHERE m.bead_id=beads.id
+			  AND m.meta_key IN (?,?,?)
+			  AND TRIM(m.meta_value) <> ''
+		  )
 		ORDER BY updated_at ASC
 		LIMIT 1000`, cutoff,
 		beadmeta.AttemptEvidenceArchiveAttemptIDMetadataKey,
 		beadmeta.AttemptEvidenceArchiveOwnerIDMetadataKey,
-		beadmeta.AttemptEvidenceArchivePayloadMetadataKey)
+		beadmeta.AttemptEvidenceArchivePayloadMetadataKey,
+		beadmeta.LifecycleRecoveryStateMetadataKey,
+		beadmeta.LifecycleRecoveryIntentMetadataKey,
+		beadmeta.LifecycleRecoveryIntentDigestKey)
 	if err != nil {
 		return 0, fmt.Errorf("sqlite purge terminal query: %w", err)
 	}

@@ -2400,6 +2400,13 @@ type InputRoot struct {
 	UnavailableReason  *string `json:"unavailable_reason,omitempty"`
 }
 
+// LifecycleRecoverySubmitOutputBody defines model for LifecycleRecoverySubmitOutputBody.
+type LifecycleRecoverySubmitOutputBody struct {
+	IntentId  string `json:"intent_id"`
+	RequestId string `json:"request_id"`
+	Status    string `json:"status"`
+}
+
 // ListBodyAgentPatch defines model for ListBodyAgentPatch.
 type ListBodyAgentPatch struct {
 	// Items The list of items.
@@ -3574,6 +3581,25 @@ type Record struct {
 	Severity   string             `json:"severity"`
 	SourcePath *string            `json:"source_path,omitempty"`
 	SourcePid  *int64             `json:"source_pid,omitempty"`
+}
+
+// RecoveryRequest defines model for RecoveryRequest.
+type RecoveryRequest struct {
+	Action            string `json:"action"`
+	AuthorizedBy      string `json:"authorized_by"`
+	ClaimGeneration   string `json:"claim_generation"`
+	ExpectedRevision  int64  `json:"expected_revision"`
+	ExpiresAt         string `json:"expires_at"`
+	IssuedAt          string `json:"issued_at"`
+	Message           string `json:"message"`
+	Owner             string `json:"owner"`
+	RequestId         string `json:"request_id"`
+	Scope             string `json:"scope"`
+	SessionGeneration string `json:"session_generation"`
+	SessionId         string `json:"session_id"`
+	Signature         string `json:"signature"`
+	Version           int64  `json:"version"`
+	WorkItemId        string `json:"work_item_id"`
 }
 
 // RequestAttemptBinding defines model for RequestAttemptBinding.
@@ -9999,6 +10025,12 @@ type PostV0CityByCityNameFormulasByNameValidateParams struct {
 	XGCRequest string `json:"X-GC-Request"`
 }
 
+// SubmitLifecycleRecoveryRequestParams defines parameters for SubmitLifecycleRecoveryRequest.
+type SubmitLifecycleRecoveryRequestParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
 // GetV0CityByCityNameMailParams defines parameters for GetV0CityByCityNameMail.
 type GetV0CityByCityNameMailParams struct {
 	// Index Event sequence number; when provided, blocks until a newer event arrives.
@@ -10670,6 +10702,9 @@ type PostV0CityByCityNameExtmsgUnbindJSONRequestBody = ExtMsgUnbindInputBody
 
 // PostV0CityByCityNameFormulasByNamePreviewJSONRequestBody defines body for PostV0CityByCityNameFormulasByNamePreview for application/json ContentType.
 type PostV0CityByCityNameFormulasByNamePreviewJSONRequestBody = FormulaPreviewBody
+
+// SubmitLifecycleRecoveryRequestJSONRequestBody defines body for SubmitLifecycleRecoveryRequest for application/json ContentType.
+type SubmitLifecycleRecoveryRequestJSONRequestBody = RecoveryRequest
 
 // SendMailJSONRequestBody defines body for SendMail for application/json ContentType.
 type SendMailJSONRequestBody = MailSendInputBody
@@ -20358,6 +20393,11 @@ type ClientInterface interface {
 	// GetV0CityByCityNameHealth request
 	GetV0CityByCityNameHealth(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// SubmitLifecycleRecoveryRequestWithBody request with any body
+	SubmitLifecycleRecoveryRequestWithBody(ctx context.Context, cityName string, params *SubmitLifecycleRecoveryRequestParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	SubmitLifecycleRecoveryRequest(ctx context.Context, cityName string, params *SubmitLifecycleRecoveryRequestParams, body SubmitLifecycleRecoveryRequestJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// GetV0CityByCityNameMail request
 	GetV0CityByCityNameMail(ctx context.Context, cityName string, params *GetV0CityByCityNameMailParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -21872,6 +21912,30 @@ func (c *Client) PostV0CityByCityNameFormulasByNameValidateWithBody(ctx context.
 
 func (c *Client) GetV0CityByCityNameHealth(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetV0CityByCityNameHealthRequest(c.Server, cityName)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) SubmitLifecycleRecoveryRequestWithBody(ctx context.Context, cityName string, params *SubmitLifecycleRecoveryRequestParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSubmitLifecycleRecoveryRequestRequestWithBody(c.Server, cityName, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) SubmitLifecycleRecoveryRequest(ctx context.Context, cityName string, params *SubmitLifecycleRecoveryRequestParams, body SubmitLifecycleRecoveryRequestJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSubmitLifecycleRecoveryRequestRequest(c.Server, cityName, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -28159,6 +28223,66 @@ func NewGetV0CityByCityNameHealthRequest(server string, cityName string) (*http.
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewSubmitLifecycleRecoveryRequestRequest calls the generic SubmitLifecycleRecoveryRequest builder with application/json body
+func NewSubmitLifecycleRecoveryRequestRequest(server string, cityName string, params *SubmitLifecycleRecoveryRequestParams, body SubmitLifecycleRecoveryRequestJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewSubmitLifecycleRecoveryRequestRequestWithBody(server, cityName, params, "application/json", bodyReader)
+}
+
+// NewSubmitLifecycleRecoveryRequestRequestWithBody generates requests for SubmitLifecycleRecoveryRequest with any type of body
+func NewSubmitLifecycleRecoveryRequestRequestWithBody(server string, cityName string, params *SubmitLifecycleRecoveryRequestParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/lifecycle/recovery-requests", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
 	}
 
 	return req, nil
@@ -34503,6 +34627,11 @@ type ClientWithResponsesInterface interface {
 	// GetV0CityByCityNameHealthWithResponse request
 	GetV0CityByCityNameHealthWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameHealthResponse, error)
 
+	// SubmitLifecycleRecoveryRequestWithBodyWithResponse request with any body
+	SubmitLifecycleRecoveryRequestWithBodyWithResponse(ctx context.Context, cityName string, params *SubmitLifecycleRecoveryRequestParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SubmitLifecycleRecoveryRequestResponse, error)
+
+	SubmitLifecycleRecoveryRequestWithResponse(ctx context.Context, cityName string, params *SubmitLifecycleRecoveryRequestParams, body SubmitLifecycleRecoveryRequestJSONRequestBody, reqEditors ...RequestEditorFn) (*SubmitLifecycleRecoveryRequestResponse, error)
+
 	// GetV0CityByCityNameMailWithResponse request
 	GetV0CityByCityNameMailWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameMailParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameMailResponse, error)
 
@@ -36868,6 +36997,35 @@ func (r GetV0CityByCityNameHealthResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r GetV0CityByCityNameHealthResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type SubmitLifecycleRecoveryRequestResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON202                   *LifecycleRecoverySubmitOutputBody
+	ApplicationproblemJSON400 *ErrorModel
+	ApplicationproblemJSON403 *ErrorModel
+	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON409 *ErrorModel
+	ApplicationproblemJSON422 *ErrorModel
+	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON503 *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r SubmitLifecycleRecoveryRequestResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r SubmitLifecycleRecoveryRequestResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -40361,6 +40519,23 @@ func (c *ClientWithResponses) GetV0CityByCityNameHealthWithResponse(ctx context.
 		return nil, err
 	}
 	return ParseGetV0CityByCityNameHealthResponse(rsp)
+}
+
+// SubmitLifecycleRecoveryRequestWithBodyWithResponse request with arbitrary body returning *SubmitLifecycleRecoveryRequestResponse
+func (c *ClientWithResponses) SubmitLifecycleRecoveryRequestWithBodyWithResponse(ctx context.Context, cityName string, params *SubmitLifecycleRecoveryRequestParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SubmitLifecycleRecoveryRequestResponse, error) {
+	rsp, err := c.SubmitLifecycleRecoveryRequestWithBody(ctx, cityName, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSubmitLifecycleRecoveryRequestResponse(rsp)
+}
+
+func (c *ClientWithResponses) SubmitLifecycleRecoveryRequestWithResponse(ctx context.Context, cityName string, params *SubmitLifecycleRecoveryRequestParams, body SubmitLifecycleRecoveryRequestJSONRequestBody, reqEditors ...RequestEditorFn) (*SubmitLifecycleRecoveryRequestResponse, error) {
+	rsp, err := c.SubmitLifecycleRecoveryRequest(ctx, cityName, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSubmitLifecycleRecoveryRequestResponse(rsp)
 }
 
 // GetV0CityByCityNameMailWithResponse request returning *GetV0CityByCityNameMailResponse
@@ -46051,6 +46226,81 @@ func ParseGetV0CityByCityNameHealthResponse(rsp *http.Response) (*GetV0CityByCit
 			return nil, err
 		}
 		response.ApplicationproblemJSON500 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseSubmitLifecycleRecoveryRequestResponse parses an HTTP response from a SubmitLifecycleRecoveryRequestWithResponse call
+func ParseSubmitLifecycleRecoveryRequestResponse(rsp *http.Response) (*SubmitLifecycleRecoveryRequestResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &SubmitLifecycleRecoveryRequestResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest LifecycleRecoverySubmitOutputBody
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON202 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 400:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON400 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON403 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON409 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
 
 	}
 

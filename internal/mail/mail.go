@@ -44,6 +44,18 @@ const (
 	// sent through [DedupSender.SendDeduped]. Repeating notifiers (patrol
 	// orders, maintenance loops) use it to suppress duplicate alerts.
 	DedupKeyMetadataKey = "mail.dedup_key"
+	// StableOutboxMetadataKey marks messages created through StableIDSender.
+	// Its value is the immutable caller-supplied idempotency key.
+	StableOutboxMetadataKey = "mail.stable_outbox"
+)
+
+var (
+	// ErrStableIDSendUnsupported means the provider cannot durably create and
+	// read back a caller-ID-bound message.
+	ErrStableIDSendUnsupported = errors.New("stable-ID mail send is unsupported")
+	// ErrStableIDSendConflict means the requested message ID already holds
+	// different content or is not a stable outbox message.
+	ErrStableIDSendConflict = errors.New("stable-ID mail message conflicts with existing content")
 )
 
 // Message represents a mail message between agents or humans.
@@ -111,6 +123,17 @@ type DedupSender interface {
 	// otherwise the newly created message, stamped with key under
 	// [DedupKeyMetadataKey].
 	SendDeduped(from, to, subject, body, key string) (msg Message, suppressed bool, err error)
+}
+
+// StableIDSender is an optional durable outbox capability. Implementations
+// must honor messageID at the durable store boundary, compare every supplied
+// field when that ID already exists (including archived rows), and resolve an
+// ambiguous create response only by exact readback of the same ID. Replays
+// return the same message with created=false. Providers that cannot meet this
+// contract must not implement the interface; callers must not fall back to
+// Send or best-effort deduplication.
+type StableIDSender interface {
+	SendStableID(messageID, from, to, subject, body, key string) (msg Message, created bool, err error)
 }
 
 // Provider is the internal interface for mail backends and the canonical

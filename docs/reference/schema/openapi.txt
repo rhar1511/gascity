@@ -4550,6 +4550,26 @@
         ],
         "type": "object"
       },
+      "LifecycleRecoverySubmitOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "intent_id": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_id",
+          "intent_id",
+          "status"
+        ],
+        "type": "object"
+      },
       "ListBodyAgentPatch": {
         "additionalProperties": false,
         "properties": {
@@ -7749,6 +7769,76 @@
           "actor",
           "message",
           "created_at"
+        ],
+        "type": "object"
+      },
+      "RecoveryRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "authorized_by": {
+            "type": "string"
+          },
+          "claim_generation": {
+            "type": "string"
+          },
+          "expected_revision": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "expires_at": {
+            "type": "string"
+          },
+          "issued_at": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "owner": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string"
+          },
+          "session_generation": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "signature": {
+            "type": "string"
+          },
+          "version": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "work_item_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "version",
+          "request_id",
+          "action",
+          "scope",
+          "work_item_id",
+          "expected_revision",
+          "owner",
+          "claim_generation",
+          "session_id",
+          "session_generation",
+          "message",
+          "issued_at",
+          "expires_at",
+          "authorized_by",
+          "signature"
         ],
         "type": "object"
       },
@@ -38480,6 +38570,170 @@
           }
         },
         "summary": "Get v0 city by city name health"
+      }
+    },
+    "/v0/city/{cityName}/lifecycle/recovery-requests": {
+      "post": {
+        "description": "Verifies a separately signed, exact-scope nudge request and stores it as a held controller intent. The endpoint does not send a message or change work ownership.",
+        "operationId": "submit-lifecycle-recovery-request",
+        "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RecoveryRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LifecycleRecoverySubmitOutputBody"
+                }
+              }
+            },
+            "description": "Accepted",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Bad Request",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Forbidden",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Not Found",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Conflict",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Service Unavailable",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          }
+        },
+        "summary": "Persist an authorized lifecycle recovery request"
       }
     },
     "/v0/city/{cityName}/mail": {

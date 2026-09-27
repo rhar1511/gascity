@@ -1935,6 +1935,13 @@
           "type": "object",
           "description": "AcceptanceAuthorities maps trusted completion authorities to their\nEd25519 public keys. Keys are base64-encoded 32-byte public keys."
         },
+        "recovery_authorities": {
+          "additionalProperties": {
+            "$ref": "#/$defs/LifecycleRecoveryAuthority"
+          },
+          "type": "object",
+          "description": "RecoveryAuthorities maps separately authorized recovery identities to\npublic keys and exact action/store scopes. These keys must differ from\nadmission and acceptance keys. Private recovery keys stay outside city\nconfiguration and the bead store."
+        },
         "escalation_target": {
           "type": "string",
           "description": "EscalationTarget is the configured recipient for one exhaustion\nescalation per work item. Empty deliberately leaves recovery disabled."
@@ -1951,6 +1958,33 @@
       "additionalProperties": false,
       "type": "object",
       "description": "LifecycleConfig controls controller-owned admission and recovery."
+    },
+    "LifecycleRecoveryAuthority": {
+      "properties": {
+        "public_key": {
+          "type": "string"
+        },
+        "actions": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "scopes": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "public_key",
+        "actions",
+        "scopes"
+      ],
+      "description": "LifecycleRecoveryAuthority grants one signing identity exact recovery actions in exact city/store scopes."
     },
     "LocalDoctorCheck": {
       "properties": {
