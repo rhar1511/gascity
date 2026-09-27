@@ -34,7 +34,7 @@ func (s *Store) AcceptRequestForAttempt(sessionID, requestID string, generation 
 
 func validRequestAttemptBinding(binding RequestAttemptBinding, sessionID string, generation int) bool {
 	revision, err := strconv.ParseInt(binding.WorkRevision, 10, 64)
-	if err != nil || revision <= 0 || strconv.FormatInt(revision, 10) != binding.WorkRevision || binding.StoreRef != strings.TrimSpace(binding.StoreRef) ||
+	if err != nil || revision == 0 || strconv.FormatInt(revision, 10) != binding.WorkRevision || binding.StoreRef != strings.TrimSpace(binding.StoreRef) ||
 		(!strings.HasPrefix(binding.StoreRef, "city:") && !strings.HasPrefix(binding.StoreRef, "rig:")) ||
 		strings.TrimSpace(strings.SplitN(binding.StoreRef, ":", 2)[1]) == "" ||
 		binding.Identity.Kind != attemptevidence.KindWorkbench || binding.Identity.OwnerBeadID != binding.Identity.ExecutionBeadID ||

@@ -216,4 +216,41 @@ describe('exact Workbench archive identity', () => {
       ),
     ).toBe(false);
   });
+
+  it.each(['-1', '-9223372036854775808', '9223372036854775807'])(
+    'accepts the canonical signed revision token %s without numeric conversion',
+    (work_revision) => {
+      expect(
+        exactRequestReceiptMatchesWorkbenchEvidence(
+          requestReceipt({
+            attempt: { ...requestReceipt().attempt!, work_revision },
+          }),
+          evidence(),
+        ),
+      ).toBe(true);
+    },
+  );
+
+  it.each([
+    '0',
+    '-0',
+    '09',
+    '-01',
+    '+1',
+    ' 1',
+    '1 ',
+    '1.0',
+    '1e2',
+    '9223372036854775808',
+    '-9223372036854775809',
+  ])('rejects malformed or out-of-range revision token %s', (work_revision) => {
+    expect(
+      exactRequestReceiptMatchesWorkbenchEvidence(
+        requestReceipt({
+          attempt: { ...requestReceipt().attempt!, work_revision },
+        }),
+        evidence(),
+      ),
+    ).toBe(false);
+  });
 });

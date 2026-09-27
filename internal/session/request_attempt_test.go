@@ -16,30 +16,36 @@ func TestSessionRequestAttemptRevisionPreservesIntegerPrecision(t *testing.T) {
 		t.Fatal(err)
 	}
 	binding := requestAttemptFixture(t, "gc-work-1", "claim-1")
-	binding.WorkRevision = "9223372036854775807"
-	if _, err := front.AcceptRequestForAttempt("gc-session", "large-revision", 2, "report", binding, now); err != nil {
-		t.Fatal(err)
+	for index, revision := range []string{"-1", "-9223372036854775808", "9223372036854775807"} {
+		requestID := []string{"negative-one", "minimum-revision", "maximum-revision"}[index]
+		binding.WorkRevision = revision
+		if _, err := front.AcceptRequestForAttempt("gc-session", requestID, 2, "report", binding, now); err != nil {
+			t.Fatalf("AcceptRequestForAttempt(revision=%q): %v", revision, err)
+		}
+		receipt, err := front.GetRequest("gc-session", requestID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, err := json.Marshal(receipt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var decoded struct {
+			Attempt struct {
+				WorkRevision string `json:"work_revision"`
+			} `json:"attempt"`
+		}
+		if err := json.Unmarshal(raw, &decoded); err != nil || decoded.Attempt.WorkRevision != revision {
+			t.Fatalf("opaque revision %q was not preserved: %s, %v", revision, raw, err)
+		}
 	}
-	receipt, err := front.GetRequest("gc-session", "large-revision")
-	if err != nil {
-		t.Fatal(err)
-	}
-	raw, err := json.Marshal(receipt)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var decoded struct {
-		Attempt struct {
-			WorkRevision string `json:"work_revision"`
-		} `json:"attempt"`
-	}
-	if err := json.Unmarshal(raw, &decoded); err != nil || decoded.Attempt.WorkRevision != binding.WorkRevision {
-		t.Fatalf("opaque revision lost precision: %s, %v", raw, err)
-	}
-	for _, revision := range []string{"0", "007", "9223372036854775808"} {
+	for _, revision := range []string{
+		"0", "-0", "007", "-01", "+1", " 1", "1 ", "1.0", "1e2",
+		"9223372036854775808", "-9223372036854775809",
+	} {
 		binding.WorkRevision = revision
 		if _, err := front.AcceptRequestForAttempt("gc-session", "invalid-"+revision, 2, "report", binding, now); !errors.Is(err, ErrRequestConflict) {
-			t.Fatalf("noncanonical or out-of-range revision %q accepted: %v", revision, err)
+			t.Fatalf("malformed or out-of-range revision %q accepted: %v", revision, err)
 		}
 	}
 }

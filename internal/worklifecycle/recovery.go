@@ -216,7 +216,7 @@ func ReserveRecoveryRequestAttemptWithFence(store beads.Store, request RecoveryR
 	if err := validateRecoveryIdentity(store, request.WorkItemID, request.Scope); err != nil {
 		return RecoveryState{}, false, 0, err
 	}
-	if !validRecoveryToken(request.RequestID, 200) || !validDigest(digest) || request.ExpectedRevision <= 0 {
+	if !validRecoveryToken(request.RequestID, 200) || !validDigest(digest) || request.ExpectedRevision == 0 {
 		return RecoveryState{}, false, 0, ErrRecoveryRequestInvalid
 	}
 	current, state, raw, err := readRecoveryStateBead(store, request.WorkItemID, request.Scope)
@@ -425,7 +425,7 @@ func validateRecoveryState(state RecoveryState, beadID, scope string) error {
 			return fmt.Errorf("recovery state for %q: %w: attempt timestamp is invalid", beadID, ErrRecoveryStateInvalid)
 		}
 		if attempt.RequestID != "" || attempt.RequestDigest != "" || attempt.ExpectedRevision != 0 {
-			if !validRecoveryToken(attempt.RequestID, 200) || !validDigest(attempt.RequestDigest) || attempt.ExpectedRevision <= 0 {
+			if !validRecoveryToken(attempt.RequestID, 200) || !validDigest(attempt.RequestDigest) || attempt.ExpectedRevision == 0 {
 				return fmt.Errorf("recovery state for %q: %w: request-bound attempt is incomplete", beadID, ErrRecoveryStateInvalid)
 			}
 			if previous, duplicate := seenRequests[attempt.RequestID]; duplicate {

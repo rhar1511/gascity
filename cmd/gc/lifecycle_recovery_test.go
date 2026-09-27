@@ -69,6 +69,20 @@ func TestLifecycleRecoveryControllerNudgesOnlyTheCASWinnerAndObservesReplay(t *t
 	}
 }
 
+func TestLifecycleRecoveryAttemptBindingPreservesSignedRevisionToken(t *testing.T) {
+	fixture := newLifecycleRecoveryFixture(t)
+	request := fixture.newRequest(t, "nudge-negative-revision", fixture.work.Revision)
+	request.ExpectedRevision = -37
+	binding, err := lifecycleRecoveryAttemptBinding(request, "city:"+fixture.city)
+	if err != nil || binding.WorkRevision != "-37" {
+		t.Fatalf("negative recovery revision binding=%+v err=%v", binding, err)
+	}
+	request.ExpectedRevision = 0
+	if _, err := lifecycleRecoveryAttemptBinding(request, "city:"+fixture.city); err == nil {
+		t.Fatal("zero revision sentinel produced an attempt binding")
+	}
+}
+
 func TestLifecycleRecoveryRejectsUnboundOrMismatchedAttemptReceipt(t *testing.T) {
 	for _, tc := range []struct {
 		name   string

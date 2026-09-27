@@ -222,7 +222,7 @@ func lifecycleRecoveryAttemptBinding(request worklifecycle.RecoveryRequest, phys
 	if !strings.HasPrefix(physicalStoreRef, "city:") && !strings.HasPrefix(physicalStoreRef, "rig:") {
 		return session.RequestAttemptBinding{}, fmt.Errorf("unsupported physical work-store reference %q", physicalStoreRef)
 	}
-	if request.ExpectedRevision <= 0 {
+	if request.ExpectedRevision == 0 {
 		return session.RequestAttemptBinding{}, worklifecycle.ErrRecoveryRequestInvalid
 	}
 	identity := attemptevidence.Identity{

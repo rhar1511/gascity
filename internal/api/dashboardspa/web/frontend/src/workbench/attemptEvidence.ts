@@ -91,7 +91,7 @@ export function exactRequestReceiptMatchesWorkbenchEvidence(
   evidence: Evidence,
 ): boolean {
   const binding = receipt.attempt;
-  if (!binding || !isCanonicalPositiveDecimal(binding.work_revision)) return false;
+  if (!binding || !isCanonicalNonzeroSignedInt64(binding.work_revision)) return false;
 
   const archived = evidence.identity;
   const bound = binding.identity;
@@ -133,6 +133,15 @@ function isCanonicalPositiveDecimal(value: string): boolean {
   if (!/^[1-9][0-9]*$/.test(value)) return false;
   const maxInt64 = '9223372036854775807';
   return value.length < maxInt64.length || (value.length === maxInt64.length && value <= maxInt64);
+}
+
+function isCanonicalNonzeroSignedInt64(value: string): boolean {
+  const negative = value.startsWith('-');
+  const magnitude = negative ? value.slice(1) : value;
+  if (!/^(0|[1-9][0-9]*)$/.test(magnitude) || magnitude === '0') return false;
+
+  const limit = negative ? '9223372036854775808' : '9223372036854775807';
+  return magnitude.length < limit.length || (magnitude.length === limit.length && magnitude <= limit);
 }
 
 /**

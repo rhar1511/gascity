@@ -1642,7 +1642,7 @@ func stampHookClaimIdentity(bead beads.Bead, opts hookClaimOptions, ops hookClai
 func stampLifecycleHookClaimIdentity(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) (beads.Bead, bool) {
 	store, current, ok := lifecycleAuthoritativeCandidate(bead, opts)
 	if !ok || !hookClaimHasIdentity(current.Assignee, opts.IdentityCandidates) ||
-		!strings.EqualFold(strings.TrimSpace(current.Status), "in_progress") || current.Revision <= 0 {
+		!strings.EqualFold(strings.TrimSpace(current.Status), "in_progress") || current.Revision == 0 {
 		return beads.Bead{}, false
 	}
 	patch := hookClaimIdentityPatch(current, opts, ops, dir)

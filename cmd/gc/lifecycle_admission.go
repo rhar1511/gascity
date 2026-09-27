@@ -1007,7 +1007,7 @@ func lifecycleConditionalClaim(candidate beads.Bead, actor string, readyAssignme
 		return beads.Bead{}, false, nil
 	}
 	actor = strings.TrimSpace(actor)
-	if actor == "" || !hookClaimHasIdentity(actor, opts.IdentityCandidates) || current.Revision <= 0 {
+	if actor == "" || !hookClaimHasIdentity(actor, opts.IdentityCandidates) || current.Revision == 0 {
 		return beads.Bead{}, false, nil
 	}
 	status := strings.ToLower(strings.TrimSpace(current.Status))

@@ -101,7 +101,7 @@ func verifyRecoveryRequest(request RecoveryRequest, cfg config.LifecycleConfig, 
 	}
 	if request.Version != 1 || request.Action != "nudge" || !validSessionRequestID(request.RequestID) ||
 		!validRecoveryToken(request.Scope, 500) || !validRecoveryToken(request.WorkItemID, 200) ||
-		request.ExpectedRevision <= 0 || !validRecoveryToken(request.Owner, 200) ||
+		request.ExpectedRevision == 0 || !validRecoveryToken(request.Owner, 200) ||
 		!validRecoveryToken(request.ClaimGeneration, 100) || !validRecoveryToken(request.SessionID, 200) ||
 		!validRecoveryToken(request.SessionGeneration, 100) || strings.TrimSpace(request.Message) == "" ||
 		len(request.Message) > 8192 || !utf8.ValidString(request.Message) ||

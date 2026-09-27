@@ -55,6 +55,35 @@ func TestRecoveryRequestVerificationBindsAuthorityScopeAndWindow(t *testing.T) {
 	}
 }
 
+func TestRecoveryRequestVerificationAcceptsNonzeroSignedInt64Revisions(t *testing.T) {
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
+	cfg := recoveryRequestConfig(public)
+	for _, revision := range []int64{-1, -9223372036854775808, 9223372036854775807} {
+		request := signedRecoveryRequest(t, private, now)
+		request.ExpectedRevision = revision
+		request, err = SignRecoveryRequest(request, private)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := VerifyRecoveryRequest(request, cfg, now); err != nil {
+			t.Fatalf("VerifyRecoveryRequest(revision=%d): %v", revision, err)
+		}
+	}
+	zero := signedRecoveryRequest(t, private, now)
+	zero.ExpectedRevision = 0
+	zero, err = SignRecoveryRequest(zero, private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyRecoveryRequest(zero, cfg, now); !errors.Is(err, ErrRecoveryRequestInvalid) {
+		t.Fatalf("zero revision sentinel error=%v, want invalid request", err)
+	}
+}
+
 func TestPersistRecoveryIntentIsStableHeldAndReplaySafe(t *testing.T) {
 	store := &beads.MemStore{HonorExplicitIDs: true, IDPrefix: "gc"}
 	work := mustCreateRecoveryWork(t, store)
@@ -180,6 +209,49 @@ func TestReserveRecoveryRequestAttemptConsumesSignedRevisionOnce(t *testing.T) {
 	}
 	if got := state.Metadata[beadmeta.LifecycleRecoveryStateMetadataKey]; got == "" {
 		t.Fatal("recovery reservation was not persisted on the work row")
+	}
+}
+
+func TestReserveRecoveryRequestAttemptAcceptsAndPersistsNegativeRevision(t *testing.T) {
+	backing := &beads.MemStore{HonorExplicitIDs: true, IDPrefix: "gc"}
+	mustCreateRecoveryWork(t, backing)
+	writer, ok := beads.ConditionalWriterFor(backing)
+	if !ok {
+		t.Fatal("fixture store does not support conditional writes")
+	}
+	store := &recoverySignedRevisionStore{Store: backing, ConditionalWriter: writer}
+	work, err := store.Get("gc-work-1")
+	if err != nil || work.Revision >= 0 {
+		t.Fatalf("signed test work revision=%d err=%v, want negative", work.Revision, err)
+	}
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
+	request := signedRecoveryRequest(t, private, now)
+	request.ExpectedRevision = work.Revision
+	request, err = SignRecoveryRequest(request, private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyRecoveryRequest(request, recoveryRequestConfig(public), now); err != nil {
+		t.Fatalf("VerifyRecoveryRequest(negative revision): %v", err)
+	}
+	digest, err := RecoveryRequestDigest(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, reserved, reservedRevision, err := ReserveRecoveryRequestAttemptWithFence(store, request, digest)
+	if err != nil || !reserved || reservedRevision >= 0 || len(state.Attempts) != 1 {
+		t.Fatalf("negative revision reservation=(%+v, %v, %d, %v)", state, reserved, reservedRevision, err)
+	}
+	if got := state.Attempts[0].ExpectedRevision; got != request.ExpectedRevision {
+		t.Fatalf("persisted expected revision=%d, want signed token %d", got, request.ExpectedRevision)
+	}
+	readback, _, err := readRecoveryState(store, work.ID, request.Scope)
+	if err != nil || len(readback.Attempts) != 1 || readback.Attempts[0].ExpectedRevision != request.ExpectedRevision {
+		t.Fatalf("signed recovery state readback=(%+v, %v)", readback, err)
 	}
 }
 
@@ -382,4 +454,21 @@ func recoveryRequestConfig(public ed25519.PublicKey) config.LifecycleConfig {
 			"operator": {PublicKey: base64.StdEncoding.EncodeToString(public), Actions: []string{"nudge"}, Scopes: []string{"city:test/city:test"}},
 		},
 	}
+}
+
+type recoverySignedRevisionStore struct {
+	beads.Store
+	beads.ConditionalWriter
+}
+
+func (s *recoverySignedRevisionStore) Get(id string) (beads.Bead, error) {
+	bead, err := s.Store.Get(id)
+	if err == nil {
+		bead.Revision = -bead.Revision
+	}
+	return bead, err
+}
+
+func (s *recoverySignedRevisionStore) UpdateIfMatch(id string, revision int64, opts beads.UpdateOpts) error {
+	return s.ConditionalWriter.UpdateIfMatch(id, -revision, opts)
 }

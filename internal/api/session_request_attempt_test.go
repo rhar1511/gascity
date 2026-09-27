@@ -44,6 +44,9 @@ func TestSessionRequestSubmitHTTPBindsAuthoritativeAttempt(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		const signedRevision int64 = -9223372036854775808
+		fs.cityBeadStore = overrideRevisionForTest(t, fs.cityBeadStore, work.ID, signedRevision)
+		front = session.NewStore(fs.SessionsBeadStore())
 		h := newTestCityHandler(t, fs)
 		response := httptest.NewRecorder()
 		body, err := json.Marshal(map[string]any{"request_id": "http-bound", "generation": generation, "message": "report progress"})
@@ -60,7 +63,7 @@ func TestSessionRequestSubmitHTTPBindsAuthoritativeAttempt(t *testing.T) {
 			t.Fatalf("missing binding: %+v %v", receipt, err)
 		}
 		binding := receipt.Attempt
-		if binding.Identity.OwnerBeadID != work.ID || binding.Identity.SessionID != info.ID || binding.Identity.ClaimGeneration != "http-claim" || binding.StoreRef != "city:"+fs.CityName() || binding.WorkRevision != strconv.FormatInt(work.Revision, 10) {
+		if binding.Identity.OwnerBeadID != work.ID || binding.Identity.SessionID != info.ID || binding.Identity.ClaimGeneration != "http-claim" || binding.StoreRef != "city:"+fs.CityName() || binding.WorkRevision != strconv.FormatInt(signedRevision, 10) {
 			t.Fatalf("incorrect server attribution: %+v", binding)
 		}
 		if receipt.Delivery != session.RequestDeliveryAccepted || receipt.AcknowledgedAt != nil || receipt.Effect != "unverified" {
@@ -187,6 +190,17 @@ func TestSessionRequestAttemptResolutionUsesCurrentWorkAndClaim(t *testing.T) {
 	if err != nil || binding == nil || binding.Identity.OwnerBeadID != work.ID || binding.Identity.ClaimGeneration != "claim-one" || binding.StoreRef != "city:"+fs.CityName() {
 		t.Fatalf("controller binding=%+v err=%v", binding, err)
 	}
+	backing := fs.cityBeadStore
+	fs.cityBeadStore = overrideRevisionForTest(t, backing, work.ID, -17)
+	signedBinding, err := New(fs).resolveSessionRequestAttempt(info.ID, generation)
+	if err != nil || signedBinding == nil || signedBinding.WorkRevision != "-17" {
+		t.Fatalf("negative backend revision attribution=%+v err=%v", signedBinding, err)
+	}
+	fs.cityBeadStore = overrideRevisionForTest(t, backing, work.ID, 0)
+	if _, err := New(fs).resolveSessionRequestAttempt(info.ID, generation); err == nil {
+		t.Fatal("zero revision sentinel resolved as an attributed attempt")
+	}
+	fs.cityBeadStore = backing
 	if _, err := srv.resolveSessionRequestAttempt(info.ID, generation+1); err == nil {
 		t.Fatal("stale generation resolved")
 	}
@@ -196,6 +210,30 @@ func TestSessionRequestAttemptResolutionUsesCurrentWorkAndClaim(t *testing.T) {
 	if _, err := srv.resolveSessionRequestAttempt(info.ID, generation); err == nil {
 		t.Fatal("unrelated work owner resolved")
 	}
+}
+
+type revisionOverrideStoreForTest struct {
+	beads.Store
+	beads.ConditionalWriter
+	id       string
+	revision int64
+}
+
+func (s *revisionOverrideStoreForTest) Get(id string) (beads.Bead, error) {
+	bead, err := s.Store.Get(id)
+	if err == nil && id == s.id {
+		bead.Revision = s.revision
+	}
+	return bead, err
+}
+
+func overrideRevisionForTest(t testing.TB, store beads.Store, id string, revision int64) beads.Store {
+	t.Helper()
+	writer, ok := beads.ConditionalWriterFor(store)
+	if !ok {
+		t.Fatal("fixture store does not support conditional writes")
+	}
+	return &revisionOverrideStoreForTest{Store: store, ConditionalWriter: writer, id: id, revision: revision}
 }
 
 func TestAttemptAcknowledgementsRemainExactAfterOwnerDeletionAndSQLiteReopen(t *testing.T) {

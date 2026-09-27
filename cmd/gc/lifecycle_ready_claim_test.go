@@ -93,17 +93,19 @@ func TestReadyJSONCarriesTrustedLifecycleScopeIntoHookClaim(t *testing.T) {
 	}
 
 	for _, tc := range []struct {
-		name      string
-		scope     string
-		verified  bool
-		intent    bool
-		receipt   bool
-		wantClaim bool
-		noCAS     bool
-		raceHold  bool
-		wantError bool
+		name           string
+		scope          string
+		verified       bool
+		intent         bool
+		receipt        bool
+		wantClaim      bool
+		noCAS          bool
+		raceHold       bool
+		signedRevision bool
+		wantError      bool
 	}{
 		{name: "local receipt with verified workflow", scope: worklifecycle.ScopeForStore("pilot", "city:pilot"), verified: true, intent: true, receipt: true, wantClaim: true},
+		{name: "negative signed revision is fenced through claim and identity stamp", scope: worklifecycle.ScopeForStore("pilot", "city:pilot"), verified: true, intent: true, receipt: true, signedRevision: true, wantClaim: true},
 		{name: "receipt replayed from another city", scope: worklifecycle.ScopeForStore("elsewhere", "city:elsewhere"), verified: true, intent: true, receipt: true, wantClaim: false},
 		{name: "worker workflow metadata without controller verification", scope: worklifecycle.ScopeForStore("pilot", "city:pilot"), intent: true, receipt: true, wantClaim: false},
 		{name: "removed intent and receipt after durable enrollment", scope: worklifecycle.ScopeForStore("pilot", "city:pilot"), verified: true, wantClaim: false},
@@ -118,6 +120,9 @@ func TestReadyJSONCarriesTrustedLifecycleScopeIntoHookClaim(t *testing.T) {
 			var store beads.Store = mem
 			if tc.noCAS {
 				mem.DisableConditionalWrites = true
+			}
+			if tc.signedRevision {
+				store = &lifecycleSignedRevisionStore{MemStore: mem}
 			}
 			if tc.raceHold {
 				store = &lifecycleHoldDuringClaimStore{MemStore: mem}
@@ -222,6 +227,32 @@ func TestReadyJSONCarriesTrustedLifecycleScopeIntoHookClaim(t *testing.T) {
 
 type lifecycleHoldDuringClaimStore struct {
 	*beads.MemStore
+}
+
+type lifecycleSignedRevisionStore struct {
+	*beads.MemStore
+}
+
+func (s *lifecycleSignedRevisionStore) Get(id string) (beads.Bead, error) {
+	bead, err := s.MemStore.Get(id)
+	if err == nil {
+		bead.Revision = -bead.Revision
+	}
+	return bead, err
+}
+
+func (s *lifecycleSignedRevisionStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	rows, err := s.MemStore.List(query)
+	if err == nil {
+		for index := range rows {
+			rows[index].Revision = -rows[index].Revision
+		}
+	}
+	return rows, err
+}
+
+func (s *lifecycleSignedRevisionStore) UpdateIfMatch(id string, revision int64, opts beads.UpdateOpts) error {
+	return s.MemStore.UpdateIfMatch(id, -revision, opts)
 }
 
 func (s *lifecycleHoldDuringClaimStore) UpdateIfMatch(id string, revision int64, opts beads.UpdateOpts) error {

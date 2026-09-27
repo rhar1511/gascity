@@ -58,7 +58,7 @@ func (s *Server) resolveSessionRequestAttempt(sessionID string, generation int) 
 		}
 	}
 	ref, ok := attemptEvidenceRefForLeg(storeref.Leg{Ref: owner.Ref}, s.state.CityName())
-	if !ok || work.ID != claim || work.Revision <= 0 || work.Status != "in_progress" ||
+	if !ok || work.ID != claim || work.Revision == 0 || work.Status != "in_progress" ||
 		!slices.Contains(session.AssigneeIdentities(info), work.Assignee) ||
 		strings.TrimSpace(work.Metadata[beadmeta.SessionIDMetadataKey]) != sessionID ||
 		!attemptevidence.IsExecutionRecord(work) {
