@@ -41,6 +41,7 @@ var (
 	_ beads.PrivateEvidenceMetadataCASWriterHandleProvider   = (*beadPolicyStore)(nil)
 	_ beads.PrivateEvidenceArchiveReaderHandleProvider       = (*beadPolicyStore)(nil)
 	_ beads.ControllerMetadataTransitionWriterHandleProvider = (*beadPolicyStore)(nil)
+	_ beads.DecisionFrontierSourceReaderHandleProvider       = (*beadPolicyStore)(nil)
 )
 
 // ConditionalWritesResolveTarget declares the wrapped store as the
@@ -71,6 +72,12 @@ func (s *beadPolicyStore) PrivateEvidenceArchiveReaderHandle() (beads.PrivateEvi
 // transport without treating the policy wrapper as a new write authority.
 func (s *beadPolicyStore) ControllerMetadataTransitionWriterHandle() (beads.ControllerMetadataTransitionWriter, bool) {
 	return beads.ControllerMetadataTransitionWriterFor(s.Store)
+}
+
+// DecisionFrontierSourceReaderHandle preserves the backing's authoritative
+// source-snapshot capability through the policy layer.
+func (s *beadPolicyStore) DecisionFrontierSourceReaderHandle() (beads.DecisionFrontierSourceReader, bool) {
+	return beads.DecisionFrontierSourceReaderFor(s.Store)
 }
 
 var (

@@ -44,6 +44,7 @@ var (
 	_ ForeignIDCreator                                 = (*ProxiedStore)(nil)
 	_ GraphApplyHandleProvider                         = (*ProxiedStore)(nil)
 	_ ControllerMetadataTransitionWriterHandleProvider = (*ProxiedStore)(nil)
+	_ DecisionFrontierSourceReaderHandleProvider       = (*ProxiedStore)(nil)
 	_ ParentProjectionWaiter                           = (*ProxiedStore)(nil)
 	_ RowWitness                                       = (*ProxiedStore)(nil)
 	_ StorageCreateStore                               = (*ProxiedStore)(nil)
@@ -422,6 +423,36 @@ func (s *ProxiedStore) ControllerMetadataTransitionWriterHandle() (ControllerMet
 		return nil, false
 	}
 	return proxiedControllerMetadataTransitionWriter{store: s, writer: writer}, true
+}
+
+type proxiedDecisionFrontierSourceReader struct {
+	store  *ProxiedStore
+	reader DecisionFrontierSourceReader
+}
+
+func (r proxiedDecisionFrontierSourceReader) DecisionFrontierSourceSnapshot(id string) (Bead, error) {
+	var snapshot Bead
+	err := r.store.withMutation("decision-frontier-source-snapshot "+id, func(Store) error {
+		var readErr error
+		snapshot, readErr = r.reader.DecisionFrontierSourceSnapshot(id)
+		return readErr
+	})
+	return snapshot, r.store.classifyReadError(err)
+}
+
+// DecisionFrontierSourceReaderHandle reads the source snapshot from the
+// authoritative bd write leaf and brackets the call with the proxy generation
+// check. The native leaf is a read projection and cannot substitute for the
+// controller's authoritative source snapshot.
+func (s *ProxiedStore) DecisionFrontierSourceReaderHandle() (DecisionFrontierSourceReader, bool) {
+	if s == nil {
+		return nil, false
+	}
+	reader, ok := DecisionFrontierSourceReaderFor(s.writeLeaf())
+	if !ok || reader == nil {
+		return nil, false
+	}
+	return proxiedDecisionFrontierSourceReader{store: s, reader: reader}, true
 }
 
 // ReleaseIfCurrent releases an assignment on the write leaf, conditionally.

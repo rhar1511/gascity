@@ -212,6 +212,42 @@ func (s NudgesStore) ControllerMetadataTransitionWriterHandle() (ControllerMetad
 	return ControllerMetadataTransitionWriterFor(s.Store)
 }
 
+// DecisionFrontierSourceReaderHandle forwards the authoritative source reader
+// through this typed store view.
+func (s WorkStore) DecisionFrontierSourceReaderHandle() (DecisionFrontierSourceReader, bool) {
+	return DecisionFrontierSourceReaderFor(s.Store)
+}
+
+// DecisionFrontierSourceReaderHandle forwards the authoritative source reader
+// through this typed store view.
+func (s GraphStore) DecisionFrontierSourceReaderHandle() (DecisionFrontierSourceReader, bool) {
+	return DecisionFrontierSourceReaderFor(s.Store)
+}
+
+// DecisionFrontierSourceReaderHandle forwards the authoritative source reader
+// through this typed store view.
+func (s SessionStore) DecisionFrontierSourceReaderHandle() (DecisionFrontierSourceReader, bool) {
+	return DecisionFrontierSourceReaderFor(s.Store)
+}
+
+// DecisionFrontierSourceReaderHandle forwards the authoritative source reader
+// through this typed store view.
+func (s MailStore) DecisionFrontierSourceReaderHandle() (DecisionFrontierSourceReader, bool) {
+	return DecisionFrontierSourceReaderFor(s.Store)
+}
+
+// DecisionFrontierSourceReaderHandle forwards the authoritative source reader
+// through this typed store view.
+func (s OrdersStore) DecisionFrontierSourceReaderHandle() (DecisionFrontierSourceReader, bool) {
+	return DecisionFrontierSourceReaderFor(s.Store)
+}
+
+// DecisionFrontierSourceReaderHandle forwards the authoritative source reader
+// through this typed store view.
+func (s NudgesStore) DecisionFrontierSourceReaderHandle() (DecisionFrontierSourceReader, bool) {
+	return DecisionFrontierSourceReaderFor(s.Store)
+}
+
 var (
 	_ ConditionalWritesResolveTargeter                 = WorkStore{}
 	_ ConditionalWritesResolveTargeter                 = GraphStore{}
@@ -225,4 +261,10 @@ var (
 	_ ControllerMetadataTransitionWriterHandleProvider = MailStore{}
 	_ ControllerMetadataTransitionWriterHandleProvider = OrdersStore{}
 	_ ControllerMetadataTransitionWriterHandleProvider = NudgesStore{}
+	_ DecisionFrontierSourceReaderHandleProvider       = WorkStore{}
+	_ DecisionFrontierSourceReaderHandleProvider       = GraphStore{}
+	_ DecisionFrontierSourceReaderHandleProvider       = SessionStore{}
+	_ DecisionFrontierSourceReaderHandleProvider       = MailStore{}
+	_ DecisionFrontierSourceReaderHandleProvider       = OrdersStore{}
+	_ DecisionFrontierSourceReaderHandleProvider       = NudgesStore{}
 )

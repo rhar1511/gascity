@@ -30,10 +30,20 @@ import (
 // honest cache action after a fenced write is a miss. The refresh, when it
 // succeeds, feeds the change notification verbatim and nothing else.
 var (
-	_ ConditionalWriter                = (*CachingStore)(nil)
-	_ conditionalWritesModeCarrier     = (*CachingStore)(nil)
-	_ conditionalWriteCapabilityProber = (*CachingStore)(nil)
+	_ ConditionalWriter                          = (*CachingStore)(nil)
+	_ conditionalWritesModeCarrier               = (*CachingStore)(nil)
+	_ conditionalWriteCapabilityProber           = (*CachingStore)(nil)
+	_ DecisionFrontierSourceReaderHandleProvider = (*CachingStore)(nil)
 )
+
+// DecisionFrontierSourceReaderHandle delegates the source snapshot directly to
+// the backing reader. Snapshot rows never enter the ordinary bead cache.
+func (c *CachingStore) DecisionFrontierSourceReaderHandle() (DecisionFrontierSourceReader, bool) {
+	if c == nil {
+		return nil, false
+	}
+	return DecisionFrontierSourceReaderFor(c.backing)
+}
 
 type cachingPrivateEvidenceMetadataCASWriter struct {
 	cache  *CachingStore
