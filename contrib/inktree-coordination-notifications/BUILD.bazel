@@ -1,0 +1,40 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+exports_files(glob(
+    ["**"],
+    exclude = ["BUILD.bazel"],
+))
+
+go_library(
+    name = "inktree-coordination-notifications",
+    srcs = ["policy.go"],
+    embedsrcs = ["policy.json"],
+    importpath = "github.com/gastownhall/gascity/contrib/inktree-coordination-notifications",
+    visibility = ["//visibility:public"],
+    deps = ["//internal/coordinationnotify"],
+)
+
+go_test(
+    name = "inktree-coordination-notifications_test",
+    srcs = [
+        "policy_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":inktree-coordination-notifications"],
+    deps = [
+        "//internal/coordinationnotify",
+        "//internal/testenv",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
