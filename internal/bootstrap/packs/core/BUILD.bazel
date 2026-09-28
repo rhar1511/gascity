@@ -71,6 +71,7 @@ go_library(
         "skills/gc-rigs/SKILL.md",
         "skills/gc-work/SKILL.md",
         "template-fragments/claim-protocol.template.md",
+        "formulas/mol-rsi-candidate.toml",
     ],
     importpath = "github.com/gastownhall/gascity/internal/bootstrap/packs/core",
     visibility = ["//:__subpackages__"],

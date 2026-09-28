@@ -269,6 +269,25 @@ func TestRSIGateRejectsJudgePermissionToReadHeldOutData(t *testing.T) {
 	}
 }
 
+func TestProcessRSIPromotionGateRequiresHumanApprovalForSensitiveAuthority(t *testing.T) {
+	store, gate := createRSIGateInputs(t, false)
+	request := rsiRequestFromStore(t, store, gate)
+	resolver := writeSignedRSIEvaluation(t, t.TempDir(), request.Candidate.BeadID, request.Candidate.ControlBeadID,
+		request.Candidate.ActorID, request.Candidate.SessionID, request.Candidate.RawOutput, request.Judges, testBundlePair(), false,
+		func(manifest *rsipolicy.TrustedEvaluationManifest) { manifest.AuthorityClass = "safety_policy" })
+
+	result, err := ProcessControl(store, gate, ProcessOptions{Context: context.Background(), ResolveRSIEvaluation: resolver})
+	if !errors.Is(err, ErrControlPending) {
+		t.Fatalf("ProcessControl error = %v, want pending human approval for sensitive authority", err)
+	}
+	if result.Processed {
+		t.Fatalf("ProcessControl = %+v, want unprocessed gate until signed approval arrives", result)
+	}
+	if after := mustGet(t, store, gate.ID); after.Status != "open" {
+		t.Fatalf("gate status = %q, want open while human approval is pending", after.Status)
+	}
+}
+
 func TestRSIGateRejectsEvaluatorAttemptBudgetNotMatchingControllerState(t *testing.T) {
 	for _, test := range []struct {
 		name string
