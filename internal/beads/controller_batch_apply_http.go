@@ -53,12 +53,18 @@ type ControllerBatchApplyHTTPConfig struct {
 	TokenFile string
 }
 
-// ControllerProtectedRecord is the deliberately small create payload accepted
-// by ControllerProtectedCreateAndLinkRequest. An explicit ID lets Beads verify
-// a supplied permit against the exact create and link resources before writing.
+// ControllerProtectedRecord is the deliberately narrow create payload
+// accepted by ControllerProtectedCreateAndLinkRequest. An explicit ID lets
+// Beads verify a supplied permit against the exact create and link resources
+// before writing. Type, description, labels, and string metadata let a caller
+// create the decision-frontier gate records without a follow-up update.
 type ControllerProtectedRecord struct {
 	ID              string
+	Type            string
 	Title           string
+	Description     string
+	Labels          []string
+	Metadata        map[string]string
 	ProtectionClass string
 }
 
@@ -71,10 +77,10 @@ type ControllerDependencyLink struct {
 }
 
 // ControllerProtectedCreateAndLinkRequest creates one exact-ID record and
-// atomically adds between one and 99 exact-ID dependency links. A protected create
+// atomically adds zero to 99 exact-ID dependency links. A protected create
 // supplies both ProtectionClass and ProtectedPermit; an ordinary create omits
 // both. Every link must include Record.ID as one endpoint. This narrow contract
-// has no update, close, generated-ID, or metadata operation.
+// has no update, close, generated-ID, or arbitrary metadata operation.
 type ControllerProtectedCreateAndLinkRequest struct {
 	Actor           string
 	Record          ControllerProtectedRecord
@@ -141,9 +147,13 @@ type controllerBatchApplyWireItem struct {
 }
 
 type controllerBatchApplyWireCreate struct {
-	ID              string `json:"id"`
-	Title           string `json:"title"`
-	ProtectionClass string `json:"protection_class,omitempty"`
+	ID              string             `json:"id"`
+	IssueType       string             `json:"issue_type,omitempty"`
+	Title           string             `json:"title"`
+	Description     string             `json:"description,omitempty"`
+	Labels          *[]string          `json:"labels,omitempty"`
+	Metadata        *map[string]string `json:"metadata,omitempty"`
+	ProtectionClass string             `json:"protection_class,omitempty"`
 }
 
 type controllerBatchApplyWireDepAdd struct {
@@ -297,8 +307,46 @@ func planControllerProtectedCreateAndLink(request ControllerProtectedCreateAndLi
 	if !validControllerBatchApplyText(request.Record.ID, controllerBatchApplyMaxRecordIDRunes) || strings.TrimSpace(request.Record.ID) != request.Record.ID || controllerBatchApplyHasControl(request.Record.ID) {
 		return controllerBatchApplyWireRequest{}, controllerBatchApplyProtocolError("record ID is invalid")
 	}
+	if request.Record.Type != "" && (!validControllerBatchApplyText(request.Record.Type, controllerBatchApplyMaxTextRunes) || strings.TrimSpace(request.Record.Type) != request.Record.Type || controllerBatchApplyHasControl(request.Record.Type)) {
+		return controllerBatchApplyWireRequest{}, controllerBatchApplyProtocolError("record type is invalid")
+	}
 	if !validControllerBatchApplyText(request.Record.Title, controllerBatchApplyMaxTextRunes) || strings.TrimSpace(request.Record.Title) == "" || controllerBatchApplyHasControl(request.Record.Title) {
 		return controllerBatchApplyWireRequest{}, controllerBatchApplyProtocolError("record title is invalid")
+	}
+	if request.Record.Description != "" &&
+		(!validControllerBatchApplyText(request.Record.Description, controllerBatchApplyMaxRequest) ||
+			len(request.Record.Description) > controllerBatchApplyMaxRequest || controllerBatchApplyHasControl(request.Record.Description)) {
+		return controllerBatchApplyWireRequest{}, controllerBatchApplyProtocolError("record description is invalid")
+	}
+	if len(request.Record.Labels) > controllerBatchApplyMaxItems {
+		return controllerBatchApplyWireRequest{}, controllerBatchApplyProtocolError("record labels exceed the supported bound")
+	}
+	seenLabels := make(map[string]struct{}, len(request.Record.Labels))
+	for _, label := range request.Record.Labels {
+		if !validControllerBatchApplyText(label, controllerBatchApplyMaxTextRunes) || strings.TrimSpace(label) != label || controllerBatchApplyHasControl(label) {
+			return controllerBatchApplyWireRequest{}, controllerBatchApplyProtocolError("record label is invalid")
+		}
+		if _, duplicate := seenLabels[label]; duplicate {
+			return controllerBatchApplyWireRequest{}, controllerBatchApplyProtocolError("record labels contain a duplicate")
+		}
+		seenLabels[label] = struct{}{}
+	}
+	if len(request.Record.Metadata) > controllerBatchApplyMaxItems {
+		return controllerBatchApplyWireRequest{}, controllerBatchApplyProtocolError("record metadata exceeds the supported bound")
+	}
+	metadataBytes := 0
+	for key, value := range request.Record.Metadata {
+		if !validControllerBatchApplyText(key, controllerBatchApplyMaxTextRunes) || strings.TrimSpace(key) != key || controllerBatchApplyHasControl(key) {
+			return controllerBatchApplyWireRequest{}, controllerBatchApplyProtocolError("record metadata key is invalid")
+		}
+		if !utf8.ValidString(value) || len(value) > controllerBatchApplyMaxRequest || controllerBatchApplyHasControl(value) {
+			return controllerBatchApplyWireRequest{}, controllerBatchApplyProtocolError("record metadata value is invalid")
+		}
+		entryBytes := len(key) + len(value)
+		if entryBytes > controllerBatchApplyMaxRequest || metadataBytes > controllerBatchApplyMaxRequest-entryBytes {
+			return controllerBatchApplyWireRequest{}, controllerBatchApplyProtocolError("record metadata exceeds the request size limit")
+		}
+		metadataBytes += entryBytes
 	}
 	if request.Record.ProtectionClass != "" && (!validControllerBatchApplyText(request.Record.ProtectionClass, controllerBatchApplyMaxTextRunes) || len(request.Record.ProtectionClass) > controllerBatchApplyMaxClassBytes || strings.TrimSpace(request.Record.ProtectionClass) != request.Record.ProtectionClass || controllerBatchApplyHasControl(request.Record.ProtectionClass)) {
 		return controllerBatchApplyWireRequest{}, controllerBatchApplyProtocolError("protection class is invalid")
@@ -306,7 +354,7 @@ func planControllerProtectedCreateAndLink(request ControllerProtectedCreateAndLi
 	if (request.Record.ProtectionClass == "") != (request.ProtectedPermit == "") {
 		return controllerBatchApplyWireRequest{}, controllerBatchApplyProtocolError("protected create requires both a protection class and permit")
 	}
-	if len(request.Links) == 0 || len(request.Links)+1 > controllerBatchApplyMaxItems {
+	if len(request.Links)+1 > controllerBatchApplyMaxItems {
 		return controllerBatchApplyWireRequest{}, controllerBatchApplyProtocolError("link count is outside the supported batch bound")
 	}
 	if request.ReceiptID != "" && (!utf8.ValidString(request.ReceiptID) || len(request.ReceiptID) > controllerBatchApplyMaxReceiptBytes || strings.ContainsRune(request.ReceiptID, '\x00')) {
@@ -318,11 +366,24 @@ func planControllerProtectedCreateAndLink(request ControllerProtectedCreateAndLi
 
 	wire := controllerBatchApplyWireRequest{Actor: request.Actor}
 	wire.Items = make([]controllerBatchApplyWireItem, 0, len(request.Links)+1)
+	create := &controllerBatchApplyWireCreate{
+		ID: request.Record.ID, IssueType: request.Record.Type, Title: request.Record.Title,
+		Description: request.Record.Description, ProtectionClass: request.Record.ProtectionClass,
+	}
+	if request.Record.Labels != nil {
+		labels := append(make([]string, 0, len(request.Record.Labels)), request.Record.Labels...)
+		create.Labels = &labels
+	}
+	if request.Record.Metadata != nil {
+		metadata := make(map[string]string, len(request.Record.Metadata))
+		for key, value := range request.Record.Metadata {
+			metadata[key] = value
+		}
+		create.Metadata = &metadata
+	}
 	wire.Items = append(wire.Items, controllerBatchApplyWireItem{
-		Kind: "create",
-		Create: &controllerBatchApplyWireCreate{
-			ID: request.Record.ID, Title: request.Record.Title, ProtectionClass: request.Record.ProtectionClass,
-		},
+		Kind:   "create",
+		Create: create,
 	})
 	for _, link := range request.Links {
 		if !validControllerBatchApplyText(link.SourceID, controllerBatchApplyMaxRecordIDRunes) || strings.TrimSpace(link.SourceID) != link.SourceID || controllerBatchApplyHasControl(link.SourceID) ||

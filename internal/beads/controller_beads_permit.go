@@ -157,12 +157,23 @@ func controllerBeadsProtectedBatchDigest(request ControllerProtectedCreateAndLin
 		return "", err
 	}
 
+	var metadata json.RawMessage
+	if request.Record.Metadata != nil {
+		encodedMetadata, err := json.Marshal(request.Record.Metadata)
+		if err != nil {
+			return "", fmt.Errorf("encode Beads protected create metadata: %w", err)
+		}
+		metadata = encodedMetadata
+	}
+	labels := append([]string(nil), request.Record.Labels...)
 	items := make([]controllerBeadsDigestApplyItem, 0, len(request.Links)+1)
 	items = append(items, controllerBeadsDigestApplyItem{
 		Kind: "create",
 		Create: &controllerBeadsDigestCreateItem{
 			Issue: &controllerBeadsDigestIssue{
 				ID: request.Record.ID, Title: request.Record.Title,
+				Description: request.Record.Description, IssueType: request.Record.Type,
+				Metadata: metadata, Labels: labels,
 			},
 			ProtectionClass: request.Record.ProtectionClass,
 		},
@@ -311,8 +322,9 @@ func validControllerBeadsPermitSHA256(value string) bool {
 }
 
 // These private shapes mirror the exported Beads values' encoding/json output
-// at the pinned revision. Keep their field order and zero-value emission fixed
-// with TestControllerBeadsProtectedBatchDigestMatchesPinnedGolden.
+// at the pinned revision. Keep the Issue subset's declaration order and zero
+// value emission fixed with the create-only and create-with-links pinned digest
+// tests.
 type controllerBeadsDigestApplyBatchRequest struct {
 	Actor                 string
 	ProtectedPermit       string
@@ -338,11 +350,15 @@ type controllerBeadsDigestCreateItem struct {
 }
 
 type controllerBeadsDigestIssue struct {
-	ID        string    `json:"id"`
-	Title     string    `json:"title"`
-	Priority  int       `json:"priority"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID          string          `json:"id"`
+	Title       string          `json:"title"`
+	Description string          `json:"description,omitempty"`
+	Priority    int             `json:"priority"`
+	IssueType   string          `json:"issue_type,omitempty"`
+	CreatedAt   time.Time       `json:"created_at"`
+	UpdatedAt   time.Time       `json:"updated_at"`
+	Metadata    json.RawMessage `json:"metadata,omitempty"`
+	Labels      []string        `json:"labels,omitempty"`
 }
 
 type controllerBeadsDigestUpdateItem struct{}

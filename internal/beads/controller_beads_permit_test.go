@@ -4,35 +4,98 @@ import (
 	"crypto"
 	"crypto/ed25519"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"io"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 )
 
 func TestControllerBeadsProtectedBatchDigestMatchesPinnedGolden(t *testing.T) {
-	request := ControllerProtectedCreateAndLinkRequest{
-		Actor: "controller-a",
-		Record: ControllerProtectedRecord{
-			ID: "bd-protected-1", Title: "Protected record", ProtectionClass: "source-decision",
-		},
-		Links: []ControllerDependencyLink{
-			{SourceID: "bd-protected-1", TargetID: "bd-map", Type: "relates-to"},
-			{SourceID: "bd-prerequisite", TargetID: "bd-protected-1", Type: "blocks"},
-		},
-		ReceiptID:       "excluded-receipt",
-		ProtectedPermit: "excluded-permit",
-	}
+	request := controllerBeadsFrontierDigestRequest(true)
+	request.ReceiptID = "excluded-receipt"
+	request.ProtectedPermit = "excluded-permit"
 
 	digest, err := controllerBeadsProtectedBatchDigest(request)
 	if err != nil {
 		t.Fatalf("controllerBeadsProtectedBatchDigest: %v", err)
 	}
-	const want = "1a17901ea4ab71a9c88ad6981d904ad84860a3e9f8c0d0a00dbaee814fd88514"
+	const want = "f05bb472b3b4f5a797586c3d6df1a2afec9e6a8f065f03e48f42b3d966bbf568"
 	if digest != want {
 		t.Fatalf("controller digest = %q, want pinned Beads digest %q", digest, want)
 	}
+
+	reorderedMetadata := request
+	reorderedMetadata.Record.Metadata = map[string]string{
+		"gc.decision_frontier.state":  "pending",
+		"gc.decision_frontier.record": "decision-frontier/map/v1",
+	}
+	metadataDigest, err := controllerBeadsProtectedBatchDigest(reorderedMetadata)
+	if err != nil {
+		t.Fatalf("controllerBeadsProtectedBatchDigest with reordered metadata: %v", err)
+	}
+	if metadataDigest != digest {
+		t.Fatalf("metadata map insertion order changed linked digest: %q != %q", metadataDigest, digest)
+	}
+	reorderedLinks := request
+	reorderedLinks.Links = []ControllerDependencyLink{request.Links[1], request.Links[0]}
+	linkDigest, err := controllerBeadsProtectedBatchDigest(reorderedLinks)
+	if err != nil {
+		t.Fatalf("controllerBeadsProtectedBatchDigest with reordered links: %v", err)
+	}
+	if linkDigest == digest {
+		t.Fatalf("dependency link order did not change digest: %q", linkDigest)
+	}
+}
+
+func TestControllerBeadsProtectedCreateOnlyDigestMatchesPinnedGolden(t *testing.T) {
+	request := controllerBeadsFrontierDigestRequest(false)
+
+	digest, err := controllerBeadsProtectedBatchDigest(request)
+	if err != nil {
+		t.Fatalf("controllerBeadsProtectedBatchDigest: %v", err)
+	}
+	const want = "f9bdd7a3fd99c83991c5288e92bb09da9b71ecc222809ac9faaded09ad796c85"
+	if digest != want {
+		t.Fatalf("controller digest = %q, want pinned Beads create-only digest %q", digest, want)
+	}
+
+	request.Record.Metadata = map[string]string{
+		"gc.decision_frontier.state":  "pending",
+		"gc.decision_frontier.record": "decision-frontier/map/v1",
+	}
+	reordered, err := controllerBeadsProtectedBatchDigest(request)
+	if err != nil {
+		t.Fatalf("controllerBeadsProtectedBatchDigest with reordered metadata: %v", err)
+	}
+	if reordered != digest {
+		t.Fatalf("metadata map insertion order changed digest: %q != %q", reordered, digest)
+	}
+}
+
+func controllerBeadsFrontierDigestRequest(withLinks bool) ControllerProtectedCreateAndLinkRequest {
+	request := ControllerProtectedCreateAndLinkRequest{
+		Actor: "controller-a",
+		Record: ControllerProtectedRecord{
+			ID: "bd-frontier-map-1", Type: "gate", Title: "Decision map for wrk-1",
+			Description: `{"schema_version":1,"kind":"decision-frontier/map/v1"}`,
+			Labels:      []string{"decision-frontier"},
+			Metadata: map[string]string{
+				"gc.decision_frontier.record": "decision-frontier/map/v1",
+				"gc.decision_frontier.state":  "pending",
+			},
+			ProtectionClass: "source-decision",
+		},
+	}
+	if withLinks {
+		request.Links = []ControllerDependencyLink{
+			{SourceID: "bd-frontier-map-1", TargetID: "bd-question-1", Type: "relates-to"},
+			{SourceID: "bd-prerequisite", TargetID: "bd-frontier-map-1", Type: "blocks"},
+		}
+	}
+	return request
 }
 
 func TestControllerBeadsPermitIssuerEmitsPinnedV1Claims(t *testing.T) {
@@ -85,6 +148,43 @@ func TestControllerBeadsPermitIssuerEmitsPinnedV1Claims(t *testing.T) {
 	const wantToken = "eyJzY2hlbWFfdmVyc2lvbiI6ImJlYWRzLnByb3RlY3RlZC1tdXRhdGlvbi1wZXJtaXQudjEiLCJwdXJwb3NlIjoicHJvdGVjdGVkX211dGF0aW9uX3Blcm1pdCIsImtleV9pZCI6ImtleS1hIiwiaXNzdWVyIjoiaXNzdWVyLWEiLCJhdWRpZW5jZSI6ImF1ZGllbmNlLWEiLCJwcm9qZWN0X2lkIjoicHJvamVjdC1hIiwiZGF0YWJhc2UiOiJiZWFkc19maXh0dXJlIiwib3BlcmF0aW9uIjoiaXNzdWUuYmF0Y2hfYXBwbHkiLCJyZXNvdXJjZV9pZHMiOlsiYmQtbWFwIiwiYmQtcHJlcmVxdWlzaXRlIiwiYmQtcHJvdGVjdGVkLTEiXSwicmVxdWVzdF9kaWdlc3QiOiIxYTE3OTAxZWE0YWI3MWE5Yzg4YWQ2OTgxZDkwNGFkODQ4NjBhM2U5ZjhjMGQwYTAwZGJhZWU4MTRmZDg4NTE0IiwicmVwbGF5X2lkIjoicmVwbGF5LWlkZW50aWZpZXItMDAwMSIsImlzc3VlZF9hdCI6IjIwMjYtMDEtMDJUMDM6MDQ6MDVaIiwiZXhwaXJlc19hdCI6IjIwMjYtMDEtMDJUMDM6MDU6MDVaIn0.aw2BYvQ8hUnbIrYjMOC4I2Si7hLNybejNdTbmDtBuU07qK8n80ZbwLZcCUPEwMDZtmlUyzhgfk-W8K1vpcgNBQ"
 	if token != wantToken {
 		t.Fatalf("permit token differs from the pinned Beads v1 fixture:\n got: %s\nwant: %s", token, wantToken)
+	}
+}
+
+func TestControllerBeadsPermitIssuerSignsFrontierCreateOnly(t *testing.T) {
+	privateKey := ed25519.NewKeyFromSeed([]byte("0123456789abcdef0123456789abcdef"))
+	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	issuer, err := NewControllerBeadsPermitIssuer(ControllerBeadsPermitIssuerConfig{
+		Audience: "audience-a", ProjectID: "project-a", Database: "beads_fixture",
+		KeyID: "key-a", Issuer: "issuer-a", Lifetime: time.Minute,
+		Signer: privateKey, Now: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("NewControllerBeadsPermitIssuer: %v", err)
+	}
+	request := controllerBeadsFrontierDigestRequest(false)
+	token, err := issuer.IssueProtectedCreateAndLink(request, "replay-identifier-0002")
+	if err != nil {
+		t.Fatalf("IssueProtectedCreateAndLink: %v", err)
+	}
+	parts := strings.Split(token, ".")
+	if len(parts) != 2 {
+		t.Fatalf("permit token has %d segments, want 2", len(parts))
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil || base64.RawURLEncoding.EncodeToString(payload) != parts[0] {
+		t.Fatalf("permit payload is not canonical raw URL base64: %v", err)
+	}
+	var claims controllerBeadsPermitClaimsV1
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		t.Fatalf("decode permit claims: %v", err)
+	}
+	digest, err := controllerBeadsProtectedBatchDigest(request)
+	if err != nil {
+		t.Fatalf("controllerBeadsProtectedBatchDigest: %v", err)
+	}
+	if claims.RequestDigest != digest || !reflect.DeepEqual(claims.ResourceIDs, []string{request.Record.ID}) {
+		t.Fatalf("create-only claims digest/resources = (%q, %v), want (%q, [%q])", claims.RequestDigest, claims.ResourceIDs, digest, request.Record.ID)
 	}
 }
 

@@ -67,7 +67,11 @@ func controllerBatchApplyTestRequest() ControllerProtectedCreateAndLinkRequest {
 	return ControllerProtectedCreateAndLinkRequest{
 		Actor: "gascity-controller",
 		Record: ControllerProtectedRecord{
-			ID: "gc-protected-1", Title: "Protected record", ProtectionClass: "gc-policy",
+			ID: "gc-protected-1", Type: "gate", Title: "Protected record",
+			Description:     `{"schema_version":1,"kind":"decision-frontier/map/v1"}`,
+			Labels:          []string{"decision-frontier"},
+			Metadata:        map[string]string{"gc.decision_frontier.record": "decision-frontier/map/v1", "gc.decision_frontier.state": "pending"},
+			ProtectionClass: "gc-policy",
 		},
 		Links: []ControllerDependencyLink{
 			{SourceID: "gc-protected-1", TargetID: "gc-map", Type: "relates-to"},
@@ -155,15 +159,25 @@ func TestControllerBatchApplyHTTPPostsTypedCreateAndOrderedLinks(t *testing.T) {
 		}
 		var createKind string
 		_ = json.Unmarshal(items[0]["kind"], &createKind)
-		if createKind != "create" || len(create) != 3 {
+		if createKind != "create" || len(create) != 7 {
 			t.Fatalf("create kind/payload = %q / %v", createKind, create)
 		}
-		var createID, title, protectionClass string
+		var createID, issueType, title, description, protectionClass string
 		_ = json.Unmarshal(create["id"], &createID)
+		_ = json.Unmarshal(create["issue_type"], &issueType)
 		_ = json.Unmarshal(create["title"], &title)
+		_ = json.Unmarshal(create["description"], &description)
 		_ = json.Unmarshal(create["protection_class"], &protectionClass)
-		if createID != request.Record.ID || title != request.Record.Title || protectionClass != request.Record.ProtectionClass {
-			t.Fatalf("create = (%q, %q, %q), want (%q, %q, %q)", createID, title, protectionClass, request.Record.ID, request.Record.Title, request.Record.ProtectionClass)
+		var labels []string
+		var metadata map[string]string
+		_ = json.Unmarshal(create["labels"], &labels)
+		_ = json.Unmarshal(create["metadata"], &metadata)
+		if createID != request.Record.ID || issueType != request.Record.Type || title != request.Record.Title ||
+			description != request.Record.Description || !reflect.DeepEqual(labels, request.Record.Labels) ||
+			!reflect.DeepEqual(metadata, request.Record.Metadata) || protectionClass != request.Record.ProtectionClass {
+			t.Fatalf("create = (%q, %q, %q, %q, %v, %v, %q), want (%q, %q, %q, %q, %v, %v, %q)",
+				createID, issueType, title, description, labels, metadata, protectionClass,
+				request.Record.ID, request.Record.Type, request.Record.Title, request.Record.Description, request.Record.Labels, request.Record.Metadata, request.Record.ProtectionClass)
 		}
 		for i, want := range request.Links {
 			var item map[string]json.RawMessage
@@ -223,19 +237,35 @@ func TestControllerBatchApplyHTTPPreservesDependencyTypeWhitespace(t *testing.T)
 	}
 }
 
-func TestControllerBatchApplyHTTPRejectsProtectedCreateWithoutLinks(t *testing.T) {
+func TestControllerBatchApplyHTTPPostsProtectedCreateWithoutLinks(t *testing.T) {
 	request := controllerBatchApplyTestRequest()
 	request.Links = nil
 	transport := &controllerBatchApplyTestTransport{}
-	transport.handler = controllerBatchApplyTestHandler("project-a", controllerBatchApplyTestCapabilities(), func(_ http.ResponseWriter, _ *http.Request) {
-		t.Fatal("create without a dependency link reached the server")
+	transport.handler = controllerBatchApplyTestHandler("project-a", controllerBatchApplyTestCapabilities(), func(w http.ResponseWriter, r *http.Request) {
+		var body controllerBatchApplyWireRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if len(body.Items) != 1 || body.Items[0].Kind != "create" || body.Items[0].Create == nil || body.Items[0].DepAdd != nil {
+			t.Fatalf("create-only items = %+v, want exactly one create", body.Items)
+		}
+		if body.Items[0].Create.ID != request.Record.ID || body.Items[0].Create.IssueType != request.Record.Type ||
+			body.Items[0].Create.Description != request.Record.Description || body.Items[0].Create.ProtectionClass != request.Record.ProtectionClass {
+			t.Fatalf("create-only record = %+v, want exact request record %+v", body.Items[0].Create, request.Record)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(controllerBatchApplyTestResponse(request, false))
 	})
 	client := controllerBatchApplyTestClient(t, transport)
-	if _, err := client.ApplyProtectedCreateAndLink(context.Background(), request); !errors.Is(err, ErrControllerBatchApplyProtocol) {
-		t.Fatalf("ApplyProtectedCreateAndLink error = %v, want local protocol refusal", err)
+	result, err := client.ApplyProtectedCreateAndLink(context.Background(), request)
+	if err != nil {
+		t.Fatalf("ApplyProtectedCreateAndLink: %v", err)
 	}
-	if transport.contextCount != 0 || transport.postCount != 0 {
-		t.Fatalf("HTTP calls = context %d, POST %d; want none", transport.contextCount, transport.postCount)
+	if result.Replayed {
+		t.Fatal("Replayed = true on first create-only response, want false")
+	}
+	if transport.contextCount != 1 || transport.postCount != 1 {
+		t.Fatalf("HTTP calls = context %d, POST %d; want one handshake and one create-only POST", transport.contextCount, transport.postCount)
 	}
 }
 
@@ -430,6 +460,16 @@ func TestControllerBatchApplyHTTPRejectsMalformedRequestsBeforeHandshake(t *test
 		{name: "empty receipt", mutate: func(request *ControllerProtectedCreateAndLinkRequest) { request.ReceiptID = "\x00" }},
 		{name: "class without permit", mutate: func(request *ControllerProtectedCreateAndLinkRequest) { request.ProtectedPermit = "" }},
 		{name: "permit without class", mutate: func(request *ControllerProtectedCreateAndLinkRequest) { request.Record.ProtectionClass = "" }},
+		{name: "invalid issue type", mutate: func(request *ControllerProtectedCreateAndLinkRequest) { request.Record.Type = " gate " }},
+		{name: "invalid description", mutate: func(request *ControllerProtectedCreateAndLinkRequest) {
+			request.Record.Description = "bad\x00description"
+		}},
+		{name: "invalid label", mutate: func(request *ControllerProtectedCreateAndLinkRequest) {
+			request.Record.Labels = []string{" valid", "bad"}
+		}},
+		{name: "invalid metadata key", mutate: func(request *ControllerProtectedCreateAndLinkRequest) {
+			request.Record.Metadata = map[string]string{"": "bad"}
+		}},
 		{name: "overlong dependency type", mutate: func(request *ControllerProtectedCreateAndLinkRequest) {
 			request.Links[0].Type = strings.Repeat("x", controllerBatchApplyMaxDepTypeBytes+1)
 		}},
@@ -449,6 +489,34 @@ func TestControllerBatchApplyHTTPRejectsMalformedRequestsBeforeHandshake(t *test
 				t.Fatalf("HTTP calls = context %d, POST %d; want none", transport.contextCount, transport.postCount)
 			}
 		})
+	}
+}
+
+func TestControllerBatchApplyHTTPEncodesMetadataDeterministically(t *testing.T) {
+	first := controllerBatchApplyTestRequest()
+	second := first
+	second.Record.Metadata = map[string]string{}
+	second.Record.Metadata["gc.decision_frontier.state"] = "pending"
+	second.Record.Metadata["gc.decision_frontier.record"] = "decision-frontier/map/v1"
+
+	firstWire, err := planControllerProtectedCreateAndLink(first)
+	if err != nil {
+		t.Fatalf("plan first request: %v", err)
+	}
+	secondWire, err := planControllerProtectedCreateAndLink(second)
+	if err != nil {
+		t.Fatalf("plan second request: %v", err)
+	}
+	firstBody, err := json.Marshal(firstWire)
+	if err != nil {
+		t.Fatalf("marshal first request: %v", err)
+	}
+	secondBody, err := json.Marshal(secondWire)
+	if err != nil {
+		t.Fatalf("marshal second request: %v", err)
+	}
+	if !bytes.Equal(firstBody, secondBody) {
+		t.Fatalf("metadata map insertion order changed wire bytes:\nfirst:  %s\nsecond: %s", firstBody, secondBody)
 	}
 }
 
