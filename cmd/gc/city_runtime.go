@@ -121,19 +121,20 @@ type CityRuntime struct {
 	buildFn                 func(*config.City, runtime.Provider, beads.Store) DesiredStateResult
 	buildFnWithSessionBeads func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult
 
-	dops                    drainOps
-	ct                      crashTracker
-	it                      idleTracker
-	mat                     maxSessionAgeTracker
-	adt                     assignedWorkDeferTracker
-	wg                      wispGC
-	od                      orderDispatcher
-	retiredOrderDispatchers []orderDispatcher
-	orderSet                []orders.Order
-	orderSetSignature       string
-	orderRescanEnabled      bool
-	orderRescanLast         time.Time
-	trace                   *sessionReconcilerTraceManager
+	dops                          drainOps
+	ct                            crashTracker
+	it                            idleTracker
+	mat                           maxSessionAgeTracker
+	adt                           assignedWorkDeferTracker
+	wg                            wispGC
+	od                            orderDispatcher
+	orderDispatchIdentityRegistry *orderDispatchIdentityRegistry
+	retiredOrderDispatchers       []orderDispatcher
+	orderSet                      []orders.Order
+	orderSetSignature             string
+	orderRescanEnabled            bool
+	orderRescanLast               time.Time
+	trace                         *sessionReconcilerTraceManager
 
 	// routeRecovery is the route-repair lane: an event-fed delta pass in the
 	// tick and a cadenced authoritative scan behind it. Created on first use so
@@ -412,45 +413,50 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 	sweepOrphanedOrderTrackingAtBoot(routes, p.CityPath, p.Cfg, p.Rec, p.Stderr)
 
 	od, orderSnapshot := buildOrderDispatcherWithSnapshot(routes, p.CityPath, p.Cfg, p.Rec, p.Stderr, "gc start: order scan")
+	orderIdentityRegistry := newOrderDispatchIdentityRegistry()
+	if memory, ok := od.(*memoryOrderDispatcher); ok {
+		memory.inflightIdentityRegistry = orderIdentityRegistry
+	}
 
 	suspendedNames := computeSuspendedNames(p.Cfg, p.CityName, p.CityPath)
 
 	cr := &CityRuntime{
-		storageRoutes:           routes,
-		cityPath:                p.CityPath,
-		cityName:                p.CityName,
-		configName:              configName,
-		tomlPath:                p.TomlPath,
-		watchTargets:            p.WatchTargets,
-		configRev:               p.ConfigRev,
-		configDirty:             configDirty,
-		cfg:                     p.Cfg,
-		compatibilityAuthority:  p.CompatibilityAuthority,
-		sp:                      p.SP,
-		publication:             p.Publication,
-		buildFn:                 p.BuildFn,
-		buildFnWithSessionBeads: p.BuildFnWithSessionBeads,
-		dops:                    p.Dops,
-		ct:                      ct,
-		it:                      it,
-		mat:                     mat,
-		adt:                     adt,
-		wg:                      wg,
-		od:                      od,
-		orderSet:                orderSnapshot.Orders,
-		orderSetSignature:       orderSnapshot.Signature,
-		orderRescanEnabled:      true,
-		orderRescanLast:         time.Now(),
-		trace:                   newSessionReconcilerTraceManager(p.CityPath, p.CityName, p.Stderr),
-		rec:                     p.Rec,
-		reapSkips:               newReapSkipTracker(),
-		poolSessions:            p.PoolSessions,
-		poolDeathHandlers:       p.PoolDeathHandlers,
-		forceStopShutdown:       p.ForceStopShutdown,
-		suspendedNames:          suspendedNames,
-		asyncStartLimiter:       newAsyncStartLimiter(maxParallelStartsPerTick(p.Cfg)),
-		transcriptMetaEnabled:   p.TranscriptMetaEnabled,
-		convergenceReqCh:        p.ConvergenceReqCh,
+		storageRoutes:                 routes,
+		cityPath:                      p.CityPath,
+		cityName:                      p.CityName,
+		configName:                    configName,
+		tomlPath:                      p.TomlPath,
+		watchTargets:                  p.WatchTargets,
+		configRev:                     p.ConfigRev,
+		configDirty:                   configDirty,
+		cfg:                           p.Cfg,
+		compatibilityAuthority:        p.CompatibilityAuthority,
+		sp:                            p.SP,
+		publication:                   p.Publication,
+		buildFn:                       p.BuildFn,
+		buildFnWithSessionBeads:       p.BuildFnWithSessionBeads,
+		dops:                          p.Dops,
+		ct:                            ct,
+		it:                            it,
+		mat:                           mat,
+		adt:                           adt,
+		wg:                            wg,
+		od:                            od,
+		orderDispatchIdentityRegistry: orderIdentityRegistry,
+		orderSet:                      orderSnapshot.Orders,
+		orderSetSignature:             orderSnapshot.Signature,
+		orderRescanEnabled:            true,
+		orderRescanLast:               time.Now(),
+		trace:                         newSessionReconcilerTraceManager(p.CityPath, p.CityName, p.Stderr),
+		rec:                           p.Rec,
+		reapSkips:                     newReapSkipTracker(),
+		poolSessions:                  p.PoolSessions,
+		poolDeathHandlers:             p.PoolDeathHandlers,
+		forceStopShutdown:             p.ForceStopShutdown,
+		suspendedNames:                suspendedNames,
+		asyncStartLimiter:             newAsyncStartLimiter(maxParallelStartsPerTick(p.Cfg)),
+		transcriptMetaEnabled:         p.TranscriptMetaEnabled,
+		convergenceReqCh:              p.ConvergenceReqCh,
 		reloadReqCh: func() chan reloadRequest {
 			if p.ReloadReqCh != nil {
 				return p.ReloadReqCh
@@ -498,6 +504,11 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 // accessors read it under RLock.
 func (cr *CityRuntime) setControllerState(cs *controllerState) {
 	cr.cs = cs
+	if cs != nil {
+		cs.mu.Lock()
+		cs.orderDispatchIdentityRegistry = cr.orderDispatchIdentityRegistry
+		cs.mu.Unlock()
+	}
 }
 
 func (cr *CityRuntime) compatibilityRuntimeIdentity() (*config.City, qualification.Snapshot, qualification.BuildIdentity, qualification.CompatibilityAuthority, error) {
@@ -1578,6 +1589,9 @@ func (cr *CityRuntime) rescanOrderDispatcherIfDue(ctx context.Context, cityRoot 
 // them instead of cold-starting (#3201).
 // Call after draining the outgoing dispatcher.
 func (cr *CityRuntime) replaceOrderDispatcher(next orderDispatcher) {
+	if memory, ok := next.(*memoryOrderDispatcher); ok && cr.orderDispatchIdentityRegistry != nil {
+		memory.inflightIdentityRegistry = cr.orderDispatchIdentityRegistry
+	}
 	cr.installCompatibilityGateOnOrderDispatcher(next)
 	if prev, ok := cr.od.(*memoryOrderDispatcher); ok {
 		if nextMem, ok := next.(*memoryOrderDispatcher); ok {

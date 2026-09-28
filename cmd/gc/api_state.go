@@ -87,32 +87,33 @@ type controllerState struct {
 	// built from it there. Nil for every city that authors no [storage] section,
 	// and for an API state built without a runtime — both route every class at
 	// the work store.
-	storageRoutes             *storageRoutes
-	cityBeadsDiagnostic       *beads.BeadsDiagnostic
-	cityMailProv              mail.Provider // city-level mail provider (all mail is city-scoped)
-	eventProv                 events.Provider
-	usageSink                 usage.Sink
-	editor                    *configedit.Editor
-	cityName                  string
-	cityPath                  string
-	version                   string
-	qualificationBuild        qualification.BuildIdentity
-	releaseAuthorizer         qualification.ReleaseAuthorizer
-	compatibilityAuthority    qualification.CompatibilityAuthority
-	startedAt                 time.Time
-	storeMetadataSignature    string
-	graphStoreGeneration      uint64        // guarded by mu; incremented on every state publication
-	compatibilityRoutesClosed bool          // guarded by mu; set before runtime storage close
-	ct                        crashTracker  // nil if crash tracking disabled
-	pokeCh                    chan struct{} // nil when poke is not available; triggers immediate reconciler tick
-	configDirty               *atomic.Bool  // optional dirty flag shared with the reconciler reload path
-	services                  workspacesvc.Registry
-	extmsgSvc                 *extmsg.Services
-	adapterReg                *extmsg.AdapterRegistry
-	maintenanceLoop           *supervisor.StoreMaintenanceLoop // nil when [maintenance.dolt] enabled=false
-	updateMu                  sync.Mutex                       // serializes rebuild+swap so stale reloads cannot overtake newer mutations
-	beadEventStartSeq         uint64
-	beadEventStartSeqOK       bool // false when LatestSeq errored at construction; 0+true = genuinely empty log
+	storageRoutes                 *storageRoutes
+	cityBeadsDiagnostic           *beads.BeadsDiagnostic
+	cityMailProv                  mail.Provider // city-level mail provider (all mail is city-scoped)
+	eventProv                     events.Provider
+	usageSink                     usage.Sink
+	editor                        *configedit.Editor
+	cityName                      string
+	cityPath                      string
+	version                       string
+	qualificationBuild            qualification.BuildIdentity
+	releaseAuthorizer             qualification.ReleaseAuthorizer
+	compatibilityAuthority        qualification.CompatibilityAuthority
+	startedAt                     time.Time
+	storeMetadataSignature        string
+	graphStoreGeneration          uint64                         // guarded by mu; incremented on every state publication
+	orderDispatchIdentityRegistry *orderDispatchIdentityRegistry // guarded by mu; shared with the city runtime
+	compatibilityRoutesClosed     bool                           // guarded by mu; set before runtime storage close
+	ct                            crashTracker                   // nil if crash tracking disabled
+	pokeCh                        chan struct{}                  // nil when poke is not available; triggers immediate reconciler tick
+	configDirty                   *atomic.Bool                   // optional dirty flag shared with the reconciler reload path
+	services                      workspacesvc.Registry
+	extmsgSvc                     *extmsg.Services
+	adapterReg                    *extmsg.AdapterRegistry
+	maintenanceLoop               *supervisor.StoreMaintenanceLoop // nil when [maintenance.dolt] enabled=false
+	updateMu                      sync.Mutex                       // serializes rebuild+swap so stale reloads cannot overtake newer mutations
+	beadEventStartSeq             uint64
+	beadEventStartSeqOK           bool // false when LatestSeq errored at construction; 0+true = genuinely empty log
 
 	// completionsDeltaIndex is the tick delta pass's warm completion-fact
 	// idempotency record: loaded from the journal once, then kept current by the
@@ -3228,6 +3229,7 @@ func (d controllerWebhookDispatcher) dispatcher() *memoryOrderDispatcher {
 	cs.mu.RLock()
 	cfg := cs.cfg
 	routes := cs.storageRoutes
+	identityRegistry := cs.orderDispatchIdentityRegistry
 	var rec events.Recorder = cs.eventProv
 	cs.mu.RUnlock()
 	if rec == nil {
@@ -3235,7 +3237,11 @@ func (d controllerWebhookDispatcher) dispatcher() *memoryOrderDispatcher {
 		// discard recorder keeps it panic-free when the city has events disabled.
 		rec = events.Discard
 	}
-	return newMemoryOrderDispatcher(routes, nil, cs.cityPath, cfg, rec, os.Stderr)
+	dispatcher := newMemoryOrderDispatcher(routes, nil, cs.cityPath, cfg, rec, os.Stderr)
+	if identityRegistry != nil {
+		dispatcher.inflightIdentityRegistry = identityRegistry
+	}
+	return dispatcher
 }
 
 // ExtMsgServices returns the external messaging services.

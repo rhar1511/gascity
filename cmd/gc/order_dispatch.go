@@ -336,6 +336,16 @@ type memoryOrderDispatcher struct {
 	inflightMu   sync.Mutex
 	inflightN    int
 	inflightDone chan struct{} // closed when inflightN returns to 0; nil when idle
+	// inflightIdentityRegistry is shared across this controller execution's
+	// scheduled and webhook dispatchers. It is observation-only and does not
+	// participate in dispatch gates.
+	inflightIdentityRegistry *orderDispatchIdentityRegistry
+	// afterIdentityPromotion is a narrow test seam for the ownership boundary
+	// between synchronous tracking creation and asynchronous launch.
+	afterIdentityPromotion func()
+	// orderFrontDoorForFn is a narrow test seam for failures while preparing
+	// the tracking store, before CreateRun establishes the next owner.
+	orderFrontDoorForFn func(beads.Store) *orders.Store
 }
 
 type orderDispatchTrackingIndex struct {
@@ -501,18 +511,19 @@ func newMemoryOrderDispatcher(routes *storageRoutes, aa []orders.Order, cityPath
 			// every scope target (ga-237xpr).
 			return openStoreAtForCityWithConfig(target.ScopeRoot, cityPath, cfg)
 		},
-		storageRoutes:        routes,
-		ep:                   ep,
-		execRun:              shellExecRunner,
-		rec:                  rec,
-		stderr:               lockedStderr(stderr),
-		maxTimeout:           cfg.Orders.MaxTimeoutDuration(),
-		maxDispatchesPerTick: maxDispatchesPerTick,
-		cfg:                  cfg,
-		cityName:             loadedCityName(cfg, cityPath),
-		cityPath:             cityPath,
-		dispatchCtx:          dispatchCtx,
-		dispatchCancel:       dispatchCancel,
+		storageRoutes:            routes,
+		ep:                       ep,
+		execRun:                  shellExecRunner,
+		rec:                      rec,
+		stderr:                   lockedStderr(stderr),
+		maxTimeout:               cfg.Orders.MaxTimeoutDuration(),
+		maxDispatchesPerTick:     maxDispatchesPerTick,
+		cfg:                      cfg,
+		cityName:                 loadedCityName(cfg, cityPath),
+		cityPath:                 cityPath,
+		dispatchCtx:              dispatchCtx,
+		dispatchCancel:           dispatchCancel,
+		inflightIdentityRegistry: newOrderDispatchIdentityRegistry(),
 	}
 }
 
@@ -1044,14 +1055,14 @@ func (m *memoryOrderDispatcher) fireCandidate(ctx context.Context, cand *orderDi
 // once after dispatchOne returns — i.e. after this goroutine's final store
 // call — so the caller can hold per-tick store handles open until the
 // goroutine releases them (gascity#3157). A nil onDone is treated as a no-op.
-func (m *memoryOrderDispatcher) launchDispatchOne(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string, vars, execEnv map[string]string, onDone func()) {
+func (m *memoryOrderDispatcher) launchDispatchOne(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string, identityLease orderDispatchIdentityLease, vars, execEnv map[string]string, onDone func()) {
 	if onDone == nil {
 		onDone = func() {}
 	}
 	if m.dispatchCtx == nil {
 		go func() {
 			defer onDone()
-			m.runDispatchGuarded(ctx, store, target, a, cityPath, trackingID, vars, execEnv)
+			m.runDispatchGuarded(ctx, store, target, a, cityPath, trackingID, vars, execEnv, identityLease)
 		}()
 		return
 	}
@@ -1064,7 +1075,7 @@ func (m *memoryOrderDispatcher) launchDispatchOne(ctx context.Context, store bea
 		defer onDone()
 		defer stopAfter()
 		defer cancelMerged()
-		m.runDispatchGuarded(mergedCtx, store, target, a, cityPath, trackingID, vars, execEnv)
+		m.runDispatchGuarded(mergedCtx, store, target, a, cityPath, trackingID, vars, execEnv, identityLease)
 	}()
 }
 
@@ -1075,13 +1086,13 @@ func (m *memoryOrderDispatcher) launchDispatchOne(ctx context.Context, store bea
 // webhook-derived args) would otherwise crash the whole supervisor. dispatchOne's
 // own defers close the tracking bead as the stack unwinds before recovery here;
 // this boundary logs the panic and contains it to the single dispatch.
-func (m *memoryOrderDispatcher) runDispatchGuarded(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string, vars, execEnv map[string]string) {
+func (m *memoryOrderDispatcher) runDispatchGuarded(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string, vars, execEnv map[string]string, identityLeases ...orderDispatchIdentityLease) {
 	defer func() {
 		if p := recover(); p != nil {
 			logDispatchError(m.stderr, "gc: order %s: dispatch goroutine panic (tracking %s): %v", a.ScopedName(), trackingID, p)
 		}
 	}()
-	m.dispatchOne(ctx, store, target, a, cityPath, trackingID, vars, execEnv)
+	m.dispatchOne(ctx, store, target, a, cityPath, trackingID, vars, execEnv, identityLeases...)
 }
 
 // launchResolvedDispatch is the single fire path shared by the controller tick
@@ -1098,12 +1109,40 @@ func (m *memoryOrderDispatcher) launchResolvedDispatch(ctx context.Context, stor
 	if err := m.preauthorizeRequiredOrderFormula(ctx, store, target, a, cityPath, vars); err != nil {
 		return orders.OrderRun{}, fmt.Errorf("preparing required order formula before tracking: %w", err)
 	}
-	trackingRun, err := m.orderFrontDoorFor(store).CreateRun(a.ScopedName(), orders.RunOpts{})
+	workKind := "formula_root"
+	if a.IsExec() {
+		workKind = "exec"
+	}
+	var reservation orderDispatchIdentityReservation
+	if m.inflightIdentityRegistry != nil {
+		reservation = m.inflightIdentityRegistry.reserve(a.ScopedName())
+	}
+	reservationOwned := reservation.reserved
+	defer func() {
+		if reservationOwned {
+			reservation.cancel()
+		}
+	}()
+
+	trackingStore := m.orderFrontDoorFor(store)
+	trackingRun, err := trackingStore.CreateRun(a.ScopedName(), orders.RunOpts{})
 	if err != nil {
 		return orders.OrderRun{}, err
 	}
+	identityLease := reservation.promote(trackingRun.ID, workKind)
+	reservationOwned = false
+	identityLeaseOwned := identityLease.registered
+	defer func() {
+		if identityLeaseOwned {
+			identityLease.complete()
+		}
+	}()
+	if m.afterIdentityPromotion != nil {
+		m.afterIdentityPromotion()
+	}
 	m.addInflight()
-	m.launchDispatchOne(ctx, store, target, a, cityPath, trackingRun.ID, vars, execEnv, onDone)
+	m.launchDispatchOne(ctx, store, target, a, cityPath, trackingRun.ID, identityLease, vars, execEnv, onDone)
+	identityLeaseOwned = false
 	return trackingRun, nil
 }
 
@@ -1735,10 +1774,15 @@ func orderTriggerUsesLastRun(a orders.Order) bool {
 // namespaced execEnv (GC_WEBHOOK_ARG_*) so an untrusted payload can never shadow
 // a controller-owned or static [order.env] key (R4); the tick loop and CLI pass
 // nil (raw overlay), preserving existing semantics.
-func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string, vars, execEnv map[string]string) {
+func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string, vars, execEnv map[string]string, identityLeases ...orderDispatchIdentityLease) {
+	var identityLease orderDispatchIdentityLease
+	if len(identityLeases) > 0 {
+		identityLease = identityLeases[0]
+	}
 	// Defer order matters: doneInflight runs last, after Close makes the
 	// tracking bead outcome observable to a waiting drain.
 	defer m.doneInflight()
+	defer identityLease.complete()
 	defer func() {
 		// The tracking bead was born in the orders store, so its close has to
 		// address that store: closing through the target scope on a split city
@@ -1789,7 +1833,7 @@ func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Sto
 		}
 		m.dispatchExec(childCtx, front, target, a, cityPath, trackingID, execOverlay)
 	} else {
-		m.dispatchWisp(childCtx, store, target, a, cityPath, trackingID, vars)
+		m.dispatchWisp(childCtx, store, target, a, cityPath, trackingID, vars, identityLease)
 	}
 }
 
@@ -2171,6 +2215,9 @@ func (m *memoryOrderDispatcher) ordersStoreFor(store beads.Store) beads.Store {
 // are the same bead in the same database by construction rather than by each
 // call site remembering to route.
 func (m *memoryOrderDispatcher) orderFrontDoorFor(store beads.Store) *orders.Store {
+	if m.orderFrontDoorForFn != nil {
+		return m.orderFrontDoorForFn(store)
+	}
 	return orders.NewStore(beads.OrdersStore{Store: m.ordersStoreFor(store)})
 }
 
@@ -2296,7 +2343,11 @@ func sweepStoreListContains(stores []beads.Store, want beads.Store) bool {
 }
 
 // dispatchWisp instantiates a wisp from the order's formula.
-func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string, vars map[string]string) {
+func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string, vars map[string]string, identityLeases ...orderDispatchIdentityLease) {
+	var identityLease orderDispatchIdentityLease
+	if len(identityLeases) > 0 {
+		identityLease = identityLeases[0]
+	}
 	scoped := a.ScopedName()
 
 	if err := ctx.Err(); err != nil {
@@ -2441,6 +2492,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 		return
 	}
 	rootID := cookResult.RootID
+	identityLease.bindWork(rootID)
 	if cookResult.GraphWorkflow {
 		// Two classes, two stores: the graph store owns the root and its steps,
 		// the work store owns the tracks edges of any input convoy the root
