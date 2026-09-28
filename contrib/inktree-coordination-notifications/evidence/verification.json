@@ -1,0 +1,41 @@
+{
+  "scope": "offline coordination notification source review",
+  "worktree_verification": "passed",
+  "toolchain": "go1.26.6",
+  "policy_dispatch_switches": {
+    "live_dispatch": "off",
+    "notification_dispatch": "off"
+  },
+  "focused_go_tests": {
+    "status": "passed",
+    "command": "go test ./internal/coordinationnotify ./contrib/inktree-coordination-notifications/...",
+    "packages": [
+      "internal/coordinationnotify",
+      "contrib/inktree-coordination-notifications",
+      "contrib/inktree-coordination-notifications/cmd/evidence"
+    ]
+  },
+  "focused_go_vet": {
+    "status": "passed",
+    "command": "go vet ./internal/coordinationnotify ./contrib/inktree-coordination-notifications/..."
+  },
+  "race_tests": {
+    "status": "not_run",
+    "reason": "CGO_ENABLED is off in this host shell; race mode requires CGO."
+  },
+  "retained_reports": [
+    "replay.json",
+    "rendered-redaction.json",
+    "reason-coverage.json",
+    "switch-report.json",
+    "ledger.json",
+    "offline-receipt.json",
+    "negative-proof.json"
+  },
+  "factory_policy_validation": {
+    "status": "unavailable",
+    "reason": "This worktree has no .agent-factory/config.yaml and the installed gc binary does not implement gc factory."
+  },
+  "synthetic_canary": "not_run_by_instruction",
+  "runtime_or_city_mutation": "none"
+}

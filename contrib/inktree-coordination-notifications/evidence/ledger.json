@@ -1,0 +1,29 @@
+{
+  "record_count": 1,
+  "notification_id": "notif-8d5756c23d0801e8",
+  "record": {
+    "channel": "discord",
+    "recipient_role": "author",
+    "severity": "action_required",
+    "redaction": "no_member_content",
+    "dedup_key": "coord-hold-inktree-syn0003"
+  },
+  "snapshot": {
+    "receipts": [
+      {
+        "dedup_key": "coord-hold-inktree-syn0003",
+        "hold_epoch": 1,
+        "channel": "discord",
+        "attempt": 1,
+        "suppressed": false
+      },
+      {
+        "dedup_key": "coord-hold-inktree-syn0003",
+        "hold_epoch": 1,
+        "channel": "discord",
+        "attempt": 2,
+        "suppressed": true
+      }
+    ]
+  }
+}

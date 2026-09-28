@@ -1,0 +1,30 @@
+{
+  "version": "coordination-policy-v1",
+  "notification_version": "inktree-coordination-notification/v1",
+  "bead_prefix": "inktree-",
+  "replay_command": "replay-coordination --corpus tests/fixtures/coordination-replay/corpus.v1.json --policy coordination-policy-v1 --out replay-report.json",
+  "switches": {
+    "live_dispatch": "off",
+    "notification_dispatch": "off"
+  },
+  "delivery": {
+    "max_attempts": 3,
+    "backoff_seconds": [30, 120, 600],
+    "failover_channel": "pr_update",
+    "escalation_recipient": "mayor",
+    "deadline_seconds": 3600
+  },
+  "reasons": {
+    "route/single_rig": {"status": "route", "code": "route.single_rig", "severity": "info"},
+    "route/multi_rig_dag": {"status": "route", "code": "route.multi_rig_dag", "severity": "info"},
+    "hard_failure/policy_violation": {"status": "hard_failure", "code": "hard_failure.policy_violation", "severity": "info"},
+    "hard_failure/deterministic_control_plane_guard": {"status": "hard_failure", "code": "hard_failure.policy_violation", "severity": "info"},
+    "hold/ambiguous_rig": {"status": "hold", "code": "hold.ambiguous_rig", "severity": "action_required", "template": "hold.action_required.v1", "sentence": "A human decision is needed before this work can proceed."},
+    "hold/jev_selected_hold": {"status": "hold", "code": "hold.ambiguous_rig", "severity": "action_required", "template": "hold.action_required.v1", "sentence": "A human decision is needed before this work can proceed."},
+    "hold/missing_evidence": {"status": "hold", "code": "hold.missing_evidence", "severity": "action_required", "template": "hold.action_required.v1", "sentence": "A human decision is needed because supporting evidence is missing."},
+    "hold/__insufficient_evidence__": {"status": "hold", "code": "hold.missing_evidence", "severity": "action_required", "template": "hold.action_required.v1", "sentence": "A human decision is needed because supporting evidence is missing."},
+    "hold/irreversible_risk": {"status": "hold", "code": "hold.irreversible_risk", "severity": "action_required", "template": "hold.action_required.v1", "sentence": "A human decision is needed before irreversible work can proceed."},
+    "hold/safety_class_security": {"status": "hold", "code": "hold.irreversible_risk", "severity": "action_required", "template": "hold.action_required.v1", "sentence": "A human decision is needed before irreversible work can proceed."},
+    "abstain/unsupported_class": {"status": "abstain", "code": "abstain.unsupported_class", "severity": "warning", "template": "abstain.warning.v1", "sentence": "No supported route was found for this request."}
+  }
+}
