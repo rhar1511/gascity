@@ -600,6 +600,10 @@ func kimiWorkDirHash(workDir string) string {
 	}
 	// Kimi CLI 1.42.0 stores sessions under md5(WorkDirMeta.path), where
 	// WorkDirMeta.path is the lexical KaosPath string rather than a realpath.
+	// This is a provider-mandated directory key, not a security digest; changing
+	// it would make existing Kimi transcripts undiscoverable.
+
+	// codeql[go/weak-sensitive-data-hashing]
 	sum := md5.Sum([]byte(filepath.Clean(workDir)))
 	return hex.EncodeToString(sum[:])
 }

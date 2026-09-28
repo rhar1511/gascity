@@ -178,6 +178,11 @@ func TestGraphProxyProofRejectsReachableUnownedPortMirror(t *testing.T) {
 	if got, ok := graphFixtureProxyPortForTest(cityDir); ok {
 		t.Fatalf("graph proxy proof accepted unowned reachable port %q", got)
 	}
+	if runtime.GOOS == "linux" {
+		if _, err := graphFixtureProxyPortForTestWithDiagnostic(cityDir); err == nil || !strings.Contains(err.Error(), "proxy root is absent") {
+			t.Fatalf("detailed graph proxy proof error = %v, want the missing fixture-root reason", err)
+		}
+	}
 }
 
 func TestGraphProcessFlagRejectsDuplicatesAndMissingValues(t *testing.T) {
@@ -490,8 +495,8 @@ func setupGraphWorkflowCityWithOptions(t *testing.T, mode string, privateEvidenc
 	}
 	cityCommand := commandEnvForDir(cityDir, true)
 	assertGraphWorkflowCityEnv(t, cityCommand, gcHome, cityDir, cityRoot)
-	if _, ok := graphFixtureProxyPortForTest(cityDir); !ok {
-		t.Fatal("graph city has no verified fixture-owned Beads proxy and Dolt listener after isolated startup")
+	if _, err := waitForGraphFixtureProxyForTest(cityDir, 15*time.Second); err != nil {
+		t.Fatalf("graph city did not establish a verified fixture-owned Beads proxy and Dolt listener after isolated startup: %v", err)
 	}
 	var transport graphPrivateEvidenceTransport
 	if privateEvidence {
@@ -737,22 +742,45 @@ func graphPathWithin(root, path string) bool {
 // owns the root; the child pidfile and /proc listener ownership prove that its
 // published database port belongs to the Dolt child in that same root.
 func graphFixtureProxyPortForTest(cityDir string) (string, bool) {
+	port, err := graphFixtureProxyPortForTestWithDiagnostic(cityDir)
+	return port, err == nil
+}
+
+func waitForGraphFixtureProxyForTest(cityDir string, timeout time.Duration) (string, error) {
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	timeoutTimer := time.NewTimer(timeout)
+	defer timeoutTimer.Stop()
+	for {
+		port, err := graphFixtureProxyPortForTestWithDiagnostic(cityDir)
+		if err == nil {
+			return port, nil
+		}
+		select {
+		case <-timeoutTimer.C:
+			return "", fmt.Errorf("timed out after %s; last ownership check: %w", timeout, err)
+		case <-ticker.C:
+		}
+	}
+}
+
+func graphFixtureProxyPortForTestWithDiagnostic(cityDir string) (string, error) {
 	if runtime.GOOS != "linux" || cityDir == "" || !filepath.IsAbs(cityDir) {
-		return "", false
+		return "", errors.New("proof requires an absolute city path on Linux")
 	}
 	cityDir = filepath.Clean(cityDir)
 	resolvedCity, err := filepath.EvalSymlinks(cityDir)
 	if err != nil || filepath.Clean(resolvedCity) != cityDir {
-		return "", false
+		return "", errors.New("city path is missing or resolves through a symlink")
 	}
 	beadsDir := filepath.Join(cityDir, ".beads")
 	root := filepath.Join(beadsDir, proxyendpoint.DefaultRootDirName)
 	if !graphFixturePathIsReal(root) {
-		return "", false
+		return "", errors.New("proxy root is absent or not a real fixture directory")
 	}
 	metadataData, ok := graphReadFixtureRegularFile(filepath.Join(beadsDir, proxyendpoint.MetadataFileName), 1<<20)
 	if !ok {
-		return "", false
+		return "", errors.New("Beads metadata is absent or not a regular file")
 	}
 	var metadata struct {
 		Backend      string `json:"backend"`
@@ -761,9 +789,11 @@ func graphFixtureProxyPortForTest(cityDir string) (string, bool) {
 		ProjectID    string `json:"project_id"`
 		DoltDataDir  string `json:"dolt_data_dir"`
 	}
-	if json.Unmarshal(metadataData, &metadata) != nil || metadata.Backend != "dolt" || metadata.DoltMode != "proxied-server" ||
-		metadata.DoltDatabase != graphFixtureCityDatabase || strings.TrimSpace(metadata.ProjectID) == "" {
-		return "", false
+	if err := json.Unmarshal(metadataData, &metadata); err != nil {
+		return "", fmt.Errorf("decode Beads metadata: %w", err)
+	}
+	if metadata.Backend != "dolt" || metadata.DoltMode != "proxied-server" || metadata.DoltDatabase != graphFixtureCityDatabase || strings.TrimSpace(metadata.ProjectID) == "" {
+		return "", fmt.Errorf("Beads metadata does not describe the fixture's proxied Dolt database (backend=%q mode=%q database=%q project_id_present=%t)", metadata.Backend, metadata.DoltMode, metadata.DoltDatabase, strings.TrimSpace(metadata.ProjectID) != "")
 	}
 	dataDir := root
 	if metadata.DoltDataDir != "" {
@@ -773,14 +803,17 @@ func graphFixtureProxyPortForTest(cityDir string) (string, bool) {
 		}
 	}
 	if !graphFixturePathEquals(dataDir, root) {
-		return "", false
+		return "", errors.New("Dolt data directory does not match the fixture proxy root")
 	}
 	sidecar, err := proxyendpoint.ReadSidecar(beadsDir)
 	if err != nil || !sidecar.Present {
-		return "", false
+		if err != nil {
+			return "", fmt.Errorf("read proxy endpoint sidecar: %w", err)
+		}
+		return "", errors.New("proxy endpoint sidecar has not been published")
 	}
 	if sidecar.RootPath != "" && !graphFixturePathEquals(sidecar.ResolvedRootPath(beadsDir), root) {
-		return "", false
+		return "", errors.New("proxy endpoint sidecar names a different root")
 	}
 	configPath := filepath.Join(root, proxyendpoint.ConfigFileName)
 	if sidecar.ConfigPath != "" {
@@ -789,7 +822,7 @@ func graphFixtureProxyPortForTest(cityDir string) (string, bool) {
 			resolved = filepath.Join(beadsDir, resolved)
 		}
 		if !graphFixturePathEquals(resolved, configPath) {
-			return "", false
+			return "", errors.New("proxy endpoint sidecar names a different config")
 		}
 	}
 	if sidecar.LogPath != "" {
@@ -798,54 +831,69 @@ func graphFixtureProxyPortForTest(cityDir string) (string, bool) {
 			resolved = filepath.Join(beadsDir, resolved)
 		}
 		if !graphFixturePathEquals(resolved, filepath.Join(root, "server.log")) {
-			return "", false
+			return "", errors.New("proxy endpoint sidecar names a different log")
 		}
 	}
 	if _, ok := graphReadFixtureRegularFile(configPath, 1<<20); !ok {
-		return "", false
+		return "", errors.New("proxy config is absent or not a regular file")
 	}
 	if _, ok := graphReadFixtureRegularFile(proxyendpoint.PIDPath(root), 16<<10); !ok {
-		return "", false
+		return "", errors.New("proxy PID record is absent or not a regular file")
 	}
 	endpoint := proxyendpoint.Inspect(root, proxyendpoint.DefaultProcessTable())
 	if endpoint.Verdict != proxyendpoint.VerdictLive || endpoint.Liveness.Evidence != proxyendpoint.EvidenceArgvBirth ||
 		endpoint.Record.Kind != proxyendpoint.RecordKind || endpoint.Record.Port <= 0 || endpoint.Record.Port > 65535 {
-		return "", false
+		return "", fmt.Errorf("proxy endpoint is not verified live (verdict=%s evidence=%s record_kind=%q port=%d)", endpoint.Verdict, endpoint.Liveness.Evidence, endpoint.Record.Kind, endpoint.Record.Port)
 	}
 	proxyRootArg, proxyRootFound, proxyRootValid := graphProcessFlag(endpoint.Liveness.Argv, proxyendpoint.RootFlag)
 	if !proxyRootFound || !proxyRootValid || !graphFixturePathEquals(proxyRootArg, root) || !proxyendpoint.ArgvNamesRoot(endpoint.Liveness.Argv, root) {
-		return "", false
+		return "", errors.New("verified proxy process argv does not name the fixture root exactly once")
 	}
 	childData, ok := graphReadFixtureRegularFile(filepath.Join(root, graphProxyChildPIDFileName), 16<<10)
 	if !ok {
-		return "", false
+		return "", errors.New("Dolt child PID record has not been published")
 	}
 	var child graphProxyProcessRecord
-	if json.Unmarshal(childData, &child) != nil || child.PID <= 0 || child.Port != endpoint.Record.Port ||
+	if err := json.Unmarshal(childData, &child); err != nil {
+		return "", fmt.Errorf("decode Dolt child PID record: %w", err)
+	}
+	if child.PID <= 0 || child.Port != endpoint.Record.Port ||
 		child.Kind != graphDoltBackendRecordKind || child.Schema < proxyendpoint.SchemaV2 || child.Birth == "" || child.RootID != endpoint.RootID {
-		return "", false
+		return "", errors.New("Dolt child identity does not match the verified proxy endpoint")
 	}
 	processes := proxyendpoint.DefaultProcessTable()
 	if !processes.Alive(child.PID) {
-		return "", false
+		return "", errors.New("Dolt child process is not alive")
 	}
 	childBirth, err := processes.Birth(child.PID)
-	if err != nil || childBirth != child.Birth {
-		return "", false
+	if err != nil {
+		return "", fmt.Errorf("read Dolt child process birth identity: %w", err)
+	}
+	if childBirth != child.Birth {
+		return "", errors.New("Dolt child process birth identity does not match its PID record")
 	}
 	argv, err := processes.Argv(child.PID)
-	if err != nil || !graphDoltChildCommandMatches(child.PID, argv, configPath, root, child.Port) {
-		return "", false
+	if err != nil {
+		return "", fmt.Errorf("read Dolt child process argv: %w", err)
+	}
+	if !graphDoltChildCommandMatches(child.PID, argv, configPath, root, child.Port) {
+		return "", errors.New("Dolt child process argv does not match the fixture config and root")
 	}
 	configData, ok := graphReadFixtureRegularFile(configPath, 1<<20)
-	if !ok || !graphProxyConfigMatches(configData, child.Port) || !graphDoltProcessOwnsListeningPort(child.PID, endpoint.Record.Port) {
-		return "", false
+	if !ok {
+		return "", errors.New("proxy config is absent or not a regular file")
+	}
+	if !graphProxyConfigMatches(configData, child.Port) {
+		return "", errors.New("proxy config does not publish the verified Dolt child port")
+	}
+	if !graphDoltProcessOwnsListeningPort(child.PID, endpoint.Record.Port) {
+		return "", errors.New("Dolt child does not own the listening socket on its published port")
 	}
 	port := strconv.Itoa(endpoint.Record.Port)
 	if !testPortReachable(port) {
-		return "", false
+		return "", errors.New("published Dolt listener is not reachable on loopback")
 	}
-	return port, true
+	return port, nil
 }
 
 // graphFixtureProcessesMayRemain is a cleanup-only proof. The city root is

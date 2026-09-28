@@ -1,6 +1,9 @@
 package workertest
 
 import (
+	"fmt"
+	"io/fs"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -240,10 +243,68 @@ func TestTelemetryHandleCatalogRegistersRecordingRequirement(t *testing.T) {
 func mustLoadSnapshot(t *testing.T, profile Profile, fixtureRoot string) *Snapshot {
 	t.Helper()
 
-	root := filepath.Clean(fixtureRoot)
+	fixtureRoot = filepath.Clean(fixtureRoot)
+	copyRoot := fixtureRoot
+	if profile.Provider == "antigravity/tmux-cli" {
+		// Antigravity stores history.jsonl alongside brain/, and its reader
+		// uses that index to resolve the transcript in the brain tree.
+		copyRoot = filepath.Dir(fixtureRoot)
+	}
+	root := copyRunfilesFixtureTree(t, copyRoot)
+	if copyRoot != fixtureRoot {
+		root = filepath.Join(root, filepath.Base(fixtureRoot))
+	}
 	snapshot, err := LoadSnapshot(profile, root)
 	if err != nil {
 		t.Fatalf("LoadSnapshot(%s, %s): %v", profile.ID, root, err)
 	}
 	return snapshot
+}
+
+// copyRunfilesFixtureTree materializes Bazel's symlinked runfile inputs as
+// regular files beneath a test-owned root. The production transcript reader
+// intentionally rejects links that escape its authorized root.
+func copyRunfilesFixtureTree(t *testing.T, source string) string {
+	t.Helper()
+
+	destination := filepath.Join(t.TempDir(), "fixture")
+	err := filepath.WalkDir(source, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		relative, err := filepath.Rel(source, path)
+		if err != nil {
+			return err
+		}
+		target := destination
+		if relative != "." {
+			target = filepath.Join(destination, relative)
+		}
+
+		info, err := os.Stat(path)
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			if entry.Type()&fs.ModeSymlink != 0 {
+				return fmt.Errorf("fixture directory symlink is unsupported: %s", path)
+			}
+			return os.MkdirAll(target, info.Mode().Perm())
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("fixture is not a regular file: %s", path)
+		}
+		contents, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
+		}
+		return os.WriteFile(target, contents, info.Mode().Perm())
+	})
+	if err != nil {
+		t.Fatalf("copy runfiles fixture tree: %v", err)
+	}
+	return destination
 }

@@ -4,6 +4,7 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,59 @@ import (
 
 	"github.com/gastownhall/gascity/internal/sessionlog"
 )
+
+func testSessionLogAdapter() SessionLogAdapter {
+	return SessionLogAdapter{SearchPaths: []string{os.TempDir()}}
+}
+
+// copyTranscriptFixtureTree materializes Bazel's symlinked runfile inputs as
+// regular files beneath a test-owned root. Transcript readers deliberately
+// reject links that escape their configured root, so tests should exercise
+// that confinement without relying on Bazel's external runfile targets.
+func copyTranscriptFixtureTree(t *testing.T, source string) string {
+	t.Helper()
+
+	destination := filepath.Join(t.TempDir(), "fixture")
+	err := filepath.WalkDir(source, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		relative, err := filepath.Rel(source, path)
+		if err != nil {
+			return err
+		}
+		target := destination
+		if relative != "." {
+			target = filepath.Join(destination, relative)
+		}
+
+		info, err := os.Stat(path) // Follow Bazel's file symlinks when copying.
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			if entry.Type()&fs.ModeSymlink != 0 {
+				return fmt.Errorf("fixture directory symlink is unsupported: %s", path)
+			}
+			return os.MkdirAll(target, info.Mode().Perm())
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("fixture is not a regular file: %s", path)
+		}
+		contents, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
+		}
+		return os.WriteFile(target, contents, info.Mode().Perm())
+	})
+	if err != nil {
+		t.Fatalf("copy transcript fixture tree: %v", err)
+	}
+	return destination
+}
 
 func TestSessionLogAdapterTailMetaForProviderUsesCodexSchema(t *testing.T) {
 	root := t.TempDir()
@@ -44,6 +98,14 @@ func TestFactoryStyleAdapterRejectsUnconfinedTranscriptRead(t *testing.T) {
 	adapter := SessionLogAdapter{requireRoots: true}
 	if _, err := adapter.ReadTranscript(TranscriptRequest{Provider: "claude", TranscriptPath: outside}); err == nil {
 		t.Fatal("factory-style adapter read a transcript without a configured search root")
+	}
+}
+
+func TestSessionLogAdapterZeroValueRejectsUnconfiguredTranscriptPath(t *testing.T) {
+	outside := filepath.Join(t.TempDir(), "outside.jsonl")
+	writeLines(t, outside, `{"uuid":"secret","type":"user","message":{"role":"user","content":"outside"}}`)
+	if _, err := (SessionLogAdapter{}).ReadTranscript(TranscriptRequest{Provider: "claude", TranscriptPath: outside}); err == nil {
+		t.Fatal("zero-value adapter read an explicit transcript outside its configured search roots")
 	}
 }
 
@@ -294,7 +356,7 @@ func TestSessionLogAdapterLoadHistoryCarriesImageBlockMetadata(t *testing.T) {
 		`{"uuid":"u1","type":"user","message":{"role":"user","content":[{"type":"text","text":"inspect this"},{"type":"image","file_path":"screens/shot.png","image_url":"https://example.com/shot.png","mime_type":"image/png"}]},"timestamp":"2025-01-01T00:00:00Z","sessionId":"provider-claude"}`,
 	)
 
-	adapter := SessionLogAdapter{}
+	adapter := testSessionLogAdapter()
 	snapshot, err := adapter.LoadHistory(LoadRequest{
 		Provider:       "claude/tmux-cli",
 		TranscriptPath: path,
@@ -329,7 +391,7 @@ func TestSessionLogAdapterLoadHistoryCarriesUserPromptMetadata(t *testing.T) {
 		fmt.Sprintf(`{"uuid":"u1","type":"user","message":{"role":"user","content":%q},"timestamp":"2025-01-01T00:00:00Z","sessionId":"provider-claude"}`, prompt),
 	)
 
-	snapshot, err := (SessionLogAdapter{}).LoadHistory(LoadRequest{
+	snapshot, err := testSessionLogAdapter().LoadHistory(LoadRequest{
 		Provider:       "claude/tmux-cli",
 		TranscriptPath: path,
 	})
@@ -371,7 +433,7 @@ func TestSessionLogAdapterLoadHistoryCarriesStructuredClaudeEditResult(t *testin
 		`{"uuid":"r1","parentUuid":"a1","type":"tool_result","toolUseID":"edit-1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"edit-1","content":"updated"}]},"toolUseResult":{"filePath":"README.md","structuredPatch":[{"oldStart":3,"oldLines":1,"newStart":3,"newLines":1,"lines":["-old","+new"]}]},"timestamp":"2025-01-01T00:00:01Z","sessionId":"provider-claude"}`,
 	)
 
-	snapshot, err := (SessionLogAdapter{}).LoadHistory(LoadRequest{
+	snapshot, err := testSessionLogAdapter().LoadHistory(LoadRequest{
 		Provider:       "claude/tmux-cli",
 		TranscriptPath: path,
 	})
@@ -412,7 +474,7 @@ func TestSessionLogAdapterLoadHistoryCarriesStructuredClaudeReadSidecarResult(t 
 		`{"uuid":"r1","parentUuid":"a1","type":"tool_result","toolUseID":"read-1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"read-1","content":"read complete"}]},"toolUseResult":{"type":"text","file":{"filePath":"src/app.ts","content":"line 12\nline 13\n","numLines":2,"startLine":12,"totalLines":24,"language":"typescript"}},"timestamp":"2025-01-01T00:00:01Z","sessionId":"provider-claude"}`,
 	)
 
-	snapshot, err := (SessionLogAdapter{}).LoadHistory(LoadRequest{
+	snapshot, err := testSessionLogAdapter().LoadHistory(LoadRequest{
 		Provider:       "claude/tmux-cli",
 		TranscriptPath: path,
 	})
@@ -450,7 +512,7 @@ func TestSessionLogAdapterLoadHistoryCarriesStructuredCodexShellResults(t *testi
 		`{"timestamp":"2026-01-02T00:00:04Z","type":"response_item","payload":{"type":"function_call_output","call_id":"grep-1","output":"Command: rg -n \"needle\" README.md src/app.ts\nOutput:\nREADME.md:1:needle\nsrc/app.ts:7:needle\n"}}`,
 	)
 
-	snapshot, err := (SessionLogAdapter{}).LoadHistory(LoadRequest{
+	snapshot, err := testSessionLogAdapter().LoadHistory(LoadRequest{
 		Provider:       "codex/tmux-cli",
 		TranscriptPath: path,
 	})
@@ -495,7 +557,7 @@ func TestSessionLogAdapterLoadHistoryCarriesStructuredCopilotToolResults(t *test
 		`{"type":"tool.execution_complete","data":{"toolCallId":"toolu-edit","model":"claude-sonnet-4.5","success":true,"result":{"content":"Edited src/app.ts","filePath":"src/app.ts","patch":"*** Begin Patch\n*** Update File: src/app.ts\n@@\n-old\n+new\n*** End Patch","oldString":"old","newString":"new","originalFile":"old\n","replaceAll":false,"userModified":false}},"id":"complete-edit","timestamp":"2026-03-04T02:31:05Z","parentId":"complete-bash"}`,
 	)
 
-	snapshot, err := (SessionLogAdapter{}).LoadHistory(LoadRequest{
+	snapshot, err := testSessionLogAdapter().LoadHistory(LoadRequest{
 		Provider:       "copilot/tmux-cli",
 		TranscriptPath: path,
 		GCSessionID:    "gc-copilot",
@@ -568,7 +630,7 @@ func TestSessionLogAdapterLoadHistoryCarriesStructuredKiroToolResults(t *testing
 		`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"kiro-session","update":{"sessionUpdate":"tool_call_update","toolCallId":"toolu-edit","status":"completed","content":[{"type":"diff","path":"src/app.ts","oldText":"old line\n","newText":"new line\n"}]}}}`,
 	)
 
-	snapshot, err := (SessionLogAdapter{}).LoadHistory(LoadRequest{
+	snapshot, err := testSessionLogAdapter().LoadHistory(LoadRequest{
 		Provider:       "kiro/tmux-cli",
 		TranscriptPath: path,
 		GCSessionID:    "gc-kiro",
@@ -629,7 +691,7 @@ func TestSessionLogAdapterLoadHistoryCarriesStructuredAmpToolResults(t *testing.
 		`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu-edit","content":"{\"filePath\":\"src/app.ts\",\"patch\":\"*** Begin Patch\\n*** Update File: src/app.ts\\n@@\\n-old\\n+new\\n*** End Patch\",\"oldString\":\"old\",\"newString\":\"new\"}","is_error":false}]},"parent_tool_use_id":null,"session_id":"T-amp-session"}`,
 	)
 
-	snapshot, err := (SessionLogAdapter{}).LoadHistory(LoadRequest{
+	snapshot, err := testSessionLogAdapter().LoadHistory(LoadRequest{
 		Provider:       "amp/tmux-cli",
 		TranscriptPath: path,
 		GCSessionID:    "gc-amp",
@@ -694,7 +756,7 @@ func TestSessionLogAdapterLoadHistoryCarriesStructuredGrokACPToolResults(t *test
 		`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"grok-session","update":{"sessionUpdate":"tool_call_update","toolCallId":"toolu-edit","status":"completed","content":[{"type":"diff","path":"src/app.ts","oldText":"old\n","newText":"new\n"}]}}}`,
 	)
 
-	snapshot, err := (SessionLogAdapter{}).LoadHistory(LoadRequest{
+	snapshot, err := testSessionLogAdapter().LoadHistory(LoadRequest{
 		Provider:       "grok/tmux-cli",
 		TranscriptPath: path,
 		GCSessionID:    "gc-grok",
@@ -755,7 +817,7 @@ func TestSessionLogAdapterLoadHistoryCarriesStructuredAuggieACPToolResults(t *te
 		`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"auggie-session","update":{"sessionUpdate":"tool_call_update","toolCallId":"toolu-edit","status":"completed","content":[{"type":"diff","path":"src/app.ts","oldText":"old\n","newText":"new\n"}]}}}`,
 	)
 
-	snapshot, err := (SessionLogAdapter{}).LoadHistory(LoadRequest{
+	snapshot, err := testSessionLogAdapter().LoadHistory(LoadRequest{
 		Provider:       "auggie/tmux-cli",
 		TranscriptPath: path,
 		GCSessionID:    "gc-auggie",
@@ -814,7 +876,7 @@ func TestSessionLogAdapterLoadHistoryCarriesCodexCommandFailure(t *testing.T) {
 		`{"timestamp":"2026-01-02T00:00:02Z","type":"response_item","payload":{"type":"function_call_output","call_id":"cmd-1","output":"{\"stdout\":\"\",\"stderr\":\"boom\\n\",\"exitCode\":2}"}}`,
 	)
 
-	snapshot, err := (SessionLogAdapter{}).LoadHistory(LoadRequest{
+	snapshot, err := testSessionLogAdapter().LoadHistory(LoadRequest{
 		Provider:       "codex/tmux-cli",
 		TranscriptPath: path,
 	})
@@ -848,7 +910,7 @@ func TestSessionLogAdapterLoadHistoryCarriesCodexTokenUsage(t *testing.T) {
 		`{"timestamp":"2026-01-02T00:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":110,"cached_input_tokens":10,"output_tokens":40,"reasoning_output_tokens":8,"total_tokens":150},"last_token_usage":{"input_tokens":110,"cached_input_tokens":10,"output_tokens":40,"reasoning_output_tokens":8,"total_tokens":150},"model_context_window":258400}}}`,
 	)
 
-	snapshot, err := (SessionLogAdapter{}).LoadHistory(LoadRequest{
+	snapshot, err := testSessionLogAdapter().LoadHistory(LoadRequest{
 		Provider:       "codex/tmux-cli",
 		TranscriptPath: path,
 	})
@@ -883,7 +945,7 @@ func TestSessionLogAdapterLoadHistoryCanonicalizesThinkingTextAndSignature(t *te
 		`{"uuid":"a1","type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"private reasoning","signature":"encrypted"}]},"timestamp":"2025-01-01T00:00:00Z","sessionId":"provider-claude"}`,
 	)
 
-	snapshot, err := (SessionLogAdapter{}).LoadHistory(LoadRequest{
+	snapshot, err := testSessionLogAdapter().LoadHistory(LoadRequest{
 		Provider:       "claude/tmux-cli",
 		TranscriptPath: path,
 	})
@@ -910,7 +972,7 @@ func TestSessionLogAdapterLoadHistoryAntigravityOpenToolUseIDs(t *testing.T) {
 		`{"step_index":1,"type":"PLANNER_RESPONSE","created_at":"2026-04-04T09:00:01Z","content":"checking","tool_calls":[{"id":"call-open","name":"Read","args":{"path":"README.md"}}]}`,
 	)
 
-	snapshot, err := SessionLogAdapter{}.LoadHistory(LoadRequest{
+	snapshot, err := testSessionLogAdapter().LoadHistory(LoadRequest{
 		Provider:       "antigravity/tmux-cli",
 		TranscriptPath: path,
 	})
@@ -932,7 +994,7 @@ func TestSessionLogAdapterLoadHistoryAntigravityCompletedToolUseIDs(t *testing.T
 		`{"step_index":2,"type":"READ_FILE","status":"failed","created_at":"2026-04-04T09:00:02Z","tool_call_id":"call-done","content":"file read failed"}`,
 	)
 
-	snapshot, err := SessionLogAdapter{}.LoadHistory(LoadRequest{
+	snapshot, err := testSessionLogAdapter().LoadHistory(LoadRequest{
 		Provider:       "antigravity/tmux-cli",
 		TranscriptPath: path,
 	})
@@ -962,7 +1024,7 @@ func TestSessionLogAdapterReadTranscriptAntigravityHonorsCursors(t *testing.T) {
 		`{"step_index":3,"type":"PLANNER_RESPONSE","created_at":"2026-04-04T09:00:03Z","content":"fourth"}`,
 	)
 
-	full, err := SessionLogAdapter{}.ReadTranscript(TranscriptRequest{
+	full, err := testSessionLogAdapter().ReadTranscript(TranscriptRequest{
 		Provider:       "antigravity/tmux-cli",
 		TranscriptPath: path,
 	})
@@ -974,7 +1036,7 @@ func TestSessionLogAdapterReadTranscriptAntigravityHonorsCursors(t *testing.T) {
 		t.Fatalf("full Antigravity transcript IDs = %v, want 4 entries", allIDs)
 	}
 
-	older, err := SessionLogAdapter{}.ReadTranscript(TranscriptRequest{
+	older, err := testSessionLogAdapter().ReadTranscript(TranscriptRequest{
 		Provider:       "antigravity/tmux-cli",
 		TranscriptPath: path,
 		BeforeEntryID:  allIDs[2],
@@ -986,7 +1048,7 @@ func TestSessionLogAdapterReadTranscriptAntigravityHonorsCursors(t *testing.T) {
 		t.Fatalf("older Antigravity transcript IDs = %v, want %v", got, want)
 	}
 
-	rawNewer, err := SessionLogAdapter{}.ReadTranscript(TranscriptRequest{
+	rawNewer, err := testSessionLogAdapter().ReadTranscript(TranscriptRequest{
 		Provider:       "antigravity/tmux-cli",
 		TranscriptPath: path,
 		AfterEntryID:   allIDs[2],
@@ -1033,7 +1095,7 @@ func TestSessionLogAdapterReadTranscriptRawEmitsMultipartRecordsOnce(t *testing.
 			path := filepath.Join(t.TempDir(), "session.jsonl")
 			writeLines(t, path, tt.record, tt.record)
 
-			result, err := (SessionLogAdapter{}).ReadTranscript(TranscriptRequest{
+			result, err := testSessionLogAdapter().ReadTranscript(TranscriptRequest{
 				Provider:       tt.provider,
 				TranscriptPath: path,
 				Raw:            true,
@@ -1067,7 +1129,7 @@ func TestSessionLogAdapterLoadHistoryHonorsCursors(t *testing.T) {
 		`{"step_index":3,"type":"PLANNER_RESPONSE","created_at":"2026-04-04T09:00:03Z","content":"fourth"}`,
 	)
 
-	full, err := SessionLogAdapter{}.LoadHistory(LoadRequest{
+	full, err := testSessionLogAdapter().LoadHistory(LoadRequest{
 		Provider:       "antigravity/tmux-cli",
 		TranscriptPath: path,
 	})
@@ -1079,7 +1141,7 @@ func TestSessionLogAdapterLoadHistoryHonorsCursors(t *testing.T) {
 		t.Fatalf("full Antigravity history IDs = %v, want 4 entries", allIDs)
 	}
 
-	older, err := SessionLogAdapter{}.LoadHistory(LoadRequest{
+	older, err := testSessionLogAdapter().LoadHistory(LoadRequest{
 		Provider:       "antigravity/tmux-cli",
 		TranscriptPath: path,
 		BeforeEntryID:  allIDs[2],
@@ -1094,7 +1156,7 @@ func TestSessionLogAdapterLoadHistoryHonorsCursors(t *testing.T) {
 		t.Fatalf("older pagination = %+v, want returned/total counts 2/4", older.Pagination)
 	}
 
-	newer, err := SessionLogAdapter{}.LoadHistory(LoadRequest{
+	newer, err := testSessionLogAdapter().LoadHistory(LoadRequest{
 		Provider:       "antigravity/tmux-cli",
 		TranscriptPath: path,
 		AfterEntryID:   allIDs[2],
@@ -1167,7 +1229,7 @@ func TestSessionLogAdapterLoadHistoryKimiToolResultError(t *testing.T) {
 		`{"role":"tool","content":[{"type":"text","text":"read failed"}],"tool_call_id":"call-kimi-read","is_error":true}`,
 	)
 
-	snapshot, err := (SessionLogAdapter{}).LoadHistory(LoadRequest{
+	snapshot, err := testSessionLogAdapter().LoadHistory(LoadRequest{
 		Provider:       "kimi/tmux-cli",
 		TranscriptPath: path,
 	})
@@ -1253,7 +1315,7 @@ func TestSessionLogAdapterLoadHistoryNormalizesOMPExecutionResults(t *testing.T)
 		`{"type":"message","id":"msg-python","parentId":"msg-bash","timestamp":"2026-02-02T00:00:02.000Z","message":{"role":"pythonExecution","code":"print('hello')","output":"hello\n","exitCode":0,"canceled":false,"timestamp":1770000002000}}`,
 	)
 
-	snapshot, err := (SessionLogAdapter{}).LoadHistory(LoadRequest{
+	snapshot, err := testSessionLogAdapter().LoadHistory(LoadRequest{
 		Provider:       "omp/tmux-cli",
 		TranscriptPath: path,
 	})
@@ -1401,7 +1463,7 @@ func TestSessionLogAdapterLoadHistoryGemini(t *testing.T) {
 		t.Fatalf("write gemini session: %v", err)
 	}
 
-	adapter := SessionLogAdapter{}
+	adapter := testSessionLogAdapter()
 	snapshot, err := adapter.LoadHistory(LoadRequest{
 		Provider:       "gemini/tmux-cli",
 		TranscriptPath: path,
@@ -1447,7 +1509,7 @@ func TestSessionLogAdapterLoadHistoryGeminiErrorMessage(t *testing.T) {
 		`{"id":"err-1","timestamp":"2026-06-21T17:08:12Z","type":"error","content":[{"text":"Gemini stream interrupted"}]}`,
 	)
 
-	snapshot, err := (SessionLogAdapter{}).LoadHistory(LoadRequest{
+	snapshot, err := testSessionLogAdapter().LoadHistory(LoadRequest{
 		Provider:       "gemini/tmux-cli",
 		TranscriptPath: path,
 	})
@@ -1489,7 +1551,7 @@ func TestSessionLogAdapterLoadHistoryOpenCodeCarriesInfoMetadata(t *testing.T) {
 		t.Fatalf("write opencode export: %v", err)
 	}
 
-	snapshot, err := (SessionLogAdapter{}).LoadHistory(LoadRequest{
+	snapshot, err := testSessionLogAdapter().LoadHistory(LoadRequest{
 		Provider:       "opencode/tmux-cli",
 		TranscriptPath: path,
 	})
@@ -1525,7 +1587,7 @@ func TestSessionLogAdapterMarksMalformedTailDegraded(t *testing.T) {
 		t.Fatalf("write torn transcript: %v", err)
 	}
 
-	snapshot, err := (SessionLogAdapter{}).LoadHistory(LoadRequest{
+	snapshot, err := testSessionLogAdapter().LoadHistory(LoadRequest{
 		Provider:       "claude/tmux-cli",
 		TranscriptPath: path,
 	})
@@ -1560,7 +1622,7 @@ func TestSessionLogAdapterPreservesDurableInteractionHistory(t *testing.T) {
 		`{"uuid":"a1","parentUuid":"u1","type":"assistant","message":{"role":"assistant","content":[{"type":"interaction","request_id":"approval-1","kind":"approval","state":"pending","prompt":"Allow Read?","options":["approve","deny"],"metadata":{"tool_name":"Read","attempt":2,"details":{"source":"test"}}}]},"timestamp":"2025-01-01T00:00:01Z","sessionId":"provider-claude"}`,
 	)
 
-	snapshot, err := (SessionLogAdapter{}).LoadHistory(LoadRequest{
+	snapshot, err := testSessionLogAdapter().LoadHistory(LoadRequest{
 		Provider:       "claude/tmux-cli",
 		TranscriptPath: path,
 	})
@@ -1613,7 +1675,7 @@ func TestSessionLogAdapterResolvedInteractionClearsTailPending(t *testing.T) {
 		`{"uuid":"u2","parentUuid":"a1","type":"user","message":{"role":"user","content":[{"type":"interaction","request_id":"approval-1","kind":"approval","state":"resolved","action":"approve"}]},"timestamp":"2025-01-01T00:00:02Z","sessionId":"provider-claude"}`,
 	)
 
-	snapshot, err := (SessionLogAdapter{}).LoadHistory(LoadRequest{
+	snapshot, err := testSessionLogAdapter().LoadHistory(LoadRequest{
 		Provider:       "claude/tmux-cli",
 		TranscriptPath: path,
 	})
@@ -1643,7 +1705,7 @@ func TestSessionLogAdapterCodexResolvedInteractionClearsTailPending(t *testing.T
 		`{"timestamp":"2026-01-02T00:00:01Z","type":"response_item","payload":{"type":"interaction","request_id":"approval-1","kind":"approval","state":"resolved","action":"approve"}}`,
 	)
 
-	snapshot, err := (SessionLogAdapter{}).LoadHistory(LoadRequest{
+	snapshot, err := testSessionLogAdapter().LoadHistory(LoadRequest{
 		Provider:       "codex/tmux-cli",
 		TranscriptPath: path,
 	})
@@ -1684,7 +1746,7 @@ func TestSessionLogAdapterGeminiResolvedInteractionClearsTailPending(t *testing.
 		t.Fatalf("write gemini transcript: %v", err)
 	}
 
-	snapshot, err := (SessionLogAdapter{}).LoadHistory(LoadRequest{
+	snapshot, err := testSessionLogAdapter().LoadHistory(LoadRequest{
 		Provider:       "gemini/tmux-cli",
 		TranscriptPath: path,
 	})
@@ -1718,7 +1780,7 @@ func TestSessionLogAdapterMarksCodexMalformedInteriorDegraded(t *testing.T) {
 		`{"timestamp":"2026-01-02T00:00:01Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"text":"done"}]}}`,
 	)
 
-	snapshot, err := (SessionLogAdapter{}).LoadHistory(LoadRequest{
+	snapshot, err := testSessionLogAdapter().LoadHistory(LoadRequest{
 		Provider:       "codex/tmux-cli",
 		TranscriptPath: path,
 	})
@@ -1755,7 +1817,7 @@ func TestSessionLogAdapterPreservesCompactionEvidenceWhenDegraded(t *testing.T) 
 		`{"uuid":"a1","parentUuid":"c1","type":"assistant","message":{"role":"assistant","content":"done","model":"claude-sonnet","stop_reason":"end_turn"},"timestamp":"2025-01-01T00:00:02Z","sessionId":"provider-claude"}`,
 	)
 
-	snapshot, err := (SessionLogAdapter{}).LoadHistory(LoadRequest{
+	snapshot, err := testSessionLogAdapter().LoadHistory(LoadRequest{
 		Provider:       "claude/tmux-cli",
 		TranscriptPath: path,
 	})
@@ -1784,7 +1846,7 @@ func TestSessionLogAdapterKeepsAllMalformedHistoryUnknown(t *testing.T) {
 	path := filepath.Join(dir, "sess-claude.jsonl")
 	writeLines(t, path, `not json`)
 
-	snapshot, err := (SessionLogAdapter{}).LoadHistory(LoadRequest{
+	snapshot, err := testSessionLogAdapter().LoadHistory(LoadRequest{
 		Provider:       "claude/tmux-cli",
 		TranscriptPath: path,
 	})

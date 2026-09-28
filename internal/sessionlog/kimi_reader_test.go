@@ -12,6 +12,12 @@ import (
 	"time"
 )
 
+func TestKimiWorkDirHashMatchesProviderStorageKey(t *testing.T) {
+	if got, want := kimiWorkDirHash("/tmp/kimi-probe-ws"), "83d3ef5552b32ae3a340745394997089"; got != want {
+		t.Fatalf("kimiWorkDirHash() = %q, want provider-compatible key %q", got, want)
+	}
+}
+
 func TestReadKimiFilePreservesNativeToolRows(t *testing.T) {
 	path := writeKimiContext(t, filepath.Join(t.TempDir(), "sessions", "hash", "session-123", "context.jsonl"), []string{
 		`{"role":"user","content":"read the file"}`,
