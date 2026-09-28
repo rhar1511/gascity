@@ -354,6 +354,7 @@ filegroup(
         "//internal/runtime/tmux:bazel_repo_srcs",
         "//internal/sdnotify:bazel_repo_srcs",
         "//internal/searchpath:bazel_repo_srcs",
+        "//internal/selectorattestation:bazel_repo_srcs",
         "//internal/session:bazel_repo_srcs",
         "//internal/session/sessiontest:bazel_repo_srcs",
         "//internal/sessionlog:bazel_repo_srcs",
