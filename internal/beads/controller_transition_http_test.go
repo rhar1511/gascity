@@ -172,9 +172,110 @@ func TestControllerMetadataTransitionHTTPPostsCanonicalWireAndExactReceipt(t *te
 		string(wire["payload"]) != `{"ticket":"private-marker"}` {
 		t.Fatalf("POST body did not preserve canonical Q43 fields: %s", transport.postBodies[0])
 	}
+	if _, present := wire["protected_permit"]; present {
+		t.Fatalf("empty protected permit was serialized: %s", transport.postBodies[0])
+	}
 	wantBody := `{"receipt_id":"receipt/1","scope":"rig:fixture","kind":"lease","actor":"controller","expected_version":"7","key":"gc.lease","expected":{"a":1,"z":0},"value":{"next":true},"payload":{"ticket":"private-marker"}}`
 	if string(transport.postBodies[0]) != wantBody {
 		t.Fatalf("POST body = %s, want %s", transport.postBodies[0], wantBody)
+	}
+}
+
+func TestControllerMetadataTransitionHTTPRejectsInvalidProtectedPermitBeforeHandshake(t *testing.T) {
+	tests := []struct {
+		name   string
+		permit string
+	}{
+		{name: "leading whitespace", permit: " permit"},
+		{name: "trailing whitespace", permit: "permit "},
+		{name: "invalid UTF-8", permit: string([]byte{0xff})},
+		{name: "too many bytes", permit: strings.Repeat("x", 65537)},
+		{name: "C0 control", permit: "permit\x00value"},
+		{name: "C1 control", permit: "permit\u0085value"},
+		{name: "line separator", permit: "permit\u2028value"},
+		{name: "paragraph separator", permit: "permit\u2029value"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			transport := &controllerTransitionTestTransport{handler: http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+				t.Fatal("invalid protected permit reached the server")
+			})}
+			store := controllerTransitionTestStore(t, transport)
+			request := controllerTransitionTestRequest()
+			request.ProtectedPermit = tc.permit
+			if _, err := store.TransitionMetadata("gc/one", request); !errors.Is(err, ErrControllerMetadataTransitionProtocol) {
+				t.Fatalf("TransitionMetadata error = %v, want local protocol refusal", err)
+			}
+			if transport.contextCount != 0 || transport.postCount != 0 {
+				t.Fatalf("invalid protected permit sent requests: context=%d post=%d", transport.contextCount, transport.postCount)
+			}
+		})
+	}
+}
+
+func TestControllerMetadataTransitionHTTPWithholdsProtectedPermitWithoutCapability(t *testing.T) {
+	transport := &controllerTransitionTestTransport{}
+	transport.handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v0/beads/context" {
+			t.Fatalf("missing protected-mutation capability allowed request %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		writeControllerTransitionTestContext(w, "project-a", "gc_fixture", []string{
+			"issues.transitionMetadata", "issues.transitionReceipt.get", "project.enforce",
+		})
+	})
+	store := controllerTransitionTestStore(t, transport)
+	request := controllerTransitionTestRequest()
+	request.ProtectedPermit = "opaque-protected-permit"
+	if _, err := store.TransitionMetadata("gc/one", request); !errors.Is(err, ErrControllerMetadataTransitionProtocol) {
+		t.Fatalf("TransitionMetadata error = %v, want capability refusal", err)
+	}
+	if transport.contextCount != 1 || transport.postCount != 0 || transport.receiptGetCount != 0 {
+		t.Fatalf("missing capability sent unexpected requests: context=%d post=%d receipt-get=%d", transport.contextCount, transport.postCount, transport.receiptGetCount)
+	}
+}
+
+func TestControllerMetadataTransitionHTTPSendsExactProtectedPermitWithCapability(t *testing.T) {
+	request := controllerTransitionTestRequest()
+	request.ProtectedPermit = "opaque permit: Δ/part two"
+	permit := request.ProtectedPermit
+	receipt := controllerTransitionTestReceipt(t, request, "controller")
+	transport := &controllerTransitionTestTransport{}
+	transport.handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/beads/context":
+			writeControllerTransitionTestContext(w, "project-a", "gc_fixture", []string{
+				"issues.transitionMetadata", "issues.transitionReceipt.get", "project.enforce", "issues.protectedMutation",
+			})
+		case r.Method == http.MethodPost:
+			_, _ = w.Write(controllerTransitionAppliedResponse(receipt))
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	store := controllerTransitionTestStore(t, transport)
+
+	result, err := store.TransitionMetadata("gc/one", request)
+	if err != nil {
+		t.Fatalf("TransitionMetadata: %v", err)
+	}
+	if !result.Applied || result.Receipt == nil {
+		t.Fatalf("transition result = %+v, want applied receipt", result)
+	}
+	if transport.contextCount != 1 || transport.postCount != 1 {
+		t.Fatalf("request counts: context=%d post=%d, want one handshake and one POST", transport.contextCount, transport.postCount)
+	}
+	var wire map[string]json.RawMessage
+	if err := json.Unmarshal(transport.postBodies[0], &wire); err != nil {
+		t.Fatalf("decode POST body: %v", err)
+	}
+	var sentPermit string
+	if err := json.Unmarshal(wire["protected_permit"], &sentPermit); err != nil {
+		t.Fatalf("decode protected permit: %v", err)
+	}
+	if sentPermit != permit {
+		t.Fatalf("protected permit = %q, want exact opaque value %q", sentPermit, permit)
 	}
 }
 
@@ -225,6 +326,43 @@ func TestControllerMetadataTransitionHTTPRecoversExactReceiptAfterLostPost(t *te
 	}
 	if transport.postCount != 1 || transport.receiptGetCount != 1 {
 		t.Fatalf("requests: post=%d receipt-get=%d, want 1 each", transport.postCount, transport.receiptGetCount)
+	}
+}
+
+func TestControllerMetadataTransitionHTTPProtectedRecoveryRequiresCapabilityBeforeReceiptLookup(t *testing.T) {
+	transport := &controllerTransitionTestTransport{dropFirstPost: true}
+	contextResponses := 0
+	transport.handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/beads/context":
+			contextResponses++
+			capabilities := []string{"issues.transitionMetadata", "issues.transitionReceipt.get", "project.enforce"}
+			if contextResponses == 1 {
+				capabilities = append(capabilities, "issues.protectedMutation")
+			}
+			writeControllerTransitionTestContext(w, "project-a", "gc_fixture", capabilities)
+		case r.Method == http.MethodPost:
+			w.WriteHeader(http.StatusInternalServerError)
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, controllerTransitionReceiptPath):
+			w.Header().Set("Content-Type", "application/problem+json")
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = io.WriteString(w, `{"code":"not_found"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	store := controllerTransitionTestStore(t, transport)
+	request := controllerTransitionTestRequest()
+	request.ProtectedPermit = "opaque-protected-permit"
+
+	result, err := store.TransitionMetadata("gc/one", request)
+	if !errors.Is(err, ErrControllerMetadataTransitionProtocol) || result.Applied || result.Receipt != nil {
+		t.Fatalf("protected transition result = %+v, error %v; want recovery refusal", result, err)
+	}
+	if contextResponses != 2 || transport.contextCount != 2 || transport.postCount != 1 || transport.receiptGetCount != 0 {
+		t.Fatalf("requests after capability disappeared: contexts=%d transport-contexts=%d posts=%d receipts=%d, want 2, 2, 1, 0",
+			contextResponses, transport.contextCount, transport.postCount, transport.receiptGetCount)
 	}
 }
 

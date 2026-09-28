@@ -24,6 +24,8 @@ func (p *ControllerMetadataTransitionProblem) Error() string {
 // ReceiptID must stay the same when recovering or retrying this request.
 // Expected and Value use nil for an absent metadata key; a raw JSON null is a
 // present value. An empty Payload is sent as omitted and means {} to Beads.
+// ProtectedPermit is sent opaquely only when the server advertises protected
+// mutation support.
 type ControllerMetadataTransitionRequest struct {
 	ReceiptID       string
 	Scope           string
@@ -34,6 +36,8 @@ type ControllerMetadataTransitionRequest struct {
 	Expected        *json.RawMessage
 	Value           *json.RawMessage
 	Payload         json.RawMessage
+	// ProtectedPermit authorizes a protected marker transition when nonempty.
+	ProtectedPermit string
 }
 
 // ControllerMetadataTransitionReceipt is the immutable Q43 receipt for an

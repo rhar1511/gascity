@@ -556,7 +556,7 @@ func (c *privateEvidenceHTTPClient) verifyContextIdentity(response privateEviden
 	return nil
 }
 
-func (c *privateEvidenceHTTPClient) verifyRevisionTransitionContext(ctx context.Context) error {
+func (c *privateEvidenceHTTPClient) verifyRevisionTransitionContext(ctx context.Context, requireProtectedMutation bool) error {
 	if !c.revisionTransitions {
 		return ErrControllerMetadataTransitionUnavailable
 	}
@@ -567,7 +567,11 @@ func (c *privateEvidenceHTTPClient) verifyRevisionTransitionContext(ctx context.
 	if err := c.verifyContextIdentity(response); err != nil {
 		return fmt.Errorf("%w: configured workspace identity mismatch", ErrControllerMetadataTransitionProtocol)
 	}
-	for _, required := range []string{"issues.transitionMetadata", "issues.transitionReceipt.get", "project.enforce"} {
+	requiredCapabilities := []string{"issues.transitionMetadata", "issues.transitionReceipt.get", "project.enforce"}
+	if requireProtectedMutation {
+		requiredCapabilities = append(requiredCapabilities, "issues.protectedMutation")
+	}
+	for _, required := range requiredCapabilities {
 		if !containsString(response.Capabilities, required) {
 			return fmt.Errorf("%w: Beads server lacks required capability %q", ErrControllerMetadataTransitionProtocol, required)
 		}

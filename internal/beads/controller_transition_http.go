@@ -21,6 +21,8 @@ const (
 	controllerTransitionReceiptPath = "/v0/beads/issue-transition-receipts/"
 )
 
+const controllerTransitionMaxProtectedPermitBytes = 65536
+
 type controllerTransitionWireRequest struct {
 	ReceiptID       string           `json:"receipt_id"`
 	Scope           string           `json:"scope"`
@@ -31,6 +33,7 @@ type controllerTransitionWireRequest struct {
 	Expected        *json.RawMessage `json:"expected,omitempty"`
 	Value           *json.RawMessage `json:"value,omitempty"`
 	Payload         json.RawMessage  `json:"payload,omitempty"`
+	ProtectedPermit string           `json:"protected_permit,omitempty"`
 }
 
 type controllerTransitionPlan struct {
@@ -51,7 +54,14 @@ func (c *privateEvidenceHTTPClient) transitionMetadata(ctx context.Context, issu
 	if err != nil {
 		return ControllerMetadataTransitionResult{}, controllerTransitionProtocolError("request could not be encoded")
 	}
-	result, status, postErr := c.postControllerMetadataTransition(ctx, plan.issueID, body)
+	protectedPermitContextVerified := false
+	if plan.request.ProtectedPermit != "" {
+		if err := c.verifyRevisionTransitionContext(ctx, true); err != nil {
+			return ControllerMetadataTransitionResult{}, err
+		}
+		protectedPermitContextVerified = true
+	}
+	result, status, postErr := c.postControllerMetadataTransition(ctx, plan, body, protectedPermitContextVerified)
 	if status >= 300 && status < 400 {
 		return ControllerMetadataTransitionResult{}, controllerTransitionProtocolError("redirect refused")
 	}
@@ -67,11 +77,13 @@ func (c *privateEvidenceHTTPClient) transitionMetadata(ctx context.Context, issu
 	return c.recoverAmbiguousControllerTransition(ctx, plan, body, status)
 }
 
-func (c *privateEvidenceHTTPClient) postControllerMetadataTransition(ctx context.Context, issueID string, body []byte) ([]byte, int, error) {
-	if err := c.verifyRevisionTransitionContext(ctx); err != nil {
-		return nil, 0, err
+func (c *privateEvidenceHTTPClient) postControllerMetadataTransition(ctx context.Context, plan controllerTransitionPlan, body []byte, contextVerified bool) ([]byte, int, error) {
+	if !contextVerified {
+		if err := c.verifyRevisionTransitionContext(ctx, plan.request.ProtectedPermit != ""); err != nil {
+			return nil, 0, err
+		}
 	}
-	path := controllerTransitionPath + url.PathEscape(issueID) + ":transitionMetadata"
+	path := controllerTransitionPath + url.PathEscape(plan.issueID) + ":transitionMetadata"
 	response, status, err := c.requestWithResponseCaps(ctx, http.MethodPost, path, body,
 		controllerTransitionMaxSuccessBody, controllerTransitionMaxProblemBody)
 	if err != nil {
@@ -95,7 +107,7 @@ func (c *privateEvidenceHTTPClient) recoverAmbiguousControllerTransition(ctx con
 	// A not-found receipt is the one safe point to retry. The receipt ID and
 	// canonical request body stay byte-for-byte stable so an in-flight first
 	// request converges with this bounded retry.
-	resultBody, retryStatus, retryErr := c.postControllerMetadataTransition(ctx, plan.issueID, body)
+	resultBody, retryStatus, retryErr := c.postControllerMetadataTransition(ctx, plan, body, false)
 	if retryStatus >= 300 && retryStatus < 400 {
 		return ControllerMetadataTransitionResult{}, controllerTransitionProtocolError("redirect refused")
 	}
@@ -113,7 +125,7 @@ func (c *privateEvidenceHTTPClient) recoverAmbiguousControllerTransition(ctx con
 }
 
 func (c *privateEvidenceHTTPClient) getControllerTransitionReceipt(ctx context.Context, plan controllerTransitionPlan) (*ControllerMetadataTransitionReceipt, bool, error) {
-	if err := c.verifyRevisionTransitionContext(ctx); err != nil {
+	if err := c.verifyRevisionTransitionContext(ctx, plan.request.ProtectedPermit != ""); err != nil {
 		return nil, false, err
 	}
 	path := controllerTransitionReceiptPath + url.PathEscape(plan.request.ReceiptID)
@@ -157,6 +169,11 @@ func planControllerMetadataTransition(issueID string, request ControllerMetadata
 	}
 	if err := validateControllerTransitionText(request.Actor, controllerTransitionMaxActor); err != nil || len(request.Actor) > 256 || hasControllerTransitionControl(request.Actor) {
 		return controllerTransitionPlan{}, controllerTransitionProtocolError("actor is invalid")
+	}
+	if request.ProtectedPermit != "" && (len(request.ProtectedPermit) > controllerTransitionMaxProtectedPermitBytes ||
+		!utf8.ValidString(request.ProtectedPermit) || strings.TrimSpace(request.ProtectedPermit) != request.ProtectedPermit ||
+		hasControllerTransitionControl(request.ProtectedPermit)) {
+		return controllerTransitionPlan{}, controllerTransitionProtocolError("protected permit is invalid")
 	}
 	if request.ExpectedVersion == 0 {
 		return controllerTransitionPlan{}, controllerTransitionProtocolError("expected revision is invalid")
@@ -306,6 +323,7 @@ func encodeControllerMetadataTransition(plan controllerTransitionPlan) ([]byte, 
 		Key:             plan.request.Key,
 		Expected:        plan.request.Expected,
 		Value:           plan.request.Value,
+		ProtectedPermit: plan.request.ProtectedPermit,
 	}
 	if len(plan.request.Payload) != 0 {
 		request.Payload = plan.request.Payload
