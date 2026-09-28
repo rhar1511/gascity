@@ -170,7 +170,7 @@ func (shellRunner) run(ctx context.Context, ep Endpoint, remoteArgv []string, st
 	// element as a POSIX-shell token. TestConnExecPreservesShellMetacharacters
 	// exercises the secondary shell boundary that CodeQL cannot model here.
 
-	// lgtm [go/command-injection]
+	// codeql[go/command-injection]
 	cmd := exec.CommandContext(ctx, "ssh", sshArgs(ep, remoteArgv)...)
 	cmd.WaitDelay = 2 * time.Second
 	var stdout, stderr bytes.Buffer

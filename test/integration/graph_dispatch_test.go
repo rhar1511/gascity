@@ -739,8 +739,9 @@ func graphPathWithin(root, path string) bool {
 
 // graphFixtureProxyPortForTest accepts only the BD-owned proxied lifecycle
 // initialized for this graph city. The proxy record proves which supervisor
-// owns the root; the child pidfile and /proc listener ownership prove that its
-// published database port belongs to the Dolt child in that same root.
+// owns the root and identifies the proxy listener. The child pidfile and /proc
+// listener ownership independently prove the Dolt backend listener in that
+// same root; those two listeners intentionally have distinct ports.
 func graphFixtureProxyPortForTest(cityDir string) (string, bool) {
 	port, err := graphFixtureProxyPortForTestWithDiagnostic(cityDir)
 	return port, err == nil
@@ -857,11 +858,11 @@ func graphFixtureProxyPortForTestWithDiagnostic(cityDir string) (string, error) 
 	if err := json.Unmarshal(childData, &child); err != nil {
 		return "", fmt.Errorf("decode Dolt child PID record: %w", err)
 	}
-	if child.PID <= 0 || child.Port != endpoint.Record.Port ||
+	if child.PID <= 0 || child.Port <= 0 || child.Port > 65535 ||
 		child.Kind != graphDoltBackendRecordKind || child.Schema < proxyendpoint.SchemaV2 || child.Birth == "" || child.RootID != endpoint.RootID {
 		return "", fmt.Errorf(
-			"Dolt child identity does not match the verified proxy endpoint (pid=%d port=%d proxy_port=%d kind=%q schema=%d birth_present=%t root_id_matches=%t)",
-			child.PID, child.Port, endpoint.Record.Port, child.Kind, child.Schema, child.Birth != "", child.RootID == endpoint.RootID,
+			"Dolt child identity is invalid or belongs to another proxy root (pid=%d backend_port=%d kind=%q schema=%d birth_present=%t root_id_matches=%t)",
+			child.PID, child.Port, child.Kind, child.Schema, child.Birth != "", child.RootID == endpoint.RootID,
 		)
 	}
 	processes := proxyendpoint.DefaultProcessTable()
@@ -889,8 +890,11 @@ func graphFixtureProxyPortForTestWithDiagnostic(cityDir string) (string, error) 
 	if !graphProxyConfigMatches(configData, child.Port) {
 		return "", errors.New("proxy config does not publish the verified Dolt child port")
 	}
-	if !graphDoltProcessOwnsListeningPort(child.PID, endpoint.Record.Port) {
-		return "", errors.New("Dolt child does not own the listening socket on its published port")
+	if !graphProcessOwnsListeningPort(endpoint.Record.PID, endpoint.Record.Port) {
+		return "", errors.New("verified proxy process does not own its published listener")
+	}
+	if !graphProcessOwnsListeningPort(child.PID, child.Port) {
+		return "", errors.New("Dolt child does not own the listening socket on its backend port")
 	}
 	port := strconv.Itoa(endpoint.Record.Port)
 	if !testPortReachable(port) {
@@ -1123,7 +1127,7 @@ func graphProxyConfigMatches(contents []byte, port int) bool {
 	return config.Listener.Host == proxyendpoint.Host && config.Listener.Port == port && config.Listener.Socket == ""
 }
 
-func graphDoltProcessOwnsListeningPort(pid, port int) bool {
+func graphProcessOwnsListeningPort(pid, port int) bool {
 	if runtime.GOOS != "linux" || pid <= 0 || port < 1 || port > 65535 {
 		return false
 	}

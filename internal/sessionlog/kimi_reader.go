@@ -603,7 +603,7 @@ func kimiWorkDirHash(workDir string) string {
 	// This is a provider-mandated directory key, not a security digest; changing
 	// it would make existing Kimi transcripts undiscoverable.
 
-	// lgtm [go/weak-sensitive-data-hashing]
+	// codeql[go/weak-sensitive-data-hashing]
 	sum := md5.Sum([]byte(filepath.Clean(workDir)))
 	return hex.EncodeToString(sum[:])
 }
