@@ -320,6 +320,7 @@ filegroup(
         "//internal/processgroup:bazel_repo_srcs",
         "//internal/processgroup/processgrouptest:bazel_repo_srcs",
         "//internal/productmetrics:bazel_repo_srcs",
+        "//internal/protectedmutation:bazel_repo_srcs",
         "//internal/promptmeta:bazel_repo_srcs",
         "//internal/promptsafe:bazel_repo_srcs",
         "//internal/qualification:bazel_repo_srcs",
