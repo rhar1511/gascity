@@ -134,6 +134,7 @@ go_test(
         "native_dolt_store_test.go",
         "native_dolt_store_update_retry_test.go",
         "native_step_topology_test.go",
+        "controller_batch_apply_http_test.go",
         "private_evidence_http_test.go",
         "private_evidence_wrappers_internal_test.go",
         "private_payload_test.go",
