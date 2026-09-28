@@ -24,6 +24,13 @@ import (
 	"github.com/gastownhall/gascity/internal/rsipolicy"
 )
 
+func TestRSIFormulaFixtureIsAvailable(t *testing.T) {
+	formulaPath := filepath.Join(rsiFormulaDir(t), "mol-rsi-candidate.toml")
+	if _, err := os.Stat(formulaPath); err != nil {
+		t.Fatalf("RSI formula fixture is unavailable at %s: %v", formulaPath, err)
+	}
+}
+
 func TestCompiledRSIFormulaWiresTrustedGateToCandidateAndBothJudges(t *testing.T) {
 	recipe := compileRSIRecipe(t)
 	gateID := "mol-rsi-candidate.promote-gate"
@@ -67,10 +74,7 @@ func TestCompiledFormulaRuntimePromotesOnlyFromSignedTrustedEvaluation(t *testin
 	for _, judge := range judges {
 		setRSIWorkerEvidence(t, store, judge.BeadID, judge.ActorID, judge.SessionID, judge.RawOutput)
 	}
-	formulaDir, err := filepath.Abs(filepath.Join("..", "bootstrap", "packs", "core", "formulas"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	formulaDir := rsiFormulaDir(t)
 	candidateID := processRSIRetryToSecondAttempt(t, store, candidateControlID, formulaDir, "improver", "session-improver", candidateRaw)
 	for _, controlID := range []string{judges[0].ControlBeadID, judges[1].ControlBeadID} {
 		processPassingRSIRetry(t, store, controlID)
@@ -336,15 +340,21 @@ func TestRSIGateRejectsUnknownEvaluatorAuthorityClass(t *testing.T) {
 
 func compileRSIRecipe(t *testing.T) *formula.Recipe {
 	t.Helper()
-	formulaDir, err := filepath.Abs(filepath.Join("..", "bootstrap", "packs", "core", "formulas"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	formulaDir := rsiFormulaDir(t)
 	recipe, err := formula.CompileWithoutRuntimeVarValidation(context.Background(), "mol-rsi-candidate", []string{formulaDir}, rsiFormulaVars())
 	if err != nil {
 		t.Fatalf("compile mol-rsi-candidate: %v", err)
 	}
 	return recipe
+}
+
+func rsiFormulaDir(t *testing.T) string {
+	t.Helper()
+	formulaDir, err := filepath.Abs(filepath.Join("..", "bootstrap", "packs", "core", "formulas"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return formulaDir
 }
 
 func rsiFormulaVars() map[string]string {
