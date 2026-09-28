@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	osexec "os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -1538,16 +1539,34 @@ func TestProvider_StartCancellationInterruptsForegroundChild(t *testing.T) {
 	dir := t.TempDir()
 	readyFile := filepath.Join(dir, "ready")
 	interruptFile := filepath.Join(dir, "interrupted")
+	binDir := filepath.Join(dir, "bin")
+	if err := os.Mkdir(binDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sleepPath, err := osexec.LookPath("sleep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Make readiness mean the external sleep process has actually been
+	// launched. The provider script's own marker immediately before `sleep`
+	// leaves a race where cancellation can arrive before the foreground child
+	// exists, which does not exercise the behavior this test claims to cover.
+	sleepWrapper := "#!/bin/sh\n\"$REAL_SLEEP\" \"$@\" &\nchild=$!\n: > \"$CHILD_READY\"\nwait \"$child\"\n"
+	if err := os.WriteFile(filepath.Join(binDir, "sleep"), []byte(sleepWrapper), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("REAL_SLEEP", sleepPath)
+	t.Setenv("CHILD_READY", readyFile)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	script := writeScript(t, dir, fmt.Sprintf(`
 case "$1" in
   start)
     trap 'printf "%%s\n" interrupted > "%s"; exit 0' INT
-    : > "%s"
     sleep 30
     ;;
   *) exit 2 ;;
 esac
-	`, interruptFile, readyFile))
+	`, interruptFile))
 	p := NewProvider(script)
 
 	ctx, cancel := context.WithCancel(context.Background())
