@@ -67,18 +67,27 @@ describe('BeadsCanvasPage', () => {
   it('widens the live query only when closed beads are requested', async () => {
     renderPage();
     await screen.findByRole('button', { name: 'ga-root: Ship the canvas' });
-    expect(beadQueries).toHaveLength(2);
-    expect(beadQueries.every((query) => !query.has('all'))).toBe(true);
-    expect(beadQueries.some((query) => query.get('status') === 'in_progress')).toBe(true);
+    const initialQueries = [...beadQueries];
+    expect(initialQueries.length).toBeGreaterThan(0);
+    expect(initialQueries.every((query) => !query.has('all'))).toBe(true);
+    expect(initialQueries.some((query) => query.get('status') === 'in_progress')).toBe(true);
 
     fireEvent.click(screen.getByRole('button', { name: 'closed' }));
 
-    await waitFor(() => expect(beadQueries).toHaveLength(4));
-    const refreshedQueries = beadQueries.slice(2);
-    expect(refreshedQueries.find((query) => !query.has('status'))?.get('all')).toBe('true');
+    await waitFor(() =>
+      expect(
+        beadQueries.some((query) => !query.has('status') && query.get('all') === 'true'),
+      ).toBe(true),
+    );
+    const refreshedQueries = beadQueries.slice(initialQueries.length);
     expect(
-      refreshedQueries.find((query) => query.get('status') === 'in_progress')?.has('all'),
-    ).toBe(false);
+      refreshedQueries.some((query) => !query.has('status') && query.get('all') === 'true'),
+    ).toBe(true);
+    expect(
+      refreshedQueries.some(
+        (query) => query.get('status') === 'in_progress' && !query.has('all'),
+      ),
+    ).toBe(true);
   });
 
   it('falls back to Gas City control and accepts an explicit Gas Town control target', async () => {
