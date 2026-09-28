@@ -10,10 +10,12 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -102,12 +104,20 @@ func TestBdStoreDecisionFrontierSourceSnapshotExactBinaryIntegration(t *testing.
 	if !ok || reader == nil {
 		t.Fatal("BdStore with revision-transition private HTTP did not expose its source-snapshot reader")
 	}
+	writer, ok := ControllerMetadataTransitionWriterFor(store)
+	if !ok || writer == nil {
+		t.Fatal("BdStore with revision-transition private HTTP did not expose its controller metadata transition writer")
+	}
 
 	priority := 2
 	const sourceTitle = "Exact binary source snapshot task"
 	const sourceDescription = "Ordinary source task for the source-snapshot integration row."
 	source, err := store.Create(Bead{
 		Title: sourceTitle, Type: "task", Priority: &priority, Description: sourceDescription,
+		Metadata: map[string]string{
+			"integration.q43_once":     "before",
+			"integration.q43_recovery": "before",
+		},
 	})
 	if err != nil {
 		t.Fatalf("create source task through exact bd binary: %v", err)
@@ -159,6 +169,345 @@ func TestBdStoreDecisionFrontierSourceSnapshotExactBinaryIntegration(t *testing.
 	repeatedEdges := bdSourceSnapshotIntegrationAssertEdges(t, repeated.ID, repeated.Dependencies, wantEdges)
 	if !bdSourceSnapshotIntegrationSameEdges(gotEdges, repeatedEdges) {
 		t.Fatalf("repeat source snapshot edge set changed: first=%v repeat=%v", gotEdges, repeatedEdges)
+	}
+	if snapshot.Metadata["integration.q43_once"] != "before" || snapshot.Metadata["integration.q43_recovery"] != "before" {
+		t.Fatalf("source snapshot metadata baseline = %v, want both disposable Q43 markers set to before", snapshot.Metadata)
+	}
+
+	const transitionScope = "rig:source-snapshot-integration"
+	const transitionKind = "integration-metadata-transition"
+	const transitionActor = "gascity-controller-integration"
+	firstExpected := json.RawMessage(`"before"`)
+	firstValue := json.RawMessage(`"after"`)
+	firstRequest := ControllerMetadataTransitionRequest{
+		ReceiptID: "q43-exact-binary-" + bdSourceSnapshotIntegrationRandomHex(t, 12),
+		Scope:     transitionScope, Kind: transitionKind, Actor: transitionActor,
+		ExpectedVersion: snapshot.Revision, Key: "integration.q43_once",
+		Expected: &firstExpected, Value: &firstValue,
+		Payload: json.RawMessage(`{"purpose":"exact-binary-integration","sequence":1}`),
+	}
+	priorTransport := store.privateEvidenceHTTP.client.Transport
+	if priorTransport == nil {
+		priorTransport = http.DefaultTransport
+	}
+	capturePosts := &bdSourceSnapshotIntegrationCaptureTransitionTransport{
+		next:           priorTransport,
+		transitionPath: controllerTransitionPath + url.PathEscape(source.ID) + ":transitionMetadata",
+	}
+	store.privateEvidenceHTTP.client.Transport = capturePosts
+	t.Cleanup(func() {
+		if store.privateEvidenceHTTP.client.Transport == capturePosts {
+			store.privateEvidenceHTTP.client.Transport = priorTransport
+		}
+	})
+	firstResult, err := writer.TransitionMetadata(source.ID, firstRequest)
+	if err != nil {
+		t.Fatalf("apply controller metadata transition through exact bd server: %v", err)
+	}
+	if !firstResult.Applied || firstResult.Replayed {
+		t.Fatalf("first transition result = %+v, want applied and not replayed", firstResult)
+	}
+	bdSourceSnapshotIntegrationAssertTransitionReceipt(t, firstResult.Receipt, source.ID, firstRequest)
+
+	afterFirst, err := reader.DecisionFrontierSourceSnapshot(source.ID)
+	if err != nil {
+		t.Fatalf("read source snapshot after first metadata transition: %v", err)
+	}
+	bdSourceSnapshotIntegrationAssertTransitionEffect(t, afterFirst, snapshot, firstResult.Receipt, firstRequest, "after")
+
+	replayed, err := writer.TransitionMetadata(source.ID, firstRequest)
+	if err != nil {
+		t.Fatalf("replay exact controller metadata transition: %v", err)
+	}
+	if !replayed.Applied || !replayed.Replayed {
+		t.Fatalf("exact replay result = %+v, want applied and replayed", replayed)
+	}
+	bdSourceSnapshotIntegrationAssertTransitionReceipt(t, replayed.Receipt, source.ID, firstRequest)
+	store.privateEvidenceHTTP.client.Transport = priorTransport
+	capturedPosts := capturePosts.snapshotRequests()
+	if len(capturedPosts) != 2 {
+		t.Fatalf("captured %d controller transition POSTs, want initial apply and one exact replay", len(capturedPosts))
+	}
+	wantPath := controllerTransitionPath + url.PathEscape(source.ID) + ":transitionMetadata"
+	for index, captured := range capturedPosts {
+		bdSourceSnapshotIntegrationAssertTransitionRequest(t, captured, wantPath, token, identity.ProjectID, firstRequest)
+		if index > 0 && !bytes.Equal(capturedPosts[0].body, captured.body) {
+			t.Fatalf("exact replay POST body differs from initial POST:\n first: %s\n replay: %s", capturedPosts[0].body, captured.body)
+		}
+	}
+	afterReplay, err := reader.DecisionFrontierSourceSnapshot(source.ID)
+	if err != nil {
+		t.Fatalf("read source snapshot after exact replay: %v", err)
+	}
+	if afterReplay.Revision != afterFirst.Revision || afterReplay.Revision != replayed.Receipt.ToVersion ||
+		afterReplay.Metadata[firstRequest.Key] != "after" ||
+		afterReplay.Metadata["integration.q43_recovery"] != "before" {
+		t.Fatalf("exact replay changed the source row: after first=%+v after replay=%+v", afterFirst, afterReplay)
+	}
+
+	recoveryExpected := json.RawMessage(`"before"`)
+	recoveryValue := json.RawMessage(`"recovered"`)
+	recoveryRequest := ControllerMetadataTransitionRequest{
+		ReceiptID: "q43-lost-post-" + bdSourceSnapshotIntegrationRandomHex(t, 12),
+		Scope:     transitionScope, Kind: transitionKind, Actor: transitionActor,
+		ExpectedVersion: afterReplay.Revision, Key: "integration.q43_recovery",
+		Expected: &recoveryExpected, Value: &recoveryValue,
+		Payload: json.RawMessage(`{"purpose":"exact-binary-integration","sequence":2}`),
+	}
+	lostPost := &bdSourceSnapshotIntegrationLostPostTransport{
+		next:           priorTransport,
+		transitionPath: controllerTransitionPath + url.PathEscape(source.ID) + ":transitionMetadata",
+	}
+	store.privateEvidenceHTTP.client.Transport = lostPost
+	t.Cleanup(func() { store.privateEvidenceHTTP.client.Transport = priorTransport })
+	recovered, err := writer.TransitionMetadata(source.ID, recoveryRequest)
+	if err != nil {
+		t.Fatalf("recover controller metadata transition after lost successful POST response: %v", err)
+	}
+	if !recovered.Applied || !recovered.Replayed {
+		t.Fatalf("lost-response recovery result = %+v, want applied and replayed", recovered)
+	}
+	bdSourceSnapshotIntegrationAssertTransitionReceipt(t, recovered.Receipt, source.ID, recoveryRequest)
+	if dropped, posts, receiptGets := lostPost.counts(); !dropped || posts != 1 || receiptGets != 1 {
+		t.Fatalf("lost-response recovery transport: dropped=%v transition-posts=%d receipt-gets=%d, want one dropped successful POST and one receipt lookup",
+			dropped, posts, receiptGets)
+	}
+	afterRecovery, err := reader.DecisionFrontierSourceSnapshot(source.ID)
+	if err != nil {
+		t.Fatalf("read source snapshot after lost-response recovery: %v", err)
+	}
+	bdSourceSnapshotIntegrationAssertTransitionEffect(t, afterRecovery, afterReplay, recovered.Receipt, recoveryRequest, "recovered")
+	if afterRecovery.Metadata[firstRequest.Key] != "after" {
+		t.Fatalf("lost-response recovery changed the prior metadata effect: metadata=%v", afterRecovery.Metadata)
+	}
+}
+
+type bdSourceSnapshotIntegrationLostPostTransport struct {
+	next           http.RoundTripper
+	transitionPath string
+	mu             sync.Mutex
+	posts          int
+	receiptGets    int
+	dropped        bool
+}
+
+func (transport *bdSourceSnapshotIntegrationLostPostTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	if request.Method == http.MethodPost && request.URL.EscapedPath() == transport.transitionPath {
+		transport.mu.Lock()
+		transport.posts++
+		attempt := transport.posts
+		transport.mu.Unlock()
+		if attempt > 1 {
+			return nil, errors.New("bounded integration transport refused a duplicate transition POST")
+		}
+
+		response, err := transport.next.RoundTrip(request)
+		if err != nil {
+			return nil, err
+		}
+		if response.StatusCode != http.StatusOK {
+			return response, nil
+		}
+		body, readErr := io.ReadAll(io.LimitReader(response.Body, controllerTransitionMaxSuccessBody+1))
+		closeErr := response.Body.Close()
+		if readErr != nil {
+			return nil, readErr
+		}
+		if closeErr != nil {
+			return nil, closeErr
+		}
+		if int64(len(body)) > controllerTransitionMaxSuccessBody {
+			return nil, errors.New("exact bd server transition response exceeded its configured body cap")
+		}
+		var result struct {
+			Applied  bool `json:"applied"`
+			Replayed bool `json:"replayed"`
+		}
+		if err := json.Unmarshal(body, &result); err != nil || !result.Applied || result.Replayed {
+			return nil, fmt.Errorf("exact bd server did not apply a new transition before simulated response loss: %s", body)
+		}
+		transport.mu.Lock()
+		transport.dropped = true
+		transport.mu.Unlock()
+		return nil, errors.New("simulated loss of successful controller transition response")
+	}
+	if request.Method == http.MethodGet && strings.HasPrefix(request.URL.EscapedPath(), controllerTransitionReceiptPath) {
+		transport.mu.Lock()
+		transport.receiptGets++
+		transport.mu.Unlock()
+	}
+	return transport.next.RoundTrip(request)
+}
+
+func (transport *bdSourceSnapshotIntegrationLostPostTransport) counts() (dropped bool, posts, receiptGets int) {
+	transport.mu.Lock()
+	defer transport.mu.Unlock()
+	return transport.dropped, transport.posts, transport.receiptGets
+}
+
+type bdSourceSnapshotIntegrationCapturedRequest struct {
+	method        string
+	path          string
+	authorization string
+	projectID     string
+	contentType   string
+	body          []byte
+}
+
+type bdSourceSnapshotIntegrationCaptureTransitionTransport struct {
+	next           http.RoundTripper
+	transitionPath string
+	mu             sync.Mutex
+	captured       []bdSourceSnapshotIntegrationCapturedRequest
+}
+
+func (transport *bdSourceSnapshotIntegrationCaptureTransitionTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	if request.Method == http.MethodPost && request.URL.EscapedPath() == transport.transitionPath {
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			return nil, err
+		}
+		request.Body = io.NopCloser(bytes.NewReader(body))
+		transport.mu.Lock()
+		if len(transport.captured) >= 2 {
+			transport.mu.Unlock()
+			return nil, errors.New("bounded integration capture refused a third transition POST")
+		}
+		transport.captured = append(transport.captured, bdSourceSnapshotIntegrationCapturedRequest{
+			method: request.Method, path: request.URL.EscapedPath(),
+			authorization: request.Header.Get("Authorization"),
+			projectID:     request.Header.Get("Bd-Project-Id"),
+			contentType:   request.Header.Get("Content-Type"),
+			body:          append([]byte(nil), body...),
+		})
+		transport.mu.Unlock()
+	}
+	return transport.next.RoundTrip(request)
+}
+
+func (transport *bdSourceSnapshotIntegrationCaptureTransitionTransport) snapshotRequests() []bdSourceSnapshotIntegrationCapturedRequest {
+	transport.mu.Lock()
+	defer transport.mu.Unlock()
+	requests := make([]bdSourceSnapshotIntegrationCapturedRequest, len(transport.captured))
+	for index, request := range transport.captured {
+		requests[index] = request
+		requests[index].body = append([]byte(nil), request.body...)
+	}
+	return requests
+}
+
+func bdSourceSnapshotIntegrationAssertTransitionRequest(t *testing.T, got bdSourceSnapshotIntegrationCapturedRequest, wantPath, token, projectID string, request ControllerMetadataTransitionRequest) {
+	t.Helper()
+	if got.method != http.MethodPost || got.path != wantPath || got.authorization != "Bearer "+token ||
+		got.projectID != projectID || got.contentType != "application/json" {
+		t.Fatalf("captured transition request = method %q path %q authorization-matches=%t project-matches=%t content type %q; want POST %q with configured identity and JSON content type",
+			got.method, got.path, got.authorization == "Bearer "+token, got.projectID == projectID, got.contentType, wantPath)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(got.body, &fields); err != nil || fields == nil {
+		t.Fatalf("decode captured transition request body %s: %v", got.body, err)
+	}
+	wantFields := map[string]bool{
+		"receipt_id": true, "scope": true, "kind": true, "actor": true,
+		"expected_version": true, "key": true,
+	}
+	if request.Expected != nil {
+		wantFields["expected"] = true
+	}
+	if request.Value != nil {
+		wantFields["value"] = true
+	}
+	if len(request.Payload) != 0 {
+		wantFields["payload"] = true
+	}
+	if len(fields) != len(wantFields) {
+		t.Fatalf("captured transition request fields = %v, want exactly %v", fields, wantFields)
+	}
+	for name := range fields {
+		if !wantFields[name] {
+			t.Fatalf("captured transition request has unexpected field %q: %s", name, got.body)
+		}
+	}
+	for name, want := range map[string]string{
+		"receipt_id": request.ReceiptID, "scope": request.Scope, "kind": request.Kind,
+		"actor": request.Actor, "key": request.Key,
+	} {
+		var value string
+		if err := json.Unmarshal(fields[name], &value); err != nil || value != want {
+			t.Fatalf("captured transition field %q = %s, want JSON string %q", name, fields[name], want)
+		}
+	}
+	wantRevision := strconv.FormatInt(request.ExpectedVersion, 10)
+	var gotRevision string
+	if err := json.Unmarshal(fields["expected_version"], &gotRevision); err != nil || gotRevision != wantRevision {
+		t.Fatalf("captured expected_version = %s, want JSON decimal string %q", fields["expected_version"], wantRevision)
+	}
+	for name, want := range map[string]*json.RawMessage{"expected": request.Expected, "value": request.Value} {
+		gotRaw, present := fields[name]
+		if want == nil {
+			if present {
+				t.Fatalf("captured transition field %q = %s, want absent", name, gotRaw)
+			}
+			continue
+		}
+		if !present || !bytes.Equal(gotRaw, *want) {
+			t.Fatalf("captured transition field %q = %s, want %s", name, gotRaw, *want)
+		}
+	}
+	if len(request.Payload) == 0 {
+		if _, present := fields["payload"]; present {
+			t.Fatalf("captured transition payload = %s, want omitted", fields["payload"])
+		}
+	} else if gotPayload, present := fields["payload"]; !present || !bytes.Equal(gotPayload, request.Payload) {
+		t.Fatalf("captured transition payload = %s, want %s", gotPayload, request.Payload)
+	}
+}
+
+func bdSourceSnapshotIntegrationAssertTransitionReceipt(t *testing.T, receipt *ControllerMetadataTransitionReceipt, issueID string, request ControllerMetadataTransitionRequest) {
+	t.Helper()
+	if receipt == nil {
+		t.Fatal("controller metadata transition returned no receipt")
+	}
+	if receipt.ReceiptID != request.ReceiptID || receipt.IssueID != issueID || receipt.Scope != request.Scope ||
+		receipt.Kind != request.Kind || receipt.Actor != request.Actor || receipt.ExpectedVersion != request.ExpectedVersion ||
+		receipt.Key != request.Key {
+		t.Fatalf("transition receipt bindings = %+v, want receipt ID %q issue %q scope %q kind %q actor %q expected revision %d key %q",
+			receipt, request.ReceiptID, issueID, request.Scope, request.Kind, request.Actor, request.ExpectedVersion, request.Key)
+	}
+	if request.Expected == nil {
+		if len(receipt.Expected) != 0 {
+			t.Fatalf("receipt expected marker = %s, want absent", receipt.Expected)
+		}
+	} else if !bytes.Equal(receipt.Expected, *request.Expected) {
+		t.Fatalf("receipt expected marker = %s, want %s", receipt.Expected, *request.Expected)
+	}
+	if request.Value == nil {
+		if len(receipt.Value) != 0 {
+			t.Fatalf("receipt value marker = %s, want absent", receipt.Value)
+		}
+	} else if !bytes.Equal(receipt.Value, *request.Value) {
+		t.Fatalf("receipt value marker = %s, want %s", receipt.Value, *request.Value)
+	}
+	if !bytes.Equal(receipt.Payload, request.Payload) {
+		t.Fatalf("receipt payload = %s, want %s", receipt.Payload, request.Payload)
+	}
+	if receipt.ToVersion == 0 || receipt.ToVersion == receipt.ExpectedVersion {
+		t.Fatalf("receipt destination revision = %d, expected revision = %d; want a distinct nonzero revision token",
+			receipt.ToVersion, receipt.ExpectedVersion)
+	}
+}
+
+func bdSourceSnapshotIntegrationAssertTransitionEffect(t *testing.T, got, before Bead, receipt *ControllerMetadataTransitionReceipt, request ControllerMetadataTransitionRequest, wantValue string) {
+	t.Helper()
+	if receipt == nil {
+		t.Fatal("cannot verify source effect without a transition receipt")
+	}
+	if got.ID != before.ID || got.Revision == 0 || got.Revision == before.Revision || got.Revision != receipt.ToVersion {
+		t.Fatalf("source snapshot revision/identity = (%q, %d), previous = (%q, %d), receipt destination revision = %d",
+			got.ID, got.Revision, before.ID, before.Revision, receipt.ToVersion)
+	}
+	if got.Metadata[request.Key] != wantValue {
+		t.Fatalf("source snapshot metadata[%q] = %q, want %q", request.Key, got.Metadata[request.Key], wantValue)
 	}
 }
 
@@ -519,7 +868,10 @@ func bdSourceSnapshotIntegrationWaitForServe(t *testing.T, ctx context.Context, 
 						t.Fatalf("bd serve identity = api %q backend %q mode %q project %q database %q, want v0 dolt server %q %q",
 							served.APIVersion, served.Backend, served.DoltMode, served.ProjectID, served.Database, projectID, database)
 					} else {
-						for _, required := range []string{"issues.casMetadata", "issues.create", "issues.get", "issues.sourceSnapshot", "project.enforce"} {
+						for _, required := range []string{
+							"issues.casMetadata", "issues.create", "issues.get", "issues.sourceSnapshot",
+							"issues.transitionMetadata", "issues.transitionReceipt.get", "project.enforce",
+						} {
 							if !slices.Contains(served.Capabilities, required) {
 								cancel()
 								t.Fatalf("bd serve context omits required capability %q: %v", required, served.Capabilities)
