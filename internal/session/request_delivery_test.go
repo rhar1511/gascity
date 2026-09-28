@@ -2,9 +2,9 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 
@@ -40,8 +40,22 @@ func TestSessionRequestDeliveryIsDurableAndNeverReplayed(t *testing.T) {
 	for _, call := range sp.SnapshotCalls() {
 		if call.Method == "Nudge" || call.Method == "NudgeNow" {
 			count++
-			if !strings.Contains(call.Message, "tracked-1") {
-				t.Fatalf("delivery missing request identity: %+v", call)
+			var envelope struct {
+				RequestID       string `json:"request_id"`
+				SessionID       string `json:"session_id"`
+				Generation      int    `json:"generation"`
+				Instruction     string `json:"instruction"`
+				AcknowledgeWith string `json:"acknowledge_with"`
+				Message         string `json:"message"`
+			}
+			if err := json.Unmarshal([]byte(call.Message), &envelope); err != nil {
+				t.Fatalf("decode tracked request envelope: %v", err)
+			}
+			if envelope.RequestID != "tracked-1" || envelope.SessionID != info.ID || envelope.Generation != gen || envelope.Message != "report progress" {
+				t.Fatalf("delivery envelope = %+v", envelope)
+			}
+			if envelope.Instruction == "" || envelope.AcknowledgeWith != `gc session request ack "tracked-1"` {
+				t.Fatalf("delivery lacks an exact acknowledgement instruction: %+v", envelope)
 			}
 		}
 	}

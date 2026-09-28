@@ -353,6 +353,10 @@ const FormulaVarPrefix = Namespace + "var."
 // so it is declared as a prefix here rather than re-enumerated in this file.
 const IdemPrefix = Namespace + "idem."
 
+// SessionRequestReceiptPrefix is the dynamic key family for durable session
+// request receipts. The request ID is the open-world suffix.
+const SessionRequestReceiptPrefix = Namespace + "session_request.v1."
+
 // Directory keys: a deliberate non-"gc."-prefixed sibling family on bead
 // metadata, declared here so the vocabulary has one home. Their read/write
 // fallback semantics (canonical-then-legacy) live with their owner in
@@ -626,6 +630,7 @@ var KnownMetadataKeys = []string{
 var KnownMetadataPrefixes = []string{
 	FormulaVarPrefix,
 	IdemPrefix,
+	SessionRequestReceiptPrefix,
 }
 
 // SessionAffinityMetadataKeys are the metadata keys that pin a work bead to a

@@ -150,8 +150,7 @@ func TestWaitList_TypedRungPreservesSubSecondOrder(t *testing.T) {
 	// cityBeadStore, which the /v0/waits handler reads.
 	state.cityBeadStore = beads.NewMemStoreFrom(2, []beads.Bead{late, early}, nil)
 
-	ts := httptest.NewServer(newTestCityHandler(t, state))
-	t.Cleanup(ts.Close)
+	ts := newCityScopedTestServer(t, state)
 	c := NewCityScopedClient(ts.URL, state.CityName())
 
 	cr, err := c.ListWaits("", "")
@@ -173,4 +172,11 @@ func TestWaitList_TypedRungPreservesSubSecondOrder(t *testing.T) {
 	if got[0].ID != "w-early" || got[1].ID != "w-late" {
 		t.Fatalf("post-sort order = [%s %s], want [w-early w-late]", got[0].ID, got[1].ID)
 	}
+}
+
+func newCityScopedTestServer(t *testing.T, state *fakeState) *httptest.Server {
+	t.Helper()
+	ts := httptest.NewServer(newTestCityHandler(t, state))
+	t.Cleanup(ts.Close)
+	return ts
 }

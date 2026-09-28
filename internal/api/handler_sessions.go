@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 // sessionResponse is the JSON representation of a chat session.
 type sessionResponse struct {
 	ID          string `json:"id"`
+	Generation  int    `json:"generation,omitempty"`
 	Kind        string `json:"kind,omitempty"`
 	Template    string `json:"template"`
 	State       string `json:"state"`
@@ -107,6 +109,9 @@ func sessionToResponse(info session.Info, cfg *config.City) sessionResponse {
 		CreatedAt:   info.CreatedAt.Format(time.RFC3339),
 		Attached:    info.Attached,
 		Rig:         rig,
+	}
+	if generation, err := strconv.Atoi(strings.TrimSpace(info.Generation)); err == nil && generation > 0 {
+		r.Generation = generation
 	}
 	// Populate pool and agent_kind from config lookup. The pool field is
 	// the agent's base name (e.g., "polecat"), useful for dashboard type

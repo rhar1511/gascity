@@ -23,6 +23,11 @@ not fall back to local mutation when it is unavailable.
 
 After receiving the request, the intended execution acknowledges it:
 
+The delivery envelope includes an `instruction` and an exact
+`acknowledge_with` command so the active agent can record receipt before acting
+on the follow-up. This evidence confirms receipt only; it does not verify the
+requested effect.
+
 ```bash
 gc session request ack request-456
 ```

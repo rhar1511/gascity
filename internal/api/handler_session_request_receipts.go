@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -74,8 +75,9 @@ func sessionRequestError(err error) error {
 // SessionRequestSubmitInput names the exact intended execution and request content.
 type SessionRequestSubmitInput struct {
 	CityScope
-	ID   string `path:"id" doc:"Exact durable session ID."`
-	Body struct {
+	ID             string `path:"id" doc:"Exact durable session ID."`
+	IdempotencyKey string `header:"Idempotency-Key" doc:"Optional retry key for this request submission."`
+	Body           struct {
 		RequestID  string `json:"request_id" minLength:"1" maxLength:"200" doc:"Durable idempotency identity for this request."`
 		Generation int    `json:"generation" minimum:"1" doc:"Exact intended execution generation."`
 		Message    string `json:"message" minLength:"1" doc:"Message delivered with its request identity."`
@@ -89,29 +91,38 @@ func (s *Server) humaHandleSessionRequestSubmit(_ context.Context, input *Sessio
 	if store.Store == nil {
 		return nil, apierr.ServiceUnavailable.Msg("session request storage unavailable")
 	}
-	handle, err := s.workerHandleForSession(store.Store, input.ID)
-	if err != nil {
-		return nil, humaResolveError(err)
-	}
-	accepted, err := session.NewStore(store).AcceptRequest(input.ID, input.Body.RequestID, input.Body.Generation, input.Body.Message, time.Now())
-	if err != nil {
-		return nil, sessionRequestError(err)
-	}
+	sessionID := input.ID
 	requestID, generation, message := input.Body.RequestID, input.Body.Generation, input.Body.Message
-	go func() {
-		defer s.recoverAsRequestFailed(requestID, RequestOperationSessionSubmit)
-		result, err := handle.Message(context.Background(), worker.MessageRequest{RequestID: requestID, Generation: generation, Text: message})
+	accepted, err := withIdempotency(s.idem, "/v0/session/"+url.PathEscape(sessionID)+"/requests", input.IdempotencyKey, input.Body, func() (session.RequestReceipt, error) {
+		handle, err := s.workerHandleForSession(store.Store, sessionID)
 		if err != nil {
-			s.emitSessionSubmitFailed(requestID, "tracked_submit_failed", err.Error())
-			return
+			return session.RequestReceipt{}, humaResolveError(err)
 		}
-		if result.Receipt == nil || result.Receipt.Delivery != session.RequestDeliveryAccepted {
-			s.emitSessionSubmitFailed(requestID, "delivery_unknown", "provider delivery has not been established; inspect the durable receipt")
-			return
+		acceptance, err := session.NewStore(store).AcceptRequest(sessionID, requestID, generation, message, time.Now())
+		if err != nil {
+			return session.RequestReceipt{}, sessionRequestError(err)
 		}
-		// This event denotes provider submission only. The persisted receipt is
-		// authoritative for session acknowledgement and effect evidence.
-		s.emitSessionSubmitSucceeded(requestID, input.ID, false, string(session.SubmitIntentDefault))
-	}()
-	return &SessionRequestOutput{Body: accepted.RequestReceipt}, nil
+		if acceptance.NewlyAccepted {
+			go func() {
+				defer s.recoverAsRequestFailed(requestID, RequestOperationSessionSubmit)
+				result, err := handle.Message(context.Background(), worker.MessageRequest{RequestID: requestID, Generation: generation, Text: message})
+				if err != nil {
+					s.emitSessionSubmitFailed(requestID, "tracked_submit_failed", err.Error())
+					return
+				}
+				if result.Receipt == nil || result.Receipt.Delivery != session.RequestDeliveryAccepted {
+					s.emitSessionSubmitFailed(requestID, "delivery_unknown", "provider delivery has not been established; inspect the durable receipt")
+					return
+				}
+				// This event denotes provider submission only. The persisted receipt is
+				// authoritative for session acknowledgement and effect evidence.
+				s.emitSessionSubmitSucceeded(requestID, sessionID, false, string(session.SubmitIntentDefault))
+			}()
+		}
+		return acceptance.RequestReceipt, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &SessionRequestOutput{Body: accepted}, nil
 }

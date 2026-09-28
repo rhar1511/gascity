@@ -83,26 +83,34 @@ func TestSessionRequestSubmitHTTPPreservesAcceptanceAndSendsOnce(t *testing.T) {
 	h := newTestCityHandler(t, state)
 	url := cityURL(state, "/session/"+info.ID+"/requests")
 	body := fmt.Sprintf(`{"request_id":"submit-http-1","generation":%d,"message":"report progress"}`, generation)
-	for range 2 {
+	var firstResponse string
+	for i := range 2 {
 		response := httptest.NewRecorder()
-		h.ServeHTTP(response, newPostRequest(url, strings.NewReader(body)))
+		req := newPostRequest(url, strings.NewReader(body))
+		req.Header.Set("Idempotency-Key", "submit-http-retry-1")
+		h.ServeHTTP(response, req)
 		if response.Code != http.StatusAccepted {
 			t.Fatalf("submit = %d: %s", response.Code, response.Body.String())
 		}
+		if i == 0 {
+			firstResponse = response.Body.String()
+		} else if response.Body.String() != firstResponse {
+			t.Fatalf("idempotent replay = %s, want cached response %s", response.Body.String(), firstResponse)
+		}
 	}
-	deadline := time.Now().Add(3 * time.Second)
-	for {
-		receipt, err := front.GetRequest(info.ID, "submit-http-1")
-		if err == nil && receipt.Delivery == session.RequestDeliveryAccepted {
-			if receipt.AcknowledgedAt != nil || receipt.Effect != "unverified" {
-				t.Fatal("provider send invented acknowledgement/effect")
-			}
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("delivery never recorded: %+v, %v", receipt, err)
-		}
-		time.Sleep(time.Millisecond)
+	success, failure := waitForSessionSubmitResult(t, state.eventProv, "submit-http-1")
+	if failure != nil {
+		t.Fatalf("request delivery failed: %+v", failure)
+	}
+	if success == nil {
+		t.Fatal("request delivery did not complete")
+	}
+	receipt, err := front.GetRequest(info.ID, "submit-http-1")
+	if err != nil || receipt.Delivery != session.RequestDeliveryAccepted {
+		t.Fatalf("delivery receipt = %+v, %v", receipt, err)
+	}
+	if receipt.AcknowledgedAt != nil || receipt.Effect != "unverified" {
+		t.Fatal("provider send invented acknowledgement/effect")
 	}
 }
 
@@ -114,8 +122,7 @@ func TestSessionRequestClientRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	generation, _ := strconv.Atoi(persisted.Generation)
-	server := httptest.NewServer(newTestCityHandler(t, state))
-	defer server.Close()
+	server := newCityScopedTestServer(t, state)
 	client := NewCityScopedClient(server.URL, state.CityName())
 	receipt, err := client.SubmitSessionRequest(info.ID, "client-request", generation, "report progress")
 	if err != nil || receipt.RequestId != "client-request" || receipt.AcknowledgedAt != nil {

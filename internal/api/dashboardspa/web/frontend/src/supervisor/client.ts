@@ -15,6 +15,7 @@ import {
   getV0CityByCityNameRigs,
   getV0CityByCityNameRunsCensus,
   getV0CityByCityNameSessionByIdPending,
+  getV0CityByCityNameSessionByIdRequestsByRequestId,
   getV0CityByCityNameSessionByIdTranscript,
   getV0CityByCityNameSessions,
   getV0CityByCityNameStatus,
@@ -23,6 +24,7 @@ import {
   patchV0CityByCityNameBeadById,
   postV0CityByCityNameBeadByIdClose,
   postV0CityByCityNameSling,
+  postV0CityByCityNameSessionByIdRequests,
   postV0CityByCityNameMailByIdArchive,
   postV0CityByCityNameMailByIdMarkUnread,
   postV0CityByCityNameMailByIdRead,
@@ -55,6 +57,8 @@ import type {
   MailListBody,
   Message,
   ListBodySessionResponse,
+  RequestReceipt,
+  SessionRequestSubmitInputBody,
   OkResponseBody,
   PostV0CityByCityNameMailByIdArchiveData,
   PostV0CityByCityNameMailByIdMarkUnreadData,
@@ -155,6 +159,12 @@ export interface SupervisorApi {
     format?: SessionStreamFormat,
   ): string;
   listSessions(cityName: string): Promise<ListBodySessionResponse>;
+  submitSessionRequest(
+    cityName: string,
+    sessionId: string,
+    body: SessionRequestSubmitInputBody,
+  ): Promise<RequestReceipt>;
+  sessionRequest(cityName: string, sessionId: string, requestId: string): Promise<RequestReceipt>;
   sessionPending(cityName: string, sessionId: string): Promise<SessionPendingResponse>;
   respondSession(
     cityName: string,
@@ -489,6 +499,26 @@ export function createSupervisorApi(options: CreateSupervisorApiOptions = {}): S
       if (partial) result.partial = true;
       if (partialErrors.length > 0) result.partial_errors = partialErrors;
       return result;
+    },
+    submitSessionRequest(cityName, sessionId, body) {
+      return unwrapSupervisorResult<RequestReceipt>(
+        postV0CityByCityNameSessionByIdRequests({
+          client,
+          path: { cityName, id: sessionId },
+          headers: { ...GC_MUTATION_HEADERS, 'Idempotency-Key': body.request_id },
+          body,
+        }) as Promise<SupervisorResult<RequestReceipt>>,
+        'gc supervisor session request submit response was empty',
+      );
+    },
+    sessionRequest(cityName, sessionId, requestId) {
+      return unwrapSupervisorResult<RequestReceipt>(
+        getV0CityByCityNameSessionByIdRequestsByRequestId({
+          client,
+          path: { cityName, id: sessionId, request_id: requestId },
+        }) as Promise<SupervisorResult<RequestReceipt>>,
+        'gc supervisor session request response was empty',
+      );
     },
     sessionPending(cityName, sessionId) {
       return unwrapSupervisorResult<SessionPendingResponse>(

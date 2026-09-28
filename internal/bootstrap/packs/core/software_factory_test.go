@@ -34,6 +34,11 @@ func TestSoftwareFactoryFormulaCarriesIndependentGates(t *testing.T) {
 	if !strings.Contains(strings.Join(strings.Fields(string(data)), " "), "publish, approve, merge, deploy, close, reply, and notify") {
 		t.Error("formula does not preserve separate delivery gates")
 	}
+	for _, action := range []string{"publish", "approve", "merge", "deploy", "close", "reply", "notify"} {
+		if !strings.Contains(string(data), action) {
+			t.Errorf("formula does not preserve %s delivery gate", action)
+		}
+	}
 }
 
 func TestSoftwareFactorySkillIsEmbedded(t *testing.T) {

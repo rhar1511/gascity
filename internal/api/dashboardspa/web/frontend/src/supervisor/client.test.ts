@@ -1330,6 +1330,8 @@ describe('supervisor client wrapper', () => {
       replyMail: vi.fn(),
       listSessions: vi.fn(),
       sessionPending: vi.fn(),
+      submitSessionRequest: vi.fn(),
+      sessionRequest: vi.fn(),
       respondSession: vi.fn(),
       mailThread: vi.fn(),
       sendMail: vi.fn(),

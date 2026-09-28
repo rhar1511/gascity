@@ -25,6 +25,7 @@ var requireIdempotency = map[string]bool{
 	"register-extmsg-adapter": true,
 	"emit-event":              true,
 	"post-v0-city":            true,
+	"post-v0-city-by-city-name-session-by-id-requests": true,
 }
 
 // pendingIdempotency lists known create operations that are deliberately NOT
@@ -78,18 +79,21 @@ var exemptFromIdempotency = map[string]bool{
 	"post-v0-city-by-city-name-order-by-name-run":              true,
 	"post-v0-city-by-city-name-rig-by-name-by-action":          true,
 	"post-v0-city-by-city-name-runs-by-run-id-cancel":          true,
-	"post-v0-city-by-city-name-service-by-name-restart":        true,
-	"post-v0-city-by-city-name-session-by-id-close":            true,
-	"post-v0-city-by-city-name-session-by-id-kill":             true,
-	"post-v0-city-by-city-name-session-by-id-permission-mode":  true,
-	"post-v0-city-by-city-name-session-by-id-rename":           true,
-	"post-v0-city-by-city-name-session-by-id-stop":             true,
-	"post-v0-city-by-city-name-session-by-id-suspend":          true,
-	"post-v0-city-by-city-name-session-by-id-wake":             true,
-	"post-v0-city-by-city-name-sling":                          true,
-	"post-v0-city-by-city-name-unregister":                     true,
-	"rotate-events":                                            true,
-	"trigger-maintenance-dolt-gc":                              true,
+	// Acknowledgement mutates an existing durable receipt; the path identifies
+	// the target and the session store makes matching repeats idempotent.
+	"post-v0-city-by-city-name-session-by-id-requests-by-request-id-ack": true,
+	"post-v0-city-by-city-name-service-by-name-restart":                  true,
+	"post-v0-city-by-city-name-session-by-id-close":                      true,
+	"post-v0-city-by-city-name-session-by-id-kill":                       true,
+	"post-v0-city-by-city-name-session-by-id-permission-mode":            true,
+	"post-v0-city-by-city-name-session-by-id-rename":                     true,
+	"post-v0-city-by-city-name-session-by-id-stop":                       true,
+	"post-v0-city-by-city-name-session-by-id-suspend":                    true,
+	"post-v0-city-by-city-name-session-by-id-wake":                       true,
+	"post-v0-city-by-city-name-sling":                                    true,
+	"post-v0-city-by-city-name-unregister":                               true,
+	"rotate-events":                                                      true,
+	"trigger-maintenance-dolt-gc":                                        true,
 }
 
 type idemSpecDoc struct {

@@ -1731,7 +1731,11 @@ func TestRunStartDriftCheck_DelegatedTryRestartTimeoutThenReplacementSucceeds(t 
 	setDelegationEnvForTest(t, "gascity-prod.service", "")
 	argsFile := installFakeDelegatedSystemctlHangingVerb(t, "try-restart")
 	oldJob := delegatedSystemctlJobTimeout
-	delegatedSystemctlJobTimeout = 300 * time.Millisecond
+	// Leave enough startup budget for the fake systemctl to publish its
+	// invocation marker when this test runs under the heavily sharded push
+	// gate. The fake still sleeps for five seconds, and the elapsed assertion
+	// below continues to prove the command is canceled within the bound.
+	delegatedSystemctlJobTimeout = time.Second
 	t.Cleanup(func() { delegatedSystemctlJobTimeout = oldJob })
 
 	// Model a unit that replaces the supervisor binary only after the CLI's

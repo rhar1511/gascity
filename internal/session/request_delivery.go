@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strconv"
 	"time"
 
@@ -59,11 +60,20 @@ func (m *Manager) SubmitRequest(ctx context.Context, id, requestID string, gener
 		}
 		// JSON keeps arbitrary message text distinct from the request identity.
 		envelope, err := json.Marshal(struct {
-			RequestID  string `json:"request_id"`
-			SessionID  string `json:"session_id"`
-			Generation int    `json:"generation"`
-			Message    string `json:"message"`
-		}{requestID, id, generation, message})
+			RequestID       string `json:"request_id"`
+			SessionID       string `json:"session_id"`
+			Generation      int    `json:"generation"`
+			Instruction     string `json:"instruction"`
+			AcknowledgeWith string `json:"acknowledge_with"`
+			Message         string `json:"message"`
+		}{
+			RequestID:       requestID,
+			SessionID:       id,
+			Generation:      generation,
+			Instruction:     "Acknowledge receipt before acting by running the command in acknowledge_with.",
+			AcknowledgeWith: fmt.Sprintf("gc session request ack %q", requestID),
+			Message:         message,
+		})
 		if err != nil {
 			return err
 		}

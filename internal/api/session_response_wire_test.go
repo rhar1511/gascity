@@ -113,6 +113,27 @@ func TestSessionGetEnrichedWireByteIdentical(t *testing.T) {
 	}
 }
 
+func TestSessionResponseExposesGenerationWithoutExecutionCredential(t *testing.T) {
+	response := sessionToResponse(session.Info{
+		ID:         "session-1",
+		Generation: "3",
+	}, nil)
+	wire, err := json.Marshal(response)
+	if err != nil {
+		t.Fatalf("marshal session response: %v", err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(wire, &fields); err != nil {
+		t.Fatalf("decode session response: %v", err)
+	}
+	if got := fields["generation"]; got != float64(3) {
+		t.Fatalf("generation = %v, want 3 in response %s", got, wire)
+	}
+	if _, leaked := fields["instance_token"]; leaked {
+		t.Fatalf("session response leaked execution credential: %s", wire)
+	}
+}
+
 // wireSessionBeadFixtures returns representative persisted session beads spanning
 // the states whose response JSON depends on bead status + metadata: creating,
 // active, and closed, with alias/title/agent_name/permission-mode overrides and

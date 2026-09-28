@@ -18,6 +18,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// ConfigRelativePath and ConfigVersion identify the project policy file and schema.
 const (
 	// ConfigRelativePath locates factory policy relative to a project root.
 	ConfigRelativePath = ".agent-factory/config.yaml"
@@ -25,10 +26,10 @@ const (
 	ConfigVersion = 1
 )
 
-// ErrNotConfigured indicates that the project has no factory policy file.
+// ErrNotConfigured indicates that a project has no factory policy file.
 var ErrNotConfigured = errors.New("software factory is not configured")
 
-// Config declares the repositories, inputs, and action policies for a software factory.
+// Config is the validated project-level software-factory policy.
 type Config struct {
 	Version      int               `yaml:"version" json:"version"`
 	Timezone     string            `yaml:"timezone,omitempty" json:"timezone,omitempty"`
@@ -46,7 +47,7 @@ type Repository struct {
 	Worktree WorktreePolicy `yaml:"worktree" json:"worktree"`
 }
 
-// WorktreePolicy selects worktree reuse or creation from a named base.
+// WorktreePolicy selects reuse or creation of a worktree from a named base.
 type WorktreePolicy struct {
 	Mode string `yaml:"mode" json:"mode"`
 	Base string `yaml:"base" json:"base"`
@@ -64,7 +65,7 @@ type Source struct {
 	Pagination  string         `yaml:"pagination,omitempty" json:"pagination,omitempty"`
 }
 
-// Workflows groups the configured factory stages and their action policies.
+// Workflows groups the configured factory phases and their action policies.
 type Workflows struct {
 	Collect       CollectWorkflow       `yaml:"collect,omitempty" json:"collect,omitempty"`
 	Lookback      LookbackWorkflow      `yaml:"lookback,omitempty" json:"lookback,omitempty"`
@@ -108,7 +109,7 @@ type HumanDigestWorkflow struct {
 	Granularity  string   `yaml:"granularity,omitempty" json:"granularity,omitempty"`
 }
 
-// PullRequestsWorkflow configures PR selection and approval and merge policies.
+// PullRequestsWorkflow configures PR selection, approval, and merge policies.
 type PullRequestsWorkflow struct {
 	Enabled  bool              `yaml:"enabled" json:"enabled"`
 	Schedule string            `yaml:"schedule,omitempty" json:"schedule,omitempty"`
@@ -117,7 +118,7 @@ type PullRequestsWorkflow struct {
 	Merge    ActionPolicy      `yaml:"merge,omitempty" json:"merge,omitempty"`
 }
 
-// PRBabysittingWorkflow configures repair and delivery policies for a target PR.
+// PRBabysittingWorkflow configures bounded repair and delivery policies for a target PR.
 type PRBabysittingWorkflow struct {
 	Enabled       bool         `yaml:"enabled" json:"enabled"`
 	Schedule      string       `yaml:"schedule,omitempty" json:"schedule,omitempty"`
@@ -131,7 +132,7 @@ type PRBabysittingWorkflow struct {
 	Soak          string       `yaml:"soak,omitempty" json:"soak,omitempty"`
 }
 
-// PRTarget identifies a pull request on a repository host.
+// PRTarget identifies a pull request on a repository host for a babysitting run.
 type PRTarget struct {
 	Host       string `yaml:"host,omitempty" json:"host,omitempty"`
 	Repository string `yaml:"repository,omitempty" json:"repository,omitempty"`
@@ -148,20 +149,20 @@ type ShipWorkflow struct {
 	Close    ActionPolicy `yaml:"close,omitempty" json:"close,omitempty"`
 }
 
-// WatchdogWorkflow configures scheduled observation and notification policy.
+// WatchdogWorkflow configures scheduled post-delivery checks and notification policy.
 type WatchdogWorkflow struct {
 	Enabled  bool         `yaml:"enabled" json:"enabled"`
 	Schedule string       `yaml:"schedule,omitempty" json:"schedule,omitempty"`
 	Notify   ActionPolicy `yaml:"notify,omitempty" json:"notify,omitempty"`
 }
 
-// RecoveryWorkflow enables and schedules the configured recovery workflow.
+// RecoveryWorkflow enables and schedules the configured recovery checks.
 type RecoveryWorkflow struct {
 	Enabled  bool   `yaml:"enabled" json:"enabled"`
 	Schedule string `yaml:"schedule,omitempty" json:"schedule,omitempty"`
 }
 
-// ActionPolicy declares permission criteria and guidance for a workflow action.
+// ActionPolicy declares permission criteria and guidance for one workflow action.
 type ActionPolicy struct {
 	Mode     string   `yaml:"mode,omitempty" json:"mode,omitempty"`
 	Allow    []string `yaml:"allow,omitempty" json:"allow,omitempty"`
@@ -176,7 +177,7 @@ func LoadProject(projectRoot string) (Config, error) {
 	return LoadFile(filepath.Join(projectRoot, ConfigRelativePath))
 }
 
-// LoadFile reads and validates a factory policy file.
+// LoadFile reads, parses, and validates a factory policy file.
 func LoadFile(path string) (Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -195,7 +196,7 @@ func LoadFile(path string) (Config, error) {
 	return cfg, nil
 }
 
-// Validate checks required fields, references, and supported policy modes.
+// Validate checks required fields, references, and supported policy values.
 func (c Config) Validate() error {
 	var problems []string
 	if c.Version != ConfigVersion {
