@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api/apierr"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -706,7 +707,7 @@ type BeadDepsResponse struct {
 // Title required via struct tag on BeadCreateInput.
 func (s *Server) humaHandleBeadCreate(ctx context.Context, input *BeadCreateInput) (*IndexOutput[beads.Bead], error) {
 	for key := range input.Body.Metadata {
-		if strings.HasPrefix(key, "gc.pr_action.") {
+		if strings.HasPrefix(key, beadmeta.PRActionMetadataPrefix) {
 			return nil, apierr.Forbidden.Msg("PR action ledger metadata is reserved for the controller")
 		}
 	}
