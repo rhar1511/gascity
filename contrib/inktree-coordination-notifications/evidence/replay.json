@@ -1,0 +1,78 @@
+{
+  "envelope": {
+    "notification_version": "inktree-coordination-notification/v1",
+    "notification_id": "notif-8d5756c23d0801e8",
+    "status": "hold",
+    "reason_code": "hold.ambiguous_rig",
+    "severity": "action_required",
+    "redaction": "no_member_content",
+    "mode": "replay",
+    "channel": "discord",
+    "recipient_role": "author",
+    "dedup_key": "coord-hold-inktree-syn0003",
+    "hold_epoch": 1,
+    "template": "hold.action_required.v1",
+    "bead_ref": "inktree-syn0003",
+    "links": {
+      "bead_command": "gc bd show inktree-syn0003"
+    },
+    "decision_ref": {
+      "envelope_content_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "policy_version": "coordination-policy-v1",
+      "model_versions": {
+        "jev": "jev-1.13-free",
+        "rlcd": "rlcd-local-v1",
+        "sem_if": "semif-qwen-local-v1"
+      },
+      "router_config_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+      "replay_command": "replay-coordination --corpus tests/fixtures/coordination-replay/corpus.v1.json --policy coordination-policy-v1 --out replay-report.json"
+    },
+    "must_include": [
+      "bead_link",
+      "decision_link",
+      "reason_code"
+    ],
+    "identity": {
+      "resolution": "resolved",
+      "binding_source": "attested_forge_author",
+      "binding_id": "forge-author"
+    },
+    "delivery": {
+      "max_attempts": 3,
+      "backoff_seconds": [
+        30,
+        120,
+        600
+      ],
+      "failover_channel": "pr_update",
+      "escalation_recipient": "mayor",
+      "deadline_seconds": 3600
+    }
+  },
+  "assertion": {
+    "channel": "discord",
+    "recipient_role": "author",
+    "severity": "action_required",
+    "redaction": "no_member_content",
+    "dedup_key": "coord-hold-inktree-syn0003",
+    "must_include": [
+      "bead_link",
+      "decision_link",
+      "reason_code"
+    ],
+    "count": 1
+  },
+  "record": {
+    "channel": "discord",
+    "recipient_role": "author",
+    "severity": "action_required",
+    "redaction": "no_member_content",
+    "dedup_key": "coord-hold-inktree-syn0003"
+  },
+  "decision": {
+    "live_dispatch": false,
+    "notification_dispatch": false,
+    "render_allowed": false,
+    "deliver": false
+  }
+}

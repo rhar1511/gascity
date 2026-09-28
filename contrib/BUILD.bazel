@@ -1,7 +1,49 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
+
 package(default_visibility = ["//visibility:public"])
 
 # Docs/contrib trees are consumed as runfiles by repo-lint tests (test/docsync,
-# scripts, k8s runtime tests). No Go sources live here.
+# scripts, k8s runtime tests). The Inktree notification policy is a small Go
+# consumer package with focused offline tests and an evidence generator.
+
+go_library(
+    name = "inktree_coordination_notifications",
+    srcs = ["inktree-coordination-notifications/policy.go"],
+    embedsrcs = ["inktree-coordination-notifications/policy.json"],
+    importpath = "github.com/gastownhall/gascity/contrib/inktree-coordination-notifications",
+    visibility = ["//visibility:public"],
+    deps = ["//internal/coordinationnotify"],
+)
+
+go_test(
+    name = "inktree_coordination_notifications_test",
+    srcs = ["inktree-coordination-notifications/policy_test.go"],
+    embed = [":inktree_coordination_notifications"],
+    deps = ["//internal/coordinationnotify"],
+)
+
+go_binary(
+    name = "inktree_coordination_notification_evidence",
+    srcs = ["inktree-coordination-notifications/cmd/evidence/main.go"],
+    importpath = "github.com/gastownhall/gascity/contrib/inktree-coordination-notifications/cmd/evidence",
+    deps = [
+        ":inktree_coordination_notifications",
+        "//internal/coordinationnotify",
+    ],
+)
+
+go_test(
+    name = "inktree_coordination_notification_evidence_test",
+    srcs = [
+        "inktree-coordination-notifications/cmd/evidence/main.go",
+        "inktree-coordination-notifications/cmd/evidence/main_test.go",
+    ],
+    deps = [
+        ":inktree_coordination_notifications",
+        "//internal/coordinationnotify",
+    ],
+)
+
 exports_files(glob(
     ["**"],
     exclude = ["BUILD.bazel"],
