@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -342,6 +341,40 @@ const graphFixtureCityDatabase = "hq"
 type graphBeadsIdentity struct {
 	projectID string
 	database  string
+}
+
+type boundedTailBuffer struct {
+	buf []byte
+	max int
+}
+
+func (b *boundedTailBuffer) Write(p []byte) (int, error) {
+	n := len(p)
+	if b.max <= 0 {
+		return n, nil
+	}
+	b.buf = append(b.buf, p...)
+	if len(b.buf) > b.max {
+		copy(b.buf, b.buf[len(b.buf)-b.max:])
+		b.buf = b.buf[:b.max]
+	}
+	return n, nil
+}
+
+func (b *boundedTailBuffer) String() string { return string(b.buf) }
+
+func TestBoundedTailBufferKeepsRecentOutput(t *testing.T) {
+	var output boundedTailBuffer
+	output.max = 5
+	if _, err := output.Write([]byte("first")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := output.Write([]byte(" second")); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := output.String(), "econd"; got != want {
+		t.Fatalf("output = %q, want %q", got, want)
+	}
 }
 
 func setupGraphWorkflowCityWithPrivateEvidence(t *testing.T, mode string) (string, graphPrivateEvidenceTransport) {
@@ -1253,8 +1286,10 @@ func startGraphPrivateEvidenceService(t *testing.T, cityEnv []string, cityDir, c
 	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
 	serviceCtx, stopService := context.WithCancel(context.Background())
 	cmd := buildCommand(serviceCtx, cityDir, serviceEnv, realBDBinary, "serve", "--addr", addr, "--auth-token-file", tokenFile)
-	cmd.Stdout = io.Discard
-	cmd.Stderr = io.Discard
+	serviceStdout := &boundedTailBuffer{max: 8 << 10}
+	serviceStderr := &boundedTailBuffer{max: 8 << 10}
+	cmd.Stdout = serviceStdout
+	cmd.Stderr = serviceStderr
 	if err := cmd.Start(); err != nil {
 		stopService()
 		t.Fatalf("start installed Beads service for graph city: %v", err)
@@ -1279,6 +1314,14 @@ func startGraphPrivateEvidenceService(t *testing.T, cityEnv []string, cityDir, c
 			t.Errorf("installed Beads service did not exit after kill; fixture root will be preserved if its process remains")
 		}
 	})
+	diagnosticOutput := func(output *boundedTailBuffer) string {
+		text := output.String()
+		text = strings.TrimSpace(text)
+		if token != "" {
+			text = strings.ReplaceAll(text, token, "[redacted]")
+		}
+		return text
+	}
 
 	endpoint := "http://" + addr
 	client := &http.Client{Timeout: time.Second, Transport: &http.Transport{Proxy: nil}}
@@ -1289,10 +1332,11 @@ func startGraphPrivateEvidenceService(t *testing.T, cityEnv []string, cityDir, c
 		func(ctx context.Context) (bool, string, error) {
 			select {
 			case <-done:
+				diagnostics := fmt.Sprintf("stdout=%q stderr=%q", diagnosticOutput(serviceStdout), diagnosticOutput(serviceStderr))
 				if processErr != nil {
-					return false, "service process exited", fmt.Errorf("installed Beads service exited before graph readiness: %w", processErr)
+					return false, "service process exited", fmt.Errorf("installed Beads service exited before graph readiness: %w; %s", processErr, diagnostics)
 				}
-				return false, "service process exited", errors.New("installed Beads service exited before graph readiness")
+				return false, "service process exited", fmt.Errorf("installed Beads service exited before graph readiness; %s", diagnostics)
 			default:
 			}
 			request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint+"/v0/beads/context", nil)
