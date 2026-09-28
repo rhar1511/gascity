@@ -1,0 +1,45 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
+
+exports_files(glob(
+    ["**"],
+    exclude = ["BUILD.bazel"],
+))
+
+go_library(
+    name = "evidence_lib",
+    srcs = ["main.go"],
+    importpath = "github.com/gastownhall/gascity/contrib/inktree-coordination-notifications/cmd/evidence",
+    visibility = ["//visibility:private"],
+    deps = [
+        "//contrib/inktree-coordination-notifications",
+        "//internal/coordinationnotify",
+    ],
+)
+
+go_binary(
+    name = "evidence",
+    embed = [":evidence_lib"],
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "evidence_test",
+    srcs = [
+        "main_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":evidence_lib"],
+    deps = ["//internal/testenv"],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
