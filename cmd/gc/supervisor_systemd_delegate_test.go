@@ -1731,7 +1731,10 @@ func TestRunStartDriftCheck_DelegatedTryRestartTimeoutThenReplacementSucceeds(t 
 	setDelegationEnvForTest(t, "gascity-prod.service", "")
 	argsFile := installFakeDelegatedSystemctlHangingVerb(t, "try-restart")
 	oldJob := delegatedSystemctlJobTimeout
-	delegatedSystemctlJobTimeout = 300 * time.Millisecond
+	// Allow the shim to start and record its marker even when package shards
+	// are competing for CPU; it still sleeps five seconds, so this call times
+	// out before the late-replacement verification path begins.
+	delegatedSystemctlJobTimeout = time.Second
 	t.Cleanup(func() { delegatedSystemctlJobTimeout = oldJob })
 
 	// Model a unit that replaces the supervisor binary only after the CLI's
