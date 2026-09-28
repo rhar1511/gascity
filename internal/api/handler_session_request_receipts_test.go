@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -82,6 +84,17 @@ func TestSessionRequestSubmitHTTPPreservesAcceptanceAndSendsOnce(t *testing.T) {
 	generation, _ := strconv.Atoi(persisted.Generation)
 	h := newTestCityHandler(t, state)
 	url := cityURL(state, "/session/"+info.ID+"/requests")
+	cursor, err := state.eventProv.LatestSeq()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), testEventTimeout)
+	defer cancel()
+	watcher, err := state.eventProv.Watch(ctx, cursor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer watcher.Close() //nolint:errcheck // best-effort test cleanup
 	body := fmt.Sprintf(`{"request_id":"submit-http-1","generation":%d,"message":"report progress"}`, generation)
 	for range 2 {
 		response := httptest.NewRecorder()
@@ -90,19 +103,30 @@ func TestSessionRequestSubmitHTTPPreservesAcceptanceAndSendsOnce(t *testing.T) {
 			t.Fatalf("submit = %d: %s", response.Code, response.Body.String())
 		}
 	}
-	deadline := time.Now().Add(3 * time.Second)
 	for {
-		receipt, err := front.GetRequest(info.ID, "submit-http-1")
-		if err == nil && receipt.Delivery == session.RequestDeliveryAccepted {
-			if receipt.AcknowledgedAt != nil || receipt.Effect != "unverified" {
-				t.Fatal("provider send invented acknowledgement/effect")
+		event, err := watcher.Next()
+		if err != nil {
+			t.Fatalf("waiting for session submit completion: %v", err)
+		}
+		if event.Type == events.RequestResultSessionSubmit {
+			var result SessionSubmitSucceededPayload
+			if json.Unmarshal(event.Payload, &result) == nil && result.RequestID == "submit-http-1" {
+				break
 			}
-			break
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("delivery never recorded: %+v, %v", receipt, err)
+		if event.Type == events.RequestFailed {
+			var failure RequestFailedPayload
+			if json.Unmarshal(event.Payload, &failure) == nil && failure.Operation == RequestOperationSessionSubmit && failure.RequestID == "submit-http-1" {
+				t.Fatalf("session submit failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
+			}
 		}
-		time.Sleep(time.Millisecond)
+	}
+	receipt, err := front.GetRequest(info.ID, "submit-http-1")
+	if err != nil || receipt.Delivery != session.RequestDeliveryAccepted {
+		t.Fatalf("delivery after completion event = %+v, %v", receipt, err)
+	}
+	if receipt.AcknowledgedAt != nil || receipt.Effect != "unverified" {
+		t.Fatal("provider send invented acknowledgement/effect")
 	}
 }
 
@@ -114,9 +138,7 @@ func TestSessionRequestClientRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	generation, _ := strconv.Atoi(persisted.Generation)
-	server := httptest.NewServer(newTestCityHandler(t, state))
-	defer server.Close()
-	client := NewCityScopedClient(server.URL, state.CityName())
+	client := newInProcessCityClient(t, state.CityName(), newTestCityHandler(t, state))
 	receipt, err := client.SubmitSessionRequest(info.ID, "client-request", generation, "report progress")
 	if err != nil || receipt.RequestId != "client-request" || receipt.AcknowledgedAt != nil {
 		t.Fatalf("submit %+v,%v", receipt, err)

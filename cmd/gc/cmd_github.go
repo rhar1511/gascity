@@ -80,13 +80,26 @@ JSON schema version 2 contains the server queue and verified action receipts.`,
 	return cmd
 }
 
-func githubPRActionClient() (string, *api.Client, error) {
+type githubPRActionAPI interface {
+	GetPRActionQueue(context.Context) (api.PRActionQueue, error)
+	ExecutePRAction(context.Context, api.PRActionRequest) (api.PRActionResult, error)
+}
+
+var (
+	githubPRActionRemoteClientBuilder = func(target *remoteTarget) (githubPRActionAPI, error) {
+		return buildRemoteWriteClient(target)
+	}
+	githubPRActionClientForCommand = githubPRActionClient
+)
+
+func githubPRActionClient() (string, githubPRActionAPI, error) {
 	resolved, err := resolveContextAllowRemote()
 	if err != nil {
 		return "", nil, err
 	}
 	if resolved.Remote != nil {
-		endpoint, err := url.Parse(resolved.Remote.BaseURL)
+		remote := *resolved.Remote
+		endpoint, err := url.Parse(remote.BaseURL)
 		if err != nil {
 			return "", nil, fmt.Errorf("invalid remote PR server URL")
 		}
@@ -95,8 +108,9 @@ func githubPRActionClient() (string, *api.Client, error) {
 		endpoint.ForceQuery = false
 		endpoint.Fragment = ""
 		endpoint.RawFragment = ""
-		target := strings.TrimRight(endpoint.String(), "/") + "/v0/city/" + url.PathEscape(resolved.Remote.CityName)
-		client, err := buildRemoteWriteClient(resolved.Remote)
+		remote.BaseURL = strings.TrimRight(endpoint.String(), "/")
+		target := remote.BaseURL + "/v0/city/" + url.PathEscape(remote.CityName)
+		client, err := githubPRActionRemoteClientBuilder(&remote)
 		return target, client, err
 	}
 	cityPath := resolved.CityPath
@@ -111,7 +125,7 @@ func doGitHubPRBackfill(parent context.Context, opts githubPRBackfillOptions, st
 	if opts.timeout <= 0 {
 		return fmt.Errorf("--timeout must be positive")
 	}
-	cityPath, client, err := githubPRActionClient()
+	cityPath, client, err := githubPRActionClientForCommand()
 	if err != nil {
 		return err
 	}
@@ -235,7 +249,7 @@ server queue. GitHub merge actions remain unavailable. Output is JSON.`,
 			if request.Action == api.PRActionQueueReview && (request.WorkID == "" || request.AttemptID == "") {
 				return fmt.Errorf("queue_review requires --work-id and --attempt-id")
 			}
-			_, client, err := githubPRActionClient()
+			_, client, err := githubPRActionClientForCommand()
 			if err != nil {
 				return err
 			}
