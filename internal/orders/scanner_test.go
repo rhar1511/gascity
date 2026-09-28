@@ -155,6 +155,66 @@ enabled = false
 	}
 }
 
+func TestScanRootsInventoryRetainsActivationDispositionAndWinningLayer(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/lower/orders/winner.toml"] = []byte(`[order]
+formula = "mol-lower"
+trigger = "manual"
+`)
+	fs.Files["/higher/orders/winner.toml"] = []byte(`[order]
+formula = "mol-higher"
+trigger = "manual"
+enabled = false
+`)
+	fs.Files["/lower/orders/skipped-name.toml"] = []byte(`[order]
+formula = "mol-name"
+trigger = "manual"
+`)
+	fs.Files["/lower/orders/skipped-alias.toml"] = []byte(`[order]
+formula = "mol-alias"
+trigger = "manual"
+skip_aliases = ["legacy-name", "legacy-name", "older-name"]
+`)
+
+	inventory, err := ScanRootsInventory(fs, []ScanRoot{
+		{Dir: "/lower/orders", FormulaLayer: "/lower/formulas"},
+		{Dir: "/higher/orders", FormulaLayer: "/higher/formulas"},
+	}, []string{"skipped-name", "legacy-name", "older-name"})
+	if err != nil {
+		t.Fatalf("ScanRootsInventory: %v", err)
+	}
+	if len(inventory) != 3 {
+		t.Fatalf("inventory = %#v, want three winning definitions", inventory)
+	}
+	byName := make(map[string]InventoryOrder, len(inventory))
+	for _, entry := range inventory {
+		byName[entry.Order.Name] = entry
+	}
+	winner := byName["winner"]
+	if winner.Activation != ActivationDisabledBySource || winner.Order.Formula != "mol-higher" || winner.Order.FormulaLayer != "/higher/formulas" || winner.Order.Source != "/higher/orders/winner.toml" {
+		t.Fatalf("higher-layer winner = %#v", winner)
+	}
+	byNameSkip := byName["skipped-name"]
+	if byNameSkip.Activation != ActivationSkippedByName || len(byNameSkip.SkipMatches) != 1 || byNameSkip.SkipMatches[0] != "skipped-name" {
+		t.Fatalf("name skip = %#v", byNameSkip)
+	}
+	aliasSkip := byName["skipped-alias"]
+	if aliasSkip.Activation != ActivationSkippedByAlias || len(aliasSkip.SkipMatches) != 2 || aliasSkip.SkipMatches[0] != "legacy-name" || aliasSkip.SkipMatches[1] != "older-name" {
+		t.Fatalf("alias skip = %#v", aliasSkip)
+	}
+
+	active, err := ScanRoots(fs, []ScanRoot{
+		{Dir: "/lower/orders", FormulaLayer: "/lower/formulas"},
+		{Dir: "/higher/orders", FormulaLayer: "/higher/formulas"},
+	}, []string{"skipped-name", "legacy-name", "older-name"})
+	if err != nil {
+		t.Fatalf("ScanRoots: %v", err)
+	}
+	if len(active) != 0 {
+		t.Fatalf("legacy active scan changed behavior: %#v", active)
+	}
+}
+
 func TestScanFormulaLayer(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/pack/orders/health.toml"] = []byte(`
