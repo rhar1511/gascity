@@ -176,11 +176,53 @@ func (s NudgesStore) PrivateEvidenceArchiveReaderHandle() (PrivateEvidenceArchiv
 	return PrivateEvidenceArchiveReaderFor(s.Store)
 }
 
+// ControllerMetadataTransitionWriterHandle forwards the scope's explicitly
+// enabled Q43 transition transport through the wrapped store.
+func (s WorkStore) ControllerMetadataTransitionWriterHandle() (ControllerMetadataTransitionWriter, bool) {
+	return ControllerMetadataTransitionWriterFor(s.Store)
+}
+
+// ControllerMetadataTransitionWriterHandle forwards the scope's explicitly
+// enabled Q43 transition transport through the wrapped store.
+func (s GraphStore) ControllerMetadataTransitionWriterHandle() (ControllerMetadataTransitionWriter, bool) {
+	return ControllerMetadataTransitionWriterFor(s.Store)
+}
+
+// ControllerMetadataTransitionWriterHandle forwards the scope's explicitly
+// enabled Q43 transition transport through the wrapped store.
+func (s SessionStore) ControllerMetadataTransitionWriterHandle() (ControllerMetadataTransitionWriter, bool) {
+	return ControllerMetadataTransitionWriterFor(s.Store)
+}
+
+// ControllerMetadataTransitionWriterHandle forwards the scope's explicitly
+// enabled Q43 transition transport through the wrapped store.
+func (s MailStore) ControllerMetadataTransitionWriterHandle() (ControllerMetadataTransitionWriter, bool) {
+	return ControllerMetadataTransitionWriterFor(s.Store)
+}
+
+// ControllerMetadataTransitionWriterHandle forwards the scope's explicitly
+// enabled Q43 transition transport through the wrapped store.
+func (s OrdersStore) ControllerMetadataTransitionWriterHandle() (ControllerMetadataTransitionWriter, bool) {
+	return ControllerMetadataTransitionWriterFor(s.Store)
+}
+
+// ControllerMetadataTransitionWriterHandle forwards the scope's explicitly
+// enabled Q43 transition transport through the wrapped store.
+func (s NudgesStore) ControllerMetadataTransitionWriterHandle() (ControllerMetadataTransitionWriter, bool) {
+	return ControllerMetadataTransitionWriterFor(s.Store)
+}
+
 var (
-	_ ConditionalWritesResolveTargeter = WorkStore{}
-	_ ConditionalWritesResolveTargeter = GraphStore{}
-	_ ConditionalWritesResolveTargeter = SessionStore{}
-	_ ConditionalWritesResolveTargeter = MailStore{}
-	_ ConditionalWritesResolveTargeter = OrdersStore{}
-	_ ConditionalWritesResolveTargeter = NudgesStore{}
+	_ ConditionalWritesResolveTargeter                 = WorkStore{}
+	_ ConditionalWritesResolveTargeter                 = GraphStore{}
+	_ ConditionalWritesResolveTargeter                 = SessionStore{}
+	_ ConditionalWritesResolveTargeter                 = MailStore{}
+	_ ConditionalWritesResolveTargeter                 = OrdersStore{}
+	_ ConditionalWritesResolveTargeter                 = NudgesStore{}
+	_ ControllerMetadataTransitionWriterHandleProvider = WorkStore{}
+	_ ControllerMetadataTransitionWriterHandleProvider = GraphStore{}
+	_ ControllerMetadataTransitionWriterHandleProvider = SessionStore{}
+	_ ControllerMetadataTransitionWriterHandleProvider = MailStore{}
+	_ ControllerMetadataTransitionWriterHandleProvider = OrdersStore{}
+	_ ControllerMetadataTransitionWriterHandleProvider = NudgesStore{}
 )

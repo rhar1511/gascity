@@ -504,6 +504,12 @@ func (s *emittingClassStore) RevisionTransitionWriterHandle() (beads.RevisionTra
 	return s, true
 }
 
+// ControllerMetadataTransitionWriterHandle forwards the private Q43 transport
+// without emitting its marker or receipt through the generic event stream.
+func (s *emittingClassStore) ControllerMetadataTransitionWriterHandle() (beads.ControllerMetadataTransitionWriter, bool) {
+	return beads.ControllerMetadataTransitionWriterFor(s.Store)
+}
+
 // CreateDecisionFrontierRecord is a private controller write. It deliberately
 // does not call emitCreated: the record description can contain prompts,
 // answers, and immutable verification material that must not enter generic

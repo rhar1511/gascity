@@ -2387,6 +2387,10 @@
         },
         "token_file": {
           "type": "string"
+        },
+        "revision_transitions": {
+          "type": "boolean",
+          "description": "RevisionTransitions opts this exact store scope into the Q43 transition\nand immutable-receipt routes. It defaults to false."
         }
       },
       "additionalProperties": false,
@@ -2397,7 +2401,7 @@
         "database",
         "token_file"
       ],
-      "description": "PrivateEvidenceTransportConfig opts one canonical Beads store scope into the body-only HTTP transport for immutable attempt evidence."
+      "description": "PrivateEvidenceTransportConfig opts one canonical Beads store scope into the controller-only HTTP transport for immutable attempt evidence."
     },
     "ProviderOption": {
       "properties": {

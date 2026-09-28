@@ -36,10 +36,11 @@ type beadPolicyGraphStore struct {
 }
 
 var (
-	_ beads.ConditionalAssignmentReleaser                  = (*beadPolicyStore)(nil)
-	_ beads.ConditionalWritesResolveTargeter               = (*beadPolicyStore)(nil)
-	_ beads.PrivateEvidenceMetadataCASWriterHandleProvider = (*beadPolicyStore)(nil)
-	_ beads.PrivateEvidenceArchiveReaderHandleProvider     = (*beadPolicyStore)(nil)
+	_ beads.ConditionalAssignmentReleaser                    = (*beadPolicyStore)(nil)
+	_ beads.ConditionalWritesResolveTargeter                 = (*beadPolicyStore)(nil)
+	_ beads.PrivateEvidenceMetadataCASWriterHandleProvider   = (*beadPolicyStore)(nil)
+	_ beads.PrivateEvidenceArchiveReaderHandleProvider       = (*beadPolicyStore)(nil)
+	_ beads.ControllerMetadataTransitionWriterHandleProvider = (*beadPolicyStore)(nil)
 )
 
 // ConditionalWritesResolveTarget declares the wrapped store as the
@@ -64,6 +65,12 @@ func (s *beadPolicyStore) PrivateEvidenceMetadataCASWriterHandle() (beads.Privat
 
 func (s *beadPolicyStore) PrivateEvidenceArchiveReaderHandle() (beads.PrivateEvidenceArchiveReader, bool) {
 	return beads.PrivateEvidenceArchiveReaderFor(s.Store)
+}
+
+// ControllerMetadataTransitionWriterHandle preserves the inner controller
+// transport without treating the policy wrapper as a new write authority.
+func (s *beadPolicyStore) ControllerMetadataTransitionWriterHandle() (beads.ControllerMetadataTransitionWriter, bool) {
+	return beads.ControllerMetadataTransitionWriterFor(s.Store)
 }
 
 var (

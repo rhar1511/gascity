@@ -368,7 +368,7 @@ func privateEvidenceOptionsForStore(cfg *config.City, storeDir, cityPath string)
 	}
 	return []beads.BdStoreOption{beads.WithBdStorePrivateEvidenceHTTP(beads.PrivateEvidenceHTTPConfig{
 		Endpoint: entry.Endpoint, ProjectID: entry.ProjectID, Database: entry.Database,
-		ScopeRef: storeRef, TokenFile: entry.TokenFile,
+		ScopeRef: storeRef, TokenFile: entry.TokenFile, RevisionTransitions: entry.RevisionTransitions,
 	})}
 }
 

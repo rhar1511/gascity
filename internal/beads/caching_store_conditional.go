@@ -73,6 +73,31 @@ func (c *CachingStore) PrivateEvidenceArchiveReaderHandle() (PrivateEvidenceArch
 	return PrivateEvidenceArchiveReaderFor(c.backing)
 }
 
+type cachingControllerMetadataTransitionWriter struct {
+	cache  *CachingStore
+	writer ControllerMetadataTransitionWriter
+}
+
+func (w cachingControllerMetadataTransitionWriter) TransitionMetadata(issueID string, request ControllerMetadataTransitionRequest) (ControllerMetadataTransitionResult, error) {
+	result, err := w.writer.TransitionMetadata(issueID, request)
+	if err != nil {
+		w.cache.applyConditionalWriteFailure(issueID, err)
+		return result, err
+	}
+	w.cache.evictForConditionalWrite(issueID)
+	return result, nil
+}
+
+// ControllerMetadataTransitionWriterHandle preserves cache invalidation while
+// forwarding the exact transition request to the configured backing handle.
+func (c *CachingStore) ControllerMetadataTransitionWriterHandle() (ControllerMetadataTransitionWriter, bool) {
+	writer, ok := ControllerMetadataTransitionWriterFor(c.backing)
+	if !ok {
+		return nil, false
+	}
+	return cachingControllerMetadataTransitionWriter{cache: c, writer: writer}, true
+}
+
 // cachingAtomicConditionalCloser preserves cache eviction and notification
 // while exposing the capability only for a backing that actually supports it.
 type cachingAtomicConditionalCloser struct{ cache *CachingStore }

@@ -9,13 +9,17 @@ import (
 )
 
 // PrivateEvidenceTransportConfig opts one canonical Beads store scope into the
-// body-only HTTP transport for immutable attempt evidence. The credential is a
+// controller-only HTTP transport for immutable attempt evidence. RevisionTransitions
+// separately enables the Q43 revision-transition routes. The credential is a
 // protected file path; the token value is never part of city.toml.
 type PrivateEvidenceTransportConfig struct {
 	Endpoint  string `toml:"endpoint" json:"endpoint"`
 	ProjectID string `toml:"project_id" json:"project_id"`
 	Database  string `toml:"database" json:"database"`
 	TokenFile string `toml:"token_file" json:"token_file"`
+	// RevisionTransitions opts this exact store scope into the Q43 transition
+	// and immutable-receipt routes. It defaults to false.
+	RevisionTransitions bool `toml:"revision_transitions,omitempty" json:"revision_transitions,omitempty"`
 }
 
 func validatePrivateEvidenceTransports(transports map[string]PrivateEvidenceTransportConfig) error {

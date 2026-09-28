@@ -700,7 +700,7 @@ PoolOverride modifies legacy [pool] fields that map to session scaling.
 
 ## PrivateEvidenceTransportConfig
 
-PrivateEvidenceTransportConfig opts one canonical Beads store scope into the body-only HTTP transport for immutable attempt evidence.
+PrivateEvidenceTransportConfig opts one canonical Beads store scope into the controller-only HTTP transport for immutable attempt evidence.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
@@ -708,6 +708,7 @@ PrivateEvidenceTransportConfig opts one canonical Beads store scope into the bod
 | `project_id` | string | **yes** |  |  |
 | `database` | string | **yes** |  |  |
 | `token_file` | string | **yes** |  |  |
+| `revision_transitions` | boolean |  |  | RevisionTransitions opts this exact store scope into the Q43 transition and immutable-receipt routes. It defaults to false. |
 
 ## ProviderOption
 

@@ -26,9 +26,18 @@ const (
 	privateEvidenceHTTPTimeout         = 5 * time.Second
 	privateEvidenceHTTPMaxRequestBody  = 4 << 20
 	privateEvidenceHTTPMaxResponseBody = 32 << 20
+	controllerTransitionMaxSuccessBody = 4 << 20
+	controllerTransitionMaxProblemBody = 1 << 20
 	privateEvidenceTokenMaxBytes       = 4 << 10
 	privateEvidenceActor               = "gascity-controller"
 	privateEvidenceRequiredScope       = "private attempt evidence"
+	controllerTransitionMaxReceiptID   = 191
+	controllerTransitionMaxIssueID     = 255
+	controllerTransitionMaxScope       = 255
+	controllerTransitionMaxKind        = 64
+	controllerTransitionMaxActor       = 255
+	controllerTransitionMaxKey         = 255
+	controllerTransitionMaxRequests    = 8
 )
 
 var (
@@ -41,6 +50,12 @@ var (
 	// ErrPrivateEvidenceHTTPProtocol reports an unsupported or malformed
 	// private-evidence HTTP response.
 	ErrPrivateEvidenceHTTPProtocol = errors.New("private evidence HTTP protocol unsupported")
+	// ErrControllerMetadataTransitionUnavailable reports a missing or unusable
+	// controller transition transport.
+	ErrControllerMetadataTransitionUnavailable = errors.New("controller metadata transition HTTP transport unavailable")
+	// ErrControllerMetadataTransitionProtocol reports an unsupported or
+	// malformed response from the controller transition API.
+	ErrControllerMetadataTransitionProtocol = errors.New("controller metadata transition HTTP protocol unsupported")
 )
 
 const redactedPrivateEvidenceDiagnostic = "[private attempt-evidence output redacted]"
@@ -58,11 +73,12 @@ func redactPrivateEvidenceDiagnostic(value string) string {
 // TokenFile contains only a filesystem path; the token itself is loaded into
 // this process and is never passed through a bd argument or child environment.
 type PrivateEvidenceHTTPConfig struct {
-	Endpoint  string
-	ProjectID string
-	Database  string
-	ScopeRef  string
-	TokenFile string
+	Endpoint            string
+	ProjectID           string
+	Database            string
+	ScopeRef            string
+	TokenFile           string
+	RevisionTransitions bool
 }
 
 // PrivateEvidenceMetadataCASWriter is deliberately separate from
@@ -116,20 +132,23 @@ type PrivateEvidenceArchiveReaderHandleProvider interface {
 }
 
 var (
-	_ PrivateEvidenceMetadataCASWriter               = (*BdStore)(nil)
-	_ PrivateEvidenceMetadataCASWriterHandleProvider = (*BdStore)(nil)
-	_ PrivateEvidencePayloadTransportReady           = (*BdStore)(nil)
-	_ PrivateEvidenceArchiveReader                   = (*BdStore)(nil)
-	_ PrivateEvidenceArchiveReaderHandleProvider     = (*BdStore)(nil)
+	_ PrivateEvidenceMetadataCASWriter                 = (*BdStore)(nil)
+	_ PrivateEvidenceMetadataCASWriterHandleProvider   = (*BdStore)(nil)
+	_ PrivateEvidencePayloadTransportReady             = (*BdStore)(nil)
+	_ PrivateEvidenceArchiveReader                     = (*BdStore)(nil)
+	_ PrivateEvidenceArchiveReaderHandleProvider       = (*BdStore)(nil)
+	_ ControllerMetadataTransitionWriter               = (*BdStore)(nil)
+	_ ControllerMetadataTransitionWriterHandleProvider = (*BdStore)(nil)
 )
 
 type privateEvidenceHTTPClient struct {
-	endpoint  string
-	projectID string
-	database  string
-	scopeRef  string
-	token     string
-	client    *http.Client
+	endpoint            string
+	projectID           string
+	database            string
+	scopeRef            string
+	token               string
+	revisionTransitions bool
+	client              *http.Client
 }
 
 // WithBdStorePrivateEvidenceHTTP installs the explicitly configured private
@@ -172,6 +191,26 @@ func (s *BdStore) PrivateEvidenceArchiveReaderHandle() (PrivateEvidenceArchiveRe
 		return nil, false
 	}
 	return s, true
+}
+
+// ControllerMetadataTransitionWriterHandle exposes the Q43 transition route
+// only for a scope whose trusted transport explicitly enables it.
+func (s *BdStore) ControllerMetadataTransitionWriterHandle() (ControllerMetadataTransitionWriter, bool) {
+	if s == nil || s.privateEvidenceHTTP == nil || s.privateEvidenceHTTPInitErr != nil || !s.privateEvidenceHTTP.revisionTransitions {
+		return nil, false
+	}
+	return s, true
+}
+
+// TransitionMetadata applies one exact Q43 revision-fenced metadata
+// transition through the bounded controller HTTP transport.
+func (s *BdStore) TransitionMetadata(issueID string, request ControllerMetadataTransitionRequest) (ControllerMetadataTransitionResult, error) {
+	if s == nil || s.privateEvidenceHTTP == nil || s.privateEvidenceHTTPInitErr != nil || !s.privateEvidenceHTTP.revisionTransitions {
+		return ControllerMetadataTransitionResult{}, ErrControllerMetadataTransitionUnavailable
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(controllerTransitionMaxRequests)*privateEvidenceHTTPTimeout)
+	defer cancel()
+	return s.privateEvidenceHTTP.transitionMetadata(ctx, issueID, request)
 }
 
 // PrivateEvidenceArchiveReaderFor resolves the body-only reader through store
@@ -378,12 +417,13 @@ func newPrivateEvidenceHTTPClient(config PrivateEvidenceHTTPConfig) (*privateEvi
 		},
 	}
 	return &privateEvidenceHTTPClient{
-		endpoint:  strings.TrimRight(endpoint, "/"),
-		projectID: projectID,
-		database:  database,
-		scopeRef:  scopeRef,
-		token:     token,
-		client:    client,
+		endpoint:            strings.TrimRight(endpoint, "/"),
+		projectID:           projectID,
+		database:            database,
+		scopeRef:            scopeRef,
+		token:               token,
+		revisionTransitions: config.RevisionTransitions,
+		client:              client,
 	}, nil
 }
 
@@ -456,34 +496,80 @@ func samePrivateEvidenceTokenFileInfo(left, right os.FileInfo) bool {
 }
 
 func (c *privateEvidenceHTTPClient) verifyContext(ctx context.Context) error {
-	body, status, err := c.request(ctx, http.MethodGet, "/v0/beads/context", nil)
+	response, err := c.readContext(ctx)
 	if err != nil {
 		return err
 	}
-	if status != http.StatusOK {
-		return fmt.Errorf("%w: context handshake returned HTTP %d", ErrPrivateEvidenceHTTPProtocol, status)
-	}
-	var response struct {
-		APIVersion   string   `json:"api_version"`
-		Backend      string   `json:"backend"`
-		BdVersion    string   `json:"bd_version"`
-		Capabilities []string `json:"capabilities"`
-		Database     string   `json:"database"`
-		DoltMode     string   `json:"dolt_mode"`
-		ProjectID    string   `json:"project_id"`
-	}
-	if err := decodePrivateEvidenceJSON(body, &response); err != nil {
-		return fmt.Errorf("%w: malformed context handshake", ErrPrivateEvidenceHTTPProtocol)
-	}
-	if response.APIVersion != "v0" || response.BdVersion == "" || response.ProjectID == "" || response.Database == "" {
-		return fmt.Errorf("%w: context identity is incomplete", ErrPrivateEvidenceHTTPProtocol)
-	}
-	if response.ProjectID != c.projectID || response.Database != c.database || response.Backend != "dolt" || response.DoltMode != "server" {
-		return fmt.Errorf("%w: configured scope %q does not match the served Beads workspace", ErrPrivateEvidenceHTTPIdentity, c.scopeRef)
+	if err := c.verifyContextIdentity(response); err != nil {
+		return err
 	}
 	for _, required := range []string{"issues.casMetadata", "issues.create", "issues.get", "project.enforce"} {
 		if !containsString(response.Capabilities, required) {
 			return fmt.Errorf("%w: Beads server lacks required capability %q", ErrPrivateEvidenceHTTPProtocol, required)
+		}
+	}
+	return nil
+}
+
+type privateEvidenceServerContext struct {
+	APIVersion   string   `json:"api_version"`
+	Backend      string   `json:"backend"`
+	BdVersion    string   `json:"bd_version"`
+	Capabilities []string `json:"capabilities"`
+	Database     string   `json:"database"`
+	DoltMode     string   `json:"dolt_mode"`
+	ProjectID    string   `json:"project_id"`
+}
+
+func (c *privateEvidenceHTTPClient) readContext(ctx context.Context) (privateEvidenceServerContext, error) {
+	body, status, err := c.request(ctx, http.MethodGet, "/v0/beads/context", nil)
+	return decodePrivateEvidenceContext(body, status, err)
+}
+
+func (c *privateEvidenceHTTPClient) readRevisionTransitionContext(ctx context.Context) (privateEvidenceServerContext, error) {
+	body, status, err := c.requestWithResponseCaps(ctx, http.MethodGet, "/v0/beads/context", nil,
+		controllerTransitionMaxSuccessBody, controllerTransitionMaxProblemBody)
+	return decodePrivateEvidenceContext(body, status, err)
+}
+
+func decodePrivateEvidenceContext(body []byte, status int, err error) (privateEvidenceServerContext, error) {
+	if err != nil {
+		return privateEvidenceServerContext{}, err
+	}
+	if status != http.StatusOK {
+		return privateEvidenceServerContext{}, fmt.Errorf("%w: context handshake returned HTTP %d", ErrPrivateEvidenceHTTPProtocol, status)
+	}
+	var response privateEvidenceServerContext
+	if err := decodePrivateEvidenceJSON(body, &response); err != nil {
+		return privateEvidenceServerContext{}, fmt.Errorf("%w: malformed context handshake", ErrPrivateEvidenceHTTPProtocol)
+	}
+	if response.APIVersion != "v0" || response.BdVersion == "" || response.ProjectID == "" || response.Database == "" {
+		return privateEvidenceServerContext{}, fmt.Errorf("%w: context identity is incomplete", ErrPrivateEvidenceHTTPProtocol)
+	}
+	return response, nil
+}
+
+func (c *privateEvidenceHTTPClient) verifyContextIdentity(response privateEvidenceServerContext) error {
+	if response.ProjectID != c.projectID || response.Database != c.database || response.Backend != "dolt" || response.DoltMode != "server" {
+		return fmt.Errorf("%w: configured scope %q does not match the served Beads workspace", ErrPrivateEvidenceHTTPIdentity, c.scopeRef)
+	}
+	return nil
+}
+
+func (c *privateEvidenceHTTPClient) verifyRevisionTransitionContext(ctx context.Context) error {
+	if !c.revisionTransitions {
+		return ErrControllerMetadataTransitionUnavailable
+	}
+	response, err := c.readRevisionTransitionContext(ctx)
+	if err != nil {
+		return fmt.Errorf("%w: context handshake failed", ErrControllerMetadataTransitionUnavailable)
+	}
+	if err := c.verifyContextIdentity(response); err != nil {
+		return fmt.Errorf("%w: configured workspace identity mismatch", ErrControllerMetadataTransitionProtocol)
+	}
+	for _, required := range []string{"issues.transitionMetadata", "issues.transitionReceipt.get", "project.enforce"} {
+		if !containsString(response.Capabilities, required) {
+			return fmt.Errorf("%w: Beads server lacks required capability %q", ErrControllerMetadataTransitionProtocol, required)
 		}
 	}
 	return nil
@@ -510,6 +596,10 @@ func (c *privateEvidenceHTTPClient) verifyListRoute(ctx context.Context) error {
 }
 
 func (c *privateEvidenceHTTPClient) request(ctx context.Context, method, path string, body []byte) ([]byte, int, error) {
+	return c.requestWithResponseCaps(ctx, method, path, body, privateEvidenceHTTPMaxResponseBody, privateEvidenceHTTPMaxResponseBody)
+}
+
+func (c *privateEvidenceHTTPClient) requestWithResponseCaps(ctx context.Context, method, path string, body []byte, successCap, problemCap int) ([]byte, int, error) {
 	if len(body) > privateEvidenceHTTPMaxRequestBody {
 		return nil, 0, fmt.Errorf("%w: request exceeds size limit", ErrPrivateEvidenceHTTPProtocol)
 	}
@@ -525,16 +615,27 @@ func (c *privateEvidenceHTTPClient) request(ctx context.Context, method, path st
 	}
 	response, err := c.client.Do(req)
 	if err != nil {
+		if response != nil {
+			status := response.StatusCode
+			_ = response.Body.Close()
+			if status >= 300 && status < 400 {
+				return nil, status, fmt.Errorf("%w: redirect refused", ErrPrivateEvidenceHTTPProtocol)
+			}
+		}
 		// Do not retain the underlying URL/request error: transport diagnostics
 		// can include caller-controlled data and this path handles private bytes.
 		return nil, 0, fmt.Errorf("%w: %s request failed", ErrPrivateEvidenceHTTPUnavailable, method)
 	}
-	data, err := io.ReadAll(io.LimitReader(response.Body, privateEvidenceHTTPMaxResponseBody+1))
+	responseCap := successCap
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		responseCap = problemCap
+	}
+	data, err := io.ReadAll(io.LimitReader(response.Body, int64(responseCap)+1))
 	closeErr := response.Body.Close()
 	if err != nil || closeErr != nil {
 		return nil, response.StatusCode, fmt.Errorf("%w: %s response could not be read", ErrPrivateEvidenceHTTPUnavailable, method)
 	}
-	if len(data) > privateEvidenceHTTPMaxResponseBody {
+	if len(data) > responseCap {
 		return nil, response.StatusCode, fmt.Errorf("%w: response exceeds size limit", ErrPrivateEvidenceHTTPProtocol)
 	}
 	if response.StatusCode >= 300 && response.StatusCode < 400 {

@@ -22,7 +22,7 @@ func TestPrivateEvidenceTransportConfigRoundTripDefaultsDisabled(t *testing.T) {
 				Endpoint: "http://127.0.0.1:9865", ProjectID: "city-project", Database: "city_db", TokenFile: "/run/gc/private-evidence.token",
 			},
 			"rig:api": {
-				Endpoint: "https://beads.example.test", ProjectID: "api-project", Database: "api_db", TokenFile: "/run/gc/api-evidence.token",
+				Endpoint: "https://beads.example.test", ProjectID: "api-project", Database: "api_db", TokenFile: "/run/gc/api-evidence.token", RevisionTransitions: true,
 			},
 		}},
 	}
@@ -36,6 +36,9 @@ func TestPrivateEvidenceTransportConfigRoundTripDefaultsDisabled(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got.Beads.PrivateEvidence, want.Beads.PrivateEvidence) {
 		t.Fatalf("private evidence transports = %#v, want %#v", got.Beads.PrivateEvidence, want.Beads.PrivateEvidence)
+	}
+	if got.Beads.PrivateEvidence["city:test"].RevisionTransitions {
+		t.Fatal("revision_transitions defaulted to enabled")
 	}
 }
 

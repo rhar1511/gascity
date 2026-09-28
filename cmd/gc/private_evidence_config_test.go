@@ -75,14 +75,15 @@ func TestBdStoreConstructorsSelectPrivateEvidenceByExactCityAndRigScope(t *testi
 		Rigs:      []config.Rig{{Name: "repo", Path: "rigs/repo", Prefix: "repo"}},
 		Beads: config.BeadsConfig{PrivateEvidence: map[string]config.PrivateEvidenceTransportConfig{
 			"city:demo": {Endpoint: cityProbe.endpoint, ProjectID: cityProbe.project, Database: cityProbe.database, TokenFile: cityToken},
-			"rig:repo":  {Endpoint: rigProbe.endpoint, ProjectID: rigProbe.project, Database: rigProbe.database, TokenFile: rigToken},
+			"rig:repo":  {Endpoint: rigProbe.endpoint, ProjectID: rigProbe.project, Database: rigProbe.database, TokenFile: rigToken, RevisionTransitions: true},
 		}},
 	}
 
 	tests := []struct {
-		name      string
-		want      *privateEvidenceConfigProbe
-		construct func() (*beads.BdStore, error)
+		name            string
+		want            *privateEvidenceConfigProbe
+		wantTransitions bool
+		construct       func() (*beads.BdStore, error)
 	}{
 		{name: "normal city", want: cityProbe, construct: func() (*beads.BdStore, error) {
 			return bdStoreForCityWithConfig(cityDir, cityDir, cfg), nil
@@ -93,13 +94,13 @@ func TestBdStoreConstructorsSelectPrivateEvidenceByExactCityAndRigScope(t *testi
 		{name: "scoped city", want: cityProbe, construct: func() (*beads.BdStore, error) {
 			return scopedBdStoreForCity(context.Background(), cityDir, cfg)
 		}},
-		{name: "normal rig", want: rigProbe, construct: func() (*beads.BdStore, error) {
+		{name: "normal rig", want: rigProbe, wantTransitions: true, construct: func() (*beads.BdStore, error) {
 			return bdStoreForRig(rigDir, cityDir, cfg), nil
 		}},
-		{name: "control rig", want: rigProbe, construct: func() (*beads.BdStore, error) {
+		{name: "control rig", want: rigProbe, wantTransitions: true, construct: func() (*beads.BdStore, error) {
 			return controlBdStoreForRig(rigDir, cityDir, cfg), nil
 		}},
-		{name: "scoped rig", want: rigProbe, construct: func() (*beads.BdStore, error) {
+		{name: "scoped rig", want: rigProbe, wantTransitions: true, construct: func() (*beads.BdStore, error) {
 			return scopedBdStoreForRig(context.Background(), cityDir, cfg, rigDir)
 		}},
 	}
@@ -112,6 +113,10 @@ func TestBdStoreConstructorsSelectPrivateEvidenceByExactCityAndRigScope(t *testi
 			}
 			if !store.PrivateEvidencePayloadTransportReady() {
 				t.Fatal("constructed BdStore did not bind the configured private evidence service")
+			}
+			writer, transitions := beads.ControllerMetadataTransitionWriterFor(store)
+			if transitions != tc.wantTransitions || transitions != (writer != nil) {
+				t.Fatalf("revision transition capability = (%T, %v), want enabled %v", writer, transitions, tc.wantTransitions)
 			}
 			if tc.want == cityProbe {
 				if cityProbe.hits.Load() <= cityBefore || rigProbe.hits.Load() != rigBefore {

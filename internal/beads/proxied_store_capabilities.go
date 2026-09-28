@@ -33,25 +33,26 @@ import (
 //     those are load-bearing and are documented at their (absent) place below:
 //     graph-apply (H4) and CachingStore's dependency-snapshot shortcut.
 var (
-	_ Store                            = (*ProxiedStore)(nil)
-	_ AtomicTxStore                    = (*ProxiedStore)(nil)
-	_ BatchDeleter                     = (*ProxiedStore)(nil)
-	_ ConditionalAssignmentReleaser    = (*ProxiedStore)(nil)
-	_ ConditionalWriterHandleProvider  = (*ProxiedStore)(nil)
-	_ ConditionalWritesResolveTargeter = (*ProxiedStore)(nil)
-	_ Counter                          = (*ProxiedStore)(nil)
-	_ DepMetadataReader                = (*ProxiedStore)(nil)
-	_ ForeignIDCreator                 = (*ProxiedStore)(nil)
-	_ GraphApplyHandleProvider         = (*ProxiedStore)(nil)
-	_ ParentProjectionWaiter           = (*ProxiedStore)(nil)
-	_ RowWitness                       = (*ProxiedStore)(nil)
-	_ StorageCreateStore               = (*ProxiedStore)(nil)
-	_ conditionalWritesModeCarrier     = (*ProxiedStore)(nil)
-	_ listDependencyCompletenessStore  = (*ProxiedStore)(nil)
-	_ readyProjectionEnrichmentStore   = (*ProxiedStore)(nil)
-	_ interface{ IDPrefix() string }   = (*ProxiedStore)(nil)
-	_ interface{ Backing() Store }     = (*ProxiedStore)(nil)
-	_ interface{ CloseStore() error }  = (*ProxiedStore)(nil)
+	_ Store                                            = (*ProxiedStore)(nil)
+	_ AtomicTxStore                                    = (*ProxiedStore)(nil)
+	_ BatchDeleter                                     = (*ProxiedStore)(nil)
+	_ ConditionalAssignmentReleaser                    = (*ProxiedStore)(nil)
+	_ ConditionalWriterHandleProvider                  = (*ProxiedStore)(nil)
+	_ ConditionalWritesResolveTargeter                 = (*ProxiedStore)(nil)
+	_ Counter                                          = (*ProxiedStore)(nil)
+	_ DepMetadataReader                                = (*ProxiedStore)(nil)
+	_ ForeignIDCreator                                 = (*ProxiedStore)(nil)
+	_ GraphApplyHandleProvider                         = (*ProxiedStore)(nil)
+	_ ControllerMetadataTransitionWriterHandleProvider = (*ProxiedStore)(nil)
+	_ ParentProjectionWaiter                           = (*ProxiedStore)(nil)
+	_ RowWitness                                       = (*ProxiedStore)(nil)
+	_ StorageCreateStore                               = (*ProxiedStore)(nil)
+	_ conditionalWritesModeCarrier                     = (*ProxiedStore)(nil)
+	_ listDependencyCompletenessStore                  = (*ProxiedStore)(nil)
+	_ readyProjectionEnrichmentStore                   = (*ProxiedStore)(nil)
+	_ interface{ IDPrefix() string }                   = (*ProxiedStore)(nil)
+	_ interface{ Backing() Store }                     = (*ProxiedStore)(nil)
+	_ interface{ CloseStore() error }                  = (*ProxiedStore)(nil)
 	_ interface {
 		DepListBatch(ids []string) (map[string][]Dep, error)
 	} = (*ProxiedStore)(nil)
@@ -396,6 +397,31 @@ func (s *ProxiedStore) PrivateEvidenceMetadataCASWriterHandle() (PrivateEvidence
 // put payload rows into a cache.
 func (s *ProxiedStore) PrivateEvidenceArchiveReaderHandle() (PrivateEvidenceArchiveReader, bool) {
 	return PrivateEvidenceArchiveReaderFor(s.writeLeaf())
+}
+
+type proxiedControllerMetadataTransitionWriter struct {
+	store  *ProxiedStore
+	writer ControllerMetadataTransitionWriter
+}
+
+func (w proxiedControllerMetadataTransitionWriter) TransitionMetadata(issueID string, request ControllerMetadataTransitionRequest) (ControllerMetadataTransitionResult, error) {
+	var result ControllerMetadataTransitionResult
+	err := w.store.withMutation("controller-metadata-transition "+issueID, func(Store) error {
+		var err error
+		result, err = w.writer.TransitionMetadata(issueID, request)
+		return err
+	})
+	return result, err
+}
+
+// ControllerMetadataTransitionWriterHandle keeps the remote write and any
+// receipt recovery in the proxy mutation-generation bracket.
+func (s *ProxiedStore) ControllerMetadataTransitionWriterHandle() (ControllerMetadataTransitionWriter, bool) {
+	writer, ok := ControllerMetadataTransitionWriterFor(s.writeLeaf())
+	if !ok {
+		return nil, false
+	}
+	return proxiedControllerMetadataTransitionWriter{store: s, writer: writer}, true
 }
 
 // ReleaseIfCurrent releases an assignment on the write leaf, conditionally.
