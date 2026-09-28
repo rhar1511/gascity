@@ -91,6 +91,7 @@ go_test(
         "class_store_test.go",
         "conditional_writes_inspect_test.go",
         "conditional_writes_resolve_internal_test.go",
+        "controller_beads_permit_test.go",
         "corpus_decoder_test.go",
         "decision_frontier_guard_test.go",
         "dep_metadata_test.go",
