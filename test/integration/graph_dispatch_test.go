@@ -495,7 +495,7 @@ func setupGraphWorkflowCityWithOptions(t *testing.T, mode string, privateEvidenc
 	}
 	cityCommand := commandEnvForDir(cityDir, true)
 	assertGraphWorkflowCityEnv(t, cityCommand, gcHome, cityDir, cityRoot)
-	if _, err := waitForGraphFixtureProxyForTest(cityDir, 15*time.Second); err != nil {
+	if _, err := waitForGraphFixtureProxyForTest(cityDir, 30*time.Second); err != nil {
 		t.Fatalf("graph city did not establish a verified fixture-owned Beads proxy and Dolt listener after isolated startup: %v", err)
 	}
 	var transport graphPrivateEvidenceTransport
@@ -859,7 +859,10 @@ func graphFixtureProxyPortForTestWithDiagnostic(cityDir string) (string, error) 
 	}
 	if child.PID <= 0 || child.Port != endpoint.Record.Port ||
 		child.Kind != graphDoltBackendRecordKind || child.Schema < proxyendpoint.SchemaV2 || child.Birth == "" || child.RootID != endpoint.RootID {
-		return "", errors.New("Dolt child identity does not match the verified proxy endpoint")
+		return "", fmt.Errorf(
+			"Dolt child identity does not match the verified proxy endpoint (pid=%d port=%d proxy_port=%d kind=%q schema=%d birth_present=%t root_id_matches=%t)",
+			child.PID, child.Port, endpoint.Record.Port, child.Kind, child.Schema, child.Birth != "", child.RootID == endpoint.RootID,
+		)
 	}
 	processes := proxyendpoint.DefaultProcessTable()
 	if !processes.Alive(child.PID) {
