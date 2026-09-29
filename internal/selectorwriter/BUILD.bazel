@@ -1,0 +1,31 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "selectorwriter",
+    srcs = ["collector.go"],
+    importpath = "github.com/gastownhall/gascity/internal/selectorwriter",
+    deps = ["//internal/selectorinventory"],
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "selectorwriter_test",
+    srcs = ["collector_test.go"],
+    deps = [
+        "//internal/selectorattestation",
+        "//internal/selectorinventory",
+    ],
+    embed = [":selectorwriter"],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

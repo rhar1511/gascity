@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -85,24 +86,59 @@ func TestSelectorRegistrySnapshotInputFailsClosedOnPendingStartAndFenceChange(t 
 	}
 }
 
-func TestControllerStateJoinSelectorExternalLedgerStopsAtIdentityFailure(t *testing.T) {
-	state, _ := selectorExternalLedgerTestState("execution-generation-1", "exec", false)
-	got := state.JoinSelectorExternalLedger(nil, selectorinventory.ExternalLedgerExpectation{
+func TestControllerStateJoinSelectorExternalLedgerStopsAtUnresolvedIdentity(t *testing.T) {
+	state, _ := selectorExternalLedgerTestState("execution-generation-1", "formula_root", false)
+	got := state.JoinSelectorExternalLedger(context.Background(), nil, nil, selectorinventory.ExternalLedgerExpectation{
 		ExecutionGeneration: "execution-generation-1",
-	})
-	if got.Status != selectorinventory.StatusUnavailable || got.IssueCode == "exec_dispatch_has_no_formula_root" || got.IssueCode == "exec_dispatch_has_unexpected_formula_root" || got.Evidence != nil {
-		t.Fatalf("join result = %#v, want exec identity accepted before ledger validation", got)
+	}, "host-id", "boot-id")
+	if got.Status != selectorinventory.StatusUnavailable || got.IssueCode != "formula_root_identity_unavailable" || got.Evidence != nil {
+		t.Fatalf("join result = %#v, want unresolved controller identity to fail before host verification", got)
 	}
 }
 
-func TestControllerStateJoinSelectorExternalLedgerCallsSelectorInventoryJoin(t *testing.T) {
+func TestControllerStateJoinSelectorExternalLedgerRequiresHostSignedEvidence(t *testing.T) {
 	state, _ := selectorExternalLedgerTestState("execution-generation-1", "formula_root", true)
-	got := state.JoinSelectorExternalLedger(nil, selectorinventory.ExternalLedgerExpectation{
+	got := state.JoinSelectorExternalLedger(context.Background(), nil, nil, selectorinventory.ExternalLedgerExpectation{
 		ExecutionGeneration: "execution-generation-1",
-	})
-	if got.Status != selectorinventory.StatusUnavailable || got.IssueCode != "validation_policy_unavailable" || got.Evidence != nil {
-		t.Fatalf("join result = %#v, want selectorinventory validation result", got)
+	}, "host-id", "boot-id")
+	if got.Status != selectorinventory.StatusUnavailable || got.IssueCode != "host_collector_record_unavailable" || got.Evidence != nil {
+		t.Fatalf("join result = %#v, want host-signed collector evidence required", got)
 	}
+}
+
+func TestControllerStateJoinSelectorExternalLedgerFencesRegistryChangeAfterVerification(t *testing.T) {
+	state, registry := selectorExternalLedgerTestState("execution-generation-1", "formula_root", true)
+	calls := 0
+	verifier := selectorExternalLedgerVerifierFunc(func(_ context.Context, raw []byte, expected selectorinventory.ExternalLedgerExpectation, snapshot selectorinventory.RegistrySnapshotInput, hostID, bootID string) selectorinventory.ExternalLedgerJoinResult {
+		calls++
+		if string(raw) != "signed-host-record" {
+			t.Errorf("verifier raw record = %q, want signed host record", raw)
+		}
+		if expected.ExecutionGeneration != "execution-generation-1" || !snapshot.Available || snapshot.ExecutionGeneration != expected.ExecutionGeneration {
+			t.Errorf("verifier inputs = expected %#v snapshot %#v, want matching available generation", expected, snapshot)
+		}
+		if hostID != "host-id" || bootID != "boot-id" {
+			t.Errorf("verifier host binding = %q/%q, want host-id/boot-id", hostID, bootID)
+		}
+		registry.begin("city.order.2", "run-2", "exec")
+		return selectorinventory.ExternalLedgerJoinResult{Status: selectorinventory.StatusAvailable}
+	})
+
+	got := state.JoinSelectorExternalLedger(context.Background(), []byte("signed-host-record"), verifier, selectorinventory.ExternalLedgerExpectation{
+		ExecutionGeneration: "execution-generation-1",
+	}, "host-id", "boot-id")
+	if calls != 1 {
+		t.Fatalf("verifier calls = %d, want 1", calls)
+	}
+	if got.Status != selectorinventory.StatusUnavailable || got.IssueCode != "in_flight_identity_snapshot_raced" || got.Evidence != nil {
+		t.Fatalf("join result = %#v, want registry change after verification to fail closed", got)
+	}
+}
+
+type selectorExternalLedgerVerifierFunc func(context.Context, []byte, selectorinventory.ExternalLedgerExpectation, selectorinventory.RegistrySnapshotInput, string, string) selectorinventory.ExternalLedgerJoinResult
+
+func (verify selectorExternalLedgerVerifierFunc) VerifyAndJoin(ctx context.Context, raw []byte, expected selectorinventory.ExternalLedgerExpectation, snapshot selectorinventory.RegistrySnapshotInput, hostID, bootID string) selectorinventory.ExternalLedgerJoinResult {
+	return verify(ctx, raw, expected, snapshot, hostID, bootID)
 }
 
 func selectorExternalLedgerTestState(generation, workKind string, bindWork bool) (*controllerState, *orderDispatchIdentityRegistry) {

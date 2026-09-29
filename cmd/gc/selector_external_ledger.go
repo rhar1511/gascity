@@ -1,9 +1,15 @@
 package main
 
 import (
+	"context"
+
 	"github.com/gastownhall/gascity/internal/qualification"
 	"github.com/gastownhall/gascity/internal/selectorinventory"
 )
+
+type selectorExternalLedgerVerifier interface {
+	VerifyAndJoin(context.Context, []byte, selectorinventory.ExternalLedgerExpectation, selectorinventory.RegistrySnapshotInput, string, string) selectorinventory.ExternalLedgerJoinResult
+}
 
 // SelectorInFlightResolutionDigest computes the selector inventory's keyed
 // in-flight identity digest from the controller's current dispatch registry.
@@ -27,13 +33,19 @@ func (cs *controllerState) SelectorInFlightResolutionDigest(expectedExecutionGen
 // JoinSelectorExternalLedger validates a retained external ledger against a
 // fresh controller registry snapshot. The registry is sampled again after the
 // join so a change during ledger validation cannot leave usable evidence.
-func (cs *controllerState) JoinSelectorExternalLedger(raw []byte, expected selectorinventory.ExternalLedgerExpectation) selectorinventory.ExternalLedgerJoinResult {
+func (cs *controllerState) JoinSelectorExternalLedger(ctx context.Context, raw []byte, verifier selectorExternalLedgerVerifier, expected selectorinventory.ExternalLedgerExpectation, hostID, bootID string) selectorinventory.ExternalLedgerJoinResult {
+	if ctx == nil {
+		return unavailableSelectorExternalJoin("host_collector_record_unavailable")
+	}
 	snapshot := cs.InFlightDispatchIdentitySnapshot(expected.ExecutionGeneration)
 	registry, availability := selectorRegistrySnapshotInput(snapshot, expected.ExecutionGeneration)
 	if availability.Status != qualification.StatusAvailable {
 		return unavailableSelectorExternalJoin(availability.Reason)
 	}
-	result := selectorinventory.JoinExternalLedger(raw, expected, registry)
+	if verifier == nil {
+		return unavailableSelectorExternalJoin("host_collector_record_unavailable")
+	}
+	result := verifier.VerifyAndJoin(ctx, raw, expected, registry, hostID, bootID)
 	if issue := selectorDispatchSnapshotFenceChange(snapshot, cs.InFlightDispatchIdentitySnapshot(expected.ExecutionGeneration), expected.ExecutionGeneration); issue != "" {
 		return unavailableSelectorExternalJoin(issue)
 	}
