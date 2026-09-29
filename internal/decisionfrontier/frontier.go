@@ -50,6 +50,20 @@ const (
 	stateResolved         = "resolved"
 )
 
+// SourceIssueLinkKey is reserved in SourceLinks. Use Proposal.SourceIssue to
+// provide a structured issue identity.
+const SourceIssueLinkKey = "source_issue"
+
+// SourceIssueRef identifies one issue on a stable tracker and repository.
+// Repository uses host/owner/name form, and CanonicalURL must be the matching
+// HTTPS issue URL.
+type SourceIssueRef struct {
+	TrackerKind  string `json:"tracker_kind"`
+	Repository   string `json:"repository"`
+	IssueID      string `json:"issue_id"`
+	CanonicalURL string `json:"canonical_url"`
+}
+
 // Question is one exact human decision. Recommendations are advisory text;
 // they are never copied into a resolution without a verified answer.
 type Question struct {
@@ -62,11 +76,12 @@ type Question struct {
 }
 
 // Proposal is a proposed independent question map for one exact source-work
-// revision. SourceLinks preserves tracker/repository/issue references supplied
-// by the authoritative intake path.
+// revision. SourceIssue binds the authoritative tracker issue, while
+// SourceLinks retains other provenance links.
 type Proposal struct {
 	Questions   []Question        `json:"questions"`
 	SourceLinks map[string]string `json:"source_links,omitempty"`
+	SourceIssue *SourceIssueRef   `json:"source_issue,omitempty"`
 }
 
 // Scope is resolved by the trusted controller from the owning city and
@@ -100,21 +115,23 @@ type Frontier struct {
 	OpenQuestions []QuestionView    `json:"open_questions"`
 	Prompt        PromptView        `json:"prompt"`
 	SourceLinks   map[string]string `json:"source_links,omitempty"`
+	SourceIssue   *SourceIssueRef   `json:"source_issue,omitempty"`
 	proposalHash  string
 }
 
 // QuestionView joins immutable question text to its durable ticket state.
 type QuestionView struct {
-	ID              string      `json:"id"`
-	TicketID        string      `json:"ticket_id"`
-	Version         string      `json:"version"`
-	Title           string      `json:"title"`
-	Prompt          string      `json:"prompt"`
-	Recommendations []string    `json:"recommendations,omitempty"`
-	DependsOn       []string    `json:"depends_on,omitempty"`
-	SourceLinks     []string    `json:"source_links,omitempty"`
-	Status          string      `json:"status"`
-	Answer          *AnswerView `json:"answer,omitempty"`
+	ID              string          `json:"id"`
+	TicketID        string          `json:"ticket_id"`
+	Version         string          `json:"version"`
+	Title           string          `json:"title"`
+	Prompt          string          `json:"prompt"`
+	Recommendations []string        `json:"recommendations,omitempty"`
+	DependsOn       []string        `json:"depends_on,omitempty"`
+	SourceLinks     []string        `json:"source_links,omitempty"`
+	SourceIssue     *SourceIssueRef `json:"source_issue,omitempty"`
+	Status          string          `json:"status"`
+	Answer          *AnswerView     `json:"answer,omitempty"`
 }
 
 // AnswerView contains the exact signed human answer record. It contains no
@@ -218,6 +235,7 @@ type PromptRequest struct {
 	MapID        string
 	TicketIDs    []string
 	SourceLinks  map[string]string
+	SourceIssue  *SourceIssueRef
 }
 
 // PromptResult reports an observed delivery stage. DefinitivelyAbsent must be
@@ -254,21 +272,23 @@ type mapRecord struct {
 	ProposalHash  string            `json:"proposal_hash"`
 	Questions     []Question        `json:"questions"`
 	SourceLinks   map[string]string `json:"source_links,omitempty"`
+	SourceIssue   *SourceIssueRef   `json:"source_issue,omitempty"`
 	PromptID      string            `json:"prompt_id"`
 	ReservationID string            `json:"reservation_id"`
 	ReleaseID     string            `json:"release_id"`
 }
 
 type ticketRecord struct {
-	SchemaVersion int      `json:"schema_version"`
-	CityRef       string   `json:"city_ref"`
-	StoreRef      string   `json:"store_ref"`
-	WorkID        string   `json:"work_id"`
-	WorkRevision  string   `json:"work_revision"`
-	WorkDigest    string   `json:"work_digest"`
-	MapID         string   `json:"map_id"`
-	Question      Question `json:"question"`
-	Version       string   `json:"version"`
+	SchemaVersion int             `json:"schema_version"`
+	CityRef       string          `json:"city_ref"`
+	StoreRef      string          `json:"store_ref"`
+	WorkID        string          `json:"work_id"`
+	WorkRevision  string          `json:"work_revision"`
+	WorkDigest    string          `json:"work_digest"`
+	MapID         string          `json:"map_id"`
+	Question      Question        `json:"question"`
+	Version       string          `json:"version"`
+	SourceIssue   *SourceIssueRef `json:"source_issue,omitempty"`
 }
 
 type answerRecord struct {
@@ -302,6 +322,7 @@ type promptRecord struct {
 	MapID         string            `json:"map_id"`
 	TicketIDs     []string          `json:"ticket_ids"`
 	SourceLinks   map[string]string `json:"source_links,omitempty"`
+	SourceIssue   *SourceIssueRef   `json:"source_issue,omitempty"`
 }
 
 type sourceHold struct {
@@ -466,6 +487,134 @@ func validateStoreRef(storeRef string) error {
 	return nil
 }
 
+func cloneSourceIssueRef(input *SourceIssueRef) *SourceIssueRef {
+	if input == nil {
+		return nil
+	}
+	copy := *input
+	return &copy
+}
+
+func sourceIssueRefsEqual(left, right *SourceIssueRef) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
+}
+
+func validateSourceIssueRef(ref *SourceIssueRef) error {
+	if ref == nil {
+		return nil
+	}
+	if ref.TrackerKind != "github" && ref.TrackerKind != "forgejo" {
+		return fmt.Errorf("%w: source issue tracker kind must be github or forgejo", ErrInvalid)
+	}
+	if !sourceIssueValueIsTrimmed(ref.TrackerKind) || !sourceIssueValueIsTrimmed(ref.Repository) ||
+		!sourceIssueValueIsTrimmed(ref.IssueID) || !sourceIssueValueIsTrimmed(ref.CanonicalURL) {
+		return fmt.Errorf("%w: source issue fields must be trimmed", ErrInvalid)
+	}
+	if len(ref.Repository) == 0 || len(ref.Repository) > 512 || len(ref.IssueID) == 0 || len(ref.IssueID) > 20 ||
+		len(ref.CanonicalURL) == 0 || len(ref.CanonicalURL) > 1024 {
+		return fmt.Errorf("%w: source issue field exceeds its supported size", ErrInvalid)
+	}
+	if !validSourceIssueRepository(ref.TrackerKind, ref.Repository) {
+		return fmt.Errorf("%w: source issue repository identity is not canonical", ErrInvalid)
+	}
+	issueID, err := strconv.ParseUint(ref.IssueID, 10, 64)
+	if err != nil || issueID == 0 || strconv.FormatUint(issueID, 10) != ref.IssueID {
+		return fmt.Errorf("%w: source issue ID must be a canonical positive decimal", ErrInvalid)
+	}
+	wantURL := "https://" + ref.Repository + "/issues/" + ref.IssueID
+	if ref.CanonicalURL != wantURL {
+		return fmt.Errorf("%w: source issue URL does not match its tracker, repository and issue ID", ErrInvalid)
+	}
+	return nil
+}
+
+func sourceIssueValueIsTrimmed(value string) bool {
+	return value != "" && strings.TrimSpace(value) == value
+}
+
+func validSourceIssueRepository(trackerKind, repository string) bool {
+	parts := strings.Split(repository, "/")
+	if len(parts) != 3 || !validSourceIssuePathSegment(parts[1]) || !validSourceIssuePathSegment(parts[2]) {
+		return false
+	}
+	host := parts[0]
+	if trackerKind == "github" {
+		return host == "github.com"
+	}
+	return trackerKind == "forgejo" && validSourceIssueHost(host)
+}
+
+func validSourceIssueHost(host string) bool {
+	if host == "" || len(host) > 253 || strings.ToLower(host) != host {
+		return false
+	}
+	hostname := host
+	if strings.Contains(host, ":") {
+		var port string
+		var found bool
+		hostname, port, found = strings.Cut(host, ":")
+		if !found || strings.Contains(port, ":") || port == "" {
+			return false
+		}
+		portNumber, err := strconv.ParseUint(port, 10, 16)
+		if err != nil || portNumber == 0 || strconv.FormatUint(portNumber, 10) != port || portNumber == 443 {
+			return false
+		}
+	}
+	if hostname == "" || len(hostname) > 253 {
+		return false
+	}
+	for _, label := range strings.Split(hostname, ".") {
+		if len(label) == 0 || len(label) > 63 || !isASCIILetterOrDigit(label[0]) || !isASCIILetterOrDigit(label[len(label)-1]) {
+			return false
+		}
+		for i := 1; i < len(label)-1; i++ {
+			if !isASCIILetterOrDigit(label[i]) && label[i] != '-' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func isASCIILetterOrDigit(value byte) bool {
+	return value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z' || value >= '0' && value <= '9'
+}
+
+func validSourceIssuePathSegment(value string) bool {
+	if value == "" || len(value) > 100 || value == "." || value == ".." ||
+		value[0] == '.' || value[0] == '-' || value[len(value)-1] == '.' || value[len(value)-1] == '-' {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		char := value[i]
+		if isASCIILetterOrDigit(char) || char == '.' || char == '_' || char == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func sourceIssueAliasKey(key string) bool {
+	var identity strings.Builder
+	for _, char := range strings.ToLower(key) {
+		if char >= 'a' && char <= 'z' || char >= '0' && char <= '9' {
+			identity.WriteRune(char)
+		}
+	}
+	key = identity.String()
+	switch key {
+	case "issue", "issueurl", "issueref", "issuereference", "sourceissue", "sourceissueurl", "sourceissueref", "sourceissuereference":
+		return true
+	default:
+		return false
+	}
+}
+
 // WorkDigest hashes source content separately from its store revision. The
 // digest catches changes in status, ownership, holds and content even if a
 // backend's revision projection is incomplete.
@@ -586,7 +735,9 @@ func (s Service) Ensure(ctx context.Context, store beads.Store, scope Scope, wor
 			existingDoc.PromptID != frontierPromptID(scope, mapID) {
 			return Frontier{}, ErrConflict
 		}
-		_, persistedHash, hashErr := normalizeProposal(Proposal{Questions: existingDoc.Questions, SourceLinks: existingDoc.SourceLinks})
+		_, persistedHash, hashErr := normalizeProposal(Proposal{
+			Questions: existingDoc.Questions, SourceLinks: existingDoc.SourceLinks, SourceIssue: existingDoc.SourceIssue,
+		})
 		if hashErr != nil || persistedHash != proposalHash {
 			return Frontier{}, ErrConflict
 		}
@@ -631,7 +782,7 @@ func (s Service) Ensure(ctx context.Context, store beads.Store, scope Scope, wor
 				SchemaVersion: frontierSchemaVersion, CityRef: scope.CityRef, StoreRef: scope.StoreRef, ID: existingDoc.PromptID,
 				WorkID: workID, WorkRevision: expectedRevision, WorkDigest: existingDoc.WorkDigest,
 				MapID: mapID, TicketIDs: ticketIDsFor(scope, mapID, existingDoc.Questions),
-				SourceLinks: cloneStringMap(existingDoc.SourceLinks),
+				SourceLinks: cloneStringMap(existingDoc.SourceLinks), SourceIssue: cloneSourceIssueRef(existingDoc.SourceIssue),
 			}
 			if err := s.advancePromptDelivery(ctx, store, promptDoc); err != nil {
 				return frontier, err
@@ -675,13 +826,14 @@ func (s Service) Ensure(ctx context.Context, store beads.Store, scope Scope, wor
 	mapDoc := mapRecord{
 		SchemaVersion: frontierSchemaVersion, CityRef: scope.CityRef, StoreRef: scope.StoreRef, WorkID: workID,
 		WorkRevision: expectedRevision, WorkDigest: workDigest, MapID: mapID,
-		ProposalHash: proposalHash, Questions: questions, SourceLinks: cloneStringMap(proposal.SourceLinks), PromptID: promptID,
+		ProposalHash: proposalHash, Questions: questions, SourceLinks: cloneStringMap(proposal.SourceLinks),
+		SourceIssue: cloneSourceIssueRef(proposal.SourceIssue), PromptID: promptID,
 		ReservationID: reservationID, ReleaseID: releaseID,
 	}
 	promptDoc := promptRecord{
 		SchemaVersion: frontierSchemaVersion, CityRef: scope.CityRef, StoreRef: scope.StoreRef, ID: promptID, WorkID: workID,
 		WorkRevision: expectedRevision, WorkDigest: workDigest, MapID: mapID, TicketIDs: ticketIDsFor(scope, mapID, questions),
-		SourceLinks: cloneStringMap(proposal.SourceLinks),
+		SourceLinks: cloneStringMap(proposal.SourceLinks), SourceIssue: cloneSourceIssueRef(proposal.SourceIssue),
 	}
 	if err := ensureFrontierRecords(recordWriter, store, mapDoc); err != nil {
 		return Frontier{}, err
@@ -1083,7 +1235,9 @@ func ensureImmutableRecord(writer beads.DecisionFrontierRecordWriter, store bead
 // existing row or dependency aborts without being overwritten.
 func ensureFrontierRecords(writer beads.DecisionFrontierRecordWriter, store beads.Store, mapDoc mapRecord) error {
 	scope := Scope{CityRef: mapDoc.CityRef, StoreRef: mapDoc.StoreRef}
-	_, proposalHash, err := normalizeProposal(Proposal{Questions: mapDoc.Questions, SourceLinks: mapDoc.SourceLinks})
+	_, proposalHash, err := normalizeProposal(Proposal{
+		Questions: mapDoc.Questions, SourceLinks: mapDoc.SourceLinks, SourceIssue: mapDoc.SourceIssue,
+	})
 	if err != nil || proposalHash != mapDoc.ProposalHash || mapDoc.SchemaVersion != frontierSchemaVersion ||
 		mapDoc.MapID != frontierMapID(scope, mapDoc.WorkID, mapDoc.WorkRevision) ||
 		mapDoc.PromptID != frontierPromptID(scope, mapDoc.MapID) || mapDoc.ReservationID != reservationReceiptID(scope, mapDoc.MapID) ||
@@ -1104,6 +1258,7 @@ func ensureFrontierRecords(writer beads.DecisionFrontierRecordWriter, store bead
 			SchemaVersion: frontierSchemaVersion, CityRef: mapDoc.CityRef, StoreRef: mapDoc.StoreRef,
 			WorkID: mapDoc.WorkID, WorkRevision: mapDoc.WorkRevision, WorkDigest: mapDoc.WorkDigest,
 			MapID: mapDoc.MapID, Question: question, Version: version,
+			SourceIssue: cloneSourceIssueRef(mapDoc.SourceIssue),
 		}
 		if err := ensureImmutableRecord(writer, store, ticketIDs[i], question.Title, ticketRecordKind, statePending, doc); err != nil {
 			return err
@@ -1113,6 +1268,7 @@ func ensureFrontierRecords(writer beads.DecisionFrontierRecordWriter, store bead
 		SchemaVersion: frontierSchemaVersion, CityRef: mapDoc.CityRef, StoreRef: mapDoc.StoreRef,
 		ID: mapDoc.PromptID, WorkID: mapDoc.WorkID, WorkRevision: mapDoc.WorkRevision, WorkDigest: mapDoc.WorkDigest,
 		MapID: mapDoc.MapID, TicketIDs: append([]string(nil), ticketIDs...), SourceLinks: cloneStringMap(mapDoc.SourceLinks),
+		SourceIssue: cloneSourceIssueRef(mapDoc.SourceIssue),
 	}
 	if err := ensureImmutableRecord(writer, store, mapDoc.PromptID, "Decision prompt intent for "+mapDoc.WorkID,
 		promptRecordKind, "unconfigured", prompt); err != nil {
@@ -1287,14 +1443,16 @@ func loadFrontier(store beads.Store, scope Scope, mapID string) (Frontier, error
 	if _, err := canonicalWorkRevision(doc.WorkRevision); err != nil || doc.WorkDigest == "" {
 		return Frontier{}, ErrConflict
 	}
-	_, proposalHash, err := normalizeProposal(Proposal{Questions: doc.Questions, SourceLinks: doc.SourceLinks})
+	_, proposalHash, err := normalizeProposal(Proposal{
+		Questions: doc.Questions, SourceLinks: doc.SourceLinks, SourceIssue: doc.SourceIssue,
+	})
 	if err != nil || proposalHash != doc.ProposalHash || doc.WorkID == "" || doc.PromptID != frontierPromptID(scope, mapID) {
 		return Frontier{}, ErrConflict
 	}
 	frontier := Frontier{
 		CityRef: doc.CityRef, StoreRef: doc.StoreRef, MapID: mapID, WorkID: doc.WorkID, WorkRevision: doc.WorkRevision,
 		WorkDigest: doc.WorkDigest, proposalHash: doc.ProposalHash,
-		State: StatePending, SourceLinks: cloneStringMap(doc.SourceLinks),
+		State: StatePending, SourceLinks: cloneStringMap(doc.SourceLinks), SourceIssue: cloneSourceIssueRef(doc.SourceIssue),
 		Questions: make([]QuestionView, 0, len(doc.Questions)), OpenQuestions: make([]QuestionView, 0, len(doc.Questions)),
 		Prompt: PromptView{ID: doc.PromptID, Status: "unavailable", Reason: "prompt delivery is not configured"},
 	}
@@ -1322,13 +1480,14 @@ func loadFrontier(store beads.Store, scope Scope, mapID string) (Frontier, error
 		if ticketErr != nil || !slices.Equal(expectedQuestion, storedQuestion) || ticketDoc.SchemaVersion != frontierSchemaVersion ||
 			ticketDoc.CityRef != doc.CityRef || ticketDoc.StoreRef != doc.StoreRef ||
 			ticketDoc.WorkID != doc.WorkID || ticketDoc.WorkRevision != doc.WorkRevision || ticketDoc.WorkDigest != doc.WorkDigest ||
-			ticketDoc.MapID != mapID || ticketDoc.Version != version || ticket.Title != question.Title {
+			ticketDoc.MapID != mapID || ticketDoc.Version != version || ticket.Title != question.Title ||
+			!sourceIssueRefsEqual(ticketDoc.SourceIssue, doc.SourceIssue) {
 			return Frontier{}, ErrConflict
 		}
 		view := QuestionView{
 			ID: question.ID, TicketID: ticketID, Version: version, Title: question.Title, Prompt: question.Prompt,
 			Recommendations: append([]string(nil), question.Recommendations...), DependsOn: append([]string(nil), question.DependsOn...),
-			SourceLinks: append([]string(nil), question.SourceLinks...), Status: "open",
+			SourceLinks: append([]string(nil), question.SourceLinks...), SourceIssue: cloneSourceIssueRef(doc.SourceIssue), Status: "open",
 		}
 		state := ticket.Metadata[beadmeta.DecisionFrontierStateMetadataKey]
 		if strings.HasPrefix(state, "answered:") {
@@ -1384,7 +1543,7 @@ func loadFrontier(store beads.Store, scope Scope, mapID string) (Frontier, error
 			promptDoc.CityRef != doc.CityRef || promptDoc.StoreRef != doc.StoreRef || promptDoc.ID != doc.PromptID || promptDoc.WorkID != doc.WorkID ||
 			promptDoc.WorkRevision != doc.WorkRevision || promptDoc.WorkDigest != doc.WorkDigest || promptDoc.MapID != mapID ||
 			!slices.Equal(promptDoc.TicketIDs, ticketIDsFor(scope, mapID, doc.Questions)) ||
-			!maps.Equal(promptDoc.SourceLinks, doc.SourceLinks) {
+			!maps.Equal(promptDoc.SourceLinks, doc.SourceLinks) || !sourceIssueRefsEqual(promptDoc.SourceIssue, doc.SourceIssue) {
 			return Frontier{}, ErrConflict
 		}
 		frontier.Prompt.Status = prompt.Metadata[beadmeta.DecisionFrontierStateMetadataKey]
@@ -1446,6 +1605,7 @@ func (s Service) advancePromptDelivery(ctx context.Context, store beads.Store, d
 	request := PromptRequest{
 		CityRef: doc.CityRef, StoreRef: doc.StoreRef, ID: doc.ID, WorkID: doc.WorkID, WorkRevision: doc.WorkRevision, MapID: doc.MapID,
 		TicketIDs: append([]string(nil), doc.TicketIDs...), SourceLinks: cloneStringMap(doc.SourceLinks),
+		SourceIssue: cloneSourceIssueRef(doc.SourceIssue),
 	}
 	if state == "submitting" || state == "unknown" {
 		result, reconcileErr := s.Delivery.ReconcileDecisionPrompt(ctx, doc.ID)
@@ -1564,16 +1724,23 @@ func normalizeProposal(proposal Proposal) ([]Question, string, error) {
 	if err := validateAcyclic(questions); err != nil {
 		return nil, "", err
 	}
+	if err := validateSourceIssueRef(proposal.SourceIssue); err != nil {
+		return nil, "", err
+	}
 	links := cloneStringMap(proposal.SourceLinks)
 	for key, value := range links {
 		if strings.TrimSpace(key) == "" || strings.TrimSpace(value) == "" {
 			return nil, "", fmt.Errorf("%w: source links require nonempty names and values", ErrInvalid)
 		}
+		if sourceIssueAliasKey(key) {
+			return nil, "", fmt.Errorf("%w: source issue references must use the structured %q field", ErrInvalid, SourceIssueLinkKey)
+		}
 	}
 	body, err := json.Marshal(struct {
-		Questions []Question        `json:"questions"`
-		Links     map[string]string `json:"source_links,omitempty"`
-	}{questions, links})
+		Questions   []Question        `json:"questions"`
+		Links       map[string]string `json:"source_links,omitempty"`
+		SourceIssue *SourceIssueRef   `json:"source_issue,omitempty"`
+	}{questions, links, proposal.SourceIssue})
 	if err != nil {
 		return nil, "", err
 	}

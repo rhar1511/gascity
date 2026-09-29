@@ -1545,6 +1545,7 @@ export type Frontier = {
     open_questions: Array<QuestionView> | null;
     prompt: PromptView;
     questions: Array<QuestionView> | null;
+    source_issue?: SourceIssueRef;
     source_links?: {
         [key: string]: string;
     };
@@ -2710,6 +2711,7 @@ export type PromptView = {
 
 export type Proposal = {
     questions: Array<Question> | null;
+    source_issue?: SourceIssueRef;
     source_links?: {
         [key: string]: string;
     };
@@ -3032,6 +3034,7 @@ export type QuestionView = {
     id: string;
     prompt: string;
     recommendations?: Array<string> | null;
+    source_issue?: SourceIssueRef;
     source_links?: Array<string> | null;
     status: string;
     ticket_id: string;
@@ -5151,6 +5154,13 @@ export type Snapshot = {
     reason?: string;
     schema_version: number;
     status: string;
+};
+
+export type SourceIssueRef = {
+    canonical_url: string;
+    issue_id: string;
+    repository: string;
+    tracker_kind: string;
 };
 
 export type Status = {

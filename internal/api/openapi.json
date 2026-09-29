@@ -4370,6 +4370,9 @@
               "null"
             ]
           },
+          "source_issue": {
+            "$ref": "#/components/schemas/SourceIssueRef"
+          },
           "source_links": {
             "additionalProperties": {
               "type": "string"
@@ -7163,6 +7166,9 @@
               "null"
             ]
           },
+          "source_issue": {
+            "$ref": "#/components/schemas/SourceIssueRef"
+          },
           "source_links": {
             "additionalProperties": {
               "type": "string"
@@ -7953,6 +7959,9 @@
               "array",
               "null"
             ]
+          },
+          "source_issue": {
+            "$ref": "#/components/schemas/SourceIssueRef"
           },
           "source_links": {
             "items": {
@@ -12908,6 +12917,30 @@
           "schema_version",
           "status",
           "input_roots"
+        ],
+        "type": "object"
+      },
+      "SourceIssueRef": {
+        "additionalProperties": false,
+        "properties": {
+          "canonical_url": {
+            "type": "string"
+          },
+          "issue_id": {
+            "type": "string"
+          },
+          "repository": {
+            "type": "string"
+          },
+          "tracker_kind": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "tracker_kind",
+          "repository",
+          "issue_id",
+          "canonical_url"
         ],
         "type": "object"
       },

@@ -1626,43 +1626,6 @@ export const zQuestion = z.object({
     title: z.string()
 });
 
-export const zProposal = z.object({
-    questions: z.array(zQuestion).nullable(),
-    source_links: z.record(z.string(), z.string()).optional()
-});
-
-export const zDecisionFrontierEnsureRequest = z.object({
-    proposal: zProposal,
-    work_revision: z.string().min(1)
-});
-
-export const zQuestionView = z.object({
-    answer: zAnswerView.optional(),
-    depends_on: z.array(z.string()).nullish(),
-    id: z.string(),
-    prompt: z.string(),
-    recommendations: z.array(z.string()).nullish(),
-    source_links: z.array(z.string()).nullish(),
-    status: z.string(),
-    ticket_id: z.string(),
-    title: z.string(),
-    version: z.string()
-});
-
-export const zFrontier = z.object({
-    city_ref: z.string(),
-    map_id: z.string(),
-    open_questions: z.array(zQuestionView).nullable(),
-    prompt: zPromptView,
-    questions: z.array(zQuestionView).nullable(),
-    source_links: z.record(z.string(), z.string()).optional(),
-    state: z.string(),
-    store_ref: z.string(),
-    work_digest: z.string(),
-    work_id: z.string(),
-    work_revision: z.string()
-});
-
 export const zReadinessItem = z.object({
     detail: z.string().optional(),
     display_name: z.string(),
@@ -3250,6 +3213,53 @@ export const zHealthOutputBody = z.object({
     status: z.string(),
     uptime_sec: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
     version: z.string().optional()
+});
+
+export const zSourceIssueRef = z.object({
+    canonical_url: z.string(),
+    issue_id: z.string(),
+    repository: z.string(),
+    tracker_kind: z.string()
+});
+
+export const zProposal = z.object({
+    questions: z.array(zQuestion).nullable(),
+    source_issue: zSourceIssueRef.optional(),
+    source_links: z.record(z.string(), z.string()).optional()
+});
+
+export const zDecisionFrontierEnsureRequest = z.object({
+    proposal: zProposal,
+    work_revision: z.string().min(1)
+});
+
+export const zQuestionView = z.object({
+    answer: zAnswerView.optional(),
+    depends_on: z.array(z.string()).nullish(),
+    id: z.string(),
+    prompt: z.string(),
+    recommendations: z.array(z.string()).nullish(),
+    source_issue: zSourceIssueRef.optional(),
+    source_links: z.array(z.string()).nullish(),
+    status: z.string(),
+    ticket_id: z.string(),
+    title: z.string(),
+    version: z.string()
+});
+
+export const zFrontier = z.object({
+    city_ref: z.string(),
+    map_id: z.string(),
+    open_questions: z.array(zQuestionView).nullable(),
+    prompt: zPromptView,
+    questions: z.array(zQuestionView).nullable(),
+    source_issue: zSourceIssueRef.optional(),
+    source_links: z.record(z.string(), z.string()).optional(),
+    state: z.string(),
+    store_ref: z.string(),
+    work_digest: z.string(),
+    work_id: z.string(),
+    work_revision: z.string()
 });
 
 export const zStatus = z.object({

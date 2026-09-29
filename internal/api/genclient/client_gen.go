@@ -2334,6 +2334,7 @@ type Frontier struct {
 	OpenQuestions *[]QuestionView    `json:"open_questions"`
 	Prompt        PromptView         `json:"prompt"`
 	Questions     *[]QuestionView    `json:"questions"`
+	SourceIssue   *SourceIssueRef    `json:"source_issue,omitempty"`
 	SourceLinks   *map[string]string `json:"source_links,omitempty"`
 	State         string             `json:"state"`
 	StoreRef      string             `json:"store_ref"`
@@ -3361,6 +3362,7 @@ type PromptView struct {
 // Proposal defines model for Proposal.
 type Proposal struct {
 	Questions   *[]Question        `json:"questions"`
+	SourceIssue *SourceIssueRef    `json:"source_issue,omitempty"`
 	SourceLinks *map[string]string `json:"source_links,omitempty"`
 }
 
@@ -3624,16 +3626,17 @@ type Question struct {
 
 // QuestionView defines model for QuestionView.
 type QuestionView struct {
-	Answer          *AnswerView `json:"answer,omitempty"`
-	DependsOn       *[]string   `json:"depends_on,omitempty"`
-	Id              string      `json:"id"`
-	Prompt          string      `json:"prompt"`
-	Recommendations *[]string   `json:"recommendations,omitempty"`
-	SourceLinks     *[]string   `json:"source_links,omitempty"`
-	Status          string      `json:"status"`
-	TicketId        string      `json:"ticket_id"`
-	Title           string      `json:"title"`
-	Version         string      `json:"version"`
+	Answer          *AnswerView     `json:"answer,omitempty"`
+	DependsOn       *[]string       `json:"depends_on,omitempty"`
+	Id              string          `json:"id"`
+	Prompt          string          `json:"prompt"`
+	Recommendations *[]string       `json:"recommendations,omitempty"`
+	SourceIssue     *SourceIssueRef `json:"source_issue,omitempty"`
+	SourceLinks     *[]string       `json:"source_links,omitempty"`
+	Status          string          `json:"status"`
+	TicketId        string          `json:"ticket_id"`
+	Title           string          `json:"title"`
+	Version         string          `json:"version"`
 }
 
 // ReadinessItem defines model for ReadinessItem.
@@ -5381,6 +5384,14 @@ type Snapshot struct {
 	Reason                            *string      `json:"reason,omitempty"`
 	SchemaVersion                     int64        `json:"schema_version"`
 	Status                            string       `json:"status"`
+}
+
+// SourceIssueRef defines model for SourceIssueRef.
+type SourceIssueRef struct {
+	CanonicalUrl string `json:"canonical_url"`
+	IssueId      string `json:"issue_id"`
+	Repository   string `json:"repository"`
+	TrackerKind  string `json:"tracker_kind"`
 }
 
 // Status defines model for Status.
