@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -37,7 +38,7 @@ func TestSessionRequestSubmitHTTPBindsAuthoritativeAttempt(t *testing.T) {
 		if err := fs.cityBeadStore.Update(work.ID, beads.UpdateOpts{Status: &status, Assignee: &info.ID}); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := front.SetCurrentClaim(info.ID, work.ID); err != nil {
+		if _, err := front.SetCurrentClaimForGeneration(info.ID, work.ID, "http-claim"); err != nil {
 			t.Fatal(err)
 		}
 		work, err = fs.cityBeadStore.Get(work.ID)
@@ -182,7 +183,7 @@ func TestSessionRequestAttemptResolutionUsesCurrentWorkAndClaim(t *testing.T) {
 	if err := fs.cityBeadStore.Update(work.ID, beads.UpdateOpts{Status: &status, Assignee: &info.ID}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := front.SetCurrentClaim(info.ID, work.ID); err != nil {
+	if _, err := front.SetCurrentClaimForGeneration(info.ID, work.ID, "claim-one"); err != nil {
 		t.Fatal(err)
 	}
 	srv := New(fs)
@@ -209,6 +210,53 @@ func TestSessionRequestAttemptResolutionUsesCurrentWorkAndClaim(t *testing.T) {
 	}
 	if _, err := srv.resolveSessionRequestAttempt(info.ID, generation); err == nil {
 		t.Fatal("unrelated work owner resolved")
+	}
+}
+
+func TestSessionRequestAttemptBindingRejectsSameBeadRenewedAfterResolution(t *testing.T) {
+	fs := newSessionFakeState(t)
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "renewed attributed request")
+	front := session.NewStore(fs.SessionsBeadStore())
+	info, err := front.Get(info.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	generation, _ := strconv.Atoi(info.Generation)
+	work, err := fs.cityBeadStore.Create(beads.Bead{
+		Title: "renewed work", Type: "task",
+		Metadata: beads.StringMap{
+			beadmeta.SessionIDMetadataKey: info.ID, beadmeta.ClaimGenerationMetadataKey: "claim-one",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := "in_progress"
+	if err := fs.cityBeadStore.Update(work.ID, beads.UpdateOpts{Status: &status, Assignee: &info.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := front.SetCurrentClaimForGeneration(info.ID, work.ID, "claim-one"); err != nil {
+		t.Fatal(err)
+	}
+	srv := New(fs)
+	oldBinding, err := srv.resolveSessionRequestAttempt(info.ID, generation)
+	if err != nil || oldBinding == nil {
+		t.Fatalf("initial binding=%+v err=%v", oldBinding, err)
+	}
+	if err := fs.cityBeadStore.SetMetadata(work.ID, beadmeta.ClaimGenerationMetadataKey, "claim-two"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := srv.resolveSessionRequestAttempt(info.ID, generation); err == nil {
+		t.Fatal("resolver accepted a work epoch newer than the reciprocal session stamp")
+	}
+	if _, err := front.SetCurrentClaimForGeneration(info.ID, work.ID, "claim-two"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := front.AcceptRequestForAttempt(info.ID, "resolved-before-renewal", generation, "report", *oldBinding, time.Now()); !errors.Is(err, session.ErrRequestConflict) {
+		t.Fatalf("acceptance accepted the old binding for the renewed same-bead claim: %v", err)
+	}
+	if _, err := front.GetRequest(info.ID, "resolved-before-renewal"); !errors.Is(err, session.ErrRequestNotFound) {
+		t.Fatalf("stale binding persisted a receipt: %v", err)
 	}
 }
 
@@ -264,7 +312,7 @@ func TestAttemptAcknowledgementsRemainExactAfterOwnerDeletionAndSQLiteReopen(t *
 		if err := store.SetMetadata(work.ID, "test_initialized", "true"); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := front.SetCurrentClaim(row.ID, work.ID); err != nil {
+		if _, err := front.SetCurrentClaimForGeneration(row.ID, work.ID, suffix); err != nil {
 			t.Fatal(err)
 		}
 		binding, err := srv.resolveSessionRequestAttempt(row.ID, 2)

@@ -123,8 +123,16 @@ func TestLifecycleRecoveryRejectsUnboundOrMismatchedAttemptReceipt(t *testing.T)
 				if _, err := front.AcceptRequest(request.SessionID, request.RequestID, generation, request.Message, time.Now()); err != nil {
 					t.Fatalf("seed legacy request receipt: %v", err)
 				}
-			} else if _, err := front.AcceptRequestForAttempt(request.SessionID, request.RequestID, generation, request.Message, *binding, time.Now()); err != nil {
-				t.Fatalf("seed mismatched attempt receipt: %v", err)
+			} else {
+				if _, err := front.SetCurrentClaimForGeneration(request.SessionID, binding.Identity.ExecutionBeadID, binding.Identity.ClaimGeneration); err != nil {
+					t.Fatalf("seed mismatched reciprocal claim: %v", err)
+				}
+				if _, err := front.AcceptRequestForAttempt(request.SessionID, request.RequestID, generation, request.Message, *binding, time.Now()); err != nil {
+					t.Fatalf("seed mismatched attempt receipt: %v", err)
+				}
+				if _, err := front.SetCurrentClaimForGeneration(request.SessionID, fixture.work.ID, request.ClaimGeneration); err != nil {
+					t.Fatalf("restore authoritative reciprocal claim: %v", err)
+				}
 			}
 
 			var logs bytes.Buffer
@@ -450,7 +458,7 @@ func newLifecycleRecoveryFixture(t *testing.T) *lifecycleRecoveryFixture {
 		t.Fatal(err)
 	}
 	front := session.NewStore(beads.SessionStore{Store: store})
-	if _, err := front.SetCurrentClaim(info.ID, work.ID); err != nil {
+	if _, err := front.SetCurrentClaimForGeneration(info.ID, work.ID, "17"); err != nil {
 		t.Fatal(err)
 	}
 	work, err = store.Get(work.ID)

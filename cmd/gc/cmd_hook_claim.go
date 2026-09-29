@@ -314,7 +314,7 @@ type (
 	hookResolveWorkBranchFunc     func(tree hookClaimWorkTree) string
 	hookResolveSessionWorkDirFunc func(sessionID string) string
 	hookStampWorkMetaFunc         func(ctx context.Context, dir string, env []string, beadID, assignee string, patch map[string]string) error
-	hookStampSessionClaimFunc     func(sessionID, beadID string) error
+	hookStampSessionClaimFunc     func(sessionID, beadID, claimGeneration string) error
 	hookPublishRunMapFunc         func(runID, beadID string, sessionKeys ...string) error
 	hookClaimReleaseFunc          func(ctx context.Context, dir string, env []string, beadID, assignee string) (bool, error)
 	// hookClaimReclaimFunc attempts a scoped stale-lease reclaim for exactly
@@ -1407,7 +1407,11 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 	if stamped && hookClaimLifecycleCandidate(durable, opts) {
 		ops.EmitExecutionStepStarted(durable, dir, opts.Env, opts.Assignee)
 	}
-	stampHookSessionCurrentClaim(bead, opts, ops, stderr)
+	claimStamp := durable
+	if strings.TrimSpace(claimStamp.ID) == "" {
+		claimStamp = bead
+	}
+	stampHookSessionCurrentClaim(claimStamp, opts, ops, stderr)
 	publishHookClaimRunMap(bead, opts, ops, stderr)
 	assigned, err := preassignHookContinuationGroup(bead, opts, ops, dir)
 	if err != nil {
@@ -2511,7 +2515,8 @@ func stampHookSessionCurrentClaim(bead beads.Bead, opts hookClaimOptions, ops ho
 	if sessionID == "" || beadID == "" {
 		return
 	}
-	if err := ops.StampSessionClaim(sessionID, beadID); err != nil {
+	claimGeneration := strings.TrimSpace(bead.Metadata[beadmeta.ClaimGenerationMetadataKey])
+	if err := ops.StampSessionClaim(sessionID, beadID, claimGeneration); err != nil {
 		fmt.Fprintf(stderr, "gc hook --claim: recording current claim %s on session %s: %v\n", beadID, sessionID, err) //nolint:errcheck
 	}
 }
@@ -2537,7 +2542,7 @@ func clearHookSessionCurrentClaim(opts hookClaimOptions, ops hookClaimOps, stder
 	if sessionID == "" {
 		return
 	}
-	if err := ops.StampSessionClaim(sessionID, ""); err != nil {
+	if err := ops.StampSessionClaim(sessionID, "", ""); err != nil {
 		fmt.Fprintf(stderr, "gc hook --claim: clearing current claim on session %s: %v\n", sessionID, err) //nolint:errcheck
 	}
 }

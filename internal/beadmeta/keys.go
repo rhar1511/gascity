@@ -437,6 +437,9 @@ const (
 	// step to ask `gc hook current` would close somebody else's bead. Every path
 	// that takes work off a session clears it.
 	CurrentClaimBeadIDMetadataKey = "current_claim_bead_id"
+	// CurrentClaimGenerationMetadataKey stores the epoch paired with the
+	// current claim id so same-bead claim renewals remain distinguishable.
+	CurrentClaimGenerationMetadataKey = "current_claim_generation"
 )
 
 // Dispatch metadata keys: a non-"gc."-prefixed family that sling writes onto

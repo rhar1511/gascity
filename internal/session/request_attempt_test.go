@@ -12,7 +12,7 @@ import (
 
 func TestSessionRequestAttemptRevisionPreservesIntegerPrecision(t *testing.T) {
 	_, front, now := requestReceiptFixture(t)
-	if _, err := front.SetCurrentClaim("gc-session", "gc-work-1"); err != nil {
+	if _, err := front.SetCurrentClaimForGeneration("gc-session", "gc-work-1", "claim-1"); err != nil {
 		t.Fatal(err)
 	}
 	binding := requestAttemptFixture(t, "gc-work-1", "claim-1")
@@ -68,7 +68,7 @@ func TestSessionRequestAttemptBindingSeparatesWorkWithinOneGeneration(t *testing
 	first := requestAttemptFixture(t, "gc-work-1", "claim-1")
 	second := requestAttemptFixture(t, "gc-work-2", "claim-2")
 	for index, binding := range []RequestAttemptBinding{first, second} {
-		if _, err := store.SetCurrentClaim("gc-session", binding.Identity.ExecutionBeadID); err != nil {
+		if _, err := store.SetCurrentClaimForGeneration("gc-session", binding.Identity.ExecutionBeadID, binding.Identity.ClaimGeneration); err != nil {
 			t.Fatal(err)
 		}
 		id := []string{"request-one", "request-two"}[index]
@@ -95,7 +95,7 @@ func TestSessionRequestAttemptBindingRequiresExactReciprocalClaim(t *testing.T) 
 	if _, err := front.AcceptRequestForAttempt("gc-session", "without-claim", 2, "report", binding, now); !errors.Is(err, ErrRequestConflict) {
 		t.Fatalf("missing claim accepted: %v", err)
 	}
-	if _, err := front.SetCurrentClaim("gc-session", "gc-work-1"); err != nil {
+	if _, err := front.SetCurrentClaimForGeneration("gc-session", "gc-work-1", "claim-1"); err != nil {
 		t.Fatal(err)
 	}
 	raced := &receiptGenerationRace{MemStore: backing, change: func() {
@@ -112,10 +112,30 @@ func TestSessionRequestAttemptBindingRequiresExactReciprocalClaim(t *testing.T) 
 	}
 }
 
+func TestSessionRequestAttemptBindingRejectsSameBeadRenewedBeforeAcceptanceWrite(t *testing.T) {
+	backing, front, now := requestReceiptFixture(t)
+	binding := requestAttemptFixture(t, "gc-work-1", "claim-1")
+	if _, err := front.SetCurrentClaimForGeneration("gc-session", "gc-work-1", "claim-1"); err != nil {
+		t.Fatal(err)
+	}
+	raced := &receiptGenerationRace{MemStore: backing, change: func() {
+		if err := backing.SetMetadata("gc-session", beadmeta.CurrentClaimGenerationMetadataKey, "claim-2"); err != nil {
+			t.Fatal(err)
+		}
+	}}
+	front = NewStore(beads.SessionStore{Store: raced})
+	if _, err := front.AcceptRequestForAttempt("gc-session", "renewed-claim-race", 2, "report", binding, now); !errors.Is(err, ErrRequestConflict) {
+		t.Fatalf("same-bead renewed claim accepted: %v", err)
+	}
+	if _, err := front.GetRequest("gc-session", "renewed-claim-race"); !errors.Is(err, ErrRequestNotFound) {
+		t.Fatalf("raced receipt persisted: %v", err)
+	}
+}
+
 func TestSessionRequestAttemptBindingIsNotRetrofittedOrChangedByReplay(t *testing.T) {
 	_, front, now := requestReceiptFixture(t)
 	binding := requestAttemptFixture(t, "gc-work-1", "claim-1")
-	if _, err := front.SetCurrentClaim("gc-session", "gc-work-1"); err != nil {
+	if _, err := front.SetCurrentClaimForGeneration("gc-session", "gc-work-1", "claim-1"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := front.AcceptRequest("gc-session", "legacy-request", 2, "report", now); err != nil {

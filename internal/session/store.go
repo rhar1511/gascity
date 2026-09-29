@@ -234,8 +234,9 @@ func (s *Store) RecordCurrentBead(id, beadID string) error {
 }
 
 // SetCurrentClaim stamps the work bead this session claimed for itself through
-// `gc hook --claim` (beadmeta.CurrentClaimBeadIDMetadataKey) — or clears the
-// stamp when beadID is empty. It reports whether a write was actually issued.
+// `gc hook --claim` — or clears the stamp when beadID is empty. Callers without
+// an observed generation clear any previous epoch. It reports whether a write
+// was actually issued.
 //
 // It is deliberately a different key from RecordCurrentBead's: that one records
 // a controller-side assignment the reconciler made at wake time, this one
@@ -255,20 +256,47 @@ func (s *Store) RecordCurrentBead(id, beadID string) error {
 // The current value is compared first and an unchanged value writes nothing: the
 // claim path re-runs on every hook tick through its adoption branches, so an
 // unconditional write would emit one bead.updated per tick per in-progress bead.
-// It emits a single-key SetMetadata, not a batch, matching RecordCurrentBead.
+// The id and generation are written as one metadata batch so readers cannot
+// observe an id from one claim paired with the generation from another.
 func (s *Store) SetCurrentClaim(id, beadID string) (bool, error) {
+	return s.SetCurrentClaimForGeneration(id, beadID, "")
+}
+
+// SetCurrentClaimForGeneration stamps the exact work bead and claim generation
+// the session currently owns. An empty bead id clears both fields. This is the
+// reciprocal epoch fence used by attempt-bound session requests.
+func (s *Store) SetCurrentClaimForGeneration(id, beadID, claimGeneration string) (bool, error) {
 	b, err := s.validatedBead(id)
 	if err != nil {
 		return false, err
 	}
 	beadID = strings.TrimSpace(beadID)
-	if strings.TrimSpace(b.Metadata[beadmeta.CurrentClaimBeadIDMetadataKey]) == beadID {
+	claimGeneration = strings.TrimSpace(claimGeneration)
+	if beadID == "" {
+		claimGeneration = ""
+	}
+	if strings.TrimSpace(b.Metadata[beadmeta.CurrentClaimBeadIDMetadataKey]) == beadID &&
+		strings.TrimSpace(b.Metadata[beadmeta.CurrentClaimGenerationMetadataKey]) == claimGeneration {
 		return false, nil
 	}
-	if err := s.setMetadataValue(b.ID, beadmeta.CurrentClaimBeadIDMetadataKey, beadID); err != nil {
+	if err := s.store.SetMetadataBatch(b.ID, map[string]string{
+		beadmeta.CurrentClaimBeadIDMetadataKey:     beadID,
+		beadmeta.CurrentClaimGenerationMetadataKey: claimGeneration,
+	}); err != nil {
 		return false, err
 	}
 	return true, nil
+}
+
+// CurrentClaim returns the paired work bead id and claim generation from one
+// session-bead read. It is the read half of SetCurrentClaimForGeneration.
+func (s *Store) CurrentClaim(id string) (beadID, claimGeneration string, err error) {
+	b, err := s.validatedBead(id)
+	if err != nil {
+		return "", "", err
+	}
+	return strings.TrimSpace(b.Metadata[beadmeta.CurrentClaimBeadIDMetadataKey]),
+		strings.TrimSpace(b.Metadata[beadmeta.CurrentClaimGenerationMetadataKey]), nil
 }
 
 // CurrentClaimBeadID returns the id of the work bead this session most recently
@@ -280,11 +308,8 @@ func (s *Store) SetCurrentClaim(id, beadID string) (bool, error) {
 // absent id is the wrapped store not-found error, so a caller can tell "this is
 // not my session" from "nothing is claimed".
 func (s *Store) CurrentClaimBeadID(id string) (string, error) {
-	b, err := s.validatedBead(id)
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(b.Metadata[beadmeta.CurrentClaimBeadIDMetadataKey]), nil
+	beadID, _, err := s.CurrentClaim(id)
+	return beadID, err
 }
 
 // CloseWithoutReason closes the session bead identified by id without stamping

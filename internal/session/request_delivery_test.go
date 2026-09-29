@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/attemptevidence"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -157,6 +158,47 @@ func TestSessionRequestDeliveryForAttemptCannotRetrofitLegacyAcceptance(t *testi
 	}
 }
 
+func TestSessionRequestDeliveryRejectsSameBeadRenewalBeforeSendReservation(t *testing.T) {
+	mgr, front, sp, info, binding, generation := requestDeliveryAttemptFixture(t)
+	backing := front.Store().Store.(*beads.MemStore)
+	raced := &requestClaimGenerationRace{MemStore: backing, changeOnUpdate: 2}
+	mgr.store = raced
+
+	if _, err := mgr.SubmitRequestForAttempt(context.Background(), info.ID, "renewed-claim-send-race", generation, "report progress", binding); !errors.Is(err, ErrRequestConflict) {
+		t.Fatalf("same-bead renewed claim reached send reservation: %v", err)
+	}
+	if got := sp.CountCalls("Nudge", info.SessionName); got != 0 {
+		t.Fatalf("provider sends=%d after claim renewal, want 0", got)
+	}
+	receipt, err := front.GetRequest(info.ID, "renewed-claim-send-race")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt.Delivery != RequestDeliveryPending || receipt.Attempt == nil || *receipt.Attempt != binding || receipt.DeliveryAttemptedAt != nil {
+		t.Fatalf("stale accepted attempt was rewritten or reserved: %+v", receipt)
+	}
+	claim, claimGeneration, err := front.CurrentClaim(info.ID)
+	if err != nil || claim != binding.Identity.ExecutionBeadID || claimGeneration != "claim-two" {
+		t.Fatalf("renewed reciprocal claim=(%q,%q), err=%v", claim, claimGeneration, err)
+	}
+}
+
+type requestClaimGenerationRace struct {
+	*beads.MemStore
+	updates        int
+	changeOnUpdate int
+}
+
+func (s *requestClaimGenerationRace) UpdateIfMatch(id string, revision int64, opts beads.UpdateOpts) error {
+	s.updates++
+	if s.updates == s.changeOnUpdate {
+		if err := s.MemStore.SetMetadata(id, beadmeta.CurrentClaimGenerationMetadataKey, "claim-two"); err != nil {
+			return err
+		}
+	}
+	return s.MemStore.UpdateIfMatch(id, revision, opts)
+}
+
 func TestSessionRecoveryRequestRejectsDifferentRevisionInsertedAfterPreflight(t *testing.T) {
 	mgr, front, sp, info, binding, generation := requestDeliveryAttemptFixture(t)
 	if _, err := front.GetRequest(info.ID, "recovery-revision-race"); !errors.Is(err, ErrRequestNotFound) {
@@ -208,7 +250,7 @@ func requestDeliveryAttemptFixture(t *testing.T) (*Manager, *Store, *runtime.Fak
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := front.SetCurrentClaim(info.ID, binding.Identity.ExecutionBeadID); err != nil {
+	if _, err := front.SetCurrentClaimForGeneration(info.ID, binding.Identity.ExecutionBeadID, binding.Identity.ClaimGeneration); err != nil {
 		t.Fatal(err)
 	}
 	return mgr, front, sp, info, binding, generation

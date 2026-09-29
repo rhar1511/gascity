@@ -122,7 +122,7 @@ func TestLifecycleRecoverySubmitPersistsHeldIntentWithoutAction(t *testing.T) {
 		t.Fatal(err)
 	}
 	front := session.NewStore(beads.SessionStore{Store: store})
-	if _, err := front.SetCurrentClaim(info.ID, work.ID); err != nil {
+	if _, err := front.SetCurrentClaimForGeneration(info.ID, work.ID, "claim-1"); err != nil {
 		t.Fatal(err)
 	}
 	work, err = store.Get(work.ID)

@@ -35,7 +35,7 @@ func (s *Server) resolveSessionRequestAttempt(sessionID string, generation int) 
 	if info.Closed || info.Generation != strconv.Itoa(generation) {
 		return nil, session.ErrRequestConflict
 	}
-	claim, err := front.CurrentClaimBeadID(sessionID)
+	claim, claimGeneration, err := front.CurrentClaim(sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -61,6 +61,7 @@ func (s *Server) resolveSessionRequestAttempt(sessionID string, generation int) 
 	if !ok || work.ID != claim || work.Revision == 0 || work.Status != "in_progress" ||
 		!slices.Contains(session.AssigneeIdentities(info), work.Assignee) ||
 		strings.TrimSpace(work.Metadata[beadmeta.SessionIDMetadataKey]) != sessionID ||
+		strings.TrimSpace(work.Metadata[beadmeta.ClaimGenerationMetadataKey]) != claimGeneration ||
 		!attemptevidence.IsExecutionRecord(work) {
 		return nil, session.ErrRequestConflict
 	}

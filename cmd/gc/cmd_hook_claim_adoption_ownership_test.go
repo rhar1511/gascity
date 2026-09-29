@@ -52,7 +52,7 @@ func (e *staleCacheEnv) run() int {
 		StampWorkMeta: func(context.Context, string, []string, string, string, map[string]string) error {
 			return nil
 		},
-		StampSessionClaim: func(string, string) error { return nil },
+		StampSessionClaim: func(string, string, string) error { return nil },
 		PublishRunMap:     func(string, string, ...string) error { return nil },
 	}
 	return doHookClaim("query", "/rig", hookClaimOptions{

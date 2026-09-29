@@ -55,5 +55,6 @@ func sameRequestAttemptExact(left, right *RequestAttemptBinding) bool {
 }
 
 func requestAttemptClaimMatches(current beads.Bead, binding *RequestAttemptBinding) bool {
-	return binding == nil || strings.TrimSpace(current.Metadata[beadmeta.CurrentClaimBeadIDMetadataKey]) == binding.Identity.ExecutionBeadID
+	return binding == nil || strings.TrimSpace(current.Metadata[beadmeta.CurrentClaimBeadIDMetadataKey]) == binding.Identity.ExecutionBeadID &&
+		strings.TrimSpace(current.Metadata[beadmeta.CurrentClaimGenerationMetadataKey]) == binding.Identity.ClaimGeneration
 }

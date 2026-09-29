@@ -68,7 +68,8 @@ func TestPinnedValues(t *testing.T) {
 		// The session-bead claim back-channel: `gc hook --claim` writes it and
 		// `gc hook current` reads it back, so a value drift here would silently
 		// break the only route a pool step has to its own bead id.
-		CurrentClaimBeadIDMetadataKey: "current_claim_bead_id",
+		CurrentClaimBeadIDMetadataKey:     "current_claim_bead_id",
+		CurrentClaimGenerationMetadataKey: "current_claim_generation",
 	}
 	for got, want := range pinned {
 		if got != want {

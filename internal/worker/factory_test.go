@@ -86,7 +86,7 @@ func TestFactorySubmitsBoundRequestThroughWorkerBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewFactory: %v", err)
 	}
-	if _, err := sessionpkg.NewStore(beads.SessionStore{Store: store}).SetCurrentClaim(info.ID, "work-one"); err != nil {
+	if _, err := sessionpkg.NewStore(beads.SessionStore{Store: store}).SetCurrentClaimForGeneration(info.ID, "work-one", "claim-one"); err != nil {
 		t.Fatalf("SetCurrentClaim: %v", err)
 	}
 	identity := attemptevidence.Identity{
