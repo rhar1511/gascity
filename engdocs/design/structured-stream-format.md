@@ -888,9 +888,10 @@ exactly why Codex results are opaque today. Then:
   work: cover every current `resultDisplay` variant and add an **incremental
   parser** so live frame-granular streaming works (the legacy reader is
   whole-file).
-- Kimi: prefer current `~/.kimi-code/sessions/<workDirKey>/<sessionId>/agents/main/wire.jsonl`
-  and subagent `wire.jsonl` files, while retaining legacy context-log support
-  until it is no longer useful.
+- Kimi: discover current `~/.kimi-code/sessions/<workDirKey>/<sessionId>/agents/main/wire.jsonl`
+  and subagent `wire.jsonl` files. Legacy context logs remain parseable when a
+  path is supplied explicitly, but are no longer auto-discovered because the
+  legacy layout keys workdirs with MD5.
 
 **1D. Alias and Pi-family hardening.**
 

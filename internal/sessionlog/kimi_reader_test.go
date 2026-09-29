@@ -12,12 +12,6 @@ import (
 	"time"
 )
 
-func TestKimiWorkDirHashMatchesProviderStorageKey(t *testing.T) {
-	if got, want := kimiWorkDirHash("/tmp/kimi-probe-ws"), "83d3ef5552b32ae3a340745394997089"; got != want {
-		t.Fatalf("kimiWorkDirHash() = %q, want provider-compatible key %q", got, want)
-	}
-}
-
 func TestReadKimiFilePreservesNativeToolRows(t *testing.T) {
 	path := writeKimiContext(t, filepath.Join(t.TempDir(), "sessions", "hash", "session-123", "context.jsonl"), []string{
 		`{"role":"user","content":"read the file"}`,
@@ -259,18 +253,15 @@ func TestReadKimiFileReportsMalformedTail(t *testing.T) {
 	}
 }
 
-func TestKimiSessionIDAndWorkDirHash(t *testing.T) {
+func TestKimiSessionIDAndEmptyWorkDirKey(t *testing.T) {
 	if got := kimiSessionID(filepath.Join("sessions", "hash", "session-123", "context.jsonl")); got != "session-123" {
 		t.Fatalf("kimiSessionID(directory path) = %q, want session-123", got)
 	}
 	if got := kimiSessionID("session-abc.jsonl"); got != "session-abc" {
 		t.Fatalf("kimiSessionID(file path) = %q, want session-abc", got)
 	}
-	if got := kimiWorkDirHash(""); got != "" {
-		t.Fatalf("kimiWorkDirHash(empty) = %q, want empty", got)
-	}
-	if got := kimiWorkDirHash("/tmp/gascity/phase1/kimi"); got != "5decc6790b1207964f31266c8258989e" {
-		t.Fatalf("kimiWorkDirHash() = %q, want Kimi CLI 1.42.0 lexical-path MD5", got)
+	if got := kimiCodeWorkDirKey("  "); got != "" {
+		t.Fatalf("kimiCodeWorkDirKey(empty) = %q, want empty", got)
 	}
 }
 
@@ -278,11 +269,11 @@ func TestFindKimiSessionFileByIDUsesSessionKey(t *testing.T) {
 	isolateKimiSearchRoots(t)
 	base := t.TempDir()
 	workDir := "/tmp/gascity/phase1/kimi"
-	workHash := kimiWorkDirHash(workDir)
-	oldPath := writeKimiContext(t, filepath.Join(base, "sessions", workHash, "old-session", "context.jsonl"), []string{
+	workKey := kimiCodeWorkDirKey(workDir)
+	oldPath := writeKimiContext(t, filepath.Join(base, "sessions", workKey, "old-session", "agents", "main", "wire.jsonl"), []string{
 		`{"role":"user","content":"old"}`,
 	})
-	newPath := writeKimiContext(t, filepath.Join(base, "sessions", workHash, "new-session", "context.jsonl"), []string{
+	newPath := writeKimiContext(t, filepath.Join(base, "sessions", workKey, "new-session", "agents", "main", "wire.jsonl"), []string{
 		`{"role":"user","content":"new"}`,
 	})
 	past := time.Now().Add(-time.Hour)
@@ -303,8 +294,8 @@ func TestFindKimiSessionFileFollowsSymlinkedRoots(t *testing.T) {
 	base := t.TempDir()
 	accountRoot := t.TempDir()
 	workDir := "/tmp/gascity/phase1/kimi"
-	workHash := kimiWorkDirHash(workDir)
-	want := writeKimiContext(t, filepath.Join(accountRoot, workHash, "session-key", "context.jsonl"), []string{
+	workKey := kimiCodeWorkDirKey(workDir)
+	want := writeKimiContext(t, filepath.Join(accountRoot, workKey, "session-key", "agents", "main", "wire.jsonl"), []string{
 		`{"role":"user","content":"via symlink"}`,
 	})
 	if err := os.Symlink(accountRoot, filepath.Join(base, "account-a")); err != nil {
@@ -324,9 +315,9 @@ func TestFindKimiSessionFileRejectsEscapingTranscriptSymlink(t *testing.T) {
 	root := t.TempDir()
 	outside := t.TempDir()
 	workDir := "/tmp/gascity/phase1/kimi-symlink-escape"
-	workHash := kimiWorkDirHash(workDir)
+	workKey := kimiCodeWorkDirKey(workDir)
 	const sessionID = "session-escape"
-	sessionDir := filepath.Join(root, workHash, sessionID)
+	sessionDir := filepath.Join(root, workKey, sessionID, "agents", "main")
 	if err := os.MkdirAll(sessionDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -334,7 +325,7 @@ func TestFindKimiSessionFileRejectsEscapingTranscriptSymlink(t *testing.T) {
 	if err := os.WriteFile(secret, []byte(`{"role":"user","content":"outside root"}`+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	transcript := filepath.Join(sessionDir, "context.jsonl")
+	transcript := filepath.Join(sessionDir, "wire.jsonl")
 	if err := os.Symlink(secret, transcript); err != nil {
 		t.Skipf("symlink unsupported on this platform: %v", err)
 	}
@@ -384,17 +375,17 @@ func TestFindKimiSessionFileLogsMissingWorkDirHashDiagnostic(t *testing.T) {
 		t.Fatal(err)
 	}
 	workDir := "/tmp/gascity/missing-kimi-workdir"
-	workHash := kimiWorkDirHash(workDir)
+	workKey := kimiCodeWorkDirKey(workDir)
 
 	if got := FindKimiSessionFile([]string{base}, workDir); got != "" {
 		t.Fatalf("FindKimiSessionFile() = %q, want empty", got)
 	}
 	logText := logs.String()
-	if !strings.Contains(logText, "expected workdir hash "+`"`+workHash+`"`) {
-		t.Fatalf("missing Kimi hash diagnostic %q in logs:\n%s", workHash, logText)
+	if !strings.Contains(logText, "expected Kimi Code workdir key "+`"`+workKey+`"`) {
+		t.Fatalf("missing Kimi Code workdir key diagnostic %q in logs:\n%s", workKey, logText)
 	}
-	if !strings.Contains(logText, "check Kimi CLI version and workdir path hashing") {
-		t.Fatalf("missing Kimi version/hash guidance in logs:\n%s", logText)
+	if !strings.Contains(logText, "check the Kimi Code version and workdir path key") {
+		t.Fatalf("missing Kimi Code version/key guidance in logs:\n%s", logText)
 	}
 }
 

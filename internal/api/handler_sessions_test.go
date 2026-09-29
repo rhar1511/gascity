@@ -3,7 +3,6 @@ package api
 import (
 	"bytes"
 	"context"
-	"crypto/md5" //nolint:gosec // Kimi uses MD5 as its documented workdir storage key.
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -6032,12 +6031,12 @@ func TestHandleSessionTranscriptSyntheticCursorSurvivesTruncationAndInvalidatesO
 		t.Fatalf("Create: %v", err)
 	}
 
-	workHash := fmt.Sprintf("%x", md5.Sum([]byte(filepath.Clean(workDir))))
+	workKey := kimiCodeTestWorkDirKey(workDir)
 	sessionDir := info.SessionKey
 	if sessionDir == "" {
 		sessionDir = "kimi-session"
 	}
-	path := filepath.Join(searchBase, workHash, sessionDir, "context.jsonl")
+	path := filepath.Join(searchBase, "sessions", workKey, sessionDir, "agents", "main", "wire.jsonl")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatalf("mkdir Kimi fixture: %v", err)
 	}
@@ -6048,9 +6047,9 @@ func TestHandleSessionTranscriptSyntheticCursorSurvivesTruncationAndInvalidatesO
 		}
 	}
 	initialLines := []string{
-		`{"role":"user","content":"zero"}`,
-		`{"role":"assistant","content":"one"}`,
-		`{"role":"user","content":"two"}`,
+		`{"type":"context.append_message","message":{"role":"user","content":"zero"}}`,
+		`{"type":"context.append_message","message":{"role":"assistant","content":"one"}}`,
+		`{"type":"context.append_message","message":{"role":"user","content":"two"}}`,
 	}
 	write(initialLines...)
 	initial, err := sessionlog.ReadProviderFile("kimi", path, 0)
@@ -6090,9 +6089,9 @@ func TestHandleSessionTranscriptSyntheticCursorSurvivesTruncationAndInvalidatesO
 		{name: "after", cursor: initial.Messages[1].UUID, wantOlder: true},
 	}
 	replacementLines := []string{
-		`{"role":"user","content":"replacement zero"}`,
-		`{"role":"assistant","content":"replacement one"}`,
-		`{"role":"user","content":"replacement two"}`,
+		`{"type":"context.append_message","message":{"role":"user","content":"replacement zero"}}`,
+		`{"type":"context.append_message","message":{"role":"assistant","content":"replacement one"}}`,
+		`{"type":"context.append_message","message":{"role":"user","content":"replacement two"}}`,
 	}
 
 	for _, surface := range surfaces {

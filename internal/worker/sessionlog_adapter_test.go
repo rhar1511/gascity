@@ -1,7 +1,7 @@
 package worker
 
 import (
-	"crypto/md5"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"io/fs"
@@ -296,15 +296,15 @@ func TestSessionLogAdapterReadTranscriptAllowsKimiSymlinkedSessionRoot(t *testin
 		t.Skipf("symlinks not supported: %v", err)
 	}
 	const (
-		workDir   = "/tmp/gascity/phase1/kimi"
-		workHash  = "5decc6790b1207964f31266c8258989e"
+		workDir   = "/tmp/kimi-probe-ws"
+		workKey   = "wd_kimi-probe-ws_87061d3d7a56"
 		sessionID = "session-key"
 	)
-	path := filepath.Join(accountRoot, workHash, sessionID, "context.jsonl")
+	path := filepath.Join(accountRoot, workKey, sessionID, "agents", "main", "wire.jsonl")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatalf("mkdir Kimi transcript dir: %v", err)
 	}
-	writeLines(t, path, `{"role":"user","content":"via Kimi account root"}`)
+	writeLines(t, path, `{"type":"context.append_message","message":{"role":"user","content":"via Kimi account root"}}`)
 
 	adapter := SessionLogAdapter{SearchPaths: []string{searchRoot}}
 	discovered := adapter.DiscoverTranscript("kimi", workDir, sessionID)
@@ -1247,14 +1247,14 @@ func TestSessionLogAdapterLoadHistoryKimiToolResultError(t *testing.T) {
 func TestSessionLogAdapterDiscoverTranscriptKimiKeyedMissFailsClosed(t *testing.T) {
 	t.Parallel()
 
-	workDir := "/tmp/kimi-project"
+	workDir := "/tmp/kimi-probe-ws"
 	base := t.TempDir()
-	workHash := kimiTestWorkDirHash(workDir)
-	otherPath := filepath.Join(base, "sessions", workHash, "different-session", "context.jsonl")
+	workKey := "wd_kimi-probe-ws_87061d3d7a56"
+	otherPath := filepath.Join(base, "sessions", workKey, "different-session", "agents", "main", "wire.jsonl")
 	if err := os.MkdirAll(filepath.Dir(otherPath), 0o755); err != nil {
 		t.Fatalf("mkdir kimi transcript dir: %v", err)
 	}
-	writeLines(t, otherPath, `{"role":"user","content":"not this session"}`)
+	writeLines(t, otherPath, `{"type":"context.append_message","message":{"role":"user","content":"not this session"}}`)
 
 	adapter := SessionLogAdapter{SearchPaths: []string{base}}
 	discovered := adapter.DiscoverTranscript("kimi/tmux-cli", workDir, "missing-session")
@@ -1266,19 +1266,19 @@ func TestSessionLogAdapterDiscoverTranscriptKimiKeyedMissFailsClosed(t *testing.
 func TestSessionLogAdapterDiscoverTranscriptKimiEmptyKeyFailsClosedWhenAmbiguous(t *testing.T) {
 	t.Parallel()
 
-	workDir := "/tmp/kimi-project"
+	workDir := "/tmp/kimi-probe-ws"
 	base := t.TempDir()
-	workHash := kimiTestWorkDirHash(workDir)
-	firstPath := filepath.Join(base, "sessions", workHash, "first-session", "context.jsonl")
-	secondPath := filepath.Join(base, "sessions", workHash, "second-session", "context.jsonl")
+	workKey := "wd_kimi-probe-ws_87061d3d7a56"
+	firstPath := filepath.Join(base, "sessions", workKey, "first-session", "agents", "main", "wire.jsonl")
+	secondPath := filepath.Join(base, "sessions", workKey, "second-session", "agents", "main", "wire.jsonl")
 	if err := os.MkdirAll(filepath.Dir(firstPath), 0o755); err != nil {
 		t.Fatalf("mkdir first kimi transcript dir: %v", err)
 	}
 	if err := os.MkdirAll(filepath.Dir(secondPath), 0o755); err != nil {
 		t.Fatalf("mkdir second kimi transcript dir: %v", err)
 	}
-	writeLines(t, firstPath, `{"role":"user","content":"first"}`)
-	writeLines(t, secondPath, `{"role":"user","content":"second"}`)
+	writeLines(t, firstPath, `{"type":"context.append_message","message":{"role":"user","content":"first"}}`)
+	writeLines(t, secondPath, `{"type":"context.append_message","message":{"role":"user","content":"second"}}`)
 
 	adapter := SessionLogAdapter{SearchPaths: []string{base}}
 	discovered := adapter.DiscoverTranscript("kimi/tmux-cli", workDir, "")
@@ -1873,9 +1873,17 @@ func writeLines(t *testing.T, path string, lines ...string) {
 	}
 }
 
-func kimiTestWorkDirHash(workDir string) string {
-	sum := md5.Sum([]byte(workDir))
-	return hex.EncodeToString(sum[:])
+func kimiTestWorkDirKey(workDir string) string {
+	if resolved, err := filepath.EvalSymlinks(workDir); err == nil {
+		workDir = resolved
+	}
+	normalized := strings.TrimRight(strings.ReplaceAll(filepath.Clean(workDir), `\`, "/"), "/")
+	slug := strings.ToLower(filepath.Base(normalized))
+	if slug == "" || slug == "." || slug == ".." {
+		slug = "workspace"
+	}
+	sum := sha256.Sum256([]byte(normalized))
+	return "wd_" + slug + "_" + hex.EncodeToString(sum[:6])
 }
 
 // Zero-delta guard. The activity derivation exists because this repo owns the
