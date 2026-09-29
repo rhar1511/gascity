@@ -66,6 +66,11 @@ func TestCanaryPostsOnceAndSuppressesSameEpochRefire(t *testing.T) {
 		AllowLoopback: true,
 		JEVVersion:    "jev-1.13-free", RLCDVersion: "rlcd-local-v1", SemIFVersion: "semif-qwen-local-v1",
 	}
+	intentPath, err := canaryIntentPath(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(intentPath) })
 	errorsCh := make(chan error, 2)
 	var workers sync.WaitGroup
 	for range 2 {
@@ -111,6 +116,20 @@ func TestCanaryPostsOnceAndSuppressesSameEpochRefire(t *testing.T) {
 	if err := runCanary(context.Background(), config); err != nil {
 		t.Fatalf("stable third canary invocation: %v", err)
 	}
+	mu.Lock()
+	retainedComment := comments[0]
+	comments = nil
+	mu.Unlock()
+	if err := os.Remove(output); err != nil {
+		t.Fatal(err)
+	}
+	if err := runCanary(context.Background(), config); err == nil || posts != 1 {
+		t.Fatalf("deleted remote receipt reused completed authorization: err=%v posts=%d", err, posts)
+	}
+	writeFixtureJSON(t, output, evidence)
+	mu.Lock()
+	comments = []forgeComment{retainedComment}
+	mu.Unlock()
 	evidence.Transport.CommentID++
 	writeFixtureJSON(t, output, evidence)
 	if err := runCanary(context.Background(), config); err == nil {
@@ -161,6 +180,27 @@ func TestCanaryRejectsUnreviewedHeadBeforeForgejo(t *testing.T) {
 	})
 	if err == nil || requests != 0 {
 		t.Fatalf("unreviewed source head reached Forgejo: err=%v requests=%d", err, requests)
+	}
+}
+
+func TestCanaryRejectsUnauthorizedSyntheticBeadBeforeForgejo(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		requests++
+		http.Error(writer, "unexpected", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	dir := t.TempDir()
+	verification, authorization, reviewedHead := writeGateFixtures(t, dir)
+	err := runCanary(context.Background(), canaryConfig{
+		ForgejoURL: server.URL, Repository: "inktri/inktree", Issue: 777,
+		RequestID: "req-syn-0003", BeadID: "inktree-syn0004", Output: filepath.Join(dir, "canary.json"),
+		Token: "fixture-token", HTTPClient: server.Client(), Verification: verification, Authorization: authorization,
+		SourceHead: reviewedHead, JEVVersion: "jev-1", RLCDVersion: "rlcd-1", SemIFVersion: "semif-1",
+		AllowLoopback: true,
+	})
+	if err == nil || requests != 0 {
+		t.Fatalf("unauthorized synthetic bead reached Forgejo: err=%v requests=%d", err, requests)
 	}
 }
 
@@ -314,7 +354,7 @@ func TestCanaryRecoversVisibleCommentAfterEvidenceWriteFailure(t *testing.T) {
 func TestProductionConfigRejectsLoopback(t *testing.T) {
 	_, err := validateCanaryConfig(canaryConfig{
 		ForgejoURL: "http://127.0.0.1:3000", Repository: "inktri/inktree", Issue: 777,
-		RequestID: "req-syn-0003", Output: "/tmp/out", Verification: "/tmp/verification",
+		RequestID: "req-syn-0003", BeadID: "inktree-syn0003", Output: "/tmp/out", Verification: "/tmp/verification",
 		Authorization: "/tmp/authorization", Token: "token", HTTPClient: http.DefaultClient,
 	})
 	if err == nil {
@@ -343,11 +383,89 @@ func TestReviewedWorktreeRejectsUntrackedSource(t *testing.T) {
 		t.Fatal(err)
 	}
 	external := t.TempDir()
+	authorization := filepath.Join(external, "authorization.json")
+	if err := os.WriteFile(authorization, []byte("{}"), 0o400); err != nil {
+		t.Fatal(err)
+	}
 	err := validateReviewedWorktree(context.Background(), canaryConfig{
-		WorkDir: repository, Output: filepath.Join(external, "out.json"), Authorization: filepath.Join(external, "authorization.json"),
+		WorkDir: repository, Output: filepath.Join(external, "out.json"), Authorization: authorization,
 	})
 	if err == nil {
 		t.Fatal("untracked source was accepted as reviewed")
+	}
+}
+
+func TestReviewedWorktreeRejectsSymlinkedExternalOutput(t *testing.T) {
+	repository := t.TempDir()
+	runGit := func(arguments ...string) {
+		t.Helper()
+		command := exec.Command("git", arguments...)
+		command.Dir = repository
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", arguments, err, output)
+		}
+	}
+	runGit("init", "-q")
+	tracked := filepath.Join(repository, "tracked.go")
+	if err := os.WriteFile(tracked, []byte("package reviewed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", "tracked.go")
+	runGit("-c", "user.name=Canary Test", "-c", "user.email=canary@example.invalid", "commit", "-qm", "reviewed")
+	external := t.TempDir()
+	link := filepath.Join(external, "apparent-external")
+	if err := os.Symlink(repository, link); err != nil {
+		t.Fatal(err)
+	}
+	authorization := filepath.Join(external, "authorization.json")
+	if err := os.WriteFile(authorization, []byte("{}"), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	err := validateReviewedWorktree(context.Background(), canaryConfig{
+		WorkDir: repository, Output: filepath.Join(link, "canary.json"), Authorization: authorization,
+	})
+	if err == nil {
+		t.Fatal("symlinked output path re-entered the reviewed worktree")
+	}
+}
+
+func TestProductionDescriptorsBindEvidenceAndOutput(t *testing.T) {
+	repository := t.TempDir()
+	runGit := func(arguments ...string) {
+		t.Helper()
+		command := exec.Command("git", arguments...)
+		command.Dir = repository
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", arguments, err, output)
+		}
+	}
+	runGit("init", "-q")
+	evidencePath := filepath.Join(repository, "verification.json")
+	if err := os.WriteFile(evidencePath, []byte("{\"passed\":true}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", "verification.json")
+	runGit("-c", "user.name=Canary Test", "-c", "user.email=canary@example.invalid", "commit", "-qm", "reviewed")
+	outputDirectory := t.TempDir()
+	if err := os.Chmod(outputDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	config := canaryConfig{WorkDir: repository, Output: filepath.Join(outputDirectory, "canary.json")}
+	data, err := readReviewedEvidenceFile(context.Background(), config, evidencePath, "fixture evidence")
+	if err != nil || string(data) != "{\"passed\":true}\n" {
+		t.Fatalf("read reviewed evidence descriptor: data=%q err=%v", data, err)
+	}
+	directory, err := openStableOutputDirectory(context.Background(), config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = directory.Close() }()
+	if err := writeJSON(context.Background(), config, config.Output, directory, map[string]bool{"passed": true}); err != nil {
+		t.Fatal(err)
+	}
+	written, err := os.ReadFile(config.Output)
+	if err != nil || !bytes.Contains(written, []byte(`"passed": true`)) {
+		t.Fatalf("write stable output descriptor: data=%q err=%v", written, err)
 	}
 }
 
@@ -401,7 +519,7 @@ func writeGateFixtures(t *testing.T, dir string) (string, string, string) {
 		t.Fatal(err)
 	}
 	writeFixtureJSON(t, authorizationPath, canaryAuthorization{
-		Version: "inktree-forgejo-canary-authorization/v1", RequestID: "req-syn-0003",
+		Version: "inktree-forgejo-canary-authorization/v1", RequestID: "req-syn-0003", BeadID: "inktree-syn0003",
 		Repository: "inktri/inktree", Issue: 777, BindingID: "binding-0123456789abcdef0123456789abcdef",
 		ReviewedHead: reviewedHead, VerificationSHA256: sha256Hex(verificationData),
 		OfflineGatesPassed: true, IndependentReviewPassed: true,

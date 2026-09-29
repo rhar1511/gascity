@@ -32,6 +32,7 @@ const authorizedForgejoOrigin = "https://forgejo.harjanto.id.au"
 var (
 	repositoryPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*$`)
 	requestIDPattern  = regexp.MustCompile(`^req-syn-[0-9]{4,}$`)
+	beadIDPattern     = regexp.MustCompile(`^inktree-syn[0-9]{4,}$`)
 	bindingIDPattern  = regexp.MustCompile(`^binding-[0-9a-f]{32}$`)
 	commitPattern     = regexp.MustCompile(`^[0-9a-f]{40}$`)
 	digestPattern     = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -77,6 +78,7 @@ type forgeComment struct {
 type canaryAuthorization struct {
 	Version                   string `json:"version"`
 	RequestID                 string `json:"request_id"`
+	BeadID                    string `json:"bead_id"`
 	Repository                string `json:"repository"`
 	Issue                     int64  `json:"issue"`
 	BindingID                 string `json:"binding_id"`
@@ -170,10 +172,13 @@ type executionTrace struct {
 
 type deliveryIntent struct {
 	Version        string `json:"version"`
+	State          string `json:"state"`
 	RequestID      string `json:"request_id"`
+	BeadID         string `json:"bead_id"`
 	Repository     string `json:"repository"`
 	Issue          int64  `json:"issue"`
 	NotificationID string `json:"notification_id"`
+	CommentID      int64  `json:"comment_id,omitempty"`
 }
 
 type canaryRuntime struct {
@@ -220,6 +225,14 @@ func runCanary(ctx context.Context, config canaryConfig) error {
 	reviewedHead, headChecks, authorization, err := validateOfflineAdmission(ctx, config)
 	if err != nil {
 		return err
+	}
+	var outputDirectory *os.File
+	if config.SourceHead == "" {
+		outputDirectory, err = openStableOutputDirectory(ctx, config)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = outputDirectory.Close() }()
 	}
 	release, err := acquireCanaryLock(config)
 	if err != nil {
@@ -343,9 +356,12 @@ func runCanary(ctx context.Context, config canaryConfig) error {
 	if err != nil {
 		return err
 	}
-	intentExists, err := validateDeliveryIntent(intentPath, config, projection.Envelope.NotificationID)
+	intent, err := readDeliveryIntent(intentPath, config, projection.Envelope.NotificationID)
 	if err != nil {
 		return err
+	}
+	if intent != nil && intent.State == "completed" && existing != nil && intent.CommentID != existing.ID {
+		return errors.New("durable completion receipt does not match the attested Forgejo comment")
 	}
 	if prior.RefireSuppressed {
 		if existing == nil {
@@ -354,10 +370,11 @@ func runCanary(ctx context.Context, config canaryConfig) error {
 		if existing.ID != prior.Transport.CommentID {
 			return errors.New("retained Forgejo receipt does not match the attested comment")
 		}
-		if intentExists {
-			if err := removeDeliveryIntent(intentPath); err != nil {
-				return err
-			}
+		if intent != nil && intent.CommentID != 0 && intent.CommentID != existing.ID {
+			return errors.New("durable completion receipt does not match the attested Forgejo comment")
+		}
+		if err := completeDeliveryIntent(intentPath, config, projection.Envelope.NotificationID, existing.ID); err != nil {
+			return err
 		}
 		return nil
 	}
@@ -372,7 +389,7 @@ func runCanary(ctx context.Context, config canaryConfig) error {
 			transport.Recovered = true
 		}
 	} else {
-		if intentExists {
+		if intent != nil {
 			return errors.New("an earlier Forgejo delivery attempt has an uncertain outcome; refusing to post again")
 		}
 		if receipt.Suppressed {
@@ -402,10 +419,10 @@ func runCanary(ctx context.Context, config canaryConfig) error {
 		Ledger: ledger.Snapshot(), LatestReceipt: receipt, Transport: transport,
 		ExecutionTrace: runtime.trace,
 	}
-	if err := writeJSON(config.Output, evidence); err != nil {
+	if err := writeJSON(ctx, config, config.Output, outputDirectory, evidence); err != nil {
 		return err
 	}
-	if err := removeDeliveryIntent(intentPath); err != nil {
+	if err := completeDeliveryIntent(intentPath, config, projection.Envelope.NotificationID, transport.CommentID); err != nil {
 		return err
 	}
 	return nil
@@ -414,7 +431,7 @@ func runCanary(ctx context.Context, config canaryConfig) error {
 func validateCanaryConfig(config canaryConfig) (*url.URL, error) {
 	if config.Token == "" || config.HTTPClient == nil || !repositoryPattern.MatchString(config.Repository) ||
 		config.Issue < 1 || !requestIDPattern.MatchString(config.RequestID) || config.Output == "" ||
-		config.Verification == "" || config.Authorization == "" {
+		!beadIDPattern.MatchString(config.BeadID) || config.Verification == "" || config.Authorization == "" {
 		return nil, errors.New("canary configuration is incomplete or malformed")
 	}
 	parsed, err := url.Parse(config.ForgejoURL)
@@ -435,7 +452,7 @@ func validateOfflineAdmission(ctx context.Context, config canaryConfig) (string,
 		return "", 0, canaryAuthorization{}, err
 	}
 	if authorization.Version != "inktree-forgejo-canary-authorization/v1" ||
-		authorization.RequestID != config.RequestID || authorization.Repository != config.Repository ||
+		authorization.RequestID != config.RequestID || authorization.BeadID != config.BeadID || authorization.Repository != config.Repository ||
 		authorization.Issue != config.Issue || !bindingIDPattern.MatchString(authorization.BindingID) ||
 		!commitPattern.MatchString(authorization.ReviewedHead) || !digestPattern.MatchString(authorization.VerificationSHA256) ||
 		!authorization.OfflineGatesPassed ||
@@ -465,7 +482,7 @@ func validateOfflineAdmission(ctx context.Context, config canaryConfig) (string,
 			return "", headChecks, canaryAuthorization{}, err
 		}
 	}
-	verificationData, err := os.ReadFile(config.Verification)
+	verificationData, err := readReviewedEvidenceFile(ctx, config, config.Verification, "offline verification manifest")
 	if err != nil {
 		return "", headChecks, canaryAuthorization{}, fmt.Errorf("read offline verification manifest: %w", err)
 	}
@@ -492,7 +509,7 @@ func validateOfflineAdmission(ctx context.Context, config canaryConfig) (string,
 		return "", headChecks, canaryAuthorization{}, err
 	}
 	replayPath := filepath.Join(filepath.Dir(config.Verification), "replay.json")
-	replayData, err := os.ReadFile(replayPath)
+	replayData, err := readReviewedEvidenceFile(ctx, config, replayPath, "retained replay evidence")
 	if err != nil {
 		return "", headChecks, canaryAuthorization{}, fmt.Errorf("read retained replay evidence: %w", err)
 	}
@@ -530,12 +547,21 @@ func validateReviewedWorktree(ctx context.Context, config canaryConfig) error {
 		return fmt.Errorf("resolve reviewed worktree: %w", err)
 	}
 	root := strings.TrimSpace(string(rootData))
-	for _, path := range []string{config.Output, config.Authorization} {
-		absolute, err := filepath.Abs(path)
+	physicalRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return fmt.Errorf("resolve physical reviewed worktree: %w", err)
+	}
+	for index, path := range []string{config.Output, config.Authorization} {
+		var physical string
+		if index == 0 {
+			physical, err = prospectivePhysicalPath(path)
+		} else {
+			physical, err = filepath.EvalSymlinks(path)
+		}
 		if err != nil {
 			return err
 		}
-		relative, err := filepath.Rel(root, absolute)
+		relative, err := filepath.Rel(physicalRoot, physical)
 		if err != nil {
 			return err
 		}
@@ -554,6 +580,124 @@ func validateReviewedWorktree(ctx context.Context, config canaryConfig) error {
 			continue
 		}
 		return fmt.Errorf("reviewed source worktree is dirty: %q", string(entry))
+	}
+	return nil
+}
+
+func prospectivePhysicalPath(path string) (string, error) {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	if info, err := os.Lstat(absolute); err == nil {
+		if !info.Mode().IsRegular() {
+			return "", errors.New("canary output must be a regular file when it already exists")
+		}
+		return filepath.EvalSymlinks(absolute)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	parent, err := filepath.EvalSymlinks(filepath.Dir(absolute))
+	if err != nil {
+		return "", errors.New("canary output parent must already exist and resolve outside the reviewed worktree")
+	}
+	return filepath.Join(parent, filepath.Base(absolute)), nil
+}
+
+func readReviewedEvidenceFile(ctx context.Context, config canaryConfig, path, label string) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", label, err)
+	}
+	defer func() { _ = file.Close() }()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("inspect %s: %w", label, err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s must be a regular file", label)
+	}
+	if config.SourceHead != "" {
+		return io.ReadAll(io.LimitReader(file, 1<<20))
+	}
+	physical, err := filepath.EvalSymlinks(fmt.Sprintf("/proc/self/fd/%d", file.Fd()))
+	if err != nil {
+		return nil, fmt.Errorf("resolve opened %s: %w", label, err)
+	}
+	rootCommand := exec.CommandContext(ctx, "git", "rev-parse", "--show-toplevel")
+	rootCommand.Dir = config.WorkDir
+	rootData, err := rootCommand.Output()
+	if err != nil {
+		return nil, fmt.Errorf("resolve reviewed worktree for %s: %w", label, err)
+	}
+	root, err := filepath.EvalSymlinks(strings.TrimSpace(string(rootData)))
+	if err != nil {
+		return nil, err
+	}
+	relative, err := filepath.Rel(root, physical)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return nil, fmt.Errorf("%s must resolve inside the reviewed worktree", label)
+	}
+	trackedCommand := exec.CommandContext(ctx, "git", "ls-files", "--error-unmatch", "--", relative)
+	trackedCommand.Dir = root
+	if err := trackedCommand.Run(); err != nil {
+		return nil, fmt.Errorf("%s must be tracked at the reviewed head", label)
+	}
+	return io.ReadAll(io.LimitReader(file, 1<<20))
+}
+
+func openStableOutputDirectory(ctx context.Context, config canaryConfig) (*os.File, error) {
+	absolute, err := filepath.Abs(config.Output)
+	if err != nil {
+		return nil, err
+	}
+	physicalParent, err := filepath.EvalSymlinks(filepath.Dir(absolute))
+	if err != nil {
+		return nil, errors.New("canary output parent must already exist")
+	}
+	directory, err := os.Open(physicalParent)
+	if err != nil {
+		return nil, fmt.Errorf("open stable canary output directory: %w", err)
+	}
+	failed := true
+	defer func() {
+		if failed {
+			_ = directory.Close()
+		}
+	}()
+	if err := validateStableOutputDirectory(ctx, config, directory); err != nil {
+		return nil, err
+	}
+	failed = false
+	return directory, nil
+}
+
+func validateStableOutputDirectory(ctx context.Context, config canaryConfig, directory *os.File) error {
+	info, err := directory.Stat()
+	if err != nil || !info.IsDir() {
+		return errors.New("stable canary output parent is not a directory")
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat.Uid != uint32(os.Getuid()) || info.Mode().Perm()&0o077 != 0 {
+		return errors.New("stable canary output parent must be private and owned by the current user")
+	}
+	openedPath, err := filepath.EvalSymlinks(fmt.Sprintf("/proc/self/fd/%d", directory.Fd()))
+	if err != nil {
+		return fmt.Errorf("resolve stable canary output directory: %w", err)
+	}
+	rootCommand := exec.CommandContext(ctx, "git", "rev-parse", "--show-toplevel")
+	rootCommand.Dir = config.WorkDir
+	rootData, err := rootCommand.Output()
+	if err != nil {
+		return err
+	}
+	physicalRoot, err := filepath.EvalSymlinks(strings.TrimSpace(string(rootData)))
+	if err != nil {
+		return err
+	}
+	relative, err := filepath.Rel(physicalRoot, openedPath)
+	if err != nil || (relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))) {
+		return errors.New("stable canary output directory resolves inside the reviewed worktree")
 	}
 	return nil
 }
@@ -744,28 +888,31 @@ func validatePrivateDirectory(path string) error {
 	return nil
 }
 
-func validateDeliveryIntent(path string, config canaryConfig, notificationID string) (bool, error) {
+func readDeliveryIntent(path string, config canaryConfig, notificationID string) (*deliveryIntent, error) {
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return false, nil
+		return nil, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("read canary delivery intent: %w", err)
+		return nil, fmt.Errorf("read canary delivery intent: %w", err)
 	}
 	intent := deliveryIntent{}
 	if err := decodeStrict(data, &intent); err != nil {
-		return false, fmt.Errorf("decode canary delivery intent: %w", err)
+		return nil, fmt.Errorf("decode canary delivery intent: %w", err)
 	}
 	if intent.Version != "inktree-forgejo-delivery-intent/v1" || intent.RequestID != config.RequestID ||
-		intent.Repository != config.Repository || intent.Issue != config.Issue || intent.NotificationID != notificationID {
-		return false, errors.New("canary delivery intent does not match the authorized target")
+		intent.BeadID != config.BeadID || intent.Repository != config.Repository || intent.Issue != config.Issue ||
+		intent.NotificationID != notificationID ||
+		(intent.State != "started" && intent.State != "completed") ||
+		(intent.State == "started" && intent.CommentID != 0) || (intent.State == "completed" && intent.CommentID == 0) {
+		return nil, errors.New("canary delivery intent does not match the authorized target")
 	}
-	return true, nil
+	return &intent, nil
 }
 
 func createDeliveryIntent(path string, config canaryConfig, notificationID string) error {
 	intent := deliveryIntent{
-		Version: "inktree-forgejo-delivery-intent/v1", RequestID: config.RequestID,
+		Version: "inktree-forgejo-delivery-intent/v1", State: "started", RequestID: config.RequestID, BeadID: config.BeadID,
 		Repository: config.Repository, Issue: config.Issue, NotificationID: notificationID,
 	}
 	data, err := json.Marshal(intent)
@@ -793,9 +940,37 @@ func createDeliveryIntent(path string, config canaryConfig, notificationID strin
 	return nil
 }
 
-func removeDeliveryIntent(path string) error {
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("remove completed canary delivery intent: %w", err)
+func completeDeliveryIntent(path string, config canaryConfig, notificationID string, commentID int64) error {
+	if commentID == 0 {
+		return errors.New("cannot complete canary delivery without a Forgejo receipt")
+	}
+	intent := deliveryIntent{
+		Version: "inktree-forgejo-delivery-intent/v1", State: "completed", RequestID: config.RequestID, BeadID: config.BeadID,
+		Repository: config.Repository, Issue: config.Issue, NotificationID: notificationID, CommentID: commentID,
+	}
+	data, err := json.Marshal(intent)
+	if err != nil {
+		return err
+	}
+	temp, err := os.CreateTemp(filepath.Dir(path), ".canary-completed-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create completed canary state: %w", err)
+	}
+	tempName := temp.Name()
+	defer func() { _ = os.Remove(tempName) }()
+	if _, err := temp.Write(append(data, '\n')); err != nil {
+		_ = temp.Close()
+		return err
+	}
+	if err := temp.Sync(); err != nil {
+		_ = temp.Close()
+		return err
+	}
+	if err := temp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tempName, path); err != nil {
+		return fmt.Errorf("retain completed canary state: %w", err)
 	}
 	return syncDirectory(filepath.Dir(path))
 }
@@ -885,16 +1060,20 @@ func sha256Hex(data []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func writeJSON(path string, value any) (retErr error) {
+func writeJSON(ctx context.Context, config canaryConfig, path string, stableDirectory *os.File, value any) (retErr error) {
 	data, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode canary evidence: %w", err)
 	}
 	data = append(data, '\n')
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("create canary evidence directory: %w", err)
+	directory := filepath.Dir(path)
+	if stableDirectory != nil {
+		if err := validateStableOutputDirectory(ctx, config, stableDirectory); err != nil {
+			return err
+		}
+		directory = fmt.Sprintf("/proc/self/fd/%d", stableDirectory.Fd())
 	}
-	temp, err := os.CreateTemp(filepath.Dir(path), ".forgejo-canary-*.tmp")
+	temp, err := os.CreateTemp(directory, ".forgejo-canary-*.tmp")
 	if err != nil {
 		return fmt.Errorf("create canary evidence temp: %w", err)
 	}
@@ -908,11 +1087,24 @@ func writeJSON(path string, value any) (retErr error) {
 		_ = temp.Close()
 		return err
 	}
+	if err := temp.Sync(); err != nil {
+		_ = temp.Close()
+		return err
+	}
 	if err := temp.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(tempName, path); err != nil {
+	destination := path
+	if stableDirectory != nil {
+		destination = filepath.Join(directory, filepath.Base(path))
+	}
+	if err := os.Rename(tempName, destination); err != nil {
 		return err
+	}
+	if stableDirectory != nil {
+		if err := stableDirectory.Sync(); err != nil {
+			return fmt.Errorf("sync canary evidence directory: %w", err)
+		}
 	}
 	return nil
 }

@@ -67,22 +67,25 @@ GIT_DIR="$(git rev-parse --git-dir)" GIT_WORK_TREE="$PWD" \
 ```
 
 The mode-0400 authorization document and output must remain outside the clean
-reviewed worktree. The authorization document must bind the synthetic request,
-repository, issue, opaque binding ID, and exact reviewed 40-hex source head, and
-explicitly attest the offline gates, independent review, and synthetic canary
-authorization. The command also verifies the retained policy/corpus hashes and
-refuses redirects, unrelated comments, arbitrary HTTPS origins, and source-head
-drift before any write. It also verifies that the running Go binary was built
-from that clean reviewed head. Run the exact command twice. The first run must
-retain one Forgejo comment receipt; the second must retain
+reviewed worktree, and the output directory must be mode 0700 and owned by the
+operator. The authorization document must bind the synthetic request,
+repository, issue, synthetic bead, opaque binding ID, and exact reviewed 40-hex
+source head, and explicitly attest the offline gates, independent review, and
+synthetic canary authorization. The command also verifies the retained
+policy/corpus hashes and refuses redirects, unrelated comments, arbitrary HTTPS
+origins, physical paths entering the worktree, and source-head drift before any
+write. It also verifies that the running Go binary was built from that clean
+reviewed head. Run the exact command twice. The first run must retain one
+Forgejo comment receipt; the second must retain
 `same_epoch_refire_suppressed: true` without a second comment. This command is
 not a live route or worker dispatch path.
 
 The authorization file is an operator-local control in the same trust domain as
 the mode-0600 token; processes running as that operator can access both. A
-durable intent is written and synced before the sole POST. If the POST outcome
-is uncertain and no comment is visible, the command fails closed and will not
-retry that request. Do not delete the intent to force a retry: inspect Forgejo
+durable intent is written and synced before the sole POST, then retained as a
+completed target tombstone. If the POST outcome is uncertain and no comment is
+visible, the command fails closed and will not retry that request. Do not delete
+the intent to force a retry: inspect Forgejo
 and the retained state, then authorize a new synthetic request if delivery was
 not accepted.
 
@@ -90,6 +93,7 @@ not accepted.
 {
   "version": "inktree-forgejo-canary-authorization/v1",
   "request_id": "req-syn-0003",
+  "bead_id": "inktree-syn0003",
   "repository": "inktri/inktree",
   "issue": 1234,
   "binding_id": "binding-0123456789abcdef0123456789abcdef",
