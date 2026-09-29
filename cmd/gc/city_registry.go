@@ -73,6 +73,10 @@ type cityRegistry struct {
 	// city start workers are launched. Per-city state copies this trusted
 	// handle; config reloads and worker environment never replace it.
 	compatibilityAuthority qualification.CompatibilityAuthority
+	// beadsPermitResolver is the supervisor-owned, host-authenticated signing
+	// authority snapshot. It is loaded once before any city is published and
+	// closed only after all city runtimes stop.
+	beadsPermitResolver *hostBeadsPermitResolver
 }
 
 type recentlyUnregisteredCity struct {

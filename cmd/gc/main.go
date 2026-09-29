@@ -37,6 +37,15 @@ func main() {
 // the exit-bypass census to be nothing but the os.Exit around this call, so any
 // work that must happen before dispatch belongs here rather than there.
 func mainExitCode(args []string, stdout, stderr io.Writer) int {
+	// Seal controller memory before command dispatch can request signing
+	// material from the host broker. The configured controller loader repeats
+	// this check immediately before connecting and fails closed as well.
+	if directory, configured := os.LookupEnv(hostBeadsPermitAuthorityDirEnv); configured && directory != "" {
+		if err := hostBeadsPermitLockProcessMemory(); err != nil {
+			fmt.Fprintf(stderr, "gc: protect configured Beads signing authority process: %v\n", err) //nolint:errcheck
+			return 1
+		}
+	}
 	// Before any dispatch: a closed stdout/stderr must surface as an EPIPE the
 	// command can handle, not as a signal that kills gc mid-write. The claim
 	// path's delivery unwind depends on surviving that write.

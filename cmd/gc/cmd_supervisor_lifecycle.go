@@ -553,6 +553,14 @@ func doSupervisorStart(stdout, stderr io.Writer) int {
 }
 
 func doSupervisorStartJSON(stdout, stderr io.Writer, jsonOut bool) int {
+	if directory := os.Getenv(hostBeadsPermitAuthorityDirEnv); directory != "" {
+		// The authority broker releases key material only to a controller PID
+		// registered by its root launcher with a pidfd-backed launch record. This
+		// user-level fork cannot create that record, so refuse it explicitly. The
+		// trusted launcher must invoke `gc supervisor run` directly.
+		fmt.Fprintln(stderr, "gc supervisor start: configured Beads signing authority requires a root broker launcher; invoke supervisor run through that launcher") //nolint:errcheck
+		return 1
+	}
 	delegation, delegated, err := supervisorSystemdDelegation()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc supervisor start: %v\n", err) //nolint:errcheck // best-effort stderr

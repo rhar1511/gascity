@@ -207,6 +207,13 @@ func (m cleanupTestingM) Run() int {
 }
 
 func TestMain(m *testing.M) {
+	// Production requires root-owned authority policy. Tests use temp
+	// directories owned by the test UID; root ownership has separate coverage.
+	hostBeadsPermitAuthorityOwnerIsTrusted = hostBeadsPermitOwnerIsTrusted
+	hostBeadsPermitBrokerOwnerIsTrusted = hostBeadsPermitOwnerIsTrusted
+	hostBeadsPermitBrokerUIDIsTrusted = func(ownerUID uint64) bool {
+		return hostBeadsPermitOwnerUIDIsTrusted(ownerUID, os.Geteuid())
+	}
 	maybeRunProductMetricsDirectChildEnvSpy()
 
 	// testscript re-executes the test binary as "gc" or "bd" for each txtar

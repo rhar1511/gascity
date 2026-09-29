@@ -1305,6 +1305,18 @@ func runController(
 		return 1
 	}
 	defer lock.Close() //nolint:errcheck // best-effort cleanup
+	beadsPermitResolver, err := loadHostBeadsPermitResolverFromEnv()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc start: protected Beads authority: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	if beadsPermitResolver != nil {
+		defer func() {
+			if err := beadsPermitResolver.close(); err != nil {
+				fmt.Fprintf(stderr, "gc start: close protected Beads authority: %v\n", err) //nolint:errcheck
+			}
+		}()
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1399,6 +1411,12 @@ func runController(
 	// disabled. Standalone runtime still needs cached city/rig stores for
 	// session-bead sync and rig-scoped wake decisions.
 	cs := newControllerStateWithRoutes(ctx, cr.storageRoutes, cfg, sp, eventProv, cityName, cityPath)
+	if err := configureControllerProtectedDecisionFrontierStores(cs, cfg, beadsPermitResolver); err != nil {
+		closeUnpublishedControllerStores(cs.cityBeadStore, cs.beadStores)
+		cr.shutdown()
+		fmt.Fprintf(stderr, "gc start: configure protected Beads authority: %v\n", err) //nolint:errcheck
+		return 1
+	}
 	cs.ct = cr.crashTrack()
 	cs.pokeCh = pokeCh
 	cs.configDirty = configDirty

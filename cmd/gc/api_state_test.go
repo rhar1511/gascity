@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -807,6 +808,87 @@ func writeBackendMetadata(t *testing.T, scopeRoot, data string) {
 	}
 	if err := os.WriteFile(filepath.Join(dir, "metadata.json"), []byte(data+"\n"), 0o644); err != nil {
 		t.Fatalf("write metadata.json: %v", err)
+	}
+}
+
+func TestControllerStateRuntimeUpdateRebuildsStoresWhenPrivateEvidenceChanges(t *testing.T) {
+	cityDir := t.TempDir()
+	current := &config.City{
+		Workspace: config.Workspace{Name: "city1"},
+		Beads: config.BeadsConfig{PrivateEvidence: map[string]config.PrivateEvidenceTransportConfig{
+			"city:city1": {
+				Endpoint: "https://beads.example.test", ProjectID: "project-1",
+				Database: "city1", TokenFile: "/run/gc/beads-token", RevisionTransitions: true,
+			},
+		}},
+	}
+	cs := &controllerState{
+		cfg:                    current,
+		beadStores:             map[string]beads.Store{},
+		cityBeadStore:          beads.NewMemStore(),
+		cityName:               "city1",
+		cityPath:               cityDir,
+		storeMetadataSignature: storeMetadataSignature(cityDir, current),
+	}
+	if !cs.runtimeUpdateCanReuseCurrentStores(current) {
+		t.Fatal("precondition: unchanged private-evidence transport should allow store reuse")
+	}
+
+	next := *current
+	next.Beads = current.Beads
+	next.Beads.PrivateEvidence = maps.Clone(current.Beads.PrivateEvidence)
+	transport := next.Beads.PrivateEvidence["city:city1"]
+	transport.Database = "city1-next"
+	next.Beads.PrivateEvidence["city:city1"] = transport
+	if cs.runtimeUpdateCanReuseCurrentStores(&next) {
+		t.Fatal("changed private-evidence transport reused stores without authority revalidation")
+	}
+}
+
+func TestPreparedRuntimeReuseKeepsNewerPendingMutation(t *testing.T) {
+	cityDir := t.TempDir()
+	current := &config.City{Workspace: config.Workspace{Name: "city1"}}
+	cs := &controllerState{
+		cfg: current, sp: runtime.NewFake(), cityPath: cityDir,
+		cityBeadStore: beads.NewMemStore(), beadStores: map[string]beads.Store{},
+		storeMetadataSignature: storeMetadataSignature(cityDir, current),
+	}
+	staged := &config.City{Workspace: config.Workspace{Name: "city1"}}
+	prepared, err := cs.prepareUpdateFromRuntime(staged, runtime.NewFake(), "")
+	if err != nil {
+		t.Fatalf("prepare runtime reuse: %v", err)
+	}
+	if !prepared.reuse || !prepared.holdsUpdateLock {
+		t.Fatalf("prepared reuse = %+v, want serialized reuse update", prepared)
+	}
+
+	newer := &config.City{Workspace: config.Workspace{Name: "city1"}, Usage: config.UsageConfig{Provider: "local"}}
+	started := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		close(started)
+		cs.updateConfigAndProviderOnly(newer, runtime.NewFake())
+		cs.markConfigMutationPending("newer-revision")
+		close(done)
+	}()
+	<-started
+	select {
+	case <-done:
+		t.Fatal("newer config update bypassed the prepared reload serializer")
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	prepared.commit()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("newer config update remained blocked after staged commit")
+	}
+	if cs.Config() != newer {
+		t.Fatal("staged reuse overwrote the newer config update")
+	}
+	if !cs.configMutationPending.Load() || cs.pendingConfigRevision() != "newer-revision" {
+		t.Fatal("staged reuse cleared the newer config mutation marker")
 	}
 }
 

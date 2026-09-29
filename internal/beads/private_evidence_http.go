@@ -184,6 +184,32 @@ func (s *BdStore) PrivateEvidencePayloadTransportReady() bool {
 	return s.privateEvidenceHTTP.verifyContext(ctx) == nil && s.privateEvidenceHTTP.verifyListRoute(ctx) == nil
 }
 
+// ValidateControllerDecisionFrontierTransport verifies the configured scope
+// identity and every private HTTP route required by controller-owned
+// decision-frontier records, without submitting a mutation.
+func (s *BdStore) ValidateControllerDecisionFrontierTransport(ctx context.Context) error {
+	if s == nil || s.privateEvidenceHTTP == nil || s.privateEvidenceHTTPInitErr != nil || ctx == nil {
+		return ErrRemoteDecisionFrontierWriterUnavailable
+	}
+	client := s.privateEvidenceHTTP
+	if !client.revisionTransitions {
+		return ErrControllerMetadataTransitionUnavailable
+	}
+	if err := client.verifyContext(ctx); err != nil {
+		return fmt.Errorf("verify private-evidence transport: %w", err)
+	}
+	if err := client.verifyListRoute(ctx); err != nil {
+		return fmt.Errorf("verify private-evidence read route: %w", err)
+	}
+	if err := client.verifySourceSnapshotContext(ctx); err != nil {
+		return fmt.Errorf("verify decision-frontier source snapshot route: %w", err)
+	}
+	if err := client.verifyRevisionTransitionContext(ctx, true); err != nil {
+		return fmt.Errorf("verify protected metadata transition and receipt routes: %w", err)
+	}
+	return nil
+}
+
 // PrivateEvidenceArchiveReaderHandle exposes this store's configured
 // body-based owner-index and archive reader.
 func (s *BdStore) PrivateEvidenceArchiveReaderHandle() (PrivateEvidenceArchiveReader, bool) {

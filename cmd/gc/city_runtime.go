@@ -2063,6 +2063,21 @@ func (cr *CityRuntime) reloadConfigTraced(
 	applyRuntimeCityIdentity(result.Cfg, cr.cityName)
 	resolveRigPathsAndRefreshQualification(cityRoot, result.Cfg, result.Prov)
 	if cr.configRev != "" && result.Revision == cr.configRev {
+		metadataChanged := cr.cs != nil && cr.cs.storeMetadataChanged(result.Cfg)
+		var preparedMetadataUpdate *preparedControllerStateUpdate
+		if metadataChanged {
+			preparedMetadataUpdate, err = cr.cs.prepareUpdate(result.Cfg, cr.sp)
+			if err != nil {
+				err = fmt.Errorf("config reload: %w", err)
+				fmt.Fprintf(cr.stderr, "%s: %v (keeping old config)\n", cr.logPrefix, err) //nolint:errcheck
+				telemetry.RecordConfigReload(ctx, result.Revision, string(source), string(reloadOutcomeFailed), len(warnings), err)
+				if trace != nil {
+					trace.RecordConfigReload(cr.configRev, result.Revision, TraceOutcomeFailed, source, nil, nil, false, warnings, err)
+				}
+				return reloadControlReply{Outcome: reloadOutcomeFailed, Error: err.Error(), Revision: result.Revision, Warnings: warnings}
+			}
+			defer preparedMetadataUpdate.abort()
+		}
 		ordersChanged, orderSummary, orderErr := cr.rescanOrderDispatcher(ctx, cityRoot, result.Cfg, "gc reload: order scan", time.Now())
 		if orderErr != nil {
 			err := fmt.Errorf("order reload: %w", orderErr)
@@ -2078,8 +2093,8 @@ func (cr *CityRuntime) reloadConfigTraced(
 				Warnings: warnings,
 			}
 		}
-		if cr.cs != nil && cr.cs.storeMetadataChanged(result.Cfg) {
-			cr.cs.update(result.Cfg, cr.sp)
+		if metadataChanged {
+			preparedMetadataUpdate.commit()
 			message := fmt.Sprintf("Config reloaded: bead store metadata changed (rev %s)", shortRev(result.Revision))
 			if ordersChanged {
 				message = fmt.Sprintf("Config reloaded: bead store metadata changed; orders reloaded: %s (rev %s)", orderSummary, shortRev(result.Revision))
@@ -2179,6 +2194,20 @@ func (cr *CityRuntime) reloadConfigTraced(
 	for _, w := range config.ReservedPrefixWarnings(nextCfg.Rigs, config.EffectiveHQPrefix(nextCfg)) {
 		appendWarning(fmt.Sprintf("config reload: %s", w))
 	}
+	var preparedControllerUpdate *preparedControllerRuntimeUpdate
+	if cr.cs != nil {
+		preparedControllerUpdate, err = cr.cs.prepareUpdateFromRuntime(nextCfg, nextSp, result.Revision)
+		if err != nil {
+			err = fmt.Errorf("config reload: %w", err)
+			fmt.Fprintf(cr.stderr, "%s: %v (keeping old config)\n", cr.logPrefix, err) //nolint:errcheck
+			telemetry.RecordConfigReload(ctx, result.Revision, string(source), string(reloadOutcomeFailed), len(warnings), err)
+			if trace != nil {
+				trace.RecordConfigReload(oldRevision, result.Revision, TraceOutcomeFailed, source, nil, nil, false, warnings, err)
+			}
+			return reloadControlReply{Outcome: reloadOutcomeFailed, Error: err.Error(), Revision: result.Revision, Warnings: warnings}
+		}
+		defer preparedControllerUpdate.abort()
+	}
 	var lifecycleErr error
 	for attempt := 1; attempt <= cityRuntimeReloadLifecycleRetryLimit; attempt++ {
 		lifecycleErr = cityRuntimeStartBeadsLifecycle(cityRoot, cr.cityName, nextCfg, cr.stderr)
@@ -2228,8 +2257,11 @@ func (cr *CityRuntime) reloadConfigTraced(
 		appendWarning(fmt.Sprintf("config reload: pruning legacy %s scripts: %v", scope, err))
 	})
 
+	var running []string
+	var providerSwapSummary string
 	if providerChanged {
-		running, lErr := cr.sp.ListRunning("")
+		var lErr error
+		running, lErr = cr.sp.ListRunning("")
 		if lErr != nil {
 			err := fmt.Errorf("config reload: listing sessions failed during provider swap: %w", lErr)
 			if runtime.IsPartialListError(lErr) {
@@ -2246,10 +2278,13 @@ func (cr *CityRuntime) reloadConfigTraced(
 				Warnings: warnings,
 			}
 		}
-		providerSwapSummary := fmt.Sprintf("%s → %s", displayProviderName(*lastProviderName), displayProviderName(pendingProviderName))
+		providerSwapSummary = fmt.Sprintf("%s → %s", displayProviderName(*lastProviderName), displayProviderName(pendingProviderName))
 		if pendingProviderName == *lastProviderName {
 			providerSwapSummary = fmt.Sprintf("%s runtime declaration changed", displayProviderName(pendingProviderName))
 		}
+	}
+
+	if providerChanged {
 		if len(running) > 0 {
 			fmt.Fprintf(cr.stdout, "Provider changed (%s), stopping %d agent(s)...\n", //nolint:errcheck
 				providerSwapSummary, len(running))
@@ -2262,6 +2297,13 @@ func (cr *CityRuntime) reloadConfigTraced(
 		})
 		fmt.Fprintf(cr.stdout, "Session provider swapped to %s.\n", displayProviderName(pendingProviderName)) //nolint:errcheck
 		*lastProviderName = pendingProviderName
+	}
+
+	// Publish the validated controller snapshot after the old provider's
+	// sessions have drained. No validation or failure path remains after this
+	// point, and API readers never observe the new provider during that drain.
+	if preparedControllerUpdate != nil {
+		preparedControllerUpdate.commit()
 	}
 
 	cr.poolSessions = computePoolSessions(nextCfg, cr.cityName, cr.cityPath, nextSp)
@@ -2336,9 +2378,6 @@ func (cr *CityRuntime) reloadConfigTraced(
 		cr.sessionEvents.restart(nextSp)
 	}
 
-	if cr.cs != nil {
-		cr.cs.updateFromRuntime(nextCfg, nextSp, result.Revision)
-	}
 	if cr.svc != nil {
 		if err := cr.svc.Reload(); err != nil {
 			appendWarning(fmt.Sprintf("service reload: %v", err))

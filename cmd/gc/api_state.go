@@ -79,6 +79,10 @@ type controllerState struct {
 	cacheCtx      context.Context
 	beadStores    map[string]beads.Store
 	cityBeadStore beads.Store // city-level store for session beads
+	// beadsPermitResolver is the boot-owned host authority snapshot. It is set
+	// only after every configured protected scope has been attached, then reused
+	// to validate replacement stores before a config reload is published.
+	beadsPermitResolver *hostBeadsPermitResolver
 	// storageRoutes is the opened non-work storage binding the city runtime
 	// resolved at boot: a constructor input, written once in
 	// newControllerStateWithRoutes and never reassigned, so reads are lock-free
@@ -959,13 +963,44 @@ func beadEventID(evt events.Event) string {
 
 // update replaces the config, session provider, and reopens stores.
 // Stores are built outside the lock to avoid blocking readers during I/O.
-func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
-	cs.updateMu.Lock()
-	defer cs.updateMu.Unlock()
+func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) error {
+	prepared, err := cs.prepareUpdate(cfg, sp)
+	if err != nil {
+		return err
+	}
+	prepared.commit()
+	return nil
+}
 
-	// The beads CAS gate is boot-latched: a reload that would change it only
-	// records a pending-restart notice, it does not flip the process mid-run.
-	cs.noteRolloutDrift(cfg)
+type preparedControllerStateUpdate struct {
+	cs                  *controllerState
+	cfg                 *config.City
+	sp                  runtime.Provider
+	stores              map[string]beads.Store
+	storeSignature      string
+	rawCfg              *config.City
+	usageSink           usage.Sink
+	cityStore           beads.Store
+	cityBeadsDiagnostic *beads.BeadsDiagnostic
+	cityMailProv        mail.Provider
+	extSvc              *extmsg.Services
+	finished            bool
+}
+
+// prepareUpdate opens and validates every replacement store while holding the
+// reload serializer, but does not publish config or store pointers. Callers
+// must commit or abort the returned update.
+func (cs *controllerState) prepareUpdate(cfg *config.City, sp runtime.Provider) (*preparedControllerStateUpdate, error) {
+	cs.updateMu.Lock()
+	prepared, err := cs.prepareUpdateLocked(cfg, sp)
+	if err != nil {
+		cs.updateMu.Unlock()
+		return nil, err
+	}
+	return prepared, nil
+}
+
+func (cs *controllerState) prepareUpdateLocked(cfg *config.City, sp runtime.Provider) (*preparedControllerStateUpdate, error) {
 
 	// Build new stores outside the lock (may do file I/O / subprocess spawns).
 	stores := cs.buildStores(cfg)
@@ -990,41 +1025,109 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	var extSvc *extmsg.Services
 	if cityStore != nil {
 		cityStore = wrapWithCachingStore(cs.cacheCtx, cityStore, cs.eventProv, true)
+	}
+	if cs.beadsPermitResolver != nil {
+		candidate := &controllerState{
+			cityName: cs.cityName, cityPath: cs.cityPath,
+			cityBeadStore: cityStore, beadStores: stores,
+		}
+		if err := configureControllerProtectedDecisionFrontierStores(candidate, cfg, cs.beadsPermitResolver); err != nil {
+			closeUnpublishedControllerStores(cityStore, stores)
+			return nil, fmt.Errorf("protected Beads authority reload refused: %w", err)
+		}
+	}
+	if cityStore != nil {
 		cityMailProv = newCityMailProvider(cs.storageRoutes, cityStore, cfg, cs.cityPath, cs.eventProv)
 		extSvc = newCityExtMsgServices(cs.storageRoutes, cityStore, cfg, cs.cityPath, cs.eventProv)
 	}
 
-	// Swap under short critical section.
+	return &preparedControllerStateUpdate{
+		cs: cs, cfg: cfg, sp: sp, stores: stores, storeSignature: storeSignature,
+		rawCfg: rawCfg, usageSink: usageSink, cityStore: cityStore,
+		cityBeadsDiagnostic: cityBeadsDiagnostic, cityMailProv: cityMailProv, extSvc: extSvc,
+	}, nil
+}
+
+func (prepared *preparedControllerStateUpdate) commit() {
+	if prepared == nil || prepared.finished || prepared.cs == nil {
+		return
+	}
+	cs := prepared.cs
+	prepared.commitLocked()
+	cs.updateMu.Unlock()
+}
+
+func (prepared *preparedControllerStateUpdate) commitLocked() {
+	if prepared == nil || prepared.finished || prepared.cs == nil {
+		return
+	}
+	prepared.finished = true
+	cs := prepared.cs
+	// The beads CAS gate is boot-latched: a reload that would change it only
+	// records a pending-restart notice once the reload is committed.
+	cs.noteRolloutDrift(prepared.cfg)
+
 	var oldCityStore beads.Store
 	var oldRigStores map[string]beads.Store
 	cs.compatibilityActionMu.Lock()
 	cs.mu.Lock()
-	cs.cfg = cfg
-	if rawCfg != nil {
-		cs.rawCfg = rawCfg
+	cs.cfg = prepared.cfg
+	if prepared.rawCfg != nil {
+		cs.rawCfg = prepared.rawCfg
 	}
-	cs.sp = sp
-	cs.usageSink = usageSink
+	cs.sp = prepared.sp
+	cs.usageSink = prepared.usageSink
 	oldRigStores = cs.beadStores
-	cs.beadStores = stores
-	if cityStore != nil {
+	cs.beadStores = prepared.stores
+	if prepared.cityStore != nil {
 		oldCityStore = cs.cityBeadStore
-		cs.cityBeadStore = cityStore
-		cs.cityBeadsDiagnostic = cityBeadsDiagnostic
-		cs.cityMailProv = cityMailProv
-		cs.storeMetadataSignature = storeSignature
+		cs.cityBeadStore = prepared.cityStore
+		cs.cityBeadsDiagnostic = prepared.cityBeadsDiagnostic
+		cs.cityMailProv = prepared.cityMailProv
+		cs.storeMetadataSignature = prepared.storeSignature
 	}
-	if extSvc != nil {
-		cs.extmsgSvc = extSvc
+	if prepared.extSvc != nil {
+		cs.extmsgSvc = prepared.extSvc
 	}
 	cs.graphStoreGeneration++
 	// Keep prior non-nil store/provider if reopen fails.
 	cs.mu.Unlock()
 	cs.compatibilityActionMu.Unlock()
-	if cityStore != nil && oldCityStore != nil && oldCityStore != cityStore {
+	if prepared.cityStore != nil && oldCityStore != nil && oldCityStore != prepared.cityStore {
 		scheduleCloseBeadStoreHandle("city bead store", oldCityStore)
 	}
-	scheduleCloseReplacedBeadStoreHandles(oldRigStores, stores)
+	scheduleCloseReplacedBeadStoreHandles(oldRigStores, prepared.stores)
+}
+
+func (prepared *preparedControllerStateUpdate) abort() {
+	if prepared == nil || prepared.finished || prepared.cs == nil {
+		return
+	}
+	prepared.finished = true
+	closeUnpublishedControllerStores(prepared.cityStore, prepared.stores)
+	prepared.cs.updateMu.Unlock()
+}
+
+func closeUnpublishedControllerStores(cityStore beads.Store, rigStores map[string]beads.Store) {
+	seen := make(map[uintptr]struct{}, len(rigStores)+1)
+	closeOne := func(store beads.Store) {
+		if store == nil {
+			return
+		}
+		if key, ok := storePointerKey(store); ok {
+			if _, duplicate := seen[key]; duplicate {
+				return
+			}
+			seen[key] = struct{}{}
+		}
+		if err := closeBeadStoreHandle(store); err != nil {
+			log.Printf("api: close refused protected-authority reload store: %v", err)
+		}
+	}
+	closeOne(cityStore)
+	for _, store := range rigStores {
+		closeOne(store)
+	}
 }
 
 func scheduleCloseBeadStoreHandle(label string, store beads.Store) {
@@ -1094,37 +1197,104 @@ func storePointerKey(store beads.Store) (uintptr, bool) {
 	return value.Pointer(), true
 }
 
-func (cs *controllerState) updateFromRuntime(cfg *config.City, sp runtime.Provider, revision string) {
+func (cs *controllerState) updateFromRuntime(cfg *config.City, sp runtime.Provider, revision string) error {
+	prepared, err := cs.prepareUpdateFromRuntime(cfg, sp, revision)
+	if err != nil {
+		return err
+	}
+	prepared.commit()
+	return nil
+}
+
+type preparedControllerRuntimeUpdate struct {
+	cs              *controllerState
+	cfg             *config.City
+	sp              runtime.Provider
+	full            *preparedControllerStateUpdate
+	reuse           bool
+	holdsUpdateLock bool
+	clearPending    bool
+	finished        bool
+}
+
+func (cs *controllerState) prepareUpdateFromRuntime(cfg *config.City, sp runtime.Provider, revision string) (*preparedControllerRuntimeUpdate, error) {
+	result := &preparedControllerRuntimeUpdate{cs: cs, cfg: cfg, sp: sp}
+	cs.updateMu.Lock()
 	if cs.configMutationPending.Load() {
 		matchesPending, stale := cs.runtimeUpdateStatusForPendingMutation(revision)
 		if stale {
-			return
+			cs.updateMu.Unlock()
+			return result, nil
 		}
 		if matchesPending {
 			if cs.runtimeUpdateDropsPendingRigs(cfg) {
-				return
+				cs.updateMu.Unlock()
+				return result, nil
 			}
 			if cs.runtimeUpdateCanReuseCurrentStores(cfg) {
-				cs.updateConfigAndProviderOnly(cfg, sp)
-				cs.clearConfigMutationPending()
-				return
+				result.reuse = true
+				result.holdsUpdateLock = true
+				result.clearPending = true
+				return result, nil
 			}
 		}
 	} else if cs.runtimeUpdateRevisionIsStale(revision) {
-		return
+		cs.updateMu.Unlock()
+		return result, nil
 	}
 	if cs.runtimeUpdateCanReuseCurrentStores(cfg) {
-		cs.updateConfigAndProviderOnly(cfg, sp)
-		cs.clearConfigMutationPending()
+		result.reuse = true
+		result.holdsUpdateLock = true
+		result.clearPending = true
+		return result, nil
+	}
+	prepared, err := cs.prepareUpdateLocked(cfg, sp)
+	if err != nil {
+		cs.updateMu.Unlock()
+		return nil, err
+	}
+	result.full = prepared
+	result.clearPending = true
+	return result, nil
+}
+
+func (prepared *preparedControllerRuntimeUpdate) commit() {
+	if prepared == nil || prepared.finished || prepared.cs == nil {
 		return
 	}
-	cs.update(cfg, sp)
-	cs.clearConfigMutationPending()
+	prepared.finished = true
+	if prepared.full != nil {
+		prepared.full.commitLocked()
+	} else if prepared.reuse {
+		prepared.cs.updateConfigAndProviderOnlyLocked(prepared.cfg, prepared.sp)
+	}
+	if prepared.clearPending {
+		prepared.cs.clearConfigMutationPending()
+	}
+	if prepared.full != nil || prepared.holdsUpdateLock {
+		prepared.cs.updateMu.Unlock()
+	}
+}
+
+func (prepared *preparedControllerRuntimeUpdate) abort() {
+	if prepared == nil || prepared.finished {
+		return
+	}
+	prepared.finished = true
+	if prepared.full != nil {
+		prepared.full.abort()
+	} else if prepared.holdsUpdateLock {
+		prepared.cs.updateMu.Unlock()
+	}
 }
 
 func (cs *controllerState) updateConfigAndProviderOnly(cfg *config.City, sp runtime.Provider) {
 	cs.updateMu.Lock()
 	defer cs.updateMu.Unlock()
+	cs.updateConfigAndProviderOnlyLocked(cfg, sp)
+}
+
+func (cs *controllerState) updateConfigAndProviderOnlyLocked(cfg *config.City, sp runtime.Provider) {
 
 	// The beads CAS gate is boot-latched (see update).
 	cs.noteRolloutDrift(cfg)
@@ -1320,6 +1490,26 @@ func storeMetadataSignature(cityPath string, cfg *config.City) string {
 	appendScopeMetadataSignature("city", cityPath)
 	if cfg == nil {
 		return b.String()
+	}
+	// Private-evidence transports are constructor inputs for BdStore. They also
+	// determine whether a host-authorized protected writer can be attached.
+	// Include their exact, sorted configuration in the reload signature so a
+	// transport or scope change rebuilds and revalidates stores before publish.
+	privateEvidenceScopes := make([]string, 0, len(cfg.Beads.PrivateEvidence))
+	for scope := range cfg.Beads.PrivateEvidence {
+		privateEvidenceScopes = append(privateEvidenceScopes, scope)
+	}
+	sort.Strings(privateEvidenceScopes)
+	for _, scope := range privateEvidenceScopes {
+		transport := cfg.Beads.PrivateEvidence[scope]
+		fmt.Fprintf(&b, "private-evidence:%q:%q:%q:%q:%q:%t\n",
+			scope,
+			transport.Endpoint,
+			transport.ProjectID,
+			transport.Database,
+			transport.TokenFile,
+			transport.RevisionTransitions,
+		)
 	}
 	// The per-rig refresh gate is part of the signature: the captured
 	// signature is compared against a recomputed one on reload
@@ -3118,7 +3308,9 @@ func (cs *controllerState) refreshConfigSnapshot() (string, error) {
 	cs.mu.RLock()
 	sp := cs.sp
 	cs.mu.RUnlock()
-	cs.update(nextCfg, sp)
+	if err := cs.update(nextCfg, sp); err != nil {
+		return "", err
+	}
 	return revision, nil
 }
 

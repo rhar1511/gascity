@@ -86,8 +86,9 @@ func TestPassthroughEnvOmitsUnset(t *testing.T) {
 // os.Environ() on the subprocess/ACP paths. The neighboring GC_ key proves the
 // exclusion is by exact name — a prefix match would strand the identity anchors
 // and the Dolt vars agents need.
-func TestPassthroughEnvPinsControllerTokenEmpty(t *testing.T) {
+func TestPassthroughEnvPinsControllerOnlyValuesEmpty(t *testing.T) {
 	t.Setenv(convergence.TokenEnvVar, "super-secret-controller-token")
+	t.Setenv(hostBeadsPermitAuthorityDirEnv, "/run/gc/protected-authority")
 	t.Setenv("GC_BEADS", "file")
 
 	got := passthroughEnv()
@@ -97,6 +98,11 @@ func TestPassthroughEnvPinsControllerTokenEmpty(t *testing.T) {
 		t.Errorf("passthroughEnv() omits %s; want present and empty so the session cannot inherit the controller's value", convergence.TokenEnvVar)
 	} else if val != "" {
 		t.Errorf("passthroughEnv()[%s] = %q, want empty", convergence.TokenEnvVar, val)
+	}
+	if val, ok := got[hostBeadsPermitAuthorityDirEnv]; !ok {
+		t.Errorf("passthroughEnv() omits %s; want present and empty", hostBeadsPermitAuthorityDirEnv)
+	} else if val != "" {
+		t.Errorf("passthroughEnv()[%s] = %q, want empty", hostBeadsPermitAuthorityDirEnv, val)
 	}
 	if got["GC_BEADS"] != "file" {
 		t.Errorf("passthroughEnv()[GC_BEADS] = %q, want %q (the exclusion must be by exact name)", got["GC_BEADS"], "file")

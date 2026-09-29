@@ -128,6 +128,13 @@ type ControllerProtectedBatchApplyWriter interface {
 	ControllerProtectedLinkWriter
 }
 
+// ControllerProtectedBatchApplyTransportValidator is implemented by the
+// controller HTTP client so a long-running owner can verify its workspace and
+// required protected routes before publishing a store that depends on them.
+type ControllerProtectedBatchApplyTransportValidator interface {
+	ValidateProtectedBatchApplyTransport(context.Context) error
+}
+
 // ControllerBatchApplyProblem preserves only Beads' stable HTTP status and
 // machine-readable code. It never retains caller-controlled response detail.
 type ControllerBatchApplyProblem struct {
@@ -252,6 +259,16 @@ func newControllerBatchApplyHTTPClient(config ControllerBatchApplyHTTPConfig) (*
 		endpoint: strings.TrimRight(endpoint, "/"), projectID: projectID,
 		database: database, token: token, client: client,
 	}, nil
+}
+
+// ValidateProtectedBatchApplyTransport checks the configured workspace and
+// the batchApply, durable-receipt, and protected-mutation capabilities without
+// submitting a write.
+func (c *controllerBatchApplyHTTPClient) ValidateProtectedBatchApplyTransport(ctx context.Context) error {
+	if c == nil || c.client == nil || ctx == nil {
+		return ErrControllerBatchApplyUnavailable
+	}
+	return c.verifyContext(ctx, true, true)
 }
 
 // ApplyProtectedCreateAndLink submits one protected create followed by its

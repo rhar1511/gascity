@@ -1368,6 +1368,18 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc supervisor: supervisor already running (PID %d)\n", pid) //nolint:errcheck
 		return 1
 	}
+	beadsPermitResolver, err := loadHostBeadsPermitResolverFromEnv()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc supervisor: protected Beads authority: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	if beadsPermitResolver != nil {
+		defer func() {
+			if err := beadsPermitResolver.close(); err != nil {
+				fmt.Fprintf(stderr, "gc supervisor: close protected Beads authority: %v\n", err) //nolint:errcheck
+			}
+		}()
+	}
 
 	// Ensure ~/.gc/ exists. doSupervisorStart does this when invoked
 	// manually (mkdir + open log file before spawning the child), but the
@@ -1431,6 +1443,7 @@ func runSupervisor(stdout, stderr io.Writer) int {
 	// Track managed cities via atomic-snapshot registry. API reads are
 	// lock-free (atomic pointer load); mutations go through citiesMu.
 	registry := newCityRegistry()
+	registry.beadsPermitResolver = beadsPermitResolver
 	supEvPath := filepath.Join(supervisor.RuntimeDir(), "events.jsonl")
 	if supFR, supErr := newFileEventsRecorder(supEvPath, config.EventsConfig{}, stderr); supErr == nil {
 		registry.SetSupervisorRecorder(supFR)
@@ -2340,6 +2353,9 @@ func startOneCity(
 	var cs *controllerState
 	if err := runPostPrepareStep("opening_controller_state", func() error {
 		cs = newControllerStateWithRoutes(cityCtx, cityRuntime.storageRoutes, cfg, sp, eventProv, cityName, path)
+		if err := configureControllerProtectedDecisionFrontierStores(cs, cfg, cr.beadsPermitResolver); err != nil {
+			return fmt.Errorf("configure protected Beads authority: %w", err)
+		}
 		cs.setCompatibilityAuthority(cityRuntime.compatibilityAuthority)
 		return nil
 	}); err != nil {
@@ -2348,6 +2364,9 @@ func startOneCity(
 		// here would leave the engine open for the life of the supervisor —
 		// including across the next attempt to start this same city.
 		cityCancel()
+		if cs != nil {
+			closeUnpublishedControllerStores(cs.cityBeadStore, cs.beadStores)
+		}
 		cityRuntime.shutdown()
 		if fr != nil {
 			fr.Close() //nolint:errcheck

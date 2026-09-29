@@ -4817,6 +4817,97 @@ func TestCityRuntimeReloadLifecycleFailureKeepsOldConfig(t *testing.T) {
 	}
 }
 
+func TestCityRuntimeReloadProtectedAuthorityFailureKeepsOldConfig(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	server, transport := controllerPermitTestTransport(t, "project-alpha", "db-alpha")
+	defer server.Close()
+	writeConfig := func(database string) {
+		t.Helper()
+		data := fmt.Sprintf(`[workspace]
+name = "test-city"
+
+[beads]
+provider = "file"
+
+[beads.private_evidence."city:test-city"]
+endpoint = %q
+project_id = %q
+database = %q
+token_file = %q
+revision_transitions = true
+
+[session]
+provider = "fake"
+`, transport.Endpoint, transport.ProjectID, database, transport.TokenFile)
+		if err := os.WriteFile(tomlPath, []byte(data), 0o644); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+	}
+	writeConfig(transport.Database)
+	cfg, err := config.Load(osFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	sp := runtime.NewFake()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cr := newTestCityRuntime(t, CityRuntimeParams{
+		CityPath: cityPath, CityName: "test-city", TomlPath: tomlPath,
+		ConfigRev: "boot-revision", Cfg: cfg, SP: sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops: newDrainOps(sp), Rec: events.Discard, Stdout: &stdout, Stderr: &stderr,
+	})
+	entry, key := hostBeadsPermitTestEntry(t, "test-city", "city:test-city", "city-key", "city-key.pem")
+	entry.ProjectID, entry.Database = transport.ProjectID, transport.Database
+	resolver := controllerPermitTestResolver(t, entry, key)
+	oldLeaf := controllerPermitTestBdStore(cityPath, "city:test-city", transport)
+	oldStore := beads.NewCachingStore(oldLeaf, nil)
+	cs := &controllerState{
+		cfg: cfg, sp: sp, cacheCtx: t.Context(), cityName: "test-city", cityPath: cityPath,
+		cityBeadStore: oldStore, beadStores: map[string]beads.Store{},
+		storeMetadataSignature: storeMetadataSignature(cityPath, cfg),
+	}
+	if err := configureControllerProtectedDecisionFrontierStores(cs, cfg, resolver); err != nil {
+		t.Fatalf("configure boot protected authority: %v", err)
+	}
+	cr.setControllerState(cs)
+	cr.sessionDrains = newDrainTracker()
+
+	previousLifecycle := cityRuntimeStartBeadsLifecycle
+	cityRuntimeStartBeadsLifecycle = func(string, string, *config.City, io.Writer) error { return nil }
+	t.Cleanup(func() { cityRuntimeStartBeadsLifecycle = previousLifecycle })
+	previousOpen := newControllerStateOpenCityStore
+	newControllerStateOpenCityStore = func(string, gate.Mode) (beads.StoreOpenResult, error) {
+		invalid := transport
+		invalid.Database = "wrong-database"
+		return beads.StoreOpenResult{Store: controllerPermitTestBdStore(cityPath, "city:test-city", invalid)}, nil
+	}
+	t.Cleanup(func() { newControllerStateOpenCityStore = previousOpen })
+
+	oldCfg, oldSP, oldDops, oldRev := cr.cfg, cr.sp, cr.dops, cr.configRev
+	writeConfig("wrong-database")
+	lastProviderName := "fake"
+	reply := cr.reloadConfigTraced(context.Background(), &lastProviderName, cityPath, nil, reloadSourceManual)
+
+	if reply.Outcome != reloadOutcomeFailed || !strings.Contains(reply.Error, "protected Beads authority reload refused") {
+		t.Fatalf("reload reply = %+v, want protected-authority failure", reply)
+	}
+	if cr.cfg != oldCfg || cr.sp != oldSP || cr.dops != oldDops || cr.configRev != oldRev {
+		t.Fatalf("runtime snapshot changed after refused authority reload: cfg=%t sp=%t dops=%t rev=%q",
+			cr.cfg != oldCfg, cr.sp != oldSP, cr.dops != oldDops, cr.configRev)
+	}
+	if cs.Config() != oldCfg || cs.CityBeadStore() != oldStore {
+		t.Fatal("controller snapshot changed after refused authority reload")
+	}
+	assertControllerDecisionFrontierWriter(t, oldStore)
+	if strings.Contains(stdout.String(), "Config reloaded:") || strings.Contains(stdout.String(), "Session provider swapped") {
+		t.Fatalf("stdout reported success after refused authority reload: %q", stdout.String())
+	}
+}
+
 func TestCityRuntimeReloadRetriesTransientLifecycleFailure(t *testing.T) {
 	cityPath := t.TempDir()
 	tomlPath := filepath.Join(cityPath, "city.toml")
