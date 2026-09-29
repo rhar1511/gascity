@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,7 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/worklifecycle"
 )
 
-func TestLifecycleRecoverySubmitPersistsHeldIntentWithoutAction(t *testing.T) {
+func TestLifecycleRecoverySubmitRejectsV2WithoutAttachmentAndPolicyProof(t *testing.T) {
 	state := newFakeState(t)
 	state.cfg.Rigs = nil
 	state.cfg.Workspace.Prefix = "test"
@@ -40,10 +41,11 @@ func TestLifecycleRecoverySubmitPersistsHeldIntentWithoutAction(t *testing.T) {
 		t.Fatal(err)
 	}
 	state.cfg.Lifecycle = config.LifecycleConfig{
-		AdmissionEnabled: true,
-		RecoveryEnabled:  true,
-		EscalationTarget: "attention",
-		AdmissionAuthorities: map[string]string{
+		AdmissionEnabled:            true,
+		RecoveryEnabled:             true,
+		EscalationTarget:            "attention",
+		AdmissionV2PrimaryAuthority: "triage",
+		AdmissionV2Authorities: map[string]string{
 			"triage": base64.StdEncoding.EncodeToString(admissionPublic),
 		},
 		AcceptanceAuthorities: map[string]string{"reviewer": base64.StdEncoding.EncodeToString(acceptancePublic)},
@@ -55,19 +57,20 @@ func TestLifecycleRecoverySubmitPersistsHeldIntentWithoutAction(t *testing.T) {
 			},
 		},
 	}
-	admission, err := worklifecycle.SignAdmissionReceipt(worklifecycle.AdmissionReceipt{
-		Version: 1, WorkItemID: workID, Scope: scope, Route: "worker", Workflow: "review",
-		MergeStrategy: "mr", Deliverable: "reviewed patch", Verification: "focused tests",
+	admission, err := worklifecycle.SignAdmissionReceiptV2(worklifecycle.AdmissionReceiptV2{
+		Version: 2, WorkItemID: workID, Scope: scope, ExpectedWorkRevision: 1, Route: "test-rig/worker", Workflow: "review",
+		RoutingPolicyDigest: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		MergeStrategy:       "mr", Deliverable: "reviewed patch", Verification: "focused tests",
 		AcceptanceAuthority: "reviewer", AdmittedBy: "triage",
 	}, admissionPrivate)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var admissionReceipt worklifecycle.AdmissionReceipt
+	var admissionReceipt worklifecycle.AdmissionReceiptV2
 	if err := json.Unmarshal([]byte(admission), &admissionReceipt); err != nil {
 		t.Fatal(err)
 	}
-	digest, err := worklifecycle.AdmissionDigest(admissionReceipt)
+	digest, err := worklifecycle.AdmissionDigestV2(admissionReceipt)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,15 +88,15 @@ func TestLifecycleRecoverySubmitPersistsHeldIntentWithoutAction(t *testing.T) {
 		SourceStoreRef   string `json:"source_store_ref"`
 		WorkflowStoreRef string `json:"workflow_store_ref"`
 		AdmissionReceipt string `json:"admission_receipt"`
-	}{1, "attached", scope, digest, "worker", "review", "mr", "materialization-token", "test-workflow", workID, "city:" + state.cityName, "city:" + state.cityName, admission})
+	}{1, "attached", scope, digest, "test-rig/worker", "review", "mr", "materialization-token", "test-workflow", workID, "city:" + state.cityName, "city:" + state.cityName, admission})
 	if err != nil {
 		t.Fatal(err)
 	}
 	work, err := store.Create(beads.Bead{
 		ID: workID, Title: "authorized recovery test", Type: "task", Labels: []string{worklifecycle.AdmissionIntentLabel},
 		Metadata: map[string]string{
-			beadmeta.LifecycleAdmissionReceiptMetadataKey: admission,
-			beadmeta.LifecycleMaterializationMetadataKey:  string(materialization),
+			beadmeta.LifecycleAdmissionReceiptV2MetadataKey: admission,
+			beadmeta.LifecycleMaterializationMetadataKey:    string(materialization),
 		},
 	})
 	if err != nil {
@@ -144,45 +147,17 @@ func TestLifecycleRecoverySubmitPersistsHeldIntentWithoutAction(t *testing.T) {
 	}
 	server := &Server{state: state}
 	input := &LifecycleRecoverySubmitInput{CityScope: CityScope{CityName: state.cityName}, Body: request}
-	first, err := server.humaHandleLifecycleRecoverySubmit(context.Background(), input)
-	if err != nil {
-		t.Fatalf("signed request intake: %v", err)
+	if _, err := server.humaHandleLifecycleRecoverySubmit(context.Background(), input); err == nil || !strings.Contains(err.Error(), "current, attached lifecycle admission") {
+		t.Fatalf("recovery intake error = %v, want v2 attachment/policy proof hold", err)
 	}
-	if first.Body.Status != "accepted" || first.Body.RequestID != request.RequestID {
-		t.Fatalf("intake output = %+v, want accepted request", first.Body)
-	}
-	intent, err := store.Get(first.Body.IntentID)
-	if err != nil {
-		t.Fatalf("durable intent readback: %v", err)
-	}
-	if intent.Type != "lifecycle-intent" || !beads.HasReadyExcludedLabel(intent) {
-		t.Fatalf("intent=%+v, want held, non-routable lifecycle intent", intent)
-	}
-	second, err := server.humaHandleLifecycleRecoverySubmit(context.Background(), input)
-	if err != nil || second.Body.IntentID != first.Body.IntentID {
-		t.Fatalf("exact request replay = (%+v, %v), want same durable intent", second, err)
-	}
-	tampered := request
-	tampered.Message += " forged"
-	if _, err := server.humaHandleLifecycleRecoverySubmit(context.Background(), &LifecycleRecoverySubmitInput{
-		CityScope: CityScope{CityName: state.cityName}, Body: tampered,
-	}); err == nil {
-		t.Fatal("tampered unsigned request was accepted")
-	}
-	changed, err := worklifecycle.SignRecoveryRequest(func() worklifecycle.RecoveryRequest {
-		modifiedRequest := request
-		modifiedRequest.Message = "different content with the same request ID"
-		return modifiedRequest
-	}(), recoveryPrivate)
+	intents, err := store.List(beads.ListQuery{Type: "lifecycle-intent", AllowScan: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := server.humaHandleLifecycleRecoverySubmit(context.Background(), &LifecycleRecoverySubmitInput{
-		CityScope: CityScope{CityName: state.cityName}, Body: changed,
-	}); err == nil {
-		t.Fatal("reused request ID with different trusted content was accepted")
+	if len(intents) != 0 {
+		t.Fatalf("unproved v2 source created durable recovery intent(s): %+v", intents)
 	}
 	if calls := state.sp.CountCalls("Nudge", info.SessionName); calls != 0 {
-		t.Fatalf("request intake performed %d runtime nudges; it must only persist intent", calls)
+		t.Fatalf("unproved recovery intake performed %d runtime nudges", calls)
 	}
 }

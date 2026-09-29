@@ -273,11 +273,11 @@ func ValidateRecoveryWorkEvidence(bead beads.Bead, cfg config.LifecycleConfig, s
 	if err := decodeStrict(bead.Metadata[beadmeta.LifecycleMaterializationMetadataKey], &marker); err != nil {
 		return fmt.Errorf("recovery target workflow materialization is invalid: %w", ErrRecoveryWorkStale)
 	}
-	digest, err := AdmissionDigest(decision.Receipt)
+	digest, err := AdmissionDigestV2(decision.Receipt)
 	if err != nil || marker.Version != 1 || marker.State != "attached" || marker.Scope != scope || marker.Contract != digest ||
 		marker.Route == "" || marker.Workflow != decision.Receipt.Workflow || marker.MergeStrategy != decision.Receipt.MergeStrategy ||
 		marker.Token == "" || marker.WorkflowID == "" || marker.SourceID != bead.ID || marker.SourceStoreRef == "" ||
-		marker.WorkflowStoreRef == "" || marker.AdmissionReceipt != bead.Metadata[beadmeta.LifecycleAdmissionReceiptMetadataKey] {
+		marker.WorkflowStoreRef == "" || marker.AdmissionReceipt != bead.Metadata[beadmeta.LifecycleAdmissionReceiptV2MetadataKey] {
 		return fmt.Errorf("recovery target workflow is not the attached admitted source: %w", ErrRecoveryWorkStale)
 	}
 	return nil

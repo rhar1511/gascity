@@ -20,6 +20,7 @@ func TestParseLifecycleValidatesTrustedAuthorities(t *testing.T) {
 	key := lifecycleTestPublicKey(1)
 	otherKey := lifecycleTestPublicKey(2)
 	recoveryKey := lifecycleTestPublicKey(3)
+	v2Key := lifecycleTestPublicKey(4)
 	recoveryTable := "[lifecycle.recovery_authorities]\noperator = { public_key = \"" + recoveryKey + "\", actions = [\"nudge\"], scopes = [\"city:test/city:test\"] }\n"
 	cases := []struct {
 		name string
@@ -40,6 +41,31 @@ func TestParseLifecycleValidatesTrustedAuthorities(t *testing.T) {
 			name: "admission gate requires acceptance authority",
 			toml: "[lifecycle]\nadmission_enabled = true\n[lifecycle.admission_authorities]\ntriage = \"" + key + "\"\n",
 			want: "requires at least one acceptance authority",
+		},
+		{
+			name: "v2 admission key must be separate from v1 key",
+			toml: "[lifecycle]\nadmission_v2_primary_authority = \"triage\"\nadmission_v2_authorities = { triage = \"" + key + "\" }\n[lifecycle.admission_authorities]\ntriage = \"" + key + "\"\n",
+			want: "must use a key separate from admission_authorities",
+		},
+		{
+			name: "v2 admission key must be separate from acceptance key",
+			toml: "[lifecycle]\nadmission_v2_primary_authority = \"triage\"\nadmission_v2_authorities = { triage = \"" + otherKey + "\" }\n[lifecycle.acceptance_authorities]\nreviewer = \"" + otherKey + "\"\n",
+			want: "must use a key separate from acceptance_authorities",
+		},
+		{
+			name: "v2 authorities require explicit primary identity",
+			toml: "[lifecycle]\nadmission_v2_authorities = { triage = \"" + v2Key + "\" }\n",
+			want: "requires lifecycle.admission_v2_primary_authority",
+		},
+		{
+			name: "v2 delegated identities are unavailable",
+			toml: "[lifecycle]\nadmission_v2_primary_authority = \"triage\"\nadmission_v2_authorities = { triage = \"" + v2Key + "\", delegate = \"" + otherKey + "\" }\n",
+			want: "delegated signers are unavailable",
+		},
+		{
+			name: "v2 primary must be the sole configured identity",
+			toml: "[lifecycle]\nadmission_v2_primary_authority = \"ricky\"\nadmission_v2_authorities = { triage = \"" + v2Key + "\" }\n",
+			want: "must identify the sole configured v2 authority",
 		},
 		{
 			name: "recovery needs admission and acceptance gates",
@@ -69,6 +95,10 @@ func TestParseLifecycleValidatesTrustedAuthorities(t *testing.T) {
 		{
 			name: "valid opt-in config",
 			toml: "[lifecycle]\nadmission_enabled = true\nrecovery_enabled = true\nescalation_target = \"ops\"\n[lifecycle.admission_authorities]\ntriage = \"" + key + "\"\n[lifecycle.acceptance_authorities]\nreviewer = \"" + otherKey + "\"\n" + recoveryTable,
+		},
+		{
+			name: "valid distinct v2 admission key",
+			toml: "[lifecycle]\nadmission_enabled = true\nadmission_v2_primary_authority = \"triage\"\n[lifecycle.admission_v2_authorities]\ntriage = \"" + v2Key + "\"\n[lifecycle.acceptance_authorities]\nreviewer = \"" + otherKey + "\"\n",
 		},
 	}
 	for _, tc := range cases {

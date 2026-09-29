@@ -85,7 +85,11 @@ func reconcileLifecycleAdmission(
 			}
 			scope := lifecycleScopeForRef(cityName, cfg, leg.ref)
 			admission := worklifecycle.EvaluateAdmission(bead, cfg.Lifecycle, scope)
-			if !admission.Requested || !admission.Admitted {
+			if !admission.Requested {
+				continue
+			}
+			if !admission.Admitted {
+				fmt.Fprintf(stderr, "lifecycle admission: holding %s: %s\n", bead.ID, admission.Reason) //nolint:errcheck
 				continue
 			}
 			if _, ok := ready[bead.ID]; !ok {
@@ -140,7 +144,7 @@ func reconcileLifecycleAdmission(
 				fmt.Fprintf(stderr, "lifecycle admission: %s store does not support revision-conditional writes; workflow materialization held\n", bead.ID) //nolint:errcheck
 				continue
 			}
-			digest, err := worklifecycle.AdmissionDigest(admission.Receipt)
+			digest, err := worklifecycle.AdmissionDigestV2(admission.Receipt)
 			if err != nil {
 				fmt.Fprintf(stderr, "lifecycle admission: hashing admission contract for %s: %v\n", bead.ID, err) //nolint:errcheck
 				continue
@@ -172,7 +176,7 @@ func reconcileLifecycleAdmission(
 				SourceID:         bead.ID,
 				SourceStoreRef:   leg.ref,
 				WorkflowStoreRef: graphStoreRef,
-				AdmissionReceipt: bead.Metadata[beadmeta.LifecycleAdmissionReceiptMetadataKey],
+				AdmissionReceipt: bead.Metadata[beadmeta.LifecycleAdmissionReceiptV2MetadataKey],
 			})
 			if err != nil {
 				fmt.Fprintf(stderr, "lifecycle admission: encoding materialization reservation for %s: %v\n", bead.ID, err) //nolint:errcheck
@@ -196,7 +200,7 @@ func reconcileLifecycleAdmission(
 				SourceID:         bead.ID,
 				SourceStoreRef:   leg.ref,
 				WorkflowStoreRef: graphStoreRef,
-				AdmissionReceipt: bead.Metadata[beadmeta.LifecycleAdmissionReceiptMetadataKey],
+				AdmissionReceipt: bead.Metadata[beadmeta.LifecycleAdmissionReceiptV2MetadataKey],
 			})
 			if err != nil {
 				fmt.Fprintf(stderr, "lifecycle admission: encoding graph lineage for %s: %v\n", bead.ID, err) //nolint:errcheck
@@ -258,7 +262,7 @@ func reconcileLifecycleAdmission(
 					SourceID:         bead.ID,
 					SourceStoreRef:   leg.ref,
 					WorkflowStoreRef: graphStoreRef,
-					AdmissionReceipt: bead.Metadata[beadmeta.LifecycleAdmissionReceiptMetadataKey],
+					AdmissionReceipt: bead.Metadata[beadmeta.LifecycleAdmissionReceiptV2MetadataKey],
 				})
 				if err != nil {
 					fmt.Fprintf(stderr, "lifecycle admission: encoding attached graph lineage for %s: %v\n", bead.ID, err) //nolint:errcheck
@@ -282,7 +286,7 @@ func reconcileLifecycleAdmission(
 				SourceID:         bead.ID,
 				SourceStoreRef:   leg.ref,
 				WorkflowStoreRef: workflowStoreRef,
-				AdmissionReceipt: bead.Metadata[beadmeta.LifecycleAdmissionReceiptMetadataKey],
+				AdmissionReceipt: bead.Metadata[beadmeta.LifecycleAdmissionReceiptV2MetadataKey],
 			})
 			if err != nil {
 				fmt.Fprintf(stderr, "lifecycle admission: encoding attached workflow evidence for %s: %v\n", bead.ID, err) //nolint:errcheck
@@ -337,7 +341,7 @@ func recheckLifecycleMaterialization(store beads.Store, beadID, scope, reservati
 	if !decision.Requested || !decision.Admitted {
 		return fmt.Errorf("signed admission changed or became invalid: %s", decision.Reason)
 	}
-	currentDigest, err := worklifecycle.AdmissionDigest(decision.Receipt)
+	currentDigest, err := worklifecycle.AdmissionDigestV2(decision.Receipt)
 	if err != nil || currentDigest != digest {
 		return fmt.Errorf("signed workflow contract changed before materialization")
 	}
@@ -364,7 +368,7 @@ func recheckLifecycleMaterialization(store beads.Store, beadID, scope, reservati
 
 func lifecycleSlingResultMatches(bead beads.Bead, workStore, graphStore beads.Store, cfg *config.City, scope, digest, route, workflow, merge, workflowID string, graphWorkflow bool, reservation, plannedGraphStoreRef string) bool {
 	decision := worklifecycle.EvaluateAdmission(bead, cfg.Lifecycle, scope)
-	currentDigest, err := worklifecycle.AdmissionDigest(decision.Receipt)
+	currentDigest, err := worklifecycle.AdmissionDigestV2(decision.Receipt)
 	marker, markerOK := lifecycleMaterializationFor(bead)
 	if err != nil || !decision.Admitted || currentDigest != digest ||
 		!markerOK || marker.State != "reserved" || strings.TrimSpace(bead.Metadata[beadmeta.LifecycleMaterializationMetadataKey]) != reservation ||
@@ -673,7 +677,7 @@ func lifecycleAdmissionRouteMatches(cfg *config.City, bead beads.Bead, scope str
 	if !ok {
 		return false
 	}
-	digest, err := worklifecycle.AdmissionDigest(decision.Receipt)
+	digest, err := worklifecycle.AdmissionDigestV2(decision.Receipt)
 	if err != nil || marker.Scope != scope || marker.Contract != digest || marker.Workflow != decision.Receipt.Workflow ||
 		marker.MergeStrategy != decision.Receipt.MergeStrategy || marker.WorkflowID == "" ||
 		agentutil.NormalizePoolRouteTarget(cfg, marker.Route) != agentutil.NormalizePoolRouteTarget(cfg, decision.Receipt.Route) {
@@ -759,11 +763,11 @@ func lifecycleLineageAdmissionMatches(cfg *config.City, bead beads.Bead, marker 
 		ID:     marker.SourceID,
 		Labels: []string{worklifecycle.AdmissionIntentLabel},
 		Metadata: map[string]string{
-			beadmeta.LifecycleAdmissionReceiptMetadataKey: marker.AdmissionReceipt,
+			beadmeta.LifecycleAdmissionReceiptV2MetadataKey: marker.AdmissionReceipt,
 		},
 	}
 	decision := worklifecycle.EvaluateAdmission(receiptBead, cfg.Lifecycle, marker.Scope)
-	digest, err := worklifecycle.AdmissionDigest(decision.Receipt)
+	digest, err := worklifecycle.AdmissionDigestV2(decision.Receipt)
 	return err == nil && decision.Admitted && digest == marker.Contract &&
 		decision.Receipt.Route == marker.Route && decision.Receipt.Workflow == marker.Workflow &&
 		decision.Receipt.MergeStrategy == marker.MergeStrategy
@@ -929,7 +933,7 @@ func lifecycleLineageCurrent(candidate beads.Bead, lineage lifecycleMaterializat
 	source.LifecycleScope = lineage.Scope
 	source.SourceStoreRef = lineage.SourceStoreRef
 	decision := worklifecycle.EvaluateAdmission(source, opts.Lifecycle, lineage.Scope)
-	digest, err := worklifecycle.AdmissionDigest(decision.Receipt)
+	digest, err := worklifecycle.AdmissionDigestV2(decision.Receipt)
 	sourceStatus := strings.ToLower(strings.TrimSpace(source.Status))
 	sourceOwner := strings.TrimSpace(source.Assignee)
 	if err != nil || !decision.Admitted || digest != lineage.Contract ||

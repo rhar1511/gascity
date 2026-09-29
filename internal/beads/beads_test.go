@@ -76,6 +76,33 @@ func TestOrdinaryCloseRequiresVerifiedLifecycleCompletion(t *testing.T) {
 	}
 }
 
+func TestV2AdmissionReceiptIsDurableAndCannotBeClearedByGenericMutation(t *testing.T) {
+	store := NewMemStore()
+	created, err := store.Create(Bead{
+		Title: "v2 admitted source", Type: "task", Status: "open",
+		Metadata: map[string]string{beadmeta.LifecycleAdmissionReceiptV2MetadataKey: "malformed but durable"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !HasLifecycleEvidence(created) || !HasLifecycleAdmissionReceipt(created) {
+		t.Fatal("v2-only evidence was not recognized as durable lifecycle enrollment")
+	}
+	if err := store.SetMetadata(created.ID, beadmeta.LifecycleAdmissionReceiptV2MetadataKey, ""); !errors.Is(err, ErrLifecycleMutationBlocked) {
+		t.Fatalf("clearing v2 admission receipt error = %v, want lifecycle mutation refusal", err)
+	}
+	if err := store.Close(created.ID); !errors.Is(err, ErrLifecycleCompletionRequired) {
+		t.Fatalf("closing v2-admitted work error = %v, want verified completion refusal", err)
+	}
+	current, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Metadata[beadmeta.LifecycleAdmissionReceiptV2MetadataKey] == "" || current.Status != "open" {
+		t.Fatalf("refused v2 mutations changed source: %+v", current)
+	}
+}
+
 func TestIsMoleculeType(t *testing.T) {
 	tests := []struct {
 		typ  string

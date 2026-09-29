@@ -26,9 +26,19 @@ type LifecycleConfig struct {
 	// separately gated because an admission authority does not grant permission
 	// to recover work. Defaults to false.
 	RecoveryEnabled bool `toml:"recovery_enabled,omitempty"`
-	// AdmissionAuthorities maps trusted triage/contract authors to their
-	// Ed25519 public keys. Keys are base64-encoded 32-byte public keys.
+	// AdmissionAuthorities maps historical v1 admission identities to their
+	// Ed25519 public keys. V2 admission verification does not use this map.
 	AdmissionAuthorities map[string]string `toml:"admission_authorities,omitempty"`
+	// AdmissionV2PrimaryAuthority names the single initial v2 admission signer.
+	// Set it to Ricky's exact configured identity for the initial rollout.
+	// Additional signer identities require a separately implemented and
+	// verified delegation-grant path and are rejected by this release.
+	AdmissionV2PrimaryAuthority string `toml:"admission_v2_primary_authority,omitempty"`
+	// AdmissionV2Authorities contains exactly the primary v2 admission signer
+	// and its purpose-specific Ed25519 public key. The key must differ from v1
+	// admission and acceptance keys. Private keys stay outside city config and
+	// the bead store.
+	AdmissionV2Authorities map[string]string `toml:"admission_v2_authorities,omitempty"`
 	// AcceptanceAuthorities maps trusted completion authorities to their
 	// Ed25519 public keys. Keys are base64-encoded 32-byte public keys.
 	AcceptanceAuthorities map[string]string `toml:"acceptance_authorities,omitempty"`
@@ -68,13 +78,22 @@ func validateLifecycleConfig(cfg LifecycleConfig) error {
 	if err := validateLifecycleAuthorities("lifecycle.admission_authorities", cfg.AdmissionAuthorities); err != nil {
 		return err
 	}
+	if err := validateLifecycleAuthorities("lifecycle.admission_v2_authorities", cfg.AdmissionV2Authorities); err != nil {
+		return err
+	}
+	if err := validateAdmissionV2PrimaryAuthority(cfg); err != nil {
+		return err
+	}
 	if err := validateLifecycleAuthorities("lifecycle.acceptance_authorities", cfg.AcceptanceAuthorities); err != nil {
+		return err
+	}
+	if err := validateAdmissionV2KeyPurpose(cfg); err != nil {
 		return err
 	}
 	if err := validateRecoveryAuthorities(cfg); err != nil {
 		return err
 	}
-	if cfg.AdmissionEnabled && len(cfg.AdmissionAuthorities) == 0 {
+	if cfg.AdmissionEnabled && len(cfg.AdmissionAuthorities)+len(cfg.AdmissionV2Authorities) == 0 {
 		return fmt.Errorf("lifecycle.admission_enabled requires at least one admission authority")
 	}
 	if cfg.AdmissionEnabled && len(cfg.AcceptanceAuthorities) == 0 {
@@ -97,9 +116,32 @@ func validateLifecycleConfig(cfg LifecycleConfig) error {
 	return nil
 }
 
+func validateAdmissionV2PrimaryAuthority(cfg LifecycleConfig) error {
+	primary := strings.TrimSpace(cfg.AdmissionV2PrimaryAuthority)
+	if primary != cfg.AdmissionV2PrimaryAuthority {
+		return fmt.Errorf("lifecycle.admission_v2_primary_authority must be a canonical identity")
+	}
+	if len(cfg.AdmissionV2Authorities) == 0 {
+		if primary != "" {
+			return fmt.Errorf("lifecycle.admission_v2_primary_authority requires exactly one matching v2 authority")
+		}
+		return nil
+	}
+	if primary == "" {
+		return fmt.Errorf("lifecycle.admission_v2_authorities requires lifecycle.admission_v2_primary_authority; delegates are unavailable")
+	}
+	if len(cfg.AdmissionV2Authorities) != 1 {
+		return fmt.Errorf("lifecycle.admission_v2_authorities must contain only the configured primary signer; delegated signers are unavailable")
+	}
+	if _, ok := cfg.AdmissionV2Authorities[primary]; !ok {
+		return fmt.Errorf("lifecycle.admission_v2_primary_authority must identify the sole configured v2 authority")
+	}
+	return nil
+}
+
 func validateRecoveryAuthorities(cfg LifecycleConfig) error {
 	usedKeys := make(map[string]string)
-	for _, authorities := range []map[string]string{cfg.AdmissionAuthorities, cfg.AcceptanceAuthorities} {
+	for _, authorities := range []map[string]string{cfg.AdmissionAuthorities, cfg.AdmissionV2Authorities, cfg.AcceptanceAuthorities} {
 		for identity, encoded := range authorities {
 			key, err := base64.StdEncoding.DecodeString(strings.TrimSpace(encoded))
 			if err == nil {
@@ -145,6 +187,32 @@ func validateRecoveryAuthorities(cfg LifecycleConfig) error {
 				return fmt.Errorf("lifecycle.recovery_authorities.%s repeats scope %q", identity, scope)
 			}
 			seenScopes[scope] = struct{}{}
+		}
+	}
+	return nil
+}
+
+func validateAdmissionV2KeyPurpose(cfg LifecycleConfig) error {
+	legacyAndAcceptance := make(map[string]string, len(cfg.AdmissionAuthorities)+len(cfg.AcceptanceAuthorities))
+	for identity, encoded := range cfg.AdmissionAuthorities {
+		key, err := base64.StdEncoding.DecodeString(strings.TrimSpace(encoded))
+		if err == nil {
+			legacyAndAcceptance[string(key)] = "admission_authorities." + identity
+		}
+	}
+	for identity, encoded := range cfg.AcceptanceAuthorities {
+		key, err := base64.StdEncoding.DecodeString(strings.TrimSpace(encoded))
+		if err == nil {
+			legacyAndAcceptance[string(key)] = "acceptance_authorities." + identity
+		}
+	}
+	for identity, encoded := range cfg.AdmissionV2Authorities {
+		key, err := base64.StdEncoding.DecodeString(strings.TrimSpace(encoded))
+		if err != nil {
+			continue // The field-specific validator reports malformed encodings.
+		}
+		if prior, exists := legacyAndAcceptance[string(key)]; exists {
+			return fmt.Errorf("lifecycle.admission_v2_authorities.%s must use a key separate from %s", identity, prior)
 		}
 	}
 	return nil

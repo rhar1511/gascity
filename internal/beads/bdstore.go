@@ -2839,6 +2839,7 @@ func bdUpdateMayReopenOrClearLifecycleEvidence(opts UpdateOpts) bool {
 	}
 	for _, key := range []string{
 		beadmeta.LifecycleAdmissionReceiptMetadataKey,
+		beadmeta.LifecycleAdmissionReceiptV2MetadataKey,
 		beadmeta.LifecycleMaterializationMetadataKey,
 		beadmeta.LifecycleCompletionReceiptMetadataKey,
 	} {

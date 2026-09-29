@@ -296,7 +296,8 @@ func HasLifecycleEvidence(b Bead) bool {
 // need not parse or verify here: malformed non-empty evidence still protects
 // the source from ordinary close and mutation paths.
 func HasLifecycleAdmissionReceipt(b Bead) bool {
-	return b.Metadata[beadmeta.LifecycleAdmissionReceiptMetadataKey] != ""
+	return b.Metadata[beadmeta.LifecycleAdmissionReceiptMetadataKey] != "" ||
+		b.Metadata[beadmeta.LifecycleAdmissionReceiptV2MetadataKey] != ""
 }
 
 // ValidateLifecycleClose rejects ordinary close operations on an enrolled
@@ -362,12 +363,13 @@ func ValidateLifecycleMutation(current Bead, opts UpdateOpts) error {
 	}
 	for _, key := range []string{
 		beadmeta.LifecycleAdmissionReceiptMetadataKey,
+		beadmeta.LifecycleAdmissionReceiptV2MetadataKey,
 		beadmeta.LifecycleMaterializationMetadataKey,
 		beadmeta.LifecycleCompletionReceiptMetadataKey,
 		beadmeta.LifecycleRecoveryStateMetadataKey,
 	} {
 		currentValue := strings.TrimSpace(current.Metadata[key])
-		if key == beadmeta.LifecycleAdmissionReceiptMetadataKey && current.Metadata[key] != "" {
+		if (key == beadmeta.LifecycleAdmissionReceiptMetadataKey || key == beadmeta.LifecycleAdmissionReceiptV2MetadataKey) && current.Metadata[key] != "" {
 			currentValue = current.Metadata[key]
 		}
 		if _, supplied := opts.Metadata[key]; supplied && currentValue != "" &&

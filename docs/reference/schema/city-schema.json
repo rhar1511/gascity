@@ -1933,7 +1933,18 @@
             "type": "string"
           },
           "type": "object",
-          "description": "AdmissionAuthorities maps trusted triage/contract authors to their\nEd25519 public keys. Keys are base64-encoded 32-byte public keys."
+          "description": "AdmissionAuthorities maps historical v1 admission identities to their\nEd25519 public keys. V2 admission verification does not use this map."
+        },
+        "admission_v2_primary_authority": {
+          "type": "string",
+          "description": "AdmissionV2PrimaryAuthority names the single initial v2 admission signer.\nSet it to Ricky's exact configured identity for the initial rollout.\nAdditional signer identities require a separately implemented and\nverified delegation-grant path and are rejected by this release."
+        },
+        "admission_v2_authorities": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "AdmissionV2Authorities contains exactly the primary v2 admission signer\nand its purpose-specific Ed25519 public key. The key must differ from v1\nadmission and acceptance keys. Private keys stay outside city config and\nthe bead store."
         },
         "acceptance_authorities": {
           "additionalProperties": {

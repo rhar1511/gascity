@@ -8,12 +8,14 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -28,13 +30,13 @@ const AdmissionIntentLabel = "ready-for-agent"
 var ErrEnrolledWorkMutationBlocked = beads.ErrLifecycleMutationBlocked
 
 const (
-	admissionDomain  = "gascity.lifecycle.admission.v1\n"
-	completionDomain = "gascity.lifecycle.completion.v1\n"
+	admissionV1Domain = "gascity.lifecycle.admission.v1\n"
+	admissionV2Domain = "gascity.lifecycle.admission.v2\n"
+	completionDomain  = "gascity.lifecycle.completion.v1\n"
 )
 
-// AdmissionReceipt binds explicit admission intent, the work item, its route,
-// acceptance authority, and the minimum usable acceptance contract. Signature
-// is Ed25519 over AdmissionSigningBytes.
+// AdmissionReceipt is the retained v1 admission envelope. It remains
+// decodable for historical evidence but cannot authorize new materialization.
 type AdmissionReceipt struct {
 	Version             int    `json:"version"`
 	WorkItemID          string `json:"work_item_id"`
@@ -47,6 +49,26 @@ type AdmissionReceipt struct {
 	AcceptanceAuthority string `json:"acceptance_authority"`
 	AdmittedBy          string `json:"admitted_by"`
 	Signature           string `json:"signature"`
+}
+
+// AdmissionReceiptV2 binds explicit admission intent to the exact reviewed
+// source revision, acceptance contract, canonical rig-qualified target, and
+// a versioned digest of the admission-relevant route/formula policy closure.
+// Signature is Ed25519 over AdmissionV2SigningBytes.
+type AdmissionReceiptV2 struct {
+	Version              int    `json:"version"`
+	WorkItemID           string `json:"work_item_id"`
+	Scope                string `json:"scope"`
+	ExpectedWorkRevision int64  `json:"expected_work_revision"`
+	Route                string `json:"route"`
+	Workflow             string `json:"workflow"`
+	RoutingPolicyDigest  string `json:"routing_policy_digest"`
+	MergeStrategy        string `json:"merge_strategy"`
+	Deliverable          string `json:"deliverable"`
+	Verification         string `json:"verification"`
+	AcceptanceAuthority  string `json:"acceptance_authority"`
+	AdmittedBy           string `json:"admitted_by"`
+	Signature            string `json:"signature"`
 }
 
 // CompletionReceipt records acceptance of the exact admission contract and
@@ -65,12 +87,13 @@ type CompletionReceipt struct {
 }
 
 // AdmissionDecision reports whether a bead requests lifecycle admission and
-// whether its signed contract is trusted for the supplied store scope.
+// whether the controller can authorize it. Receipt is populated only when all
+// required store-backed attachment and current-policy checks have succeeded.
 type AdmissionDecision struct {
 	Requested bool
 	Admitted  bool
 	Reason    string
-	Receipt   AdmissionReceipt
+	Receipt   AdmissionReceiptV2
 }
 
 // CompletionDecision reports whether a signed completion receipt satisfies
@@ -85,12 +108,11 @@ type CompletionDecision struct {
 // by an admission authority. The receipt signature is excluded.
 func AdmissionSigningBytes(receipt AdmissionReceipt) ([]byte, error) {
 	receipt.Signature = ""
-	return signingBytes(admissionDomain, receipt)
+	return signingBytes(admissionV1Domain, receipt)
 }
 
-// SignAdmissionReceipt signs a receipt and returns its JSON representation for
-// the gc.lifecycle.admission_receipt.v1 metadata key. Private keys should be
-// held by the trusted admission tool, never in city.toml or bead metadata.
+// SignAdmissionReceipt signs a historical v1 receipt for compatibility and
+// migration tests. It cannot authorize current lifecycle admission.
 func SignAdmissionReceipt(receipt AdmissionReceipt, privateKey ed25519.PrivateKey) (string, error) {
 	if len(privateKey) != ed25519.PrivateKeySize {
 		return "", errors.New("admission signing key must be an Ed25519 private key")
@@ -107,47 +129,144 @@ func SignAdmissionReceipt(receipt AdmissionReceipt, privateKey ed25519.PrivateKe
 	return string(encoded), nil
 }
 
-// EvaluateAdmission recognizes lifecycle admission only when the intent label
-// is present. With the gate disabled or no explicit intent, existing workflows
-// retain their current eligibility path. Once intent is present, malformed,
-// absent, stale, or untrusted evidence blocks only this item.
+// AdmissionV2SigningBytes returns the domain-separated v2 payload with the
+// detached signature excluded.
+func AdmissionV2SigningBytes(receipt AdmissionReceiptV2) ([]byte, error) {
+	receipt.Signature = ""
+	return signingBytes(admissionV2Domain, receipt)
+}
+
+// SignAdmissionReceiptV2 signs a v2 receipt. The returned canonical JSON is
+// stored under gc.lifecycle.admission_receipt.v2. The v2 signing key must be
+// dedicated to admission and kept outside city config and bead metadata.
+func SignAdmissionReceiptV2(receipt AdmissionReceiptV2, privateKey ed25519.PrivateKey) (string, error) {
+	if len(privateKey) != ed25519.PrivateKeySize {
+		return "", errors.New("admission v2 signing key must be an Ed25519 private key")
+	}
+	payload, err := AdmissionV2SigningBytes(receipt)
+	if err != nil {
+		return "", err
+	}
+	receipt.Signature = base64.StdEncoding.EncodeToString(ed25519.Sign(privateKey, payload))
+	encoded, err := json.Marshal(receipt)
+	if err != nil {
+		return "", fmt.Errorf("encode admission v2 receipt: %w", err)
+	}
+	return string(encoded), nil
+}
+
+// EvaluateAdmission recognizes explicit lifecycle intent or durable admission
+// evidence. V1 remains a historical hold. A valid v2 signature alone also
+// remains held until the caller integrates exact Q43 attachment and current
+// route-policy proof; this method has no store capabilities to verify those.
 func EvaluateAdmission(bead beads.Bead, cfg config.LifecycleConfig, scope string) AdmissionDecision {
-	receiptMetadata := strings.TrimSpace(bead.Metadata[beadmeta.LifecycleAdmissionReceiptMetadataKey])
-	if !cfg.AdmissionEnabled || (!hasLabel(bead, AdmissionIntentLabel) && receiptMetadata == "") {
+	v1Metadata := bead.Metadata[beadmeta.LifecycleAdmissionReceiptMetadataKey]
+	v2Metadata := bead.Metadata[beadmeta.LifecycleAdmissionReceiptV2MetadataKey]
+	if !cfg.AdmissionEnabled || (!hasLabel(bead, AdmissionIntentLabel) && v1Metadata == "" && v2Metadata == "") {
 		return AdmissionDecision{}
 	}
-	decision := AdmissionDecision{Requested: true, Reason: "admission receipt is missing"}
-	var receipt AdmissionReceipt
-	if err := decodeStrict(bead.Metadata[beadmeta.LifecycleAdmissionReceiptMetadataKey], &receipt); err != nil {
-		decision.Reason = "admission receipt is invalid: " + err.Error()
+	decision := AdmissionDecision{Requested: true, Reason: "v2 admission receipt is missing"}
+	if v1Metadata != "" && v2Metadata != "" {
+		decision.Reason = "conflicting v1 and v2 admission receipts are present"
 		return decision
 	}
-	if receipt.Version != 1 || strings.TrimSpace(receipt.WorkItemID) != bead.ID || strings.TrimSpace(receipt.Scope) == "" || strings.TrimSpace(receipt.Scope) != strings.TrimSpace(scope) {
-		decision.Reason = "admission receipt does not identify this work item, store scope, and version"
+	if v2Metadata == "" {
+		if v1Metadata != "" {
+			var legacy AdmissionReceipt
+			if err := decodeStrict(v1Metadata, &legacy); err == nil {
+				decision.Reason = "v1 admission evidence is historical and requires explicit v2 re-admission"
+			} else {
+				decision.Reason = "historical v1 admission receipt is invalid"
+			}
+		}
 		return decision
 	}
-	if strings.TrimSpace(receipt.Route) == "" || strings.TrimSpace(receipt.Workflow) == "" || strings.TrimSpace(receipt.Deliverable) == "" || strings.TrimSpace(receipt.Verification) == "" {
-		decision.Reason = "admission receipt must name a route, workflow, deliverable, and verification method"
+	_, err := VerifyAdmissionReceiptV2(bead, cfg, scope)
+	if err != nil {
+		decision.Reason = err.Error()
 		return decision
+	}
+	decision.Reason = "v2 admission requires verified attachment and current route-policy proof"
+	return decision
+}
+
+// VerifyAdmissionReceiptV2 verifies only the canonical signed envelope and its
+// authority/configuration binding. It deliberately does not report admission:
+// callers must separately prove the atomic Q43 attachment and recompute the
+// current route-policy projection before any materialization or worker claim.
+func VerifyAdmissionReceiptV2(bead beads.Bead, cfg config.LifecycleConfig, scope string) (AdmissionReceiptV2, error) {
+	v1Metadata := bead.Metadata[beadmeta.LifecycleAdmissionReceiptMetadataKey]
+	v2Metadata := bead.Metadata[beadmeta.LifecycleAdmissionReceiptV2MetadataKey]
+	if !cfg.AdmissionEnabled {
+		return AdmissionReceiptV2{}, errors.New("v2 admission is disabled")
+	}
+	if v1Metadata != "" || v2Metadata == "" {
+		return AdmissionReceiptV2{}, errors.New("v2 admission receipt is missing or conflicts with historical v1 evidence")
+	}
+	var receipt AdmissionReceiptV2
+	if err := decodeStrict(v2Metadata, &receipt); err != nil {
+		return AdmissionReceiptV2{}, fmt.Errorf("v2 admission receipt is invalid: %w", err)
+	}
+	canonical, err := json.Marshal(receipt)
+	if err != nil || !bytes.Equal(canonical, []byte(v2Metadata)) {
+		return AdmissionReceiptV2{}, errors.New("v2 admission receipt is not canonical JSON")
+	}
+	if receipt.Version != 2 || receipt.WorkItemID != bead.ID || receipt.Scope == "" || receipt.Scope != scope || receipt.ExpectedWorkRevision == 0 {
+		return AdmissionReceiptV2{}, errors.New("v2 admission receipt does not identify this work item, nonzero reviewed revision, store scope, and version")
+	}
+	if !canonicalRigQualifiedTarget(receipt.Route) || strings.TrimSpace(receipt.Workflow) == "" ||
+		!validLowerSHA256(receipt.RoutingPolicyDigest) || strings.TrimSpace(receipt.Deliverable) == "" || strings.TrimSpace(receipt.Verification) == "" {
+		return AdmissionReceiptV2{}, errors.New("v2 admission receipt must name a canonical rig-qualified target, workflow, policy digest, deliverable, and verification method")
 	}
 	switch receipt.MergeStrategy {
 	case "direct", "mr", "local":
 	default:
-		decision.Reason = "admission receipt must name a supported merge strategy (direct, mr, or local)"
-		return decision
+		return AdmissionReceiptV2{}, errors.New("v2 admission receipt must name a supported merge strategy (direct, mr, or local)")
 	}
 	if _, ok := cfg.AcceptanceAuthorities[receipt.AcceptanceAuthority]; !ok {
-		decision.Reason = "admission receipt names an untrusted acceptance authority"
-		return decision
+		return AdmissionReceiptV2{}, errors.New("v2 admission receipt names an untrusted acceptance authority")
 	}
-	if !verifyReceiptSignature(receipt, receipt.Signature, receipt.AdmittedBy, cfg.AdmissionAuthorities) {
-		decision.Reason = "admission receipt signature is not trusted"
-		return decision
+	if cfg.AdmissionV2PrimaryAuthority == "" || len(cfg.AdmissionV2Authorities) != 1 || receipt.AdmittedBy != cfg.AdmissionV2PrimaryAuthority ||
+		!admissionV2KeyPurposeSeparated(cfg, receipt.AdmittedBy) {
+		return AdmissionReceiptV2{}, errors.New("v2 admission requires the sole explicitly configured, purpose-separated primary signer; delegates are unavailable")
 	}
-	decision.Admitted = true
-	decision.Reason = "verified"
-	decision.Receipt = receipt
-	return decision
+	if !verifyReceiptSignature(receipt, receipt.Signature, receipt.AdmittedBy, cfg.AdmissionV2Authorities) {
+		return AdmissionReceiptV2{}, errors.New("v2 admission signature is not trusted")
+	}
+	return receipt, nil
+}
+
+func admissionV2KeyPurposeSeparated(cfg config.LifecycleConfig, identity string) bool {
+	encoded := strings.TrimSpace(cfg.AdmissionV2Authorities[identity])
+	publicKey, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil || len(publicKey) != ed25519.PublicKeySize {
+		return false
+	}
+	for _, authorities := range []map[string]string{cfg.AdmissionAuthorities, cfg.AcceptanceAuthorities} {
+		for _, value := range authorities {
+			other, err := base64.StdEncoding.DecodeString(strings.TrimSpace(value))
+			if err == nil && bytes.Equal(publicKey, other) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func canonicalRigQualifiedTarget(value string) bool {
+	if strings.Count(value, "/") != 1 || strings.IndexFunc(value, unicode.IsSpace) >= 0 {
+		return false
+	}
+	dir, name := config.ParseQualifiedName(value)
+	return strings.TrimSpace(dir) != "" && strings.TrimSpace(name) != ""
+}
+
+func validLowerSHA256(value string) bool {
+	if len(value) != sha256.Size*2 {
+		return false
+	}
+	decoded, err := hex.DecodeString(value)
+	return err == nil && hex.EncodeToString(decoded) == value
 }
 
 // CompletionSigningBytes returns the domain-separated canonical payload signed
@@ -181,6 +300,17 @@ func SignCompletionReceipt(receipt CompletionReceipt, privateKey ed25519.Private
 // excluding its detached signature. Completion receipts bind to this digest.
 func AdmissionDigest(receipt AdmissionReceipt) (string, error) {
 	payload, err := AdmissionSigningBytes(receipt)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(payload)
+	return base64.RawURLEncoding.EncodeToString(digest[:]), nil
+}
+
+// AdmissionDigestV2 returns the stable digest of the signed v2 admission
+// payload, excluding its detached signature.
+func AdmissionDigestV2(receipt AdmissionReceiptV2) (string, error) {
+	payload, err := AdmissionV2SigningBytes(receipt)
 	if err != nil {
 		return "", err
 	}
@@ -235,7 +365,7 @@ func EvaluateCompletionAt(bead beads.Bead, cfg config.LifecycleConfig, scope str
 		decision.Reason = "completion receipt is older than the configured freshness window"
 		return decision
 	}
-	digest, err := AdmissionDigest(admission.Receipt)
+	digest, err := AdmissionDigestV2(admission.Receipt)
 	if err != nil || receipt.AdmissionDigest != digest {
 		decision.Reason = "completion receipt does not bind to the current admission contract"
 		return decision
@@ -341,12 +471,31 @@ func verifyReceiptSignature(receipt any, encodedSignature, identity string, auth
 	switch value := receipt.(type) {
 	case AdmissionReceipt:
 		payload, err = AdmissionSigningBytes(value)
+	case AdmissionReceiptV2:
+		payload, err = AdmissionV2SigningBytes(value)
 	case CompletionReceipt:
 		payload, err = CompletionSigningBytes(value)
 	default:
 		return false
 	}
 	return err == nil && ed25519.Verify(ed25519.PublicKey(publicKey), payload, signature)
+}
+
+// CanonicalAdmissionReceiptV2 verifies that a v2 receipt uses its exact
+// canonical JSON representation. The detached signature is included here.
+func CanonicalAdmissionReceiptV2(encoded string) (string, error) {
+	var receipt AdmissionReceiptV2
+	if err := decodeStrict(encoded, &receipt); err != nil {
+		return "", err
+	}
+	canonical, err := json.Marshal(receipt)
+	if err != nil {
+		return "", err
+	}
+	if !bytes.Equal([]byte(encoded), canonical) {
+		return "", errors.New("admission v2 receipt JSON is not canonical")
+	}
+	return string(canonical), nil
 }
 
 // CanonicalAdmissionReceipt reports whether the metadata JSON is the exact

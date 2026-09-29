@@ -5,9 +5,9 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -26,7 +26,7 @@ func TestLifecycleCompletionRequiresScopedAcceptance(t *testing.T) {
 		edit       func(*beads.Bead, *config.City)
 		wantClosed bool
 	}{
-		{name: "accepted", wantClosed: true},
+		{name: "accepted envelope without attachment proof", wantClosed: false},
 		{name: "unsigned workflow success", edit: func(b *beads.Bead, _ *config.City) {
 			delete(b.Metadata, beadmeta.LifecycleCompletionReceiptMetadataKey)
 			b.Metadata[beadmeta.OutcomeMetadataKey] = beadmeta.OutcomePass
@@ -81,8 +81,8 @@ func TestLifecycleCompletionReceiptCannotBeReplayedAfterGenericReopen(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if closed.Status != "closed" {
-		t.Fatalf("initial completion status=%q, want closed", closed.Status)
+	if closed.Status != "in_progress" {
+		t.Fatalf("unproved v2 completion status=%q, want source to remain open", closed.Status)
 	}
 	if err := store.Update(row.ID, beads.UpdateOpts{Metadata: map[string]string{beadmeta.LifecycleCompletionReceiptMetadataKey: ""}}); !errors.Is(err, beads.ErrLifecycleMutationBlocked) {
 		t.Fatalf("clearing accepted receipt error = %v, want lifecycle mutation refusal", err)
@@ -98,7 +98,7 @@ func TestLifecycleCompletionReceiptCannotBeReplayedAfterGenericReopen(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if after.Status != "closed" || after.Metadata[beadmeta.LifecycleCompletionReceiptMetadataKey] == "" {
+	if after.Status != "in_progress" || after.Metadata[beadmeta.LifecycleCompletionReceiptMetadataKey] == "" {
 		t.Fatalf("refused mutations changed completion evidence: status=%q metadata=%v", after.Status, after.Metadata)
 	}
 	reconcileLifecycleCompletions("pilot", "/fixture/city", cfg, store, nil, nil, io.Discard)
@@ -130,7 +130,7 @@ func TestLifecycleCompletionRefusesUnsupportedOrStaleClose(t *testing.T) {
 	}
 }
 
-func TestDecisionFrontierAnswerAllowsAuthorizedLifecycleCompletionOnSupportedStores(t *testing.T) {
+func TestDecisionFrontierAnswerDoesNotBypassV2AdmissionProofForCompletion(t *testing.T) {
 	for _, tc := range lifecycleCompletionStores(t) {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg, row := lifecycleCompletionFixture(t)
@@ -149,16 +149,16 @@ func TestDecisionFrontierAnswerAllowsAuthorizedLifecycleCompletionOnSupportedSto
 				t.Fatalf("ordinary close error = %v, want lifecycle authorization guard", err)
 			}
 			if err := reconcileLifecycleCompletion(store, row.ID,
-				worklifecycle.ScopeForStore("pilot", "city:pilot"), cfg.Lifecycle); err != nil {
-				t.Fatalf("authorized lifecycle completion after answer: %v", err)
+				worklifecycle.ScopeForStore("pilot", "city:pilot"), cfg.Lifecycle); err == nil || !strings.Contains(err.Error(), "verified admission contract") {
+				t.Fatalf("completion error = %v, want explicit v2 proof hold", err)
 			}
 			closed, err := store.Get(row.ID)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if closed.Status != "closed" || beads.HasDecisionFrontierHold(closed) ||
+			if closed.Status != "in_progress" || beads.HasDecisionFrontierHold(closed) ||
 				closed.Metadata[beadmeta.DecisionFrontierRevisionReceiptsMetadataKey] == "" {
-				t.Fatalf("completed source lost expected state or receipts: status=%q metadata=%v", closed.Status, closed.Metadata)
+				t.Fatalf("unproved source changed completion state or lost receipts: status=%q metadata=%v", closed.Status, closed.Metadata)
 			}
 		})
 	}
@@ -181,7 +181,7 @@ func TestDecisionFrontierReleasePreservesUnrelatedHoldDuringLifecycleCompletion(
 			}
 			if err := reconcileLifecycleCompletion(store, row.ID,
 				worklifecycle.ScopeForStore("pilot", "city:pilot"), cfg.Lifecycle); err != nil {
-				t.Fatalf("reconcile held completion: %v", err)
+				t.Fatalf("external hold should be an observable skip: %v", err)
 			}
 			after, err := store.Get(row.ID)
 			if err != nil {
@@ -309,16 +309,8 @@ func TestLifecycleCompletionBudgetsUnknownOutcomesAndEscalatesOnce(t *testing.T)
 		if err != nil {
 			t.Fatal(err)
 		}
-		var state worklifecycle.RecoveryState
-		if err := json.Unmarshal([]byte(after.Metadata[beadmeta.LifecycleRecoveryStateMetadataKey]), &state); err != nil {
-			t.Fatal(err)
-		}
-		if applied {
-			if store.calls != 1 || len(state.Attempts) != 1 || state.Escalation != nil || after.Status != "closed" {
-				t.Fatalf("committed unknown result was repeated: calls=%d state=%+v status=%s", store.calls, state, after.Status)
-			}
-		} else if store.calls != 2 || len(state.Attempts) != 2 || state.Escalation == nil || state.Escalation.Target != "human" {
-			t.Fatalf("unknown failures exceeded budget or did not request escalation: calls=%d state=%+v", store.calls, state)
+		if store.calls != 0 || after.Status != "in_progress" || after.Metadata[beadmeta.LifecycleRecoveryStateMetadataKey] != "" {
+			t.Fatalf("unproved v2 admission reached completion side effects: calls=%d status=%s state=%q", store.calls, after.Status, after.Metadata[beadmeta.LifecycleRecoveryStateMetadataKey])
 		}
 		reconcileLifecycleCompletions("pilot", "/fixture/city", cfg, store, nil, nil, io.Discard)
 		repeated, err := store.Get(row.ID)
@@ -362,20 +354,21 @@ func lifecycleCompletionFixture(t *testing.T) (*config.City, beads.Bead) {
 	acceptanceKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{2}, ed25519.SeedSize))
 	cfg := &config.City{Workspace: config.Workspace{Name: "pilot"}, Lifecycle: config.LifecycleConfig{
 		AdmissionEnabled: true, RecoveryEnabled: true, EscalationTarget: "human",
-		AdmissionAuthorities:    map[string]string{"triage": base64.StdEncoding.EncodeToString(admissionKey.Public().(ed25519.PublicKey))},
-		AcceptanceAuthorities:   map[string]string{"reviewer": base64.StdEncoding.EncodeToString(acceptanceKey.Public().(ed25519.PublicKey))},
-		CompletionReceiptMaxAge: "168h", CompletionClockSkew: "5m",
+		AdmissionV2PrimaryAuthority: "triage",
+		AdmissionV2Authorities:      map[string]string{"triage": base64.StdEncoding.EncodeToString(admissionKey.Public().(ed25519.PublicKey))},
+		AcceptanceAuthorities:       map[string]string{"reviewer": base64.StdEncoding.EncodeToString(acceptanceKey.Public().(ed25519.PublicKey))},
+		CompletionReceiptMaxAge:     "168h", CompletionClockSkew: "5m",
 	}}
-	admission := worklifecycle.AdmissionReceipt{
-		Version: 1, WorkItemID: "work-1", Scope: worklifecycle.ScopeForStore("pilot", "city:pilot"),
-		Route: "worker", Workflow: "reviewed-change", MergeStrategy: "mr", Deliverable: "reviewed patch",
+	admission := worklifecycle.AdmissionReceiptV2{
+		Version: 2, WorkItemID: "work-1", Scope: worklifecycle.ScopeForStore("pilot", "city:pilot"), ExpectedWorkRevision: 1,
+		Route: "pilot/worker", Workflow: "reviewed-change", RoutingPolicyDigest: strings.Repeat("a", 64), MergeStrategy: "mr", Deliverable: "reviewed patch",
 		Verification: "acceptance tests", AcceptanceAuthority: "reviewer", AdmittedBy: "triage",
 	}
-	admissionJSON, err := worklifecycle.SignAdmissionReceipt(admission, admissionKey)
+	admissionJSON, err := worklifecycle.SignAdmissionReceiptV2(admission, admissionKey)
 	if err != nil {
 		t.Fatal(err)
 	}
-	digest, err := worklifecycle.AdmissionDigest(admission)
+	digest, err := worklifecycle.AdmissionDigestV2(admission)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -390,8 +383,8 @@ func lifecycleCompletionFixture(t *testing.T) (*config.City, beads.Bead) {
 	return cfg, beads.Bead{
 		ID: admission.WorkItemID, Title: "accepted work", Type: "task", Status: "in_progress", Assignee: "original-owner",
 		Metadata: map[string]string{
-			beadmeta.LifecycleAdmissionReceiptMetadataKey:  admissionJSON,
-			beadmeta.LifecycleCompletionReceiptMetadataKey: completionJSON,
+			beadmeta.LifecycleAdmissionReceiptV2MetadataKey: admissionJSON,
+			beadmeta.LifecycleCompletionReceiptMetadataKey:  completionJSON,
 			"worktree": "/preserved/worktree",
 		},
 	}

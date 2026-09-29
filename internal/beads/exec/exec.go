@@ -358,6 +358,7 @@ func lifecycleMutationMayReopenOrClear(opts beads.UpdateOpts) bool {
 	}
 	for _, key := range []string{
 		beadmeta.LifecycleAdmissionReceiptMetadataKey,
+		beadmeta.LifecycleAdmissionReceiptV2MetadataKey,
 		beadmeta.LifecycleMaterializationMetadataKey,
 		beadmeta.LifecycleCompletionReceiptMetadataKey,
 		beadmeta.LifecycleRecoveryStateMetadataKey,

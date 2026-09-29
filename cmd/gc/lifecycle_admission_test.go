@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
@@ -10,7 +9,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -24,58 +22,27 @@ import (
 	"github.com/gastownhall/gascity/internal/worklifecycle"
 )
 
-func TestLifecycleAdmissionMaterializesConfiguredDefaultWorkflowOnce(t *testing.T) {
+func TestLifecycleAdmissionHoldsSignedV2UntilAttachmentAndPolicyProof(t *testing.T) {
 	store, cfg, cityPath := lifecycleAdmissionFixture(t)
 	var stderr bytes.Buffer
 	reconcileLifecycleAdmission("pilot", cityPath, cfg, store, nil, nil, &stderr)
-	if stderr.Len() != 0 {
-		t.Fatalf("first reconciliation logged an error: %s", stderr.String())
-	}
 	work, err := store.Get("work-1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if work.Metadata[beadmeta.RoutedToMetadataKey] != "worker" || work.Metadata[beadmeta.MergeStrategyMetadataKey] != "mr" {
-		t.Fatalf("source route/merge = %q/%q, want worker/mr; metadata=%v", work.Metadata[beadmeta.RoutedToMetadataKey], work.Metadata[beadmeta.MergeStrategyMetadataKey], work.Metadata)
+	decision := worklifecycle.EvaluateAdmission(work, cfg.Lifecycle, worklifecycle.ScopeForStore("pilot", "city:pilot"))
+	if !decision.Requested || decision.Admitted || !strings.Contains(decision.Reason, "attachment and current route-policy proof") {
+		t.Fatalf("admission decision = %+v, want fail-closed proof hold", decision)
 	}
-	if work.Metadata[beadmeta.MoleculeIDMetadataKey] == "" {
-		t.Fatalf("source has no attached workflow root: %v", work.Metadata)
+	if work.Metadata[beadmeta.RoutedToMetadataKey] != "" || work.Metadata[beadmeta.MoleculeIDMetadataKey] != "" || work.Metadata[beadmeta.LifecycleMaterializationMetadataKey] != "" {
+		t.Fatalf("unproved v2 receipt caused materialization: %v", work.Metadata)
 	}
-	root, err := store.Get(work.Metadata[beadmeta.MoleculeIDMetadataKey])
-	if err != nil {
-		t.Fatalf("get attached workflow root: %v", err)
-	}
-	if root.Metadata[beadmeta.FormulaNameMetadataKey] != "review" {
-		t.Fatalf("attached formula = %q, want configured review workflow; root=%+v", root.Metadata[beadmeta.FormulaNameMetadataKey], root)
-	}
-	if !lifecycleAdmissionRouteMatches(cfg, work, worklifecycle.ScopeForStore("pilot", "city:pilot")) {
-		t.Fatal("materialized source does not satisfy its signed lifecycle contract")
-	}
-	ready, err := beads.HandlesFor(store).Live.Ready(beads.ReadyQuery{TierMode: beads.FederatedReadTier})
-	if err != nil {
-		t.Fatalf("read ready work after trusted admission: %v", err)
-	}
-	if !slices.ContainsFunc(ready, func(row beads.Bead) bool { return row.ID == work.ID }) {
-		t.Fatalf("trustedly admitted source was routed and materialized but did not become ready: %v", ready)
-	}
-
-	// A later controller pass recognizes the same attached formula and leaves
-	// both the existing route and workflow intact.
-	firstRootID := root.ID
-	reconcileLifecycleAdmission("pilot", cityPath, cfg, store, nil, nil, &stderr)
-	if got := lifecycleWorkflowRootCount(store, "review"); got != 1 {
-		t.Fatalf("second pass left %d review workflow roots, want one", got)
-	}
-	work, err = store.Get("work-1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if work.Metadata[beadmeta.MoleculeIDMetadataKey] != firstRootID {
-		t.Fatalf("second pass replaced workflow %q with %q", firstRootID, work.Metadata[beadmeta.MoleculeIDMetadataKey])
+	if !strings.Contains(stderr.String(), "holding work-1") {
+		t.Fatalf("reconciliation did not explain the hold: %s", stderr.String())
 	}
 }
 
-func TestLifecycleAdmissionReservationHasOneConcurrentMaterializer(t *testing.T) {
+func TestLifecycleAdmissionConcurrentPassesDoNotMaterializeWithoutProof(t *testing.T) {
 	store, cfg, cityPath := lifecycleAdmissionFixture(t)
 	var wg sync.WaitGroup
 	for range 2 {
@@ -86,19 +53,19 @@ func TestLifecycleAdmissionReservationHasOneConcurrentMaterializer(t *testing.T)
 		}()
 	}
 	wg.Wait()
-	if got := lifecycleWorkflowRootCount(store, "review"); got != 1 {
-		t.Fatalf("concurrent reconciliations left %d review workflow roots, want one CAS winner", got)
+	if got := lifecycleWorkflowRootCount(store, "review"); got != 0 {
+		t.Fatalf("unproved concurrent reconciliations created %d review workflow roots", got)
 	}
 	work, err := store.Get("work-1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if work.Metadata[beadmeta.MoleculeIDMetadataKey] == "" || !lifecycleMaterializationEvidence(work) {
-		t.Fatalf("concurrent materialization did not persist one verified workflow: %v", work.Metadata)
+	if work.Metadata[beadmeta.RoutedToMetadataKey] != "" || work.Metadata[beadmeta.MoleculeIDMetadataKey] != "" || work.Metadata[beadmeta.LifecycleMaterializationMetadataKey] != "" {
+		t.Fatalf("unproved concurrent pass changed source lifecycle state: %v", work.Metadata)
 	}
 }
 
-func TestLifecycleAdmissionHoldsAnIncompleteReservationAfterRestart(t *testing.T) {
+func TestLifecycleAdmissionDoesNotResumeReservationWithoutV2Proof(t *testing.T) {
 	store, cfg, cityPath := lifecycleAdmissionFixture(t)
 	row, err := store.Get("work-1")
 	if err != nil {
@@ -109,8 +76,18 @@ func TestLifecycleAdmissionHoldsAnIncompleteReservationAfterRestart(t *testing.T
 	}
 	var stderr bytes.Buffer
 	reconcileLifecycleAdmission("pilot", cityPath, cfg, store, nil, nil, &stderr)
-	if !strings.Contains(stderr.String(), "incomplete prior materialization reservation") {
-		t.Fatalf("stderr=%q, want explicit held-reservation evidence", stderr.String())
+	current, err := store.Get(row.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Metadata[beadmeta.LifecycleMaterializationMetadataKey] != `{"version":1,"state":"reserved","scope":"city:pilot/city:pilot","contract":"prior","route":"worker","workflow":"review","merge_strategy":"mr","token":"prior-owner"}` {
+		t.Fatalf("unproved pass changed prior reservation: %v", current.Metadata)
+	}
+	if current.Metadata[beadmeta.RoutedToMetadataKey] != "" || current.Metadata[beadmeta.MoleculeIDMetadataKey] != "" {
+		t.Fatalf("unproved prior reservation was resumed: %v", current.Metadata)
+	}
+	if !strings.Contains(stderr.String(), "attachment and current route-policy proof") {
+		t.Fatalf("stderr=%q, want explicit v2 proof hold", stderr.String())
 	}
 }
 
@@ -127,124 +104,25 @@ func TestLifecycleProtectionSurvivesDisabledAdmissionWithoutChangingLegacyRows(t
 	}
 }
 
-func TestLifecycleGraphV2DescendantClaimRevalidatesLiveSourceAndSkipsLegacyReclaim(t *testing.T) {
-	for _, tc := range []struct {
-		name        string
-		beforeQuery func(t *testing.T, store beads.Store, source beads.Bead)
-		staleOwner  string
-		wantHold    string
-		wantClaim   bool
-	}{
-		{
-			name: "source hold added after ready snapshot",
-			beforeQuery: func(t *testing.T, store beads.Store, source beads.Bead) {
-				t.Helper()
-				if err := store.Update(source.ID, beads.UpdateOpts{Labels: []string{beadmeta.DispatchHoldLabels[0]}}); err != nil {
-					t.Fatal(err)
-				}
-			},
-			wantHold: "source admission",
-		},
-		{
-			name: "source materialization becomes incomplete",
-			beforeQuery: func(t *testing.T, store beads.Store, source beads.Bead) {
-				t.Helper()
-				marker, ok := lifecycleMaterializationFor(source)
-				if !ok {
-					t.Fatal("source has no controller materialization marker")
-				}
-				marker.State = "reserved"
-				value, err := encodeLifecycleMaterialization(marker)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if err := store.SetMetadata(source.ID, beadmeta.LifecycleMaterializationMetadataKey, value); err != nil {
-					t.Fatal(err)
-				}
-			},
-			wantHold: "graph lineage",
-		},
-		{
-			name:       "legacy stale-owner reclaim is skipped",
-			staleOwner: "former-session",
-		},
-		{
-			name:      "fresh graph descendant claim uses lifecycle CAS",
-			wantClaim: true,
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			store, cfg, cityPath := lifecycleAdmissionFixture(t)
-			root, descendant := materializeLifecycleGraphV2(t, store, cfg, cityPath, "work-1")
-			if !sourceworkflow.IsWorkflowRoot(root) || descendant.ID == "" || !lifecycleMaterializationEvidence(descendant) {
-				t.Fatalf("compiled graph lineage missing root/descendant proof: root=%+v descendant=%+v", root, descendant)
-			}
-			if tc.staleOwner != "" {
-				descendant.Assignee = tc.staleOwner
-				if err := store.Update(descendant.ID, beads.UpdateOpts{Assignee: &tc.staleOwner}); err != nil {
-					t.Fatal(err)
-				}
-			}
-			currentSource, err := store.Get("work-1")
-			if err != nil {
-				t.Fatal(err)
-			}
-			readyJSON := lifecycleReadyWireJSON(t, descendant, "city:pilot", worklifecycle.ScopeForStore("pilot", "city:pilot"))
-			var claims, reclaims int
-			ops := hookClaimOps{
-				Runner: func(string, string) (string, error) {
-					if tc.beforeQuery != nil {
-						tc.beforeQuery(t, store, currentSource)
-					}
-					return readyJSON, nil
-				},
-				Claim: func(context.Context, string, []string, string, string) (beads.Bead, bool, error) {
-					claims++
-					return beads.Bead{}, false, nil
-				},
-				ReclaimStale: func(context.Context, string, []string, string) (bool, string, error) {
-					reclaims++
-					return true, "former-session", nil
-				},
-				DrainAck: func(io.Writer) error { return nil },
-			}
-			var stdout, stderr bytes.Buffer
-			code := doHookClaim("gc ready --json", cityPath, hookClaimOptions{
-				Assignee: "worker-session", IdentityCandidates: []string{"worker-session"}, RouteTargets: []string{"worker"},
-				Env: nil, DrainAck: true, JSON: true, Lifecycle: cfg.Lifecycle, LifecycleCity: cfg,
-				TrustedLifecycleScope: true, AutoReclaimStaleClaims: true,
-				ResolveLifecycleStore: func(ref string) (beads.Store, error) {
-					if ref != "city:pilot" {
-						return nil, beads.ErrNotFound
-					}
-					return store, nil
-				},
-			}, ops, &stdout, &stderr)
-			if code != 0 {
-				t.Fatalf("hook claim = %d, want acknowledged no-work; stderr=%s", code, stderr.String())
-			}
-			if claims != 0 {
-				t.Fatalf("claim path ran %d times although lifecycle authority was absent or reclaim was unsafe", claims)
-			}
-			if reclaims != 0 {
-				t.Fatalf("legacy stale-owner reclaim ran %d times for enrolled descendant", reclaims)
-			}
-			claimed, err := store.Get(descendant.ID)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if (strings.EqualFold(claimed.Status, "in_progress") && claimed.Assignee == "worker-session") != tc.wantClaim {
-				t.Fatalf("descendant status/owner = %q/%q, wantClaim=%v; stdout=%q stderr=%q", claimed.Status, claimed.Assignee, tc.wantClaim, stdout.String(), stderr.String())
-			}
-			if tc.wantHold != "" && !strings.Contains(stderr.String(), tc.wantHold) {
-				t.Fatalf("stderr=%q, want explanation containing %q", stderr.String(), tc.wantHold)
-			}
-		})
+func TestLifecycleGraphV2AdmissionWaitsForAttachmentAndPolicyProof(t *testing.T) {
+	store, cfg, cityPath := lifecycleAdmissionFixture(t)
+	var stderr bytes.Buffer
+	reconcileLifecycleAdmission("pilot", cityPath, cfg, store, nil, nil, &stderr)
+	source, err := store.Get("work-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision := worklifecycle.EvaluateAdmission(source, cfg.Lifecycle, worklifecycle.ScopeForStore("pilot", "city:pilot"))
+	if !decision.Requested || decision.Admitted || !strings.Contains(decision.Reason, "attachment and current route-policy proof") {
+		t.Fatalf("graph admission = %+v, want proof hold", decision)
+	}
+	if source.Metadata[beadmeta.MoleculeIDMetadataKey] != "" || source.Metadata[beadmeta.LifecycleMaterializationMetadataKey] != "" || lifecycleWorkflowRootCount(store, "review") != 0 {
+		t.Fatalf("unproved graph admission created lineage: %+v", source.Metadata)
 	}
 }
 
 func TestLifecycleGraphDescendantAssignmentProtectsLiveSessionFromLegacyRestart(t *testing.T) {
-	env, session, sessionName := newProgressStallTestEnv(t)
+	env, _, _ := newProgressStallTestEnv(t)
 	env.cfg.Lifecycle.AdmissionEnabled = true
 	workflow := "review"
 	env.cfg.Agents[0].DefaultSlingFormula = &workflow
@@ -265,76 +143,51 @@ func TestLifecycleGraphDescendantAssignmentProtectsLiveSessionFromLegacyRestart(
 	if err != nil {
 		t.Fatal(err)
 	}
-	env.cfg.Lifecycle.AdmissionAuthorities = map[string]string{"triage": base64.StdEncoding.EncodeToString(admissionKey.Public().(ed25519.PublicKey))}
+	env.cfg.Lifecycle.AdmissionV2Authorities = map[string]string{"triage": base64.StdEncoding.EncodeToString(admissionKey.Public().(ed25519.PublicKey))}
 	env.cfg.Lifecycle.AcceptanceAuthorities = map[string]string{"reviewer": base64.StdEncoding.EncodeToString(acceptanceKey.Public().(ed25519.PublicKey))}
 	scope := worklifecycle.ScopeForStore("test-city", "city:test-city")
+	if len(env.cfg.Agents) == 0 {
+		t.Fatal("test city has no worker template")
+	}
+	env.cfg.Agents[0].Dir = "test-rig"
 	source, err := env.store.Create(beads.Bead{Title: "graph lifecycle work", Type: "task", Status: "open", Labels: []string{worklifecycle.AdmissionIntentLabel}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	receipt, err := worklifecycle.SignAdmissionReceipt(worklifecycle.AdmissionReceipt{
-		Version: 1, WorkItemID: source.ID, Scope: scope, Route: "worker", Workflow: workflow, MergeStrategy: "mr",
+	receipt, err := worklifecycle.SignAdmissionReceiptV2(worklifecycle.AdmissionReceiptV2{
+		Version: 2, WorkItemID: source.ID, Scope: scope, ExpectedWorkRevision: source.Revision, Route: "test-rig/worker", Workflow: workflow,
+		RoutingPolicyDigest: strings.Repeat("a", 64), MergeStrategy: "mr",
 		Deliverable: "reviewed patch", Verification: "tests", AcceptanceAuthority: "reviewer", AdmittedBy: "triage",
 	}, admissionKey)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := env.store.SetMetadata(source.ID, beadmeta.LifecycleAdmissionReceiptMetadataKey, receipt); err != nil {
+	if err := env.store.SetMetadata(source.ID, beadmeta.LifecycleAdmissionReceiptV2MetadataKey, receipt); err != nil {
 		t.Fatal(err)
 	}
 	cityPath := t.TempDir()
-	reconcileLifecycleAdmission("test-city", cityPath, env.cfg, env.store, nil, nil, io.Discard)
+	var stderr bytes.Buffer
+	reconcileLifecycleAdmission("test-city", cityPath, env.cfg, env.store, nil, nil, &stderr)
 	source, err = env.store.Get(source.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	marker, ok := lifecycleMaterializationFor(source)
-	if !ok || marker.State != "attached" {
-		t.Fatalf("compiled graph admission did not attach source lineage: %+v", marker)
+	decision := worklifecycle.EvaluateAdmission(source, env.cfg.Lifecycle, scope)
+	if !decision.Requested || decision.Admitted || !strings.Contains(decision.Reason, "attachment and current route-policy proof") {
+		t.Fatalf("graph admission = %+v, want proof hold", decision)
 	}
-	rows, err := env.store.ListByMetadata(map[string]string{beadmeta.RootBeadIDMetadataKey: marker.WorkflowID}, 0, beads.WithBothTiers)
+	if source.Metadata[beadmeta.RoutedToMetadataKey] != "" || source.Metadata[beadmeta.MoleculeIDMetadataKey] != "" || source.Metadata[beadmeta.LifecycleMaterializationMetadataKey] != "" {
+		t.Fatalf("unproved graph admission changed the source: %+v", source.Metadata)
+	}
+	rows, err := env.store.ListByMetadata(map[string]string{beadmeta.RootBeadIDMetadataKey: source.ID}, 0, beads.WithBothTiers)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var descendant beads.Bead
-	for _, row := range rows {
-		if row.ID != marker.WorkflowID && row.Metadata[beadmeta.RoutedToMetadataKey] == "worker" {
-			descendant = row
-			break
-		}
-	}
-	if descendant.ID == "" || !lifecycleMaterializationEvidence(descendant) {
-		t.Fatalf("compiled graph did not carry enrollment onto a runnable descendant: %+v", rows)
-	}
-	if err := env.store.Update(descendant.ID, beads.UpdateOpts{Assignee: &sessionName}); err != nil {
-		t.Fatal(err)
-	}
-	descendant, err = env.store.Get(descendant.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !lifecycleProtectedWork(descendant, env.cfg) {
-		t.Fatal("graph descendant lacks durable protection evidence")
-	}
-	env.reconcileAtPath(cityPath, []beads.Bead{session})
-	if !env.sp.IsRunning(sessionName) {
-		t.Fatalf("session %q was stopped while assigned an enrolled graph descendant", sessionName)
-	}
-	after, err := env.store.Get(descendant.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if after.Status != "open" || after.Assignee != sessionName {
-		t.Fatalf("legacy session restart changed graph ownership: status=%q assignee=%q", after.Status, after.Assignee)
-	}
-	if strings.Contains(env.stderr.String(), "progress-stalled") || strings.Contains(env.stderr.String(), "restart-requested action") {
-		t.Fatalf("stderr=%q, lifecycle-owned graph assignment should suppress legacy restart", env.stderr.String())
+	if len(rows) != 0 {
+		t.Fatalf("unproved graph admission created descendants: %+v", rows)
 	}
 	if err := env.store.Close(source.ID); err == nil {
-		t.Fatal("ordinary close accepted lifecycle source work without a completion receipt")
-	}
-	if err := env.store.Close(descendant.ID); err != nil {
-		t.Fatalf("ordinary close of an admitted graph descendant must preserve step-completion behavior: %v", err)
+		t.Fatal("ordinary close accepted durably enrolled source work")
 	}
 }
 
@@ -346,14 +199,14 @@ func TestLifecycleGraphWorkflowLookupDoesNotFallBackAcrossDuplicateIDs(t *testin
 	}
 	scope := worklifecycle.ScopeForStore("pilot", "city:pilot")
 	decision := worklifecycle.EvaluateAdmission(source, cfg.Lifecycle, scope)
-	digest, err := worklifecycle.AdmissionDigest(decision.Receipt)
+	digest, err := worklifecycle.AdmissionDigestV2(decision.Receipt)
 	if err != nil {
 		t.Fatal(err)
 	}
 	const rootID = "duplicate-workflow-id"
 	reservation, err := encodeLifecycleMaterialization(lifecycleMaterialization{
-		Version: 1, State: "reserved", Scope: scope, Contract: digest, Route: "worker", Workflow: "review", MergeStrategy: "mr",
-		Token: "reservation", SourceID: source.ID, SourceStoreRef: "city:pilot", WorkflowStoreRef: "class:graph", AdmissionReceipt: source.Metadata[beadmeta.LifecycleAdmissionReceiptMetadataKey],
+		Version: 1, State: "reserved", Scope: scope, Contract: digest, Route: "pilot/worker", Workflow: "review", MergeStrategy: "mr",
+		Token: "reservation", SourceID: source.ID, SourceStoreRef: "city:pilot", WorkflowStoreRef: "class:graph", AdmissionReceipt: source.Metadata[beadmeta.LifecycleAdmissionReceiptV2MetadataKey],
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -361,7 +214,7 @@ func TestLifecycleGraphWorkflowLookupDoesNotFallBackAcrossDuplicateIDs(t *testin
 	inputConvoy := "input-convoy"
 	if err := store.Update(source.ID, beads.UpdateOpts{Metadata: map[string]string{
 		beadmeta.LifecycleMaterializationMetadataKey: reservation,
-		beadmeta.RoutedToMetadataKey:                 "worker",
+		beadmeta.RoutedToMetadataKey:                 "pilot/worker",
 		beadmeta.MergeStrategyMetadataKey:            "mr",
 		beadmeta.WorkflowIDMetadataKey:               rootID,
 	}, ParentID: &inputConvoy}); err != nil {
@@ -372,9 +225,9 @@ func TestLifecycleGraphWorkflowLookupDoesNotFallBackAcrossDuplicateIDs(t *testin
 		t.Fatal(err)
 	}
 	lineage, err := encodeLifecycleMaterialization(lifecycleMaterialization{
-		Version: 1, State: "lineage_pending", Scope: scope, Contract: digest, Route: "worker", Workflow: "review", MergeStrategy: "mr",
+		Version: 1, State: "lineage_pending", Scope: scope, Contract: digest, Route: "pilot/worker", Workflow: "review", MergeStrategy: "mr",
 		Token: "reservation", WorkflowID: rootID, SourceID: source.ID, SourceStoreRef: "city:pilot", WorkflowStoreRef: "class:graph",
-		AdmissionReceipt: source.Metadata[beadmeta.LifecycleAdmissionReceiptMetadataKey],
+		AdmissionReceipt: source.Metadata[beadmeta.LifecycleAdmissionReceiptV2MetadataKey],
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -385,7 +238,7 @@ func TestLifecycleGraphWorkflowLookupDoesNotFallBackAcrossDuplicateIDs(t *testin
 			beadmeta.KindMetadataKey:                     beadmeta.KindWorkflow,
 			beadmeta.FormulaNameMetadataKey:              "review",
 			beadmeta.FormulaContractMetadataKey:          beadmeta.FormulaContractGraphV2,
-			beadmeta.ExecutionRoutedToMetadataKey:        "worker",
+			beadmeta.ExecutionRoutedToMetadataKey:        "pilot/worker",
 			beadmeta.MergeStrategyMetadataKey:            "mr",
 			beadmeta.InputConvoyIDMetadataKey:            inputConvoy,
 			beadmeta.LifecycleMaterializationMetadataKey: lineage,
@@ -450,7 +303,7 @@ func materializeLifecycleGraphV2(t *testing.T, store beads.Store, cfg *config.Ci
 		t.Fatal(err)
 	}
 	for _, child := range children {
-		if child.ID != root.ID && child.Metadata[beadmeta.RoutedToMetadataKey] == "worker" && lifecycleMaterializationEvidence(child) {
+		if child.ID != root.ID && child.Metadata[beadmeta.RoutedToMetadataKey] == "pilot/worker" && lifecycleMaterializationEvidence(child) {
 			return root, child
 		}
 	}
@@ -502,12 +355,14 @@ func lifecycleAdmissionFixture(t *testing.T) (beads.Store, *config.City, string)
 		FormulaLayers: config.FormulaLayers{City: []string{formulaDir}},
 		Agents: []config.Agent{{
 			Name:                "worker",
+			Dir:                 "pilot",
 			MaxActiveSessions:   &maxSessions,
 			DefaultSlingFormula: &workflow,
 		}},
 		Lifecycle: config.LifecycleConfig{
-			AdmissionEnabled: true,
-			AdmissionAuthorities: map[string]string{
+			AdmissionEnabled:            true,
+			AdmissionV2PrimaryAuthority: "triage",
+			AdmissionV2Authorities: map[string]string{
 				"triage": base64.StdEncoding.EncodeToString(admissionKey.Public().(ed25519.PublicKey)),
 			},
 			AcceptanceAuthorities: map[string]string{
@@ -515,9 +370,9 @@ func lifecycleAdmissionFixture(t *testing.T) (beads.Store, *config.City, string)
 			},
 		},
 	}
-	receipt, err := worklifecycle.SignAdmissionReceipt(worklifecycle.AdmissionReceipt{
-		Version: 1, WorkItemID: "work-1", Scope: worklifecycle.ScopeForStore("pilot", "city:pilot"),
-		Route: "worker", Workflow: workflow, MergeStrategy: "mr", Deliverable: "reviewed patch",
+	receipt, err := worklifecycle.SignAdmissionReceiptV2(worklifecycle.AdmissionReceiptV2{
+		Version: 2, WorkItemID: "work-1", Scope: worklifecycle.ScopeForStore("pilot", "city:pilot"), ExpectedWorkRevision: 1,
+		Route: "pilot/worker", Workflow: workflow, RoutingPolicyDigest: strings.Repeat("a", 64), MergeStrategy: "mr", Deliverable: "reviewed patch",
 		Verification: "acceptance tests", AcceptanceAuthority: "reviewer", AdmittedBy: "triage",
 	}, admissionKey)
 	if err != nil {
@@ -527,7 +382,7 @@ func lifecycleAdmissionFixture(t *testing.T) (beads.Store, *config.City, string)
 	if _, err := store.Create(beads.Bead{
 		ID: "work-1", Title: "lifecycle test", Type: "task", Status: "open",
 		Labels:   []string{worklifecycle.AdmissionIntentLabel},
-		Metadata: map[string]string{beadmeta.LifecycleAdmissionReceiptMetadataKey: receipt},
+		Metadata: map[string]string{beadmeta.LifecycleAdmissionReceiptV2MetadataKey: receipt},
 	}); err != nil {
 		t.Fatal(err)
 	}

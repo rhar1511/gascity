@@ -1292,7 +1292,7 @@ func findPRRepairWork(store beads.Store, monitor config.GitHubPRMonitor, item PR
 	}
 	row := rows[0]
 	if !validPRRepairWork(row, monitor, item) {
-		return beads.Bead{}, false, errors.New("stored repair work does not verify as held or lifecycle-admitted work for the requested revision")
+		return beads.Bead{}, false, errors.New("stored repair work does not verify as held triage work for the requested revision")
 	}
 	return row, true, nil
 }
@@ -1307,10 +1307,10 @@ func validPRRepairWork(row beads.Bead, monitor config.GitHubPRMonitor, item PRAc
 	if hasPRActionExternalHold(row.Labels) {
 		return row.Metadata[beadmeta.RoutedToMetadataKey] == ""
 	}
-	// After explicit lifecycle admission, the signed receipt and serving route
-	// are written by that separate authority. Prepare itself never removes the
-	// hold or installs a serving route.
-	return row.Metadata[beadmeta.RoutedToMetadataKey] == monitor.RepairRoute && row.Metadata[beadmeta.LifecycleAdmissionReceiptMetadataKey] != ""
+	// A v2 metadata value and serving route are not proof of the atomic Q43
+	// attachment or current route-policy check. This lookup path has no
+	// proof-aware verifier, so an unheld row remains unrecognized here.
+	return false
 }
 
 func hasPRActionExternalHold(labels []string) bool {

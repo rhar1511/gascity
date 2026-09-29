@@ -375,6 +375,26 @@ func TestPRActionPreparePersistsWorkTransitionBeforeReportingSuccess(t *testing.
 	}
 }
 
+func TestPRRepairLookupDoesNotAuthorizeRawV2ReceiptPresence(t *testing.T) {
+	fx := newPRActionFixture(t, false)
+	queue, err := fx.service.Queue(context.Background())
+	if err != nil || len(queue.Items) != 1 {
+		t.Fatalf("queue = %+v, err=%v", queue, err)
+	}
+	monitor := fx.state.cfg.GitHub.PRMonitors[0]
+	work, err := ensurePRRepairWork(fx.store, monitor, queue.Items[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	work.Labels = []string{"github", "ci", "repair", "pr-monitor"}
+	work.Metadata[beadmeta.RoutedToMetadataKey] = monitor.RepairRoute
+	work.Metadata[beadmeta.LifecycleAdmissionReceiptV2MetadataKey] = "malformed-but-present"
+
+	if validPRRepairWork(work, monitor, queue.Items[0]) {
+		t.Fatal("raw v2 metadata presence and a serving route authorized an unheld repair row")
+	}
+}
+
 func TestPRActionExecuteKeepsLedgerAndPreparedWorkOnMonitorRig(t *testing.T) {
 	fx := newPRActionFixture(t, false)
 	fx.forge.pullRequests[0].MergeStateStatus = "BEHIND"

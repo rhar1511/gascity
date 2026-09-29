@@ -1250,7 +1250,7 @@ func walkSourceBeadChain(rootStore beads.Store, rootID string, opts ProcessOptio
 			if !mutate {
 				return nil
 			}
-			if strings.TrimSpace(loaded.Metadata[beadmeta.LifecycleAdmissionReceiptMetadataKey]) != "" ||
+			if beads.HasLifecycleAdmissionReceipt(loaded) ||
 				strings.TrimSpace(loaded.Metadata[beadmeta.LifecycleMaterializationMetadataKey]) != "" {
 				// Workflow finalization is not acceptance of the deliverable.
 				// Enrolled source work closes only through the controller's

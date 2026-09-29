@@ -257,9 +257,9 @@ func lifecycleRecoveryAttachedWorkflowMatches(work beads.Bead, sourceRef string,
 		return false
 	}
 	decision := worklifecycle.EvaluateAdmission(work, cfg.Lifecycle, scope)
-	digest, err := worklifecycle.AdmissionDigest(decision.Receipt)
+	digest, err := worklifecycle.AdmissionDigestV2(decision.Receipt)
 	if err != nil || !decision.Admitted || digest != marker.Contract || marker.Workflow != decision.Receipt.Workflow ||
-		marker.MergeStrategy != decision.Receipt.MergeStrategy || marker.AdmissionReceipt != work.Metadata[beadmeta.LifecycleAdmissionReceiptMetadataKey] {
+		marker.MergeStrategy != decision.Receipt.MergeStrategy || marker.AdmissionReceipt != work.Metadata[beadmeta.LifecycleAdmissionReceiptV2MetadataKey] {
 		return false
 	}
 	workflowStore := storesByRef[marker.WorkflowStoreRef]

@@ -27,8 +27,9 @@ func TestReadyJSONCarriesTrustedLifecycleScopeIntoHookClaim(t *testing.T) {
 		t.Fatal(err)
 	}
 	lifecycleCfg := config.LifecycleConfig{
-		AdmissionEnabled: true,
-		AdmissionAuthorities: map[string]string{
+		AdmissionEnabled:            true,
+		AdmissionV2PrimaryAuthority: "triage",
+		AdmissionV2Authorities: map[string]string{
 			"triage": base64.StdEncoding.EncodeToString(admissionKey.Public().(ed25519.PublicKey)),
 		},
 		AcceptanceAuthorities: map[string]string{
@@ -36,38 +37,40 @@ func TestReadyJSONCarriesTrustedLifecycleScopeIntoHookClaim(t *testing.T) {
 		},
 	}
 	workflow := "mol-polecat-work"
-	cityCfg := &config.City{Lifecycle: lifecycleCfg, Agents: []config.Agent{{Name: "worker", DefaultSlingFormula: &workflow}}}
-	makeCandidate := func(scope string, controllerVerified, intent, receiptPresent bool) beads.Bead {
-		receipt := worklifecycle.AdmissionReceipt{
-			Version:             1,
-			WorkItemID:          "work-1",
-			Scope:               scope,
-			Route:               "worker",
-			Workflow:            "mol-polecat-work",
-			MergeStrategy:       "mr",
-			Deliverable:         "reviewed code change",
-			Verification:        "tests and merge request",
-			AcceptanceAuthority: "reviewer",
-			AdmittedBy:          "triage",
+	cityCfg := &config.City{Lifecycle: lifecycleCfg, Agents: []config.Agent{{Name: "worker", Dir: "pilot", DefaultSlingFormula: &workflow}}}
+	makeCandidate := func(scope string, controllerVerified, intent, receiptPresent bool, reviewedRevision int64) beads.Bead {
+		receipt := worklifecycle.AdmissionReceiptV2{
+			Version:              2,
+			WorkItemID:           "work-1",
+			Scope:                scope,
+			ExpectedWorkRevision: reviewedRevision,
+			Route:                "pilot/worker",
+			Workflow:             "mol-polecat-work",
+			RoutingPolicyDigest:  strings.Repeat("a", 64),
+			MergeStrategy:        "mr",
+			Deliverable:          "reviewed code change",
+			Verification:         "tests and merge request",
+			AcceptanceAuthority:  "reviewer",
+			AdmittedBy:           "triage",
 		}
-		encoded, err := worklifecycle.SignAdmissionReceipt(receipt, admissionKey)
+		encoded, err := worklifecycle.SignAdmissionReceiptV2(receipt, admissionKey)
 		if err != nil {
 			t.Fatal(err)
 		}
-		digest, err := worklifecycle.AdmissionDigest(receipt)
+		digest, err := worklifecycle.AdmissionDigestV2(receipt)
 		if err != nil {
 			t.Fatal(err)
 		}
 		metadata := map[string]string{
-			beadmeta.LifecycleAdmissionReceiptMetadataKey: encoded,
-			beadmeta.RoutedToMetadataKey:                  "worker",
-			beadmeta.ExecutionRoutedToMetadataKey:         "worker",
-			beadmeta.MergeStrategyMetadataKey:             "mr",
-			"workflow_id":                                 "wf-1",
+			beadmeta.LifecycleAdmissionReceiptV2MetadataKey: encoded,
+			beadmeta.RoutedToMetadataKey:                    "pilot/worker",
+			beadmeta.ExecutionRoutedToMetadataKey:           "pilot/worker",
+			beadmeta.MergeStrategyMetadataKey:               "mr",
+			"workflow_id":                                   "wf-1",
 		}
 		if controllerVerified {
 			metadata[beadmeta.LifecycleMaterializationMetadataKey], err = encodeLifecycleMaterialization(lifecycleMaterialization{
-				Version: 1, State: "attached", Scope: scope, Contract: digest, Route: "worker",
+				Version: 1, State: "attached", Scope: scope, Contract: digest, Route: "pilot/worker",
 				Workflow: "mol-polecat-work", MergeStrategy: "mr", Token: "controller-token", WorkflowID: "wf-1",
 				SourceID: "work-1", SourceStoreRef: "city:pilot", WorkflowStoreRef: "city:pilot", AdmissionReceipt: encoded,
 			})
@@ -87,7 +90,7 @@ func TestReadyJSONCarriesTrustedLifecycleScopeIntoHookClaim(t *testing.T) {
 			bead.Labels = []string{worklifecycle.AdmissionIntentLabel}
 		}
 		if !receiptPresent {
-			delete(bead.Metadata, beadmeta.LifecycleAdmissionReceiptMetadataKey)
+			delete(bead.Metadata, beadmeta.LifecycleAdmissionReceiptV2MetadataKey)
 		}
 		return bead
 	}
@@ -104,17 +107,21 @@ func TestReadyJSONCarriesTrustedLifecycleScopeIntoHookClaim(t *testing.T) {
 		signedRevision bool
 		wantError      bool
 	}{
-		{name: "local receipt with verified workflow", scope: worklifecycle.ScopeForStore("pilot", "city:pilot"), verified: true, intent: true, receipt: true, wantClaim: true},
-		{name: "negative signed revision is fenced through claim and identity stamp", scope: worklifecycle.ScopeForStore("pilot", "city:pilot"), verified: true, intent: true, receipt: true, signedRevision: true, wantClaim: true},
+		{name: "local receipt with workflow waits for Q43 and policy proof", scope: worklifecycle.ScopeForStore("pilot", "city:pilot"), verified: true, intent: true, receipt: true},
+		{name: "negative signed revision still waits for Q43 and policy proof", scope: worklifecycle.ScopeForStore("pilot", "city:pilot"), verified: true, intent: true, receipt: true, signedRevision: true},
 		{name: "receipt replayed from another city", scope: worklifecycle.ScopeForStore("elsewhere", "city:elsewhere"), verified: true, intent: true, receipt: true, wantClaim: false},
 		{name: "worker workflow metadata without controller verification", scope: worklifecycle.ScopeForStore("pilot", "city:pilot"), intent: true, receipt: true, wantClaim: false},
 		{name: "removed intent and receipt after durable enrollment", scope: worklifecycle.ScopeForStore("pilot", "city:pilot"), verified: true, wantClaim: false},
-		{name: "unsupported CAS refuses lifecycle claim", scope: worklifecycle.ScopeForStore("pilot", "city:pilot"), verified: true, intent: true, receipt: true, noCAS: true, wantError: true},
-		{name: "hold racing the claim CAS refuses lifecycle claim", scope: worklifecycle.ScopeForStore("pilot", "city:pilot"), verified: true, intent: true, receipt: true, raceHold: true, wantError: true},
+		{name: "unsupported CAS remains unclaimed before proof integration", scope: worklifecycle.ScopeForStore("pilot", "city:pilot"), verified: true, intent: true, receipt: true, noCAS: true},
+		{name: "hold race is not reached before proof integration", scope: worklifecycle.ScopeForStore("pilot", "city:pilot"), verified: true, intent: true, receipt: true, raceHold: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			mem := &beads.MemStore{IDPrefix: "work", HonorExplicitIDs: true}
-			if _, err := mem.Create(makeCandidate(tc.scope, tc.verified, tc.intent, tc.receipt)); err != nil {
+			reviewedRevision := int64(1)
+			if tc.signedRevision {
+				reviewedRevision = -1
+			}
+			if _, err := mem.Create(makeCandidate(tc.scope, tc.verified, tc.intent, tc.receipt, reviewedRevision)); err != nil {
 				t.Fatal(err)
 			}
 			var store beads.Store = mem
@@ -154,10 +161,10 @@ func TestReadyJSONCarriesTrustedLifecycleScopeIntoHookClaim(t *testing.T) {
 					t.Fatalf("unverified ready row unexpectedly has controller materialization: %+v", decoded[0].Metadata)
 				}
 				decision := worklifecycle.EvaluateAdmission(decoded[0], lifecycleCfg, decoded[0].LifecycleScope)
-				if !decision.Requested || !decision.Admitted || lifecycleAdmissionRouteMatches(cityCfg, decoded[0], decoded[0].LifecycleScope) {
+				if !decision.Requested || decision.Admitted || lifecycleAdmissionRouteMatches(cityCfg, decoded[0], decoded[0].LifecycleScope) {
 					t.Fatalf("unverified admission state: requested=%v admitted=%v routeMatches=%v reason=%q", decision.Requested, decision.Admitted, lifecycleAdmissionRouteMatches(cityCfg, decoded[0], decoded[0].LifecycleScope), decision.Reason)
 				}
-				filtered := filterHookLifecycleCandidates(decoded, hookClaimOptions{Lifecycle: lifecycleCfg, LifecycleCity: cityCfg, TrustedLifecycleScope: true, RouteTargets: []string{"worker"}}, io.Discard)
+				filtered := filterHookLifecycleCandidates(decoded, hookClaimOptions{Lifecycle: lifecycleCfg, LifecycleCity: cityCfg, TrustedLifecycleScope: true, RouteTargets: []string{"pilot/worker"}}, io.Discard)
 				if len(filtered) != 0 {
 					t.Fatalf("worker-authored workflow metadata passed lifecycle filter: %+v", filtered)
 				}
@@ -182,7 +189,7 @@ func TestReadyJSONCarriesTrustedLifecycleScopeIntoHookClaim(t *testing.T) {
 			code := doHookClaim("gc ready --json", "/city", hookClaimOptions{
 				Assignee:              "worker-session",
 				IdentityCandidates:    []string{"worker-session"},
-				RouteTargets:          []string{"worker"},
+				RouteTargets:          []string{"pilot/worker"},
 				Lifecycle:             lifecycleCfg,
 				LifecycleCity:         cityCfg,
 				TrustedLifecycleScope: true,
@@ -217,8 +224,8 @@ func TestReadyJSONCarriesTrustedLifecycleScopeIntoHookClaim(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if strings.EqualFold(current.Status, "in_progress") || current.Assignee != "" || !lifecycleRowHeld(current) {
-					t.Fatalf("claim race changed owner/status or lost the hold: status=%q owner=%q labels=%v", current.Status, current.Assignee, current.Labels)
+				if strings.EqualFold(current.Status, "in_progress") || current.Assignee != "" {
+					t.Fatalf("unproved claim changed owner/status: status=%q owner=%q labels=%v", current.Status, current.Assignee, current.Labels)
 				}
 			}
 		})

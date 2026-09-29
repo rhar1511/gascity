@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -24,7 +25,7 @@ import (
 	"github.com/gastownhall/gascity/internal/worklifecycle"
 )
 
-func TestLifecycleRecoveryControllerNudgesOnlyTheCASWinnerAndObservesReplay(t *testing.T) {
+func TestLifecycleRecoveryRequiresV2AttachmentAndPolicyProof(t *testing.T) {
 	fixture := newLifecycleRecoveryFixture(t)
 	request := fixture.newRequest(t, "nudge-1", fixture.work.Revision)
 	fixture.persist(t, request)
@@ -42,30 +43,18 @@ func TestLifecycleRecoveryControllerNudgesOnlyTheCASWinnerAndObservesReplay(t *t
 	reconcileLifecycleRecoveryRequests(context.Background(), fixture.city, fixture.cityPath, fixture.cfg, fixture.store, nil,
 		beads.SessionStore{Store: fixture.store}, fixture.provider, &logs)
 
-	if got := fixture.provider.CountCalls("Nudge", fixture.info.SessionName); got != 1 {
-		t.Fatalf("nudge count=%d, want one CAS winner; log=%s", got, logs.String())
-	}
-	receipt, err := session.NewStore(beads.SessionStore{Store: fixture.store}).GetRequest(fixture.info.ID, request.RequestID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	wantBinding := lifecycleRecoveryBindingForTest(t, fixture, request)
-	if receipt.Attempt == nil || *receipt.Attempt != wantBinding {
-		t.Fatalf("session receipt attempt=%+v, want exact trusted binding %+v", receipt.Attempt, wantBinding)
-	}
-	if receipt.Delivery != session.RequestDeliveryAccepted || receipt.AcknowledgedAt != nil || receipt.Effect != "unverified" {
-		t.Fatalf("session receipt=%+v, want provider acceptance only", receipt)
+	if got := fixture.provider.CountCalls("Nudge", fixture.info.SessionName); got != 0 {
+		t.Fatalf("v2 receipt without attachment/policy proof sent %d nudges", got)
 	}
 	work, err := fixture.store.Get(fixture.work.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	state := recoveryStateFromWork(t, work)
-	if len(state.Attempts) != 1 || state.Attempts[0].RequestID != request.RequestID || state.Attempts[0].RequestDigest == "" || state.Attempts[0].ExpectedRevision != request.ExpectedRevision {
-		t.Fatalf("recovery state did not retain the signed work/session request tuple: %+v", state)
+	if work.Metadata[beadmeta.LifecycleRecoveryStateMetadataKey] != "" {
+		t.Fatalf("unproved v2 admission consumed recovery budget: %s", work.Metadata[beadmeta.LifecycleRecoveryStateMetadataKey])
 	}
-	if !bytes.Contains(logs.Bytes(), []byte("not useful-progress evidence")) {
-		t.Fatalf("controller log conflated nudge receipt with progress: %s", logs.String())
+	if !bytes.Contains(logs.Bytes(), []byte("no attempt reserved")) {
+		t.Fatalf("controller did not explain the proof hold: %s", logs.String())
 	}
 }
 
@@ -83,7 +72,7 @@ func TestLifecycleRecoveryAttemptBindingPreservesSignedRevisionToken(t *testing.
 	}
 }
 
-func TestLifecycleRecoveryRejectsUnboundOrMismatchedAttemptReceipt(t *testing.T) {
+func TestLifecycleRecoveryDoesNotTrustSessionReceiptsWithoutAdmissionProof(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		mutate func(session.RequestAttemptBinding, worklifecycle.RecoveryRequest) *session.RequestAttemptBinding
@@ -141,8 +130,8 @@ func TestLifecycleRecoveryRejectsUnboundOrMismatchedAttemptReceipt(t *testing.T)
 			if got := fixture.provider.CountCalls("Nudge", fixture.info.SessionName); got != 0 {
 				t.Fatalf("mismatched receipt triggered %d provider send(s)", got)
 			}
-			if !bytes.Contains(logs.Bytes(), []byte("conflicts with an existing session receipt; holding")) {
-				t.Fatalf("controller did not reject the unbound/mismatched receipt: %s", logs.String())
+			if !bytes.Contains(logs.Bytes(), []byte("no attempt reserved")) {
+				t.Fatalf("controller did not fail closed before session receipt reconciliation: %s", logs.String())
 			}
 			work, err := fixture.store.Get(fixture.work.ID)
 			if err != nil {
@@ -259,7 +248,7 @@ func TestLifecycleRecoveryExpiredRequestDoesNotReserveOrSend(t *testing.T) {
 	}
 }
 
-func TestLifecycleRecoveryConsumesAmbiguousReservationWithoutSending(t *testing.T) {
+func TestLifecycleRecoveryDoesNotReserveBeforeAdmissionProof(t *testing.T) {
 	fixture := newLifecycleRecoveryFixture(t)
 	request := fixture.newRequest(t, "nudge-ambiguous", fixture.work.Revision)
 	fixture.persist(t, request)
@@ -278,94 +267,43 @@ func TestLifecycleRecoveryConsumesAmbiguousReservationWithoutSending(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	state := recoveryStateFromWork(t, work)
-	if len(state.Attempts) != 1 {
-		t.Fatalf("maybe-committed reservation was not consumed: %+v", state)
+	if work.Metadata[beadmeta.LifecycleRecoveryStateMetadataKey] != "" {
+		t.Fatalf("unproved admission consumed ambiguous recovery reservation: %s", work.Metadata[beadmeta.LifecycleRecoveryStateMetadataKey])
 	}
+	revision := work.Revision
 	reconcileLifecycleRecoveryRequests(context.Background(), fixture.city, fixture.cityPath, fixture.cfg, fixture.store, nil,
 		beads.SessionStore{Store: fixture.store}, fixture.provider, &logs)
 	if got := fixture.provider.CountCalls("Nudge", fixture.info.SessionName); got != 0 {
-		t.Fatalf("replay sent after ambiguous reservation: nudge count=%d", got)
+		t.Fatalf("replay sent before admission proof: nudge count=%d", got)
+	}
+	work, err = fixture.store.Get(fixture.work.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if work.Revision != revision || work.Metadata[beadmeta.LifecycleRecoveryStateMetadataKey] != "" {
+		t.Fatalf("unproved replay changed source revision/state: revision=%d state=%q", work.Revision, work.Metadata[beadmeta.LifecycleRecoveryStateMetadataKey])
 	}
 }
 
-func TestLifecycleRecoveryRechecksHoldAfterReservationAndEscalatesAtBudget(t *testing.T) {
+func TestLifecycleRecoveryRequiresProofBeforeBudgetOrEscalation(t *testing.T) {
 	fixture := newLifecycleRecoveryFixture(t)
-	first := fixture.newRequest(t, "nudge-first", fixture.work.Revision)
-	fixture.persist(t, first)
-	innerWriter, ok := beads.ConditionalWriterFor(fixture.store)
-	if !ok {
-		t.Fatal("fixture store does not support conditional writes")
-	}
-	store := &lifecycleRecoveryHoldAfterCASStore{Store: fixture.store, ConditionalWriter: innerWriter, target: fixture.work.ID}
-	reconcileLifecycleRecoveryRequests(context.Background(), fixture.city, fixture.cityPath, fixture.cfg, store, nil,
-		beads.SessionStore{Store: fixture.store}, fixture.provider, &bytes.Buffer{})
+	request := fixture.newRequest(t, "nudge-first", fixture.work.Revision)
+	fixture.persist(t, request)
+	var logs bytes.Buffer
+	reconcileLifecycleRecoveryRequests(context.Background(), fixture.city, fixture.cityPath, fixture.cfg, fixture.store, nil,
+		beads.SessionStore{Store: fixture.store}, fixture.provider, &logs)
 	if got := fixture.provider.CountCalls("Nudge", fixture.info.SessionName); got != 0 {
-		t.Fatalf("a hold arriving after reservation still allowed %d nudges", got)
+		t.Fatalf("unproved admission sent %d nudges", got)
 	}
 	work, err := fixture.store.Get(fixture.work.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	state := recoveryStateFromWork(t, work)
-	if len(state.Attempts) != 1 {
-		t.Fatalf("held action did not consume its reserved slot: %+v", state)
+	if work.Metadata[beadmeta.LifecycleRecoveryStateMetadataKey] != "" {
+		t.Fatalf("unproved admission consumed a recovery slot: %s", work.Metadata[beadmeta.LifecycleRecoveryStateMetadataKey])
 	}
-
-	// An operator removes the hold and explicitly signs a second request against
-	// the exact revision now visible. The second durable reservation exhausts
-	// the fixed budget and leaves one immutable escalation request.
-	if err := fixture.store.Update(work.ID, beads.UpdateOpts{RemoveLabels: []string{"hold:external"}}); err != nil {
-		t.Fatal(err)
-	}
-	work, err = fixture.store.Get(work.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	second := fixture.newRequest(t, "nudge-second", work.Revision)
-	fixture.persist(t, second)
-	outbox := lifecycleRecoveryOutbox{store: fixture.store, sessionStore: fixture.store}
-	reconcileLifecycleRecoveryRequests(context.Background(), fixture.city, fixture.cityPath, fixture.cfg, fixture.store, nil,
-		beads.SessionStore{Store: fixture.store}, fixture.provider, &bytes.Buffer{}, outbox)
-	work, err = fixture.store.Get(work.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	state = recoveryStateFromWork(t, work)
-	if len(state.Attempts) != worklifecycle.MaxRecoveryAttempts || state.Escalation == nil || state.Escalation.Target != fixture.cfg.Lifecycle.EscalationTarget {
-		t.Fatalf("exhaustion did not persist one escalation request: %+v", state)
-	}
-	if fixture.provider.CountCalls("Nudge", fixture.info.SessionName) != 1 {
-		t.Fatal("hold-gated first request should not send; only second explicit request may nudge")
-	}
-	// Reconciliation replay observes both stored receipts and the same escalation
-	// identity; it does not spend budget or send either request again.
-	firstStateID := state.Escalation.ID
-	reconcileLifecycleRecoveryRequests(context.Background(), fixture.city, fixture.cityPath, fixture.cfg, fixture.store, nil,
-		beads.SessionStore{Store: fixture.store}, fixture.provider, &bytes.Buffer{}, outbox)
-	work, err = fixture.store.Get(work.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	state = recoveryStateFromWork(t, work)
-	if len(state.Attempts) != worklifecycle.MaxRecoveryAttempts || state.Escalation == nil || state.Escalation.ID != firstStateID {
-		t.Fatalf("replay changed exhausted state: %+v", state)
-	}
-	messageID, ok := recoveryEscalationMessageID(fixture.store, state.Escalation.DedupKey)
-	if !ok {
-		t.Fatal("fixture store should support stable outbox message IDs")
-	}
-	message, err := fixture.store.Get(messageID)
-	if err != nil {
-		t.Fatalf("durable escalation message missing: %v", err)
-	}
-	if message.Type != "message" || message.Assignee != state.Escalation.Target || message.Ephemeral ||
-		message.Metadata["mail.stable_outbox"] != state.Escalation.DedupKey {
-		t.Fatalf("escalation outbox row=%+v, want one durable stable-ID message", message)
-	}
-	rows, err := fixture.store.List(beads.ListQuery{Type: "message", TierMode: beads.TierBoth, AllowScan: true})
-	if err != nil || len(rows) != 1 || rows[0].ID != messageID {
-		t.Fatalf("replayed outbox rows=%+v err=%v, want one stable message", rows, err)
+	if !bytes.Contains(logs.Bytes(), []byte("no attempt reserved")) {
+		t.Fatalf("controller did not report the proof hold: %s", logs.String())
 	}
 }
 
@@ -406,18 +344,20 @@ func newLifecycleRecoveryFixture(t *testing.T) *lifecycleRecoveryFixture {
 	cfg := &config.City{
 		Workspace:     config.Workspace{Name: city},
 		FormulaLayers: config.FormulaLayers{City: []string{formulaDir}},
-		Agents:        []config.Agent{{Name: "worker", MaxActiveSessions: &maxSessions, DefaultSlingFormula: &workflow}},
+		Agents:        []config.Agent{{Name: "worker", Dir: "pilot", MaxActiveSessions: &maxSessions, DefaultSlingFormula: &workflow}},
 		Lifecycle: config.LifecycleConfig{
 			AdmissionEnabled: true, RecoveryEnabled: true, EscalationTarget: "mayor",
-			AdmissionAuthorities:  map[string]string{"triage": base64.StdEncoding.EncodeToString(admissionPrivate.Public().(ed25519.PublicKey))},
-			AcceptanceAuthorities: map[string]string{"reviewer": base64.StdEncoding.EncodeToString(acceptancePrivate.Public().(ed25519.PublicKey))},
+			AdmissionV2PrimaryAuthority: "triage",
+			AdmissionV2Authorities:      map[string]string{"triage": base64.StdEncoding.EncodeToString(admissionPrivate.Public().(ed25519.PublicKey))},
+			AcceptanceAuthorities:       map[string]string{"reviewer": base64.StdEncoding.EncodeToString(acceptancePrivate.Public().(ed25519.PublicKey))},
 			RecoveryAuthorities: map[string]config.LifecycleRecoveryAuthority{"recovery": {
 				PublicKey: base64.StdEncoding.EncodeToString(recoveryPublic), Actions: []string{"nudge"}, Scopes: []string{scope},
 			}},
 		},
 	}
-	admission, err := worklifecycle.SignAdmissionReceipt(worklifecycle.AdmissionReceipt{
-		Version: 1, WorkItemID: "work-1", Scope: scope, Route: "worker", Workflow: workflow, MergeStrategy: "mr",
+	admission, err := worklifecycle.SignAdmissionReceiptV2(worklifecycle.AdmissionReceiptV2{
+		Version: 2, WorkItemID: "work-1", Scope: scope, ExpectedWorkRevision: 1, Route: "pilot/worker", Workflow: workflow,
+		RoutingPolicyDigest: strings.Repeat("a", 64), MergeStrategy: "mr",
 		Deliverable: "reviewed patch", Verification: "acceptance tests", AcceptanceAuthority: "reviewer", AdmittedBy: "triage",
 	}, admissionPrivate)
 	if err != nil {
@@ -427,7 +367,7 @@ func newLifecycleRecoveryFixture(t *testing.T) *lifecycleRecoveryFixture {
 	work, err := store.Create(beads.Bead{
 		ID: "work-1", Title: "authorized recovery fixture", Type: "task", Status: "open",
 		Labels:   []string{worklifecycle.AdmissionIntentLabel},
-		Metadata: map[string]string{beadmeta.LifecycleAdmissionReceiptMetadataKey: admission},
+		Metadata: map[string]string{beadmeta.LifecycleAdmissionReceiptV2MetadataKey: admission},
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -345,6 +345,11 @@ const (
 	WorkflowExpandedMetadataKey = "gc.workflow_expanded"
 )
 
+// LifecycleAdmissionReceiptV2MetadataKey stores the separately signed v2
+// admission contract. Kept outside the large key block to avoid realigning
+// unrelated metadata declarations.
+const LifecycleAdmissionReceiptV2MetadataKey = "gc.lifecycle.admission_receipt.v2"
+
 // Work-record metadata keys (ADR-0009). These bind a work bead to its claim
 // and its outcome so observability/eval can answer "what work was done, by
 // whom, with what artifact, to what end":
@@ -602,6 +607,7 @@ var KnownMetadataKeys = []string{
 	ItemRootKeyMetadataKey,
 	KindMetadataKey,
 	LifecycleAdmissionReceiptMetadataKey,
+	LifecycleAdmissionReceiptV2MetadataKey,
 	LifecycleCompletionReceiptMetadataKey,
 	LifecycleHoldMetadataKey,
 	LifecycleHoldReasonMetadataKey,
