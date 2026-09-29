@@ -69,7 +69,7 @@ jobs:
           build-mode: ${{ matrix.build-mode }}
           # Run Go's built-in source-suppression query beside the default suite
           # so justified // codeql[...] annotations are emitted in SARIF.
-          queries: ${{ matrix.language == 'go' && 'codeql/go-queries:AlertSuppression.ql' || '' }}
+          queries: ${{ matrix.language == 'go' && '+./.github/codeql/go-alert-suppression.qls' || '' }}
 
       - name: Autobuild
         if: matrix.build-mode == 'autobuild'
