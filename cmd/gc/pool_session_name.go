@@ -206,10 +206,11 @@ func protectedWakeWorkKeys(wakeCandidates []beads.Bead, wakeCandidateStoreRefs [
 	return keys
 }
 
-// releaseOrphanedPoolAssignments reopens active pool-routed work whose
-// assignee no longer maps to any open session bead. This also recovers
-// pool-routed work left in_progress with no assignee, which cannot be claimed
-// again until it is moved back to open.
+// releaseOrphanedPoolAssignments evaluates active pool-routed work whose
+// assignee no longer maps to an open session bead. Blank-assignee in_progress
+// work and open assigned work are held because the supported conditional
+// release does not cover those shapes. Exact authorization and fencing for
+// assigned-owner replacement remain a separate recovery policy decision.
 //
 // store and sessionStore are deliberately separate parameters because the two
 // reads here are different storage classes: sessionStore backs the
@@ -323,9 +324,11 @@ func releaseOrphanedPoolAssignments(
 		// it was, so a bead skipped by a liveness gate never reaches it.
 		ownerStore := assignedWorkOwnerStore(cfg, store, rigStores, assignedWorkStores, i, wb)
 		if assignee == "" {
-			if wb.Status != "in_progress" {
-				continue
-			}
+			// An in_progress row without an assignee has no current owner to
+			// establish as abandoned. Session affinity and a stale session tuple
+			// are not proof that this claim belongs to a closed session. Hold it
+			// for an explicit recovery decision instead of reopening it here.
+			continue
 		} else {
 			if openSessionOwnsWork(legacyOpenIdentifiers, openIdentifiers, assignee, workStoreRef, storeRefAware) {
 				continue
@@ -694,66 +697,31 @@ func isCanonicalWorkflowRoot(wb beads.Bead) bool {
 	return sourceworkflow.IsWorkflowRoot(wb) && legacyWorkflowRunTarget(wb) == ""
 }
 
-// releaseOrphanedPoolAssignment clears wb's assignment (assignee -> "",
-// status -> open) plus the session-affinity metadata, preferring the store's
-// atomic conditional release so a legitimate re-claim landing between the
-// orphan staleness check and the release write is never clobbered.
-//
-// Release order:
-//
-//  1. beads.ConditionalAssignmentReleaser.ReleaseIfCurrent when the store
-//     offers it for this snapshot shape (in_progress with a non-empty assignee
-//     — the verb's contract) AND the bead carries no active continuation-group
-//     routing vector (see beadHasActiveContinuationGroup). On BdStore this
-//     currently rides raw `bd sql`; when bd grows a native conditional-release
-//     verb it slots in inside BdStore.ReleaseIfCurrent (feature-detect the
-//     verb, fall back to `bd sql` on unsupported) and this caller needs no
-//     change.
-//  2. Otherwise the tightest conditional path the store layer offers:
-//     beads.UpdateOpts has no conditional fields, so re-verify the snapshot
-//     with a live read immediately before the unconditional write and re-read
-//     after it, logging loudly when a concurrent claim raced the release. The
-//     residual recheck->write window cannot be closed without a store-level
-//     conditional write; it is shrunk and made observable instead of silent.
-//     This single Update also clears the affinity metadata alongside
-//     status/assignee, so it is the correct path for continuation-group beads:
-//     the group is never exposed on an open, unassigned bead.
+// releaseOrphanedPoolAssignment clears an orphaned pool assignment only when
+// the store can conditionally release the exact current assignment. Stores
+// without that capability, and continuation-group rows that need a second
+// routing-metadata write, are held for a later explicit recovery decision.
 func releaseOrphanedPoolAssignment(store beads.Store, wb beads.Bead, clearDetached bool) bool {
 	if store == nil || strings.TrimSpace(wb.ID) == "" {
 		return false
 	}
-	// Continuation-group beads bypass the CAS fast path: ReleaseIfCurrent swaps
-	// only status/assignee, so clearing the group would need a second write, and
-	// that gap would expose the routing vector on a claimable bead. The recheck
-	// fallback clears status, assignee, and affinity metadata in one Update.
-	if !beadHasActiveContinuationGroup(wb) {
-		if released, handled := releasePoolAssignmentIfCurrent(store, wb); handled {
-			if !released {
-				return false
-			}
-			clearReleasedPoolAssignmentMetadata(store, wb.ID, clearDetached)
-			return true
-		}
+	if beadHasActiveContinuationGroup(wb) {
+		log.Printf("releaseOrphanedPoolAssignments: holding %s because continuation routing metadata cannot be cleared atomically with the release", wb.ID)
+		return false
 	}
-	return releasePoolAssignmentWithRecheck(store, wb, clearDetached)
+	released, handled := releasePoolAssignmentIfCurrent(store, wb)
+	if !handled || !released {
+		return false
+	}
+	clearReleasedPoolAssignmentMetadata(store, wb.ID, clearDetached)
+	return true
 }
 
 // beadHasActiveContinuationGroup reports whether wb still advertises the active
-// continuation-group routing vector (gc.continuation_group). Such beads must
-// skip the two-write CAS release path: ReleaseIfCurrent swaps only
-// status/assignee, so the follow-up metadata clear rides a separate write, and
-// in that gap the bead is open and unassigned while gc.continuation_group is
-// still set. A concurrent `gc hook --claim` can then vacuum the bead (or its
-// {root, group} siblings) onto a new session via the stale group —
-// preassignHookContinuationGroup / hookListContinuationWithBdStore route on
-// gc.continuation_group + gc.root_bead_id. Routing these beads through
-// releasePoolAssignmentWithRecheck clears status, assignee, and the affinity
-// metadata in a single Update, so the group is never visible on a claimable
-// bead. gc.session_affinity is an advisory marker no routing path reads (see the
-// beadmeta.SessionAffinityMetadataKeys doc), so it needs no such guard and the
-// CAS path still clears it. Lift this once bd's native conditional-release verb
-// can clear the metadata in the same guarded write (BdStore.ReleaseIfCurrent
-// SEAM).
+// continuation-group routing vector (gc.continuation_group). ReleaseIfCurrent
+// changes status and assignee but cannot clear this routing key in the same
+// guarded write, so these beads remain held until the store offers an atomic
+// release that includes the metadata.
 func beadHasActiveContinuationGroup(wb beads.Bead) bool {
 	return strings.TrimSpace(wb.Metadata[beadmeta.ContinuationGroupMetadataKey]) != ""
 }
@@ -761,15 +729,15 @@ func beadHasActiveContinuationGroup(wb beads.Bead) bool {
 // releasePoolAssignmentIfCurrent attempts the store's atomic conditional
 // release. handled=false means the store cannot conditionally release this
 // snapshot (no ConditionalAssignmentReleaser, ErrConditionalReleaseUnsupported,
-// or a snapshot shape outside the verb's contract) and the caller must take
-// the recheck fallback. handled=true with released=false means the store
-// answered authoritatively and the release must NOT be retried unconditionally.
+// or a snapshot shape outside the verb's contract), so the caller holds the
+// work item. handled=true with released=false means the store answered
+// authoritatively and the release must NOT be retried unconditionally.
 func releasePoolAssignmentIfCurrent(store beads.Store, wb beads.Bead) (released, handled bool) {
 	expectedAssignee := strings.TrimSpace(wb.Assignee)
-	// ReleaseIfCurrent's contract covers in_progress assignments only, and bd
-	// backends may persist an unassigned bead as SQL NULL rather than '', so
-	// open-status strands (issue #2793) and assignee-less in_progress recovery
-	// take the recheck fallback.
+	// ReleaseIfCurrent's contract covers in_progress assignments only. Open
+	// assigned rows (issue #2793) and assignee-less rows have no supported
+	// conditional-release verb, so the caller must hold them instead of falling
+	// back to an unconditional update.
 	if wb.Status != "in_progress" || expectedAssignee == "" {
 		return false, false
 	}
@@ -809,52 +777,6 @@ func clearReleasedPoolAssignmentMetadata(store beads.Store, id string, clearDeta
 	if err := store.Update(id, beads.UpdateOpts{Metadata: metadata}); err != nil {
 		log.Printf("releaseOrphanedPoolAssignments: clearing metadata after releasing %s: %v", id, err)
 	}
-}
-
-// releasePoolAssignmentWithRecheck is the conditional-release fallback for
-// stores without a usable ReleaseIfCurrent: re-verify (status, assignee) with
-// a live read immediately before the unconditional write — after the earlier
-// staleness gate and the potentially slow detached probe — then verify after
-// the write that no concurrent claim raced the release.
-func releasePoolAssignmentWithRecheck(store beads.Store, wb beads.Bead, clearDetached bool) bool {
-	expectedAssignee := strings.TrimSpace(wb.Assignee)
-	if !liveWorkAssignmentStillReleasable(store, wb.ID, wb.Status, expectedAssignee) {
-		log.Printf("releaseOrphanedPoolAssignments: skipping release for %s: assignment changed between staleness check and release write", wb.ID)
-		return false
-	}
-	opts := beads.UpdateOpts{
-		Assignee: stringPtr(""),
-		Status:   stringPtr("open"),
-		Metadata: clearedSessionAffinityMetadata(),
-	}
-	if clearDetached {
-		opts.Metadata[detachedProbeMetadataKey] = ""
-	}
-	if err := store.Update(wb.ID, opts); err != nil {
-		log.Printf("releaseOrphanedPoolAssignments: releasing orphaned pool assignment %s: %v", wb.ID, err)
-		return false
-	}
-	verifyReleasedPoolAssignment(store, wb.ID, expectedAssignee)
-	return true
-}
-
-// verifyReleasedPoolAssignment makes a lost release race observable: when a
-// concurrent claim lands around the unconditional release write, the ordering
-// that survives (claim after release) shows up here as a foreign assignee. A
-// claim clobbered BY the release write (claim between recheck and write)
-// reads back empty and stays undetectable without a store-level conditional
-// write — that ordering is why ReleaseIfCurrent is preferred.
-func verifyReleasedPoolAssignment(store beads.Store, id, expectedAssignee string) {
-	got, err := store.Get(id)
-	if err != nil {
-		log.Printf("releaseOrphanedPoolAssignments: verify-after read failed for %s: %v", id, err)
-		return
-	}
-	observed := strings.TrimSpace(got.Assignee)
-	if observed == "" || observed == expectedAssignee {
-		return
-	}
-	log.Printf("releaseOrphanedPoolAssignments: RELEASE RACE on %s: observed assignee %q immediately after releasing %q — a concurrent claim raced the orphan release", id, observed, expectedAssignee)
 }
 
 func liveOpenSessionAssignmentExists(store beads.Store, assignee string) bool {

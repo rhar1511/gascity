@@ -70,6 +70,54 @@ func TestReserveRecoveryAttemptConsumesFixedBudget(t *testing.T) {
 	}
 }
 
+func TestReserveRecoveryAttemptForRevisionReturnsVerifiedCurrentBead(t *testing.T) {
+	store := beads.NewMemStore()
+	beadID := recoveryWorkItem(t, store)
+	before, err := store.Get(beadID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	state, reserved, verified, err := ReserveRecoveryAttemptForRevision(store, beadID, recoveryTestScope, before.Revision)
+	if err != nil || !reserved || len(state.Attempts) != 1 || verified.ID != beadID || verified.Revision == 0 {
+		t.Fatalf("revision-fenced reservation=(%+v,%t,%+v,%v), want one attempt and exact nonzero current-bead readback", state, reserved, verified, err)
+	}
+	current, err := store.Get(beadID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Revision != verified.Revision || current.Revision == before.Revision {
+		t.Fatalf("current revision=%d, returned=%d, before=%d", current.Revision, verified.Revision, before.Revision)
+	}
+
+	_, reserved, _, err = ReserveRecoveryAttemptForRevision(store, beadID, recoveryTestScope, before.Revision)
+	if reserved || !errors.Is(err, ErrRecoveryWorkStale) {
+		t.Fatalf("stale snapshot reservation=(%t,%v), want stale refusal", reserved, err)
+	}
+	state, _ = readStoredRecoveryState(t, store, beadID)
+	if len(state.Attempts) != 1 {
+		t.Fatalf("stale snapshot changed attempt count to %d, want 1", len(state.Attempts))
+	}
+}
+
+func TestReserveRecoveryAttemptForRevisionRequiresConditionalWriter(t *testing.T) {
+	backing := beads.NewMemStore()
+	beadID := recoveryWorkItem(t, backing)
+	bead, err := backing.Get(beadID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	state, reserved, verified, err := ReserveRecoveryAttemptForRevision(recoveryNoCASStore{Store: backing}, beadID, recoveryTestScope, bead.Revision)
+	if reserved || verified.ID != "" || !errors.Is(err, beads.ErrConditionalWriteUnsupported) {
+		t.Fatalf("unsupported fenced reservation=(%+v,%t,%+v,%v), want fail-closed conditional-write refusal", state, reserved, verified, err)
+	}
+	_, raw := readStoredRecoveryState(t, backing, beadID)
+	if raw != "" {
+		t.Fatalf("unsupported store persisted a recovery reservation: %s", raw)
+	}
+}
+
 func TestRecoveryBudgetPersistsAcrossFileStoreReopenAndUnknownOutcome(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "recovery.json")
 	store, err := beads.OpenFileStore(fsys.OSFS{}, path)

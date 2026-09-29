@@ -135,6 +135,89 @@ func ReserveRecoveryAttempt(store beads.Store, beadID, scope string) (state Reco
 	return RecoveryState{}, false, ErrRecoveryCASContention
 }
 
+// ReserveRecoveryAttemptForRevision reserves one intervention only while the
+// work row still has the exact revision observed by the caller. On success it
+// returns the exact live bead read back after verifying the recovery-state
+// write. That readback revision may include a later concurrent row mutation;
+// callers must revalidate the complete work identity and ownership evidence
+// from the returned bead before using its revision for a subsequent CAS. A
+// stale observation, missing CAS capability, ambiguous write, or unverifiable
+// readback never authorizes an effect. An ambiguous write may still have
+// consumed budget.
+func ReserveRecoveryAttemptForRevision(store beads.Store, beadID, scope string, expectedRevision int64) (state RecoveryState, reserved bool, verifiedCurrent beads.Bead, err error) {
+	if err := validateRecoveryIdentity(store, beadID, scope); err != nil {
+		return RecoveryState{}, false, beads.Bead{}, err
+	}
+	if expectedRevision == 0 {
+		return RecoveryState{}, false, beads.Bead{}, ErrRecoveryWorkStale
+	}
+	if _, ok := beads.ConditionalWriterFor(store); !ok {
+		return RecoveryState{}, false, beads.Bead{}, beads.ErrConditionalWriteUnsupported
+	}
+	attemptID, err := newRecoveryID()
+	if err != nil {
+		return RecoveryState{}, false, beads.Bead{}, fmt.Errorf("create recovery attempt ID: %w", err)
+	}
+
+	live := beads.HandlesFor(store).Live
+	bead, err := live.Get(beadID)
+	if err != nil {
+		return RecoveryState{}, false, beads.Bead{}, fmt.Errorf("read recovery state for %q: %w", beadID, err)
+	}
+	state, raw, err := recoveryStateFromBead(bead, beadID, scope)
+	if err != nil {
+		return RecoveryState{}, false, beads.Bead{}, err
+	}
+	if bead.ID != beadID || bead.Revision != expectedRevision {
+		return state, false, beads.Bead{}, ErrRecoveryWorkStale
+	}
+	if len(state.Attempts) >= MaxRecoveryAttempts {
+		return state, false, beads.Bead{}, nil
+	}
+
+	next := cloneRecoveryState(state)
+	next.Attempts = append(next.Attempts, RecoveryAttempt{
+		ID:         attemptID,
+		ReservedAt: time.Now().UTC().Format(time.RFC3339Nano),
+	})
+	encoded, err := json.Marshal(next)
+	if err != nil {
+		return state, false, beads.Bead{}, fmt.Errorf("encode recovery state: %w", err)
+	}
+	writeErr := beads.UpdateLifecycleRecoveryStateIfMatch(store, beadID, expectedRevision, raw, string(encoded))
+	readbackBead, readErr := live.Get(beadID)
+	if readErr == nil {
+		readback, readbackRaw, decodeErr := recoveryStateFromBead(readbackBead, beadID, scope)
+		if decodeErr != nil {
+			return readback, false, beads.Bead{}, decodeErr
+		}
+		if writeErr == nil {
+			if readbackBead.ID != beadID || readbackRaw != string(encoded) {
+				return readback, false, beads.Bead{}, fmt.Errorf("conditional recovery reservation readback differs from the winning write: %w", ErrRecoveryStateInvalid)
+			}
+			if readbackBead.Revision == 0 {
+				return readback, false, beads.Bead{}, fmt.Errorf("conditional recovery reservation has no usable revision: %w", ErrRecoveryStateInvalid)
+			}
+			return readback, true, readbackBead, nil
+		}
+		if readbackRaw == string(encoded) {
+			// The row may have committed despite an ambiguous response. Preserve
+			// the consumed budget, but do not give this caller effect authority.
+			return readback, false, beads.Bead{}, fmt.Errorf("recovery reservation outcome is unknown: %w", writeErr)
+		}
+	}
+	if writeErr != nil {
+		if beads.IsPreconditionFailed(writeErr) {
+			return state, false, beads.Bead{}, ErrRecoveryWorkStale
+		}
+		return state, false, beads.Bead{}, errors.Join(fmt.Errorf("reserve recovery attempt for %q: %w", beadID, writeErr), readErr)
+	}
+	if readErr != nil {
+		return next, false, beads.Bead{}, fmt.Errorf("verify recovery reservation readback: %w", readErr)
+	}
+	return state, false, beads.Bead{}, fmt.Errorf("conditional recovery reservation readback differs from the winning write: %w", ErrRecoveryStateInvalid)
+}
+
 // RequestRecoveryEscalation writes one immutable, deduplicated escalation
 // request after both automatic attempts have been reserved. The scope must be
 // the same canonical ScopeForStore value used for reservations. Calling it
@@ -371,9 +454,17 @@ func readRecoveryStateBead(store beads.Store, beadID, scope string) (beads.Bead,
 	if err != nil {
 		return beads.Bead{}, RecoveryState{}, "", fmt.Errorf("read recovery state for %q: %w", beadID, err)
 	}
+	state, raw, err := recoveryStateFromBead(bead, beadID, scope)
+	if err != nil {
+		return bead, RecoveryState{}, raw, err
+	}
+	return bead, state, raw, nil
+}
+
+func recoveryStateFromBead(bead beads.Bead, beadID, scope string) (RecoveryState, string, error) {
 	raw := bead.Metadata[beadmeta.LifecycleRecoveryStateMetadataKey]
 	if raw == "" {
-		return bead, RecoveryState{
+		return RecoveryState{
 			Version:    recoveryStateVersion,
 			WorkItemID: beadID,
 			Scope:      scope,
@@ -382,9 +473,9 @@ func readRecoveryStateBead(store beads.Store, beadID, scope string) (beads.Bead,
 	}
 	state, err := decodeRecoveryState(raw, beadID, scope)
 	if err != nil {
-		return bead, RecoveryState{}, raw, err
+		return RecoveryState{}, raw, err
 	}
-	return bead, state, raw, nil
+	return state, raw, nil
 }
 
 func decodeRecoveryState(raw, beadID, scope string) (RecoveryState, error) {
