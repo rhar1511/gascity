@@ -37,6 +37,7 @@ type beadPolicyGraphStore struct {
 
 var (
 	_ beads.ConditionalAssignmentReleaser                           = (*beadPolicyStore)(nil)
+	_ beads.ConditionalWriterHandleProvider                         = (*beadPolicyStore)(nil)
 	_ beads.ConditionalWritesResolveTargeter                        = (*beadPolicyStore)(nil)
 	_ beads.PrivateEvidenceMetadataCASWriterHandleProvider          = (*beadPolicyStore)(nil)
 	_ beads.PrivateEvidenceArchiveReaderHandleProvider              = (*beadPolicyStore)(nil)
@@ -57,6 +58,18 @@ var (
 // wrapper. beadPolicyGraphStore inherits this via its embedded
 // *beadPolicyStore.
 func (s *beadPolicyStore) ConditionalWritesResolveTarget() beads.Store { return s.Store }
+
+// ConditionalWriterHandle preserves the backing store's conditional writer
+// through this policy wrapper. Built-in sling routing requires a revision
+// compare-and-swap even when the rollout gate is unset; exposing the exact
+// backing capability keeps that route fail-closed without an unconditional
+// fallback.
+func (s *beadPolicyStore) ConditionalWriterHandle() (beads.ConditionalWriter, bool) {
+	if s == nil {
+		return nil, false
+	}
+	return beads.ConditionalWriterFor(s.Store)
+}
 
 // PrivatePayloadValueTransportTarget lets evidence capture inspect the actual
 // store rather than assuming the policy wrapper's command transport is safe.

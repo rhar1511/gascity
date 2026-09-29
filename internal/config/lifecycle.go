@@ -20,7 +20,9 @@ import (
 // configuration and the bead store.
 type LifecycleConfig struct {
 	// AdmissionEnabled requires a signed admission receipt for work carrying
-	// explicit lifecycle admission intent. Defaults to false.
+	// explicit lifecycle admission intent. It also disables direct custom
+	// sling_query routing for the city because an arbitrary runner has no atomic
+	// guard against a concurrent admission attachment. Defaults to false.
 	AdmissionEnabled bool `toml:"admission_enabled,omitempty"`
 	// RecoveryEnabled permits the controller lifecycle recovery policy. It is
 	// separately gated because an admission authority does not grant permission

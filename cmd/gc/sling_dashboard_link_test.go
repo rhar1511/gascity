@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/sling"
@@ -302,6 +303,13 @@ func stubSlingDashboardLink(t *testing.T, url string, runsList bool) *string {
 	return &gotCityPath
 }
 
+func seedDashboardRouteStore(t *testing.T, deps *slingDeps) {
+	t.Helper()
+	deps.Store = beads.NewMemStoreFrom(1, []beads.Bead{{
+		ID: "BL-42", Title: "BL-42", Type: "task", Status: "open", Revision: 1, Metadata: map[string]string{},
+	}}, nil)
+}
+
 func TestDoSlingBatchPrintsDashboardLine(t *testing.T) {
 	link := "http://127.0.0.1:8372/city/test-city/runs"
 	gotCityPath := stubSlingDashboardLink(t, link, true)
@@ -312,6 +320,7 @@ func TestDoSlingBatchPrintsDashboardLine(t *testing.T) {
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	seedDashboardRouteStore(t, &deps)
 	opts := testOpts(a, "BL-42")
 	code := doSlingBatch(opts, deps, nil, stdout, stderr)
 
@@ -344,6 +353,7 @@ func TestDoSlingBatchPrintsBareDashboardLineForRunDetail(t *testing.T) {
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	seedDashboardRouteStore(t, &deps)
 	opts := testOpts(a, "BL-42")
 	code := doSlingBatch(opts, deps, nil, stdout, stderr)
 
@@ -368,6 +378,7 @@ func TestDoSlingBatchOmitsDashboardLineWhenUnresolved(t *testing.T) {
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	seedDashboardRouteStore(t, &deps)
 	opts := testOpts(a, "BL-42")
 	code := doSlingBatch(opts, deps, nil, stdout, stderr)
 
@@ -454,6 +465,7 @@ func TestDoSlingBatchJSONIncludesDashboardURL(t *testing.T) {
 
 	var jsonStdout, stderr bytes.Buffer
 	deps, _, _ := testDeps(cfg, sp, runner.run)
+	seedDashboardRouteStore(t, &deps)
 	opts := testOpts(a, "BL-42")
 	code := doSlingBatchWithJSON(opts, deps, nil, true, io.Discard, &jsonStdout, &stderr)
 
@@ -483,6 +495,7 @@ func TestDoSlingBatchJSONRunsListURLStaysBare(t *testing.T) {
 
 	var jsonStdout, stderr bytes.Buffer
 	deps, _, _ := testDeps(cfg, sp, runner.run)
+	seedDashboardRouteStore(t, &deps)
 	opts := testOpts(a, "BL-42")
 	code := doSlingBatchWithJSON(opts, deps, nil, true, io.Discard, &jsonStdout, &stderr)
 
@@ -512,6 +525,7 @@ func TestDoSlingBatchJSONOmitsDashboardURLWhenUnresolved(t *testing.T) {
 
 	var jsonStdout, stderr bytes.Buffer
 	deps, _, _ := testDeps(cfg, sp, runner.run)
+	seedDashboardRouteStore(t, &deps)
 	opts := testOpts(a, "BL-42")
 	code := doSlingBatchWithJSON(opts, deps, nil, true, io.Discard, &jsonStdout, &stderr)
 

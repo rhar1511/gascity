@@ -726,6 +726,9 @@ func (r apiBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 	cfg := r.cfg
 	if cfg != nil {
 		if agentCfg, ok := findAgentByQualifiedTemplate(cfg, req.Target); ok && sling.IsCustomSlingQuery(agentCfg) {
+			if cfg.Lifecycle.AdmissionEnabled {
+				return fmt.Errorf("custom sling_query routing is disabled while lifecycle admission is enabled; custom runners have no atomic pre-effect guard")
+			}
 			runner := r.server.slingRunner()
 			if runner == nil {
 				return fmt.Errorf("custom sling_query requires a runner")
@@ -738,9 +741,9 @@ func (r apiBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 			return err
 		}
 	}
-	// The built-in metadata write needs the selected store to remain open until
-	// SetMetadata completes. This callback is bounded to the store operation;
-	// configured shell routing returned above without holding the lease.
+	// The built-in conditional metadata write needs the selected store to remain
+	// open until UpdateIfMatch completes. This callback is bounded to the store
+	// operation; configured shell routing returns above without holding the lease.
 	if r.formulaActionLease != nil {
 		if err := r.formulaActionLease.Acquire(); err != nil {
 			return fmt.Errorf("pinning formula route for built-in routing: %w", err)
@@ -751,11 +754,23 @@ func (r apiBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 	if cfg != nil {
 		routedTo = agentutil.NormalizePoolRouteTarget(cfg, req.Target)
 	}
-	if err := r.store.SetMetadata(req.BeadID, beadmeta.RoutedToMetadataKey, routedTo); err != nil {
+	if err != nil {
 		if req.Force && errors.Is(err, beads.ErrNotFound) {
 			return nil
 		}
 		return fmt.Errorf("setting gc.routed_to on %s: %w", req.BeadID, err)
+	}
+	if current.Revision == 0 {
+		return fmt.Errorf("built-in sling routing on %s requires a nonzero observed revision", req.BeadID)
+	}
+	writer, ok := beads.ConditionalWriterFor(r.store)
+	if !ok {
+		return fmt.Errorf("built-in sling routing requires a conditional writer: %w", beads.ErrConditionalWriteUnsupported)
+	}
+	if err := writer.UpdateIfMatch(req.BeadID, current.Revision, beads.UpdateOpts{Metadata: map[string]string{
+		beadmeta.RoutedToMetadataKey: routedTo,
+	}}); err != nil {
+		return fmt.Errorf("conditionally setting gc.routed_to on %s: %w", req.BeadID, err)
 	}
 	return nil
 }

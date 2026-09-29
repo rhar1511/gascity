@@ -769,6 +769,9 @@ func (r cliBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 	}
 	if r.deps.Cfg != nil {
 		if agentCfg, ok := findAgentByQualified(r.deps.Cfg, req.Target); ok && isCustomSlingQuery(agentCfg) {
+			if r.deps.Cfg.Lifecycle.AdmissionEnabled {
+				return fmt.Errorf("custom sling_query routing is disabled while lifecycle admission is enabled; custom runners have no atomic pre-effect guard")
+			}
 			if r.deps.Runner == nil {
 				return fmt.Errorf("custom sling_query requires a runner")
 			}
@@ -781,8 +784,20 @@ func (r cliBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 	if r.deps.Cfg != nil {
 		routedTo = agentutil.NormalizePoolRouteTarget(r.deps.Cfg, req.Target)
 	}
-	if err := r.deps.Store.SetMetadata(req.BeadID, beadmeta.RoutedToMetadataKey, routedTo); err != nil {
+	if err != nil {
 		return fmt.Errorf("setting gc.routed_to on %s: %w", req.BeadID, err)
+	}
+	if current.Revision == 0 {
+		return fmt.Errorf("built-in sling routing on %s requires a nonzero observed revision", req.BeadID)
+	}
+	writer, ok := beads.ConditionalWriterFor(r.deps.Store)
+	if !ok {
+		return fmt.Errorf("built-in sling routing requires a conditional writer: %w", beads.ErrConditionalWriteUnsupported)
+	}
+	if err := writer.UpdateIfMatch(req.BeadID, current.Revision, beads.UpdateOpts{Metadata: map[string]string{
+		beadmeta.RoutedToMetadataKey: routedTo,
+	}}); err != nil {
+		return fmt.Errorf("conditionally setting gc.routed_to on %s: %w", req.BeadID, err)
 	}
 	return nil
 }

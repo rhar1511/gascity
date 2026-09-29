@@ -533,7 +533,7 @@ LifecycleConfig controls controller-owned admission and recovery.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `admission_enabled` | boolean |  |  | AdmissionEnabled requires a signed admission receipt for work carrying explicit lifecycle admission intent. Defaults to false. |
+| `admission_enabled` | boolean |  |  | AdmissionEnabled requires a signed admission receipt for work carrying explicit lifecycle admission intent. It also disables direct custom sling_query routing for the city because an arbitrary runner has no atomic guard against a concurrent admission attachment. Defaults to false. |
 | `recovery_enabled` | boolean |  |  | RecoveryEnabled permits the controller lifecycle recovery policy. It is separately gated because an admission authority does not grant permission to recover work. Defaults to false. |
 | `admission_authorities` | map[string]string |  |  | AdmissionAuthorities maps historical v1 admission identities to their Ed25519 public keys. V2 admission verification does not use this map. |
 | `admission_v2_primary_authority` | string |  |  | AdmissionV2PrimaryAuthority names the single initial v2 admission signer. Set it to Ricky's exact configured identity for the initial rollout. Additional signer identities require a separately implemented and verified delegation-grant path and are rejected by this release. |

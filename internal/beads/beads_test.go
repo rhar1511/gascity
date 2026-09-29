@@ -114,6 +114,7 @@ func TestLifecycleEnrollmentBlocksRouteMetadataChanges(t *testing.T) {
 		beadmeta.MoleculeIDMetadataKey,
 		beadmeta.MergeStrategyMetadataKey,
 		beadmeta.LifecycleMaterializationMetadataKey,
+		beadmeta.WorkflowExpandedMetadataKey,
 		"gc.lifecycle.admission_receipt.v2",
 	}
 	for _, key := range keys {
@@ -188,8 +189,15 @@ func TestLifecycleRouteMetadataBlockedThroughGenericAndConditionalStoreAPIs(t *t
 		{"UpdateIfMatch", func() error {
 			return store.UpdateIfMatch(created.ID, created.Revision, UpdateOpts{Metadata: map[string]string{beadmeta.MoleculeIDMetadataKey: "mol-1"}})
 		}},
+		{"UpdateIfMatch workflow expanded", func() error {
+			return store.UpdateIfMatch(created.ID, created.Revision, UpdateOpts{Metadata: map[string]string{beadmeta.WorkflowExpandedMetadataKey: "true"}})
+		}},
 		{"CompareAndSetMetadataKey", func() error {
 			_, err := store.CompareAndSetMetadataKey(created.ID, beadmeta.MergeStrategyMetadataKey, "", "squash")
+			return err
+		}},
+		{"CompareAndSetMetadataKey workflow expanded", func() error {
+			_, err := store.CompareAndSetMetadataKey(created.ID, beadmeta.WorkflowExpandedMetadataKey, "", "true")
 			return err
 		}},
 	}

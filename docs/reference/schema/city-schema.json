@@ -1922,7 +1922,7 @@
       "properties": {
         "admission_enabled": {
           "type": "boolean",
-          "description": "AdmissionEnabled requires a signed admission receipt for work carrying\nexplicit lifecycle admission intent. Defaults to false."
+          "description": "AdmissionEnabled requires a signed admission receipt for work carrying\nexplicit lifecycle admission intent. It also disables direct custom\nsling_query routing for the city because an arbitrary runner has no atomic\nguard against a concurrent admission attachment. Defaults to false."
         },
         "recovery_enabled": {
           "type": "boolean",
