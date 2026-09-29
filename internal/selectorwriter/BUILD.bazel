@@ -2,15 +2,18 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "selectorwriter",
-    srcs = ["collector.go"],
+    srcs = ["collector.go", "linux_identity_linux.go"],
     importpath = "github.com/gastownhall/gascity/internal/selectorwriter",
-    deps = ["//internal/selectorinventory"],
+    deps = [
+        "//internal/selectorinventory",
+        "@org_golang_x_sys//unix",
+    ],
     visibility = ["//:__subpackages__"],
 )
 
 go_test(
     name = "selectorwriter_test",
-    srcs = ["collector_test.go"],
+    srcs = ["collector_test.go", "linux_identity_test.go"],
     deps = [
         "//internal/selectorattestation",
         "//internal/selectorinventory",

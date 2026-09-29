@@ -2,15 +2,26 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "selectorinventory",
-    srcs = ["selectorinventory.go", "external_ledger.go"],
+    srcs = [
+        "external_ledger.go",
+        "linux_filesystem_linux.go",
+        "selectorinventory.go",
+    ],
     importpath = "github.com/gastownhall/gascity/internal/selectorinventory",
-    deps = ["//internal/selectorattestation"],
+    deps = [
+        "//internal/selectorattestation",
+        "@org_golang_x_sys//unix",
+    ],
     visibility = ["//:__subpackages__"],
 )
 
 go_test(
     name = "selectorinventory_test",
-    srcs = ["selectorinventory_test.go", "external_ledger_test.go"],
+    srcs = [
+        "external_ledger_test.go",
+        "linux_filesystem_test.go",
+        "selectorinventory_test.go",
+    ],
     deps = ["//internal/selectorattestation"],
     embed = [":selectorinventory"],
 )

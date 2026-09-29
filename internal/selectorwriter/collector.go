@@ -97,6 +97,9 @@ type LinuxScopeSnapshot struct {
 
 // OrderLedgerReader reads the canonical order ledger without changing it.
 // It must return every retained sequence in the requested fixed window.
+// Current orders.OrderRun data has only per-order event cursors and prunes
+// closed runs, so RecentRunsAll cannot satisfy this contract as a retained
+// global ledger adapter.
 type OrderLedgerReader interface {
 	ReadOrderLedger(context.Context, selectorinventory.CaptureWindow, selectorinventory.Limits) (OrderLedgerSnapshot, error)
 }
@@ -105,6 +108,9 @@ type OrderLedgerReader interface {
 // ScopeManual without running discovered commands. It must honor the supplied
 // byte, entry, and command limits. The returned digest identifies the bounded
 // transient source snapshot; raw content never enters a signed record.
+// Process-table samples alone cannot satisfy ScopeManual: short-lived manual
+// executions can occur and exit between samples. Until a complete host audit
+// source is selected and wired, this scope must remain unavailable.
 type LinuxScopeReader interface {
 	ReadLinuxScope(context.Context, string, selectorinventory.CaptureWindow, selectorinventory.Limits) (LinuxScopeSnapshot, error)
 }
