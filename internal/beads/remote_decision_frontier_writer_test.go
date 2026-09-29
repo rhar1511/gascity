@@ -62,7 +62,7 @@ func newRemoteDecisionFrontierTestWriter(t *testing.T, issuer *remoteDecisionFro
 	writer, err := NewRemoteDecisionFrontierRecordWriter(RemoteDecisionFrontierRecordWriterConfig{
 		Actor:           actor,
 		ProtectionClass: protectionClass,
-		RequestTimeout:  3 * time.Second,
+		BatchTimeout:    3 * time.Second,
 		PermitIssuer:    issuer,
 		BatchWriter:     batch,
 		LinkWriter:      link,
@@ -155,6 +155,21 @@ func TestRemoteDecisionFrontierRecordWriterRejectsUnrepresentableRecordBeforeIss
 	}
 	if len(issuer.requests) != 0 || len(batch.requests) != 0 {
 		t.Fatalf("invalid record reached permit issuer or batch writer: %d/%d", len(issuer.requests), len(batch.requests))
+	}
+}
+
+func TestRemoteDecisionFrontierRecordWriterPreservesEmptyLabelPresence(t *testing.T) {
+	issuer := &remoteDecisionFrontierTestPermitIssuer{token: "opaque-permit"}
+	batch := &remoteDecisionFrontierTestBatchWriter{}
+	writer := newRemoteDecisionFrontierTestWriter(t, issuer, batch, &remoteDecisionFrontierTestLinkWriter{})
+	record := remoteDecisionFrontierTestMapRecord()
+	record.Labels = []string{}
+
+	if _, err := writer.CreateDecisionFrontierRecord(record); err != nil {
+		t.Fatalf("CreateDecisionFrontierRecord: %v", err)
+	}
+	if len(batch.requests) != 1 || batch.requests[0].Record.Labels == nil {
+		t.Fatalf("batch labels = %#v, want a present empty slice", batch.requests)
 	}
 }
 

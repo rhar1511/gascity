@@ -9,10 +9,10 @@ import (
 )
 
 const (
-	controllerDecisionFrontierReceiptPrefix      = "gc-df-record-v1-"
-	controllerDecisionFrontierPermitReplayPrefix = "gc-df-replay-v1-"
-	controllerDecisionFrontierDefaultTimeout     = controllerBatchApplyTimeout
-	controllerDecisionFrontierMaxTimeout         = time.Minute
+	controllerDecisionFrontierReceiptPrefix       = "gc-df-record-v1-"
+	controllerDecisionFrontierPermitReplayPrefix  = "gc-df-replay-v1-"
+	controllerDecisionFrontierDefaultBatchTimeout = controllerBatchApplyTimeout
+	controllerDecisionFrontierMaxBatchTimeout     = time.Minute
 )
 
 var (
@@ -37,17 +37,19 @@ type ControllerProtectedCreateAndLinkPermitIssuer interface {
 // needs. Implementations must authorize the relationship from the immutable
 // decision-frontier endpoint documents and make exact retries safe.
 type DecisionFrontierLinkWriter interface {
+	// EnsureDecisionFrontierLink owns any I/O timeout needed by its transport.
 	EnsureDecisionFrontierLink(sourceID, targetID, depType string) error
 }
 
 // RemoteDecisionFrontierRecordWriterConfig injects the only external
 // capabilities used by RemoteDecisionFrontierRecordWriter. The actor is
 // controller-authored request identity and must be configured by trusted
-// controller code.
+// controller code. BatchTimeout bounds only the batch transport call; the
+// injected local permit issuer and link writer own their own execution bounds.
 type RemoteDecisionFrontierRecordWriterConfig struct {
 	Actor           string
 	ProtectionClass string
-	RequestTimeout  time.Duration
+	BatchTimeout    time.Duration
 	PermitIssuer    ControllerProtectedCreateAndLinkPermitIssuer
 	BatchWriter     ControllerProtectedCreateAndLinkWriter
 	LinkWriter      DecisionFrontierLinkWriter
@@ -67,7 +69,7 @@ type RemoteDecisionFrontierRecordWriterConfig struct {
 type RemoteDecisionFrontierRecordWriter struct {
 	actor           string
 	protectionClass string
-	requestTimeout  time.Duration
+	batchTimeout    time.Duration
 	permitIssuer    ControllerProtectedCreateAndLinkPermitIssuer
 	batchWriter     ControllerProtectedCreateAndLinkWriter
 	linkWriter      DecisionFrontierLinkWriter
@@ -92,15 +94,15 @@ func NewRemoteDecisionFrontierRecordWriter(config RemoteDecisionFrontierRecordWr
 		config.BatchWriter == nil || config.LinkWriter == nil {
 		return nil, ErrRemoteDecisionFrontierWriterUnavailable
 	}
-	if config.RequestTimeout == 0 {
-		config.RequestTimeout = controllerDecisionFrontierDefaultTimeout
+	if config.BatchTimeout == 0 {
+		config.BatchTimeout = controllerDecisionFrontierDefaultBatchTimeout
 	}
-	if config.RequestTimeout < 0 || config.RequestTimeout > controllerDecisionFrontierMaxTimeout {
+	if config.BatchTimeout < 0 || config.BatchTimeout > controllerDecisionFrontierMaxBatchTimeout {
 		return nil, ErrRemoteDecisionFrontierWriterUnavailable
 	}
 	return &RemoteDecisionFrontierRecordWriter{
 		actor: config.Actor, protectionClass: config.ProtectionClass,
-		requestTimeout: config.RequestTimeout, permitIssuer: config.PermitIssuer,
+		batchTimeout: config.BatchTimeout, permitIssuer: config.PermitIssuer,
 		batchWriter: config.BatchWriter, linkWriter: config.LinkWriter,
 	}, nil
 }
@@ -133,7 +135,7 @@ func (w *RemoteDecisionFrontierRecordWriter) CreateDecisionFrontierRecord(record
 		Actor: w.actor,
 		Record: ControllerProtectedRecord{
 			ID: record.ID, Type: record.Type, Title: record.Title,
-			Description: record.Description, Labels: append([]string(nil), record.Labels...),
+			Description: record.Description, Labels: cloneControllerDecisionFrontierLabels(record.Labels),
 			Metadata:        cloneControllerDecisionFrontierMetadata(record.Metadata),
 			ProtectionClass: w.protectionClass,
 		},
@@ -152,7 +154,7 @@ func (w *RemoteDecisionFrontierRecordWriter) CreateDecisionFrontierRecord(record
 		return Bead{}, ErrControllerBeadsPermitRequest
 	}
 	request.ProtectedPermit = permit
-	ctx, cancel := context.WithTimeout(context.Background(), w.requestTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), w.batchTimeout)
 	defer cancel()
 	if _, err := w.batchWriter.ApplyProtectedCreateAndLink(ctx, request); err != nil {
 		return Bead{}, fmt.Errorf("create protected decision-frontier record %q: %w", record.ID, err)
@@ -184,6 +186,13 @@ func cloneControllerDecisionFrontierMetadata(metadata StringMap) map[string]stri
 		cloned[key] = value
 	}
 	return cloned
+}
+
+func cloneControllerDecisionFrontierLabels(labels []string) []string {
+	if labels == nil {
+		return nil
+	}
+	return append([]string{}, labels...)
 }
 
 func remoteDecisionFrontierRecordProjectionSupported(record Bead) bool {
