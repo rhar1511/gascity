@@ -1488,7 +1488,10 @@ func waitForBeadClosedWithoutPrivatePayloadDiagnostics(t *testing.T, cityDir str
 		func(ctx context.Context) (bool, string, error) {
 			bead, err := readGraphBeadOverHTTPContext(ctx, transport, beadID)
 			if err != nil {
-				return false, "workflow bead read is unavailable", nil
+				// The error contains only a generic transport/protocol message or
+				// HTTP status. Preserve it as the last observation so CI can
+				// distinguish a missing route/issue from an unreachable service.
+				return false, "workflow bead read is unavailable: " + err.Error(), nil
 			}
 			if bead.Status == "closed" {
 				closed = bead

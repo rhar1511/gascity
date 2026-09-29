@@ -122,7 +122,10 @@ func TestSetsidDoesNotPreventOrphanSelection(t *testing.T) {
 	}
 	sessionID := "ga-repro-s434i0-setsid-" + strconv.Itoa(os.Getpid())
 
-	launcher := exec.Command("sh", "-c", "setsid sleep 300 >/dev/null 2>&1 & sleep 0.2; pgrep -f 'sleep 300' | tail -1")
+	// Read the background child's PID from the shell itself. Looking it up
+	// through pgrep -f can match this test's shell command (or another parallel
+	// test's sleep), which makes the session-leader assertion nondeterministic.
+	launcher := exec.Command("sh", "-c", "setsid sleep 300 >/dev/null 2>&1 & child=$!; sleep 0.2; echo $child")
 	launcher.Env = append(os.Environ(), "GC_SESSION_ID="+sessionID)
 	out, err := launcher.Output()
 	if err != nil {
