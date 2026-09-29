@@ -2512,6 +2512,14 @@ type getOnlyClassStore struct {
 func (s getOnlyClassStore) Update(string, beads.UpdateOpts) error { return s.writeErr }
 func (s getOnlyClassStore) Close(string) error                    { return s.writeErr }
 func (s getOnlyClassStore) Reopen(string) error                   { return s.writeErr }
+func (s getOnlyClassStore) UpdateIfMatch(string, int64, beads.UpdateOpts) error {
+	return s.writeErr
+}
+func (s getOnlyClassStore) CloseIfMatch(string, int64) error  { return s.writeErr }
+func (s getOnlyClassStore) DeleteIfMatch(string, int64) error { return s.writeErr }
+func (s getOnlyClassStore) CompareAndSetMetadataKey(string, string, string, string) (bool, error) {
+	return false, s.writeErr
+}
 
 // stubClassBindingStore replaces this city's resolved class stores with store,
 // for the whole of one test.
