@@ -4,12 +4,23 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	inktreecoordinationnotifications "github.com/gastownhall/gascity/contrib/inktree-coordination-notifications"
 )
 
 func TestGenerateRetainsOfflineEvidenceWithoutDispatch(t *testing.T) {
 	dir := t.TempDir()
-	if err := generate(dir); err != nil {
+	corpus, err := inktreecoordinationnotifications.ReplayCorpusDocument()
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := inktreecoordinationnotifications.PolicyDocument()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := generateFromData(dir, corpus, policy); err != nil {
 		t.Fatal(err)
 	}
 	for _, name := range []string{
@@ -39,5 +50,16 @@ func TestGenerateRetainsOfflineEvidenceWithoutDispatch(t *testing.T) {
 	}
 	if switches.Live != "off" || switches.Notifications != "off" || switches.Deliver {
 		t.Fatalf("offline evidence authorized delivery: %#v", switches)
+	}
+	var replay replayReport
+	data, err = os.ReadFile(filepath.Join(dir, "replay.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(data, &replay); err != nil {
+		t.Fatal(err)
+	}
+	if len(replay.CaseResults) != 7 || !replay.Deterministic || replay.CorpusHash == strings.Repeat("0", 64) || replay.PolicyHash == strings.Repeat("1", 64) {
+		t.Fatalf("replay evidence is not bound to retained inputs: %#v", replay)
 	}
 }

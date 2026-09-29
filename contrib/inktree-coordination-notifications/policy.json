@@ -2,7 +2,7 @@
   "version": "coordination-policy-v1",
   "notification_version": "inktree-coordination-notification/v1",
   "bead_prefix": "inktree-",
-  "replay_command": "replay-coordination --corpus tests/fixtures/coordination-replay/corpus.v1.json --policy coordination-policy-v1 --out replay-report.json",
+  "replay_command": "go run ./contrib/inktree-coordination-notifications/cmd/evidence --corpus contrib/inktree-coordination-notifications/replay/corpus.v1.json --policy contrib/inktree-coordination-notifications/policy.json --out contrib/inktree-coordination-notifications/evidence",
   "switches": {
     "live_dispatch": "off",
     "notification_dispatch": "off"

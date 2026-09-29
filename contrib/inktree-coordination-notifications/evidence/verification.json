@@ -1,5 +1,5 @@
 {
-  "scope": "offline coordination notification source review",
+  "scope": "offline coordination notification source and independent-review repair",
   "worktree_verification": "passed",
   "toolchain": "go1.26.6",
   "policy_dispatch_switches": {
@@ -19,6 +19,25 @@
     "status": "passed",
     "command": "go vet ./internal/coordinationnotify ./contrib/inktree-coordination-notifications/..."
   },
+  "replay_binding": {
+    "status": "passed",
+    "command": "go run ./contrib/inktree-coordination-notifications/cmd/evidence --corpus contrib/inktree-coordination-notifications/replay/corpus.v1.json --policy contrib/inktree-coordination-notifications/policy.json --out contrib/inktree-coordination-notifications/evidence",
+    "case_count": 7,
+    "corpus_hash": "e9bbde83c442a2d5b46415fc72a7d311976bbcfae43d6ce53ff8dd8e7ff3db1c",
+    "policy_hash": "0424c27237c43cbd0e8c514d62a341cc4e9f91cfaa626a8e4e4734ed820dbc3a"
+  },
+  "review_findings": {
+    "binding_id_grammar": "passed",
+    "terminal_delivery_guard": "passed",
+    "bounded_event_retry_ledger": "passed",
+    "reproducible_replay_inputs": "passed"
+  },
+  "repository_checks": {
+    "check_docs": "passed",
+    "check_hooks": "passed",
+    "json_parse": "passed",
+    "bazel_focused": "not_run_bazel_unavailable"
+  },
   "race_tests": {
     "status": "not_run",
     "reason": "CGO_ENABLED is off in this host shell; race mode requires CGO."
@@ -31,6 +50,10 @@
     "ledger.json",
     "offline-receipt.json",
     "negative-proof.json"
+  ],
+  "retained_inputs": [
+    "../replay/corpus.v1.json",
+    "../policy.json"
   ],
   "factory_policy_validation": {
     "status": "unavailable",

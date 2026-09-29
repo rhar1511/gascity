@@ -1,78 +1,387 @@
 {
-  "envelope": {
-    "notification_version": "inktree-coordination-notification/v1",
-    "notification_id": "notif-8d5756c23d0801e8",
-    "status": "hold",
-    "reason_code": "hold.ambiguous_rig",
-    "severity": "action_required",
-    "redaction": "no_member_content",
-    "mode": "replay",
-    "channel": "discord",
-    "recipient_role": "author",
-    "dedup_key": "coord-hold-inktree-syn0003",
-    "hold_epoch": 1,
-    "template": "hold.action_required.v1",
-    "bead_ref": "inktree-syn0003",
-    "links": {
-      "bead_command": "gc bd show inktree-syn0003"
+  "corpus_version": "inktree-coordination-notification-replay/v1",
+  "corpus_hash": "e9bbde83c442a2d5b46415fc72a7d311976bbcfae43d6ce53ff8dd8e7ff3db1c",
+  "policy_version": "coordination-policy-v1",
+  "policy_hash": "0424c27237c43cbd0e8c514d62a341cc4e9f91cfaa626a8e4e4734ed820dbc3a",
+  "deterministic": true,
+  "case_results": [
+    {
+      "case_id": "route-single-rig",
+      "envelope_content_hash": "f7c4aefcf5bb9e4d0541fe4411bc6732d64fd8f37509150d06064ad6a485df2f",
+      "projection_hash": "00efc974d0722a4b13f1d168e3719d1bdf4171200c5f1cd39218aebccade78b0",
+      "matched": true,
+      "projection": {
+        "decision": {
+          "live_dispatch": false,
+          "notification_dispatch": false,
+          "render_allowed": false,
+          "deliver": false
+        }
+      }
     },
-    "decision_ref": {
-      "envelope_content_hash": "0000000000000000000000000000000000000000000000000000000000000000",
-      "policy_version": "coordination-policy-v1",
-      "model_versions": {
-        "jev": "jev-1.13-free",
-        "rlcd": "rlcd-local-v1",
-        "sem_if": "semif-qwen-local-v1"
-      },
-      "router_config_hash": "1111111111111111111111111111111111111111111111111111111111111111",
-      "replay_command": "replay-coordination --corpus tests/fixtures/coordination-replay/corpus.v1.json --policy coordination-policy-v1 --out replay-report.json"
+    {
+      "case_id": "route-multi-rig-dag",
+      "envelope_content_hash": "7fd767560f895e0f236318f87e993df4f7d5b6ba4688b4fb3b9fd1bced26805d",
+      "projection_hash": "00efc974d0722a4b13f1d168e3719d1bdf4171200c5f1cd39218aebccade78b0",
+      "matched": true,
+      "projection": {
+        "decision": {
+          "live_dispatch": false,
+          "notification_dispatch": false,
+          "render_allowed": false,
+          "deliver": false
+        }
+      }
     },
-    "must_include": [
-      "bead_link",
-      "decision_link",
-      "reason_code"
-    ],
-    "identity": {
-      "resolution": "resolved",
-      "binding_source": "attested_forge_author",
-      "binding_id": "forge-author"
+    {
+      "case_id": "hold-ambiguous-rig",
+      "envelope_content_hash": "79832435c7e91ec82d581af5247f4c3943f86116696a61adeef971fe4389e452",
+      "projection_hash": "14c6b54b569142a0f2a708e1aa89d51ef87e807888d1f6c9b16b4322e39b7211",
+      "matched": true,
+      "projection": {
+        "envelope": {
+          "notification_version": "inktree-coordination-notification/v1",
+          "notification_id": "notif-8d5756c23d0801e8",
+          "status": "hold",
+          "reason_code": "hold.ambiguous_rig",
+          "severity": "action_required",
+          "redaction": "no_member_content",
+          "mode": "replay",
+          "channel": "discord",
+          "recipient_role": "author",
+          "dedup_key": "coord-hold-inktree-syn0003",
+          "hold_epoch": 1,
+          "template": "hold.action_required.v1",
+          "bead_ref": "inktree-syn0003",
+          "links": {
+            "bead_command": "gc bd show inktree-syn0003"
+          },
+          "decision_ref": {
+            "envelope_content_hash": "79832435c7e91ec82d581af5247f4c3943f86116696a61adeef971fe4389e452",
+            "policy_version": "coordination-policy-v1",
+            "model_versions": {
+              "jev": "jev-1.13-free",
+              "rlcd": "rlcd-local-v1",
+              "sem_if": "semif-qwen-local-v1"
+            },
+            "router_config_hash": "0424c27237c43cbd0e8c514d62a341cc4e9f91cfaa626a8e4e4734ed820dbc3a",
+            "replay_command": "go run ./contrib/inktree-coordination-notifications/cmd/evidence --corpus contrib/inktree-coordination-notifications/replay/corpus.v1.json --policy contrib/inktree-coordination-notifications/policy.json --out contrib/inktree-coordination-notifications/evidence"
+          },
+          "must_include": [
+            "bead_link",
+            "decision_link",
+            "reason_code"
+          ],
+          "identity": {
+            "resolution": "resolved",
+            "binding_source": "attested_forge_author",
+            "binding_id": "binding-0123456789abcdef0123456789abcdef"
+          },
+          "delivery": {
+            "max_attempts": 3,
+            "backoff_seconds": [
+              30,
+              120,
+              600
+            ],
+            "failover_channel": "pr_update",
+            "escalation_recipient": "mayor",
+            "deadline_seconds": 3600
+          }
+        },
+        "assertion": {
+          "channel": "discord",
+          "recipient_role": "author",
+          "severity": "action_required",
+          "redaction": "no_member_content",
+          "dedup_key": "coord-hold-inktree-syn0003",
+          "must_include": [
+            "bead_link",
+            "decision_link",
+            "reason_code"
+          ],
+          "count": 1
+        },
+        "record": {
+          "channel": "discord",
+          "recipient_role": "author",
+          "severity": "action_required",
+          "redaction": "no_member_content",
+          "dedup_key": "coord-hold-inktree-syn0003"
+        },
+        "decision": {
+          "live_dispatch": false,
+          "notification_dispatch": false,
+          "render_allowed": false,
+          "deliver": false
+        }
+      }
     },
-    "delivery": {
-      "max_attempts": 3,
-      "backoff_seconds": [
-        30,
-        120,
-        600
-      ],
-      "failover_channel": "pr_update",
-      "escalation_recipient": "mayor",
-      "deadline_seconds": 3600
+    {
+      "case_id": "hold-missing-evidence",
+      "envelope_content_hash": "220aafc9dd0989465cf816e6206771a3a2c6e0273c183a9ab62e6f7fb2080a36",
+      "projection_hash": "99602d96b4302ae94ac3858ee9a9c3d39f3d743b3532391f1fe06ae09080bbaf",
+      "matched": true,
+      "projection": {
+        "envelope": {
+          "notification_version": "inktree-coordination-notification/v1",
+          "notification_id": "notif-18456d5840de799c",
+          "status": "hold",
+          "reason_code": "hold.missing_evidence",
+          "severity": "action_required",
+          "redaction": "no_member_content",
+          "mode": "replay",
+          "channel": "discord",
+          "recipient_role": "author",
+          "dedup_key": "coord-hold-inktree-syn0004",
+          "hold_epoch": 1,
+          "template": "hold.action_required.v1",
+          "bead_ref": "inktree-syn0004",
+          "links": {
+            "bead_command": "gc bd show inktree-syn0004"
+          },
+          "decision_ref": {
+            "envelope_content_hash": "220aafc9dd0989465cf816e6206771a3a2c6e0273c183a9ab62e6f7fb2080a36",
+            "policy_version": "coordination-policy-v1",
+            "model_versions": {
+              "jev": "jev-1.13-free",
+              "rlcd": "rlcd-local-v1",
+              "sem_if": "semif-qwen-local-v1"
+            },
+            "router_config_hash": "0424c27237c43cbd0e8c514d62a341cc4e9f91cfaa626a8e4e4734ed820dbc3a",
+            "replay_command": "go run ./contrib/inktree-coordination-notifications/cmd/evidence --corpus contrib/inktree-coordination-notifications/replay/corpus.v1.json --policy contrib/inktree-coordination-notifications/policy.json --out contrib/inktree-coordination-notifications/evidence"
+          },
+          "must_include": [
+            "bead_link",
+            "decision_link",
+            "reason_code"
+          ],
+          "identity": {
+            "resolution": "resolved",
+            "binding_source": "attested_forge_author",
+            "binding_id": "binding-0123456789abcdef0123456789abcdef"
+          },
+          "delivery": {
+            "max_attempts": 3,
+            "backoff_seconds": [
+              30,
+              120,
+              600
+            ],
+            "failover_channel": "pr_update",
+            "escalation_recipient": "mayor",
+            "deadline_seconds": 3600
+          }
+        },
+        "assertion": {
+          "channel": "discord",
+          "recipient_role": "author",
+          "severity": "action_required",
+          "redaction": "no_member_content",
+          "dedup_key": "coord-hold-inktree-syn0004",
+          "must_include": [
+            "bead_link",
+            "decision_link",
+            "reason_code"
+          ],
+          "count": 1
+        },
+        "record": {
+          "channel": "discord",
+          "recipient_role": "author",
+          "severity": "action_required",
+          "redaction": "no_member_content",
+          "dedup_key": "coord-hold-inktree-syn0004"
+        },
+        "decision": {
+          "live_dispatch": false,
+          "notification_dispatch": false,
+          "render_allowed": false,
+          "deliver": false
+        }
+      }
+    },
+    {
+      "case_id": "hold-irreversible-risk",
+      "envelope_content_hash": "80e9f33ccb115ee68aeac9d9d49635cebc7d3e97160f8848b1f3666c76281537",
+      "projection_hash": "189224ec25cb0e170aa82c1e63eac51d33f7fcc8058201d8e2a2f0b30d0b6af3",
+      "matched": true,
+      "projection": {
+        "envelope": {
+          "notification_version": "inktree-coordination-notification/v1",
+          "notification_id": "notif-994aa89b193c45b6",
+          "status": "hold",
+          "reason_code": "hold.irreversible_risk",
+          "severity": "action_required",
+          "redaction": "no_member_content",
+          "mode": "replay",
+          "channel": "discord",
+          "recipient_role": "author",
+          "dedup_key": "coord-hold-inktree-syn0005",
+          "hold_epoch": 1,
+          "template": "hold.action_required.v1",
+          "bead_ref": "inktree-syn0005",
+          "links": {
+            "bead_command": "gc bd show inktree-syn0005"
+          },
+          "decision_ref": {
+            "envelope_content_hash": "80e9f33ccb115ee68aeac9d9d49635cebc7d3e97160f8848b1f3666c76281537",
+            "policy_version": "coordination-policy-v1",
+            "model_versions": {
+              "jev": "jev-1.13-free",
+              "rlcd": "rlcd-local-v1",
+              "sem_if": "semif-qwen-local-v1"
+            },
+            "router_config_hash": "0424c27237c43cbd0e8c514d62a341cc4e9f91cfaa626a8e4e4734ed820dbc3a",
+            "replay_command": "go run ./contrib/inktree-coordination-notifications/cmd/evidence --corpus contrib/inktree-coordination-notifications/replay/corpus.v1.json --policy contrib/inktree-coordination-notifications/policy.json --out contrib/inktree-coordination-notifications/evidence"
+          },
+          "must_include": [
+            "bead_link",
+            "decision_link",
+            "reason_code"
+          ],
+          "identity": {
+            "resolution": "resolved",
+            "binding_source": "attested_forge_author",
+            "binding_id": "binding-0123456789abcdef0123456789abcdef"
+          },
+          "delivery": {
+            "max_attempts": 3,
+            "backoff_seconds": [
+              30,
+              120,
+              600
+            ],
+            "failover_channel": "pr_update",
+            "escalation_recipient": "mayor",
+            "deadline_seconds": 3600
+          }
+        },
+        "assertion": {
+          "channel": "discord",
+          "recipient_role": "author",
+          "severity": "action_required",
+          "redaction": "no_member_content",
+          "dedup_key": "coord-hold-inktree-syn0005",
+          "must_include": [
+            "bead_link",
+            "decision_link",
+            "reason_code"
+          ],
+          "count": 1
+        },
+        "record": {
+          "channel": "discord",
+          "recipient_role": "author",
+          "severity": "action_required",
+          "redaction": "no_member_content",
+          "dedup_key": "coord-hold-inktree-syn0005"
+        },
+        "decision": {
+          "live_dispatch": false,
+          "notification_dispatch": false,
+          "render_allowed": false,
+          "deliver": false
+        }
+      }
+    },
+    {
+      "case_id": "abstain-unsupported-class",
+      "envelope_content_hash": "214b2f3430683e6ac4bccfbdd03db37f0b793db76d09757733639fab9df5f929",
+      "projection_hash": "3fc6c97326f76b5da3792a42d0a4d951361242fd1ada8c57914daefe2cc51427",
+      "matched": true,
+      "projection": {
+        "envelope": {
+          "notification_version": "inktree-coordination-notification/v1",
+          "notification_id": "notif-be358c53d402953c",
+          "status": "abstain",
+          "reason_code": "abstain.unsupported_class",
+          "severity": "warning",
+          "redaction": "no_member_content",
+          "mode": "replay",
+          "channel": "discord",
+          "recipient_role": "author",
+          "dedup_key": "coord-abstain-inktree-syn0006",
+          "hold_epoch": 1,
+          "template": "abstain.warning.v1",
+          "bead_ref": "inktree-syn0006",
+          "links": {
+            "bead_command": "gc bd show inktree-syn0006"
+          },
+          "decision_ref": {
+            "envelope_content_hash": "214b2f3430683e6ac4bccfbdd03db37f0b793db76d09757733639fab9df5f929",
+            "policy_version": "coordination-policy-v1",
+            "model_versions": {
+              "jev": "jev-1.13-free",
+              "rlcd": "rlcd-local-v1",
+              "sem_if": "semif-qwen-local-v1"
+            },
+            "router_config_hash": "0424c27237c43cbd0e8c514d62a341cc4e9f91cfaa626a8e4e4734ed820dbc3a",
+            "replay_command": "go run ./contrib/inktree-coordination-notifications/cmd/evidence --corpus contrib/inktree-coordination-notifications/replay/corpus.v1.json --policy contrib/inktree-coordination-notifications/policy.json --out contrib/inktree-coordination-notifications/evidence"
+          },
+          "must_include": [
+            "bead_link",
+            "decision_link",
+            "reason_code"
+          ],
+          "identity": {
+            "resolution": "resolved",
+            "binding_source": "attested_forge_author",
+            "binding_id": "binding-0123456789abcdef0123456789abcdef"
+          },
+          "delivery": {
+            "max_attempts": 3,
+            "backoff_seconds": [
+              30,
+              120,
+              600
+            ],
+            "failover_channel": "pr_update",
+            "escalation_recipient": "mayor",
+            "deadline_seconds": 3600
+          }
+        },
+        "assertion": {
+          "channel": "discord",
+          "recipient_role": "author",
+          "severity": "warning",
+          "redaction": "no_member_content",
+          "dedup_key": "coord-abstain-inktree-syn0006",
+          "must_include": [
+            "bead_link",
+            "decision_link",
+            "reason_code"
+          ],
+          "count": 1
+        },
+        "record": {
+          "channel": "discord",
+          "recipient_role": "author",
+          "severity": "warning",
+          "redaction": "no_member_content",
+          "dedup_key": "coord-abstain-inktree-syn0006"
+        },
+        "decision": {
+          "live_dispatch": false,
+          "notification_dispatch": false,
+          "render_allowed": false,
+          "deliver": false
+        }
+      }
+    },
+    {
+      "case_id": "hard-failure-policy-violation",
+      "envelope_content_hash": "75fd15c7a90f9d48d925f70c9bda23b40dc6cc4cf19165e187f71b30f576d683",
+      "projection_hash": "00efc974d0722a4b13f1d168e3719d1bdf4171200c5f1cd39218aebccade78b0",
+      "matched": true,
+      "projection": {
+        "decision": {
+          "live_dispatch": false,
+          "notification_dispatch": false,
+          "render_allowed": false,
+          "deliver": false
+        }
+      }
     }
-  },
-  "assertion": {
-    "channel": "discord",
-    "recipient_role": "author",
-    "severity": "action_required",
-    "redaction": "no_member_content",
-    "dedup_key": "coord-hold-inktree-syn0003",
-    "must_include": [
-      "bead_link",
-      "decision_link",
-      "reason_code"
-    ],
-    "count": 1
-  },
-  "record": {
-    "channel": "discord",
-    "recipient_role": "author",
-    "severity": "action_required",
-    "redaction": "no_member_content",
-    "dedup_key": "coord-hold-inktree-syn0003"
-  },
-  "decision": {
-    "live_dispatch": false,
-    "notification_dispatch": false,
-    "render_allowed": false,
-    "deliver": false
-  }
+  ]
 }

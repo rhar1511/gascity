@@ -8,22 +8,27 @@ only; it defines no order, transport binding, worker, route, or delivery
 action.
 
 The generic package owns deterministic envelope construction, assertion and
-record projections, fixed-template rendering, switch validation, and
-same-epoch dedup receipts. This directory owns the Inktree reason vocabulary
-and copy. Unknown reason strings and switch values fail closed.
+record projections, fixed-template rendering, switch validation, and bounded
+event-addressed retry receipts. This directory owns the Inktree reason
+vocabulary and copy. Unknown reason strings and switch values fail closed.
 
 ## Offline evidence
 
-The evidence generator writes deterministic reports for a synthetic
-`req-syn-*` input, including an offline receipt fixture. It does not create a
-Forgejo delivery receipt or run a live canary. No live dispatch or consumer
-overlay is included in this pack. `evidence/verification.json` records which
-checks ran in the implementation environment.
+The evidence generator replays the seven retained synthetic cases in
+`replay/corpus.v1.json`, hashes the exact corpus, each complete canonical replay
+input, the policy document, and each resulting projection, and verifies those
+projections against retained hashes before writing an offline receipt fixture.
+It does not create a Forgejo delivery receipt or run a live canary. No live
+dispatch or consumer overlay is included in this pack.
+`evidence/verification.json` records which checks ran in the implementation
+environment.
 
 Regenerate the files from the repository root with:
 
 ```sh
 go run ./contrib/inktree-coordination-notifications/cmd/evidence \
+  --corpus contrib/inktree-coordination-notifications/replay/corpus.v1.json \
+  --policy contrib/inktree-coordination-notifications/policy.json \
   --out contrib/inktree-coordination-notifications/evidence
 ```
 
@@ -43,9 +48,16 @@ itself or alter a city.
 The adapter must create envelopes from the accepted event-triggered order and
 ordinary-pack seam. It must not add a controller fork or another routing path.
 The semantic notification key remains `coord-<status>-<bead_id>` plus
-`hold_epoch`; each transport attempt is identified by its event ID and
-destination. The canonical identity is the Gas City actor ID, resolved through
-source-author attestation and administrator-managed channel bindings.
+`hold_epoch`; each transport attempt is identified by its opaque event ID and
+destination. Accepted retries must satisfy the retained attempt bound,
+cumulative backoff schedule, and delivery deadline. Suppressed receipts are
+audit records and never restore accepted dedup state. The canonical identity is
+the Gas City actor ID, resolved through source-author attestation and
+administrator-managed channel bindings.
+
+Retained `binding_id` values use `binding-<32 lowercase hex>` record keys. They
+are neither handles nor caller-provided labels, and adapters resolve them only
+through the operator-managed binding store.
 
 Delivery requires explicit opt-in for both the request and the selected
 channel. Practice routing delivers nothing. A preview shows the resolved
