@@ -1097,6 +1097,9 @@ func TestSetMetadata(t *testing.T) {
 
 	script := writeScript(t, dir, `
 case "$1" in
+  get)
+    echo '{"id":"EX-1","title":"test","status":"open","type":"task","created_at":"2026-01-01T00:00:00Z"}'
+    ;;
   set-metadata) cat > "`+outFile+`" ;;
   *) exit 2 ;;
 esac
@@ -1113,6 +1116,43 @@ esac
 	}
 	if string(data) != "mr" {
 		t.Errorf("metadata value = %q, want %q", string(data), "mr")
+	}
+}
+
+func TestLifecycleRouteMetadataMutationIsCheckedBeforeScriptWrite(t *testing.T) {
+	dir := t.TempDir()
+	writeMarker := filepath.Join(dir, "write-called")
+	script := writeScript(t, dir, `
+case "$1" in
+  get)
+    echo '{"id":"EX-1","title":"enrolled","status":"open","type":"task","created_at":"2026-01-01T00:00:00Z","metadata":{"gc.lifecycle.admission_receipt.v2":"durable admission evidence"}}'
+    ;;
+  update|set-metadata)
+    touch "`+writeMarker+`"
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	store := NewStore(script)
+	for _, mutation := range []struct {
+		name string
+		fn   func() error
+	}{
+		{"Update", func() error {
+			return store.Update("EX-1", beads.UpdateOpts{Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "pool/worker"}})
+		}},
+		{"SetMetadata", func() error {
+			return store.SetMetadata("EX-1", beadmeta.WorkflowIDMetadataKey, "workflow-1")
+		}},
+	} {
+		t.Run(mutation.name, func(t *testing.T) {
+			if err := mutation.fn(); !errors.Is(err, beads.ErrLifecycleMutationBlocked) {
+				t.Fatalf("mutation error = %v, want ErrLifecycleMutationBlocked", err)
+			}
+		})
+	}
+	if _, err := os.Stat(writeMarker); !os.IsNotExist(err) {
+		t.Fatalf("delegate mutation ran; marker stat error = %v", err)
 	}
 }
 

@@ -103,6 +103,150 @@ func TestV2AdmissionReceiptIsDurableAndCannotBeClearedByGenericMutation(t *testi
 	}
 }
 
+func TestLifecycleEnrollmentBlocksRouteMetadataChanges(t *testing.T) {
+	keys := []string{
+		beadmeta.RoutedToMetadataKey,
+		beadmeta.ExecutionRoutedToMetadataKey,
+		beadmeta.DeferredRoutedToMetadataKey,
+		beadmeta.DeferredExecutionRoutedToMetadataKey,
+		beadmeta.RunTargetMetadataKey,
+		beadmeta.WorkflowIDMetadataKey,
+		beadmeta.MoleculeIDMetadataKey,
+		beadmeta.MergeStrategyMetadataKey,
+		beadmeta.LifecycleMaterializationMetadataKey,
+		"gc.lifecycle.admission_receipt.v2",
+	}
+	for _, key := range keys {
+		t.Run(key, func(t *testing.T) {
+			current := Bead{Metadata: map[string]string{
+				beadmeta.LifecycleAdmissionReceiptMetadataKey: "durable admission evidence",
+				key: "before",
+			}}
+			err := ValidateLifecycleMutation(current, UpdateOpts{Metadata: map[string]string{key: "after"}})
+			if !errors.Is(err, ErrLifecycleMutationBlocked) {
+				t.Fatalf("ValidateLifecycleMutation(%q) = %v, want ErrLifecycleMutationBlocked", key, err)
+			}
+		})
+	}
+}
+
+func TestLifecycleRouteMetadataNoOpAndUnenrolledWrites(t *testing.T) {
+	store := NewMemStore()
+	created, err := store.Create(Bead{
+		ID: "route-fence-noop", Type: "task", Status: "open",
+		Metadata: map[string]string{
+			beadmeta.LifecycleAdmissionReceiptMetadataKey: "durable admission evidence",
+			beadmeta.RoutedToMetadataKey:                  "pool/worker",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetMetadata(created.ID, beadmeta.RoutedToMetadataKey, "pool/worker"); err != nil {
+		t.Fatalf("idempotent route write: %v", err)
+	}
+
+	unenrolled, err := store.Create(Bead{ID: "route-fence-ordinary", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetMetadata(unenrolled.ID, beadmeta.RoutedToMetadataKey, "pool/worker"); err != nil {
+		t.Fatalf("ordinary route write: %v", err)
+	}
+	got, err := store.Get(unenrolled.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Metadata[beadmeta.RoutedToMetadataKey] != "pool/worker" {
+		t.Fatalf("ordinary route = %q, want pool/worker", got.Metadata[beadmeta.RoutedToMetadataKey])
+	}
+}
+
+func TestLifecycleRouteMetadataBlockedThroughGenericAndConditionalStoreAPIs(t *testing.T) {
+	store := NewMemStore()
+	created, err := store.Create(Bead{
+		ID: "route-fence-store-apis", Type: "task", Status: "open",
+		Metadata: map[string]string{beadmeta.LifecycleAdmissionReceiptMetadataKey: "durable admission evidence"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	title := "should not apply"
+	calls := []struct {
+		name string
+		fn   func() error
+	}{
+		{"Update", func() error {
+			return store.Update(created.ID, UpdateOpts{Title: &title, Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "pool/worker"}})
+		}},
+		{"SetMetadata", func() error {
+			return store.SetMetadata(created.ID, beadmeta.ExecutionRoutedToMetadataKey, "pool/worker")
+		}},
+		{"SetMetadataBatch", func() error {
+			return store.SetMetadataBatch(created.ID, map[string]string{beadmeta.RunTargetMetadataKey: "pool/worker"})
+		}},
+		{"UpdateIfMatch", func() error {
+			return store.UpdateIfMatch(created.ID, created.Revision, UpdateOpts{Metadata: map[string]string{beadmeta.MoleculeIDMetadataKey: "mol-1"}})
+		}},
+		{"CompareAndSetMetadataKey", func() error {
+			_, err := store.CompareAndSetMetadataKey(created.ID, beadmeta.MergeStrategyMetadataKey, "", "squash")
+			return err
+		}},
+	}
+	for _, call := range calls {
+		t.Run(call.name, func(t *testing.T) {
+			err := call.fn()
+			if !errors.Is(err, ErrLifecycleMutationBlocked) {
+				t.Fatalf("%s error = %v, want ErrLifecycleMutationBlocked", call.name, err)
+			}
+		})
+	}
+	after, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Title == title || len(after.Metadata) != 1 {
+		t.Fatalf("refused mutations changed bead: title=%q metadata=%v", after.Title, after.Metadata)
+	}
+}
+
+func TestLifecycleRouteMetadataAdmissionRaceHasNoPostEnrollmentWriter(t *testing.T) {
+	store := NewMemStore()
+	created, err := store.Create(Bead{ID: "route-fence-race", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	type result struct {
+		name string
+		err  error
+	}
+	results := make(chan result, 2)
+	go func() {
+		<-start
+		results <- result{name: "admission", err: store.UpdateIfMatch(created.ID, created.Revision, UpdateOpts{Metadata: map[string]string{"gc.lifecycle.admission_receipt.v2": "durable admission evidence"}})}
+	}()
+	go func() {
+		<-start
+		results <- result{name: "route", err: store.UpdateIfMatch(created.ID, created.Revision, UpdateOpts{Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "pool/worker"}})}
+	}()
+	close(start)
+	first, second := <-results, <-results
+	if first.err != nil && second.err != nil {
+		t.Fatalf("both revision-CAS racers failed: admission=%v route=%v", first.err, second.err)
+	}
+	after, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if HasLifecycleEvidence(after) && after.Metadata[beadmeta.RoutedToMetadataKey] != "" {
+		t.Fatalf("route landed after admission evidence: metadata=%v", after.Metadata)
+	}
+	if after.Metadata[beadmeta.RoutedToMetadataKey] != "" && after.Metadata[beadmeta.RoutedToMetadataKey] != "pool/worker" {
+		t.Fatalf("unexpected route after race: %q", after.Metadata[beadmeta.RoutedToMetadataKey])
+	}
+}
+
 func TestIsMoleculeType(t *testing.T) {
 	tests := []struct {
 		typ  string

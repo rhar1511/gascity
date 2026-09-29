@@ -770,6 +770,63 @@ func TestCliBeadRouterAllowsCityTargetFromCityStore(t *testing.T) {
 	}
 }
 
+func TestCliBeadRouterRefusesLifecycleEnrollmentBeforeCustomQuery(t *testing.T) {
+	store := newSlingTestStore()
+	bead, err := store.Create(beads.Bead{
+		ID: "LIFE-CLI-1", Type: "task", Status: "open",
+		Metadata: map[string]string{beadmeta.LifecycleAdmissionReceiptMetadataKey: "durable admission evidence"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	called := 0
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker", SlingQuery: "custom-dispatch {}"}}}
+	router := cliBeadRouter{deps: &slingDeps{
+		Cfg: cfg, Store: store,
+		Runner: func(string, string, map[string]string) (string, error) {
+			called++
+			return "", nil
+		},
+	}}
+	err = router.Route(context.Background(), sling.RouteRequest{BeadID: bead.ID, Target: "worker"})
+	if !errors.Is(err, beads.ErrLifecycleMutationBlocked) {
+		t.Fatalf("Route error = %v, want lifecycle routing refusal", err)
+	}
+	if called != 0 {
+		t.Fatalf("custom sling query called %d times, want 0", called)
+	}
+	after, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Metadata[beadmeta.RoutedToMetadataKey] != "" {
+		t.Fatalf("refused route wrote gc.routed_to=%q", after.Metadata[beadmeta.RoutedToMetadataKey])
+	}
+}
+
+func TestCliBeadRouterRefusesLifecycleEnrollmentBeforeBuiltInRoute(t *testing.T) {
+	store := newSlingTestStore()
+	bead, err := store.Create(beads.Bead{
+		ID: "LIFE-CLI-2", Type: "task", Status: "open",
+		Metadata: map[string]string{"gc.lifecycle.admission_receipt.v2": "durable v2 admission evidence"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	router := cliBeadRouter{deps: &slingDeps{Store: store}}
+	err = router.Route(context.Background(), sling.RouteRequest{BeadID: bead.ID, Target: "pool/worker"})
+	if !errors.Is(err, beads.ErrLifecycleMutationBlocked) {
+		t.Fatalf("Route error = %v, want lifecycle routing refusal", err)
+	}
+	after, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Metadata[beadmeta.RoutedToMetadataKey] != "" {
+		t.Fatalf("refused route wrote gc.routed_to=%q", after.Metadata[beadmeta.RoutedToMetadataKey])
+	}
+}
+
 func TestDoSlingFormulaToAgent(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()

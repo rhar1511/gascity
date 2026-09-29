@@ -21,6 +21,7 @@ import (
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/molecule"
+	"github.com/gastownhall/gascity/internal/sling"
 )
 
 type getErrStore struct {
@@ -98,6 +99,64 @@ func TestSlingWithBead(t *testing.T) {
 	}
 	if got := updated.Metadata["gc.routed_to"]; got != "myrig/worker" {
 		t.Fatalf("gc.routed_to = %q, want myrig/worker", got)
+	}
+}
+
+func TestAPIBeadRouterRefusesLifecycleEnrollmentBeforeCustomQuery(t *testing.T) {
+	state := newFakeMutatorState(t)
+	store := state.stores["myrig"]
+	bead, err := store.Create(beads.Bead{
+		ID: "LIFE-API-CUSTOM", Type: "task", Status: "open",
+		Metadata: map[string]string{beadmeta.LifecycleAdmissionReceiptMetadataKey: "durable admission evidence"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.cfg.Agents[0].SlingQuery = "custom-dispatch {}"
+	server := New(state)
+	runnerCalls := 0
+	server.SlingRunnerFunc = func(string, string, map[string]string) (string, error) {
+		runnerCalls++
+		return "", nil
+	}
+	router := apiBeadRouter{server: server, cfg: state.cfg, store: store}
+	err = router.Route(t.Context(), sling.RouteRequest{BeadID: bead.ID, Target: "myrig/worker"})
+	if !errors.Is(err, beads.ErrLifecycleMutationBlocked) {
+		t.Fatalf("Route error = %v, want lifecycle routing refusal", err)
+	}
+	if runnerCalls != 0 {
+		t.Fatalf("custom sling query called %d times, want 0", runnerCalls)
+	}
+	after, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Metadata[beadmeta.RoutedToMetadataKey] != "" {
+		t.Fatalf("refused route wrote gc.routed_to=%q", after.Metadata[beadmeta.RoutedToMetadataKey])
+	}
+}
+
+func TestAPIBeadRouterRefusesLifecycleEnrollmentBeforeBuiltInRoute(t *testing.T) {
+	state := newFakeMutatorState(t)
+	store := state.stores["myrig"]
+	bead, err := store.Create(beads.Bead{
+		ID: "LIFE-API-BUILTIN", Type: "task", Status: "open",
+		Metadata: map[string]string{"gc.lifecycle.admission_receipt.v2": "durable v2 admission evidence"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	router := apiBeadRouter{server: New(state), cfg: state.cfg, store: store}
+	err = router.Route(t.Context(), sling.RouteRequest{BeadID: bead.ID, Target: "myrig/worker"})
+	if !errors.Is(err, beads.ErrLifecycleMutationBlocked) {
+		t.Fatalf("Route error = %v, want lifecycle routing refusal", err)
+	}
+	after, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Metadata[beadmeta.RoutedToMetadataKey] != "" {
+		t.Fatalf("refused route wrote gc.routed_to=%q", after.Metadata[beadmeta.RoutedToMetadataKey])
 	}
 }
 

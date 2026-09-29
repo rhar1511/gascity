@@ -3360,6 +3360,9 @@ func TestBdStoreUpdateNoLabels(t *testing.T) {
 func TestBdStoreSetMetadata(t *testing.T) {
 	var gotArgs []string
 	runner := func(_, _ string, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "show" {
+			return []byte(`[{"id":"bd-42","title":"task","status":"open","issue_type":"task","created_at":"2026-01-01T00:00:00Z"}]`), nil
+		}
 		gotArgs = args
 		return nil, nil
 	}
@@ -3384,6 +3387,9 @@ func TestBdStoreSetMetadataDisablesAutoCommitForDoltlite(t *testing.T) {
 	}
 	var gotArgs []string
 	runner := func(_, _ string, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "show" {
+			return []byte(`[{"id":"bd-42","title":"task","status":"open","issue_type":"task","created_at":"2026-01-01T00:00:00Z"}]`), nil
+		}
 		gotArgs = args
 		return nil, nil
 	}

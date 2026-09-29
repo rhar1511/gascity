@@ -711,6 +711,18 @@ func (r apiBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 	if r.server == nil {
 		return fmt.Errorf("sling router: missing server")
 	}
+	if r.store == nil {
+		return fmt.Errorf("sling routing requires a store to check lifecycle enrollment")
+	}
+	current, err := r.store.Get(req.BeadID)
+	if err != nil && !errors.Is(err, beads.ErrNotFound) {
+		return fmt.Errorf("checking lifecycle routing for %s: %w", req.BeadID, err)
+	}
+	if err == nil {
+		if err := beads.ValidateLifecycleRouting(current); err != nil {
+			return fmt.Errorf("routing bead %s: %w", req.BeadID, err)
+		}
+	}
 	cfg := r.cfg
 	if cfg != nil {
 		if agentCfg, ok := findAgentByQualifiedTemplate(cfg, req.Target); ok && sling.IsCustomSlingQuery(agentCfg) {
@@ -734,9 +746,6 @@ func (r apiBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 			return fmt.Errorf("pinning formula route for built-in routing: %w", err)
 		}
 		defer r.formulaActionLease.Release()
-	}
-	if r.store == nil {
-		return fmt.Errorf("built-in sling routing requires a store")
 	}
 	routedTo := req.Target
 	if cfg != nil {

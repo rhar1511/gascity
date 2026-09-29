@@ -2828,26 +2828,7 @@ func (s *BdStore) Reopen(id string) error {
 }
 
 func bdUpdateMayReopenOrClearLifecycleEvidence(opts UpdateOpts) bool {
-	if opts.Status != nil {
-		return true
-	}
-	// Recovery budget writes are protected even when the replacement value is
-	// non-empty. In particular, a valid-looking empty attempts array must not
-	// bypass the lifecycle validator in conditional-update paths.
-	if _, supplied := opts.Metadata[beadmeta.LifecycleRecoveryStateMetadataKey]; supplied {
-		return true
-	}
-	for _, key := range []string{
-		beadmeta.LifecycleAdmissionReceiptMetadataKey,
-		beadmeta.LifecycleAdmissionReceiptV2MetadataKey,
-		beadmeta.LifecycleMaterializationMetadataKey,
-		beadmeta.LifecycleCompletionReceiptMetadataKey,
-	} {
-		if value, supplied := opts.Metadata[key]; supplied && strings.TrimSpace(value) == "" {
-			return true
-		}
-	}
-	return false
+	return LifecycleMutationNeedsValidation(opts)
 }
 
 func (s *BdStore) validateLifecycleCloseTargets(ids []string, metadata map[string]string) error {

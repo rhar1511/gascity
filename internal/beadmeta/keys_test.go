@@ -52,19 +52,20 @@ func TestKnownMetadataPrefixesWellFormed(t *testing.T) {
 // are pinned independently of the generator.
 func TestPinnedValues(t *testing.T) {
 	pinned := map[string]string{
-		KindMetadataKey:              "gc.kind",
-		RootBeadIDMetadataKey:        "gc.root_bead_id",
-		StepRefMetadataKey:           "gc.step_ref",
-		OutcomeMetadataKey:           "gc.outcome",
-		RoutedToMetadataKey:          "gc.routed_to",
-		ScopeRefMetadataKey:          "gc.scope_ref",
-		AttemptMetadataKey:           "gc.attempt",
-		ExecutionRoutedToMetadataKey: "gc.execution_routed_to",
-		InstantiatingMetadataKey:     "gc.instantiating",
-		FormulaVarPrefix:             "gc.var.",
-		Namespace:                    "gc.",
-		OptionMetadataPrefix:         "opt_",
-		MoleculeFailedMetadataKey:    "molecule_failed",
+		KindMetadataKey:                        "gc.kind",
+		RootBeadIDMetadataKey:                  "gc.root_bead_id",
+		StepRefMetadataKey:                     "gc.step_ref",
+		OutcomeMetadataKey:                     "gc.outcome",
+		RoutedToMetadataKey:                    "gc.routed_to",
+		ScopeRefMetadataKey:                    "gc.scope_ref",
+		AttemptMetadataKey:                     "gc.attempt",
+		ExecutionRoutedToMetadataKey:           "gc.execution_routed_to",
+		LifecycleAdmissionReceiptV2MetadataKey: "gc.lifecycle.admission_receipt.v2",
+		InstantiatingMetadataKey:               "gc.instantiating",
+		FormulaVarPrefix:                       "gc.var.",
+		Namespace:                              "gc.",
+		OptionMetadataPrefix:                   "opt_",
+		MoleculeFailedMetadataKey:              "molecule_failed",
 		// The session-bead claim back-channel: `gc hook --claim` writes it and
 		// `gc hook current` reads it back, so a value drift here would silently
 		// break the only route a pool step has to its own bead id.

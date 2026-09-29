@@ -14,7 +14,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -353,21 +352,7 @@ func (s *Store) Reopen(id string) error {
 }
 
 func lifecycleMutationMayReopenOrClear(opts beads.UpdateOpts) bool {
-	if opts.Status != nil {
-		return true
-	}
-	for _, key := range []string{
-		beadmeta.LifecycleAdmissionReceiptMetadataKey,
-		beadmeta.LifecycleAdmissionReceiptV2MetadataKey,
-		beadmeta.LifecycleMaterializationMetadataKey,
-		beadmeta.LifecycleCompletionReceiptMetadataKey,
-		beadmeta.LifecycleRecoveryStateMetadataKey,
-	} {
-		if value, supplied := opts.Metadata[key]; supplied && strings.TrimSpace(value) == "" {
-			return true
-		}
-	}
-	return false
+	return beads.LifecycleMutationNeedsValidation(opts)
 }
 
 // CloseAll closes multiple beads and sets metadata on each.

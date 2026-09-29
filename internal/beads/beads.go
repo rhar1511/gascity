@@ -17,9 +17,9 @@ import (
 // ErrNotFound is returned when a bead ID does not exist in the store.
 var ErrNotFound = errors.New("bead not found")
 
-// ErrLifecycleMutationBlocked reports an attempted generic update that would
-// reopen lifecycle-enrolled work or clear its durable controller evidence.
-var ErrLifecycleMutationBlocked = errors.New("lifecycle-enrolled work cannot be reopened or have controller evidence cleared")
+// ErrLifecycleMutationBlocked reports a generic mutation that would change
+// lifecycle-enrolled work or clear its durable controller evidence.
+var ErrLifecycleMutationBlocked = errors.New("lifecycle-enrolled work cannot be changed through ordinary mutation paths")
 
 // ErrLifecycleCompletionRequired reports an ordinary close of lifecycle source
 // work that lacks the controller's verified conditional-completion path.
@@ -274,6 +274,51 @@ type UpdateOpts struct {
 	lifecycleRecoveryStateWrite bool
 }
 
+// IsLifecycleRoutingMetadataKey reports whether key changes the routing or
+// materialization identity of work that has durable lifecycle evidence.
+func IsLifecycleRoutingMetadataKey(key string) bool {
+	switch key {
+	case beadmeta.RoutedToMetadataKey,
+		beadmeta.ExecutionRoutedToMetadataKey,
+		beadmeta.DeferredRoutedToMetadataKey,
+		beadmeta.DeferredExecutionRoutedToMetadataKey,
+		beadmeta.RunTargetMetadataKey,
+		beadmeta.WorkflowIDMetadataKey,
+		beadmeta.MoleculeIDMetadataKey,
+		beadmeta.MergeStrategyMetadataKey,
+		beadmeta.LifecycleMaterializationMetadataKey:
+		return true
+	default:
+		return false
+	}
+}
+
+// LifecycleMutationNeedsValidation reports whether opts touches state whose
+// generic mutation must be checked against the current bead before writing.
+// The exec and bd-backed adapters use this to run the same preflight guard as
+// stores that validate under their write lock or inside a conditional
+// transaction. The external adapters still have a read/write race unless the
+// caller uses their conditional-write path.
+func LifecycleMutationNeedsValidation(opts UpdateOpts) bool {
+	if opts.Status != nil {
+		return true
+	}
+	for key := range opts.Metadata {
+		if IsLifecycleRoutingMetadataKey(key) {
+			return true
+		}
+		switch key {
+		case beadmeta.LifecycleAdmissionReceiptMetadataKey,
+			beadmeta.LifecycleAdmissionReceiptV2MetadataKey,
+			beadmeta.LifecycleCompletionReceiptMetadataKey,
+			beadmeta.LifecycleMaterializationMetadataKey,
+			beadmeta.LifecycleRecoveryStateMetadataKey:
+			return true
+		}
+	}
+	return false
+}
+
 // HasLifecycleEvidence reports controller lifecycle enrollment persisted on
 // the bead. It excludes the removable intent label by design.
 func HasLifecycleEvidence(b Bead) bool {
@@ -300,6 +345,16 @@ func HasLifecycleAdmissionReceipt(b Bead) bool {
 		b.Metadata[beadmeta.LifecycleAdmissionReceiptV2MetadataKey] != ""
 }
 
+// ValidateLifecycleRouting rejects ordinary CLI/API routing of any bead that
+// carries durable lifecycle evidence. Proof-aware controller routing must use
+// its separate verified path.
+func ValidateLifecycleRouting(current Bead) error {
+	if HasLifecycleEvidence(current) {
+		return ErrLifecycleMutationBlocked
+	}
+	return nil
+}
+
 // ValidateLifecycleClose rejects ordinary close operations on an enrolled
 // source bead. The controller's receipt-verified completion path uses
 // CloseIfMatch directly after verifying the signed receipt and expected row
@@ -319,9 +374,10 @@ func ValidateLifecycleClose(current Bead) error {
 }
 
 // ValidateLifecycleMutation keeps generic updates from erasing durable
-// enrollment, reopening a lifecycle record, or closing source work without
-// verified acceptance. An intentional retry must be represented as a
-// separately authorized fresh work item.
+// enrollment, changing routing or materialization identity, reopening a
+// lifecycle record, or closing source work without verified acceptance. An
+// intentional retry must be represented as a separately authorized fresh work
+// item.
 func ValidateLifecycleMutation(current Bead, opts UpdateOpts) error {
 	if HasLifecycleRecoveryIntent(current) {
 		return ErrLifecycleIntentImmutable
@@ -352,6 +408,15 @@ func ValidateLifecycleMutation(current Bead, opts UpdateOpts) error {
 	}
 	if !HasLifecycleEvidence(current) {
 		return nil
+	}
+	for key, next := range opts.Metadata {
+		if IsLifecycleRoutingMetadataKey(key) && current.Metadata[key] != next {
+			return ErrLifecycleMutationBlocked
+		}
+		if (key == beadmeta.LifecycleAdmissionReceiptMetadataKey || key == beadmeta.LifecycleAdmissionReceiptV2MetadataKey) &&
+			current.Metadata[key] != "" && current.Metadata[key] != next {
+			return ErrLifecycleMutationBlocked
+		}
 	}
 	if opts.Status != nil && strings.EqualFold(strings.TrimSpace(current.Status), "closed") &&
 		!strings.EqualFold(strings.TrimSpace(*opts.Status), "closed") {
