@@ -382,7 +382,7 @@ func TestDigestAdmissionPolicyV2ChangesForReviewedPolicyInputs(t *testing.T) {
 			p.FormulaSources = append(p.FormulaSources, AdmissionFormulaSourceV2{LogicalID: "mol-other", SHA256: strings.Repeat("d", 64)})
 			p.FormulaSourceCount++
 		}},
-		{name: "compiler version", mutate: func(p *AdmissionPolicyProjectionV2) { p.FormulaCompilerVersion = "2.1.0" }},
+		{name: "compiler capability", mutate: func(p *AdmissionPolicyProjectionV2) { p.FormulaCompilerCapability = "2.1.0" }},
 		{name: "formula schema", mutate: func(p *AdmissionPolicyProjectionV2) { p.FormulaSchemaVersion = "formula.v2" }},
 		{name: "formula v2 mode", mutate: func(p *AdmissionPolicyProjectionV2) { p.FormulaV2Enabled = false }},
 		{name: "compile variable", mutate: func(p *AdmissionPolicyProjectionV2) { p.EffectiveCompileVariables["component"] = "worker" }},
@@ -505,7 +505,13 @@ func TestDigestAdmissionPolicyV2RejectsIncompleteOrAmbiguousInputs(t *testing.T)
 		{name: "duplicate composition", mutate: func(p *AdmissionPolicyProjectionV2) {
 			p.EffectiveComposedFormulaIDs = []string{"mol-parent", "mol-parent"}
 		}},
-		{name: "missing compiler version", mutate: func(p *AdmissionPolicyProjectionV2) { p.FormulaCompilerVersion = "" }},
+		{name: "missing compiler capability", mutate: func(p *AdmissionPolicyProjectionV2) { p.FormulaCompilerCapability = "" }},
+		{name: "missing compiler implementation version", mutate: func(p *AdmissionPolicyProjectionV2) { p.FormulaCompilerImplementationVersion = "" }},
+		{name: "unsupported compiler implementation version", mutate: func(p *AdmissionPolicyProjectionV2) {
+			p.FormulaCompilerImplementationVersion = "gascity-formula-compiler-v2"
+		}},
+		{name: "missing provenance schema version", mutate: func(p *AdmissionPolicyProjectionV2) { p.FormulaProvenanceSchemaVersion = 0 }},
+		{name: "unsupported provenance schema version", mutate: func(p *AdmissionPolicyProjectionV2) { p.FormulaProvenanceSchemaVersion++ }},
 		{name: "missing schema version", mutate: func(p *AdmissionPolicyProjectionV2) { p.FormulaSchemaVersion = "" }},
 		{name: "unsupported merge behavior", mutate: func(p *AdmissionPolicyProjectionV2) { p.MergeStrategy = "unknown" }},
 		{name: "missing source store", mutate: func(p *AdmissionPolicyProjectionV2) { p.StorePlacement.SourceStoreRef = "" }},
@@ -613,10 +619,12 @@ func validAdmissionPolicyProjectionV2(t *testing.T) AdmissionPolicyProjectionV2 
 			InheritedMaxSource:         "unlimited",
 			RuntimeRigSuspensionKnown:  true,
 		},
-		Workflow:               "mol-work",
-		FormulaCompilerVersion: "2.0.0",
-		FormulaSchemaVersion:   "graph.v2",
-		FormulaV2Enabled:       true,
+		Workflow:                             "mol-work",
+		FormulaCompilerCapability:            "2.0.0",
+		FormulaCompilerImplementationVersion: formula.FormulaCompilerImplementationVersion,
+		FormulaProvenanceSchemaVersion:       formula.CompileProvenanceSchemaVersion,
+		FormulaSchemaVersion:                 "graph.v2",
+		FormulaV2Enabled:                     true,
 		FormulaSources: []AdmissionFormulaSourceV2{
 			{LogicalID: "mol-work", SHA256: strings.Repeat("a", 64)},
 			{LogicalID: "mol-parent", SHA256: strings.Repeat("b", 64)},

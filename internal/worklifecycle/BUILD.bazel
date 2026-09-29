@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "worklifecycle",
     srcs = [
+        "admission_attachment.go",
         "admission_policy_v2.go",
         "receipt.go",
         "recovery.go",
@@ -17,6 +18,7 @@ go_library(
         "//internal/beads",
         "//internal/config",
         "//internal/coordclass",
+        "//internal/formula",
         "//internal/qualification",
         "//internal/storebinding",
         "//internal/storeref",
@@ -26,6 +28,7 @@ go_library(
 go_test(
     name = "worklifecycle_test",
     srcs = [
+        "admission_attachment_test.go",
         "admission_policy_v2_test.go",
         "receipt_test.go",
         "recovery_request_test.go",

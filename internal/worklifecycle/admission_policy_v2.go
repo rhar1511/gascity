@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
+	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/qualification"
 	"github.com/gastownhall/gascity/internal/storebinding"
 	"github.com/gastownhall/gascity/internal/storeref"
@@ -20,7 +21,7 @@ const (
 	// AdmissionPolicyProjectionV2Version versions the canonical input schema
 	// hashed by DigestAdmissionPolicyV2. Change it when the projected fields or
 	// their meaning changes.
-	AdmissionPolicyProjectionV2Version = 2
+	AdmissionPolicyProjectionV2Version = 3
 
 	admissionPolicyProjectionV2Domain = "gascity.lifecycle.routing-formula-policy.v2\n"
 	// AdmissionRouteResolverV2Version identifies the exact canonical-target
@@ -323,25 +324,27 @@ type AdmissionStorePlacementV2 struct {
 // or dependency must set the matching completeness flag false; the digest
 // rejects it.
 type AdmissionPolicyProjectionV2 struct {
-	SourceScope                  string                     `json:"source_scope"`
-	RouteResolverVersion         string                     `json:"route_resolver_version"`
-	Target                       CanonicalAdmissionPoolV2   `json:"target"`
-	Workflow                     string                     `json:"workflow"`
-	FormulaSources               []AdmissionFormulaSourceV2 `json:"formula_sources"`
-	FormulaSourceCount           int                        `json:"formula_source_count"`
-	ExternalAssets               []AdmissionExternalAssetV2 `json:"external_assets"`
-	ExternalAssetCount           int                        `json:"external_asset_count"`
-	ExternalAssetClosureComplete bool                       `json:"external_asset_closure_complete"`
-	CheckPathCount               int                        `json:"check_path_count"`
-	CheckMappingsComplete        bool                       `json:"check_mappings_complete"`
-	CheckClosures                []AdmissionCheckClosureV2  `json:"check_closures"`
-	FormulaCompilerVersion       string                     `json:"formula_compiler_version"`
-	FormulaSchemaVersion         string                     `json:"formula_schema_version"`
-	FormulaV2Enabled             bool                       `json:"formula_v2_enabled"`
-	EffectiveCompileVariables    map[string]string          `json:"effective_compile_variables"`
-	EffectiveComposedFormulaIDs  []string                   `json:"effective_composed_formula_ids"`
-	MergeStrategy                string                     `json:"merge_strategy"`
-	StorePlacement               AdmissionStorePlacementV2  `json:"store_placement"`
+	SourceScope                          string                     `json:"source_scope"`
+	RouteResolverVersion                 string                     `json:"route_resolver_version"`
+	Target                               CanonicalAdmissionPoolV2   `json:"target"`
+	Workflow                             string                     `json:"workflow"`
+	FormulaSources                       []AdmissionFormulaSourceV2 `json:"formula_sources"`
+	FormulaSourceCount                   int                        `json:"formula_source_count"`
+	ExternalAssets                       []AdmissionExternalAssetV2 `json:"external_assets"`
+	ExternalAssetCount                   int                        `json:"external_asset_count"`
+	ExternalAssetClosureComplete         bool                       `json:"external_asset_closure_complete"`
+	CheckPathCount                       int                        `json:"check_path_count"`
+	CheckMappingsComplete                bool                       `json:"check_mappings_complete"`
+	CheckClosures                        []AdmissionCheckClosureV2  `json:"check_closures"`
+	FormulaCompilerCapability            string                     `json:"formula_compiler_capability"`
+	FormulaCompilerImplementationVersion string                     `json:"formula_compiler_implementation_version"`
+	FormulaProvenanceSchemaVersion       int                        `json:"formula_provenance_schema_version"`
+	FormulaSchemaVersion                 string                     `json:"formula_schema_version"`
+	FormulaV2Enabled                     bool                       `json:"formula_v2_enabled"`
+	EffectiveCompileVariables            map[string]string          `json:"effective_compile_variables"`
+	EffectiveComposedFormulaIDs          []string                   `json:"effective_composed_formula_ids"`
+	MergeStrategy                        string                     `json:"merge_strategy"`
+	StorePlacement                       AdmissionStorePlacementV2  `json:"store_placement"`
 }
 
 // DigestAdmissionPolicyV2 validates and hashes a canonical projection of the
@@ -398,8 +401,14 @@ func canonicalAdmissionPolicyProjectionV2(input AdmissionPolicyProjectionV2) (Ad
 	if input.Workflow != input.Target.DefaultSlingFormula {
 		return AdmissionPolicyProjectionV2{}, admissionPolicyV2Error("effective workflow does not match the target pool's configured default sling formula")
 	}
-	if !validCanonicalText(input.FormulaCompilerVersion) {
-		return AdmissionPolicyProjectionV2{}, admissionPolicyV2Error("formula compiler version is missing or non-canonical")
+	if !validCanonicalText(input.FormulaCompilerCapability) {
+		return AdmissionPolicyProjectionV2{}, admissionPolicyV2Error("formula compiler capability is missing or non-canonical")
+	}
+	if input.FormulaCompilerImplementationVersion != formula.FormulaCompilerImplementationVersion {
+		return AdmissionPolicyProjectionV2{}, admissionPolicyV2Error("formula compiler implementation version is missing or unsupported")
+	}
+	if input.FormulaProvenanceSchemaVersion != formula.CompileProvenanceSchemaVersion {
+		return AdmissionPolicyProjectionV2{}, admissionPolicyV2Error("formula provenance schema version is missing or unsupported")
 	}
 	if !validCanonicalText(input.FormulaSchemaVersion) {
 		return AdmissionPolicyProjectionV2{}, admissionPolicyV2Error("formula schema version is missing or non-canonical")
