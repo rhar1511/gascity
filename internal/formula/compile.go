@@ -38,6 +38,32 @@ func Compile(_ context.Context, name string, searchPaths []string, vars map[stri
 	return compileFormula(name, searchPaths, vars, true)
 }
 
+// CompileWithProvenance runs the same compiler pipeline as Compile and returns
+// compiler-owned source and transformation provenance. A successful Recipe can
+// still have unavailable admission provenance; callers must check Status.
+func CompileWithProvenance(_ context.Context, name string, searchPaths []string, vars map[string]string) (*Recipe, CompileProvenance, error) {
+	source := SourceFromEnv()
+	recorder := newCompileProvenanceRecorder(source)
+	recipe, err := compileFormulaWithSource(name, searchPaths, vars, true, source, recorder)
+	if err != nil {
+		return nil, CompileProvenance{}, err
+	}
+	return recipe, recorder.result, nil
+}
+
+// CompileWithoutRuntimeVarValidationWithProvenance mirrors
+// CompileWithoutRuntimeVarValidation while returning compiler-owned
+// provenance. Runtime-variable validation remains deferred to the caller.
+func CompileWithoutRuntimeVarValidationWithProvenance(_ context.Context, name string, searchPaths []string, vars map[string]string) (*Recipe, CompileProvenance, error) {
+	source := SourceFromEnv()
+	recorder := newCompileProvenanceRecorder(source)
+	recipe, err := compileFormulaWithSource(name, searchPaths, vars, false, source, recorder)
+	if err != nil {
+		return nil, CompileProvenance{}, err
+	}
+	return recipe, recorder.result, nil
+}
+
 // CompileWithoutRuntimeVarValidation compiles a formula while deferring
 // required runtime-var checks to the caller. Required vars used by compile-time
 // operators are still validated during compilation. Use this for read-only
@@ -51,7 +77,15 @@ func CompileWithoutRuntimeVarValidation(_ context.Context, name string, searchPa
 const explicitGraphRequirementError = `requires: formulas that use graph-only constructs must declare [requires] formula_compiler = ">=2.0.0" or the deprecated contract = "graph.v2" explicitly`
 
 func compileFormula(name string, searchPaths []string, vars map[string]string, validateRuntimeVars bool) (*Recipe, error) {
-	parser := NewParser(searchPaths...).SetSource(SourceFromEnv())
+	return compileFormulaWithSource(name, searchPaths, vars, validateRuntimeVars, SourceFromEnv(), nil)
+}
+
+func compileFormulaWithSource(name string, searchPaths []string, vars map[string]string, validateRuntimeVars bool, source Source, recorder *compileProvenanceRecorder) (*Recipe, error) {
+	if recorder != nil {
+		source = recordingFormulaSource{Source: source, recorder: recorder}
+	}
+	parser := NewParser(searchPaths...).SetSource(source)
+	parser.provenance = recorder
 	v2Enabled := IsFormulaV2Enabled()
 	var composedRequirements []formulaCompilerConstraint
 	var composedSources []SourceIdentity
@@ -135,6 +169,10 @@ func compileFormula(name string, searchPaths []string, vars map[string]string, v
 			if err != nil {
 				return nil, err
 			}
+			parser.recordCompileFormulaUse(CompileTraceEntry{
+				Kind:        CompileTraceAspect,
+				FormulaName: aspectFormula.Formula,
+			})
 			if len(aspectFormula.Advice) > 0 {
 				resolved.Steps = ApplyAdvice(resolved.Steps, aspectFormula.Advice)
 			}
@@ -159,6 +197,12 @@ func compileFormula(name string, searchPaths []string, vars map[string]string, v
 		for k, v := range vars {
 			expansionVars[k] = v
 		}
+		parser.recordCompileFormulaUse(CompileTraceEntry{
+			Kind:               CompileTraceStandaloneExpand,
+			FormulaName:        resolved.Formula,
+			TargetStepID:       "main",
+			EffectiveVariables: expansionVars,
+		})
 		if err := MaterializeExpansion(resolved, "main", expansionVars); err != nil {
 			return nil, fmt.Errorf("standalone expansion %q: %w", name, err)
 		}
@@ -220,7 +264,14 @@ func compileFormula(name string, searchPaths []string, vars map[string]string, v
 	if err != nil {
 		return nil, err
 	}
-	return toRecipeWithGraph(resolved, graphWorkflow)
+	recipe, err := toRecipeWithGraph(resolved, graphWorkflow)
+	if err != nil {
+		return nil, err
+	}
+	if recorder != nil {
+		recorder.result = recorder.finish(recipe, compileVars, v2Enabled)
+	}
+	return recipe, nil
 }
 
 func loadResolvedAspectFormula(parser *Parser, name string, collectRequirements formulaRequirementCollector) (*Formula, error) {

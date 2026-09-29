@@ -151,9 +151,11 @@ type Formula struct {
 }
 
 // SourceIdentity binds one loaded formula file to the bytes parsed by
-// the formula compiler. Path is process-local provenance, not a wire field.
+// the formula compiler. FormulaName is the stable logical identity; Path is
+// process-local provenance and must not be used as an admission policy ID.
 type SourceIdentity struct {
 	Path          string `json:"-"`
+	FormulaName   string `json:"-"`
 	ContentSHA256 string `json:"-"`
 }
 
