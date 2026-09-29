@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { PRActionOption, PRActionQueueItem } from '../supervisor/prActions';
 import { PullRequestActions } from './PullRequestActions';
@@ -76,6 +76,30 @@ describe('PullRequestActions', () => {
     expect(screen.getByRole('button', { name: /prepare pr/i }).hasAttribute('disabled')).toBe(true);
     expect(screen.getByText(/prepare: merge conflict/i)).toBeTruthy();
     expect(screen.queryByRole('button', { name: /merge/i })).toBeNull();
+  });
+
+  it('fails closed on a cached verdict after queue refresh fails but leaves refresh available', () => {
+    const onRefresh = vi.fn();
+    render(
+      <PullRequestActions
+        item={item}
+        prepare={allowed}
+        queueReview={null}
+        busy={null}
+        refreshing={false}
+        actionsDisabled
+        error="queue temporarily unavailable"
+        receipt={null}
+        onAction={vi.fn()}
+        onRefresh={onRefresh}
+      />,
+    );
+
+    expect(screen.getByRole('button', { name: /prepare pr/i }).hasAttribute('disabled')).toBe(true);
+    const refresh = screen.getByRole('button', { name: /refresh pr verdict/i });
+    expect((refresh as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(refresh);
+    expect(onRefresh).toHaveBeenCalledOnce();
   });
 
   it('explains when Gas City offers no action for this revision', () => {
