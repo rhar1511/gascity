@@ -5166,9 +5166,9 @@ func (hangingListProvider) ListRunning(string) ([]string, error) {
 
 func TestStopManagedCityBoundsForcedShutdownWhenRuntimeHangs(t *testing.T) {
 	cityPath := t.TempDir()
-	logFile := filepath.Join(t.TempDir(), "ops.log")
-	script := writeSpyScript(t, logFile)
-	t.Setenv("GC_BEADS", "exec:"+script)
+	// Provider lifecycle is covered separately. Keep this timer focused on
+	// the city shutdown budget, not exec-provider process startup/teardown.
+	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)
 
 	closer := &closerSpy{}
@@ -5373,7 +5373,10 @@ while True:
 		cityPath: cityPath,
 		cityName: "bright-lights",
 		cfg: &config.City{
-			Daemon: config.DaemonConfig{ShutdownTimeout: "20ms"},
+			// Forced city shutdown gets five times this grace period. Keep it
+			// above the proxy process's 2s process-group stop wait so this test
+			// observes completed service cleanup before that bounded wait expires.
+			Daemon: config.DaemonConfig{ShutdownTimeout: "500ms"},
 			Services: []config.Service{{
 				Name: "bridge",
 				Kind: "proxy_process",

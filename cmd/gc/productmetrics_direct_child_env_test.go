@@ -12,9 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/execenv"
-	"github.com/gastownhall/gascity/internal/githubmonitor"
 	"github.com/gastownhall/gascity/internal/shellquote"
 	"github.com/gastownhall/gascity/internal/testutil"
 )
@@ -101,20 +99,6 @@ func TestProductMetricsDirectChildEnvPerf(t *testing.T) {
 func TestProductMetricsDirectChildEnvPromptSling(t *testing.T) {
 	entries := captureProductMetricsDirectChildEnv(t, func() error {
 		return defaultSlingCaller(context.Background(), []string{"child-env-spy"})
-	})
-	assertProductMetricsDirectChildEnv(t, entries)
-}
-
-func TestProductMetricsDirectChildEnvGitHubNudge(t *testing.T) {
-	installProductMetricsDirectChildSpyCommand(t, "gc")
-	entries := captureProductMetricsDirectChildEnv(t, func() error {
-		defaultNudgeGitHubPRRepairWorker("/test/city", "worker", beads.Bead{ID: "gc-test"}, githubmonitor.Result{
-			Owner:       "owner",
-			Repo:        "repo",
-			Number:      1,
-			FailureKind: "checks_failed",
-		})
-		return nil
 	})
 	assertProductMetricsDirectChildEnv(t, entries)
 }

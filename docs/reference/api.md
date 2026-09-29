@@ -52,6 +52,91 @@ The spec is the full reference. A brief summary of the surfaces:
   `GET /v0/city/{cityName}/events/stream` at city scope.
 - **Config & packs.** Per-city config and pack metadata under
   `/v0/city/{cityName}/config` and `/v0/city/{cityName}/packs`.
+- **Pull-request actions.** `GET /v0/city/{cityName}/pr-actions/queue`
+  returns fresh monitored PR state joined with durable repair work and exact
+  immutable attempt-evidence references. `POST /v0/city/{cityName}/pr-actions`
+  prepares repair work, records an exact revision for review, or merges after
+  separate human approval. See the trust requirements below.
+
+### Pull-request action trust
+
+The central controller computes the permitted actions; clients cannot submit a
+role, approval boolean, policy, base/head revision, or evidence verdict as
+authority. Action requests repeat the current queue's monitor, repository, PR,
+head SHA, base SHA, policy version, work and attempt IDs, and provide an
+`Idempotency-Key` header. The controller reloads work and forge state before
+recording an intent and again before execution. A change or source outage makes
+the action stale or unavailable. An idempotent replay returns its stored result
+and does not repeat an effect.
+
+`prepare` creates at most one durable repair-work bead for the exact monitor,
+repository, PR, base SHA, and candidate SHA, even if concurrent callers use
+different idempotency keys. The repair bead is a held triage candidate with
+`hold:external`; its route is recorded only as a proposal. It is not runnable
+until the separate signed lifecycle-admission path removes that hold and
+installs a serving route. PR review or merge authority does not grant admission.
+`queue_review` records that the exact revision is ready for review only when an
+immutable attempt reference matches its current head and base. `merge` also
+requires successful checks and a signed human grant. Queueing for review never
+authorizes a merge. The GitHub adapter currently advertises merge as unavailable
+and sends no merge request because GitHub's merge API cannot atomically require
+the approved base SHA as well as the head SHA. A future adapter must enforce
+both revisions before this action can become available. Before any enabled
+adapter is called, the controller persists a non-retryable merge-submission
+state. An unverified outcome stays `unknown`; even after the claim lease expires,
+retrying the same key never repeats a merge submission.
+
+Action receipts are stored as non-runnable controller ledger records and ordinary
+city bead create/update/assign/close/reopen/delete routes reject changes to them.
+This API protection does not replace host-level controls for direct access to
+the underlying bead backend.
+
+Every mutating action requires a verified city-write grant. Merge approval uses
+a different Ed25519 keyring and issuer/subject map from `GC_PR_HUMAN_TRUST`, a
+host-managed supervisor environment value. Each approval signature binds the
+city, action scope, repository, PR, exact head/base SHAs, policy version, work
+ID, idempotency key, and a short expiry. The configured human key must not
+overlap a city-write key. A worker's city-write signature and a human-looking
+`sub` claim do not establish human authority. Without the separate trusted
+human keyring, merge is disabled.
+
+The controller reads GitHub using its own `GH_TOKEN` or `GITHUB_TOKEN`; it does
+not run `gh` as a request-time fallback. Missing credentials, inaccessible
+repositories, unavailable work stores, and missing attempt evidence are shown
+as unavailable or missing, not as an empty approved queue. Review and merge
+remain unavailable until controller composition supplies the exact immutable
+attempt-evidence reader. The evidence payload itself is not copied into an
+action record.
+
+The reader resolves the exact indexed attempt ID; it never substitutes the
+latest attempt. Actionable evidence must match the current PR base and head,
+identify the candidate work, use the `candidate_commit_delta` digest, and report
+a clean candidate worktree. A dirty workspace snapshot or mismatched revision
+is not proof of the reviewed commit. The host must keep the evaluator, evidence
+store, human signer, and controller configuration outside candidate write
+permissions. Signatures authenticate the evaluator's assertion; they do not by
+themselves prove operating-system isolation or that measurements were collected
+honestly.
+
+The root-controlled `GC_PR_ACTION_POLICY` value contains one signed policy per
+city. A policy names the monitored repositories, rig, allowed base branches,
+repair route, and required checks. The server normalizes the policy and derives
+its version from the SHA-256 digest of its canonical signed contents; a request
+cannot select or change the version. The signature must come from the exact
+key, issuer, and subject granted `pr.policy.write` by `GC_PR_HUMAN_TRUST`.
+Neither city configuration nor a worker write grant can expand this policy.
+An absent or invalid trusted policy leaves the queue unavailable.
+
+`GC_PR_HUMAN_TRUST` is a supervisor-owned JSON trust document containing
+Ed25519 public keys and explicit `(key_id, issuer, subject, scopes)` bindings.
+Private human-grant keys stay in a separate human authorization service; they
+must not be available to candidate workers or the city-write grant minter.
+The same exact human authority map signs short-lived merge approvals that bind
+city, repository, PR, head and base SHAs, policy version, work ID, and
+idempotency key. A public key or key ID shared with the city-write grant set is
+rejected. Missing human trust disables merge approval. Host isolation, signing
+key custody, and evidence-provider permissions still require deployment
+verification before any live promotion or merge release.
 
 ## Request and response headers
 

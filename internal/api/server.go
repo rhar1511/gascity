@@ -183,6 +183,17 @@ type Server struct {
 	// webhookMaxBody overrides the /hook/ request body cap in tests. Zero uses
 	// defaultMaxWebhookBodyBytes.
 	webhookMaxBody int64
+
+	// prHumanVerifier is built from host-managed trust configuration, separately
+	// from city-write keys. Nil keeps human PR actions unavailable.
+	prHumanVerifier *PRHumanGrantVerifier
+
+	// prActionService is lazily built per cached city server from controller
+	// credentials and optional immutable evidence support on State.
+	prActionServiceMu sync.Mutex
+	prActionService   *PRActionService
+	prActionForge     PRActionForge
+	prActionEvidence  PRActionAttemptEvidenceReader
 }
 
 // cachedWebhookVerifier is a memoized verifier plus the config fingerprint it

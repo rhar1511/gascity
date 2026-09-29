@@ -67,12 +67,23 @@ describe('BeadsCanvasPage', () => {
   it('widens the live query only when closed beads are requested', async () => {
     renderPage();
     await screen.findByRole('button', { name: 'ga-root: Ship the canvas' });
-    expect(beadQueries.length).toBeGreaterThan(0);
+    const initialQueryCount = beadQueries.length;
+    expect(initialQueryCount).toBeGreaterThan(0);
     expect(beadQueries.every((query) => !query.has('all'))).toBe(true);
+    expect(beadQueries.some((query) => query.get('status') === 'in_progress')).toBe(true);
 
     fireEvent.click(screen.getByRole('button', { name: 'closed' }));
 
-    await waitFor(() => expect(beadQueries.some((query) => query.get('all') === 'true')).toBe(true));
+    await waitFor(() =>
+      expect(beadQueries.slice(initialQueryCount).some((query) => query.get('all') === 'true')).toBe(
+        true,
+      ),
+    );
+    const refreshedQueries = beadQueries.slice(initialQueryCount);
+    expect(refreshedQueries.find((query) => !query.has('status'))?.get('all')).toBe('true');
+    expect(
+      refreshedQueries.find((query) => query.get('status') === 'in_progress')?.has('all'),
+    ).toBe(false);
   });
 
   it('falls back to Gas City control and accepts an explicit Gas Town control target', async () => {

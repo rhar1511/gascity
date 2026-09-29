@@ -1586,7 +1586,7 @@ func TestHandleSessionCloseDeleteRetriesTransientConflict(t *testing.T) {
 }
 
 func TestDeleteSessionBeadAfterCloseReturnsLastTransientError(t *testing.T) {
-	store := &alwaysTransientDeleteConflictStore{Store: beads.NewMemStore()}
+	store := &alwaysTransientDeleteConflictStore{Store: closedSessionDeleteFixture(t)}
 
 	err := deleteSessionBeadAfterClose(store, "gc-test")
 
@@ -1602,7 +1602,7 @@ func TestDeleteSessionBeadAfterCloseReturnsLastTransientError(t *testing.T) {
 }
 
 func TestDeleteSessionBeadAfterCloseDoesNotRetryNonTransientError(t *testing.T) {
-	store := &nonTransientDeleteErrorStore{err: errors.New("permission denied")}
+	store := &nonTransientDeleteErrorStore{Store: closedSessionDeleteFixture(t), err: errors.New("permission denied")}
 
 	err := deleteSessionBeadAfterClose(store, "gc-test")
 
@@ -1627,6 +1627,18 @@ func TestDeleteSessionBeadAfterCloseLogsAlreadyGone(t *testing.T) {
 	if !strings.Contains(logs.String(), "already gone") {
 		t.Fatalf("logs = %q, want already gone signal", logs.String())
 	}
+}
+
+func closedSessionDeleteFixture(t *testing.T) beads.Store {
+	t.Helper()
+	store := &beads.MemStore{IDPrefix: "gc", HonorExplicitIDs: true}
+	if _, err := store.Create(beads.Bead{ID: "gc-test", Type: "session", Labels: []string{session.LabelSession}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close("gc-test"); err != nil {
+		t.Fatal(err)
+	}
+	return store
 }
 
 type deleteMissingStore struct {

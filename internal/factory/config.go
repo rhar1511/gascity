@@ -20,8 +20,10 @@ import (
 
 // ConfigRelativePath and ConfigVersion identify the project policy file and schema.
 const (
+	// ConfigRelativePath locates factory policy relative to a project root.
 	ConfigRelativePath = ".agent-factory/config.yaml"
-	ConfigVersion      = 1
+	// ConfigVersion is the supported factory policy schema version.
+	ConfigVersion = 1
 )
 
 // ErrNotConfigured indicates that a project has no factory policy file.

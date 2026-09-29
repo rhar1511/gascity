@@ -361,6 +361,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	cityPost(sm, "/service/{name}/restart", (*Server).humaHandleServiceRestart, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound))
 
 	// Sessions (non-stream — stream is the SSE registration below).
+	registerSessionRequestRoutes(sm)
 	cityRegister(sm, huma.Operation{
 		OperationID:   "create-session",
 		Method:        http.MethodPost,
@@ -477,4 +478,6 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		Errors: []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable},
 	}, (*Server).humaHandleExtMsgAdapterRegister)
 	cityDelete(sm, "/extmsg/adapters", (*Server).humaHandleExtMsgAdapterUnregister, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusServiceUnavailable))
+
+	sm.registerCityPRActionRoutes()
 }

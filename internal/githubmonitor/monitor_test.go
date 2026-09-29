@@ -147,6 +147,7 @@ func TestGraphQLDecodePullRequests(t *testing.T) {
 						"isDraft": false,
 						"mergeStateStatus": "BLOCKED",
 						"baseRefName": "main",
+						"baseRef": {"target": {"oid": "base789"}},
 						"headRefName": "fix",
 						"headRefOid": "abc123",
 						"commits": {
@@ -181,7 +182,7 @@ func TestGraphQLDecodePullRequests(t *testing.T) {
 		t.Fatalf("len(prs) = %d, want 1", len(prs))
 	}
 	got := prs[0]
-	if got.HeadSHA != "abc123" || got.MergeStateStatus != "BLOCKED" {
+	if got.HeadSHA != "abc123" || got.BaseSHA != "base789" || got.State != "OPEN" || got.MergeStateStatus != "BLOCKED" {
 		t.Fatalf("decoded PR = %#v", got)
 	}
 	if len(got.Checks) != 2 {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -1526,28 +1527,53 @@ esac
 	}
 }
 
+func TestProviderCancellationForegroundChildHelper(t *testing.T) {
+	if os.Getenv("GC_EXEC_CANCEL_CHILD") != "1" {
+		return
+	}
+
+	interrupts := make(chan os.Signal, 1)
+	signal.Notify(interrupts, os.Interrupt)
+	defer signal.Stop(interrupts)
+	if err := os.WriteFile(os.Getenv("GC_EXEC_CANCEL_READY"), []byte("ready\n"), 0o600); err != nil {
+		t.Fatalf("write child readiness marker: %v", err)
+	}
+	select {
+	case <-interrupts:
+	case <-time.After(30 * time.Second):
+		t.Fatal("foreground child did not receive interrupt")
+	}
+	if err := os.WriteFile(os.Getenv("GC_EXEC_CANCEL_CHILD_INTERRUPTED"), []byte("interrupted\n"), 0o600); err != nil {
+		t.Fatalf("write child interrupt marker: %v", err)
+	}
+}
+
 // TestProvider_StartCancellationInterruptsForegroundChild proves cooperative
 // cancellation reaches a foreground child of the adapter, not just the shell
-// leader. The adapter shell blocks in a foreground `sleep` far longer than the
-// provider's WaitDelay (mimicking a `ready_delay_ms` readiness delay). A
-// process-only interrupt would be deferred by the shell until the child
-// returned, so WaitDelay would force-kill the shell before its rollback trap
-// ran and the resource the adapter created would leak. Signaling the process
-// group unblocks the child so the trap runs inside the grace window.
+// leader. The helper child announces readiness only after installing its
+// interrupt handler, eliminating the race between the shell's readiness
+// marker and the child actually starting. A process-only interrupt would be
+// deferred by the shell until the child returned, so WaitDelay would force-kill
+// the shell before its rollback trap ran. Signaling the process group unblocks
+// both processes and lets the trap run inside the grace window.
 func TestProvider_StartCancellationInterruptsForegroundChild(t *testing.T) {
 	dir := t.TempDir()
 	readyFile := filepath.Join(dir, "ready")
 	interruptFile := filepath.Join(dir, "interrupted")
+	childInterruptFile := filepath.Join(dir, "child-interrupted")
 	script := writeScript(t, dir, fmt.Sprintf(`
 case "$1" in
   start)
     trap 'printf "%%s\n" interrupted > "%s"; exit 0' INT
-    : > "%s"
-    sleep 30
+    "$GC_EXEC_CANCEL_BINARY" -test.run '^TestProviderCancellationForegroundChildHelper$'
     ;;
   *) exit 2 ;;
 esac
-	`, interruptFile, readyFile))
+	`, interruptFile))
+	t.Setenv("GC_EXEC_CANCEL_BINARY", os.Args[0])
+	t.Setenv("GC_EXEC_CANCEL_CHILD", "1")
+	t.Setenv("GC_EXEC_CANCEL_READY", readyFile)
+	t.Setenv("GC_EXEC_CANCEL_CHILD_INTERRUPTED", childInterruptFile)
 	p := NewProvider(script)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1593,6 +1619,13 @@ esac
 	}
 	if got := strings.TrimSpace(string(data)); got != "interrupted" {
 		t.Fatalf("interrupt marker = %q, want %q", got, "interrupted")
+	}
+	data, err = os.ReadFile(childInterruptFile)
+	if err != nil {
+		t.Fatalf("read child interrupt marker (process-group signal never reached the foreground child): %v", err)
+	}
+	if got := strings.TrimSpace(string(data)); got != "interrupted" {
+		t.Fatalf("child interrupt marker = %q, want %q", got, "interrupted")
 	}
 }
 

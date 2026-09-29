@@ -1,0 +1,59 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "accepted_at": {
+      "format": "date-time",
+      "type": "string"
+    },
+    "acknowledged_at": {
+      "format": "date-time",
+      "type": "string"
+    },
+    "delivery": {
+      "type": "string"
+    },
+    "delivery_attempted_at": {
+      "format": "date-time",
+      "type": "string"
+    },
+    "effect": {
+      "type": "string"
+    },
+    "generation": {
+      "format": "int64",
+      "type": "integer"
+    },
+    "message_digest": {
+      "type": "string"
+    },
+    "provider_result_at": {
+      "format": "date-time",
+      "type": "string"
+    },
+    "request_id": {
+      "type": "string"
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "1"
+    },
+    "ok": {
+      "const": true
+    }
+  },
+  "required": [
+    "request_id",
+    "session_id",
+    "generation",
+    "message_digest",
+    "accepted_at",
+    "delivery",
+    "effect",
+    "schema_version",
+    "ok"
+  ],
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

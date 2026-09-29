@@ -403,6 +403,10 @@ func (s *Server) handleSessionClose(w http.ResponseWriter, r *http.Request) {
 	// Optional: permanently delete the bead after closing.
 	if r.URL.Query().Get("delete") == "true" {
 		if err := deleteSessionBeadAfterClose(store.Store, id); err != nil {
+			if errors.Is(err, session.ErrRequestEvidenceRetained) {
+				writeError(w, http.StatusConflict, "conflict", err.Error())
+				return
+			}
 			log.Printf("gc api: deleting bead after close %s: %v", id, err)
 			writeError(w, http.StatusInternalServerError, "internal", "closed but delete failed: "+err.Error())
 			return
@@ -416,7 +420,7 @@ func deleteSessionBeadAfterClose(store beads.Store, id string) error {
 	const maxAttempts = 5
 	var err error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
-		err = store.Delete(id)
+		err = session.NewStore(beads.SessionStore{Store: store}).DeleteClosedSession(id)
 		if err == nil {
 			return nil
 		}

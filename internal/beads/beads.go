@@ -663,7 +663,7 @@ func IsReadyExcludedBead(b Bead) bool {
 func HasReadyExcludedLabel(b Bead) bool {
 	for _, label := range b.Labels {
 		switch label {
-		case "gc:session", "gc:order-tracking", "order-tracking":
+		case "gc:session", "gc:order-tracking", "order-tracking", "hold:external":
 			return true
 		}
 	}

@@ -202,6 +202,14 @@ const (
 	PackMetadataKey                     = "gc.pack"
 	PackRootMetadataKey                 = "gc.pack_root"
 	PackWorkspaceMetadataKey            = "gc.pack_workspace"
+	PRActionClaimMetadataKey            = "gc.pr_action.claim"
+	PRActionFingerprintMetadataKey      = "gc.pr_action.fingerprint"
+	PRActionIdempotencyMetadataKey      = "gc.pr_action.idempotency_key"
+	PRActionQueueIndexMetadataKey       = "gc.pr_action.queue_index"
+	PRActionRecordMetadataKey           = "gc.pr_action.record"
+	PRActionRouteProposalMetadataKey    = "gc.pr_action.proposed_route"
+	PRActionSourceMetadataKey           = "gc.pr_action.source"
+	PRActionTargetMetadataKey           = "gc.pr_action.target_key"
 	PerDispatchModelMetadataKey         = "gc.per_dispatch_model"
 	RalphStepIDMetadataKey              = "gc.ralph_step_id"
 	RSIRoleMetadataKey                  = "gc.rsi_role"
@@ -352,6 +360,18 @@ const FormulaVarPrefix = Namespace + "var."
 // are defined once as local constants next to their reader/writer (rigidem.go),
 // so it is declared as a prefix here rather than re-enumerated in this file.
 const IdemPrefix = Namespace + "idem."
+
+// PRActionMetadataPrefix reserves the controller-owned PR-action ledger
+// namespace, including future ledger fields not yet enumerated above.
+const PRActionMetadataPrefix = Namespace + "pr_action."
+
+// SessionRequestReceiptMetadataPrefix is the dynamic key prefix for durable
+// request receipts stored on session beads.
+const SessionRequestReceiptMetadataPrefix = Namespace + "session_request.v1."
+
+// LifecycleAdmissionReceiptMetadataKey is the signed lifecycle admission
+// receipt attached to work after an explicit external-hold review.
+const LifecycleAdmissionReceiptMetadataKey = "gc.lifecycle.admission_receipt.v1"
 
 // Directory keys: a deliberate non-"gc."-prefixed sibling family on bead
 // metadata, declared here so the vocabulary has one home. Their read/write
@@ -547,6 +567,14 @@ var KnownMetadataKeys = []string{
 	PackMetadataKey,
 	PackRootMetadataKey,
 	PackWorkspaceMetadataKey,
+	PRActionClaimMetadataKey,
+	PRActionFingerprintMetadataKey,
+	PRActionIdempotencyMetadataKey,
+	PRActionQueueIndexMetadataKey,
+	PRActionRecordMetadataKey,
+	PRActionRouteProposalMetadataKey,
+	PRActionSourceMetadataKey,
+	PRActionTargetMetadataKey,
 	PerDispatchModelMetadataKey,
 	RalphStepIDMetadataKey,
 	RSIRoleMetadataKey,
@@ -626,6 +654,8 @@ var KnownMetadataKeys = []string{
 var KnownMetadataPrefixes = []string{
 	FormulaVarPrefix,
 	IdemPrefix,
+	PRActionMetadataPrefix,
+	SessionRequestReceiptMetadataPrefix,
 }
 
 // SessionAffinityMetadataKeys are the metadata keys that pin a work bead to a
