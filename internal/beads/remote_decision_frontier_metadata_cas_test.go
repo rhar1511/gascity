@@ -31,6 +31,9 @@ type remoteDecisionFrontierMetadataTransitionWriterStub struct {
 	refuseWith          *string
 	corruptReceipt      bool
 	mutateTitleAfterCAS bool
+	omitDurableReceipt  bool
+	dropAfterWrite      bool
+	receipts            map[string]ControllerMetadataTransitionReceipt
 	err                 error
 }
 
@@ -90,7 +93,24 @@ func (writer *remoteDecisionFrontierMetadataTransitionWriterStub) TransitionMeta
 	if writer.corruptReceipt {
 		receipt.ReceiptID += "-changed"
 	}
+	if !writer.omitDurableReceipt {
+		if writer.receipts == nil {
+			writer.receipts = make(map[string]ControllerMetadataTransitionReceipt)
+		}
+		writer.receipts[request.ReceiptID] = cloneControllerMetadataTransitionReceipt(*receipt)
+	}
+	if writer.dropAfterWrite {
+		return ControllerMetadataTransitionResult{}, errors.New("simulated lost metadata transition response")
+	}
 	return ControllerMetadataTransitionResult{Applied: true, Replayed: writer.replayed, Receipt: receipt}, nil
+}
+
+func (writer *remoteDecisionFrontierMetadataTransitionWriterStub) ControllerMetadataTransitionReceipt(issueID, receiptID string) (ControllerMetadataTransitionReceipt, bool, error) {
+	receipt, found := writer.receipts[receiptID]
+	if !found || receipt.IssueID != issueID {
+		return ControllerMetadataTransitionReceipt{}, false, nil
+	}
+	return cloneControllerMetadataTransitionReceipt(receipt), true, nil
 }
 
 func newRemoteDecisionFrontierMetadataCASFixture(t *testing.T, record Bead, issuer *remoteDecisionFrontierMetadataPermitIssuerStub, transition *remoteDecisionFrontierMetadataTransitionWriterStub) (*RemoteDecisionFrontierRecordWriter, *remoteDecisionFrontierLinkRecordReaderStub) {
@@ -106,6 +126,7 @@ func newRemoteDecisionFrontierMetadataCASFixture(t *testing.T, record Bead, issu
 		BatchWriter:  &remoteDecisionFrontierTestBatchWriter{}, LinkWriter: &remoteDecisionFrontierTestLinkWriter{},
 		MetadataTransitionScope: "store-test", MetadataTransitionKind: "decision-frontier-record-metadata",
 		MetadataRecordReader: reader, MetadataPermitIssuer: issuer, MetadataTransitionWriter: transition,
+		MetadataReceiptReader: transition,
 	})
 	if err != nil {
 		t.Fatalf("NewRemoteDecisionFrontierRecordWriter: %v", err)
@@ -211,6 +232,16 @@ func TestRemoteDecisionFrontierMetadataCASAcceptsExactReplayReceiptAndAuthoritat
 	}
 	if handle, ok := writer.DecisionFrontierRecordWriterHandle(); ok || handle != nil {
 		t.Fatal("configured inert CAS writer advertised its record-writer capability")
+	}
+}
+
+func TestRemoteDecisionFrontierMetadataCASRecoversLostResponseFromDurableReceipt(t *testing.T) {
+	issuer := &remoteDecisionFrontierMetadataPermitIssuerStub{token: "opaque-transition-permit"}
+	transition := &remoteDecisionFrontierMetadataTransitionWriterStub{toRevision: 47, dropAfterWrite: true}
+	record := remoteDecisionFrontierMetadataCASMapRecord(t, 7)
+	writer, _ := newRemoteDecisionFrontierMetadataCASFixture(t, record, issuer, transition)
+	if won, err := writer.CompareAndSetDecisionFrontierRecordMetadataKey(record.ID, beadmeta.DecisionFrontierStateMetadataKey, "pending", "resolved"); err != nil || !won {
+		t.Fatalf("lost-response recovery = %v, %v; want durable receipt proof", won, err)
 	}
 }
 
@@ -339,6 +370,15 @@ func TestRemoteDecisionFrontierMetadataCASValidatesRefusalAndRejectsUnprovedComm
 		writer, _ := newRemoteDecisionFrontierMetadataCASFixture(t, record, issuer, transition)
 		if _, err := writer.CompareAndSetDecisionFrontierRecordMetadataKey(record.ID, beadmeta.DecisionFrontierStateMetadataKey, "pending", "resolved"); !errors.Is(err, ErrRemoteDecisionFrontierMetadataCASProtocol) {
 			t.Fatalf("mismatched receipt error = %v, want protocol refusal", err)
+		}
+	})
+	t.Run("response without durable receipt", func(t *testing.T) {
+		issuer := &remoteDecisionFrontierMetadataPermitIssuerStub{token: "opaque-transition-permit"}
+		transition := &remoteDecisionFrontierMetadataTransitionWriterStub{toRevision: 48, omitDurableReceipt: true}
+		record := remoteDecisionFrontierMetadataCASMapRecord(t, 7)
+		writer, _ := newRemoteDecisionFrontierMetadataCASFixture(t, record, issuer, transition)
+		if _, err := writer.CompareAndSetDecisionFrontierRecordMetadataKey(record.ID, beadmeta.DecisionFrontierStateMetadataKey, "pending", "resolved"); !errors.Is(err, ErrRemoteDecisionFrontierMetadataCASProtocol) {
+			t.Fatalf("missing durable receipt error = %v, want protocol refusal", err)
 		}
 	})
 	t.Run("authoritative record mismatch", func(t *testing.T) {

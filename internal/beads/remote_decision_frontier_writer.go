@@ -66,6 +66,7 @@ type RemoteDecisionFrontierRecordWriterConfig struct {
 	MetadataRecordReader     DecisionFrontierMetadataRecordReader
 	MetadataPermitIssuer     ControllerProtectedMutationPermitIssuer
 	MetadataTransitionWriter ControllerMetadataTransitionWriter
+	MetadataReceiptReader    ControllerMetadataTransitionReceiptReader
 }
 
 // RemoteDecisionFrontierRecordWriter adapts remote protected record creation,
@@ -85,6 +86,7 @@ type RemoteDecisionFrontierRecordWriter struct {
 	metadataRecordReader     DecisionFrontierMetadataRecordReader
 	metadataPermitIssuer     ControllerProtectedMutationPermitIssuer
 	metadataTransitionWriter ControllerMetadataTransitionWriter
+	metadataReceiptReader    ControllerMetadataTransitionReceiptReader
 }
 
 var (
@@ -124,6 +126,7 @@ func NewRemoteDecisionFrontierRecordWriter(config RemoteDecisionFrontierRecordWr
 		metadataRecordReader:     config.MetadataRecordReader,
 		metadataPermitIssuer:     config.MetadataPermitIssuer,
 		metadataTransitionWriter: config.MetadataTransitionWriter,
+		metadataReceiptReader:    config.MetadataReceiptReader,
 	}, nil
 }
 
@@ -186,7 +189,7 @@ func (w *RemoteDecisionFrontierRecordWriter) CreateDecisionFrontierRecord(record
 // transport. This inert source slice is not exposed through a capability
 // handle until production wiring and the complete remote contract are reviewed.
 func (w *RemoteDecisionFrontierRecordWriter) CompareAndSetDecisionFrontierRecordMetadataKey(id, key, expected, next string) (bool, error) {
-	if w == nil || w.metadataRecordReader == nil || w.metadataPermitIssuer == nil || w.metadataTransitionWriter == nil {
+	if w == nil || w.metadataRecordReader == nil || w.metadataPermitIssuer == nil || w.metadataTransitionWriter == nil || w.metadataReceiptReader == nil {
 		return false, ErrRemoteDecisionFrontierCASUnsupported
 	}
 	return w.compareAndSetDecisionFrontierRecordMetadataKey(id, key, expected, next)

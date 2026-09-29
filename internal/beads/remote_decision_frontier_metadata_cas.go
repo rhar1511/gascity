@@ -22,11 +22,12 @@ var ErrRemoteDecisionFrontierMetadataCASProtocol = errors.New("remote decision-f
 
 func validateRemoteDecisionFrontierMetadataCASConfig(config RemoteDecisionFrontierRecordWriterConfig) error {
 	configured := config.MetadataTransitionScope != "" || config.MetadataTransitionKind != "" ||
-		config.MetadataRecordReader != nil || config.MetadataPermitIssuer != nil || config.MetadataTransitionWriter != nil
+		config.MetadataRecordReader != nil || config.MetadataPermitIssuer != nil || config.MetadataTransitionWriter != nil ||
+		config.MetadataReceiptReader != nil
 	if !configured {
 		return nil
 	}
-	if config.MetadataRecordReader == nil || config.MetadataPermitIssuer == nil || config.MetadataTransitionWriter == nil ||
+	if config.MetadataRecordReader == nil || config.MetadataPermitIssuer == nil || config.MetadataTransitionWriter == nil || config.MetadataReceiptReader == nil ||
 		validateControllerTransitionText(config.MetadataTransitionScope, controllerTransitionMaxScope) != nil ||
 		strings.TrimSpace(config.MetadataTransitionScope) != config.MetadataTransitionScope || hasControllerTransitionControl(config.MetadataTransitionScope) ||
 		validateControllerTransitionText(config.MetadataTransitionKind, controllerTransitionMaxKind) != nil ||
@@ -84,7 +85,7 @@ func (w *RemoteDecisionFrontierRecordWriter) compareAndSetDecisionFrontierRecord
 
 	result, err := w.metadataTransitionWriter.TransitionMetadata(id, request)
 	if err != nil {
-		return false, fmt.Errorf("apply protected decision-frontier metadata transition %q: %w", id, err)
+		return w.recoverMetadataTransitionError(before, id, key, expected, next, request, err)
 	}
 	if !result.Applied {
 		return w.verifyMetadataTransitionRefusal(before, id, key, expected, request, result)
@@ -127,6 +128,11 @@ func (w *RemoteDecisionFrontierRecordWriter) verifyMetadataTransitionRefusal(bef
 	if result.Replayed || result.Receipt != nil || len(result.Current) == 0 {
 		return false, ErrRemoteDecisionFrontierMetadataCASProtocol
 	}
+	if _, found, err := w.readMetadataTransitionReceipt(id, request); err != nil {
+		return false, fmt.Errorf("read refused decision-frontier metadata receipt: %w", err)
+	} else if found {
+		return false, ErrRemoteDecisionFrontierMetadataCASProtocol
+	}
 	after, err := w.metadataRecordReader.Get(id)
 	if err != nil {
 		return false, fmt.Errorf("read decision-frontier record %q after refused metadata CAS: %w", id, err)
@@ -153,6 +159,13 @@ func (w *RemoteDecisionFrontierRecordWriter) verifyMetadataTransitionApplied(bef
 		!bytes.Equal(receipt.Payload, request.Payload) || receipt.ToVersion <= 0 || receipt.ToVersion == request.ExpectedVersion {
 		return false, ErrRemoteDecisionFrontierMetadataCASProtocol
 	}
+	stored, found, err := w.readMetadataTransitionReceipt(id, request)
+	if err != nil {
+		return false, fmt.Errorf("read durable decision-frontier metadata receipt: %w", err)
+	}
+	if !found || stored.ToVersion != receipt.ToVersion {
+		return false, ErrRemoteDecisionFrontierMetadataCASProtocol
+	}
 	after, err := w.metadataRecordReader.Get(id)
 	if err != nil {
 		return false, fmt.Errorf("read decision-frontier record %q after metadata CAS: %w", id, err)
@@ -161,7 +174,7 @@ func (w *RemoteDecisionFrontierRecordWriter) verifyMetadataTransitionApplied(bef
 		return false, err
 	}
 	value, present := after.Metadata[key]
-	if after.Revision != receipt.ToVersion || !present || value != next ||
+	if after.Revision != stored.ToVersion || !present || value != next ||
 		!controllerTransitionSourceContentMatches(before, after, key, expected, next) {
 		return false, ErrRemoteDecisionFrontierMetadataCASProtocol
 	}
@@ -169,6 +182,31 @@ func (w *RemoteDecisionFrontierRecordWriter) verifyMetadataTransitionApplied(bef
 		return false, ErrRemoteDecisionFrontierMetadataCASProtocol
 	}
 	return true, nil
+}
+
+func (w *RemoteDecisionFrontierRecordWriter) recoverMetadataTransitionError(before Bead, id, key, expected, next string, request ControllerMetadataTransitionRequest, transitionErr error) (bool, error) {
+	receipt, found, err := w.readMetadataTransitionReceipt(id, request)
+	if err != nil {
+		return false, errors.Join(fmt.Errorf("apply protected decision-frontier metadata transition %q: %w", id, transitionErr),
+			fmt.Errorf("recover durable decision-frontier metadata receipt: %w", err))
+	}
+	if !found {
+		return false, fmt.Errorf("apply protected decision-frontier metadata transition %q: %w", id, transitionErr)
+	}
+	return w.verifyMetadataTransitionApplied(before, id, key, expected, next, request, ControllerMetadataTransitionResult{
+		Applied: true, Replayed: true, Receipt: &receipt,
+	})
+}
+
+func (w *RemoteDecisionFrontierRecordWriter) readMetadataTransitionReceipt(id string, request ControllerMetadataTransitionRequest) (ControllerMetadataTransitionReceipt, bool, error) {
+	receipt, found, err := w.metadataReceiptReader.ControllerMetadataTransitionReceipt(id, request.ReceiptID)
+	if err != nil || !found {
+		return ControllerMetadataTransitionReceipt{}, found, err
+	}
+	if !controllerMetadataTransitionReceiptMatchesRequest(receipt, id, request) {
+		return ControllerMetadataTransitionReceipt{}, true, ErrRemoteDecisionFrontierMetadataCASProtocol
+	}
+	return receipt, true, nil
 }
 
 func (w *RemoteDecisionFrontierRecordWriter) validateMetadataTransitionRecord(record Bead, id string) error {
