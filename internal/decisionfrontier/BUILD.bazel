@@ -2,12 +2,16 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "decisionfrontier",
-    srcs = ["frontier.go"],
+    srcs = [
+        "frontier.go",
+        "session_delivery.go",
+    ],
     importpath = "github.com/gastownhall/gascity/internal/decisionfrontier",
     visibility = ["//:__subpackages__"],
     deps = [
         "//internal/beadmeta",
         "//internal/beads",
+        "//internal/session",
     ],
 )
 
@@ -15,6 +19,7 @@ go_test(
     name = "decisionfrontier_test",
     srcs = [
         "frontier_test.go",
+        "session_delivery_test.go",
         "testenv_import_test.go",
         "transition_test.go",
     ],
@@ -22,6 +27,7 @@ go_test(
     deps = [
         "//internal/beadmeta",
         "//internal/beads",
+        "//internal/session",
         "//internal/testenv",
     ],
 )

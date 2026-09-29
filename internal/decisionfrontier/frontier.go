@@ -1341,26 +1341,32 @@ func promptRequestForMap(mapDoc mapRecord) (PromptRequest, error) {
 	return request, nil
 }
 
-func promptMessageDigest(request PromptRequest) string {
-	body, _ := json.Marshal(struct {
-		CityRef             string                       `json:"city_ref"`
-		StoreRef            string                       `json:"store_ref"`
-		ID                  string                       `json:"id"`
-		WorkID              string                       `json:"work_id"`
-		WorkRevision        string                       `json:"work_revision"`
-		MapID               string                       `json:"map_id"`
-		PresentationVersion int                          `json:"presentation_version"`
-		WorkDigest          string                       `json:"work_digest"`
-		TicketIDs           []string                     `json:"ticket_ids"`
-		Questions           []PromptQuestionPresentation `json:"questions"`
-		SourceLinks         map[string]string            `json:"source_links,omitempty"`
-		SourceIssue         *SourceIssueRef              `json:"source_issue,omitempty"`
-	}{
+type promptMessagePayload struct {
+	CityRef             string                       `json:"city_ref"`
+	StoreRef            string                       `json:"store_ref"`
+	ID                  string                       `json:"id"`
+	WorkID              string                       `json:"work_id"`
+	WorkRevision        string                       `json:"work_revision"`
+	MapID               string                       `json:"map_id"`
+	PresentationVersion int                          `json:"presentation_version"`
+	WorkDigest          string                       `json:"work_digest"`
+	TicketIDs           []string                     `json:"ticket_ids"`
+	Questions           []PromptQuestionPresentation `json:"questions"`
+	SourceLinks         map[string]string            `json:"source_links,omitempty"`
+	SourceIssue         *SourceIssueRef              `json:"source_issue,omitempty"`
+}
+
+func promptMessageJSON(request PromptRequest) ([]byte, error) {
+	return json.Marshal(promptMessagePayload{
 		CityRef: request.CityRef, StoreRef: request.StoreRef, ID: request.ID, WorkID: request.WorkID,
 		WorkRevision: request.WorkRevision, MapID: request.MapID, PresentationVersion: request.PresentationVersion,
 		WorkDigest: request.WorkDigest, TicketIDs: request.TicketIDs, Questions: request.Questions,
 		SourceLinks: request.SourceLinks, SourceIssue: request.SourceIssue,
 	})
+}
+
+func promptMessageDigest(request PromptRequest) string {
+	body, _ := promptMessageJSON(request)
 	return digest(body)
 }
 
