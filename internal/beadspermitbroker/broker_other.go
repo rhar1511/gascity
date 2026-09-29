@@ -18,12 +18,13 @@ type Config struct {
 }
 
 type LaunchConfig struct {
-	AuthorityDirectory  string
-	PrivateKeyDirectory string
-	GCExecutable        string
-	ControllerPath      string
-	ControllerUID       uint32
-	ControllerGID       uint32
+	AuthorityDirectory        string
+	PrivateKeyDirectory       string
+	ControllerEnvironmentFile string
+	GCExecutable              string
+	ControllerPath            string
+	ControllerUID             uint32
+	ControllerGID             uint32
 }
 
 type Broker struct{}

@@ -653,11 +653,15 @@ func rootOwned(info os.FileInfo) bool {
 }
 
 func readRootFile(root *os.Root, name string, limit int64, private bool) ([]byte, error) {
+	return readRootFileWithMode(root, name, limit, private, 0)
+}
+
+func readRootFileWithMode(root *os.Root, name string, limit int64, private bool, requiredMode os.FileMode) ([]byte, error) {
 	if root == nil || name == "" || filepath.Base(name) != name || limit <= 0 {
 		return nil, errors.New("file name is invalid")
 	}
 	info, err := root.Lstat(name)
-	if err != nil || !safeRootFile(info, limit, private) {
+	if err != nil || !safeRootFileWithMode(info, limit, private, requiredMode) {
 		return nil, errors.New("file is not a protected regular file")
 	}
 	file, err := root.Open(name)
@@ -665,14 +669,14 @@ func readRootFile(root *os.Root, name string, limit int64, private bool) ([]byte
 		return nil, err
 	}
 	openedInfo, err := file.Stat()
-	if err != nil || !safeRootFile(openedInfo, limit, private) || !os.SameFile(info, openedInfo) {
+	if err != nil || !safeRootFileWithMode(openedInfo, limit, private, requiredMode) || !os.SameFile(info, openedInfo) {
 		_ = file.Close()
 		return nil, errors.New("file changed while opening")
 	}
 	data, err := io.ReadAll(io.LimitReader(file, limit+1))
 	readInfo, statErr := file.Stat()
 	closeErr := file.Close()
-	if err != nil || int64(len(data)) > limit || statErr != nil || closeErr != nil || !safeRootFile(readInfo, limit, private) ||
+	if err != nil || int64(len(data)) > limit || statErr != nil || closeErr != nil || !safeRootFileWithMode(readInfo, limit, private, requiredMode) ||
 		!os.SameFile(openedInfo, readInfo) || openedInfo.Size() != readInfo.Size() || !openedInfo.ModTime().Equal(readInfo.ModTime()) {
 		zero(data)
 		return nil, errors.New("file changed while reading or exceeded its size limit")
@@ -681,8 +685,15 @@ func readRootFile(root *os.Root, name string, limit int64, private bool) ([]byte
 }
 
 func safeRootFile(info os.FileInfo, limit int64, private bool) bool {
+	return safeRootFileWithMode(info, limit, private, 0)
+}
+
+func safeRootFileWithMode(info os.FileInfo, limit int64, private bool, requiredMode os.FileMode) bool {
 	if info == nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || !rootOwned(info) ||
 		info.Mode().Perm()&0o022 != 0 || info.Size() < 1 || info.Size() > limit {
+		return false
+	}
+	if requiredMode != 0 && (info.Mode().Perm() != requiredMode || info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0) {
 		return false
 	}
 	if private && info.Mode().Perm()&0o077 != 0 {

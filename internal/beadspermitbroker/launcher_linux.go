@@ -13,12 +13,18 @@ import (
 	"os/signal"
 	"os/user"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
+
+	"github.com/gastownhall/gascity/internal/processenv"
 )
 
-const childLaunchMode = "--internal-protected-authority-exec-child"
+const (
+	childLaunchMode                     = "--internal-protected-authority-exec-child"
+	maxControllerEnvironmentBytes int64 = 64 << 10
+)
 
 type launchPayload struct {
 	Executable  string   `json:"executable"`
@@ -29,12 +35,13 @@ type launchPayload struct {
 // LaunchConfig describes the one gc supervisor process this launcher may
 // start. It deliberately has no arbitrary command or argument fields.
 type LaunchConfig struct {
-	AuthorityDirectory  string
-	PrivateKeyDirectory string
-	GCExecutable        string
-	ControllerPath      string
-	ControllerUID       uint32
-	ControllerGID       uint32
+	AuthorityDirectory        string
+	PrivateKeyDirectory       string
+	ControllerEnvironmentFile string
+	GCExecutable              string
+	ControllerPath            string
+	ControllerUID             uint32
+	ControllerGID             uint32
 }
 
 // LaunchSupervisor starts one non-root gc supervisor run process. The helper
@@ -140,6 +147,14 @@ func launchRegisteredChild(broker *Broker, config LaunchConfig, gcPath string, s
 	if _, err := trustedExecutable(helperPath); err != nil {
 		return 1, fmt.Errorf("launcher executable is not protected: %w", err)
 	}
+	controllerExtras, err := readControllerEnvironmentFile(config.ControllerEnvironmentFile)
+	if err != nil {
+		return 1, err
+	}
+	environment, err := controllerEnvironmentWithExtras(config.AuthorityDirectory, config.ControllerUID, config.ControllerPath, controllerExtras)
+	if err != nil {
+		return 1, err
+	}
 	gateRead, gateWrite, err := os.Pipe()
 	if err != nil {
 		return 1, fmt.Errorf("create launch gate: %w", err)
@@ -184,10 +199,6 @@ func launchRegisteredChild(broker *Broker, config LaunchConfig, gcPath string, s
 	}
 	arguments := []string{gcPath, "supervisor", "run"}
 	if err := broker.RegisterLaunch(cmd.Process.Pid, config.ControllerUID, gcPath, arguments); err != nil {
-		return 1, err
-	}
-	environment, err := controllerEnvironment(config.AuthorityDirectory, config.ControllerUID, config.ControllerPath)
-	if err != nil {
 		return 1, err
 	}
 	payload, err := json.Marshal(launchPayload{
@@ -240,6 +251,10 @@ func childExitCode(err error) int {
 }
 
 func controllerEnvironment(authorityDirectory string, uid uint32, path string) ([]string, error) {
+	return controllerEnvironmentWithExtras(authorityDirectory, uid, path, nil)
+}
+
+func controllerEnvironmentWithExtras(authorityDirectory string, uid uint32, path string, extras map[string]string) ([]string, error) {
 	account, err := user.LookupId(strconv.FormatUint(uint64(uid), 10))
 	if err != nil {
 		return nil, fmt.Errorf("look up controller user: %w", err)
@@ -247,16 +262,31 @@ func controllerEnvironment(authorityDirectory string, uid uint32, path string) (
 	if path == "" {
 		path = "/usr/local/bin:/usr/bin:/bin"
 	}
-	if !validPathList(path) || !filepath.IsAbs(authorityDirectory) || filepath.Clean(authorityDirectory) != authorityDirectory {
+	if !validPathList(path) || !cleanAbsolutePath(authorityDirectory) {
 		return nil, errors.New("controller environment paths are invalid")
 	}
-	return []string{
+	environment := []string{
 		"HOME=" + account.HomeDir,
 		"LOGNAME=" + account.Username,
 		"PATH=" + path,
 		"USER=" + account.Username,
 		authorityDirectoryEnv + "=" + authorityDirectory,
-	}, nil
+	}
+	keys := make([]string, 0, len(extras))
+	for key, value := range extras {
+		if err := validateControllerEnvironmentExtra(key, value); err != nil {
+			return nil, err
+		}
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		environment = append(environment, key+"="+extras[key])
+	}
+	if !validControllerEnvironment(environment) {
+		return nil, errors.New("controller environment failed validation")
+	}
+	return environment, nil
 }
 
 func validLaunchPayload(payload launchPayload) bool {
@@ -267,31 +297,163 @@ func validLaunchPayload(payload launchPayload) bool {
 }
 
 func validControllerEnvironment(environment []string) bool {
-	allowed := map[string]bool{
-		"HOME": false, "LOGNAME": false, "PATH": false, "USER": false, authorityDirectoryEnv: false,
+	const fixedCount = 5
+	if len(environment) < fixedCount || len(environment) > 256 {
+		return false
 	}
+	fixedKeys := [...]string{"HOME", "LOGNAME", "PATH", "USER", authorityDirectoryEnv}
 	values := make(map[string]string, len(environment))
-	for _, item := range environment {
-		key, value, ok := strings.Cut(item, "=")
-		if !ok || !allowedKey(allowed, key) || allowed[key] || value == "" || strings.ContainsRune(value, '\x00') {
+	for index, key := range fixedKeys {
+		actualKey, value, ok := strings.Cut(environment[index], "=")
+		if !ok || actualKey != key || value == "" || strings.ContainsRune(value, '\x00') {
 			return false
 		}
-		allowed[key] = true
 		values[key] = value
 	}
-	for _, found := range allowed {
-		if !found {
+	previousExtra := ""
+	for _, item := range environment[fixedCount:] {
+		key, value, ok := strings.Cut(item, "=")
+		if !ok || validateControllerEnvironmentExtra(key, value) != nil || (previousExtra != "" && key <= previousExtra) {
+			return false
+		}
+		previousExtra = key
+		values[key] = value
+	}
+	return cleanAbsolutePath(values["HOME"]) && values["USER"] == values["LOGNAME"] && validPathList(values["PATH"]) &&
+		cleanAbsolutePath(values[authorityDirectoryEnv])
+}
+
+func parseControllerEnvironment(data []byte) (map[string]string, error) {
+	if len(data) == 0 || int64(len(data)) > maxControllerEnvironmentBytes {
+		return nil, errors.New("controller environment file is empty or exceeds its size limit")
+	}
+	var extras map[string]string
+	if err := decodeStrictJSON(data, &extras); err != nil || extras == nil {
+		return nil, errors.New("controller environment file must be a strict JSON object of string values")
+	}
+	if len(extras) > 251 {
+		return nil, errors.New("controller environment file has too many entries")
+	}
+	for key, value := range extras {
+		if err := validateControllerEnvironmentExtra(key, value); err != nil {
+			return nil, err
+		}
+	}
+	return extras, nil
+}
+
+func readControllerEnvironmentFile(path string) (map[string]string, error) {
+	if path == "" {
+		return nil, nil
+	}
+	if !cleanAbsolutePath(path) || filepath.Base(path) == "." || filepath.Base(path) == string(filepath.Separator) {
+		return nil, errors.New("controller environment file path must be clean and absolute")
+	}
+	root, err := openTrustedDirectory(filepath.Dir(path))
+	if err != nil {
+		return nil, fmt.Errorf("open protected controller environment directory: %w", err)
+	}
+	defer root.Close() //nolint:errcheck
+	data, err := readRootFileWithMode(root, filepath.Base(path), maxControllerEnvironmentBytes, true, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("read protected controller environment file: %w", err)
+	}
+	defer zero(data)
+	extra, err := parseControllerEnvironment(data)
+	if err != nil {
+		return nil, err
+	}
+	return extra, nil
+}
+
+var allowedControllerEnvironmentExtras = map[string]struct{}{
+	"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":      {},
+	"CLAUDE_CODE_EFFORT_LEVEL":                      {},
+	"CLAUDE_CODE_OAUTH_TOKEN":                       {},
+	"CLAUDE_CODE_SUBAGENT_MODEL":                    {},
+	"CLAUDE_CONFIG_DIR":                             {},
+	"GC_COMPATIBILITY_AUTHORITY_DIR":                {},
+	"GC_COMPATIBILITY_AUTHORITY_MAX_REVOCATION_AGE": {},
+	"GC_DOLT_HOST":                                  {},
+	"GC_DOLT_LOGLEVEL":                              {},
+	"GC_DOLT_PASSWORD":                              {},
+	"GC_DOLT_PORT":                                  {},
+	"GC_DOLT_USER":                                  {},
+	"GC_HOME":                                       {},
+	"GC_PR_HUMAN_TRUST":                             {},
+	"LANG":                                          {},
+	"LC_ALL":                                        {},
+	"LC_CTYPE":                                      {},
+	"SHELL":                                         {},
+	"T3CODE_HOME":                                   {},
+	"T3_HOME":                                       {},
+	"T3_WS_URL":                                     {},
+	"TZ":                                            {},
+	"XDG_CONFIG_HOME":                               {},
+	"XDG_RUNTIME_DIR":                               {},
+	"XDG_STATE_HOME":                                {},
+}
+
+var reservedControllerEnvironmentKeys = map[string]struct{}{
+	"HOME": {}, "LOGNAME": {}, "PATH": {}, "USER": {}, authorityDirectoryEnv: {},
+}
+
+func validateControllerEnvironmentExtra(key, value string) error {
+	if !validEnvironmentIdentifier(key) {
+		return errors.New("controller environment contains an invalid variable name")
+	}
+	if _, reserved := reservedControllerEnvironmentKeys[key]; reserved {
+		return fmt.Errorf("controller environment cannot override reserved variable %q", key)
+	}
+	if dangerousControllerEnvironmentKey(key) {
+		return fmt.Errorf("controller environment variable %q is forbidden", key)
+	}
+	if _, allowed := allowedControllerEnvironmentExtras[key]; !allowed && !processenv.IsProviderCredentialEnv(key) {
+		return fmt.Errorf("controller environment variable %q is not allowed", key)
+	}
+	if value == "" || strings.ContainsRune(value, '\x00') {
+		return fmt.Errorf("controller environment variable %q has an invalid value", key)
+	}
+	if isControllerEnvironmentPath(key) && !cleanAbsolutePath(value) {
+		return fmt.Errorf("controller environment path %q must be clean and absolute", key)
+	}
+	return nil
+}
+
+func validEnvironmentIdentifier(key string) bool {
+	if key == "" || !isEnvironmentIdentifierStart(key[0]) {
+		return false
+	}
+	for index := 1; index < len(key); index++ {
+		character := key[index]
+		if !isEnvironmentIdentifierStart(character) && (character < '0' || character > '9') {
 			return false
 		}
 	}
-	return filepath.IsAbs(values["HOME"]) && filepath.Clean(values["HOME"]) == values["HOME"] &&
-		values["USER"] == values["LOGNAME"] && validPathList(values["PATH"]) &&
-		filepath.IsAbs(values[authorityDirectoryEnv]) && filepath.Clean(values[authorityDirectoryEnv]) == values[authorityDirectoryEnv]
+	return true
 }
 
-func allowedKey(allowed map[string]bool, key string) bool {
-	_, ok := allowed[key]
-	return ok
+func isEnvironmentIdentifierStart(character byte) bool {
+	return character == '_' || character >= 'A' && character <= 'Z' || character >= 'a' && character <= 'z'
+}
+
+func dangerousControllerEnvironmentKey(key string) bool {
+	return strings.HasPrefix(key, "LD_") || strings.HasPrefix(key, "DYLD_") || key == "GODEBUG" ||
+		key == "GOTRACEBACK" || key == "GOENV" || key == "GORACE"
+}
+
+func isControllerEnvironmentPath(key string) bool {
+	switch key {
+	case "CLAUDE_CONFIG_DIR", "GC_COMPATIBILITY_AUTHORITY_DIR", "GC_HOME", "SHELL", "T3CODE_HOME", "T3_HOME",
+		"XDG_CONFIG_HOME", "XDG_RUNTIME_DIR", "XDG_STATE_HOME":
+		return true
+	default:
+		return false
+	}
+}
+
+func cleanAbsolutePath(path string) bool {
+	return path != "" && filepath.IsAbs(path) && filepath.Clean(path) == path && !strings.ContainsRune(path, '\x00')
 }
 
 func validPathList(path string) bool {

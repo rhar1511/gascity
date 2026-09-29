@@ -10,6 +10,8 @@ import (
 	"encoding/json"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -111,8 +113,12 @@ func TestLaunchPayloadIsExactlySupervisorRun(t *testing.T) {
 	}
 	valid.Arguments[2] = "run"
 	valid.Environment = append(valid.Environment, "AWS_SECRET_ACCESS_KEY=secret")
+	if !validLaunchPayload(valid) {
+		t.Fatal("curated provider credential was rejected by launch helper")
+	}
+	valid.Environment = append(valid.Environment, "LD_PRELOAD=/tmp/inject.so")
 	if validLaunchPayload(valid) {
-		t.Fatal("unlisted environment variable was accepted by launch helper")
+		t.Fatal("loader injection variable was accepted by launch helper")
 	}
 	valid.Environment = valid.Environment[:len(valid.Environment)-1]
 	valid.Environment = append(valid.Environment, "PATH=/bin")
@@ -140,6 +146,130 @@ func TestControllerEnvironmentExcludesLauncherSecrets(t *testing.T) {
 		if !found {
 			t.Errorf("controller environment is missing %q", key)
 		}
+	}
+}
+
+func TestControllerEnvironmentFileAllowsExplicitSupervisorInputs(t *testing.T) {
+	data := []byte(`{
+		"CLAUDE_CONFIG_DIR":"/srv/controller/claude",
+		"CLAUDE_CODE_OAUTH_TOKEN":"claude-oauth-secret",
+		"CLAUDE_CODE_SUBAGENT_MODEL":"sonnet",
+		"CLAUDE_CODE_EFFORT_LEVEL":"high",
+		"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":"1",
+		"GC_HOME":"/srv/controller/gc-home",
+		"XDG_RUNTIME_DIR":"/run/user/1001",
+		"GC_COMPATIBILITY_AUTHORITY_DIR":"/etc/gc/compatibility-authority",
+		"GC_COMPATIBILITY_AUTHORITY_MAX_REVOCATION_AGE":"15m",
+		"GC_PR_HUMAN_TRUST":"trusted-reviewer",
+		"ANTHROPIC_API_KEY":"provider-secret",
+		"GC_DOLT_HOST":"dolt.example.internal",
+		"GC_DOLT_LOGLEVEL":"warn",
+		"T3_WS_URL":"ws://127.0.0.1:4100/ws",
+		"TZ":"America/New_York",
+		"LANG":"C.UTF-8"
+	}`)
+	extras, err := parseControllerEnvironment(data)
+	if err != nil {
+		t.Fatalf("parse explicit controller environment: %v", err)
+	}
+	environment, err := controllerEnvironmentWithExtras("/etc/gc/protected-authority", uint32(os.Getuid()), "/usr/local/bin:/usr/bin:/bin", extras)
+	if err != nil {
+		t.Fatalf("build explicit controller environment: %v", err)
+	}
+	if !validControllerEnvironment(environment) {
+		t.Fatalf("explicit controller environment failed child validation: %#v", environment)
+	}
+	if !validLaunchPayload(launchPayload{
+		Executable:  "/usr/bin/gc",
+		Arguments:   []string{"/usr/bin/gc", "supervisor", "run"},
+		Environment: environment,
+	}) {
+		t.Fatal("child rejected the final explicit supervisor launch payload")
+	}
+	if len(environment) < 5 || !sort.StringsAreSorted(environment[5:]) {
+		t.Fatalf("extra controller environment entries are not sorted: %#v", environment[5:])
+	}
+	joined := strings.Join(environment, "\n")
+	for _, want := range []string{
+		"CLAUDE_CONFIG_DIR=/srv/controller/claude",
+		"CLAUDE_CODE_OAUTH_TOKEN=claude-oauth-secret",
+		"CLAUDE_CODE_SUBAGENT_MODEL=sonnet",
+		"CLAUDE_CODE_EFFORT_LEVEL=high",
+		"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
+		"GC_HOME=/srv/controller/gc-home",
+		"XDG_RUNTIME_DIR=/run/user/1001",
+		"GC_COMPATIBILITY_AUTHORITY_DIR=/etc/gc/compatibility-authority",
+		"GC_COMPATIBILITY_AUTHORITY_MAX_REVOCATION_AGE=15m",
+		"GC_PR_HUMAN_TRUST=trusted-reviewer",
+		"ANTHROPIC_API_KEY=provider-secret",
+		"GC_DOLT_HOST=dolt.example.internal",
+		"GC_DOLT_LOGLEVEL=warn",
+		"T3_WS_URL=ws://127.0.0.1:4100/ws",
+		"TZ=America/New_York",
+		"LANG=C.UTF-8",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("explicit controller environment is missing %q: %q", want, joined)
+		}
+	}
+}
+
+func TestControllerEnvironmentFileRejectsFixedKeyOverrides(t *testing.T) {
+	for _, key := range []string{"HOME", "USER", "LOGNAME", "PATH", authorityDirectoryEnv} {
+		t.Run(key, func(t *testing.T) {
+			data := []byte(`{"` + key + `":"/tmp/override"}`)
+			if _, err := parseControllerEnvironment(data); err == nil {
+				t.Fatalf("fixed controller key %q was accepted", key)
+			}
+		})
+	}
+}
+
+func TestControllerEnvironmentFileRejectsMalformedOrUnsafeEntries(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		data string
+	}{
+		{name: "malformed JSON", data: `{"LANG":`},
+		{name: "top-level null", data: `null`},
+		{name: "top-level array", data: `[]`},
+		{name: "duplicate key", data: `{"LANG":"C","LANG":"C.UTF-8"}`},
+		{name: "invalid identifier", data: `{"bad-name":"value"}`},
+		{name: "non-string value", data: `{"LANG":7}`},
+		{name: "empty value", data: `{"LANG":""}`},
+		{name: "NUL value", data: `{"LANG":"x\u0000y"}`},
+		{name: "unrecognized name", data: `{"NOT_A_CONTROLLER_INPUT":"value"}`},
+		{name: "LD_PRELOAD", data: `{"LD_PRELOAD":"/tmp/inject.so"}`},
+		{name: "LD_LIBRARY_PATH", data: `{"LD_LIBRARY_PATH":"/tmp/lib"}`},
+		{name: "DYLD injection", data: `{"DYLD_INSERT_LIBRARIES":"/tmp/inject.dylib"}`},
+		{name: "GODEBUG", data: `{"GODEBUG":"cgocheck=0"}`},
+		{name: "GOTRACEBACK", data: `{"GOTRACEBACK":"crash"}`},
+		{name: "GOENV", data: `{"GOENV":"/tmp/go.env"}`},
+		{name: "GORACE", data: `{"GORACE":"halt_on_error=1"}`},
+		{name: "relative GC_HOME", data: `{"GC_HOME":"relative/home"}`},
+		{name: "relative CLAUDE_CONFIG_DIR", data: `{"CLAUDE_CONFIG_DIR":"relative/claude"}`},
+		{name: "unclean XDG_RUNTIME_DIR", data: `{"XDG_RUNTIME_DIR":"/run/../tmp"}`},
+		{name: "protected key material", data: `{"GC_BEADS_PROTECTED_KEY_TOKEN":"secret"}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := parseControllerEnvironment([]byte(test.data)); err == nil {
+				t.Fatalf("unsafe controller environment %s was accepted", test.name)
+			}
+		})
+	}
+}
+
+func TestReadControllerEnvironmentFileRejectsUnsafeFile(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "environment.json")
+	if err := os.WriteFile(path, []byte(`{"LANG":"C"}`), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readControllerEnvironmentFile(path); err == nil {
+		t.Fatal("environment file with unsafe ancestry or permissions was accepted")
+	}
+	if _, err := readControllerEnvironmentFile(directory + string(filepath.Separator) + "../environment.json"); err == nil {
+		t.Fatal("non-clean environment file path was accepted")
 	}
 }
 

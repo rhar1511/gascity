@@ -9,7 +9,7 @@ go_library(
     ],
     importpath = "github.com/gastownhall/gascity/internal/beadspermitbroker",
     visibility = ["//:__subpackages__"],
-    deps = select({
+    deps = ["//internal/processenv"] + select({
         "@rules_go//go/platform:linux": [
             "@org_golang_x_sys//unix",
         ],
