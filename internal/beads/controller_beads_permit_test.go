@@ -75,6 +75,81 @@ func TestControllerBeadsProtectedCreateOnlyDigestMatchesPinnedGolden(t *testing.
 	}
 }
 
+func TestControllerBeadsProtectedLinkDigestMatchesPinnedGolden(t *testing.T) {
+	request := controllerBeadsProtectedLinkRequest()
+	request.ReceiptID = "excluded-link-receipt"
+
+	digest, err := controllerBeadsProtectedLinkDigest(request)
+	if err != nil {
+		t.Fatalf("controllerBeadsProtectedLinkDigest: %v", err)
+	}
+	const want = "a1613932a1e5cf482be9f1d79e0cbd274cc21923987e016811324a406678306d"
+	if digest != want {
+		t.Fatalf("controller digest = %q, want pinned Beads link-only digest %q", digest, want)
+	}
+
+	request.ReceiptID = "a-different-receipt"
+	receiptDigest, err := controllerBeadsProtectedLinkDigest(request)
+	if err != nil {
+		t.Fatalf("controllerBeadsProtectedLinkDigest with changed receipt: %v", err)
+	}
+	if receiptDigest != digest {
+		t.Fatalf("receipt ID changed the protected link digest: %q != %q", receiptDigest, digest)
+	}
+	reversed := request
+	reversed.Link.SourceID, reversed.Link.TargetID = reversed.Link.TargetID, reversed.Link.SourceID
+	reversedDigest, err := controllerBeadsProtectedLinkDigest(reversed)
+	if err != nil {
+		t.Fatalf("controllerBeadsProtectedLinkDigest with reversed edge: %v", err)
+	}
+	if reversedDigest == digest {
+		t.Fatalf("reversing the dependency edge did not change the digest: %q", digest)
+	}
+}
+
+func TestControllerBeadsPermitIssuerBindsOnlyLinkEndpoints(t *testing.T) {
+	privateKey := ed25519.NewKeyFromSeed([]byte("0123456789abcdef0123456789abcdef"))
+	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	issuer, err := NewControllerBeadsPermitIssuer(ControllerBeadsPermitIssuerConfig{
+		Audience: "audience-a", ProjectID: "project-a", Database: "beads_fixture",
+		KeyID: "key-a", Issuer: "issuer-a", Lifetime: time.Minute,
+		Signer: privateKey, Now: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("NewControllerBeadsPermitIssuer: %v", err)
+	}
+	request := controllerBeadsProtectedLinkRequest()
+	token, err := issuer.IssueProtectedLink(request, "replay-link-identifier-0001")
+	if err != nil {
+		t.Fatalf("IssueProtectedLink: %v", err)
+	}
+	parts := strings.Split(token, ".")
+	if len(parts) != 2 {
+		t.Fatalf("permit token has %d segments, want 2", len(parts))
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil || base64.RawURLEncoding.EncodeToString(payload) != parts[0] {
+		t.Fatalf("permit payload is not canonical raw URL base64: %v", err)
+	}
+	var claims controllerBeadsPermitClaimsV1
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		t.Fatalf("decode permit claims: %v", err)
+	}
+	signature, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil || base64.RawURLEncoding.EncodeToString(signature) != parts[1] ||
+		!ed25519.Verify(privateKey.Public().(ed25519.PublicKey), append([]byte(controllerBeadsPermitSigningDomain), payload...), signature) {
+		t.Fatal("link permit signature did not verify against the pinned signing domain")
+	}
+	digest, err := controllerBeadsProtectedLinkDigest(request)
+	if err != nil {
+		t.Fatalf("controllerBeadsProtectedLinkDigest: %v", err)
+	}
+	wantResources := []string{"bd-question-a", "bd-question-b"}
+	if claims.RequestDigest != digest || !reflect.DeepEqual(claims.ResourceIDs, wantResources) {
+		t.Fatalf("link-only claims digest/resources = (%q, %v), want (%q, %v)", claims.RequestDigest, claims.ResourceIDs, digest, wantResources)
+	}
+}
+
 func controllerBeadsFrontierDigestRequest(withLinks bool) ControllerProtectedCreateAndLinkRequest {
 	request := ControllerProtectedCreateAndLinkRequest{
 		Actor: "controller-a",
@@ -96,6 +171,15 @@ func controllerBeadsFrontierDigestRequest(withLinks bool) ControllerProtectedCre
 		}
 	}
 	return request
+}
+
+func controllerBeadsProtectedLinkRequest() ControllerProtectedLinkRequest {
+	return ControllerProtectedLinkRequest{
+		Actor: "controller-a",
+		Link: ControllerDependencyLink{
+			SourceID: "bd-question-b", TargetID: "bd-question-a", Type: "blocks",
+		},
+	}
 }
 
 func TestControllerBeadsPermitIssuerEmitsPinnedV1Claims(t *testing.T) {
@@ -235,6 +319,19 @@ func TestControllerBeadsPermitIssuerRejectsInvalidAuthorityAndInput(t *testing.T
 	withPermit.ProtectedPermit = "already-issued"
 	if _, err := issuer.IssueProtectedCreateAndLink(withPermit, "replay-identifier-0001"); err == nil {
 		t.Fatal("issuer replaced an existing permit")
+	}
+	linkRequest := controllerBeadsProtectedLinkRequest()
+	if _, err := issuer.IssueProtectedLink(linkRequest, "short"); err == nil {
+		t.Fatal("issuer accepted an invalid link replay ID")
+	}
+	linkRequest.ProtectedPermit = "already-issued"
+	if _, err := issuer.IssueProtectedLink(linkRequest, "replay-link-identifier-0001"); err == nil {
+		t.Fatal("issuer replaced an existing link permit")
+	}
+	linkRequest = controllerBeadsProtectedLinkRequest()
+	linkRequest.Link.TargetID = linkRequest.Link.SourceID
+	if _, err := issuer.IssueProtectedLink(linkRequest, "replay-link-identifier-0001"); err == nil {
+		t.Fatal("issuer accepted a self dependency link")
 	}
 }
 

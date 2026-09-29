@@ -91,7 +91,7 @@ func NewControllerBeadsPermitIssuer(config ControllerBeadsPermitIssuerConfig) (*
 // replayID is separate from the batch receipt ID and must be unique within the
 // permit audience.
 func (i *ControllerBeadsPermitIssuer) IssueProtectedCreateAndLink(request ControllerProtectedCreateAndLinkRequest, replayID string) (string, error) {
-	if i == nil || i.signer == nil || len(i.publicKey) != ed25519.PublicKeySize || request.ProtectedPermit != "" || !validControllerBeadsPermitReplayID(replayID) {
+	if i == nil || request.ProtectedPermit != "" || !validControllerBeadsPermitReplayID(replayID) {
 		return "", ErrControllerBeadsPermitRequest
 	}
 	digest, err := controllerBeadsProtectedBatchDigest(request)
@@ -103,6 +103,33 @@ func (i *ControllerBeadsPermitIssuer) IssueProtectedCreateAndLink(request Contro
 		return "", fmt.Errorf("%w: invalid resource set", ErrControllerBeadsPermitRequest)
 	}
 
+	return i.signProtectedBatch(digest, resources, replayID)
+}
+
+// IssueProtectedLink signs one protected exact-ID dependency-link request.
+// Pass the returned token unchanged as request.ProtectedPermit. replayID is
+// separate from the batch receipt ID and must be unique within the permit
+// audience.
+func (i *ControllerBeadsPermitIssuer) IssueProtectedLink(request ControllerProtectedLinkRequest, replayID string) (string, error) {
+	if i == nil || request.ProtectedPermit != "" || !validControllerBeadsPermitReplayID(replayID) {
+		return "", ErrControllerBeadsPermitRequest
+	}
+	digest, err := controllerBeadsProtectedLinkDigest(request)
+	if err != nil {
+		return "", fmt.Errorf("%w: unsupported protected link shape", ErrControllerBeadsPermitRequest)
+	}
+	resources, err := controllerBeadsProtectedLinkResources(request)
+	if err != nil {
+		return "", fmt.Errorf("%w: invalid resource set", ErrControllerBeadsPermitRequest)
+	}
+
+	return i.signProtectedBatch(digest, resources, replayID)
+}
+
+func (i *ControllerBeadsPermitIssuer) signProtectedBatch(digest string, resources []string, replayID string) (string, error) {
+	if i == nil || i.signer == nil || len(i.publicKey) != ed25519.PublicKeySize {
+		return "", ErrControllerBeadsPermitRequest
+	}
 	issuedAt := i.now().UTC()
 	expiresAt := issuedAt.Add(i.lifetime)
 	claims := controllerBeadsPermitClaimsV1{
@@ -188,13 +215,39 @@ func controllerBeadsProtectedBatchDigest(request ControllerProtectedCreateAndLin
 			},
 		})
 	}
+	return controllerBeadsProtectedApplyDigest(request.Actor, items)
+}
+
+// controllerBeadsProtectedLinkDigest maps a single exact-ID dep_add operation
+// to the JSON shape hashed by Beads issueops.ApplyBatchRequestDigest.
+func controllerBeadsProtectedLinkDigest(request ControllerProtectedLinkRequest) (string, error) {
+	validated := request
+	if validated.ProtectedPermit == "" {
+		// The issuer prepares the permit that the narrow planner requires.
+		validated.ProtectedPermit = "permit-pending-issuance"
+	}
+	if _, err := planControllerProtectedLink(validated); err != nil {
+		return "", err
+	}
+	items := []controllerBeadsDigestApplyItem{{
+		Kind: "dep_add",
+		DepAdd: &controllerBeadsDigestDepAddItem{
+			Source: controllerBeadsDigestRef{ID: request.Link.SourceID},
+			Target: controllerBeadsDigestRef{ID: request.Link.TargetID},
+			Type:   request.Link.Type,
+		},
+	}}
+	return controllerBeadsProtectedApplyDigest(request.Actor, items)
+}
+
+func controllerBeadsProtectedApplyDigest(actor string, items []controllerBeadsDigestApplyItem) (string, error) {
 	createSourceRepos := make([]string, len(items))
 	encoded, err := json.Marshal(struct {
 		Request           controllerBeadsDigestApplyBatchRequest
 		CreateSourceRepos []string
 	}{
 		Request: controllerBeadsDigestApplyBatchRequest{
-			Actor: request.Actor, ProtectedPermit: "", Items: items,
+			Actor: actor, ProtectedPermit: "", Items: items,
 		},
 		CreateSourceRepos: createSourceRepos,
 	})
@@ -206,11 +259,22 @@ func controllerBeadsProtectedBatchDigest(request ControllerProtectedCreateAndLin
 }
 
 func controllerBeadsProtectedBatchResources(request ControllerProtectedCreateAndLinkRequest) ([]string, error) {
-	set := make(map[string]struct{}, 1+len(request.Links)*2)
-	set[request.Record.ID] = struct{}{}
+	resourceIDs := make([]string, 1, 1+len(request.Links)*2)
+	resourceIDs[0] = request.Record.ID
 	for _, link := range request.Links {
-		set[link.SourceID] = struct{}{}
-		set[link.TargetID] = struct{}{}
+		resourceIDs = append(resourceIDs, link.SourceID, link.TargetID)
+	}
+	return controllerBeadsProtectedResourceIDs(resourceIDs...)
+}
+
+func controllerBeadsProtectedLinkResources(request ControllerProtectedLinkRequest) ([]string, error) {
+	return controllerBeadsProtectedResourceIDs(request.Link.SourceID, request.Link.TargetID)
+}
+
+func controllerBeadsProtectedResourceIDs(resourceIDs ...string) ([]string, error) {
+	set := make(map[string]struct{}, len(resourceIDs))
+	for _, resourceID := range resourceIDs {
+		set[resourceID] = struct{}{}
 	}
 	if len(set) == 0 || len(set) > 256 {
 		return nil, ErrControllerBeadsPermitRequest
@@ -323,8 +387,8 @@ func validControllerBeadsPermitSHA256(value string) bool {
 
 // These private shapes mirror the exported Beads values' encoding/json output
 // at the pinned revision. Keep the Issue subset's declaration order and zero
-// value emission fixed with the create-only and create-with-links pinned digest
-// tests.
+// value emission fixed with the create-only, create-with-links, and link-only
+// pinned digest tests.
 type controllerBeadsDigestApplyBatchRequest struct {
 	Actor                 string
 	ProtectedPermit       string

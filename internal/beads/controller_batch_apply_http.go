@@ -69,7 +69,7 @@ type ControllerProtectedRecord struct {
 }
 
 // ControllerDependencyLink is one exact-ID dependency edge in a protected
-// create batch. The edge list preserves caller order.
+// batchApply request. Lists preserve caller order.
 type ControllerDependencyLink struct {
 	SourceID string
 	TargetID string
@@ -89,9 +89,24 @@ type ControllerProtectedCreateAndLinkRequest struct {
 	ProtectedPermit string
 }
 
+// ControllerProtectedLinkRequest adds one exact-ID dependency edge between
+// existing records. A protected permit is required for this link-only batch.
+type ControllerProtectedLinkRequest struct {
+	Actor           string
+	Link            ControllerDependencyLink
+	ReceiptID       string
+	ProtectedPermit string
+}
+
 // ControllerProtectedCreateAndLinkResult reports whether Beads returned the
 // original durable receipt result for an exact retry.
 type ControllerProtectedCreateAndLinkResult struct {
+	Replayed bool
+}
+
+// ControllerProtectedLinkResult reports whether Beads returned the original
+// durable receipt result for an exact retry.
+type ControllerProtectedLinkResult struct {
 	Replayed bool
 }
 
@@ -99,6 +114,18 @@ type ControllerProtectedCreateAndLinkResult struct {
 // exposed by this HTTP contract client.
 type ControllerProtectedCreateAndLinkWriter interface {
 	ApplyProtectedCreateAndLink(context.Context, ControllerProtectedCreateAndLinkRequest) (ControllerProtectedCreateAndLinkResult, error)
+}
+
+// ControllerProtectedLinkWriter exposes a protected exact dependency link.
+type ControllerProtectedLinkWriter interface {
+	ApplyProtectedLink(context.Context, ControllerProtectedLinkRequest) (ControllerProtectedLinkResult, error)
+}
+
+// ControllerProtectedBatchApplyWriter exposes the narrow protected batchApply
+// operations supported by this contract client.
+type ControllerProtectedBatchApplyWriter interface {
+	ControllerProtectedCreateAndLinkWriter
+	ControllerProtectedLinkWriter
 }
 
 // ControllerBatchApplyProblem preserves only Beads' stable HTTP status and
@@ -170,7 +197,7 @@ type controllerBatchApplyWireRef struct {
 // reads its bearer token from the same protected token-file contract used by the
 // existing controller-owned Beads transports. It does not reuse or install the
 // private-evidence transport.
-func NewControllerBatchApplyHTTPClient(config ControllerBatchApplyHTTPConfig) (ControllerProtectedCreateAndLinkWriter, error) {
+func NewControllerBatchApplyHTTPClient(config ControllerBatchApplyHTTPConfig) (ControllerProtectedBatchApplyWriter, error) {
 	return newControllerBatchApplyHTTPClient(config)
 }
 
@@ -238,26 +265,59 @@ func (c *controllerBatchApplyHTTPClient) ApplyProtectedCreateAndLink(ctx context
 	if err != nil {
 		return ControllerProtectedCreateAndLinkResult{}, err
 	}
+	var result ControllerProtectedCreateAndLinkResult
+	err = c.apply(ctx, wire, request.ReceiptID, request.ProtectedPermit != "", func(response []byte) error {
+		var decodeErr error
+		result, decodeErr = decodeControllerBatchApplyResponse(response, request)
+		return decodeErr
+	})
+	return result, err
+}
+
+// ApplyProtectedLink submits one protected exact-ID dependency edge between
+// records that already exist. A durable receipt makes one identical recovery
+// POST safe after an ambiguous result.
+func (c *controllerBatchApplyHTTPClient) ApplyProtectedLink(ctx context.Context, request ControllerProtectedLinkRequest) (ControllerProtectedLinkResult, error) {
+	if c == nil || c.client == nil || ctx == nil {
+		return ControllerProtectedLinkResult{}, ErrControllerBatchApplyUnavailable
+	}
+	wire, err := planControllerProtectedLink(request)
+	if err != nil {
+		return ControllerProtectedLinkResult{}, err
+	}
+	var result ControllerProtectedLinkResult
+	err = c.apply(ctx, wire, request.ReceiptID, true, func(response []byte) error {
+		var decodeErr error
+		result, decodeErr = decodeControllerBatchApplyLinkResponse(response, request)
+		return decodeErr
+	})
+	return result, err
+}
+
+func (c *controllerBatchApplyHTTPClient) apply(ctx context.Context, wire controllerBatchApplyWireRequest, receiptID string, requireProtected bool, decode func([]byte) error) error {
+	if c == nil || c.client == nil || ctx == nil {
+		return ErrControllerBatchApplyUnavailable
+	}
 	body, err := json.Marshal(wire)
 	if err != nil || len(body) > controllerBatchApplyMaxRequest {
-		return ControllerProtectedCreateAndLinkResult{}, controllerBatchApplyProtocolError("request is too large or could not be encoded")
+		return controllerBatchApplyProtocolError("request is too large or could not be encoded")
 	}
 
 	for attempt := 0; attempt < 2; attempt++ {
-		if err := c.verifyContext(ctx, request); err != nil {
+		if err := c.verifyContext(ctx, receiptID != "", requireProtected); err != nil {
 			if attempt == 0 {
-				return ControllerProtectedCreateAndLinkResult{}, err
+				return err
 			}
-			return ControllerProtectedCreateAndLinkResult{}, controllerBatchApplyUnknownOutcome(err)
+			return controllerBatchApplyUnknownOutcome(err)
 		}
 		response, status, requestErr := c.request(ctx, http.MethodPost, controllerBatchApplyPath, body)
 		if attempt == 1 {
 			if requestErr == nil && status == http.StatusOK {
-				result, decodeErr := decodeControllerBatchApplyResponse(response, request)
-				if decodeErr == nil {
-					return result, nil
+				if decodeErr := decode(response); decodeErr == nil {
+					return nil
+				} else {
+					return controllerBatchApplyUnknownOutcome(decodeErr)
 				}
-				return ControllerProtectedCreateAndLinkResult{}, controllerBatchApplyUnknownOutcome(decodeErr)
 			}
 			var recoveryErr error
 			switch {
@@ -272,7 +332,7 @@ func (c *controllerBatchApplyHTTPClient) ApplyProtectedCreateAndLink(ctx context
 			default:
 				recoveryErr = controllerBatchApplyProtocolError("recovery response did not establish the batchApply result")
 			}
-			return ControllerProtectedCreateAndLinkResult{}, controllerBatchApplyUnknownOutcome(recoveryErr)
+			return controllerBatchApplyUnknownOutcome(recoveryErr)
 		}
 		var ambiguousErr error
 		if status >= 300 && status < 400 {
@@ -280,24 +340,24 @@ func (c *controllerBatchApplyHTTPClient) ApplyProtectedCreateAndLink(ctx context
 		}
 		if status >= 400 && status < 500 {
 			if requestErr != nil {
-				return ControllerProtectedCreateAndLinkResult{}, controllerBatchApplyProtocolError("Beads error response could not be read")
+				return controllerBatchApplyProtocolError("Beads error response could not be read")
 			}
-			return ControllerProtectedCreateAndLinkResult{}, controllerBatchApplyStatusError(status, response)
+			return controllerBatchApplyStatusError(status, response)
 		}
 		if ambiguousErr == nil && requestErr == nil && status == http.StatusOK {
-			result, decodeErr := decodeControllerBatchApplyResponse(response, request)
-			if decodeErr == nil {
-				return result, nil
+			if decodeErr := decode(response); decodeErr == nil {
+				return nil
+			} else {
+				ambiguousErr = decodeErr
 			}
-			ambiguousErr = decodeErr
 		} else if ambiguousErr == nil {
 			ambiguousErr = requestErr
 		}
-		if request.ReceiptID == "" {
-			return ControllerProtectedCreateAndLinkResult{}, controllerBatchApplyUnknownOutcome(ambiguousErr)
+		if receiptID == "" {
+			return controllerBatchApplyUnknownOutcome(ambiguousErr)
 		}
 	}
-	return ControllerProtectedCreateAndLinkResult{}, ErrControllerBatchApplyOutcomeUnknown
+	return ErrControllerBatchApplyOutcomeUnknown
 }
 
 func planControllerProtectedCreateAndLink(request ControllerProtectedCreateAndLinkRequest) (controllerBatchApplyWireRequest, error) {
@@ -386,9 +446,7 @@ func planControllerProtectedCreateAndLink(request ControllerProtectedCreateAndLi
 		Create: create,
 	})
 	for _, link := range request.Links {
-		if !validControllerBatchApplyText(link.SourceID, controllerBatchApplyMaxRecordIDRunes) || strings.TrimSpace(link.SourceID) != link.SourceID || controllerBatchApplyHasControl(link.SourceID) ||
-			!validControllerBatchApplyText(link.TargetID, controllerBatchApplyMaxRecordIDRunes) || strings.TrimSpace(link.TargetID) != link.TargetID || controllerBatchApplyHasControl(link.TargetID) ||
-			!validControllerBatchApplyText(link.Type, controllerBatchApplyMaxTextRunes) || len(link.Type) > controllerBatchApplyMaxDepTypeBytes || controllerBatchApplyHasControl(link.Type) {
+		if !validControllerDependencyLink(link) {
 			return controllerBatchApplyWireRequest{}, controllerBatchApplyProtocolError("link is invalid")
 		}
 		if link.SourceID == link.TargetID || (link.SourceID != request.Record.ID && link.TargetID != request.Record.ID) {
@@ -414,7 +472,49 @@ func planControllerProtectedCreateAndLink(request ControllerProtectedCreateAndLi
 	return wire, nil
 }
 
-func (c *controllerBatchApplyHTTPClient) verifyContext(ctx context.Context, request ControllerProtectedCreateAndLinkRequest) error {
+func planControllerProtectedLink(request ControllerProtectedLinkRequest) (controllerBatchApplyWireRequest, error) {
+	if !validControllerBatchApplyText(request.Actor, controllerBatchApplyMaxActorBytes) || len(request.Actor) > controllerBatchApplyMaxActorBytes || strings.TrimSpace(request.Actor) != request.Actor || controllerBatchApplyHasControl(request.Actor) {
+		return controllerBatchApplyWireRequest{}, controllerBatchApplyProtocolError("actor is invalid")
+	}
+	if !validControllerDependencyLink(request.Link) {
+		return controllerBatchApplyWireRequest{}, controllerBatchApplyProtocolError("link is invalid")
+	}
+	if request.Link.SourceID == request.Link.TargetID {
+		return controllerBatchApplyWireRequest{}, controllerBatchApplyProtocolError("link endpoints must be distinct exact IDs")
+	}
+	if request.ReceiptID != "" && (!utf8.ValidString(request.ReceiptID) || len(request.ReceiptID) > controllerBatchApplyMaxReceiptBytes || strings.ContainsRune(request.ReceiptID, '\x00')) {
+		return controllerBatchApplyWireRequest{}, controllerBatchApplyProtocolError("receipt ID is invalid")
+	}
+	if request.ProtectedPermit == "" || !utf8.ValidString(request.ProtectedPermit) || len(request.ProtectedPermit) > controllerBatchApplyMaxPermitBytes || strings.TrimSpace(request.ProtectedPermit) != request.ProtectedPermit || controllerBatchApplyHasControl(request.ProtectedPermit) {
+		return controllerBatchApplyWireRequest{}, controllerBatchApplyProtocolError("protected link requires a valid permit")
+	}
+	wire := controllerBatchApplyWireRequest{
+		Actor: request.Actor,
+		Items: []controllerBatchApplyWireItem{{
+			Kind: "dep_add",
+			DepAdd: &controllerBatchApplyWireDepAdd{
+				Source: controllerBatchApplyWireRef{ID: request.Link.SourceID},
+				Target: controllerBatchApplyWireRef{ID: request.Link.TargetID},
+				Type:   request.Link.Type,
+			},
+		}},
+	}
+	if request.ReceiptID != "" {
+		value := request.ReceiptID
+		wire.ReceiptID = &value
+	}
+	permit := request.ProtectedPermit
+	wire.ProtectedPermit = &permit
+	return wire, nil
+}
+
+func validControllerDependencyLink(link ControllerDependencyLink) bool {
+	return validControllerBatchApplyText(link.SourceID, controllerBatchApplyMaxRecordIDRunes) && strings.TrimSpace(link.SourceID) == link.SourceID && !controllerBatchApplyHasControl(link.SourceID) &&
+		validControllerBatchApplyText(link.TargetID, controllerBatchApplyMaxRecordIDRunes) && strings.TrimSpace(link.TargetID) == link.TargetID && !controllerBatchApplyHasControl(link.TargetID) &&
+		validControllerBatchApplyText(link.Type, controllerBatchApplyMaxTextRunes) && len(link.Type) <= controllerBatchApplyMaxDepTypeBytes && !controllerBatchApplyHasControl(link.Type)
+}
+
+func (c *controllerBatchApplyHTTPClient) verifyContext(ctx context.Context, requireReceipt, requireProtected bool) error {
 	body, status, err := c.request(ctx, http.MethodGet, controllerBatchApplyContextPath, nil)
 	if err != nil {
 		return fmt.Errorf("%w: context handshake failed", ErrControllerBatchApplyUnavailable)
@@ -430,10 +530,10 @@ func (c *controllerBatchApplyHTTPClient) verifyContext(ctx context.Context, requ
 		return ErrControllerBatchApplyIdentity
 	}
 	required := []string{"issues.batchApply", "project.enforce"}
-	if request.ReceiptID != "" {
+	if requireReceipt {
 		required = append(required, "issues.batchApplyReceipt")
 	}
-	if request.ProtectedPermit != "" {
+	if requireProtected {
 		required = append(required, "issues.protectedMutation")
 	}
 	for _, capability := range required {
@@ -517,6 +617,32 @@ func decodeControllerBatchApplyResponse(raw []byte, request ControllerProtectedC
 		}
 	}
 	return ControllerProtectedCreateAndLinkResult{Replayed: *replayed}, nil
+}
+
+func decodeControllerBatchApplyLinkResponse(raw []byte, request ControllerProtectedLinkRequest) (ControllerProtectedLinkResult, error) {
+	members, err := controllerBatchApplyObject(raw)
+	if err != nil || !controllerBatchApplyOnlyMembers(members, "keys", "items", "replayed") {
+		return ControllerProtectedLinkResult{}, controllerBatchApplyProtocolError("batchApply response has unsupported members")
+	}
+	var keys map[string]string
+	if rawKeys, ok := members["keys"]; !ok || json.Unmarshal(rawKeys, &keys) != nil || keys == nil || len(keys) != 0 {
+		return ControllerProtectedLinkResult{}, controllerBatchApplyProtocolError("batchApply response keys are inconsistent")
+	}
+	var replayed *bool
+	if rawReplayed, ok := members["replayed"]; !ok || json.Unmarshal(rawReplayed, &replayed) != nil || replayed == nil {
+		return ControllerProtectedLinkResult{}, controllerBatchApplyProtocolError("batchApply response replay flag is malformed")
+	}
+	if *replayed && request.ReceiptID == "" {
+		return ControllerProtectedLinkResult{}, controllerBatchApplyProtocolError("batchApply response replay flag is inconsistent")
+	}
+	var items []json.RawMessage
+	if rawItems, ok := members["items"]; !ok || json.Unmarshal(rawItems, &items) != nil || items == nil || len(items) != 1 {
+		return ControllerProtectedLinkResult{}, controllerBatchApplyProtocolError("batchApply response item count is inconsistent")
+	}
+	if err := validateControllerBatchApplyResultItem(items[0], "dep_add", request.Link.SourceID, request.Link.TargetID, false); err != nil {
+		return ControllerProtectedLinkResult{}, err
+	}
+	return ControllerProtectedLinkResult{Replayed: *replayed}, nil
 }
 
 func validateControllerBatchApplyResultItem(raw []byte, wantKind, wantIssueID, wantDependsOnID string, create bool) error {

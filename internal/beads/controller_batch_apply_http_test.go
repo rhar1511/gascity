@@ -82,6 +82,17 @@ func controllerBatchApplyTestRequest() ControllerProtectedCreateAndLinkRequest {
 	}
 }
 
+func controllerBatchApplyTestLinkRequest() ControllerProtectedLinkRequest {
+	return ControllerProtectedLinkRequest{
+		Actor: "gascity-controller",
+		Link: ControllerDependencyLink{
+			SourceID: "gc-question-source", TargetID: "gc-question-target", Type: "blocks",
+		},
+		ReceiptID:       "receipt-link-1",
+		ProtectedPermit: "opaque-link-permit",
+	}
+}
+
 func controllerBatchApplyTestCapabilities() []string {
 	return []string{"issues.batchApply", "issues.batchApplyReceipt", "issues.protectedMutation", "project.enforce"}
 }
@@ -123,6 +134,120 @@ func controllerBatchApplyTestResponse(request ControllerProtectedCreateAndLinkRe
 		panic(err)
 	}
 	return body
+}
+
+func controllerBatchApplyTestLinkResponse(request ControllerProtectedLinkRequest, replayed bool) []byte {
+	body, err := json.Marshal(map[string]any{
+		"keys": map[string]string{},
+		"items": []map[string]any{{
+			"kind": "dep_add", "issue_id": request.Link.SourceID, "depends_on_id": request.Link.TargetID,
+			"changed": true, "revision": "-3912",
+		}},
+		"replayed": replayed,
+	})
+	if err != nil {
+		panic(err)
+	}
+	return body
+}
+
+func TestControllerBatchApplyHTTPPostsOneProtectedLinkBetweenExistingRecords(t *testing.T) {
+	request := controllerBatchApplyTestLinkRequest()
+	transport := &controllerBatchApplyTestTransport{}
+	transport.handler = controllerBatchApplyTestHandler("project-a", controllerBatchApplyTestCapabilities(), func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		if len(body) != 4 || body["actor"] == nil || body["items"] == nil || body["receipt_id"] == nil || body["protected_permit"] == nil {
+			t.Fatalf("request members = %v, want only actor/items/receipt_id/protected_permit", body)
+		}
+		var actor, receipt, permit string
+		_ = json.Unmarshal(body["actor"], &actor)
+		_ = json.Unmarshal(body["receipt_id"], &receipt)
+		_ = json.Unmarshal(body["protected_permit"], &permit)
+		if actor != request.Actor || receipt != request.ReceiptID || permit != request.ProtectedPermit {
+			t.Fatalf("request identity = (%q, %q, %q), want (%q, %q, %q)", actor, receipt, permit, request.Actor, request.ReceiptID, request.ProtectedPermit)
+		}
+		var items []map[string]json.RawMessage
+		if err := json.Unmarshal(body["items"], &items); err != nil {
+			t.Fatalf("decode items: %v", err)
+		}
+		if len(items) != 1 || len(items[0]) != 2 {
+			t.Fatalf("items = %v, want exactly one dep_add item", items)
+		}
+		var kind string
+		var link map[string]json.RawMessage
+		if json.Unmarshal(items[0]["kind"], &kind) != nil || json.Unmarshal(items[0]["dep_add"], &link) != nil || kind != "dep_add" || len(link) != 3 {
+			t.Fatalf("item = (%q, %v), want one typed dep_add", kind, link)
+		}
+		var source, target map[string]string
+		var depType string
+		_ = json.Unmarshal(link["source"], &source)
+		_ = json.Unmarshal(link["target"], &target)
+		_ = json.Unmarshal(link["type"], &depType)
+		if !reflect.DeepEqual(source, map[string]string{"id": request.Link.SourceID}) ||
+			!reflect.DeepEqual(target, map[string]string{"id": request.Link.TargetID}) || depType != request.Link.Type {
+			t.Fatalf("link = (%v, %v, %q), want (%q, %q, %q)", source, target, depType, request.Link.SourceID, request.Link.TargetID, request.Link.Type)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(controllerBatchApplyTestLinkResponse(request, true))
+	})
+	client := controllerBatchApplyTestClient(t, transport)
+
+	result, err := client.ApplyProtectedLink(context.Background(), request)
+	if err != nil {
+		t.Fatalf("ApplyProtectedLink: %v", err)
+	}
+	if !result.Replayed {
+		t.Fatal("Replayed = false, want true")
+	}
+	if transport.postCount != 1 || transport.contextCount != 1 {
+		t.Fatalf("POST/context calls = %d/%d, want 1/1", transport.postCount, transport.contextCount)
+	}
+}
+
+func TestControllerBatchApplyHTTPRequiresPermitForLinkOnlyBatch(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*ControllerProtectedLinkRequest)
+	}{
+		{name: "missing permit", mutate: func(request *ControllerProtectedLinkRequest) { request.ProtectedPermit = "" }},
+		{name: "blank permit", mutate: func(request *ControllerProtectedLinkRequest) { request.ProtectedPermit = " " }},
+		{name: "self link", mutate: func(request *ControllerProtectedLinkRequest) { request.Link.TargetID = request.Link.SourceID }},
+		{name: "missing endpoint", mutate: func(request *ControllerProtectedLinkRequest) { request.Link.SourceID = "" }},
+		{name: "invalid dependency type", mutate: func(request *ControllerProtectedLinkRequest) { request.Link.Type = "blocks\x00" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			request := controllerBatchApplyTestLinkRequest()
+			tc.mutate(&request)
+			transport := &controllerBatchApplyTestTransport{}
+			transport.handler = controllerBatchApplyTestHandler("project-a", controllerBatchApplyTestCapabilities(), func(_ http.ResponseWriter, _ *http.Request) {
+				t.Fatal("invalid request reached the server")
+			})
+			client := controllerBatchApplyTestClient(t, transport)
+			if _, err := client.ApplyProtectedLink(context.Background(), request); !errors.Is(err, ErrControllerBatchApplyProtocol) {
+				t.Fatalf("ApplyProtectedLink error = %v, want local protocol refusal", err)
+			}
+			if transport.contextCount != 0 || transport.postCount != 0 {
+				t.Fatalf("HTTP calls = context %d, POST %d; want none", transport.contextCount, transport.postCount)
+			}
+		})
+	}
+}
+
+func TestControllerBatchApplyHTTPRequiresProtectedMutationCapabilityForLinkOnlyBatch(t *testing.T) {
+	transport := &controllerBatchApplyTestTransport{}
+	transport.handler = controllerBatchApplyTestHandler("project-a", []string{"issues.batchApply", "issues.batchApplyReceipt", "project.enforce"}, func(_ http.ResponseWriter, _ *http.Request) {
+		t.Fatal("link-only batch reached the server without protected-mutation capability")
+	})
+	client := controllerBatchApplyTestClient(t, transport)
+	if _, err := client.ApplyProtectedLink(context.Background(), controllerBatchApplyTestLinkRequest()); !errors.Is(err, ErrControllerBatchApplyProtocol) {
+		t.Fatalf("ApplyProtectedLink error = %v, want protected-mutation capability refusal", err)
+	}
+	if transport.contextCount != 1 || transport.postCount != 0 {
+		t.Fatalf("HTTP calls = context %d, POST %d; want context check and no POST", transport.contextCount, transport.postCount)
+	}
 }
 
 func TestControllerBatchApplyHTTPPostsTypedCreateAndOrderedLinks(t *testing.T) {
