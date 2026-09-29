@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -20,7 +19,7 @@ func TestCanaryPostsOnceAndSuppressesSameEpochRefire(t *testing.T) {
 	var mu sync.Mutex
 	comments := []forgeComment{}
 	posts := 0
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+	client := newTestHTTPClient(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.Header.Get("Authorization") != "token fixture-token" {
 			http.Error(writer, "unauthorized", http.StatusUnauthorized)
 			return
@@ -54,14 +53,13 @@ func TestCanaryPostsOnceAndSuppressesSameEpochRefire(t *testing.T) {
 			http.NotFound(writer, request)
 		}
 	}))
-	defer server.Close()
 
 	output := filepath.Join(t.TempDir(), "canary.json")
 	verification, authorization, reviewedHead := writeGateFixtures(t, filepath.Dir(output))
 	config := canaryConfig{
-		ForgejoURL: server.URL, Repository: "inktri/inktree", Issue: 777,
+		ForgejoURL: "http://127.0.0.1", Repository: "inktri/inktree", Issue: 777,
 		RequestID: "req-syn-0003", BeadID: "inktree-syn0003", Output: output,
-		Token: "fixture-token", HTTPClient: server.Client(),
+		Token: "fixture-token", HTTPClient: client,
 		Verification: verification, Authorization: authorization, SourceHead: reviewedHead,
 		AllowLoopback: true,
 		JEVVersion:    "jev-1.13-free", RLCDVersion: "rlcd-local-v1", SemIFVersion: "semif-qwen-local-v1",
@@ -138,7 +136,7 @@ func TestCanaryPostsOnceAndSuppressesSameEpochRefire(t *testing.T) {
 }
 
 func TestCanaryRejectsUnattestedAuthor(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+	client := newTestHTTPClient(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Content-Type", "application/json")
 		if request.URL.Path == "/api/v1/user" {
 			_ = json.NewEncoder(writer).Encode(forgeUser{Login: "token-owner"})
@@ -146,13 +144,12 @@ func TestCanaryRejectsUnattestedAuthor(t *testing.T) {
 		}
 		_ = json.NewEncoder(writer).Encode(forgeIssue{Number: 777, Title: "req-syn-0003", State: "open", User: forgeUser{Login: "different-author"}})
 	}))
-	defer server.Close()
 	dir := t.TempDir()
 	verification, authorization, reviewedHead := writeGateFixtures(t, dir)
 	err := runCanary(context.Background(), canaryConfig{
-		ForgejoURL: server.URL, Repository: "inktri/inktree", Issue: 777,
+		ForgejoURL: "http://127.0.0.1", Repository: "inktri/inktree", Issue: 777,
 		RequestID: "req-syn-0003", BeadID: "inktree-syn0003", Output: filepath.Join(dir, "canary.json"),
-		Token: "fixture-token", HTTPClient: server.Client(),
+		Token: "fixture-token", HTTPClient: client,
 		Verification: verification, Authorization: authorization, SourceHead: reviewedHead,
 		AllowLoopback: true,
 		JEVVersion:    "jev-1", RLCDVersion: "rlcd-1", SemIFVersion: "semif-1",
@@ -164,17 +161,16 @@ func TestCanaryRejectsUnattestedAuthor(t *testing.T) {
 
 func TestCanaryRejectsUnreviewedHeadBeforeForgejo(t *testing.T) {
 	requests := 0
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+	client := newTestHTTPClient(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		requests++
 		http.Error(writer, "unexpected", http.StatusInternalServerError)
 	}))
-	defer server.Close()
 	dir := t.TempDir()
 	verification, authorization, _ := writeGateFixtures(t, dir)
 	err := runCanary(context.Background(), canaryConfig{
-		ForgejoURL: server.URL, Repository: "inktri/inktree", Issue: 777,
+		ForgejoURL: "http://127.0.0.1", Repository: "inktri/inktree", Issue: 777,
 		RequestID: "req-syn-0003", BeadID: "inktree-syn0003", Output: filepath.Join(dir, "canary.json"),
-		Token: "fixture-token", HTTPClient: server.Client(), Verification: verification, Authorization: authorization,
+		Token: "fixture-token", HTTPClient: client, Verification: verification, Authorization: authorization,
 		SourceHead: strings.Repeat("b", 40), JEVVersion: "jev-1", RLCDVersion: "rlcd-1", SemIFVersion: "semif-1",
 		AllowLoopback: true,
 	})
@@ -185,17 +181,16 @@ func TestCanaryRejectsUnreviewedHeadBeforeForgejo(t *testing.T) {
 
 func TestCanaryRejectsUnauthorizedSyntheticBeadBeforeForgejo(t *testing.T) {
 	requests := 0
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+	client := newTestHTTPClient(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		requests++
 		http.Error(writer, "unexpected", http.StatusInternalServerError)
 	}))
-	defer server.Close()
 	dir := t.TempDir()
 	verification, authorization, reviewedHead := writeGateFixtures(t, dir)
 	err := runCanary(context.Background(), canaryConfig{
-		ForgejoURL: server.URL, Repository: "inktri/inktree", Issue: 777,
+		ForgejoURL: "http://127.0.0.1", Repository: "inktri/inktree", Issue: 777,
 		RequestID: "req-syn-0003", BeadID: "inktree-syn0004", Output: filepath.Join(dir, "canary.json"),
-		Token: "fixture-token", HTTPClient: server.Client(), Verification: verification, Authorization: authorization,
+		Token: "fixture-token", HTTPClient: client, Verification: verification, Authorization: authorization,
 		SourceHead: reviewedHead, JEVVersion: "jev-1", RLCDVersion: "rlcd-1", SemIFVersion: "semif-1",
 		AllowLoopback: true,
 	})
@@ -206,21 +201,20 @@ func TestCanaryRejectsUnauthorizedSyntheticBeadBeforeForgejo(t *testing.T) {
 
 func TestCanaryRejectsForgejoRedirect(t *testing.T) {
 	redirectedRequests := 0
-	target := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
-		redirectedRequests++
-		writer.WriteHeader(http.StatusOK)
+	client := newTestHTTPClient(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Host == "redirect.invalid" {
+			redirectedRequests++
+			writer.WriteHeader(http.StatusOK)
+			return
+		}
+		http.Redirect(writer, request, "http://redirect.invalid", http.StatusTemporaryRedirect)
 	}))
-	defer target.Close()
-	source := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		http.Redirect(writer, request, target.URL, http.StatusTemporaryRedirect)
-	}))
-	defer source.Close()
 	dir := t.TempDir()
 	verification, authorization, reviewedHead := writeGateFixtures(t, dir)
 	err := runCanary(context.Background(), canaryConfig{
-		ForgejoURL: source.URL, Repository: "inktri/inktree", Issue: 777,
+		ForgejoURL: "http://127.0.0.1", Repository: "inktri/inktree", Issue: 777,
 		RequestID: "req-syn-0003", BeadID: "inktree-syn0003", Output: filepath.Join(dir, "canary.json"),
-		Token: "fixture-token", HTTPClient: source.Client(), Verification: verification, Authorization: authorization,
+		Token: "fixture-token", HTTPClient: client, Verification: verification, Authorization: authorization,
 		SourceHead: reviewedHead, JEVVersion: "jev-1", RLCDVersion: "rlcd-1", SemIFVersion: "semif-1",
 		AllowLoopback: true,
 	})
@@ -231,7 +225,7 @@ func TestCanaryRejectsForgejoRedirect(t *testing.T) {
 
 func TestCanaryLeavesUncertainPostIntentAndRefusesRetry(t *testing.T) {
 	posts := 0
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+	client := newTestHTTPClient(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Content-Type", "application/json")
 		switch request.Method + " " + request.URL.Path {
 		case "GET /api/v1/user":
@@ -247,13 +241,12 @@ func TestCanaryLeavesUncertainPostIntentAndRefusesRetry(t *testing.T) {
 			http.NotFound(writer, request)
 		}
 	}))
-	defer server.Close()
 	dir := t.TempDir()
 	verification, authorization, reviewedHead := writeGateFixtures(t, dir)
 	config := canaryConfig{
-		ForgejoURL: server.URL, Repository: "inktri/inktree", Issue: 777,
+		ForgejoURL: "http://127.0.0.1", Repository: "inktri/inktree", Issue: 777,
 		RequestID: "req-syn-0003", BeadID: "inktree-syn0003", Output: filepath.Join(dir, "canary.json"),
-		Token: "fixture-token", HTTPClient: server.Client(), Verification: verification, Authorization: authorization,
+		Token: "fixture-token", HTTPClient: client, Verification: verification, Authorization: authorization,
 		SourceHead: reviewedHead, JEVVersion: "jev-1", RLCDVersion: "rlcd-1", SemIFVersion: "semif-1", AllowLoopback: true,
 	}
 	intentPath, err := canaryIntentPath(config)
@@ -273,7 +266,7 @@ func TestCanaryRecoversVisibleCommentAfterEvidenceWriteFailure(t *testing.T) {
 	var mu sync.Mutex
 	comments := []forgeComment{}
 	posts := 0
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+	client := newTestHTTPClient(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Content-Type", "application/json")
 		switch request.Method + " " + request.URL.Path {
 		case "GET /api/v1/user":
@@ -303,7 +296,6 @@ func TestCanaryRecoversVisibleCommentAfterEvidenceWriteFailure(t *testing.T) {
 			http.NotFound(writer, request)
 		}
 	}))
-	defer server.Close()
 	dir := t.TempDir()
 	verification, authorization, reviewedHead := writeGateFixtures(t, dir)
 	readOnlyDirectory := filepath.Join(dir, "read-only")
@@ -313,9 +305,9 @@ func TestCanaryRecoversVisibleCommentAfterEvidenceWriteFailure(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(readOnlyDirectory, 0o700) })
 	failedOutput := filepath.Join(readOnlyDirectory, "canary.json")
 	config := canaryConfig{
-		ForgejoURL: server.URL, Repository: "inktri/inktree", Issue: 777,
+		ForgejoURL: "http://127.0.0.1", Repository: "inktri/inktree", Issue: 777,
 		RequestID: "req-syn-0003", BeadID: "inktree-syn0003", Output: failedOutput,
-		Token: "fixture-token", HTTPClient: server.Client(), Verification: verification, Authorization: authorization,
+		Token: "fixture-token", HTTPClient: client, Verification: verification, Authorization: authorization,
 		SourceHead: reviewedHead, JEVVersion: "jev-1", RLCDVersion: "rlcd-1", SemIFVersion: "semif-1", AllowLoopback: true,
 	}
 	intentPath, err := canaryIntentPath(config)
@@ -366,8 +358,7 @@ func TestReviewedWorktreeRejectsUntrackedSource(t *testing.T) {
 	repository := t.TempDir()
 	runGit := func(arguments ...string) {
 		t.Helper()
-		command := exec.Command("git", arguments...)
-		command.Dir = repository
+		command := gitCommand(context.Background(), repository, arguments...)
 		if output, err := command.CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v: %s", arguments, err, output)
 		}
@@ -399,8 +390,7 @@ func TestReviewedWorktreeRejectsSymlinkedExternalOutput(t *testing.T) {
 	repository := t.TempDir()
 	runGit := func(arguments ...string) {
 		t.Helper()
-		command := exec.Command("git", arguments...)
-		command.Dir = repository
+		command := gitCommand(context.Background(), repository, arguments...)
 		if output, err := command.CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v: %s", arguments, err, output)
 		}
@@ -433,8 +423,7 @@ func TestProductionDescriptorsBindEvidenceAndOutput(t *testing.T) {
 	repository := t.TempDir()
 	runGit := func(arguments ...string) {
 		t.Helper()
-		command := exec.Command("git", arguments...)
-		command.Dir = repository
+		command := gitCommand(context.Background(), repository, arguments...)
 		if output, err := command.CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v: %s", arguments, err, output)
 		}
@@ -485,6 +474,20 @@ func TestCanaryStateKeyCanonicalizesEquivalentTargetConfiguration(t *testing.T) 
 	if firstPath != secondPath {
 		t.Fatalf("same Forgejo target produced different locks: %q != %q", firstPath, secondPath)
 	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (function roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return function(request)
+}
+
+func newTestHTTPClient(handler http.Handler) *http.Client {
+	return &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, request)
+		return recorder.Result(), nil
+	})}
 }
 
 func writeGateFixtures(t *testing.T, dir string) (string, string, string) {
