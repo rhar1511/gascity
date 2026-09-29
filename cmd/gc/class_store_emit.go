@@ -137,6 +137,8 @@ type emittingClassStore struct {
 	cityPath string
 }
 
+var _ beads.DecisionFrontierRecordWriterHandleProvider = (*emittingClassStore)(nil)
+
 // ---------------------------------------------------------------------------
 // Emission.
 
@@ -476,6 +478,9 @@ func (s *emittingClassStore) StableCreateIDResolveTarget() beads.Store {
 // answers, and their links contain private controller state and are written
 // only through this narrow role.
 func (s *emittingClassStore) DecisionFrontierRecordWriterHandle() (beads.DecisionFrontierRecordWriter, bool) {
+	if s == nil {
+		return nil, false
+	}
 	writer, ok := beads.DecisionFrontierRecordWriterFor(s.Store)
 	if !ok || writer == nil {
 		return nil, false

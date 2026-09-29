@@ -213,4 +213,14 @@ func TestNewRemoteDecisionFrontierRecordWriterRequiresAllInjectedCapabilities(t 
 	if !errors.Is(err, ErrRemoteDecisionFrontierWriterUnavailable) {
 		t.Fatalf("constructor error = %v, want ErrRemoteDecisionFrontierWriterUnavailable", err)
 	}
+
+	var nilLink *remoteDecisionFrontierTestLinkWriter
+	_, err = NewRemoteDecisionFrontierRecordWriter(RemoteDecisionFrontierRecordWriterConfig{
+		Actor: "controller-test-actor", ProtectionClass: "frontier-records",
+		PermitIssuer: &remoteDecisionFrontierTestPermitIssuer{token: "unused-create-permit"},
+		BatchWriter:  &remoteDecisionFrontierTestBatchWriter{}, LinkWriter: nilLink,
+	})
+	if !errors.Is(err, ErrRemoteDecisionFrontierWriterUnavailable) {
+		t.Fatalf("typed-nil link writer error = %v, want ErrRemoteDecisionFrontierWriterUnavailable", err)
+	}
 }

@@ -27,7 +27,8 @@ func validateRemoteDecisionFrontierMetadataCASConfig(config RemoteDecisionFronti
 	if !configured {
 		return nil
 	}
-	if config.MetadataRecordReader == nil || config.MetadataPermitIssuer == nil || config.MetadataTransitionWriter == nil || config.MetadataReceiptReader == nil ||
+	if !capabilityValuePresent(config.MetadataRecordReader) || !capabilityValuePresent(config.MetadataPermitIssuer) ||
+		!capabilityValuePresent(config.MetadataTransitionWriter) || !capabilityValuePresent(config.MetadataReceiptReader) ||
 		validateControllerTransitionText(config.MetadataTransitionScope, controllerTransitionMaxScope) != nil ||
 		strings.TrimSpace(config.MetadataTransitionScope) != config.MetadataTransitionScope || hasControllerTransitionControl(config.MetadataTransitionScope) ||
 		validateControllerTransitionText(config.MetadataTransitionKind, controllerTransitionMaxKind) != nil ||

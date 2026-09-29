@@ -41,4 +41,19 @@ func TestBeadPolicyStoreDoesNotInventDecisionFrontierSourceReader(t *testing.T) 
 	}
 }
 
+func TestBeadPolicyStorePreservesOnlyBackingDecisionFrontierWriter(t *testing.T) {
+	backing := beads.NewMemStore()
+	backing.HonorExplicitIDs = true
+	wrapped := wrapStoreWithBeadPolicies(backing, nil)
+	if _, ok := beads.DecisionFrontierRecordWriterFor(wrapped); !ok {
+		t.Fatal("bead policy wrapper hid the backing's writable decision-frontier role")
+	}
+
+	incomplete := &beadPolicyPlainStore{Store: beads.NewMemStore()}
+	wrapped = wrapStoreWithBeadPolicies(incomplete, nil)
+	if writer, ok := beads.DecisionFrontierRecordWriterFor(wrapped); ok || writer != nil {
+		t.Fatalf("bead policy wrapper invented a decision-frontier writer: (%T, %t)", writer, ok)
+	}
+}
+
 type beadPolicyPlainStore struct{ beads.Store }

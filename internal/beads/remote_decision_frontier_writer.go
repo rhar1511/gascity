@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 )
@@ -72,8 +73,7 @@ type RemoteDecisionFrontierRecordWriterConfig struct {
 // RemoteDecisionFrontierRecordWriter adapts remote protected record creation,
 // metadata CAS, and decision-frontier linking to the local record-writer
 // surface. Its external capabilities are injected; this type performs no
-// startup, credential, or store wiring. It deliberately refuses its capability
-// handle so the new CAS slice cannot affect production routing yet.
+// startup, credential, or store wiring.
 type RemoteDecisionFrontierRecordWriter struct {
 	actor                    string
 	protectionClass          string
@@ -104,8 +104,8 @@ func NewRemoteDecisionFrontierRecordWriter(config RemoteDecisionFrontierRecordWr
 		controllerBatchApplyHasControl(config.Actor) ||
 		!validControllerBatchApplyText(config.ProtectionClass, controllerBatchApplyMaxTextRunes) ||
 		len(config.ProtectionClass) > controllerBatchApplyMaxClassBytes || strings.TrimSpace(config.ProtectionClass) != config.ProtectionClass ||
-		controllerBatchApplyHasControl(config.ProtectionClass) || config.PermitIssuer == nil ||
-		config.BatchWriter == nil || config.LinkWriter == nil {
+		controllerBatchApplyHasControl(config.ProtectionClass) || !capabilityValuePresent(config.PermitIssuer) ||
+		!capabilityValuePresent(config.BatchWriter) || !capabilityValuePresent(config.LinkWriter) {
 		return nil, ErrRemoteDecisionFrontierWriterUnavailable
 	}
 	if config.BatchTimeout == 0 {
@@ -130,11 +130,20 @@ func NewRemoteDecisionFrontierRecordWriter(config RemoteDecisionFrontierRecordWr
 	}, nil
 }
 
-// DecisionFrontierRecordWriterHandle intentionally keeps this inert adapter
-// out of the store capability resolver until the complete production read,
-// permit, transition, and recovery wiring has been reviewed.
-func (*RemoteDecisionFrontierRecordWriter) DecisionFrontierRecordWriterHandle() (DecisionFrontierRecordWriter, bool) {
-	return nil, false
+// DecisionFrontierRecordWriterHandle exposes the adapter only when the full
+// create, link, exact-record-read, metadata-CAS, and durable-receipt path is
+// configured. The constructor validates all-or-none metadata-CAS setup; this
+// second check keeps a zero value or a future partially initialized adapter
+// from making the capability resolver overclaim support.
+func (w *RemoteDecisionFrontierRecordWriter) DecisionFrontierRecordWriterHandle() (DecisionFrontierRecordWriter, bool) {
+	if w == nil || w.actor == "" || w.protectionClass == "" || w.batchTimeout <= 0 ||
+		!capabilityValuePresent(w.permitIssuer) || !capabilityValuePresent(w.batchWriter) || !capabilityValuePresent(w.linkWriter) ||
+		w.metadataTransitionScope == "" || w.metadataTransitionKind == "" ||
+		!capabilityValuePresent(w.metadataRecordReader) || !capabilityValuePresent(w.metadataPermitIssuer) ||
+		!capabilityValuePresent(w.metadataTransitionWriter) || !capabilityValuePresent(w.metadataReceiptReader) {
+		return nil, false
+	}
+	return w, true
 }
 
 // CreateDecisionFrontierRecord submits exactly one validated immutable record
@@ -143,7 +152,7 @@ func (*RemoteDecisionFrontierRecordWriter) DecisionFrontierRecordWriterHandle() 
 // protected request. The batch API does not return the stored row, so the
 // returned bead is a detached projection of the caller's exact create input.
 func (w *RemoteDecisionFrontierRecordWriter) CreateDecisionFrontierRecord(record Bead) (Bead, error) {
-	if w == nil || w.permitIssuer == nil || w.batchWriter == nil {
+	if w == nil || !capabilityValuePresent(w.permitIssuer) || !capabilityValuePresent(w.batchWriter) {
 		return Bead{}, ErrRemoteDecisionFrontierWriterUnavailable
 	}
 	if err := validateDecisionFrontierRecordCreate(record); err != nil {
@@ -186,10 +195,10 @@ func (w *RemoteDecisionFrontierRecordWriter) CreateDecisionFrontierRecord(record
 
 // CompareAndSetDecisionFrontierRecordMetadataKey uses the configured exact
 // record reader, generic Beads permit issuer, and Q43 metadata transition
-// transport. This inert source slice is not exposed through a capability
-// handle until production wiring and the complete remote contract are reviewed.
+// transport. The operation refuses when any required CAS dependency is absent.
 func (w *RemoteDecisionFrontierRecordWriter) CompareAndSetDecisionFrontierRecordMetadataKey(id, key, expected, next string) (bool, error) {
-	if w == nil || w.metadataRecordReader == nil || w.metadataPermitIssuer == nil || w.metadataTransitionWriter == nil || w.metadataReceiptReader == nil {
+	if w == nil || !capabilityValuePresent(w.metadataRecordReader) || !capabilityValuePresent(w.metadataPermitIssuer) ||
+		!capabilityValuePresent(w.metadataTransitionWriter) || !capabilityValuePresent(w.metadataReceiptReader) {
 		return false, ErrRemoteDecisionFrontierCASUnsupported
 	}
 	return w.compareAndSetDecisionFrontierRecordMetadataKey(id, key, expected, next)
@@ -198,10 +207,26 @@ func (w *RemoteDecisionFrontierRecordWriter) CompareAndSetDecisionFrontierRecord
 // EnsureDecisionFrontierLink delegates to the explicitly injected narrow link
 // contract. It does not fold links into arbitrary record create requests.
 func (w *RemoteDecisionFrontierRecordWriter) EnsureDecisionFrontierLink(sourceID, targetID, depType string) error {
-	if w == nil || w.linkWriter == nil {
+	if w == nil || !capabilityValuePresent(w.linkWriter) {
 		return ErrRemoteDecisionFrontierWriterUnavailable
 	}
 	return w.linkWriter.EnsureDecisionFrontierLink(sourceID, targetID, depType)
+}
+
+// capabilityValuePresent treats an interface containing a typed nil as absent.
+// Otherwise a handle resolver could report support and panic only when the
+// first request reaches a nil receiver.
+func capabilityValuePresent(capability any) bool {
+	if capability == nil {
+		return false
+	}
+	value := reflect.ValueOf(capability)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return !value.IsNil()
+	default:
+		return true
+	}
 }
 
 func cloneControllerDecisionFrontierMetadata(metadata StringMap) map[string]string {

@@ -490,15 +490,19 @@ type DecisionFrontierRecordWriterHandleProvider interface {
 }
 
 // DecisionFrontierRecordWriterFor returns the trusted record capability for
-// direct stores whose creation, metadata CAS, and link semantics are proven
-// and currently writable. Wrappers and other backends fail closed until they
-// implement and test their own persistence and routing behavior.
+// stores whose creation, metadata CAS, and link semantics are proven and
+// currently writable. Wrappers expose it only through an explicit handle that
+// preserves their cache, policy, or write-leaf routing behavior.
 func DecisionFrontierRecordWriterFor(store Store) (DecisionFrontierRecordWriter, bool) {
 	if store == nil {
 		return nil, false
 	}
 	if provider, ok := store.(DecisionFrontierRecordWriterHandleProvider); ok {
-		return provider.DecisionFrontierRecordWriterHandle()
+		writer, available := provider.DecisionFrontierRecordWriterHandle()
+		if !available || !capabilityValuePresent(writer) {
+			return nil, false
+		}
+		return writer, true
 	}
 	switch typed := store.(type) {
 	case *MemStore:

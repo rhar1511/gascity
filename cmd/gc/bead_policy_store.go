@@ -43,6 +43,7 @@ var (
 	_ beads.ControllerMetadataTransitionWriterHandleProvider        = (*beadPolicyStore)(nil)
 	_ beads.ControllerMetadataTransitionReceiptReaderHandleProvider = (*beadPolicyStore)(nil)
 	_ beads.DecisionFrontierSourceReaderHandleProvider              = (*beadPolicyStore)(nil)
+	_ beads.DecisionFrontierRecordWriterHandleProvider              = (*beadPolicyStore)(nil)
 	_ beads.RevisionTransitionReceiptReaderHandleProvider           = (*beadPolicyStore)(nil)
 	_ beads.RevisionTransitionWriterHandleProvider                  = (*beadPolicyStore)(nil)
 )
@@ -81,6 +82,16 @@ func (s *beadPolicyStore) ControllerMetadataTransitionWriterHandle() (beads.Cont
 // source-snapshot capability through the policy layer.
 func (s *beadPolicyStore) DecisionFrontierSourceReaderHandle() (beads.DecisionFrontierSourceReader, bool) {
 	return beads.DecisionFrontierSourceReaderFor(s.Store)
+}
+
+// DecisionFrontierRecordWriterHandle preserves the backing's complete private
+// record-writer role through the policy wrapper without claiming support from
+// its embedded Store interface alone.
+func (s *beadPolicyStore) DecisionFrontierRecordWriterHandle() (beads.DecisionFrontierRecordWriter, bool) {
+	if s == nil {
+		return nil, false
+	}
+	return beads.DecisionFrontierRecordWriterFor(s.Store)
 }
 
 // RevisionTransitionReceiptReaderHandle preserves the backing exact-receipt

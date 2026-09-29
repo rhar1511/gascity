@@ -14,8 +14,9 @@ package beads
 // Optional capabilities (e.g. Counter, GraphApplyStore, GraphApplyFor,
 // StorageCreateStore, Backing/ReadyLive) are NOT promoted through the embedding:
 // a type assertion on a typed store value asserts on the wrapper, not the
-// underlying store, and will fail. Access optional capabilities by asserting on
-// the embedded .Store field instead (e.g. `c, ok := s.Store.(beads.Counter)`).
+// underlying store, and will fail. Capabilities with an explicit handle
+// provider are resolved through that provider; for other optional capabilities,
+// assert on the embedded .Store field instead (e.g. `c, ok := s.Store.(beads.Counter)`).
 // Likewise pass the unwrapped .Store field when calling a generic Store helper
 // that is shared across multiple classes.
 
@@ -326,6 +327,32 @@ func (s NudgesStore) RevisionTransitionWriterHandle() (RevisionTransitionWriter,
 	return RevisionTransitionWriterFor(s.Store)
 }
 
+// DecisionFrontierRecordWriterHandle forwards the protected record writer
+// through the typed class view without inventing support.
+func (s WorkStore) DecisionFrontierRecordWriterHandle() (DecisionFrontierRecordWriter, bool) {
+	return DecisionFrontierRecordWriterFor(s.Store)
+}
+
+func (s GraphStore) DecisionFrontierRecordWriterHandle() (DecisionFrontierRecordWriter, bool) {
+	return DecisionFrontierRecordWriterFor(s.Store)
+}
+
+func (s SessionStore) DecisionFrontierRecordWriterHandle() (DecisionFrontierRecordWriter, bool) {
+	return DecisionFrontierRecordWriterFor(s.Store)
+}
+
+func (s MailStore) DecisionFrontierRecordWriterHandle() (DecisionFrontierRecordWriter, bool) {
+	return DecisionFrontierRecordWriterFor(s.Store)
+}
+
+func (s OrdersStore) DecisionFrontierRecordWriterHandle() (DecisionFrontierRecordWriter, bool) {
+	return DecisionFrontierRecordWriterFor(s.Store)
+}
+
+func (s NudgesStore) DecisionFrontierRecordWriterHandle() (DecisionFrontierRecordWriter, bool) {
+	return DecisionFrontierRecordWriterFor(s.Store)
+}
+
 var (
 	_ ConditionalWritesResolveTargeter                        = WorkStore{}
 	_ ConditionalWritesResolveTargeter                        = GraphStore{}
@@ -363,4 +390,10 @@ var (
 	_ RevisionTransitionWriterHandleProvider                  = MailStore{}
 	_ RevisionTransitionWriterHandleProvider                  = OrdersStore{}
 	_ RevisionTransitionWriterHandleProvider                  = NudgesStore{}
+	_ DecisionFrontierRecordWriterHandleProvider              = WorkStore{}
+	_ DecisionFrontierRecordWriterHandleProvider              = GraphStore{}
+	_ DecisionFrontierRecordWriterHandleProvider              = SessionStore{}
+	_ DecisionFrontierRecordWriterHandleProvider              = MailStore{}
+	_ DecisionFrontierRecordWriterHandleProvider              = OrdersStore{}
+	_ DecisionFrontierRecordWriterHandleProvider              = NudgesStore{}
 )

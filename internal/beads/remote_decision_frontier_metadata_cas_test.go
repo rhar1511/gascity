@@ -230,8 +230,8 @@ func TestRemoteDecisionFrontierMetadataCASAcceptsExactReplayReceiptAndAuthoritat
 	if got := reader.records[record.ID]; got.Revision != 47 || got.Metadata[beadmeta.DecisionFrontierStateMetadataKey] != "resolved" {
 		t.Fatalf("authoritative record after transition = revision %d state %q, want 47/resolved", got.Revision, got.Metadata[beadmeta.DecisionFrontierStateMetadataKey])
 	}
-	if handle, ok := writer.DecisionFrontierRecordWriterHandle(); ok || handle != nil {
-		t.Fatal("configured inert CAS writer advertised its record-writer capability")
+	if handle, ok := writer.DecisionFrontierRecordWriterHandle(); !ok || handle != writer {
+		t.Fatal("complete protected create/link/CAS writer did not advertise its record-writer capability")
 	}
 }
 
@@ -242,6 +242,31 @@ func TestRemoteDecisionFrontierMetadataCASRecoversLostResponseFromDurableReceipt
 	writer, _ := newRemoteDecisionFrontierMetadataCASFixture(t, record, issuer, transition)
 	if won, err := writer.CompareAndSetDecisionFrontierRecordMetadataKey(record.ID, beadmeta.DecisionFrontierStateMetadataKey, "pending", "resolved"); err != nil || !won {
 		t.Fatalf("lost-response recovery = %v, %v; want durable receipt proof", won, err)
+	}
+}
+
+func TestBdStoreDecisionFrontierWriterOptionAdvertisesOnlyCompleteRemoteWriter(t *testing.T) {
+	incomplete := newRemoteDecisionFrontierTestWriter(t,
+		&remoteDecisionFrontierTestPermitIssuer{token: "create-permit"},
+		&remoteDecisionFrontierTestBatchWriter{}, &remoteDecisionFrontierTestLinkWriter{})
+	incompleteStore := NewBdStore("/city", nil, WithBdStoreDecisionFrontierRecordWriter(incomplete))
+	if writer, ok := DecisionFrontierRecordWriterFor(incompleteStore); ok || writer != nil {
+		t.Fatalf("incomplete remote writer was advertised through BdStore: (%T, %t)", writer, ok)
+	}
+
+	record := remoteDecisionFrontierMetadataCASMapRecord(t, 7)
+	complete, _ := newRemoteDecisionFrontierMetadataCASFixture(t, record,
+		&remoteDecisionFrontierMetadataPermitIssuerStub{token: "metadata-permit"},
+		&remoteDecisionFrontierMetadataTransitionWriterStub{toRevision: 47})
+	completeStore := NewBdStore("/city", nil, WithBdStoreDecisionFrontierRecordWriter(complete))
+	writer, ok := DecisionFrontierRecordWriterFor(completeStore)
+	if !ok || writer != complete {
+		t.Fatalf("complete remote writer handle = (%T, %t), want configured writer", writer, ok)
+	}
+
+	plainStore := NewBdStore("/city", nil)
+	if writer, ok := DecisionFrontierRecordWriterFor(plainStore); ok || writer != nil {
+		t.Fatalf("unconfigured BdStore advertised a record writer: (%T, %t)", writer, ok)
 	}
 }
 
@@ -401,5 +426,19 @@ func TestNewRemoteDecisionFrontierRecordWriterRequiresCompleteMetadataCASConfigu
 	})
 	if !errors.Is(err, ErrRemoteDecisionFrontierWriterUnavailable) {
 		t.Fatalf("partial metadata CAS config error = %v, want ErrRemoteDecisionFrontierWriterUnavailable", err)
+	}
+
+	var nilExactReader *remoteDecisionFrontierLinkRecordReaderStub
+	transition := &remoteDecisionFrontierMetadataTransitionWriterStub{}
+	_, err = NewRemoteDecisionFrontierRecordWriter(RemoteDecisionFrontierRecordWriterConfig{
+		Actor: "controller-test-actor", ProtectionClass: "frontier-records",
+		PermitIssuer: &remoteDecisionFrontierTestPermitIssuer{token: "unused-create-permit"},
+		BatchWriter:  &remoteDecisionFrontierTestBatchWriter{}, LinkWriter: &remoteDecisionFrontierTestLinkWriter{},
+		MetadataTransitionScope: "store-test", MetadataTransitionKind: "decision-frontier-record-metadata",
+		MetadataRecordReader: nilExactReader, MetadataPermitIssuer: &remoteDecisionFrontierMetadataPermitIssuerStub{token: "metadata-permit"},
+		MetadataTransitionWriter: transition, MetadataReceiptReader: transition,
+	})
+	if !errors.Is(err, ErrRemoteDecisionFrontierWriterUnavailable) {
+		t.Fatalf("typed-nil exact record reader error = %v, want ErrRemoteDecisionFrontierWriterUnavailable", err)
 	}
 }

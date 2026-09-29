@@ -46,6 +46,7 @@ var (
 	_ ControllerMetadataTransitionWriterHandleProvider        = (*ProxiedStore)(nil)
 	_ ControllerMetadataTransitionReceiptReaderHandleProvider = (*ProxiedStore)(nil)
 	_ DecisionFrontierSourceReaderHandleProvider              = (*ProxiedStore)(nil)
+	_ DecisionFrontierRecordWriterHandleProvider              = (*ProxiedStore)(nil)
 	_ RevisionTransitionReceiptReaderHandleProvider           = (*ProxiedStore)(nil)
 	_ RevisionTransitionWriterHandleProvider                  = (*ProxiedStore)(nil)
 	_ ParentProjectionWaiter                                  = (*ProxiedStore)(nil)
@@ -504,6 +505,63 @@ func (s *ProxiedStore) ControllerMetadataTransitionReceiptReaderHandle() (Contro
 type proxiedRevisionTransitionWriter struct {
 	store  *ProxiedStore
 	writer RevisionTransitionWriter
+}
+
+type proxiedDecisionFrontierRecordWriter struct {
+	store *ProxiedStore
+}
+
+func (w proxiedDecisionFrontierRecordWriter) CreateDecisionFrontierRecord(record Bead) (Bead, error) {
+	var created Bead
+	err := w.store.withMutation("decision-frontier-record-create "+record.ID, func(leaf Store) error {
+		writer, ok := DecisionFrontierRecordWriterFor(leaf)
+		if !ok || writer == nil {
+			return ErrDecisionFrontierCapabilityUnsupported
+		}
+		var writeErr error
+		created, writeErr = writer.CreateDecisionFrontierRecord(record)
+		return writeErr
+	})
+	return created, err
+}
+
+func (w proxiedDecisionFrontierRecordWriter) CompareAndSetDecisionFrontierRecordMetadataKey(id, key, expected, next string) (bool, error) {
+	var changed bool
+	err := w.store.withMutation("decision-frontier-record-cas "+id, func(leaf Store) error {
+		writer, ok := DecisionFrontierRecordWriterFor(leaf)
+		if !ok || writer == nil {
+			return ErrDecisionFrontierCapabilityUnsupported
+		}
+		var writeErr error
+		changed, writeErr = writer.CompareAndSetDecisionFrontierRecordMetadataKey(id, key, expected, next)
+		return writeErr
+	})
+	return changed, err
+}
+
+func (w proxiedDecisionFrontierRecordWriter) EnsureDecisionFrontierLink(sourceID, targetID, depType string) error {
+	return w.store.withMutation("decision-frontier-link "+sourceID+" -> "+targetID, func(leaf Store) error {
+		writer, ok := DecisionFrontierRecordWriterFor(leaf)
+		if !ok || writer == nil {
+			return ErrDecisionFrontierCapabilityUnsupported
+		}
+		return writer.EnsureDecisionFrontierLink(sourceID, targetID, depType)
+	})
+}
+
+// DecisionFrontierRecordWriterHandle checks the current WRITE leaf before
+// advertising support. Each returned-handle call resolves the capability again
+// from the leaf passed inside its generation bracket, so an adapter retained
+// across a restart cannot keep writing through an old leaf. The native leaf is
+// a read projection and cannot own these writes.
+func (s *ProxiedStore) DecisionFrontierRecordWriterHandle() (DecisionFrontierRecordWriter, bool) {
+	if s == nil {
+		return nil, false
+	}
+	if _, ok := DecisionFrontierRecordWriterFor(s.writeLeaf()); !ok {
+		return nil, false
+	}
+	return proxiedDecisionFrontierRecordWriter{store: s}, true
 }
 
 func (w proxiedRevisionTransitionWriter) CompareAndSetMetadataKeyWithReceipt(id, key, expected, next string, expectedRevision int64, receipt RevisionTransitionReceipt) (Bead, bool, error) {

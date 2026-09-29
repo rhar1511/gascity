@@ -34,6 +34,7 @@ var (
 	_ conditionalWritesModeCarrier                            = (*CachingStore)(nil)
 	_ conditionalWriteCapabilityProber                        = (*CachingStore)(nil)
 	_ DecisionFrontierSourceReaderHandleProvider              = (*CachingStore)(nil)
+	_ DecisionFrontierRecordWriterHandleProvider              = (*CachingStore)(nil)
 	_ RevisionTransitionReceiptReaderHandleProvider           = (*CachingStore)(nil)
 	_ ControllerMetadataTransitionReceiptReaderHandleProvider = (*CachingStore)(nil)
 	_ RevisionTransitionWriterHandleProvider                  = (*CachingStore)(nil)
@@ -46,6 +47,67 @@ func (c *CachingStore) DecisionFrontierSourceReaderHandle() (DecisionFrontierSou
 		return nil, false
 	}
 	return DecisionFrontierSourceReaderFor(c.backing)
+}
+
+type cachingDecisionFrontierRecordWriter struct {
+	cache  *CachingStore
+	writer DecisionFrontierRecordWriter
+}
+
+func (w cachingDecisionFrontierRecordWriter) CreateDecisionFrontierRecord(record Bead) (Bead, error) {
+	created, err := w.writer.CreateDecisionFrontierRecord(record)
+	if err != nil {
+		w.cache.applyConditionalWriteFailure(record.ID, err)
+		return Bead{}, err
+	}
+	w.cache.evictForConditionalWrite(record.ID)
+	if created.ID != record.ID {
+		w.cache.evictForConditionalWrite(created.ID)
+	}
+	return created, nil
+}
+
+func (w cachingDecisionFrontierRecordWriter) CompareAndSetDecisionFrontierRecordMetadataKey(id, key, expected, next string) (bool, error) {
+	changed, err := w.writer.CompareAndSetDecisionFrontierRecordMetadataKey(id, key, expected, next)
+	if err != nil {
+		w.cache.applyConditionalWriteFailure(id, err)
+		return changed, err
+	}
+	// Even a clean false result may have observed a newer exact remote row than
+	// the ordinary cache has. Drop it so subsequent readers do not use stale
+	// controller metadata.
+	w.cache.evictForConditionalWrite(id)
+	return changed, nil
+}
+
+func (w cachingDecisionFrontierRecordWriter) EnsureDecisionFrontierLink(sourceID, targetID, depType string) error {
+	if err := w.writer.EnsureDecisionFrontierLink(sourceID, targetID, depType); err != nil {
+		w.cache.applyConditionalWriteFailure(sourceID, err)
+		if targetID != sourceID {
+			w.cache.applyConditionalWriteFailure(targetID, err)
+		}
+		return err
+	}
+	// Invalidate both endpoint snapshots: dependency lists and readiness views
+	// can be keyed from either endpoint depending on the query direction.
+	w.cache.evictForConditionalWrite(sourceID)
+	if targetID != sourceID {
+		w.cache.evictForConditionalWrite(targetID)
+	}
+	return nil
+}
+
+// DecisionFrontierRecordWriterHandle preserves cache invalidation for private
+// decision records without publishing their contents through cache events.
+func (c *CachingStore) DecisionFrontierRecordWriterHandle() (DecisionFrontierRecordWriter, bool) {
+	if c == nil {
+		return nil, false
+	}
+	writer, ok := DecisionFrontierRecordWriterFor(c.backing)
+	if !ok || writer == nil {
+		return nil, false
+	}
+	return cachingDecisionFrontierRecordWriter{cache: c, writer: writer}, true
 }
 
 // RevisionTransitionReceiptReaderHandle delegates exact receipt reads directly

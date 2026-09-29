@@ -504,6 +504,12 @@ type BdStore struct {
 	privateEvidenceHTTP           *privateEvidenceHTTPClient
 	privateEvidenceHTTPInitErr    error
 	privateEvidenceHTTPConfigured bool
+
+	// decisionFrontierRecordWriter is supplied only by an explicit trusted
+	// constructor option. It remains unavailable when the remote adapter is
+	// missing any create, link, exact-read, metadata-CAS, or durable-receipt
+	// dependency.
+	decisionFrontierRecordWriter *RemoteDecisionFrontierRecordWriter
 }
 
 const (
