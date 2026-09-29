@@ -316,11 +316,15 @@ func TestInstallWriteAuthLeavesAnswerFallbackUnavailableWithoutHumanTrust(t *tes
 
 type decisionFrontierDeliveryStub struct{}
 
-func (*decisionFrontierDeliveryStub) DeliverDecisionPrompt(context.Context, decisionfrontier.PromptRequest) (decisionfrontier.PromptResult, error) {
+func (*decisionFrontierDeliveryStub) ResolveDecisionPrompt(_ context.Context, request decisionfrontier.PromptRequest) (decisionfrontier.PromptBinding, error) {
+	return decisionfrontier.PromptBinding{SessionID: "api-test-session", ExecutionGeneration: 1, RequestID: request.ID}, nil
+}
+
+func (*decisionFrontierDeliveryStub) DeliverDecisionPrompt(context.Context, decisionfrontier.PromptRequest, decisionfrontier.PromptBinding) (decisionfrontier.PromptResult, error) {
 	return decisionfrontier.PromptResult{}, nil
 }
 
-func (*decisionFrontierDeliveryStub) ReconcileDecisionPrompt(context.Context, string) (decisionfrontier.PromptResult, error) {
+func (*decisionFrontierDeliveryStub) ReconcileDecisionPrompt(context.Context, decisionfrontier.PromptRequest, decisionfrontier.PromptBinding) (decisionfrontier.PromptResult, error) {
 	return decisionfrontier.PromptResult{}, nil
 }
 

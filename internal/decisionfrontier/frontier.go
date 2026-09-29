@@ -41,13 +41,14 @@ var (
 )
 
 const (
-	frontierSchemaVersion = 1
-	mapRecordKind         = "decision-frontier/map/v1"
-	ticketRecordKind      = "decision-frontier/question/v1"
-	answerRecordKind      = "decision-frontier/answer/v1"
-	promptRecordKind      = "decision-frontier/prompt/v1"
-	statePending          = "pending"
-	stateResolved         = "resolved"
+	frontierSchemaVersion     = 1
+	promptPresentationVersion = 1
+	mapRecordKind             = "decision-frontier/map/v1"
+	ticketRecordKind          = "decision-frontier/question/v1"
+	answerRecordKind          = "decision-frontier/answer/v1"
+	promptRecordKind          = "decision-frontier/prompt/v1"
+	statePending              = "pending"
+	stateResolved             = "resolved"
 )
 
 // SourceIssueLinkKey is reserved in SourceLinks. Use Proposal.SourceIssue to
@@ -225,18 +226,46 @@ type AnswerVerifier interface {
 	VerifyDecisionAnswer(context.Context, AnswerChallenge, AnswerSubmission) (VerifiedAnswer, error)
 }
 
-// PromptRequest is the durable-intent identity passed to an optional delivery
-// provider. It contains no guessed session ID.
+// PromptQuestionPresentation is one ordered, immutable question as it was
+// selected for delivery. TicketID and Version identify the exact answer slot.
+type PromptQuestionPresentation struct {
+	ID              string          `json:"id"`
+	TicketID        string          `json:"ticket_id"`
+	Version         string          `json:"version"`
+	Title           string          `json:"title"`
+	Prompt          string          `json:"prompt"`
+	Recommendations []string        `json:"recommendations,omitempty"`
+	DependsOn       []string        `json:"depends_on,omitempty"`
+	SourceLinks     []string        `json:"source_links,omitempty"`
+	SourceIssue     *SourceIssueRef `json:"source_issue,omitempty"`
+}
+
+// PromptRequest is the complete durable-intent payload passed to an optional
+// delivery provider. Its questions preserve the exact order and presentation
+// selected by the immutable decision map.
 type PromptRequest struct {
-	CityRef      string
-	StoreRef     string
-	ID           string
-	WorkID       string
-	WorkRevision string
-	MapID        string
-	TicketIDs    []string
-	SourceLinks  map[string]string
-	SourceIssue  *SourceIssueRef
+	CityRef             string                       `json:"city_ref"`
+	StoreRef            string                       `json:"store_ref"`
+	ID                  string                       `json:"id"`
+	WorkID              string                       `json:"work_id"`
+	WorkRevision        string                       `json:"work_revision"`
+	WorkDigest          string                       `json:"work_digest"`
+	MapID               string                       `json:"map_id"`
+	PresentationVersion int                          `json:"presentation_version"`
+	MessageDigest       string                       `json:"message_digest"`
+	TicketIDs           []string                     `json:"ticket_ids"`
+	Questions           []PromptQuestionPresentation `json:"questions"`
+	SourceLinks         map[string]string            `json:"source_links,omitempty"`
+	SourceIssue         *SourceIssueRef              `json:"source_issue,omitempty"`
+}
+
+// PromptBinding identifies one selected session execution and the tracked
+// request assigned to it. Generation is positive and RequestID must equal the
+// corresponding PromptRequest.ID.
+type PromptBinding struct {
+	SessionID           string `json:"session_id"`
+	ExecutionGeneration int64  `json:"execution_generation"`
+	RequestID           string `json:"request_id"`
 }
 
 // PromptResult reports an observed delivery stage. DefinitivelyAbsent must be
@@ -247,12 +276,13 @@ type PromptResult struct {
 	DefinitivelyAbsent bool
 }
 
-// PromptDelivery must reconcile an uncertain request ID before retrying its
-// external effect. Implementations must make request IDs idempotent where the
-// delivery system supports it.
+// PromptDelivery resolves one exact execution without side effects before any
+// protected records are created. Delivery and reconciliation always receive
+// the persisted request and binding; they must not re-resolve on replay.
 type PromptDelivery interface {
-	DeliverDecisionPrompt(context.Context, PromptRequest) (PromptResult, error)
-	ReconcileDecisionPrompt(context.Context, string) (PromptResult, error)
+	ResolveDecisionPrompt(context.Context, PromptRequest) (PromptBinding, error)
+	DeliverDecisionPrompt(context.Context, PromptRequest, PromptBinding) (PromptResult, error)
+	ReconcileDecisionPrompt(context.Context, PromptRequest, PromptBinding) (PromptResult, error)
 }
 
 // Service owns domain transitions. Nil verifier and delivery ports are the
@@ -274,6 +304,7 @@ type mapRecord struct {
 	Questions     []Question        `json:"questions"`
 	SourceLinks   map[string]string `json:"source_links,omitempty"`
 	SourceIssue   *SourceIssueRef   `json:"source_issue,omitempty"`
+	PromptBinding *PromptBinding    `json:"prompt_binding,omitempty"`
 	PromptID      string            `json:"prompt_id"`
 	ReservationID string            `json:"reservation_id"`
 	ReleaseID     string            `json:"release_id"`
@@ -313,17 +344,21 @@ type answerRecord struct {
 }
 
 type promptRecord struct {
-	SchemaVersion int               `json:"schema_version"`
-	CityRef       string            `json:"city_ref"`
-	StoreRef      string            `json:"store_ref"`
-	ID            string            `json:"id"`
-	WorkID        string            `json:"work_id"`
-	WorkRevision  string            `json:"work_revision"`
-	WorkDigest    string            `json:"work_digest"`
-	MapID         string            `json:"map_id"`
-	TicketIDs     []string          `json:"ticket_ids"`
-	SourceLinks   map[string]string `json:"source_links,omitempty"`
-	SourceIssue   *SourceIssueRef   `json:"source_issue,omitempty"`
+	SchemaVersion       int                          `json:"schema_version"`
+	CityRef             string                       `json:"city_ref"`
+	StoreRef            string                       `json:"store_ref"`
+	ID                  string                       `json:"id"`
+	WorkID              string                       `json:"work_id"`
+	WorkRevision        string                       `json:"work_revision"`
+	WorkDigest          string                       `json:"work_digest"`
+	MapID               string                       `json:"map_id"`
+	PresentationVersion int                          `json:"presentation_version"`
+	MessageDigest       string                       `json:"message_digest"`
+	TicketIDs           []string                     `json:"ticket_ids"`
+	Questions           []PromptQuestionPresentation `json:"questions"`
+	SourceLinks         map[string]string            `json:"source_links,omitempty"`
+	SourceIssue         *SourceIssueRef              `json:"source_issue,omitempty"`
+	PromptBinding       *PromptBinding               `json:"prompt_binding,omitempty"`
 }
 
 type sourceHold struct {
@@ -726,6 +761,7 @@ func (s Service) Ensure(ctx context.Context, store beads.Store, scope Scope, wor
 	markerValue := canonicalHoldValue(scope, workID, expectedRevision, workDigest, mapID, proposalHash)
 	markerPresent := work.Metadata[beadmeta.DecisionFrontierHoldMetadataKey]
 	if existing, getErr := store.Get(mapID); getErr == nil {
+		legacyUnboundPrompt := false
 		var existingDoc mapRecord
 		if existing.Metadata[beadmeta.DecisionFrontierRecordMetadataKey] != mapRecordKind ||
 			json.Unmarshal([]byte(existing.Description), &existingDoc) != nil ||
@@ -735,6 +771,21 @@ func (s Service) Ensure(ctx context.Context, store beads.Store, scope Scope, wor
 			existingDoc.ReservationID != reservationReceiptID(scope, mapID) || existingDoc.ReleaseID != releaseReceiptID(scope, mapID) ||
 			existingDoc.PromptID != frontierPromptID(scope, mapID) {
 			return Frontier{}, ErrConflict
+		}
+		if existingDoc.PromptBinding != nil && !validPromptBinding(*existingDoc.PromptBinding, existingDoc.PromptID) {
+			return Frontier{}, ErrConflict
+		}
+		if s.Delivery != nil && existingDoc.PromptBinding == nil {
+			return Frontier{}, fmt.Errorf("%w: persisted decision map has no prompt execution binding", ErrConflict)
+		}
+		if _, promptErr := store.Get(existingDoc.PromptID); promptErr == nil {
+			promptDoc, err := readPromptRecord(store, existingDoc)
+			if err != nil {
+				return Frontier{}, err
+			}
+			legacyUnboundPrompt = promptDoc.PresentationVersion == 0 && existingDoc.PromptBinding == nil
+		} else if !errors.Is(promptErr, beads.ErrNotFound) {
+			return Frontier{}, fmt.Errorf("check existing decision prompt %s: %w", existingDoc.PromptID, promptErr)
 		}
 		_, persistedHash, hashErr := normalizeProposal(Proposal{
 			Questions: existingDoc.Questions, SourceLinks: existingDoc.SourceLinks, SourceIssue: existingDoc.SourceIssue,
@@ -754,8 +805,10 @@ func (s Service) Ensure(ctx context.Context, store beads.Store, scope Scope, wor
 			if err := validatePendingReservation(work, scope, workID, expectedRevision, existingDoc.WorkDigest, mapID, existingDoc.ProposalHash, markerValue, receiptReader); err != nil {
 				return Frontier{}, err
 			}
-			if err := ensureFrontierRecords(recordWriter, store, existingDoc); err != nil {
-				return Frontier{}, err
+			if !legacyUnboundPrompt {
+				if err := ensureFrontierRecords(recordWriter, store, existingDoc); err != nil {
+					return Frontier{}, err
+				}
 			}
 		}
 		frontier, loadErr := loadFrontier(store, scope, mapID)
@@ -773,20 +826,18 @@ func (s Service) Ensure(ctx context.Context, store beads.Store, scope Scope, wor
 		if err := validateFrontierSource(work, frontier, markerValue, receiptReader); err != nil {
 			return Frontier{}, err
 		}
-		if frontier.State == StateResolved && markerPresent != "" {
-			if err := releaseSource(transitionWriter, sourceReader, receiptReader, scope, workID, expectedRevision, workDigest, mapID, markerValue); err != nil {
-				return Frontier{}, err
-			}
-		}
-		if s.Delivery != nil {
-			promptDoc := promptRecord{
-				SchemaVersion: frontierSchemaVersion, CityRef: scope.CityRef, StoreRef: scope.StoreRef, ID: existingDoc.PromptID,
-				WorkID: workID, WorkRevision: expectedRevision, WorkDigest: existingDoc.WorkDigest,
-				MapID: mapID, TicketIDs: ticketIDsFor(scope, mapID, existingDoc.Questions),
-				SourceLinks: cloneStringMap(existingDoc.SourceLinks), SourceIssue: cloneSourceIssueRef(existingDoc.SourceIssue),
+		if s.Delivery != nil && frontier.State != StateResolved {
+			promptDoc, err := readPromptRecord(store, existingDoc)
+			if err != nil {
+				return frontier, err
 			}
 			if err := s.advancePromptDelivery(ctx, store, promptDoc); err != nil {
 				return frontier, err
+			}
+		}
+		if frontier.State == StateResolved && markerPresent != "" {
+			if err := releaseSource(transitionWriter, sourceReader, receiptReader, scope, workID, expectedRevision, workDigest, mapID, markerValue); err != nil {
+				return Frontier{}, err
 			}
 		}
 		frontier, loadErr = loadFrontier(store, scope, mapID)
@@ -810,6 +861,29 @@ func (s Service) Ensure(ctx context.Context, store beads.Store, scope Scope, wor
 		}
 	}
 	promptID := frontierPromptID(scope, mapID)
+	reservationID := reservationReceiptID(scope, mapID)
+	releaseID := releaseReceiptID(scope, mapID)
+	mapDoc := mapRecord{
+		SchemaVersion: frontierSchemaVersion, CityRef: scope.CityRef, StoreRef: scope.StoreRef, WorkID: workID,
+		WorkRevision: expectedRevision, WorkDigest: workDigest, MapID: mapID,
+		ProposalHash: proposalHash, Questions: questions, SourceLinks: cloneStringMap(proposal.SourceLinks),
+		SourceIssue: cloneSourceIssueRef(proposal.SourceIssue), PromptID: promptID,
+		ReservationID: reservationID, ReleaseID: releaseID,
+	}
+	if s.Delivery != nil {
+		request, err := promptRequestForMap(mapDoc)
+		if err != nil {
+			return Frontier{}, err
+		}
+		binding, err := s.Delivery.ResolveDecisionPrompt(ctx, request)
+		if err != nil {
+			return Frontier{}, errors.Join(ErrPromptDeliveryUnavailable, err)
+		}
+		if !validPromptBinding(binding, request.ID) {
+			return Frontier{}, fmt.Errorf("%w: prompt execution resolver returned a malformed or mismatched binding", ErrConflict)
+		}
+		mapDoc.PromptBinding = &binding
+	}
 	if markerPresent == "" {
 		if _, err := reserveSource(transitionWriter, sourceReader, receiptReader, scope, work, expectedRevision, workDigest, mapID, markerValue); err != nil {
 			return Frontier{}, err
@@ -822,22 +896,24 @@ func (s Service) Ensure(ctx context.Context, store beads.Store, scope Scope, wor
 	if err := validatePendingReservation(work, scope, workID, expectedRevision, workDigest, mapID, proposalHash, markerValue, receiptReader); err != nil {
 		return Frontier{}, err
 	}
-	reservationID := reservationReceiptID(scope, mapID)
-	releaseID := releaseReceiptID(scope, mapID)
-	mapDoc := mapRecord{
-		SchemaVersion: frontierSchemaVersion, CityRef: scope.CityRef, StoreRef: scope.StoreRef, WorkID: workID,
-		WorkRevision: expectedRevision, WorkDigest: workDigest, MapID: mapID,
-		ProposalHash: proposalHash, Questions: questions, SourceLinks: cloneStringMap(proposal.SourceLinks),
-		SourceIssue: cloneSourceIssueRef(proposal.SourceIssue), PromptID: promptID,
-		ReservationID: reservationID, ReleaseID: releaseID,
-	}
-	promptDoc := promptRecord{
-		SchemaVersion: frontierSchemaVersion, CityRef: scope.CityRef, StoreRef: scope.StoreRef, ID: promptID, WorkID: workID,
-		WorkRevision: expectedRevision, WorkDigest: workDigest, MapID: mapID, TicketIDs: ticketIDsFor(scope, mapID, questions),
-		SourceLinks: cloneStringMap(proposal.SourceLinks), SourceIssue: cloneSourceIssueRef(proposal.SourceIssue),
-	}
 	if err := ensureFrontierRecords(recordWriter, store, mapDoc); err != nil {
-		return Frontier{}, err
+		winnerBead, winnerErr := store.Get(mapID)
+		if winnerErr != nil {
+			return Frontier{}, err
+		}
+		var winner mapRecord
+		if json.Unmarshal([]byte(winnerBead.Description), &winner) != nil ||
+			winnerBead.Metadata[beadmeta.DecisionFrontierRecordMetadataKey] != mapRecordKind ||
+			!sameMapRecordExceptBinding(mapDoc, winner) ||
+			promptBindingsEqual(mapDoc.PromptBinding, winner.PromptBinding) ||
+			winner.PromptBinding != nil && !validPromptBinding(*winner.PromptBinding, winner.PromptID) ||
+			s.Delivery != nil && winner.PromptBinding == nil {
+			return Frontier{}, err
+		}
+		mapDoc = winner
+		if err := ensureFrontierRecords(recordWriter, store, mapDoc); err != nil {
+			return Frontier{}, err
+		}
 	}
 	frontier, err := loadFrontier(store, scope, mapID)
 	if err != nil {
@@ -848,7 +924,11 @@ func (s Service) Ensure(ctx context.Context, store beads.Store, scope Scope, wor
 			return Frontier{}, err
 		}
 	}
-	if s.Delivery != nil {
+	if s.Delivery != nil && frontier.State != StateResolved {
+		promptDoc, err := readPromptRecord(store, mapDoc)
+		if err != nil {
+			return frontier, err
+		}
 		if err := s.advancePromptDelivery(ctx, store, promptDoc); err != nil {
 			return frontier, err
 		}
@@ -1231,6 +1311,177 @@ func ensureImmutableRecord(writer beads.DecisionFrontierRecordWriter, store bead
 	return nil
 }
 
+func validPromptBinding(binding PromptBinding, requestID string) bool {
+	return strings.TrimSpace(binding.SessionID) != "" && strings.TrimSpace(binding.SessionID) == binding.SessionID &&
+		binding.ExecutionGeneration > 0 && requestID != "" && binding.RequestID == requestID
+}
+
+func promptRequestForMap(mapDoc mapRecord) (PromptRequest, error) {
+	scope := Scope{CityRef: mapDoc.CityRef, StoreRef: mapDoc.StoreRef}
+	ticketIDs := ticketIDsFor(scope, mapDoc.MapID, mapDoc.Questions)
+	questions := make([]PromptQuestionPresentation, 0, len(mapDoc.Questions))
+	for i, question := range mapDoc.Questions {
+		version, err := questionVersion(question)
+		if err != nil {
+			return PromptRequest{}, err
+		}
+		questions = append(questions, PromptQuestionPresentation{
+			ID: question.ID, TicketID: ticketIDs[i], Version: version, Title: question.Title, Prompt: question.Prompt,
+			Recommendations: append([]string(nil), question.Recommendations...), DependsOn: append([]string(nil), question.DependsOn...),
+			SourceLinks: append([]string(nil), question.SourceLinks...), SourceIssue: cloneSourceIssueRef(mapDoc.SourceIssue),
+		})
+	}
+	request := PromptRequest{
+		CityRef: mapDoc.CityRef, StoreRef: mapDoc.StoreRef, ID: mapDoc.PromptID, WorkID: mapDoc.WorkID,
+		WorkRevision: mapDoc.WorkRevision, WorkDigest: mapDoc.WorkDigest, MapID: mapDoc.MapID,
+		PresentationVersion: promptPresentationVersion, TicketIDs: ticketIDs, Questions: questions,
+		SourceLinks: cloneStringMap(mapDoc.SourceLinks), SourceIssue: cloneSourceIssueRef(mapDoc.SourceIssue),
+	}
+	request.MessageDigest = promptMessageDigest(request)
+	return request, nil
+}
+
+func promptMessageDigest(request PromptRequest) string {
+	body, _ := json.Marshal(struct {
+		CityRef             string                       `json:"city_ref"`
+		StoreRef            string                       `json:"store_ref"`
+		ID                  string                       `json:"id"`
+		WorkID              string                       `json:"work_id"`
+		WorkRevision        string                       `json:"work_revision"`
+		MapID               string                       `json:"map_id"`
+		PresentationVersion int                          `json:"presentation_version"`
+		WorkDigest          string                       `json:"work_digest"`
+		TicketIDs           []string                     `json:"ticket_ids"`
+		Questions           []PromptQuestionPresentation `json:"questions"`
+		SourceLinks         map[string]string            `json:"source_links,omitempty"`
+		SourceIssue         *SourceIssueRef              `json:"source_issue,omitempty"`
+	}{
+		CityRef: request.CityRef, StoreRef: request.StoreRef, ID: request.ID, WorkID: request.WorkID,
+		WorkRevision: request.WorkRevision, MapID: request.MapID, PresentationVersion: request.PresentationVersion,
+		WorkDigest: request.WorkDigest, TicketIDs: request.TicketIDs, Questions: request.Questions,
+		SourceLinks: request.SourceLinks, SourceIssue: request.SourceIssue,
+	})
+	return digest(body)
+}
+
+func promptRecordForMap(mapDoc mapRecord) (promptRecord, error) {
+	request, err := promptRequestForMap(mapDoc)
+	if err != nil {
+		return promptRecord{}, err
+	}
+	return promptRecord{
+		SchemaVersion: frontierSchemaVersion, CityRef: mapDoc.CityRef, StoreRef: mapDoc.StoreRef,
+		ID: request.ID, WorkID: request.WorkID, WorkRevision: request.WorkRevision, WorkDigest: request.WorkDigest,
+		MapID: request.MapID, PresentationVersion: request.PresentationVersion, MessageDigest: request.MessageDigest,
+		TicketIDs: append([]string(nil), request.TicketIDs...), Questions: clonePromptQuestions(request.Questions),
+		SourceLinks: cloneStringMap(request.SourceLinks), SourceIssue: cloneSourceIssueRef(request.SourceIssue),
+		PromptBinding: clonePromptBinding(mapDoc.PromptBinding),
+	}, nil
+}
+
+func clonePromptBinding(binding *PromptBinding) *PromptBinding {
+	if binding == nil {
+		return nil
+	}
+	copy := *binding
+	return &copy
+}
+
+func clonePromptQuestions(questions []PromptQuestionPresentation) []PromptQuestionPresentation {
+	if questions == nil {
+		return nil
+	}
+	copy := make([]PromptQuestionPresentation, len(questions))
+	for i, question := range questions {
+		copy[i] = question
+		copy[i].Recommendations = append([]string(nil), question.Recommendations...)
+		copy[i].DependsOn = append([]string(nil), question.DependsOn...)
+		copy[i].SourceLinks = append([]string(nil), question.SourceLinks...)
+		copy[i].SourceIssue = cloneSourceIssueRef(question.SourceIssue)
+	}
+	return copy
+}
+
+func clonePromptRequest(request PromptRequest) PromptRequest {
+	request.TicketIDs = append([]string(nil), request.TicketIDs...)
+	request.Questions = clonePromptQuestions(request.Questions)
+	request.SourceLinks = cloneStringMap(request.SourceLinks)
+	request.SourceIssue = cloneSourceIssueRef(request.SourceIssue)
+	return request
+}
+
+func promptRequestFromRecord(doc promptRecord) (PromptRequest, error) {
+	request := PromptRequest{
+		CityRef: doc.CityRef, StoreRef: doc.StoreRef, ID: doc.ID, WorkID: doc.WorkID,
+		WorkRevision: doc.WorkRevision, WorkDigest: doc.WorkDigest, MapID: doc.MapID,
+		PresentationVersion: doc.PresentationVersion, MessageDigest: doc.MessageDigest,
+		TicketIDs: append([]string(nil), doc.TicketIDs...), Questions: clonePromptQuestions(doc.Questions),
+		SourceLinks: cloneStringMap(doc.SourceLinks), SourceIssue: cloneSourceIssueRef(doc.SourceIssue),
+	}
+	if request.PresentationVersion != promptPresentationVersion || request.MessageDigest == "" || request.MessageDigest != promptMessageDigest(request) {
+		return PromptRequest{}, ErrConflict
+	}
+	return request, nil
+}
+
+func promptRecordsEqual(left, right promptRecord) bool {
+	leftJSON, leftErr := json.Marshal(left)
+	rightJSON, rightErr := json.Marshal(right)
+	return leftErr == nil && rightErr == nil && slices.Equal(leftJSON, rightJSON)
+}
+
+func promptBindingsEqual(left, right *PromptBinding) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
+}
+
+func sameMapRecordExceptBinding(left, right mapRecord) bool {
+	left.PromptBinding = nil
+	right.PromptBinding = nil
+	leftJSON, leftErr := json.Marshal(left)
+	rightJSON, rightErr := json.Marshal(right)
+	return leftErr == nil && rightErr == nil && slices.Equal(leftJSON, rightJSON)
+}
+
+func readPromptRecord(store beads.Store, mapDoc mapRecord) (promptRecord, error) {
+	expected, err := promptRecordForMap(mapDoc)
+	if err != nil {
+		return promptRecord{}, err
+	}
+	bead, err := store.Get(mapDoc.PromptID)
+	if err != nil {
+		return promptRecord{}, fmt.Errorf("read decision prompt intent: %w", err)
+	}
+	if !validRecordMetadata(bead, promptRecordKind, "unconfigured", true) || bead.Title != "Decision prompt intent for "+mapDoc.WorkID {
+		return promptRecord{}, ErrConflict
+	}
+	var got promptRecord
+	if err := json.Unmarshal([]byte(bead.Description), &got); err != nil {
+		return promptRecord{}, ErrConflict
+	}
+	if !promptRecordsEqual(got, expected) && !legacyUnboundPromptMatches(got, mapDoc) {
+		return promptRecord{}, ErrConflict
+	}
+	if got.PromptBinding != nil && !validPromptBinding(*got.PromptBinding, got.ID) {
+		return promptRecord{}, ErrConflict
+	}
+	return got, nil
+}
+
+func legacyUnboundPromptMatches(got promptRecord, mapDoc mapRecord) bool {
+	if mapDoc.PromptBinding != nil || got.PromptBinding != nil || got.PresentationVersion != 0 || got.MessageDigest != "" || len(got.Questions) != 0 {
+		return false
+	}
+	scope := Scope{CityRef: mapDoc.CityRef, StoreRef: mapDoc.StoreRef}
+	return got.SchemaVersion == frontierSchemaVersion && got.CityRef == mapDoc.CityRef && got.StoreRef == mapDoc.StoreRef &&
+		got.ID == mapDoc.PromptID && got.WorkID == mapDoc.WorkID && got.WorkRevision == mapDoc.WorkRevision &&
+		got.WorkDigest == mapDoc.WorkDigest && got.MapID == mapDoc.MapID &&
+		slices.Equal(got.TicketIDs, ticketIDsFor(scope, mapDoc.MapID, mapDoc.Questions)) &&
+		maps.Equal(got.SourceLinks, mapDoc.SourceLinks) && sourceIssueRefsEqual(got.SourceIssue, mapDoc.SourceIssue)
+}
+
 // ensureFrontierRecords converges every immutable row and dependency from the
 // exact persisted map document. It only creates absent rows; a conflicting
 // existing row or dependency aborts without being overwritten.
@@ -1242,7 +1493,8 @@ func ensureFrontierRecords(writer beads.DecisionFrontierRecordWriter, store bead
 	if err != nil || proposalHash != mapDoc.ProposalHash || mapDoc.SchemaVersion != frontierSchemaVersion ||
 		mapDoc.MapID != frontierMapID(scope, mapDoc.WorkID, mapDoc.WorkRevision) ||
 		mapDoc.PromptID != frontierPromptID(scope, mapDoc.MapID) || mapDoc.ReservationID != reservationReceiptID(scope, mapDoc.MapID) ||
-		mapDoc.ReleaseID != releaseReceiptID(scope, mapDoc.MapID) {
+		mapDoc.ReleaseID != releaseReceiptID(scope, mapDoc.MapID) ||
+		mapDoc.PromptBinding != nil && !validPromptBinding(*mapDoc.PromptBinding, mapDoc.PromptID) {
 		return ErrConflict
 	}
 	if err := ensureImmutableRecord(writer, store, mapDoc.MapID, "Decision map for "+mapDoc.WorkID,
@@ -1265,11 +1517,9 @@ func ensureFrontierRecords(writer beads.DecisionFrontierRecordWriter, store bead
 			return err
 		}
 	}
-	prompt := promptRecord{
-		SchemaVersion: frontierSchemaVersion, CityRef: mapDoc.CityRef, StoreRef: mapDoc.StoreRef,
-		ID: mapDoc.PromptID, WorkID: mapDoc.WorkID, WorkRevision: mapDoc.WorkRevision, WorkDigest: mapDoc.WorkDigest,
-		MapID: mapDoc.MapID, TicketIDs: append([]string(nil), ticketIDs...), SourceLinks: cloneStringMap(mapDoc.SourceLinks),
-		SourceIssue: cloneSourceIssueRef(mapDoc.SourceIssue),
+	prompt, err := promptRecordForMap(mapDoc)
+	if err != nil {
+		return err
 	}
 	if err := ensureImmutableRecord(writer, store, mapDoc.PromptID, "Decision prompt intent for "+mapDoc.WorkID,
 		promptRecordKind, "unconfigured", prompt); err != nil {
@@ -1536,15 +1786,7 @@ func loadFrontier(store beads.Store, scope Scope, mapID string) (Frontier, error
 	}
 	prompt, err := store.Get(doc.PromptID)
 	if err == nil {
-		if !validRecordMetadata(prompt, promptRecordKind, "unconfigured", true) || prompt.Title != "Decision prompt intent for "+doc.WorkID {
-			return Frontier{}, ErrConflict
-		}
-		var promptDoc promptRecord
-		if err := json.Unmarshal([]byte(prompt.Description), &promptDoc); err != nil || promptDoc.SchemaVersion != frontierSchemaVersion ||
-			promptDoc.CityRef != doc.CityRef || promptDoc.StoreRef != doc.StoreRef || promptDoc.ID != doc.PromptID || promptDoc.WorkID != doc.WorkID ||
-			promptDoc.WorkRevision != doc.WorkRevision || promptDoc.WorkDigest != doc.WorkDigest || promptDoc.MapID != mapID ||
-			!slices.Equal(promptDoc.TicketIDs, ticketIDsFor(scope, mapID, doc.Questions)) ||
-			!maps.Equal(promptDoc.SourceLinks, doc.SourceLinks) || !sourceIssueRefsEqual(promptDoc.SourceIssue, doc.SourceIssue) {
+		if _, err := readPromptRecord(store, doc); err != nil {
 			return Frontier{}, ErrConflict
 		}
 		frontier.Prompt.Status = prompt.Metadata[beadmeta.DecisionFrontierStateMetadataKey]
@@ -1588,6 +1830,13 @@ func (s Service) advancePromptDelivery(ctx context.Context, store beads.Store, d
 	if s.Delivery == nil {
 		return nil
 	}
+	if doc.PromptBinding == nil || !validPromptBinding(*doc.PromptBinding, doc.ID) {
+		return fmt.Errorf("%w: persisted prompt has no valid execution binding", ErrConflict)
+	}
+	request, err := promptRequestFromRecord(doc)
+	if err != nil {
+		return err
+	}
 	bead, err := store.Get(doc.ID)
 	if err != nil {
 		return err
@@ -1603,13 +1852,8 @@ func (s Service) advancePromptDelivery(ctx context.Context, store beads.Store, d
 		}
 		state = "pending"
 	}
-	request := PromptRequest{
-		CityRef: doc.CityRef, StoreRef: doc.StoreRef, ID: doc.ID, WorkID: doc.WorkID, WorkRevision: doc.WorkRevision, MapID: doc.MapID,
-		TicketIDs: append([]string(nil), doc.TicketIDs...), SourceLinks: cloneStringMap(doc.SourceLinks),
-		SourceIssue: cloneSourceIssueRef(doc.SourceIssue),
-	}
 	if state == "submitting" || state == "unknown" {
-		result, reconcileErr := s.Delivery.ReconcileDecisionPrompt(ctx, doc.ID)
+		result, reconcileErr := s.Delivery.ReconcileDecisionPrompt(ctx, request, *doc.PromptBinding)
 		if reconcileErr != nil {
 			if err := setPromptState(store, doc.ID, state, "unknown", reconcileErr.Error()); err != nil {
 				return err
@@ -1617,7 +1861,7 @@ func (s Service) advancePromptDelivery(ctx context.Context, store beads.Store, d
 			return errors.Join(ErrPromptDeliveryUnavailable, reconcileErr)
 		}
 		switch {
-		case result.DefinitivelyAbsent:
+		case result.DefinitivelyAbsent && (result.Status == "" || result.Status == "absent"):
 			won, err := conditionalCAS(store, doc.ID, state, "pending")
 			if err != nil || !won {
 				return err
@@ -1638,7 +1882,7 @@ func (s Service) advancePromptDelivery(ctx context.Context, store beads.Store, d
 		if err != nil || !won {
 			return err
 		}
-		result, deliverErr := s.Delivery.DeliverDecisionPrompt(ctx, request)
+		result, deliverErr := s.Delivery.DeliverDecisionPrompt(ctx, request, *doc.PromptBinding)
 		if deliverErr != nil {
 			if err := setPromptState(store, doc.ID, "submitting", "unknown", deliverErr.Error()); err != nil {
 				return err

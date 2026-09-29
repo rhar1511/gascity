@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 
@@ -1131,7 +1133,7 @@ func TestPromptDeliveryReconcilesUnknownBeforeRetryingEffect(t *testing.T) {
 		t.Fatal(err)
 	}
 	revision, _ := WorkRevision(work)
-	delivery := &promptDeliveryFake{deliverErr: fmt.Errorf("connection dropped"), reconcile: PromptResult{Status: "absent", DefinitivelyAbsent: true}}
+	delivery := &promptDeliveryFake{binding: PromptBinding{SessionID: "session-selected", ExecutionGeneration: 7}, deliverErr: fmt.Errorf("connection dropped"), reconcile: PromptResult{Status: "absent", DefinitivelyAbsent: true}}
 	service := Service{Delivery: delivery}
 	proposal := Proposal{Questions: []Question{{ID: "q", Title: "Question", Prompt: "Choose."}}}
 	if _, err := service.Ensure(context.Background(), store, testCityScope(), work.ID, revision, proposal); err == nil {
@@ -1147,8 +1149,384 @@ func TestPromptDeliveryReconcilesUnknownBeforeRetryingEffect(t *testing.T) {
 	if delivery.reconciliations != 1 || delivery.deliveries != 2 {
 		t.Fatalf("delivery sequence = %d sends, %d reconciliations; want reconcile before one retry", delivery.deliveries, delivery.reconciliations)
 	}
+	if delivery.resolutions != 1 {
+		t.Fatalf("binding resolutions = %d, want one across duplicate Ensure", delivery.resolutions)
+	}
+	if delivery.deliveredBinding != delivery.reconciledBinding || delivery.deliveredRequest.ID == "" || delivery.deliveredBinding.RequestID != delivery.deliveredRequest.ID {
+		t.Fatalf("retry changed exact prompt binding: delivered=%+v reconciled=%+v request=%+v", delivery.deliveredBinding, delivery.reconciledBinding, delivery.deliveredRequest)
+	}
+	if !promptRequestsEqual(delivery.deliveredRequest, delivery.reconciledRequest) {
+		t.Fatalf("retry changed prompt payload:\n delivered=%+v\n reconciled=%+v", delivery.deliveredRequest, delivery.reconciledRequest)
+	}
 	if frontier.Prompt.Status != "accepted" {
 		t.Fatalf("prompt status = %q, want accepted", frontier.Prompt.Status)
+	}
+}
+
+func TestPromptBindingAndPresentationSurviveRestartAndReplay(t *testing.T) {
+	dir := t.TempDir()
+	opened, err := beads.OpenSQLiteStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := opened.(*beads.SQLiteStore)
+	var activeStore beads.Store = store
+	work, err := store.Create(beads.Bead{Type: "task", Title: "Choose a deployment", Description: "Revisioned source"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if work.Revision == 0 {
+		description := "source revision established"
+		if err := store.Update(work.ID, beads.UpdateOpts{Description: &description}); err != nil {
+			t.Fatal(err)
+		}
+		work, err = store.Get(work.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	revision, err := WorkRevision(work)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issue := &SourceIssueRef{TrackerKind: "github", Repository: "github.com/example/gascity", IssueID: "17", CanonicalURL: "https://github.com/example/gascity/issues/17"}
+	proposal := Proposal{
+		Questions: []Question{
+			{ID: "scope", Title: "Pilot scope", Prompt: "Choose the pilot scope.", Recommendations: []string{"one rig"}, SourceLinks: []string{"https://example.test/notes"}},
+			{ID: "rollout", Title: "Rollout", Prompt: "Choose the rollout after scope.", DependsOn: []string{"scope"}},
+		},
+		SourceLinks: map[string]string{"design": "https://example.test/design"}, SourceIssue: issue,
+	}
+	scope := testCityScope()
+	mapID := frontierMapID(scope, work.ID, revision)
+	promptID := frontierPromptID(scope, mapID)
+	delivery := &promptDeliveryFake{
+		binding:    PromptBinding{SessionID: "session-a", ExecutionGeneration: 4},
+		deliverErr: fmt.Errorf("connection dropped after submit"),
+		reconcile:  PromptResult{Status: "delivered"},
+		beforeDelivery: func(request PromptRequest, _ PromptBinding) error {
+			for _, id := range []string{mapID, promptID, frontierQuestionID(scope, mapID, "scope"), frontierQuestionID(scope, mapID, "rollout")} {
+				if _, err := activeStore.Get(id); err != nil {
+					return fmt.Errorf("record %s missing before delivery: %w", id, err)
+				}
+			}
+			held, err := activeStore.Get(work.ID)
+			if err != nil || held.Metadata[beadmeta.DecisionFrontierHoldMetadataKey] == "" {
+				return fmt.Errorf("source hold missing before delivery: bead=%+v err=%v", held, err)
+			}
+			if request.WorkDigest == "" || len(request.Questions) != 2 {
+				return fmt.Errorf("delivery request is incomplete: %+v", request)
+			}
+			return nil
+		},
+	}
+	service := Service{Delivery: delivery}
+	if _, err := service.Ensure(context.Background(), store, scope, work.ID, revision, proposal); !errors.Is(err, ErrPromptDeliveryUnavailable) {
+		t.Fatalf("first uncertain delivery error = %v, want ErrPromptDeliveryUnavailable", err)
+	}
+	if delivery.resolutions != 1 {
+		t.Fatalf("binding resolver calls = %d, want 1", delivery.resolutions)
+	}
+	if delivery.deliveredBinding.RequestID != promptID {
+		t.Fatalf("resolved tracked request ID = %q, want %q", delivery.deliveredBinding.RequestID, promptID)
+	}
+
+	mapBead, err := store.Get(mapID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persistedMap mapRecord
+	if err := json.Unmarshal([]byte(mapBead.Description), &persistedMap); err != nil {
+		t.Fatal(err)
+	}
+	if persistedMap.PromptBinding == nil || *persistedMap.PromptBinding != delivery.deliveredBinding {
+		t.Fatalf("map binding = %+v, want %+v", persistedMap.PromptBinding, delivery.deliveredBinding)
+	}
+	promptBead, err := store.Get(promptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persistedPrompt promptRecord
+	if err := json.Unmarshal([]byte(promptBead.Description), &persistedPrompt); err != nil {
+		t.Fatal(err)
+	}
+	if persistedPrompt.PromptBinding == nil || *persistedPrompt.PromptBinding != delivery.deliveredBinding || len(persistedPrompt.Questions) != 2 {
+		t.Fatalf("persisted prompt binding/presentation = %+v, %+v", persistedPrompt.PromptBinding, persistedPrompt.Questions)
+	}
+	wantPresentation := []PromptQuestionPresentation{
+		{ID: "scope", TicketID: frontierQuestionID(scope, mapID, "scope"), Version: persistedPrompt.Questions[0].Version,
+			Title: "Pilot scope", Prompt: "Choose the pilot scope.", Recommendations: []string{"one rig"}, SourceLinks: []string{"https://example.test/notes"}, SourceIssue: issue},
+		{ID: "rollout", TicketID: frontierQuestionID(scope, mapID, "rollout"), Version: persistedPrompt.Questions[1].Version,
+			Title: "Rollout", Prompt: "Choose the rollout after scope.", DependsOn: []string{"scope"}, SourceIssue: issue},
+	}
+	gotJSON, _ := json.Marshal(persistedPrompt.Questions)
+	wantJSON, _ := json.Marshal(wantPresentation)
+	if !slices.Equal(gotJSON, wantJSON) || persistedPrompt.WorkDigest != persistedMap.WorkDigest || !maps.Equal(persistedPrompt.SourceLinks, proposal.SourceLinks) || !sourceIssueRefsEqual(persistedPrompt.SourceIssue, issue) {
+		t.Fatalf("persisted prompt content does not match immutable selected presentation:\n got %s\nwant %s", gotJSON, wantJSON)
+	}
+	if persistedPrompt.PresentationVersion != promptPresentationVersion || persistedPrompt.MessageDigest == "" || persistedPrompt.MessageDigest != delivery.deliveredRequest.MessageDigest || delivery.deliveredRequest.MessageDigest != promptMessageDigest(delivery.deliveredRequest) {
+		t.Fatalf("prompt presentation identity = version %d digest %q; request=%+v", persistedPrompt.PresentationVersion, persistedPrompt.MessageDigest, delivery.deliveredRequest)
+	}
+	if err := store.CloseStore(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := beads.OpenSQLiteStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reopenedStore := reopened.(*beads.SQLiteStore)
+	t.Cleanup(func() { _ = reopenedStore.CloseStore() })
+	activeStore = reopenedStore
+	delivery.binding = PromptBinding{SessionID: "session-changed", ExecutionGeneration: 99}
+	delivery.deliverErr = nil
+	frontier, err := (Service{Delivery: delivery}).Ensure(context.Background(), reopenedStore, scope, work.ID, revision, proposal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if delivery.resolutions != 1 || delivery.reconciliations != 1 || delivery.reconciledBinding != delivery.deliveredBinding {
+		t.Fatalf("restart re-resolved or changed binding: resolutions=%d reconciliations=%d delivered=%+v reconciled=%+v", delivery.resolutions, delivery.reconciliations, delivery.deliveredBinding, delivery.reconciledBinding)
+	}
+	if !promptRequestsEqual(delivery.deliveredRequest, delivery.reconciledRequest) {
+		t.Fatalf("restart changed persisted prompt request:\n delivered=%+v\n reconciled=%+v", delivery.deliveredRequest, delivery.reconciledRequest)
+	}
+	if frontier.Prompt.Status != "delivered" {
+		t.Fatalf("prompt status after reconciliation = %q, want delivered", frontier.Prompt.Status)
+	}
+}
+
+func TestMalformedPromptBindingFailsBeforeProtectiveWrites(t *testing.T) {
+	for name, binding := range map[string]PromptBinding{
+		"missing session":        {ExecutionGeneration: 1},
+		"nonpositive generation": {SessionID: "session", ExecutionGeneration: 0},
+		"wrong tracked request":  {SessionID: "session", ExecutionGeneration: 1, RequestID: "another-request"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			store.HonorExplicitIDs = true
+			work, err := store.Create(beads.Bead{ID: "wrk-invalid-binding", Type: "task", Title: "Choose"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			revision, _ := WorkRevision(work)
+			delivery := &promptDeliveryFake{binding: binding}
+			if _, err := (Service{Delivery: delivery}).Ensure(context.Background(), store, testCityScope(), work.ID, revision,
+				Proposal{Questions: []Question{{ID: "q", Title: "Question", Prompt: "Choose."}}}); err == nil {
+				t.Fatal("Ensure succeeded with malformed or wrong binding")
+			}
+			rows, err := store.List(beads.ListQuery{Type: "gate", AllowScan: true, IncludeClosed: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			current, err := store.Get(work.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(rows) != 0 || current.Metadata[beadmeta.DecisionFrontierHoldMetadataKey] != "" || delivery.deliveries != 0 {
+				t.Fatalf("invalid binding caused writes/effects: records=%d hold=%q deliveries=%d", len(rows), current.Metadata[beadmeta.DecisionFrontierHoldMetadataKey], delivery.deliveries)
+			}
+		})
+	}
+}
+
+func TestConcurrentEnsureAdoptsPersistedPromptBinding(t *testing.T) {
+	store := beads.NewMemStore()
+	store.HonorExplicitIDs = true
+	work, err := store.Create(beads.Bead{ID: "wrk-concurrent-prompt-binding", Type: "task", Title: "Choose"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	revision, _ := WorkRevision(work)
+	proposal := Proposal{Questions: []Question{{ID: "q", Title: "Question", Prompt: "Choose."}}}
+	ready := make(chan struct{}, 2)
+	release := make(chan struct{})
+	deliveries := []*promptDeliveryFake{
+		{binding: PromptBinding{SessionID: "session-first", ExecutionGeneration: 1}, reconcile: PromptResult{Status: "delivered"}},
+		{binding: PromptBinding{SessionID: "session-second", ExecutionGeneration: 2}, reconcile: PromptResult{Status: "delivered"}},
+	}
+	for _, delivery := range deliveries {
+		delivery.resolvePrompt = func(_ context.Context, request PromptRequest) (PromptBinding, error) {
+			ready <- struct{}{}
+			<-release
+			binding := delivery.binding
+			binding.RequestID = request.ID
+			return binding, nil
+		}
+	}
+	type ensureResult struct {
+		index int
+		err   error
+	}
+	results := make(chan ensureResult, len(deliveries))
+	for i, delivery := range deliveries {
+		go func(index int, delivery *promptDeliveryFake) {
+			_, err := (Service{Delivery: delivery}).Ensure(context.Background(), store, testCityScope(), work.ID, revision, proposal)
+			results <- ensureResult{index: index, err: err}
+		}(i, delivery)
+	}
+	<-ready
+	<-ready
+	close(release)
+	var succeeded bool
+	for range deliveries {
+		result := <-results
+		if result.err == nil {
+			succeeded = true
+		} else if !errors.Is(result.err, ErrConflict) && !errors.Is(result.err, ErrPromptDeliveryUnavailable) {
+			t.Errorf("concurrent Ensure %d error = %v", result.index, result.err)
+		}
+	}
+	if !succeeded {
+		t.Fatal("both concurrent Ensure calls failed")
+	}
+	mapID := frontierMapID(testCityScope(), work.ID, revision)
+	mapBead, err := store.Get(mapID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persisted mapRecord
+	if err := json.Unmarshal([]byte(mapBead.Description), &persisted); err != nil {
+		t.Fatal(err)
+	}
+	if persisted.PromptBinding == nil || !validPromptBinding(*persisted.PromptBinding, frontierPromptID(testCityScope(), mapID)) {
+		t.Fatalf("persisted concurrent winner binding = %+v", persisted.PromptBinding)
+	}
+	var observed int
+	for i, delivery := range deliveries {
+		if delivery.resolutions != 1 {
+			t.Errorf("resolver %d calls = %d, want one per concurrent caller", i, delivery.resolutions)
+		}
+		if delivery.deliveries > 0 {
+			observed++
+			if delivery.deliveredBinding != *persisted.PromptBinding {
+				t.Errorf("delivery %d used losing binding %+v, persisted winner is %+v", i, delivery.deliveredBinding, *persisted.PromptBinding)
+			}
+		}
+		if delivery.reconciliations > 0 {
+			observed++
+			if delivery.reconciledBinding != *persisted.PromptBinding {
+				t.Errorf("reconciliation %d used losing binding %+v, persisted winner is %+v", i, delivery.reconciledBinding, *persisted.PromptBinding)
+			}
+		}
+	}
+	if observed == 0 {
+		t.Fatal("concurrent Ensure did not reach delivery or reconciliation")
+	}
+}
+
+func TestExistingUnboundMapAndChangedPromptBindingFailClosed(t *testing.T) {
+	t.Run("unbound map cannot be enabled later", func(t *testing.T) {
+		store := beads.NewMemStore()
+		store.HonorExplicitIDs = true
+		work, err := store.Create(beads.Bead{ID: "wrk-unbound-prompt", Type: "task", Title: "Choose"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		revision, _ := WorkRevision(work)
+		proposal := Proposal{Questions: []Question{{ID: "q", Title: "Question", Prompt: "Choose."}}}
+		first, err := (Service{}).Ensure(context.Background(), store, testCityScope(), work.ID, revision, proposal)
+		if err != nil {
+			t.Fatal(err)
+		}
+		before, err := store.List(beads.ListQuery{Type: "gate", AllowScan: true, IncludeClosed: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		delivery := &promptDeliveryFake{binding: PromptBinding{SessionID: "late-session", ExecutionGeneration: 1}}
+		if _, err := (Service{Delivery: delivery}).Ensure(context.Background(), store, testCityScope(), work.ID, revision, proposal); !errors.Is(err, ErrConflict) {
+			t.Fatalf("enabling delivery for unbound map error = %v, want ErrConflict", err)
+		}
+		after, err := store.List(beads.ListQuery{Type: "gate", AllowScan: true, IncludeClosed: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(after) != len(before) || delivery.resolutions != 0 || delivery.deliveries != 0 || delivery.reconciliations != 0 {
+			t.Fatalf("unbound delivery enablement wrote or caused effects: before=%d after=%d fake=%+v", len(before), len(after), delivery)
+		}
+		replayed, err := (Service{}).Read(context.Background(), store, testCityScope(), work.ID, revision)
+		if err != nil || replayed.MapID != first.MapID {
+			t.Fatalf("unconfigured map changed after rejected enablement: frontier=%+v err=%v", replayed, err)
+		}
+	})
+
+	t.Run("changed persisted binding fails before effects", func(t *testing.T) {
+		store := beads.NewMemStore()
+		store.HonorExplicitIDs = true
+		work, err := store.Create(beads.Bead{ID: "wrk-changed-binding", Type: "task", Title: "Choose"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		revision, _ := WorkRevision(work)
+		proposal := Proposal{Questions: []Question{{ID: "q", Title: "Question", Prompt: "Choose."}}}
+		delivery := &promptDeliveryFake{binding: PromptBinding{SessionID: "bound-session", ExecutionGeneration: 3}}
+		frontier, err := (Service{Delivery: delivery}).Ensure(context.Background(), store, testCityScope(), work.ID, revision, proposal)
+		if err != nil {
+			t.Fatal(err)
+		}
+		prompt, err := store.Get(frontier.Prompt.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var doc promptRecord
+		if err := json.Unmarshal([]byte(prompt.Description), &doc); err != nil {
+			t.Fatal(err)
+		}
+		if doc.PromptBinding == nil {
+			t.Fatal("prompt record omitted execution binding")
+		}
+		before, err := store.List(beads.ListQuery{Type: "gate", AllowScan: true, IncludeClosed: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		calls := delivery.deliveries + delivery.reconciliations
+		tampered := &sourceIssueTamperReadStore{
+			Store: store, recordID: prompt.ID,
+			mutate: func(raw string) (string, error) {
+				var stored promptRecord
+				if err := json.Unmarshal([]byte(raw), &stored); err != nil {
+					return "", err
+				}
+				stored.PromptBinding.SessionID = "changed-session"
+				body, err := json.Marshal(stored)
+				return string(body), err
+			},
+		}
+		if _, err := (Service{Delivery: delivery}).Ensure(context.Background(), tampered, testCityScope(), work.ID, revision, proposal); !errors.Is(err, ErrConflict) {
+			t.Fatalf("changed persisted binding error = %v, want ErrConflict", err)
+		}
+		after, err := store.List(beads.ListQuery{Type: "gate", AllowScan: true, IncludeClosed: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(after) != len(before) || delivery.deliveries+delivery.reconciliations != calls || delivery.resolutions != 1 {
+			t.Fatalf("changed binding caused writes/effects: before=%d after=%d fake=%+v", len(before), len(after), delivery)
+		}
+	})
+}
+
+func TestUnknownPromptReceiptDoesNotRetryDelivery(t *testing.T) {
+	store := beads.NewMemStore()
+	store.HonorExplicitIDs = true
+	work, err := store.Create(beads.Bead{ID: "wrk-unknown-receipt", Type: "task", Title: "Choose"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	revision, _ := WorkRevision(work)
+	delivery := &promptDeliveryFake{
+		binding:    PromptBinding{SessionID: "receipt-session", ExecutionGeneration: 2},
+		deliverErr: fmt.Errorf("connection dropped"),
+		reconcile:  PromptResult{Status: "unknown", DefinitivelyAbsent: true},
+	}
+	service := Service{Delivery: delivery}
+	proposal := Proposal{Questions: []Question{{ID: "q", Title: "Question", Prompt: "Choose."}}}
+	if _, err := service.Ensure(context.Background(), store, testCityScope(), work.ID, revision, proposal); !errors.Is(err, ErrPromptDeliveryUnavailable) {
+		t.Fatalf("initial ambiguous delivery error = %v", err)
+	}
+	if _, err := service.Ensure(context.Background(), store, testCityScope(), work.ID, revision, proposal); !errors.Is(err, ErrPromptDeliveryUnavailable) {
+		t.Fatalf("unknown receipt error = %v, want ErrPromptDeliveryUnavailable", err)
+	}
+	if delivery.deliveries != 1 || delivery.reconciliations != 1 {
+		t.Fatalf("unknown receipt retried external delivery: sends=%d reconciliations=%d", delivery.deliveries, delivery.reconciliations)
 	}
 }
 
@@ -1159,25 +1537,69 @@ func (f verifierFunc) VerifyDecisionAnswer(ctx context.Context, challenge Answer
 }
 
 type promptDeliveryFake struct {
-	deliveries      int
-	reconciliations int
-	deliverErr      error
-	reconcile       PromptResult
+	deliveries        int
+	reconciliations   int
+	resolutions       int
+	deliverErr        error
+	deliverResult     PromptResult
+	reconcile         PromptResult
+	binding           PromptBinding
+	deliveredRequest  PromptRequest
+	deliveredBinding  PromptBinding
+	reconciledRequest PromptRequest
+	reconciledBinding PromptBinding
+	beforeDelivery    func(PromptRequest, PromptBinding) error
+	resolvePrompt     func(context.Context, PromptRequest) (PromptBinding, error)
 }
 
-func (f *promptDeliveryFake) DeliverDecisionPrompt(context.Context, PromptRequest) (PromptResult, error) {
+func (f *promptDeliveryFake) ResolveDecisionPrompt(ctx context.Context, request PromptRequest) (PromptBinding, error) {
+	f.resolutions++
+	if f.resolvePrompt != nil {
+		return f.resolvePrompt(ctx, request)
+	}
+	binding := f.binding
+	if binding.RequestID == "" {
+		binding.RequestID = request.ID
+	}
+	return binding, nil
+}
+
+func (f *promptDeliveryFake) DeliverDecisionPrompt(_ context.Context, request PromptRequest, binding PromptBinding) (PromptResult, error) {
 	f.deliveries++
+	f.deliveredRequest = clonePromptRequest(request)
+	f.deliveredBinding = binding
+	if f.beforeDelivery != nil {
+		if err := f.beforeDelivery(request, binding); err != nil {
+			return PromptResult{}, err
+		}
+	}
 	if f.deliverErr != nil {
 		err := f.deliverErr
 		f.deliverErr = nil
 		return PromptResult{}, err
 	}
-	return PromptResult{Status: "accepted"}, nil
+	if f.deliverResult.Status == "" {
+		return PromptResult{Status: "accepted"}, nil
+	}
+	return f.deliverResult, nil
 }
 
-func (f *promptDeliveryFake) ReconcileDecisionPrompt(context.Context, string) (PromptResult, error) {
+func (f *promptDeliveryFake) ReconcileDecisionPrompt(_ context.Context, request PromptRequest, binding PromptBinding) (PromptResult, error) {
 	f.reconciliations++
+	f.reconciledRequest = clonePromptRequest(request)
+	f.reconciledBinding = binding
+	if f.beforeDelivery != nil {
+		if err := f.beforeDelivery(request, binding); err != nil {
+			return PromptResult{}, err
+		}
+	}
 	return f.reconcile, nil
+}
+
+func promptRequestsEqual(left, right PromptRequest) bool {
+	leftJSON, _ := json.Marshal(left)
+	rightJSON, _ := json.Marshal(right)
+	return slices.Equal(leftJSON, rightJSON)
 }
 
 func questionByID(t *testing.T, frontier Frontier, id string) QuestionView {

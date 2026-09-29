@@ -386,18 +386,36 @@ func (s *sourceIssueTamperReadStore) DecisionFrontierSourceReaderHandle() (beads
 	return beads.DecisionFrontierSourceReaderFor(s.Store)
 }
 
+func (s *sourceIssueTamperReadStore) StableCreateIDResolveTarget() beads.Store { return s.Store }
+
+func (s *sourceIssueTamperReadStore) ConditionalWriterHandle() (beads.ConditionalWriter, bool) {
+	return beads.ConditionalWriterFor(s.Store)
+}
+
+func (s *sourceIssueTamperReadStore) RevisionTransitionWriterHandle() (beads.RevisionTransitionWriter, bool) {
+	return beads.RevisionTransitionWriterFor(s.Store)
+}
+
+func (s *sourceIssueTamperReadStore) DecisionFrontierRecordWriterHandle() (beads.DecisionFrontierRecordWriter, bool) {
+	return beads.DecisionFrontierRecordWriterFor(s.Store)
+}
+
 func (s *sourceIssueTamperReadStore) RevisionTransitionReceiptReaderHandle() (beads.RevisionTransitionReceiptReader, bool) {
 	return beads.RevisionTransitionReceiptReaderFor(s.Store)
 }
 
-func (f *sourceIssueDeliveryFake) DeliverDecisionPrompt(_ context.Context, request PromptRequest) (PromptResult, error) {
+func (f *sourceIssueDeliveryFake) ResolveDecisionPrompt(_ context.Context, request PromptRequest) (PromptBinding, error) {
+	return PromptBinding{SessionID: "source-issue-session", ExecutionGeneration: 1, RequestID: request.ID}, nil
+}
+
+func (f *sourceIssueDeliveryFake) DeliverDecisionPrompt(_ context.Context, request PromptRequest, _ PromptBinding) (PromptResult, error) {
 	request.SourceIssue = cloneSourceIssueRef(request.SourceIssue)
 	request.SourceLinks = cloneStringMap(request.SourceLinks)
 	f.requests = append(f.requests, request)
 	return PromptResult{Status: "accepted"}, nil
 }
 
-func (f *sourceIssueDeliveryFake) ReconcileDecisionPrompt(context.Context, string) (PromptResult, error) {
+func (f *sourceIssueDeliveryFake) ReconcileDecisionPrompt(context.Context, PromptRequest, PromptBinding) (PromptResult, error) {
 	return PromptResult{DefinitivelyAbsent: true}, nil
 }
 
