@@ -105,7 +105,7 @@ func newExternalLedgerTestFixture(t *testing.T) *externalLedgerTestFixture {
 		Identities: []RegistryDispatchIdentity{
 			{
 				ScopedOrderID: "scoped-order-canary", RunID: "run-id-canary", WorkID: "work-id-canary",
-				ExecutionGeneration: "execution-generation-canary",
+				WorkKind: "formula_root", ExecutionGeneration: "execution-generation-canary",
 			},
 		},
 	}
@@ -397,6 +397,45 @@ func TestInFlightResolutionDigestIsKeyedAndRejectsDuplicateIDs(t *testing.T) {
 	result := DigestInFlightResolution(duplicate, duplicate.ExecutionGeneration, fixture.expected.ResolutionKey)
 	if result.Status != StatusUnavailable || result.IssueCode != "in_flight_identity_ambiguous" || result.SHA256 != "" {
 		t.Fatalf("duplicate identity digest = %#v, want unavailable ambiguity", result)
+	}
+	conflicting := fixture.registry
+	conflicting.Identities = append(append([]RegistryDispatchIdentity(nil), fixture.registry.Identities...), fixture.registry.Identities[0])
+	conflicting.Identities[1].WorkID = "another-work-id"
+	result = DigestInFlightResolution(conflicting, conflicting.ExecutionGeneration, fixture.expected.ResolutionKey)
+	if result.Status != StatusUnavailable || result.IssueCode != "in_flight_identity_ambiguous" || result.SHA256 != "" {
+		t.Fatalf("conflicting run identity digest = %#v, want unavailable ambiguity", result)
+	}
+}
+
+func TestInFlightResolutionDigestAcceptsExecWithoutFormulaWorkID(t *testing.T) {
+	snapshot := RegistrySnapshotInput{
+		Available: true, ExecutionGeneration: "execution-generation-exec", StartFence: 9, EndFence: 9,
+		Identities: []RegistryDispatchIdentity{{
+			ScopedOrderID: "scoped-order-exec", RunID: "run-exec", WorkKind: "exec",
+			ExecutionGeneration: "execution-generation-exec",
+		}},
+	}
+	key := bytes.Repeat([]byte{'e'}, 32)
+	got := DigestInFlightResolution(snapshot, snapshot.ExecutionGeneration, key)
+	if got.Status != StatusAvailable || len(got.SHA256) != 64 || got.IssueCode != "" {
+		t.Fatalf("exec resolution digest = %#v, want available exact scoped-order/run/generation identity", got)
+	}
+
+	for name, mutate := range map[string]func(*RegistryDispatchIdentity){
+		"invented formula work id": func(identity *RegistryDispatchIdentity) { identity.WorkID = "formula-root" },
+		"missing kind":             func(identity *RegistryDispatchIdentity) { identity.WorkKind = "" },
+		"wrong kind":               func(identity *RegistryDispatchIdentity) { identity.WorkKind = "formula_root" },
+		"stale generation":         func(identity *RegistryDispatchIdentity) { identity.ExecutionGeneration = "execution-generation-old" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			malformed := snapshot
+			malformed.Identities = append([]RegistryDispatchIdentity(nil), snapshot.Identities...)
+			mutate(&malformed.Identities[0])
+			result := DigestInFlightResolution(malformed, snapshot.ExecutionGeneration, key)
+			if result.Status != StatusUnavailable || result.SHA256 != "" {
+				t.Fatalf("malformed exec identity digest = %#v, want unavailable", result)
+			}
+		})
 	}
 }
 

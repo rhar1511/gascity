@@ -26,6 +26,24 @@ func TestControllerStateSelectorInFlightResolutionDigestUsesExactFormulaIdentity
 	}
 }
 
+func TestControllerStateSelectorInFlightResolutionDigestAcceptsExecIdentityWithoutFormulaRoot(t *testing.T) {
+	state, registry := selectorExternalLedgerTestState("execution-generation-exec", "exec", false)
+	got := state.SelectorInFlightResolutionDigest("execution-generation-exec", []byte("0123456789abcdef0123456789abcdef"))
+	if got.Status != selectorinventory.StatusAvailable || len(got.SHA256) != 64 || got.IssueCode != "" {
+		t.Fatalf("exec resolution digest = %#v, want available exact identity digest", got)
+	}
+
+	encoded, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range []string{"city.order", "run-1", registry.generation, "work-1"} {
+		if strings.Contains(string(encoded), raw) {
+			t.Fatalf("exec resolution result disclosed transient identity %q: %s", raw, encoded)
+		}
+	}
+}
+
 func TestControllerStateSelectorInFlightResolutionDistinguishesMissingWorkKinds(t *testing.T) {
 	key := []byte("0123456789abcdef0123456789abcdef")
 	tests := []struct {
@@ -34,7 +52,6 @@ func TestControllerStateSelectorInFlightResolutionDistinguishesMissingWorkKinds(
 		bindWork bool
 		wantCode string
 	}{
-		{name: "exec has no formula root", workKind: "exec", wantCode: "exec_dispatch_has_no_formula_root"},
 		{name: "formula root is unresolved", workKind: "formula_root", wantCode: "formula_root_identity_unavailable"},
 	}
 	for _, test := range tests {
@@ -73,8 +90,8 @@ func TestControllerStateJoinSelectorExternalLedgerStopsAtIdentityFailure(t *test
 	got := state.JoinSelectorExternalLedger(nil, selectorinventory.ExternalLedgerExpectation{
 		ExecutionGeneration: "execution-generation-1",
 	})
-	if got.Status != selectorinventory.StatusUnavailable || got.IssueCode != "exec_dispatch_has_no_formula_root" || got.Evidence != nil {
-		t.Fatalf("join result = %#v, want explicit exec identity failure", got)
+	if got.Status != selectorinventory.StatusUnavailable || got.IssueCode == "exec_dispatch_has_no_formula_root" || got.IssueCode == "exec_dispatch_has_unexpected_formula_root" || got.Evidence != nil {
+		t.Fatalf("join result = %#v, want exec identity accepted before ledger validation", got)
 	}
 }
 

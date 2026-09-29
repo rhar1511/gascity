@@ -95,11 +95,14 @@ func TestOrderDispatchIdentitySnapshotSortsAndMarksUnknownWork(t *testing.T) {
 
 	execLease := registry.begin("script-order", "run-exec", "exec")
 	execSnapshot := registry.SnapshotForGeneration(generation)
-	if execSnapshot.Availability.Status != qualification.StatusUnavailable || len(execSnapshot.Identities) != 1 {
-		t.Fatalf("exec work identity should be explicitly unavailable: %+v", execSnapshot)
+	if execSnapshot.Availability.Status != qualification.StatusAvailable || len(execSnapshot.Identities) != 1 {
+		t.Fatalf("exec dispatch identity should be available without a formula root: %+v", execSnapshot)
 	}
 	if execSnapshot.Identities[0].WorkIdentityAvailability.Status != qualification.StatusUnavailable || execSnapshot.Identities[0].WorkIdentityAvailability.Reason != "exec_has_no_canonical_work_identity" {
 		t.Fatalf("exec work identity availability = %+v", execSnapshot.Identities[0].WorkIdentityAvailability)
+	}
+	if execSnapshot.Identities[0].WorkKind != "exec" || execSnapshot.Identities[0].WorkID != "" || execSnapshot.Identities[0].RunID != "run-exec" {
+		t.Fatalf("exec dispatch identity = %+v, want exact run identity with no formula WorkID", execSnapshot.Identities[0])
 	}
 	execLease.complete()
 }

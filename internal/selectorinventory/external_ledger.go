@@ -87,6 +87,7 @@ type RegistryDispatchIdentity struct {
 	ScopedOrderID       string `json:"-"`
 	RunID               string `json:"-"`
 	WorkID              string `json:"-"`
+	WorkKind            string `json:"-"`
 	ExecutionGeneration string `json:"-"`
 }
 
@@ -472,7 +473,19 @@ func digestInFlightResolution(snapshot RegistrySnapshotInput, expectedGeneration
 	identities := append([]RegistryDispatchIdentity(nil), snapshot.Identities...)
 	for _, identity := range identities {
 		if !validOpaqueAtom(identity.ScopedOrderID) || !validOpaqueAtom(identity.RunID) ||
-			!validOpaqueAtom(identity.WorkID) || identity.ExecutionGeneration != expectedGeneration {
+			identity.ExecutionGeneration != expectedGeneration {
+			return "", "in_flight_identity_unavailable"
+		}
+		switch identity.WorkKind {
+		case "formula_root":
+			if !validOpaqueAtom(identity.WorkID) {
+				return "", "in_flight_identity_unavailable"
+			}
+		case "exec":
+			if identity.WorkID != "" {
+				return "", "in_flight_identity_unavailable"
+			}
+		default:
 			return "", "in_flight_identity_unavailable"
 		}
 	}
@@ -671,7 +684,7 @@ func sameStringSlice(a, b []string) bool {
 }
 
 func sameRegistryIdentity(a, b RegistryDispatchIdentity) bool {
-	return a.ScopedOrderID == b.ScopedOrderID && a.RunID == b.RunID && a.WorkID == b.WorkID
+	return a.ScopedOrderID == b.ScopedOrderID && a.RunID == b.RunID
 }
 
 type digestWriter interface {

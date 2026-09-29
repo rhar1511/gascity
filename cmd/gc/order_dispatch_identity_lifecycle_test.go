@@ -125,10 +125,11 @@ func TestLaunchResolvedDispatchReservesIdentityBeforeCreateRun(t *testing.T) {
 		t.Fatal("dispatch did not reach the tracking close barrier")
 	}
 	promoted := registry.SnapshotForGeneration("execution-blocked-create")
-	if promoted.Availability.Status != qualification.StatusUnavailable || promoted.Availability.Reason != "exact_work_identity_unavailable" {
-		t.Fatalf("snapshot after promotion = %+v, want exact run identity with unavailable exec work", promoted)
+	if promoted.Availability.Status != qualification.StatusAvailable {
+		t.Fatalf("snapshot after promotion = %+v, want available exact exec run identity", promoted)
 	}
-	if len(promoted.Identities) != 1 || promoted.Identities[0].RunID != launched.run.ID || promoted.Identities[0].ScopedOrder != order.ScopedName() {
+	if len(promoted.Identities) != 1 || promoted.Identities[0].RunID != launched.run.ID || promoted.Identities[0].ScopedOrder != order.ScopedName() ||
+		promoted.Identities[0].WorkKind != "exec" || promoted.Identities[0].WorkID != "" {
 		t.Fatalf("snapshot after promotion = %+v, want the created order run", promoted.Identities)
 	}
 

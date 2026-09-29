@@ -109,6 +109,37 @@ func safeDispatchIdentityValue(value string) bool {
 	return true
 }
 
+func selectorDispatchIdentityIssue(identity OrderDispatchIdentity, expectedExecutionGeneration string) string {
+	if !safeDispatchIdentityValue(identity.ScopedOrder) {
+		return "canonical_order_identity_unavailable"
+	}
+	if !safeDispatchIdentityValue(identity.RunID) {
+		return "canonical_run_identity_unavailable"
+	}
+	if !safeDispatchIdentityValue(expectedExecutionGeneration) || identity.ExecutionGeneration != expectedExecutionGeneration {
+		return "controller_execution_generation_mismatch"
+	}
+	switch identity.WorkKind {
+	case "formula_root":
+		if !safeDispatchIdentityValue(identity.WorkID) ||
+			identity.WorkIdentityAvailability.Status != qualification.StatusAvailable ||
+			identity.WorkIdentityAvailability.Reason != "" {
+			return "formula_root_identity_unavailable"
+		}
+	case "exec":
+		if identity.WorkID != "" {
+			return "exec_dispatch_has_unexpected_formula_root"
+		}
+		if identity.WorkIdentityAvailability.Status != qualification.StatusUnavailable ||
+			identity.WorkIdentityAvailability.Reason != "exec_has_no_canonical_work_identity" {
+			return "exec_dispatch_identity_unavailable"
+		}
+	default:
+		return "dispatch_work_kind_unavailable"
+	}
+	return ""
+}
+
 func (registry *orderDispatchIdentityRegistry) begin(scopedOrder, runID, workKind string) orderDispatchIdentityLease {
 	reservation := registry.reserve(scopedOrder)
 	return reservation.promote(runID, workKind)
@@ -369,8 +400,11 @@ func (registry *orderDispatchIdentityRegistry) snapshotForGeneration(expectedGen
 		snapshot.Availability = unavailableSelectorObservation("dispatch_identity_start_pending")
 	default:
 		for _, identity := range snapshot.Identities {
-			if identity.WorkIdentityAvailability.Status != qualification.StatusAvailable {
-				snapshot.Availability = unavailableSelectorObservation("exact_work_identity_unavailable")
+			if issue := selectorDispatchIdentityIssue(identity, generation); issue != "" {
+				if issue == "formula_root_identity_unavailable" {
+					issue = "exact_work_identity_unavailable"
+				}
+				snapshot.Availability = unavailableSelectorObservation(issue)
 				return snapshot
 			}
 		}

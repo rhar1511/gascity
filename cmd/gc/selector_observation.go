@@ -23,7 +23,7 @@ import (
 // SelectorObservationSchemaVersion identifies the read-only selector
 // observation contract. This snapshot is evidence input only: it neither
 // authorizes nor starts a trial, changes an order, or retires a selector.
-const SelectorObservationSchemaVersion = 1
+const SelectorObservationSchemaVersion = 2
 
 const (
 	selectorOrderFound     = "found"
@@ -103,33 +103,52 @@ type SelectorEventWindow struct {
 	End   SelectorEventWatermark `json:"end"`
 }
 
-// SelectorReferenceInventory holds identities supplied by an authoritative
-// collector. The controller currently has no complete identity collector for
-// in-flight selector effects, so the controller-local snapshot leaves this
-// unavailable instead of substituting a goroutine count.
+// SelectorReferenceInventory holds references supplied by an authoritative
+// external collector.
 type SelectorReferenceInventory struct {
 	Availability SelectorObservationAvailability `json:"availability"`
 	References   []string                        `json:"references"`
+}
+
+// SelectorObservedDispatch is one exact in-flight order identity joined to
+// the effective selector inventory. Exec dispatches intentionally have no
+// WorkID because they do not create formula roots.
+type SelectorObservedDispatch struct {
+	ScopedOrder         string `json:"scoped_order"`
+	RunID               string `json:"run_id"`
+	WorkKind            string `json:"work_kind"`
+	WorkID              string `json:"work_id,omitempty"`
+	ExecutionGeneration string `json:"execution_generation"`
+}
+
+// SelectorInFlightDispatchInventory records the fenced controller dispatch
+// identities joined to the requested effective selector orders.
+type SelectorInFlightDispatchInventory struct {
+	Availability        SelectorObservationAvailability `json:"availability"`
+	ExecutionGeneration string                          `json:"execution_generation,omitempty"`
+	StartFence          uint64                          `json:"start_fence"`
+	EndFence            uint64                          `json:"end_fence"`
+	Dispatches          []SelectorObservedDispatch      `json:"dispatches"`
 }
 
 // SelectorObservationSnapshot is one generation-fenced, read-only input to a
 // later selector-retirement evidence bundle. Status remains unavailable while
 // sequence completeness or required writer/reference inventories are absent.
 type SelectorObservationSnapshot struct {
-	SchemaVersion        int                             `json:"schema_version"`
-	Status               string                          `json:"status"`
-	Reasons              []string                        `json:"reasons"`
-	CanonicalSHA256      string                          `json:"canonical_sha256,omitempty"`
-	Qualification        qualification.Snapshot          `json:"qualification"`
-	ControllerBuild      qualification.BuildIdentity     `json:"controller_build"`
-	ReleaseAuthorization qualification.Authorization     `json:"release_authorization"`
-	ControllerGeneration uint64                          `json:"controller_generation"`
-	GenerationFence      SelectorObservationAvailability `json:"generation_fence"`
-	Orders               SelectorOrderInventory          `json:"orders"`
-	EventWatermarks      SelectorEventWindow             `json:"event_watermarks"`
-	InternalInFlight     SelectorReferenceInventory      `json:"internal_in_flight"`
-	ExternalWriters      SelectorReferenceInventory      `json:"external_writers"`
-	SequenceCompleteness SelectorObservationAvailability `json:"sequence_completeness"`
+	SchemaVersion        int                               `json:"schema_version"`
+	Status               string                            `json:"status"`
+	Reasons              []string                          `json:"reasons"`
+	CanonicalSHA256      string                            `json:"canonical_sha256,omitempty"`
+	Qualification        qualification.Snapshot            `json:"qualification"`
+	ControllerBuild      qualification.BuildIdentity       `json:"controller_build"`
+	ReleaseAuthorization qualification.Authorization       `json:"release_authorization"`
+	ControllerGeneration uint64                            `json:"controller_generation"`
+	GenerationFence      SelectorObservationAvailability   `json:"generation_fence"`
+	Orders               SelectorOrderInventory            `json:"orders"`
+	EventWatermarks      SelectorEventWindow               `json:"event_watermarks"`
+	InternalInFlight     SelectorInFlightDispatchInventory `json:"internal_in_flight"`
+	ExternalWriters      SelectorReferenceInventory        `json:"external_writers"`
+	SequenceCompleteness SelectorObservationAvailability   `json:"sequence_completeness"`
 }
 
 // SelectorObservationSnapshot reads an evidence snapshot without publishing a
@@ -146,9 +165,9 @@ func (cs *controllerState) selectorObservationSnapshotFS(fs fsys.FS, requestedSc
 	snapshot := SelectorObservationSnapshot{
 		SchemaVersion: SelectorObservationSchemaVersion,
 		Status:        qualification.StatusUnavailable,
-		InternalInFlight: SelectorReferenceInventory{
-			Availability: unavailableSelectorObservation("internal_in_flight_reference_collector_unavailable"),
-			References:   []string{},
+		InternalInFlight: SelectorInFlightDispatchInventory{
+			Availability: unavailableSelectorObservation("controller_identity_registry_unavailable"),
+			Dispatches:   []SelectorObservedDispatch{},
 		},
 		ExternalWriters: SelectorReferenceInventory{
 			Availability: unavailableSelectorObservation("external_writer_collector_unavailable"),
@@ -171,6 +190,7 @@ func (cs *controllerState) selectorObservationSnapshotFS(fs fsys.FS, requestedSc
 	build := cs.qualificationBuild
 	authorizer := cs.releaseAuthorizer
 	generation := cs.graphStoreGeneration
+	identityRegistry := cs.orderDispatchIdentityRegistry
 	eventProvider := cs.eventProv
 	cityPath := cs.cityPath
 	cs.mu.RUnlock()
@@ -179,9 +199,12 @@ func (cs *controllerState) selectorObservationSnapshotFS(fs fsys.FS, requestedSc
 	snapshot.Qualification = cfg.QualificationSnapshot()
 	snapshot.ControllerBuild = build
 	snapshot.ReleaseAuthorization, _ = qualification.Authorize(context.Background(), authorizer, snapshot.Qualification, build)
+	identityStart := selectorDispatchIdentitySnapshot(identityRegistry, "")
 	snapshot.EventWatermarks.Start = selectorEventWatermark(eventProvider)
 	snapshot.Orders = scanSelectorOrderInventoryFS(fs, cityPath, cfg, requestedScopedOrders)
 	snapshot.EventWatermarks.End = selectorEventWatermark(eventProvider)
+	identityEnd := selectorDispatchIdentitySnapshot(identityRegistry, identityStart.ExecutionGeneration)
+	snapshot.InternalInFlight = joinSelectorInFlightDispatches(identityStart, identityEnd, snapshot.Orders)
 
 	cs.mu.RLock()
 	sameGeneration := generation != 0 && cs.graphStoreGeneration == generation && cs.cfg == cfg
@@ -198,6 +221,87 @@ func (cs *controllerState) selectorObservationSnapshotFS(fs fsys.FS, requestedSc
 	snapshot.Reasons = selectorObservationReasons(snapshot)
 	sealSelectorObservationSnapshot(&snapshot)
 	return snapshot
+}
+
+func selectorDispatchIdentitySnapshot(registry *orderDispatchIdentityRegistry, expectedGeneration string) OrderDispatchIdentitySnapshot {
+	if registry == nil {
+		return OrderDispatchIdentitySnapshot{
+			Availability: unavailableSelectorObservation("controller_identity_registry_unavailable"),
+			Identities:   []OrderDispatchIdentity{},
+		}
+	}
+	return registry.SnapshotForGeneration(expectedGeneration)
+}
+
+func joinSelectorInFlightDispatches(before, after OrderDispatchIdentitySnapshot, orders SelectorOrderInventory) SelectorInFlightDispatchInventory {
+	unavailable := func(reason string) SelectorInFlightDispatchInventory {
+		if reason == "" {
+			reason = "in_flight_dispatch_inventory_unavailable"
+		}
+		return SelectorInFlightDispatchInventory{
+			Availability: unavailableSelectorObservation(reason),
+			Dispatches:   []SelectorObservedDispatch{},
+		}
+	}
+	if before.ExecutionGeneration == "" {
+		return unavailable("controller_execution_generation_unavailable")
+	}
+	_, availability := selectorRegistrySnapshotInput(before, before.ExecutionGeneration)
+	if availability.Status != qualification.StatusAvailable {
+		return unavailable(availability.Reason)
+	}
+	if issue := selectorDispatchSnapshotFenceChange(before, after, before.ExecutionGeneration); issue != "" {
+		return unavailable(issue)
+	}
+	if orders.Availability.Status != qualification.StatusAvailable {
+		return unavailable(reasonOrSelector(orders.Availability.Reason, "effective_order_inventory_unavailable"))
+	}
+
+	ordersByName := make(map[string]SelectorObservedOrder, len(orders.Orders))
+	for _, order := range orders.Orders {
+		if _, exists := ordersByName[order.ScopedName]; exists {
+			return unavailable("effective_order_ambiguous")
+		}
+		ordersByName[order.ScopedName] = order
+	}
+	joined := make([]SelectorObservedDispatch, 0, len(before.Identities))
+	joinedByOrder := make(map[string]struct{}, len(before.Identities))
+	for _, identity := range before.Identities {
+		order, requested := ordersByName[identity.ScopedOrder]
+		if !requested {
+			continue
+		}
+		if _, exists := joinedByOrder[identity.ScopedOrder]; exists {
+			return unavailable("in_flight_selector_dispatch_ambiguous")
+		}
+		if order.Resolution != selectorOrderFound || order.Availability.Status != qualification.StatusAvailable ||
+			order.Enabled == nil || !*order.Enabled {
+			return unavailable("in_flight_selector_order_unresolved")
+		}
+		wantDispatchKind := "formula"
+		if identity.WorkKind == "exec" {
+			wantDispatchKind = "exec"
+		}
+		if order.DispatchKind != wantDispatchKind {
+			return unavailable("in_flight_selector_dispatch_conflict")
+		}
+		joinedByOrder[identity.ScopedOrder] = struct{}{}
+		joined = append(joined, SelectorObservedDispatch{
+			ScopedOrder: identity.ScopedOrder, RunID: identity.RunID,
+			WorkKind: identity.WorkKind, WorkID: identity.WorkID,
+			ExecutionGeneration: identity.ExecutionGeneration,
+		})
+	}
+	sort.Slice(joined, func(i, j int) bool {
+		if joined[i].ScopedOrder != joined[j].ScopedOrder {
+			return joined[i].ScopedOrder < joined[j].ScopedOrder
+		}
+		return joined[i].RunID < joined[j].RunID
+	})
+	return SelectorInFlightDispatchInventory{
+		Availability: availableSelectorObservation(), ExecutionGeneration: before.ExecutionGeneration,
+		StartFence: before.StartFence, EndFence: before.EndFence, Dispatches: joined,
+	}
 }
 
 func selectorEventWatermark(provider interface{ LatestSeq() (uint64, error) }) SelectorEventWatermark {

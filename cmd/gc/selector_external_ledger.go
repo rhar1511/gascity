@@ -67,27 +67,21 @@ func selectorRegistrySnapshotInput(snapshot OrderDispatchIdentitySnapshot, expec
 	}
 
 	identities := make([]selectorinventory.RegistryDispatchIdentity, 0, len(snapshot.Identities))
+	seen := make(map[orderDispatchIdentityKey]struct{}, len(snapshot.Identities))
 	for _, identity := range snapshot.Identities {
-		if identity.ExecutionGeneration != expectedExecutionGeneration {
-			return unavailable("controller_execution_generation_mismatch")
+		if issue := selectorDispatchIdentityIssue(identity, expectedExecutionGeneration); issue != "" {
+			return unavailable(issue)
 		}
-		switch identity.WorkKind {
-		case "exec":
-			if identity.WorkID != "" {
-				return unavailable("exec_dispatch_has_unexpected_formula_root")
-			}
-			return unavailable("exec_dispatch_has_no_formula_root")
-		case "formula_root":
-			if identity.WorkIdentityAvailability.Status != qualification.StatusAvailable || identity.WorkID == "" {
-				return unavailable("formula_root_identity_unavailable")
-			}
-		default:
-			return unavailable("dispatch_work_kind_unavailable")
+		key := orderDispatchIdentityKey{scopedOrder: identity.ScopedOrder, runID: identity.RunID}
+		if _, exists := seen[key]; exists {
+			return unavailable("in_flight_identity_ambiguous")
 		}
+		seen[key] = struct{}{}
 		identities = append(identities, selectorinventory.RegistryDispatchIdentity{
 			ScopedOrderID:       identity.ScopedOrder,
 			RunID:               identity.RunID,
 			WorkID:              identity.WorkID,
+			WorkKind:            identity.WorkKind,
 			ExecutionGeneration: identity.ExecutionGeneration,
 		})
 	}
@@ -102,21 +96,11 @@ func selectorRegistrySnapshotInput(snapshot OrderDispatchIdentitySnapshot, expec
 
 func selectorDispatchWorkIdentityIssue(identities []OrderDispatchIdentity) string {
 	for _, identity := range identities {
-		switch identity.WorkKind {
-		case "exec":
-			if identity.WorkID != "" {
-				return "exec_dispatch_has_unexpected_formula_root"
-			}
-			return "exec_dispatch_has_no_formula_root"
-		case "formula_root":
-			if identity.WorkIdentityAvailability.Status != qualification.StatusAvailable || identity.WorkID == "" {
-				return "formula_root_identity_unavailable"
-			}
-		default:
-			return "dispatch_work_kind_unavailable"
+		if issue := selectorDispatchIdentityIssue(identity, identity.ExecutionGeneration); issue != "" {
+			return issue
 		}
 	}
-	return "exact_work_identity_unavailable"
+	return ""
 }
 
 func selectorDispatchSnapshotFenceChange(before, after OrderDispatchIdentitySnapshot, expectedExecutionGeneration string) string {
@@ -134,7 +118,38 @@ func selectorDispatchSnapshotFenceChange(before, after OrderDispatchIdentitySnap
 		}
 		return reason
 	}
+	if _, availability := selectorRegistrySnapshotInput(after, expectedExecutionGeneration); availability.Status != qualification.StatusAvailable {
+		return availability.Reason
+	}
+	if !sameSelectorDispatchIdentities(before.Identities, after.Identities) {
+		return "in_flight_identity_snapshot_conflict"
+	}
 	return ""
+}
+
+func sameSelectorDispatchIdentities(left, right []OrderDispatchIdentity) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	byKey := make(map[orderDispatchIdentityKey]OrderDispatchIdentity, len(left))
+	for _, identity := range left {
+		key := orderDispatchIdentityKey{scopedOrder: identity.ScopedOrder, runID: identity.RunID}
+		if _, exists := byKey[key]; exists {
+			return false
+		}
+		byKey[key] = identity
+	}
+	for _, identity := range right {
+		key := orderDispatchIdentityKey{scopedOrder: identity.ScopedOrder, runID: identity.RunID}
+		previous, exists := byKey[key]
+		if !exists || previous.WorkID != identity.WorkID || previous.WorkKind != identity.WorkKind ||
+			previous.ExecutionGeneration != identity.ExecutionGeneration ||
+			previous.WorkIdentityAvailability != identity.WorkIdentityAvailability {
+			return false
+		}
+		delete(byKey, key)
+	}
+	return len(byKey) == 0
 }
 
 func unavailableSelectorResolution(issue string) selectorinventory.ResolutionDigestResult {

@@ -104,6 +104,154 @@ func TestSelectorObservationSnapshotBindsGenerationIdentityAndExactOrderBytes(t 
 	}
 }
 
+func TestSelectorObservationSnapshotJoinsInFlightExecIdentity(t *testing.T) {
+	cityPath := t.TempDir()
+	writeSelectorObservationFile(t, filepath.Join(cityPath, "orders", "candidate.toml"), `[order]
+exec = "true"
+scope = "city"
+trigger = "manual"
+`)
+	registry := newOrderDispatchIdentityRegistryWithGeneration("execution-generation-exec")
+	lease := registry.begin("candidate", "run-exec-1", "exec")
+	if !lease.registered {
+		t.Fatal("exec dispatch identity did not register")
+	}
+	defer lease.complete()
+	state := &controllerState{
+		cfg: &config.City{}, cityPath: cityPath, graphStoreGeneration: 13,
+		qualificationBuild:            selectorObservationTestBuildIdentity(),
+		releaseAuthorizer:             selectorObservationTestAuthorizer{},
+		orderDispatchIdentityRegistry: registry,
+	}
+
+	got := state.SelectorObservationSnapshot([]string{"candidate"})
+	if got.InternalInFlight.Availability.Status != qualification.StatusAvailable {
+		t.Fatalf("in-flight dispatch inventory = %#v, want available exact exec identity", got.InternalInFlight)
+	}
+	if got.InternalInFlight.ExecutionGeneration != "execution-generation-exec" ||
+		got.InternalInFlight.StartFence != got.InternalInFlight.EndFence || len(got.InternalInFlight.Dispatches) != 1 {
+		t.Fatalf("in-flight dispatch fence/identities = %#v, want one stable exec identity", got.InternalInFlight)
+	}
+	dispatch := got.InternalInFlight.Dispatches[0]
+	if dispatch.ScopedOrder != "candidate" || dispatch.RunID != "run-exec-1" ||
+		dispatch.WorkKind != "exec" || dispatch.WorkID != "" ||
+		dispatch.ExecutionGeneration != "execution-generation-exec" {
+		t.Fatalf("in-flight exec dispatch = %#v, want exact scoped-order/run/generation without a formula WorkID", dispatch)
+	}
+	encoded, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), `"work_id"`) {
+		t.Fatalf("exec dispatch serialized a formula WorkID field: %s", encoded)
+	}
+}
+
+func TestSelectorObservationSnapshotPreservesInFlightFormulaIdentity(t *testing.T) {
+	cityPath := t.TempDir()
+	writeSelectorObservationFile(t, filepath.Join(cityPath, "orders", "candidate.toml"), `[order]
+formula = "candidate-formula"
+scope = "city"
+trigger = "manual"
+`)
+	registry := newOrderDispatchIdentityRegistryWithGeneration("execution-generation-formula")
+	lease := registry.begin("candidate", "run-formula-1", "formula_root")
+	if !lease.registered {
+		t.Fatal("formula dispatch identity did not register")
+	}
+	lease.bindWork("formula-root-1")
+	defer lease.complete()
+	state := &controllerState{
+		cfg: &config.City{}, cityPath: cityPath, graphStoreGeneration: 14,
+		qualificationBuild:            selectorObservationTestBuildIdentity(),
+		releaseAuthorizer:             selectorObservationTestAuthorizer{},
+		orderDispatchIdentityRegistry: registry,
+	}
+
+	got := state.SelectorObservationSnapshot([]string{"candidate"})
+	if got.InternalInFlight.Availability.Status != qualification.StatusAvailable || len(got.InternalInFlight.Dispatches) != 1 {
+		t.Fatalf("in-flight formula inventory = %#v, want one available formula identity", got.InternalInFlight)
+	}
+	dispatch := got.InternalInFlight.Dispatches[0]
+	if dispatch.WorkKind != "formula_root" || dispatch.WorkID != "formula-root-1" || dispatch.RunID != "run-formula-1" {
+		t.Fatalf("in-flight formula dispatch = %#v, want exact formula-root identity", dispatch)
+	}
+}
+
+func TestJoinSelectorInFlightDispatchesFailsClosedOnBadEvidence(t *testing.T) {
+	base := OrderDispatchIdentitySnapshot{
+		Availability: availableSelectorObservation(), ExecutionGeneration: "execution-generation-join",
+		StartFence: 7, EndFence: 7,
+		Identities: []OrderDispatchIdentity{{
+			ScopedOrder: "candidate", RunID: "run-1", WorkKind: "exec",
+			WorkIdentityAvailability: unavailableSelectorObservation("exec_has_no_canonical_work_identity"),
+			ExecutionGeneration:      "execution-generation-join",
+		}},
+	}
+	orders := SelectorOrderInventory{
+		Availability: availableSelectorObservation(),
+		Orders: []SelectorObservedOrder{{
+			ScopedName: "candidate", Resolution: selectorOrderFound, Availability: availableSelectorObservation(),
+			Enabled: selectorObservationBool(true), DispatchKind: "exec",
+		}},
+	}
+	malformed := selectorDispatchSnapshotWithIdentity(base, func(identity *OrderDispatchIdentity) {
+		identity.WorkKind = "unknown"
+	})
+	stale := selectorDispatchSnapshotWithIdentity(base, func(identity *OrderDispatchIdentity) {
+		identity.ExecutionGeneration = "execution-generation-old"
+	})
+	ambiguous := base
+	ambiguous.Identities = append(append([]OrderDispatchIdentity(nil), base.Identities...), OrderDispatchIdentity{
+		ScopedOrder: "candidate", RunID: "run-2", WorkKind: "exec",
+		WorkIdentityAvailability: unavailableSelectorObservation("exec_has_no_canonical_work_identity"),
+		ExecutionGeneration:      base.ExecutionGeneration,
+	})
+	conflictingOrders := SelectorOrderInventory{
+		Availability: availableSelectorObservation(),
+		Orders: []SelectorObservedOrder{{
+			ScopedName: "candidate", Resolution: selectorOrderFound, Availability: availableSelectorObservation(),
+			Enabled: selectorObservationBool(true), DispatchKind: "formula",
+		}},
+	}
+	tests := []struct {
+		name   string
+		before OrderDispatchIdentitySnapshot
+		after  OrderDispatchIdentitySnapshot
+		orders SelectorOrderInventory
+	}{
+		{name: "incomplete", before: unavailableSelectorDispatchTestSnapshot("controller_identity_registry_unavailable"), after: unavailableSelectorDispatchTestSnapshot("controller_identity_registry_unavailable"), orders: orders},
+		{name: "malformed kind", before: malformed, after: malformed, orders: orders},
+		{name: "stale generation", before: stale, after: stale, orders: orders},
+		{name: "ambiguous runs", before: ambiguous, after: ambiguous, orders: orders},
+		{name: "dispatch conflict", before: base, after: base, orders: conflictingOrders},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := joinSelectorInFlightDispatches(test.before, test.after, test.orders)
+			if got.Availability.Status != qualification.StatusUnavailable || len(got.Dispatches) != 0 {
+				t.Fatalf("joined in-flight inventory = %#v, want unavailable with no identities", got)
+			}
+		})
+	}
+}
+
+func selectorObservationBool(value bool) *bool {
+	return &value
+}
+
+func selectorDispatchSnapshotWithIdentity(snapshot OrderDispatchIdentitySnapshot, mutate func(*OrderDispatchIdentity)) OrderDispatchIdentitySnapshot {
+	snapshot.Identities = append([]OrderDispatchIdentity(nil), snapshot.Identities...)
+	mutate(&snapshot.Identities[0])
+	return snapshot
+}
+
+func unavailableSelectorDispatchTestSnapshot(reason string) OrderDispatchIdentitySnapshot {
+	return OrderDispatchIdentitySnapshot{
+		Availability: unavailableSelectorObservation(reason), Identities: []OrderDispatchIdentity{},
+	}
+}
+
 func TestSelectorObservationInventoryPreservesEveryValidationError(t *testing.T) {
 	cityPath := t.TempDir()
 	writeSelectorObservationFile(t, filepath.Join(cityPath, "orders", "missing-action.toml"), "[order]\ntrigger = \"manual\"\n")
