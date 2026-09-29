@@ -1283,6 +1283,16 @@ func startGraphPrivateEvidenceService(t *testing.T, cityEnv []string, cityDir, c
 			t.Fatalf("graph Beads service has an unexpected endpoint override %s", name)
 		}
 	}
+	// bd serve resolves its project context from Git. Give the disposable city
+	// an explicitly bounded repository instead of letting Git discover the
+	// ambient checkout (the service environment intentionally strips Git vars).
+	if output, err := runCommand(cityDir, serviceEnv, 10*time.Second, "git", "init", "--quiet", cityDir); err != nil {
+		t.Fatalf("initialize private-evidence fixture repository: %v\noutput: %s", err, output)
+	}
+	root, err := runCommand(cityDir, serviceEnv, 10*time.Second, "git", "rev-parse", "--show-toplevel")
+	if err != nil || filepath.Clean(strings.TrimSpace(root)) != filepath.Clean(cityDir) {
+		t.Fatalf("private-evidence fixture repository root = %q, want %q (err=%v)", strings.TrimSpace(root), cityDir, err)
+	}
 	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
 	serviceCtx, stopService := context.WithCancel(context.Background())
 	cmd := buildCommand(serviceCtx, cityDir, serviceEnv, realBDBinary, "serve", "--addr", addr, "--auth-token-file", tokenFile)
