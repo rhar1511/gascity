@@ -219,7 +219,8 @@
               "storage-preflight",
               "nudge-drop",
               "beads-city-migrate-proxied",
-              "factory-validate"
+              "factory-validate",
+              "controller-reconcile"
             ]
           },
           "event_id": {

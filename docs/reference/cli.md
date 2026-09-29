@@ -36,6 +36,7 @@ gc [flags]
 | [gc completion](#gc-completion) | Generate the autocompletion script for the specified shell |
 | [gc config](#gc-config) | Inspect and validate city configuration |
 | [gc context](#gc-context) | Manage named remote cities (~/.gc/contexts.toml) |
+| [gc controller](#gc-controller) | Request controller reconciliation |
 | [gc converge](#gc-converge) | Manage convergence loops (bounded iterative refinement) |
 | [gc convoy](#gc-convoy) | Manage convoys — graphs of related work |
 | [gc costs](#gc-costs) | Show per-run usage and estimated cost for this city |
@@ -930,6 +931,33 @@ with no arguments is not supported; remove the default by removing the context.
 ```
 gc context use <name>
 ```
+
+## gc controller
+
+Request controller reconciliation
+
+```
+gc controller
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc controller reconcile](#gc-controller-reconcile) | Request a tick from the running local controller |
+
+## gc controller reconcile
+
+Request a reconciliation tick using the running local controller's
+existing configuration and policy. A successful reply acknowledges the request;
+it does not establish session readiness, useful progress, or completed recovery.
+Requests may be coalesced with a pending tick.
+
+```
+gc controller reconcile [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | emit a JSON request acknowledgement |
 
 ## gc converge
 
