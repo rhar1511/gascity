@@ -342,10 +342,14 @@ func (s *PRActionService) Queue(ctx context.Context) (PRActionQueue, error) {
 				queue.Items = queue.Items[:sourceItemsStart]
 				break
 			}
+			mergeState := strings.ToUpper(strings.TrimSpace(pr.MergeStateStatus))
+			if mergeState == "" {
+				mergeState = "UNKNOWN"
+			}
 			item := PRActionQueueItem{
 				Monitor: source.Monitor, Owner: source.Owner, Repo: source.Repo, PullRequest: pr.Number,
 				Title: pr.Title, URL: pr.URL, BaseRefName: pr.BaseRefName, HeadRefName: pr.HeadRefName,
-				HeadSHA: pr.HeadSHA, BaseSHA: pr.BaseSHA, MergeState: strings.ToUpper(strings.TrimSpace(pr.MergeStateStatus)),
+				HeadSHA: pr.HeadSHA, BaseSHA: pr.BaseSHA, MergeState: mergeState,
 				IsDraft: pr.IsDraft, PolicyVersion: s.policy.Version, ObservedAt: observed,
 				FreshUntil: queue.FreshUntil, WorkRecords: []PRActionWorkRecord{}, AttemptEvidence: []PRActionAttemptReference{}, ActionReceipts: []PRActionResult{},
 				EvidenceState: PRActionEvidenceMissing, Actions: []PRActionOption{},
@@ -393,7 +397,7 @@ func (s *PRActionService) Queue(ctx context.Context) (PRActionQueue, error) {
 				item.Actions = append(item.Actions, PRActionOption{Action: PRActionPrepare, Available: true, Reason: "no durable repair work is recorded for this revision"})
 			}
 			if item.EvidenceState == PRActionEvidenceVerified && len(item.AttemptEvidence) > 0 && !pr.IsDraft {
-				item.Actions = append(item.Actions, PRActionOption{Action: PRActionQueueReview, Available: true, Reason: "server verified immutable evidence for the current revision"})
+				item.Actions = append(item.Actions, prActionQueueReviewVerdict(item.MergeState))
 				if prMergeReady(pr, monitor.RequiredChecks) {
 					merge := PRActionOption{Action: PRActionMerge, RequiresHumanApproval: true}
 					if s.forge.SupportsAtomicBaseBoundMerge() {
@@ -428,6 +432,27 @@ func (s *PRActionService) Queue(ctx context.Context) (PRActionQueue, error) {
 		queue.Availability = PRActionAvailabilityUnknown
 	}
 	return queue, nil
+}
+
+// Review queueing is distinct from merge readiness: known non-conflict states
+// like BLOCKED and UNSTABLE can still be routed for human review. Conflicts,
+// missing state, and unrecognized states fail closed.
+func prActionQueueReviewVerdict(mergeState string) PRActionOption {
+	option := PRActionOption{Action: PRActionQueueReview}
+	switch strings.ToUpper(strings.TrimSpace(mergeState)) {
+	case "DIRTY":
+		option.Reason = "merge conflicts are reported (merge state DIRTY); resolve conflicts before queueing review"
+	case "CLEAN", "BEHIND", "BLOCKED", "UNSTABLE", "HAS_HOOKS":
+		option.Available = true
+		option.Reason = "server verified immutable evidence for the current revision"
+	default:
+		state := strings.ToUpper(strings.TrimSpace(mergeState))
+		if state == "" {
+			state = "UNKNOWN"
+		}
+		option.Reason = fmt.Sprintf("merge state %s is unknown or unsupported; refresh PR state before queueing review", state)
+	}
+	return option
 }
 
 // Execute persists and runs a revision-bound action under a durable idempotency

@@ -92,11 +92,22 @@ func (m *Manager) submitRequest(ctx context.Context, id, requestID string, gener
 		}
 		// JSON keeps arbitrary message text distinct from the request identity.
 		envelope, err := json.Marshal(struct {
-			RequestID  string `json:"request_id"`
-			SessionID  string `json:"session_id"`
-			Generation int    `json:"generation"`
-			Message    string `json:"message"`
-		}{requestID, id, generation, message})
+			RequestID            string `json:"request_id"`
+			SessionID            string `json:"session_id"`
+			Generation           int    `json:"generation"`
+			Message              string `json:"message"`
+			AcknowledgeWith      string `json:"acknowledge_with"`
+			AcknowledgeWhen      string `json:"acknowledge_when"`
+			AcknowledgementMeans string `json:"acknowledgement_means"`
+		}{
+			RequestID:            requestID,
+			SessionID:            id,
+			Generation:           generation,
+			Message:              message,
+			AcknowledgeWith:      "gc session request ack -- " + requestID,
+			AcknowledgeWhen:      "after reading this request and before acting on it",
+			AcknowledgementMeans: "receipt_only; this does not verify completion or effect",
+		})
 		if err != nil {
 			return err
 		}

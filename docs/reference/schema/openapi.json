@@ -9406,7 +9406,21 @@
       },
       "SessionRequestSubmitInputBody": {
         "additionalProperties": false,
+        "dependentRequired": {
+          "claim_generation": [
+            "work_id"
+          ],
+          "work_id": [
+            "claim_generation"
+          ]
+        },
         "properties": {
+          "claim_generation": {
+            "description": "Optional Workbench attempt selector. Provide with work_id; the server verifies both against the current session claim.",
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
           "generation": {
             "description": "Exact intended execution generation.",
             "format": "int64",
@@ -9420,6 +9434,12 @@
           },
           "request_id": {
             "description": "Durable idempotency identity for this request.",
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "work_id": {
+            "description": "Optional Workbench attempt selector. Provide with claim_generation; the server verifies both against the current session claim.",
             "maxLength": 200,
             "minLength": 1,
             "type": "string"

@@ -4248,6 +4248,9 @@ type SessionRequestAcknowledgementInputBody struct {
 
 // SessionRequestSubmitInputBody defines model for SessionRequestSubmitInputBody.
 type SessionRequestSubmitInputBody struct {
+	// ClaimGeneration Optional Workbench attempt selector. Provide with work_id; the server verifies both against the current session claim.
+	ClaimGeneration *string `json:"claim_generation,omitempty"`
+
 	// Generation Exact intended execution generation.
 	Generation int64 `json:"generation"`
 
@@ -4256,6 +4259,9 @@ type SessionRequestSubmitInputBody struct {
 
 	// RequestId Durable idempotency identity for this request.
 	RequestId string `json:"request_id"`
+
+	// WorkId Optional Workbench attempt selector. Provide with claim_generation; the server verifies both against the current session claim.
+	WorkId *string `json:"work_id,omitempty"`
 }
 
 // SessionResetStalledPayload defines model for SessionResetStalledPayload.

@@ -3771,6 +3771,10 @@ export type SessionRequestAcknowledgementInputBody = {
 
 export type SessionRequestSubmitInputBody = {
     /**
+     * Optional Workbench attempt selector. Provide with work_id; the server verifies both against the current session claim.
+     */
+    claim_generation?: string;
+    /**
      * Exact intended execution generation.
      */
     generation: number;
@@ -3782,6 +3786,10 @@ export type SessionRequestSubmitInputBody = {
      * Durable idempotency identity for this request.
      */
     request_id: string;
+    /**
+     * Optional Workbench attempt selector. Provide with claim_generation; the server verifies both against the current session claim.
+     */
+    work_id?: string;
 };
 
 export type SessionResetStalledPayload = {

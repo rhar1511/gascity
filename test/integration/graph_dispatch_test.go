@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -19,6 +20,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -328,15 +330,17 @@ func setupGraphWorkflowCity(t *testing.T, mode string) string {
 }
 
 type graphPrivateEvidenceTransport struct {
-	endpoint       string
-	projectID      string
-	database       string
-	scopeRef       string
-	tokenFile      string
-	token          string
-	configRevision string
-	bdLauncher     string
-	client         *http.Client
+	endpoint           string
+	projectID          string
+	database           string
+	scopeRef           string
+	tokenFile          string
+	token              string
+	configRevision     string
+	bdLauncher         string
+	client             *http.Client
+	serviceDone        <-chan struct{}
+	serviceDiagnostics func() string
 }
 
 func newGraphPrivateEvidenceHTTPClient() *http.Client {
@@ -351,11 +355,14 @@ type graphBeadsIdentity struct {
 }
 
 type boundedTailBuffer struct {
+	mu  sync.Mutex
 	buf []byte
 	max int
 }
 
 func (b *boundedTailBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	n := len(p)
 	if b.max <= 0 {
 		return n, nil
@@ -368,7 +375,11 @@ func (b *boundedTailBuffer) Write(p []byte) (int, error) {
 	return n, nil
 }
 
-func (b *boundedTailBuffer) String() string { return string(b.buf) }
+func (b *boundedTailBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return string(b.buf)
+}
 
 func TestBoundedTailBufferKeepsRecentOutput(t *testing.T) {
 	var output boundedTailBuffer
@@ -381,6 +392,29 @@ func TestBoundedTailBufferKeepsRecentOutput(t *testing.T) {
 	}
 	if got, want := output.String(), "econd"; got != want {
 		t.Fatalf("output = %q, want %q", got, want)
+	}
+}
+
+func TestBoundedTailBufferConcurrentReadAndWrite(t *testing.T) {
+	var output boundedTailBuffer
+	output.max = 128
+	var workers sync.WaitGroup
+	workers.Add(2)
+	go func() {
+		defer workers.Done()
+		for range 1000 {
+			_, _ = output.Write([]byte(strings.Repeat("x", 32)))
+		}
+	}()
+	go func() {
+		defer workers.Done()
+		for range 1000 {
+			_ = output.String()
+		}
+	}()
+	workers.Wait()
+	if got := len(output.String()); got > output.max {
+		t.Fatalf("tail buffer size = %d, exceeds bound %d", got, output.max)
 	}
 }
 
@@ -400,7 +434,13 @@ func TestGraphIssueReadsReuseHTTPConnection(t *testing.T) {
 
 	client := newGraphPrivateEvidenceHTTPClient()
 	t.Cleanup(client.CloseIdleConnections)
-	transport := graphPrivateEvidenceTransport{endpoint: server.URL, client: client}
+	transport := graphPrivateEvidenceTransport{
+		endpoint: server.URL,
+		client:   client,
+		serviceDiagnostics: func() string {
+			return `service=running stdout="" stderr=""`
+		},
+	}
 	for range 4 {
 		if _, err := readGraphBeadOverHTTPContext(context.Background(), transport, "gc-test"); err != nil {
 			t.Fatalf("read graph issue: %v", err)
@@ -408,6 +448,44 @@ func TestGraphIssueReadsReuseHTTPConnection(t *testing.T) {
 	}
 	if got := connections.Load(); got != 1 {
 		t.Fatalf("issue reads opened %d HTTP connections, want one reused connection", got)
+	}
+}
+
+func TestGraphIssueReadTimeoutReportsHTTPProgress(t *testing.T) {
+	const token = "private-test-token"
+	started := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+		close(started)
+		<-request.Context().Done()
+	}))
+	t.Cleanup(server.Close)
+
+	client := &http.Client{Timeout: 25 * time.Millisecond, Transport: &http.Transport{Proxy: nil}}
+	t.Cleanup(client.CloseIdleConnections)
+	transport := graphPrivateEvidenceTransport{
+		endpoint: server.URL,
+		client:   client,
+		token:    token,
+		serviceDiagnostics: func() string {
+			return redactGraphPrivateEvidenceToken(`service=running stdout="" stderr="private-test-token"`, token)
+		},
+	}
+	_, err := readGraphBeadOverHTTPContext(context.Background(), transport, "gc-test")
+	if err == nil {
+		t.Fatal("stalled issue read unexpectedly succeeded")
+	}
+	select {
+	case <-started:
+	default:
+		t.Fatal("stalled server never received the issue request")
+	}
+	for _, evidence := range []string{"request failed after", "got_connection=true", "first_response_byte=false", "service=running"} {
+		if !strings.Contains(err.Error(), evidence) {
+			t.Fatalf("timeout diagnostic %q does not include %q", err, evidence)
+		}
+	}
+	if strings.Contains(err.Error(), token) {
+		t.Fatalf("timeout diagnostic exposed the service token: %q", err)
 	}
 }
 
@@ -1359,12 +1437,7 @@ func startGraphPrivateEvidenceService(t *testing.T, cityEnv []string, cityDir, c
 		}
 	})
 	diagnosticOutput := func(output *boundedTailBuffer) string {
-		text := output.String()
-		text = strings.TrimSpace(text)
-		if token != "" {
-			text = strings.ReplaceAll(text, token, "[redacted]")
-		}
-		return text
+		return redactGraphPrivateEvidenceToken(strings.TrimSpace(output.String()), token)
 	}
 
 	endpoint := "http://" + addr
@@ -1415,9 +1488,19 @@ func startGraphPrivateEvidenceService(t *testing.T, cityEnv []string, cityDir, c
 	}
 	issueClient := newGraphPrivateEvidenceHTTPClient()
 	t.Cleanup(issueClient.CloseIdleConnections)
+	serviceDiagnostics := func() string {
+		state := "running"
+		select {
+		case <-done:
+			state = "exited"
+		default:
+		}
+		return fmt.Sprintf("service=%s stdout=%q stderr=%q", state, diagnosticOutput(serviceStdout), diagnosticOutput(serviceStderr))
+	}
 	return graphPrivateEvidenceTransport{
 		endpoint: endpoint, projectID: loadedIdentity.projectID, database: loadedIdentity.database,
 		scopeRef: "city:" + cityName, tokenFile: tokenFile, token: token, client: issueClient,
+		serviceDone: done, serviceDiagnostics: serviceDiagnostics,
 	}
 }
 
@@ -1526,9 +1609,10 @@ func waitForBeadClosedWithoutPrivatePayloadDiagnostics(t *testing.T, cityDir str
 		func(ctx context.Context) (bool, string, error) {
 			bead, err := readGraphBeadOverHTTPContext(ctx, transport, beadID)
 			if err != nil {
-				// The error contains only a generic transport/protocol message or
-				// HTTP status. Preserve it as the last observation so CI can
-				// distinguish a missing route/issue from an unreachable service.
+				// The error contains token-redacted transport details or an HTTP
+				// status, never the private response body. Preserve it as the last
+				// observation so CI distinguishes an unreachable service from a
+				// missing route or issue.
 				return false, "workflow bead read is unavailable: " + err.Error(), nil
 			}
 			if bead.Status == "closed" {
@@ -1554,6 +1638,13 @@ func readGraphBeadOverHTTPContext(ctx context.Context, transport graphPrivateEvi
 	if transport.client == nil {
 		return graphBead{}, errors.New("graph issue transport has no HTTP client")
 	}
+	if transport.serviceDone != nil {
+		select {
+		case <-transport.serviceDone:
+			return graphBead{}, fmt.Errorf("installed Beads service exited before issue read: %s", graphServiceDiagnosticText(transport))
+		default:
+		}
+	}
 	endpoint := transport.endpoint + "/v0/beads/issues/" + url.PathEscape(beadID)
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
@@ -1561,9 +1652,26 @@ func readGraphBeadOverHTTPContext(ctx context.Context, transport graphPrivateEvi
 	}
 	request.Header.Set("Authorization", "Bearer "+transport.token)
 	request.Header.Set("Bd-Project-Id", transport.projectID)
+	var gotConnection, reusedConnection, firstResponseByte atomic.Bool
+	trace := &httptrace.ClientTrace{
+		GotConn: func(info httptrace.GotConnInfo) {
+			gotConnection.Store(true)
+			reusedConnection.Store(info.Reused)
+		},
+		GotFirstResponseByte: func() { firstResponseByte.Store(true) },
+	}
+	request = request.WithContext(httptrace.WithClientTrace(request.Context(), trace))
+	started := time.Now()
 	response, err := transport.client.Do(request)
 	if err != nil {
-		return graphBead{}, fmt.Errorf("could not read graph issue through installed service: %s", safeGraphHTTPTransportError(err, transport.token))
+		observation := fmt.Sprintf(
+			"request failed after %s (got_connection=%t connection_reused=%t first_response_byte=%t)",
+			time.Since(started).Round(time.Millisecond), gotConnection.Load(), reusedConnection.Load(), firstResponseByte.Load(),
+		)
+		if diagnostic := graphServiceDiagnosticText(transport); diagnostic != "" {
+			observation += "; " + diagnostic
+		}
+		return graphBead{}, fmt.Errorf("could not read graph issue through installed service: %s; %s", safeGraphHTTPTransportError(err, transport.token), observation)
 	}
 	if response.StatusCode != http.StatusOK {
 		if err := response.Body.Close(); err != nil {
@@ -1588,8 +1696,18 @@ func readGraphBeadOverHTTPContext(ctx context.Context, transport graphPrivateEvi
 	return bead, nil
 }
 
+func graphServiceDiagnosticText(transport graphPrivateEvidenceTransport) string {
+	if transport.serviceDiagnostics == nil {
+		return ""
+	}
+	return transport.serviceDiagnostics()
+}
+
 func safeGraphHTTPTransportError(err error, token string) string {
-	message := err.Error()
+	return redactGraphPrivateEvidenceToken(err.Error(), token)
+}
+
+func redactGraphPrivateEvidenceToken(message, token string) string {
 	if token != "" {
 		message = strings.ReplaceAll(message, token, "[redacted]")
 	}

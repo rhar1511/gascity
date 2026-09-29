@@ -164,21 +164,27 @@ func (c *Conn) execScript(ctx context.Context, script []byte) ([]byte, int, erro
 type shellRunner struct{}
 
 func (shellRunner) run(ctx context.Context, ep Endpoint, remoteArgv []string, stdin []byte) ([]byte, int, error) {
-	// This provider deliberately executes the requested argv on the configured
-	// remote host. Locally the executable is the fixed "ssh" binary; sshArgs
-	// ends option parsing before the destination and quotes every remote argv
-	// element as a POSIX-shell token. TestConnExecPreservesShellMetacharacters
-	// exercises the secondary shell boundary that CodeQL cannot model here.
+	// OpenSSH sends its remote command through the remote user's shell. For
+	// every invocation, keep that command fixed to `sh`. Exec requests are sent
+	// as a shell-quoted script on stdin; setup scripts already use the same
+	// channel. This keeps caller-controlled argv out of ssh's command arguments
+	// while preserving the requested command's exit status via exec.
+	remoteScript := stdin
+	if remoteScript == nil {
+		for i, arg := range remoteArgv {
+			if strings.ContainsRune(arg, '\x00') {
+				return nil, -1, fmt.Errorf("ssh: remote argv element %d contains NUL", i)
+			}
+		}
+		remoteScript = []byte(shellQuote(remoteArgv) + "\n")
+	}
 
-	// codeql[go/command-injection]
-	cmd := exec.CommandContext(ctx, "ssh", sshArgs(ep, remoteArgv)...)
+	cmd := exec.CommandContext(ctx, "ssh", sshArgs(ep, []string{"sh"})...)
 	cmd.WaitDelay = 2 * time.Second
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	if stdin != nil {
-		cmd.Stdin = bytes.NewReader(stdin)
-	}
+	cmd.Stdin = bytes.NewReader(remoteScript)
 
 	if err := cmd.Run(); err != nil {
 		// Context cancellation/timeout is a transport failure, not a command exit.
