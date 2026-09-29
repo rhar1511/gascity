@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "worklifecycle",
     srcs = [
+        "admission_policy_v2.go",
         "receipt.go",
         "recovery.go",
         "recovery_request.go",
@@ -11,15 +12,18 @@ go_library(
     importpath = "github.com/gastownhall/gascity/internal/worklifecycle",
     visibility = ["//:__subpackages__"],
     deps = [
+        "//internal/agentutil",
         "//internal/beadmeta",
         "//internal/beads",
         "//internal/config",
+        "//internal/qualification",
     ],
 )
 
 go_test(
     name = "worklifecycle_test",
     srcs = [
+        "admission_policy_v2_test.go",
         "receipt_test.go",
         "recovery_request_test.go",
         "recovery_test.go",
@@ -27,6 +31,7 @@ go_test(
     ],
     embed = [":worklifecycle"],
     deps = [
+        "//internal/formula",
         "//internal/beadmeta",
         "//internal/beads",
         "//internal/config",
