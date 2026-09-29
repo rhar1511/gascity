@@ -192,6 +192,16 @@ func doEventEmit(ep events.Provider, eventType, subject, message, actor, payload
 			return false                                                        // best-effort — never fail
 		}
 		e.Payload = json.RawMessage(payload)
+		if eventType == events.BeadCreated || eventType == events.BeadUpdated || eventType == events.BeadClosed || eventType == events.BeadDeleted {
+			if bead, ok := beads.DecodeBeadEventPayload(e.Payload); ok {
+				redacted, err := beads.EncodeBeadEventPayload(bead)
+				if err != nil {
+					fmt.Fprintf(stderr, "gc event emit: redact bead payload: %v\n", err) //nolint:errcheck // best-effort stderr
+					return false
+				}
+				e.Payload = redacted
+			}
+		}
 	}
 
 	ep.Record(e)

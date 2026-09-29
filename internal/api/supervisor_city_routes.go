@@ -314,7 +314,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	cityGet(sm, "/formulas/feed", (*Server).humaHandleFormulaFeed, errorStatuses(http.StatusBadRequest, http.StatusNotFound, http.StatusServiceUnavailable))
 	// Backwards-compatible workflow aliases.
 	cityGet(sm, "/workflow/{workflow_id}", (*Server).humaHandleWorkflowGet, errorStatuses(http.StatusBadRequest, http.StatusNotFound))
-	cityDelete(sm, "/workflow/{workflow_id}", (*Server).humaHandleWorkflowDelete, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound))
+	cityDelete(sm, "/workflow/{workflow_id}", (*Server).humaHandleWorkflowDelete, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict))
 
 	// Canonical Run resource — the ONE typed run projection, sourced from the
 	// city event log.
@@ -361,6 +361,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	cityPost(sm, "/service/{name}/restart", (*Server).humaHandleServiceRestart, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound))
 
 	// Sessions (non-stream — stream is the SSE registration below).
+	registerSessionRequestRoutes(sm)
 	cityRegister(sm, huma.Operation{
 		OperationID:   "create-session",
 		Method:        http.MethodPost,

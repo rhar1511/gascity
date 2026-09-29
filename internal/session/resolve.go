@@ -268,19 +268,15 @@ func IsSessionBeadOrRepairableInfo(i Info) bool {
 	return i.Type == "" && hasSessionLabelInfo(i)
 }
 
-// RepairEmptyType fixes a session bead with an empty type field by
-// setting it to "session". Only call it from paths that already mutate
-// or materialize the bead; read-only resolution normalizes in memory
-// instead. This is a best-effort repair — if the store update fails,
-// the failure is logged and the in-memory bead is still patched so the
-// current operation can proceed.
+// RepairEmptyType fixes a legacy session bead through Store.RepairType. The
+// caller's snapshot is patched only after the revision-fenced write succeeds.
 func RepairEmptyType(store beads.Store, b *beads.Bead) {
 	if b.Type != "" {
 		return
 	}
-	t := BeadType
-	if err := store.Update(b.ID, beads.UpdateOpts{Type: &t}); err != nil {
+	if err := NewStore(beads.SessionStore{Store: store}).RepairType(b.ID); err != nil {
 		log.Printf("session %s: repairing empty bead type: %v", b.ID, err)
+		return
 	}
 	b.Type = BeadType
 }

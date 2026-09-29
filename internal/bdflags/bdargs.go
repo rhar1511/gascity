@@ -27,6 +27,29 @@ func SplitGlobalFlags(args []string) (string, []string) {
 	return "", nil
 }
 
+// RequestsJSONOutput reports whether argv selects bd's JSON renderer. The
+// canonical flag manifest declares --format as value-consuming, so both split
+// and inline forms are handled here alongside the native --json boolean.
+func RequestsJSONOutput(args []string) bool {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--json" || arg == "--json=true" {
+			return true
+		}
+		if arg == "--format" && i+1 < len(args) {
+			if args[i+1] == "json" {
+				return true
+			}
+			i++
+			continue
+		}
+		if strings.HasPrefix(arg, "--format=") && strings.TrimPrefix(arg, "--format=") == "json" {
+			return true
+		}
+	}
+	return false
+}
+
 // Positionals returns the positional arguments of a bd subcommand's argv,
 // skipping every token consumed as a flag's value.
 //

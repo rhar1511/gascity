@@ -250,8 +250,7 @@ type ConditionalAssignmentReleaser interface {
 //     conditional or unconditional — mints a fresh nonzero revision. This
 //     covers row-backed Update fields, metadata writes, Close, and Reopen;
 //     reads never change it.
-//     Separate label/parent persistence and derived or heartbeat fields are
-//     outside this guarantee.
+//     Derived or heartbeat fields are outside this guarantee.
 //   - Denormalized/derived projection columns are OUTSIDE this guarantee. bd
 //     maintains a denormalized is_blocked column on the issue row that other
 //     beads' dependency/close/route writes recompute (the same reason bd pins
@@ -271,13 +270,9 @@ type ConditionalAssignmentReleaser interface {
 // the value-CAS RESULT either way, but must not build timing or interference
 // assumptions on top of it.
 type ConditionalWriter interface {
-	// UpdateIfMatch applies row-backed opts only if the bead's revision equals
-	// expectedRevision; otherwise it returns *PreconditionFailedError. A store
-	// that persists ParentID, Labels, or RemoveLabels through separate writes
-	// cannot fold them into the guarded update and rejects them with
-	// *ConditionalUpdateFieldUnsupportedError; bd-backed and Dolt-backed stores
-	// do. Callers must therefore handle that error rather than assume the
-	// fields applied.
+	// UpdateIfMatch applies row-backed opts, parent changes, and label
+	// additions/removals only if the bead's revision equals expectedRevision;
+	// otherwise it returns *PreconditionFailedError.
 	UpdateIfMatch(id string, expectedRevision int64, opts UpdateOpts) error
 	// CloseIfMatch closes the bead only if its revision equals expectedRevision;
 	// otherwise it returns *PreconditionFailedError.
@@ -350,16 +345,10 @@ func (e *ConditionalUpdateFieldUnsupportedError) Error() string {
 	return fmt.Sprintf("conditional update: %s is not supported with revision matching", e.Field)
 }
 
-// validateConditionalUpdateOpts rejects the fields bd must persist separately
-// before any store evaluates a revision fence or mutates state.
+// validateConditionalUpdateOpts rejects empty updates before any store evaluates
+// a revision fence or mutates state.
 func validateConditionalUpdateOpts(o UpdateOpts) error {
 	switch {
-	case o.ParentID != nil:
-		return &ConditionalUpdateFieldUnsupportedError{Field: "parent_id"}
-	case len(o.Labels) > 0:
-		return &ConditionalUpdateFieldUnsupportedError{Field: "labels"}
-	case len(o.RemoveLabels) > 0:
-		return &ConditionalUpdateFieldUnsupportedError{Field: "remove_labels"}
 	case isEmptyUpdateOpts(o):
 		return ErrEmptyConditionalUpdate
 	default:

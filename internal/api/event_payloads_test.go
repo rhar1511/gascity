@@ -2,10 +2,14 @@ package api
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 func TestDecodeBeadEventPayloadWrapped(t *testing.T) {
@@ -56,6 +60,66 @@ func TestDecodeBeadEventPayloadCanonicalRawBead(t *testing.T) {
 	}
 	if payload.Bead.Metadata["state"] != "awake" {
 		t.Fatalf("metadata state = %q, want awake", payload.Bead.Metadata["state"])
+	}
+}
+
+func TestDecodeBeadEventPayloadRedactsLegacyCredentialSnapshot(t *testing.T) {
+	raw := json.RawMessage(`{"id":"gc-session","issue_type":"session","metadata":{"instance_token":"legacy-secret","execution_token":"other-secret","generation":"7"}}`)
+	got, registered, err := events.DecodePayload(events.BeadUpdated, raw)
+	if err != nil || !registered {
+		t.Fatalf("DecodePayload = (%T, %v, %v)", got, registered, err)
+	}
+	payload, ok := got.(BeadEventPayload)
+	if !ok {
+		t.Fatalf("payload = %T, want BeadEventPayload", got)
+	}
+	if _, ok := payload.Bead.Metadata["instance_token"]; ok {
+		t.Fatalf("published payload retained instance_token: %#v", payload.Bead.Metadata)
+	}
+	if _, ok := payload.Bead.Metadata["execution_token"]; ok {
+		t.Fatalf("published payload retained execution_token: %#v", payload.Bead.Metadata)
+	}
+	if payload.Bead.Metadata["generation"] != "7" {
+		t.Fatalf("published payload lost safe metadata: %#v", payload.Bead.Metadata)
+	}
+}
+
+func TestBeadEventFeedsRedactExecutionCredentialWithoutMutatingSnapshot(t *testing.T) {
+	bead := beads.Bead{
+		ID: "gc-session", Type: session.BeadType, Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			beadmeta.SessionInstanceTokenMetadataKey: "event-secret",
+			"generation":                             "11",
+		},
+	}
+	raw, err := json.Marshal(bead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := events.Event{Seq: 1, Type: events.BeadUpdated, Actor: "test", Subject: bead.ID, Payload: raw}
+	listEvent, ok := toWireEvent(event)
+	if !ok {
+		t.Fatal("event list projection rejected valid bead event")
+	}
+	workflow := &workflowEventProjection{Bead: workflowBeadResponseFromBead(bead)}
+	streamEvent, err := wireEventFrom(event, workflow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, value := range map[string]any{"list": listEvent, "stream": streamEvent, "typed": BeadEventPayload{Bead: bead}} {
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			t.Fatalf("marshal %s feed: %v", name, err)
+		}
+		if strings.Contains(string(encoded), "event-secret") || strings.Contains(string(encoded), `"instance_token"`) {
+			t.Fatalf("%s feed leaked credential: %s", name, encoded)
+		}
+		if !strings.Contains(string(encoded), `"generation":"11"`) {
+			t.Fatalf("%s feed lost safe metadata: %s", name, encoded)
+		}
+	}
+	if bead.Metadata[beadmeta.SessionInstanceTokenMetadataKey] != "event-secret" {
+		t.Fatalf("event serialization mutated source metadata: %#v", bead.Metadata)
 	}
 }
 

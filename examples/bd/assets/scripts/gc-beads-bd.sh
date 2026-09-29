@@ -3372,16 +3372,23 @@ scope_store_dir() {
 }
 
 op_store_bridge() {
-    local scope_dir host gc_bin
+    local scope_dir host gc_bin bridge_op
     scope_dir=$(scope_store_dir)
     host=$(connect_host)
+    bridge_op=$1
+    shift
+    case "$bridge_op" in
+        get|list|ready|children|list-by-label)
+            bridge_op="private-$bridge_op"
+            ;;
+    esac
 
     gc_bin=$(resolve_gc_bin)
     if [ -z "$gc_bin" ]; then
         die "gc binary not found for exec store operations"
     fi
 
-    GC_DOLT_PASSWORD="$DOLT_PASSWORD"     BEADS_DOLT_PASSWORD="$DOLT_PASSWORD"     "$gc_bin" bd-store-bridge         --dir "$scope_dir"         --host "$host"         --port "$DOLT_PORT"         --user "$DOLT_USER"         "$@"
+    GC_BD_STORE_BRIDGE_PRIVATE=1     GC_DOLT_PASSWORD="$DOLT_PASSWORD"     BEADS_DOLT_PASSWORD="$DOLT_PASSWORD"     "$gc_bin" bd-store-bridge         --dir "$scope_dir"         --host "$host"         --port "$DOLT_PORT"         --user "$DOLT_USER"         "$bridge_op" "$@"
     return $?
 }
 op_health() {

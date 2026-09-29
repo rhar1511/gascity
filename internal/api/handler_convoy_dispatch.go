@@ -604,7 +604,7 @@ func workflowBeadResponseFromBead(bead beads.Bead) workflowBeadResponse {
 		LogicalBeadID: wb.LogicalBeadID,
 		ScopeRef:      wb.ScopeRef,
 		Assignee:      wb.Assignee,
-		Metadata:      wb.Metadata,
+		Metadata:      beadmeta.RedactGenericMetadata(wb.Metadata),
 	}
 }
 

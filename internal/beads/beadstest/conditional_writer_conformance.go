@@ -19,12 +19,9 @@ type ConditionalWriterOptions struct {
 	// preserve every unconditional flavor leave this false.
 	RowBackedMutationFlavors bool
 
-	// RestrictedUpdateFields declares that this store persists parent and
-	// labels through writes it cannot fold into a revision-guarded update, so
-	// UpdateIfMatch must reject those options with
-	// *beads.ConditionalUpdateFieldUnsupportedError instead of applying them.
-	// bd-backed and Dolt-backed stores do; a store that keeps the whole bead in
-	// one row can apply them and leaves this false.
+	// RestrictedUpdateFields is retained for source compatibility with existing
+	// conformance registrations. Parent and label changes are now required parts
+	// of UpdateIfMatch, so this option no longer changes the suite.
 	RestrictedUpdateFields bool
 
 	// OpenDisabled returns a fresh store of the same kind whose conditional
@@ -73,9 +70,8 @@ func RunConditionalWriterConformanceWithOptions(t *testing.T, name string, open 
 
 	t.Run(name, func(t *testing.T) { runEmptyUpdateContract(t, open) })
 	conformanceWholeBeadWriteChangesRevision(t, name, open)
-	if opts.RestrictedUpdateFields {
-		conformanceRestrictedUpdateFieldsRejected(t, name, open)
-	}
+	conformanceLabelWritesAreRevisionFenced(t, name, open)
+	conformanceParentWritesAreRevisionFenced(t, name, open)
 	conformanceReadsNeverBump(t, name, open)
 	conformanceRevisionTokensNeverReused(t, name, open)
 	conformanceReleaseIfCurrentMintsRevision(t, name, open)
@@ -143,55 +139,75 @@ func conformanceWholeBeadWriteChangesRevision(t *testing.T, name string, open fu
 	})
 }
 
-// conformanceRestrictedUpdateFieldsRejected asserts a store that cannot fold
-// parent/labels into a revision-guarded update rejects them with the typed
-// unsupported error and mutates nothing.
-func conformanceRestrictedUpdateFieldsRejected(t *testing.T, name string, open func(t *testing.T) beads.Store) {
-	t.Run(name+"/restricted_update_fields_are_rejected_without_mutation", func(t *testing.T) {
+func conformanceLabelWritesAreRevisionFenced(t *testing.T, name string, open func(t *testing.T) beads.Store) {
+	t.Run(name+"/label_writes_are_revision_fenced", func(t *testing.T) {
 		s := open(t)
 		w := conformanceWriterFor(t, s)
-		parentBefore, err := s.Create(beads.Bead{Title: "restricted-update-parent"})
+		created, err := s.Create(beads.Bead{Title: "labels", Labels: []string{"keep", "remove"}})
 		if err != nil {
-			t.Fatalf("Create parent fixture: %v", err)
+			t.Fatal(err)
 		}
-		parent := "parent-after"
-		tests := []struct {
-			name string
-			opts beads.UpdateOpts
-		}{
-			{name: "parent", opts: beads.UpdateOpts{ParentID: &parent}},
-			{name: "add_labels", opts: beads.UpdateOpts{Labels: []string{"added"}}},
-			{name: "remove_labels", opts: beads.UpdateOpts{RemoveLabels: []string{"remove"}}},
+		before, err := s.Get(created.ID)
+		if err != nil {
+			t.Fatal(err)
 		}
+		if err := w.UpdateIfMatch(created.ID, before.Revision, beads.UpdateOpts{Labels: []string{"added"}, RemoveLabels: []string{"remove"}}); err != nil {
+			t.Fatalf("UpdateIfMatch labels: %v", err)
+		}
+		after, err := s.Get(created.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(after.Labels, []string{"keep", "added"}) || after.Revision == before.Revision {
+			t.Fatalf("label update = labels %v revision %d, want [keep added] and revision after %d", after.Labels, after.Revision, before.Revision)
+		}
+		if err := w.UpdateIfMatch(created.ID, before.Revision, beads.UpdateOpts{Labels: []string{"stale"}}); err == nil {
+			t.Fatal("stale label update succeeded")
+		}
+	})
+}
 
-		for _, tt := range tests {
-			t.Run(tt.name, func(t *testing.T) {
-				created, err := s.Create(beads.Bead{
-					Title:    "restricted-update",
-					ParentID: parentBefore.ID,
-					Labels:   []string{"keep", "remove"},
-				})
-				if err != nil {
-					t.Fatal(err)
-				}
-				before, err := s.Get(created.ID)
-				if err != nil {
-					t.Fatal(err)
-				}
-
-				err = w.UpdateIfMatch(created.ID, before.Revision, tt.opts)
-				var unsupported *beads.ConditionalUpdateFieldUnsupportedError
-				if !errors.As(err, &unsupported) {
-					t.Fatalf("UpdateIfMatch(%s) = %v, want *ConditionalUpdateFieldUnsupportedError", tt.name, err)
-				}
-				after, err := s.Get(created.ID)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if !reflect.DeepEqual(after, before) {
-					t.Fatalf("restricted conditional update mutated bead: before=%#v after=%#v", before, after)
-				}
-			})
+func conformanceParentWritesAreRevisionFenced(t *testing.T, name string, open func(t *testing.T) beads.Store) {
+	t.Run(name+"/parent_writes_are_revision_fenced", func(t *testing.T) {
+		s := open(t)
+		w := conformanceWriterFor(t, s)
+		parentBefore, err := s.Create(beads.Bead{Title: "parent-before"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		parentAfter, err := s.Create(beads.Bead{Title: "parent-after"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		created, err := s.Create(beads.Bead{Title: "child", ParentID: parentBefore.ID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		before, err := s.Get(created.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		title := "child-renamed"
+		if err := w.UpdateIfMatch(created.ID, before.Revision, beads.UpdateOpts{Title: &title, ParentID: &parentAfter.ID}); err != nil {
+			t.Fatalf("combined parent UpdateIfMatch: %v", err)
+		}
+		after, err := s.Get(created.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if after.ParentID != parentAfter.ID || after.Title != title || after.Revision == before.Revision {
+			t.Fatalf("combined parent update = parent %q title %q revision %d; want %q, %q, revision after %d", after.ParentID, after.Title, after.Revision, parentAfter.ID, title, before.Revision)
+		}
+		clearParent := ""
+		if err := w.UpdateIfMatch(created.ID, before.Revision, beads.UpdateOpts{ParentID: &clearParent}); !beads.IsPreconditionFailed(err) {
+			t.Fatalf("stale parent UpdateIfMatch = %v, want precondition failure", err)
+		}
+		unchanged, err := s.Get(created.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if unchanged.ParentID != after.ParentID || unchanged.Revision != after.Revision {
+			t.Fatalf("stale parent update mutated bead: before=%#v after=%#v", after, unchanged)
 		}
 	})
 }

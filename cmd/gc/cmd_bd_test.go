@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
@@ -1575,6 +1576,120 @@ printf '{"id":"scratch-1","metadata":{"written":true}}\n' > "$SCRATCH_BEAD"
 				t.Fatalf("scratch bead changed on refusal:\n got %q\nwant %q", got, original)
 			}
 		})
+	}
+}
+
+func TestGcBdRejectsProtocolOwnedMetadataWrites(t *testing.T) {
+	cfg := &config.City{}
+	for _, args := range [][]string{
+		{"update", "gc-1", "--set-metadata", "instance_token=chosen"},
+		{"update", "gc-1", "--unset-metadata", "gc.execution_token"},
+		{"update", "gc-1", "--set-metadata", "session_name=retargeted"},
+		{"update", "gc-1", "--unset-metadata", "generation"},
+		{"update", "gc-1", "--set-metadata", beadmeta.SessionRequestPurgeFenceMetadataKey + "=forged"},
+		{"update", "gc-1", "--set-metadata=" + beadmeta.SessionRequestReceiptPrefix + "forged={}"},
+		{"update", "gc-1", "--unset-metadata", beadmeta.SessionRequestPurgeFenceMetadataKey},
+		{"update", "gc-1", "--unset-metadata=" + beadmeta.SessionRequestReceiptPrefix + "forged"},
+		{"create", "task", "--metadata", `{"gc.session_request_purge_fence":"forged"}`},
+		{"new", "task", `--metadata={"gc.session_request.v1.forged":"{}"}`},
+	} {
+		msg, refused := bdRigQualifiedMetadataRefusal(cfg, args)
+		if !refused || !strings.Contains(msg, "protected session lifecycle metadata") {
+			t.Fatalf("bdRigQualifiedMetadataRefusal(%v) = (%q, %v), want protected-key refusal", args, msg, refused)
+		}
+	}
+}
+
+func TestRedactBdJSONOutputRemovesOnlyExecutionCredentials(t *testing.T) {
+	input := []byte(`[{"id":"gc-1","metadata":{"instance_token":"secret","gc.execution_token":"also-secret","generation":"8","owner":"mayor"}}]`)
+	output, ok := redactBdJSONOutput(input)
+	if !ok {
+		t.Fatal("valid JSON output was not recognized")
+	}
+	text := string(output)
+	if strings.Contains(text, "secret") || strings.Contains(text, "instance_token") || strings.Contains(text, "gc.execution_token") {
+		t.Fatalf("credential leaked from generic JSON output: %s", text)
+	}
+	if !strings.Contains(text, `"generation":"8"`) || !strings.Contains(text, `"owner":"mayor"`) {
+		t.Fatalf("safe metadata was removed: %s", text)
+	}
+}
+
+func TestBdOutputCredentialRedactionDetectsListAndShowBehindGlobalFlags(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{name: "plain text show", args: []string{"show", "gc-1"}, want: true},
+		{name: "text show after split actor", args: []string{"--actor", "worker", "show", "gc-1"}, want: true},
+		{name: "text show after inline actor", args: []string{"--actor=worker", "show", "gc-1"}, want: true},
+		{name: "text show after short directory", args: []string{"-C", "/city", "show", "gc-1"}, want: true},
+		{name: "text show after stacked globals", args: []string{"--actor", "worker", "--readonly", "--database=/tmp/beads.db", "show", "gc-1"}, want: true},
+		{name: "text show with global after verb", args: []string{"show", "--actor", "worker", "gc-1"}, want: true},
+		{name: "plain text list", args: []string{"list"}, want: false},
+		{name: "text list after split actor", args: []string{"--actor", "worker", "list"}, want: false},
+		{name: "global value named show does not retarget list", args: []string{"--actor", "show", "list"}, want: false},
+		{name: "text list after directory", args: []string{"--directory", "/city", "list"}, want: false},
+		{name: "json before list", args: []string{"--json", "list"}, want: true},
+		{name: "json after list", args: []string{"list", "--json"}, want: true},
+		{name: "json true before show", args: []string{"--json=true", "show", "gc-1"}, want: true},
+		{name: "split format before list", args: []string{"--format", "json", "list"}, want: true},
+		{name: "split format after list", args: []string{"list", "--format", "json"}, want: true},
+		{name: "inline format before list", args: []string{"--format=json", "list"}, want: true},
+		{name: "inline format after list", args: []string{"list", "--format=json"}, want: true},
+		{name: "text format before list", args: []string{"--format", "table", "list"}, want: false},
+		{name: "json false text list", args: []string{"--json=false", "list"}, want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := bdOutputNeedsCredentialRedaction(tc.args); got != tc.want {
+				t.Errorf("bdOutputNeedsCredentialRedaction(%v) = %v, want %v", tc.args, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestBdRequestsProtectedMutationRecognizesUnrevisionedFallbacks(t *testing.T) {
+	for _, args := range [][]string{
+		{"update", "gc-1", "--status", "closed", "--notes", "done"},
+		{"update", "gc-1", "--title", "--status"},
+		{"--actor", "worker", "update", "gc-1", "--metadata", `{"safe":"value"}`},
+		{"update", "gc-1", "--unset-metadata=key"},
+		{"update", "gc-1", "--set-labels", "worker"},
+		{"close", "gc-1", "--reason", "done"},
+		{"reopen", "gc-1", "--reason=retry"},
+	} {
+		if !bdRequestsProtectedMutation(args) {
+			t.Errorf("bdRequestsProtectedMutation(%v) = false", args)
+		}
+	}
+	for _, args := range [][]string{
+		{"update", "gc-1", "--notes", "done"},
+		{"show", "gc-1", "--json"},
+	} {
+		if bdRequestsProtectedMutation(args) {
+			t.Errorf("bdRequestsProtectedMutation(%v) = true", args)
+		}
+	}
+}
+
+func TestRedactBdJSONOutputRejectsNonJSON(t *testing.T) {
+	if output, ok := redactBdJSONOutput([]byte("ordinary text output\n")); ok || output != nil {
+		t.Fatalf("non-JSON output = (%q, %v), want passthrough signal", output, ok)
+	}
+}
+
+func TestRedactBdTextOutputRemovesCredentialLines(t *testing.T) {
+	input := []byte("Metadata:\n  generation: 8\n  instance_token: must-not-leak\n  gc.session_request.v1.x: {execution_token_digest: safe-digest}\n  owner: mayor\n")
+	output := string(redactBdTextOutput(input))
+	if strings.Contains(output, "must-not-leak") || strings.Contains(output, "instance_token:") {
+		t.Fatalf("credential leaked from generic text output: %s", output)
+	}
+	for _, safe := range []string{"generation: 8", "execution_token_digest", "owner: mayor"} {
+		if !strings.Contains(output, safe) {
+			t.Fatalf("safe field %q was removed: %s", safe, output)
+		}
 	}
 }
 

@@ -38,6 +38,7 @@ type beadPolicyGraphStore struct {
 var (
 	_ beads.ConditionalAssignmentReleaser    = (*beadPolicyStore)(nil)
 	_ beads.ConditionalWritesResolveTargeter = (*beadPolicyStore)(nil)
+	_ beads.ConditionalWriterHandleProvider  = (*beadPolicyStore)(nil)
 )
 
 // ConditionalWritesResolveTarget declares the wrapped store as the
@@ -49,6 +50,12 @@ var (
 // wrapper. beadPolicyGraphStore inherits this via its embedded
 // *beadPolicyStore.
 func (s *beadPolicyStore) ConditionalWritesResolveTarget() beads.Store { return s.Store }
+
+// ConditionalWriterHandle preserves revision-fenced mutations through the
+// policy wrapper without claiming support when the backing lacks it.
+func (s *beadPolicyStore) ConditionalWriterHandle() (beads.ConditionalWriter, bool) {
+	return beads.ConditionalWriterFor(s.Store)
+}
 
 var (
 	_ beads.BatchDeleter      = (*beadPolicyStore)(nil)
