@@ -1,0 +1,28 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library")
+
+go_library(
+    name = "gc-protected-authority-launcher_lib",
+    srcs = [
+        "main_linux.go",
+        "main_other.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/cmd/gc-protected-authority-launcher",
+    visibility = ["//visibility:private"],
+    deps = ["//internal/beadspermitbroker"],
+)
+
+go_binary(
+    name = "gc-protected-authority-launcher",
+    embed = [":gc-protected-authority-launcher_lib"],
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

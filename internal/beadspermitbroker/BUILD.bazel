@@ -1,0 +1,43 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "beadspermitbroker",
+    srcs = [
+        "broker_linux.go",
+        "broker_other.go",
+        "launcher_linux.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/beadspermitbroker",
+    visibility = ["//:__subpackages__"],
+    deps = select({
+        "@rules_go//go/platform:linux": [
+            "@org_golang_x_sys//unix",
+        ],
+        "//conditions:default": [],
+    }),
+)
+
+go_test(
+    name = "beadspermitbroker_test",
+    srcs = [
+        "broker_linux_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":beadspermitbroker"],
+    deps = ["//internal/testenv"] + select({
+        "@rules_go//go/platform:linux": [
+            "@org_golang_x_sys//unix",
+        ],
+        "//conditions:default": [],
+    }),
+)
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
