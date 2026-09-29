@@ -31,7 +31,7 @@
     "ledger.json",
     "offline-receipt.json",
     "negative-proof.json"
-  },
+  ],
   "factory_policy_validation": {
     "status": "unavailable",
     "reason": "This worktree has no .agent-factory/config.yaml and the installed gc binary does not implement gc factory."
