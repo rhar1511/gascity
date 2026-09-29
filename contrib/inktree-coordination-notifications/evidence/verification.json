@@ -12,7 +12,8 @@
     "packages": [
       "internal/coordinationnotify",
       "contrib/inktree-coordination-notifications",
-      "contrib/inktree-coordination-notifications/cmd/evidence"
+      "contrib/inktree-coordination-notifications/cmd/evidence",
+      "contrib/inktree-coordination-notifications/cmd/forgejo-canary"
     ]
   },
   "focused_go_vet": {
@@ -30,7 +31,8 @@
     "binding_id_grammar": "passed",
     "terminal_delivery_guard": "passed",
     "bounded_event_retry_ledger": "passed",
-    "reproducible_replay_inputs": "passed"
+    "reproducible_replay_inputs": "passed",
+    "canary_adapter": "passed"
   },
   "repository_checks": {
     "check_docs": "passed",
@@ -40,7 +42,7 @@
   },
   "race_tests": {
     "status": "not_run",
-    "reason": "CGO_ENABLED is off in this host shell; race mode requires CGO."
+    "reason": "Race mode requires CGO, and this host environment has no C compiler in PATH."
   },
   "retained_reports": [
     "replay.json",

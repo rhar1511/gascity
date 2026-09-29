@@ -212,6 +212,7 @@ filegroup(
         "//contrib:bazel_repo_srcs",
         "//contrib/inktree-coordination-notifications:bazel_repo_srcs",
         "//contrib/inktree-coordination-notifications/cmd/evidence:bazel_repo_srcs",
+        "//contrib/inktree-coordination-notifications/cmd/forgejo-canary:bazel_repo_srcs",
         "//contrib/inktree-story-benchmark:bazel_repo_srcs",
         "//docs:bazel_repo_srcs",
         "//examples:bazel_repo_srcs",

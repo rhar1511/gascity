@@ -34,7 +34,7 @@ type ReasonRule struct {
 	Sentence string `json:"sentence,omitempty"`
 }
 
-// Switches keeps notification rendering and live transport independently gated.
+// Switches keeps route dispatch and notification delivery independently gated.
 // Values are strings so unknown configuration fails closed instead of being
 // silently coerced to a zero-value boolean.
 type Switches struct {
@@ -161,8 +161,8 @@ type Record struct {
 	DedupKey      string `json:"dedup_key"`
 }
 
-// Decision captures independent kill-switch outcomes. Delivery is never
-// authorized by replay or shadow mode.
+// Decision captures independent route and notification kill-switch outcomes.
+// Delivery is never authorized by replay or shadow mode.
 type Decision struct {
 	LiveDispatch         bool `json:"live_dispatch"`
 	NotificationDispatch bool `json:"notification_dispatch"`
@@ -386,6 +386,6 @@ func decision(s Switches, mode Mode) Decision {
 	return Decision{
 		LiveDispatch: live, NotificationDispatch: notify,
 		RenderAllowed: notify && mode == ModeReminder,
-		Deliver:       live && notify && mode == ModeReminder,
+		Deliver:       notify && mode == ModeReminder,
 	}
 }
