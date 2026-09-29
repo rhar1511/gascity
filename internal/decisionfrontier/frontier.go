@@ -212,6 +212,7 @@ type VerifiedAnswer struct {
 	WorkDigest      string
 	MapID           string
 	TicketID        string
+	QuestionID      string
 	QuestionVersion string
 	AnswerDigest    string
 	Resolution      Resolution
@@ -1840,7 +1841,7 @@ func verifiedAnswerMatches(answer VerifiedAnswer, challenge AnswerChallenge) boo
 	return strings.TrimSpace(answer.KeyID) != "" && strings.TrimSpace(answer.Issuer) != "" && strings.TrimSpace(answer.Subject) != "" &&
 		answer.CityRef == challenge.CityRef && answer.StoreRef == challenge.StoreRef && answer.WorkID == challenge.WorkID && answer.WorkRevision == challenge.WorkRevision &&
 		answer.WorkDigest == challenge.WorkDigest && answer.MapID == challenge.MapID &&
-		answer.TicketID == challenge.TicketID && answer.QuestionVersion == challenge.QuestionVersion &&
+		answer.TicketID == challenge.TicketID && answer.QuestionID == challenge.QuestionID && answer.QuestionVersion == challenge.QuestionVersion &&
 		answer.AnswerDigest == challenge.AnswerDigest && answer.Resolution == challenge.Resolution
 }
 

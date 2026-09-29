@@ -192,7 +192,8 @@ type Server struct {
 
 	// prHumanVerifier is built from host-managed trust configuration, separately
 	// from city-write keys. Nil keeps human PR actions unavailable.
-	prHumanVerifier *PRHumanGrantVerifier
+	prHumanVerifier        *PRHumanGrantVerifier
+	decisionAnswerVerifier *DecisionAnswerGrantVerifier
 
 	// prActionService is lazily built per cached city server from controller
 	// credentials and optional immutable evidence support on State.

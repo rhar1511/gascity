@@ -197,6 +197,21 @@ rejected. Missing human trust disables merge approval. Host isolation, signing
 key custody, and evidence-provider permissions still require deployment
 verification before any live promotion or merge release.
 
+Decision-frontier answers are opt-in under the separate `decision.answer`
+scope in the same trust document. Their signed JSON payload has `protocol`,
+`kid`, `iss`, `sub`, `scope`, `challenge`, `iat`, `exp`, and `jti` fields;
+`protocol` must be `gascity.decision-answer.v1`, and `challenge` must exactly
+match the current city/store, source work, revision, map, ticket, question, and
+answer digest. The Ed25519 signing input is the bytes
+`gascity.decision-answer.v1\0` followed by the canonical JSON payload. The
+opaque `proof` is the unpadded base64url payload and signature separated by a
+dot. Grants require a nonempty JTI and last at most two minutes. Replaying the
+same grant for the same challenge is allowed and returns the same durable
+answer; JTI is not consumed as a one-time nonce. The challenge binds source
+work identity and the immutable frontier map, but does not include external
+`SourceIssue` or `SourceLinks` values. When a state-owned verifier is absent,
+missing supervisor-managed human trust leaves answers unavailable.
+
 ## Request and response headers
 
 Every operation's header contract appears in the OpenAPI spec — if a

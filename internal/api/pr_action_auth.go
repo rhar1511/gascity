@@ -13,8 +13,8 @@ import (
 	"time"
 )
 
-// PRActionScopePrepare and the related constants name the actions that may be
-// granted by a trusted human authority.
+// Human grant scope constants name the actions that may be granted by the
+// supervisor-managed human authority.
 const (
 	// PRHumanTrustEnv is read only by the trusted supervisor process. The
 	// corresponding private keys must be held by the named human grant service,
@@ -25,6 +25,8 @@ const (
 	PRActionScopeReview      = "pr.review"
 	PRActionScopeMerge       = "pr.merge"
 	PRActionScopePolicyWrite = "pr.policy.write"
+	// DecisionAnswerScope is an opt-in human authority for signed frontier answers.
+	DecisionAnswerScope = "decision.answer"
 
 	maxPRHumanGrantBytes = 16 << 10
 	maxPRHumanGrantTTL   = 2 * time.Minute
@@ -173,6 +175,7 @@ func NewPRHumanGrantVerifier(cfg PRHumanTrustConfig, workerKeys map[string]ed255
 	authorities := make(map[prHumanAuthorityKey]map[string]struct{}, len(cfg.Authorities))
 	knownScopes := map[string]struct{}{
 		PRActionScopePrepare: {}, PRActionScopeReview: {}, PRActionScopeMerge: {}, PRActionScopePolicyWrite: {},
+		DecisionAnswerScope: {},
 	}
 	for _, entry := range cfg.Authorities {
 		binding := prHumanAuthorityKey{

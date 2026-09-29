@@ -246,7 +246,8 @@ func (lifecycleDecisionAnswerVerifier) VerifyDecisionAnswer(_ context.Context, c
 		CityRef: challenge.CityRef, StoreRef: challenge.StoreRef, KeyID: "human-key", Issuer: "human-authority",
 		Subject: "authorized-human", WorkID: challenge.WorkID, WorkRevision: challenge.WorkRevision,
 		WorkDigest: challenge.WorkDigest, MapID: challenge.MapID, TicketID: challenge.TicketID,
-		QuestionVersion: challenge.QuestionVersion, AnswerDigest: challenge.AnswerDigest, Resolution: challenge.Resolution,
+		QuestionID: challenge.QuestionID, QuestionVersion: challenge.QuestionVersion,
+		AnswerDigest: challenge.AnswerDigest, Resolution: challenge.Resolution,
 	}, nil
 }
 

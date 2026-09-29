@@ -332,7 +332,7 @@ func TestServiceUsesReturnedRevisionTokensInsteadOfIncrementing(t *testing.T) {
 		return VerifiedAnswer{
 			CityRef: challenge.CityRef, StoreRef: challenge.StoreRef, KeyID: "key", Issuer: "issuer", Subject: "human",
 			WorkID: challenge.WorkID, WorkRevision: challenge.WorkRevision, WorkDigest: challenge.WorkDigest,
-			MapID: challenge.MapID, TicketID: challenge.TicketID, QuestionVersion: challenge.QuestionVersion,
+			MapID: challenge.MapID, TicketID: challenge.TicketID, QuestionID: challenge.QuestionID, QuestionVersion: challenge.QuestionVersion,
 			AnswerDigest: AnswerDigest(submission.Resolution, submission.Text), Resolution: submission.Resolution,
 		}, nil
 	})
@@ -649,7 +649,7 @@ func TestSQLiteFrontierRecoversCommittedReceiptAfterRestart(t *testing.T) {
 		return VerifiedAnswer{
 			CityRef: challenge.CityRef, StoreRef: challenge.StoreRef, KeyID: "key", Issuer: "issuer", Subject: "human",
 			WorkID: challenge.WorkID, WorkRevision: challenge.WorkRevision, WorkDigest: challenge.WorkDigest,
-			MapID: challenge.MapID, TicketID: challenge.TicketID, QuestionVersion: challenge.QuestionVersion,
+			MapID: challenge.MapID, TicketID: challenge.TicketID, QuestionID: challenge.QuestionID, QuestionVersion: challenge.QuestionVersion,
 			AnswerDigest: AnswerDigest(submission.Resolution, submission.Text), Resolution: submission.Resolution,
 		}, nil
 	})

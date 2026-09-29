@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"reflect"
 	"strings"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -161,10 +162,27 @@ func (s *Server) humaHandleDecisionFrontierAnswer(ctx context.Context, input *De
 }
 
 func (s *Server) decisionFrontierService() decisionfrontier.Service {
+	service := decisionfrontier.Service{}
 	if provider, ok := s.state.(DecisionFrontierServiceProvider); ok {
-		return provider.DecisionFrontierService()
+		service = provider.DecisionFrontierService()
 	}
-	return decisionfrontier.Service{}
+	if !decisionAnswerVerifierAvailable(service.Verifier) && s.decisionAnswerVerifier != nil {
+		service.Verifier = s.decisionAnswerVerifier
+	}
+	return service
+}
+
+func decisionAnswerVerifierAvailable(verifier decisionfrontier.AnswerVerifier) bool {
+	if verifier == nil {
+		return false
+	}
+	value := reflect.ValueOf(verifier)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return !value.IsNil()
+	default:
+		return true
+	}
 }
 
 // decisionFrontierSource binds the path ID to its controller-resolved physical

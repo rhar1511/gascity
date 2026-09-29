@@ -3,10 +3,14 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -72,7 +76,7 @@ func TestDecisionFrontierAPIEnsureReplayReadAndAnswerAuthority(t *testing.T) {
 			return decisionfrontier.VerifiedAnswer{
 				CityRef: challenge.CityRef, StoreRef: challenge.StoreRef, KeyID: "human-key", Issuer: "mayor-authority", Subject: "ricky",
 				WorkID: challenge.WorkID, WorkRevision: challenge.WorkRevision, WorkDigest: challenge.WorkDigest,
-				MapID: challenge.MapID, TicketID: challenge.TicketID, QuestionVersion: challenge.QuestionVersion,
+				MapID: challenge.MapID, TicketID: challenge.TicketID, QuestionID: challenge.QuestionID, QuestionVersion: challenge.QuestionVersion,
 				AnswerDigest: decisionfrontier.AnswerDigest(submission.Resolution, submission.Text), Resolution: submission.Resolution,
 			}, nil
 		}),
@@ -233,6 +237,91 @@ func TestDecisionFrontierAPIWithoutVerifierFailsClosedAndChangedBodyConflicts(t 
 	if updated.Metadata[beadmeta.DecisionFrontierHoldMetadataKey] == "" {
 		t.Fatal("answer without trusted verifier released source work")
 	}
+}
+
+func TestInstallWriteAuthWiresDecisionAnswerFallbackAndPreservesStateService(t *testing.T) {
+	t.Setenv("GC_CITY_WRITE_PUBKEY", "")
+	t.Setenv("GC_CITY_WRITE_REQUIRED", "")
+	publicKey, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trust, err := json.Marshal(PRHumanTrustConfig{
+		Keys: []PRHumanGrantKey{{KeyID: "answer-key", PublicKey: base64.StdEncoding.EncodeToString(publicKey)}},
+		Authorities: []PRHumanAuthority{{
+			KeyID: "answer-key", Issuer: "city-governance", Subject: "reviewer@example.test",
+			Scopes: []string{DecisionAnswerScope},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(PRHumanTrustEnv, string(trust))
+
+	mux := NewSupervisorMux(nil, nil, false, "test", "", time.Now())
+	if err := InstallWriteAuth(mux, "", false, WriteAuthBindContext{}); err != nil {
+		t.Fatalf("install auth: %v", err)
+	}
+	plainState := newFakeState(t)
+	plainServer := mux.getCityServer("plain", plainState)
+	plainService := plainServer.decisionFrontierService()
+	if _, ok := plainService.Verifier.(*DecisionAnswerGrantVerifier); !ok {
+		t.Fatalf("installed answer verifier = %T, want DecisionAnswerGrantVerifier", plainService.Verifier)
+	}
+	if plainService.Delivery != nil {
+		t.Fatalf("answer verifier installation changed prompt delivery: %T", plainService.Delivery)
+	}
+
+	providedVerifier := NewDecisionAnswerGrantVerifier(mux.prHumanVerifier)
+	delivery := &decisionFrontierDeliveryStub{}
+	providerState := &decisionFrontierState{
+		State:   newFakeState(t),
+		service: decisionfrontier.Service{Verifier: providedVerifier, Delivery: delivery},
+	}
+	providerService := mux.getCityServer("provider", providerState).decisionFrontierService()
+	if got, ok := providerService.Verifier.(*DecisionAnswerGrantVerifier); !ok || got != providedVerifier {
+		t.Fatalf("state verifier = %T (%v), want provider verifier %p", providerService.Verifier, ok, providedVerifier)
+	}
+	if providerService.Delivery != delivery {
+		t.Fatalf("provider prompt delivery changed: got %T, want %T", providerService.Delivery, delivery)
+	}
+
+	var typedNilVerifier *DecisionAnswerGrantVerifier
+	typedNilState := &decisionFrontierState{
+		State:   newFakeState(t),
+		service: decisionfrontier.Service{Verifier: typedNilVerifier, Delivery: delivery},
+	}
+	typedNilService := mux.getCityServer("typed-nil", typedNilState).decisionFrontierService()
+	if got, ok := typedNilService.Verifier.(*DecisionAnswerGrantVerifier); !ok || got == nil {
+		t.Fatalf("typed-nil state verifier did not use configured fallback: %T (%v)", typedNilService.Verifier, ok)
+	}
+	if typedNilService.Delivery != delivery {
+		t.Fatalf("typed-nil fallback changed prompt delivery: got %T, want %T", typedNilService.Delivery, delivery)
+	}
+}
+
+func TestInstallWriteAuthLeavesAnswerFallbackUnavailableWithoutHumanTrust(t *testing.T) {
+	t.Setenv("GC_CITY_WRITE_PUBKEY", "")
+	t.Setenv("GC_CITY_WRITE_REQUIRED", "")
+	t.Setenv(PRHumanTrustEnv, "")
+	mux := NewSupervisorMux(nil, nil, false, "test", "", time.Now())
+	if err := InstallWriteAuth(mux, "", false, WriteAuthBindContext{}); err != nil {
+		t.Fatalf("install auth without optional human trust: %v", err)
+	}
+	service := mux.getCityServer("no-human-trust", newFakeState(t)).decisionFrontierService()
+	if service.Verifier != nil {
+		t.Fatalf("answer verifier without configured human trust = %T, want nil", service.Verifier)
+	}
+}
+
+type decisionFrontierDeliveryStub struct{}
+
+func (*decisionFrontierDeliveryStub) DeliverDecisionPrompt(context.Context, decisionfrontier.PromptRequest) (decisionfrontier.PromptResult, error) {
+	return decisionfrontier.PromptResult{}, nil
+}
+
+func (*decisionFrontierDeliveryStub) ReconcileDecisionPrompt(context.Context, string) (decisionfrontier.PromptResult, error) {
+	return decisionfrontier.PromptResult{}, nil
 }
 
 func TestDecisionFrontierAPIRejectsGenericRecordMinting(t *testing.T) {

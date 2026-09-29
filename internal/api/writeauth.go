@@ -469,6 +469,6 @@ func InstallWriteAuth(sm *SupervisorMux, configKey string, configRequired bool, 
 	if err != nil {
 		return err
 	}
-	sm.WithPRHumanGrantVerifier(human)
+	sm.WithPRHumanGrantVerifier(human).WithDecisionAnswerGrantVerifier(NewDecisionAnswerGrantVerifier(human))
 	return nil
 }

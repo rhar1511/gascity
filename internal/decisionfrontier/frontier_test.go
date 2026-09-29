@@ -303,6 +303,7 @@ func TestHeldFrontierRejectsConcurrentDependencyMutationAndStillReleases(t *test
 					CityRef: challenge.CityRef, StoreRef: challenge.StoreRef, WorkDigest: challenge.WorkDigest,
 					KeyID: "test-key", Issuer: "test-authority", Subject: "test-human", WorkID: challenge.WorkID,
 					WorkRevision: challenge.WorkRevision, MapID: challenge.MapID, TicketID: challenge.TicketID,
+					QuestionID:      challenge.QuestionID,
 					QuestionVersion: challenge.QuestionVersion, AnswerDigest: AnswerDigest(submission.Resolution, submission.Text),
 					Resolution: submission.Resolution,
 				}, nil
@@ -371,6 +372,7 @@ func TestAnswerRefusesOutOfBandGraphChangeBeforeRelease(t *testing.T) {
 			CityRef: challenge.CityRef, StoreRef: challenge.StoreRef, WorkDigest: challenge.WorkDigest,
 			KeyID: "test-key", Issuer: "test-authority", Subject: "test-human", WorkID: challenge.WorkID,
 			WorkRevision: challenge.WorkRevision, MapID: challenge.MapID, TicketID: challenge.TicketID,
+			QuestionID:      challenge.QuestionID,
 			QuestionVersion: challenge.QuestionVersion, AnswerDigest: AnswerDigest(submission.Resolution, submission.Text),
 			Resolution: submission.Resolution,
 		}, nil
@@ -467,6 +469,7 @@ func TestAnswerRequiresConfiguredVerifierAndResumesOnlyExactFrontier(t *testing.
 			KeyID: "human-key", Issuer: "human-authority", Subject: "authorized-human",
 			WorkID: challenge.WorkID, WorkRevision: challenge.WorkRevision,
 			MapID: challenge.MapID, TicketID: challenge.TicketID,
+			QuestionID:      challenge.QuestionID,
 			QuestionVersion: challenge.QuestionVersion, AnswerDigest: AnswerDigest(submission.Resolution, submission.Text),
 			Resolution: submission.Resolution,
 		}, nil
@@ -635,6 +638,7 @@ func TestAnswerVerifierAndTicketReplayAreBoundToOwningCity(t *testing.T) {
 			KeyID: "human-key", Issuer: "human-issuer", Subject: "authorized-human",
 			WorkID: challenge.WorkID, WorkRevision: challenge.WorkRevision, WorkDigest: challenge.WorkDigest,
 			MapID: challenge.MapID, TicketID: challenge.TicketID, QuestionVersion: challenge.QuestionVersion,
+			QuestionID:   challenge.QuestionID,
 			AnswerDigest: challenge.AnswerDigest, Resolution: challenge.Resolution,
 		}, nil
 	})}
@@ -654,6 +658,7 @@ func TestAnswerVerifierAndTicketReplayAreBoundToOwningCity(t *testing.T) {
 			KeyID: "human-key", Issuer: "human-issuer", Subject: "authorized-human",
 			WorkID: challenge.WorkID, WorkRevision: challenge.WorkRevision, WorkDigest: challenge.WorkDigest,
 			MapID: challenge.MapID, TicketID: challenge.TicketID, QuestionVersion: challenge.QuestionVersion,
+			QuestionID:   challenge.QuestionID,
 			AnswerDigest: AnswerDigest(sub.Resolution, sub.Text), Resolution: sub.Resolution,
 		}, nil
 	})
@@ -1032,10 +1037,29 @@ func TestAnswerVerifierMustBindExactQuestionAndUnresolvedAnswerKeepsWorkHeld(t *
 			CityRef: challenge.CityRef, StoreRef: challenge.StoreRef, WorkDigest: challenge.WorkDigest,
 			KeyID: "human-key", Issuer: "human-authority", Subject: "worker-forgery",
 			WorkID: challenge.WorkID, WorkRevision: challenge.WorkRevision, MapID: challenge.MapID,
-			TicketID: challenge.TicketID, QuestionVersion: challenge.QuestionVersion,
+			TicketID: challenge.TicketID, QuestionID: challenge.QuestionID + "-changed", QuestionVersion: challenge.QuestionVersion,
 			AnswerDigest: challenge.AnswerDigest, Resolution: challenge.Resolution,
 		}, nil
 	})}
+	if _, err := service.Answer(context.Background(), store, testCityScope(), work.ID, submission); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("answer verifier response for a different question ID = %v, want unauthorized", err)
+	}
+	stillHeld, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !beads.HasDecisionFrontierHold(stillHeld) {
+		t.Fatal("question-ID mismatch released source work")
+	}
+	service.Verifier = verifierFunc(func(_ context.Context, challenge AnswerChallenge, _ AnswerSubmission) (VerifiedAnswer, error) {
+		return VerifiedAnswer{
+			CityRef: challenge.CityRef, StoreRef: challenge.StoreRef, WorkDigest: challenge.WorkDigest,
+			KeyID: "human-key", Issuer: "human-authority", Subject: "worker-forgery",
+			WorkID: challenge.WorkID, WorkRevision: challenge.WorkRevision, MapID: challenge.MapID,
+			TicketID: challenge.TicketID, QuestionID: challenge.QuestionID, QuestionVersion: challenge.QuestionVersion,
+			AnswerDigest: challenge.AnswerDigest, Resolution: challenge.Resolution,
+		}, nil
+	})
 	resolved, err := service.Answer(context.Background(), store, testCityScope(), work.ID, submission)
 	if err != nil {
 		t.Fatal(err)
@@ -1066,7 +1090,7 @@ func TestExactAnswerReplayReturnsPersistedFrontierWithoutAddingRows(t *testing.T
 			CityRef: challenge.CityRef, StoreRef: challenge.StoreRef, WorkDigest: challenge.WorkDigest,
 			KeyID: "human-key", Issuer: "authority", Subject: "ricky",
 			WorkID: challenge.WorkID, WorkRevision: challenge.WorkRevision, MapID: challenge.MapID,
-			TicketID: challenge.TicketID, QuestionVersion: challenge.QuestionVersion,
+			TicketID: challenge.TicketID, QuestionID: challenge.QuestionID, QuestionVersion: challenge.QuestionVersion,
 			AnswerDigest: challenge.AnswerDigest, Resolution: challenge.Resolution,
 		}, nil
 	})}
