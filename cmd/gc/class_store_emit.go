@@ -552,6 +552,16 @@ func (s *emittingClassStore) DecisionFrontierSourceSnapshot(id string) (beads.Be
 	return reader.DecisionFrontierSourceSnapshot(id)
 }
 
+// DecisionFrontierRevisionTransitionReceipt reads the exact durable source
+// receipt without publishing its private payload through generic bead events.
+func (s *emittingClassStore) DecisionFrontierRevisionTransitionReceipt(issueID, receiptID string) (beads.RevisionTransitionReceipt, bool, error) {
+	reader, ok := beads.RevisionTransitionReceiptReaderFor(s.Store)
+	if !ok || reader == nil {
+		return beads.RevisionTransitionReceipt{}, false, beads.ErrConditionalWriteUnsupported
+	}
+	return reader.DecisionFrontierRevisionTransitionReceipt(issueID, receiptID)
+}
+
 // CompareAndSetMetadataKeyWithReceipt performs the private atomic source
 // transition without exposing its hold marker or immutable receipt in a
 // generic event payload.

@@ -143,6 +143,26 @@ func (s *offsetRevisionStore) DecisionFrontierSourceSnapshot(id string) (beads.B
 	return toOffsetToken(bead)
 }
 
+func (s *offsetRevisionStore) DecisionFrontierRevisionTransitionReceipt(issueID, receiptID string) (beads.RevisionTransitionReceipt, bool, error) {
+	reader, ok := beads.RevisionTransitionReceiptReaderFor(s.Store)
+	if !ok || reader == nil {
+		return beads.RevisionTransitionReceipt{}, false, beads.ErrConditionalWriteUnsupported
+	}
+	receipt, found, err := reader.DecisionFrontierRevisionTransitionReceipt(issueID, receiptID)
+	if err != nil || !found {
+		return receipt, found, err
+	}
+	receipt.FromRevision, err = toOffsetRevision(receipt.FromRevision)
+	if err != nil {
+		return beads.RevisionTransitionReceipt{}, false, err
+	}
+	receipt.ToRevision, err = toOffsetRevision(receipt.ToRevision)
+	if err != nil {
+		return beads.RevisionTransitionReceipt{}, false, err
+	}
+	return receipt, true, nil
+}
+
 func (s *offsetRevisionStore) Get(id string) (beads.Bead, error) {
 	bead, err := s.Store.Get(id)
 	if err != nil {
@@ -223,6 +243,13 @@ func toOffsetToken(bead beads.Bead) (beads.Bead, error) {
 		bead.Metadata[beadmeta.DecisionFrontierRevisionReceiptsMetadataKey] = updated
 	}
 	return bead, nil
+}
+
+func toOffsetRevision(revision int64) (int64, error) {
+	if revision <= 0 {
+		return 0, fmt.Errorf("invalid raw revision token %d", revision)
+	}
+	return revision*17 + 5, nil
 }
 
 func rewriteHoldRevision(raw string, transform func(string) (string, error)) (string, error) {

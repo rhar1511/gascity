@@ -440,6 +440,21 @@ func (r proxiedDecisionFrontierSourceReader) DecisionFrontierSourceSnapshot(id s
 	return snapshot, r.store.classifyReadError(err)
 }
 
+func (r proxiedDecisionFrontierSourceReader) DecisionFrontierRevisionTransitionReceipt(issueID, receiptID string) (RevisionTransitionReceipt, bool, error) {
+	reader, ok := r.reader.(RevisionTransitionReceiptReader)
+	if !ok || reader == nil {
+		return RevisionTransitionReceipt{}, false, ErrConditionalWriteUnsupported
+	}
+	var receipt RevisionTransitionReceipt
+	var found bool
+	err := r.store.withMutation("decision-frontier-transition-receipt "+issueID, func(Store) error {
+		var readErr error
+		receipt, found, readErr = reader.DecisionFrontierRevisionTransitionReceipt(issueID, receiptID)
+		return readErr
+	})
+	return receipt, found, r.store.classifyReadError(err)
+}
+
 // DecisionFrontierSourceReaderHandle reads the source snapshot from the
 // authoritative bd write leaf and brackets the call with the proxy generation
 // check. The native leaf is a read projection and cannot substitute for the

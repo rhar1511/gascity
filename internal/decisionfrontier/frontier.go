@@ -373,21 +373,15 @@ func canonicalHoldValue(scope Scope, workID, revision, workDigest, mapID, propos
 
 func proposalHashFromFrontier(frontier Frontier) string { return frontier.proposalHash }
 
-func transitionReceipt(bead beads.Bead, id string) (beads.RevisionTransitionReceipt, bool, error) {
-	raw := bead.Metadata[beadmeta.DecisionFrontierRevisionReceiptsMetadataKey]
-	if strings.TrimSpace(raw) == "" {
-		return beads.RevisionTransitionReceipt{}, false, nil
+func transitionReceipt(reader beads.RevisionTransitionReceiptReader, issueID, id string) (beads.RevisionTransitionReceipt, bool, error) {
+	if reader == nil {
+		return beads.RevisionTransitionReceipt{}, false, fmt.Errorf("%w: exact transition receipt reads are required", ErrUnavailable)
 	}
-	var receipts []beads.RevisionTransitionReceipt
-	if err := json.Unmarshal([]byte(raw), &receipts); err != nil {
-		return beads.RevisionTransitionReceipt{}, false, fmt.Errorf("decode decision-frontier source receipts: %w", ErrConflict)
+	receipt, found, err := reader.DecisionFrontierRevisionTransitionReceipt(issueID, id)
+	if err != nil {
+		return beads.RevisionTransitionReceipt{}, false, errors.Join(ErrConflict, err)
 	}
-	for _, receipt := range receipts {
-		if receipt.ID == id {
-			return receipt, true, nil
-		}
-	}
-	return beads.RevisionTransitionReceipt{}, false, nil
+	return receipt, found, nil
 }
 
 func receiptMatches(receipt beads.RevisionTransitionReceipt, scope Scope, workID, mapID, operation string, fromRevision int64) bool {
@@ -397,7 +391,7 @@ func receiptMatches(receipt beads.RevisionTransitionReceipt, scope Scope, workID
 		fromRevision != 0 && receipt.FromRevision != 0 && receipt.ToRevision != 0 && receipt.ToRevision != fromRevision
 }
 
-func validateFrontierSource(work beads.Bead, frontier Frontier, expectedMarker string) error {
+func validateFrontierSource(work beads.Bead, frontier Frontier, expectedMarker string, receiptReader beads.RevisionTransitionReceiptReader) error {
 	scope := Scope{CityRef: frontier.CityRef, StoreRef: frontier.StoreRef}
 	if validateScope(scope) != nil || work.ID != frontier.WorkID || expectedMarker == "" {
 		return ErrConflict
@@ -416,7 +410,7 @@ func validateFrontierSource(work beads.Bead, frontier Frontier, expectedMarker s
 	}
 	marker := work.Metadata[beadmeta.DecisionFrontierHoldMetadataKey]
 	reservationID := reservationReceiptID(scope, frontier.MapID)
-	reserved, found, err := transitionReceipt(work, reservationID)
+	reserved, found, err := transitionReceipt(receiptReader, work.ID, reservationID)
 	if err != nil || !found || !receiptMatches(reserved, scope, frontier.WorkID, frontier.MapID, "reserve", baseRevision) {
 		return ErrConflict
 	}
@@ -429,13 +423,13 @@ func validateFrontierSource(work beads.Bead, frontier Frontier, expectedMarker s
 			currentRevision != strconv.FormatInt(reserved.ToRevision, 10) {
 			return ErrStale
 		}
-		if _, found, err := transitionReceipt(work, releaseReceiptID(scope, frontier.MapID)); err != nil || found {
+		if _, found, err := transitionReceipt(receiptReader, work.ID, releaseReceiptID(scope, frontier.MapID)); err != nil || found {
 			return ErrConflict
 		}
 		return nil
 	}
 	if marker == "" && frontier.State == StateResolved {
-		released, found, err := transitionReceipt(work, releaseReceiptID(scope, frontier.MapID))
+		released, found, err := transitionReceipt(receiptReader, work.ID, releaseReceiptID(scope, frontier.MapID))
 		if err != nil || !found || !receiptMatches(released, scope, frontier.WorkID, frontier.MapID, "release", reserved.ToRevision) ||
 			currentRevision != strconv.FormatInt(released.ToRevision, 10) {
 			return ErrStale
@@ -558,7 +552,7 @@ func (s Service) Ensure(ctx context.Context, store beads.Store, scope Scope, wor
 	if _, err := canonicalWorkRevision(expectedRevision); err != nil {
 		return Frontier{}, err
 	}
-	recordWriter, transitionWriter, sourceReader, err := requireStoreCapabilities(store)
+	recordWriter, transitionWriter, sourceReader, receiptReader, err := requireStoreCapabilities(store)
 	if err != nil {
 		return Frontier{}, err
 	}
@@ -605,7 +599,7 @@ func (s Service) Ensure(ctx context.Context, store beads.Store, scope Scope, wor
 			if markerPresent != markerValue {
 				return Frontier{}, ErrStale
 			}
-			if err := validatePendingReservation(work, scope, workID, expectedRevision, existingDoc.WorkDigest, mapID, existingDoc.ProposalHash, markerValue); err != nil {
+			if err := validatePendingReservation(work, scope, workID, expectedRevision, existingDoc.WorkDigest, mapID, existingDoc.ProposalHash, markerValue, receiptReader); err != nil {
 				return Frontier{}, err
 			}
 			if err := ensureFrontierRecords(recordWriter, store, existingDoc); err != nil {
@@ -624,11 +618,11 @@ func (s Service) Ensure(ctx context.Context, store beads.Store, scope Scope, wor
 		if err != nil || workDigest != existingDoc.WorkDigest {
 			return Frontier{}, ErrStale
 		}
-		if err := validateFrontierSource(work, frontier, markerValue); err != nil {
+		if err := validateFrontierSource(work, frontier, markerValue, receiptReader); err != nil {
 			return Frontier{}, err
 		}
 		if frontier.State == StateResolved && markerPresent != "" {
-			if err := releaseSource(transitionWriter, sourceReader, scope, workID, expectedRevision, workDigest, mapID, markerValue); err != nil {
+			if err := releaseSource(transitionWriter, sourceReader, receiptReader, scope, workID, expectedRevision, workDigest, mapID, markerValue); err != nil {
 				return Frontier{}, err
 			}
 		}
@@ -659,13 +653,13 @@ func (s Service) Ensure(ctx context.Context, store beads.Store, scope Scope, wor
 		if markerPresent != markerValue {
 			return Frontier{}, ErrStale
 		}
-		if err := validatePendingReservation(work, scope, workID, expectedRevision, workDigest, mapID, proposalHash, markerValue); err != nil {
+		if err := validatePendingReservation(work, scope, workID, expectedRevision, workDigest, mapID, proposalHash, markerValue, receiptReader); err != nil {
 			return Frontier{}, err
 		}
 	}
 	promptID := frontierPromptID(scope, mapID)
 	if markerPresent == "" {
-		if _, err := reserveSource(transitionWriter, sourceReader, scope, work, expectedRevision, workDigest, mapID, markerValue); err != nil {
+		if _, err := reserveSource(transitionWriter, sourceReader, receiptReader, scope, work, expectedRevision, workDigest, mapID, markerValue); err != nil {
 			return Frontier{}, err
 		}
 	}
@@ -673,7 +667,7 @@ func (s Service) Ensure(ctx context.Context, store beads.Store, scope Scope, wor
 	if err != nil {
 		return Frontier{}, fmt.Errorf("re-read reserved decision source %q: %w", workID, err)
 	}
-	if err := validatePendingReservation(work, scope, workID, expectedRevision, workDigest, mapID, proposalHash, markerValue); err != nil {
+	if err := validatePendingReservation(work, scope, workID, expectedRevision, workDigest, mapID, proposalHash, markerValue, receiptReader); err != nil {
 		return Frontier{}, err
 	}
 	reservationID := reservationReceiptID(scope, mapID)
@@ -697,7 +691,7 @@ func (s Service) Ensure(ctx context.Context, store beads.Store, scope Scope, wor
 		return Frontier{}, err
 	}
 	if frontier.State == StateResolved {
-		if err := finalizeFrontier(recordWriter, transitionWriter, sourceReader, store, scope, workID, expectedRevision, workDigest, mapID, markerValue); err != nil {
+		if err := finalizeFrontier(recordWriter, transitionWriter, sourceReader, receiptReader, store, scope, workID, expectedRevision, workDigest, mapID, markerValue); err != nil {
 			return Frontier{}, err
 		}
 	}
@@ -742,7 +736,11 @@ func (Service) Read(ctx context.Context, store beads.Store, scope Scope, workID,
 		return Frontier{}, ErrConflict
 	}
 	marker := canonicalHoldValue(scope, workID, expectedRevision, frontier.WorkDigest, mapID, proposalHashFromFrontier(frontier))
-	if err := validateFrontierSource(work, frontier, marker); err != nil {
+	receiptReader, ok := beads.RevisionTransitionReceiptReaderFor(store)
+	if !ok || receiptReader == nil {
+		return Frontier{}, fmt.Errorf("%w: exact transition receipt reads are required", ErrUnavailable)
+	}
+	if err := validateFrontierSource(work, frontier, marker, receiptReader); err != nil {
 		return Frontier{}, err
 	}
 	return frontier, nil
@@ -763,7 +761,7 @@ func (s Service) Answer(ctx context.Context, store beads.Store, scope Scope, wor
 	if _, err := canonicalWorkRevision(submission.WorkRevision); err != nil {
 		return Frontier{}, err
 	}
-	recordWriter, transitionWriter, sourceReader, err := requireStoreCapabilities(store)
+	recordWriter, transitionWriter, sourceReader, receiptReader, err := requireStoreCapabilities(store)
 	if err != nil {
 		return Frontier{}, err
 	}
@@ -777,7 +775,7 @@ func (s Service) Answer(ctx context.Context, store beads.Store, scope Scope, wor
 		return Frontier{}, err
 	}
 	markerValue := canonicalHoldValue(scope, workID, submission.WorkRevision, frontier.WorkDigest, mapID, proposalHashFromFrontier(frontier))
-	if err := validateFrontierSource(work, frontier, markerValue); err != nil {
+	if err := validateFrontierSource(work, frontier, markerValue, receiptReader); err != nil {
 		return Frontier{}, err
 	}
 	if frontier.WorkID != workID || frontier.WorkRevision != submission.WorkRevision ||
@@ -823,7 +821,7 @@ func (s Service) Answer(ctx context.Context, store beads.Store, scope Scope, wor
 			}
 			if frontier.State == StateResolved {
 				if work.Metadata[beadmeta.DecisionFrontierHoldMetadataKey] != "" {
-					if err := finalizeFrontier(recordWriter, transitionWriter, sourceReader, store, scope, workID, submission.WorkRevision, frontier.WorkDigest, mapID, markerValue); err != nil {
+					if err := finalizeFrontier(recordWriter, transitionWriter, sourceReader, receiptReader, store, scope, workID, submission.WorkRevision, frontier.WorkDigest, mapID, markerValue); err != nil {
 						return Frontier{}, err
 					}
 				}
@@ -843,33 +841,37 @@ func (s Service) Answer(ctx context.Context, store beads.Store, scope Scope, wor
 		return Frontier{}, err
 	}
 	if frontier.State == StateResolved {
-		if err := finalizeFrontier(recordWriter, transitionWriter, sourceReader, store, scope, workID, submission.WorkRevision, frontier.WorkDigest, mapID, markerValue); err != nil {
+		if err := finalizeFrontier(recordWriter, transitionWriter, sourceReader, receiptReader, store, scope, workID, submission.WorkRevision, frontier.WorkDigest, mapID, markerValue); err != nil {
 			return Frontier{}, err
 		}
 	}
 	return frontier, nil
 }
 
-func requireStoreCapabilities(store beads.Store) (beads.DecisionFrontierRecordWriter, beads.RevisionTransitionWriter, beads.DecisionFrontierSourceReader, error) {
+func requireStoreCapabilities(store beads.Store) (beads.DecisionFrontierRecordWriter, beads.RevisionTransitionWriter, beads.DecisionFrontierSourceReader, beads.RevisionTransitionReceiptReader, error) {
 	if store == nil || !beads.StableCreateIDFor(store) {
-		return nil, nil, nil, fmt.Errorf("%w: durable stable-ID creation is required", ErrUnavailable)
+		return nil, nil, nil, nil, fmt.Errorf("%w: durable stable-ID creation is required", ErrUnavailable)
 	}
 	writer, ok := beads.DecisionFrontierRecordWriterFor(store)
 	if !ok || writer == nil {
-		return nil, nil, nil, fmt.Errorf("%w: trusted decision-record writes are required", ErrUnavailable)
+		return nil, nil, nil, nil, fmt.Errorf("%w: trusted decision-record writes are required", ErrUnavailable)
 	}
 	transitionWriter, ok := beads.RevisionTransitionWriterFor(store)
 	if !ok || transitionWriter == nil {
-		return nil, nil, nil, fmt.Errorf("%w: atomic revision-bound transition receipts are required", ErrUnavailable)
+		return nil, nil, nil, nil, fmt.Errorf("%w: atomic revision-bound transition receipts are required", ErrUnavailable)
 	}
 	sourceReader, ok := beads.DecisionFrontierSourceReaderFor(store)
 	if !ok || sourceReader == nil {
-		return nil, nil, nil, fmt.Errorf("%w: authoritative decision-source snapshots are required", ErrUnavailable)
+		return nil, nil, nil, nil, fmt.Errorf("%w: authoritative decision-source snapshots are required", ErrUnavailable)
 	}
-	return writer, transitionWriter, sourceReader, nil
+	receiptReader, ok := beads.RevisionTransitionReceiptReaderFor(store)
+	if !ok || receiptReader == nil {
+		return nil, nil, nil, nil, fmt.Errorf("%w: exact durable transition receipt reads are required", ErrUnavailable)
+	}
+	return writer, transitionWriter, sourceReader, receiptReader, nil
 }
 
-func validatePendingReservation(work beads.Bead, scope Scope, workID, revision, workDigest, mapID, proposalHash, marker string) error {
+func validatePendingReservation(work beads.Bead, scope Scope, workID, revision, workDigest, mapID, proposalHash, marker string, receiptReader beads.RevisionTransitionReceiptReader) error {
 	currentRevision, err := WorkRevision(work)
 	if err != nil || work.Metadata[beadmeta.DecisionFrontierHoldMetadataKey] != marker {
 		return ErrStale
@@ -882,7 +884,7 @@ func validatePendingReservation(work beads.Bead, scope Scope, workID, revision, 
 	if err != nil {
 		return ErrConflict
 	}
-	receipt, found, err := transitionReceipt(work, reservationReceiptID(scope, mapID))
+	receipt, found, err := transitionReceipt(receiptReader, work.ID, reservationReceiptID(scope, mapID))
 	if err != nil || !found || !receiptMatches(receipt, scope, workID, mapID, "reserve", baseRevision) ||
 		currentRevision != strconv.FormatInt(receipt.ToRevision, 10) {
 		return ErrStale
@@ -894,13 +896,13 @@ func validatePendingReservation(work beads.Bead, scope Scope, workID, revision, 
 		hold.ReservationID != receipt.ID {
 		return ErrConflict
 	}
-	if _, found, err := transitionReceipt(work, releaseReceiptID(scope, mapID)); err != nil || found {
+	if _, found, err := transitionReceipt(receiptReader, work.ID, releaseReceiptID(scope, mapID)); err != nil || found {
 		return ErrConflict
 	}
 	return nil
 }
 
-func reserveSource(writer beads.RevisionTransitionWriter, sourceReader beads.DecisionFrontierSourceReader, scope Scope, work beads.Bead, revision, workDigest, mapID, marker string) (beads.RevisionTransitionReceipt, error) {
+func reserveSource(writer beads.RevisionTransitionWriter, sourceReader beads.DecisionFrontierSourceReader, receiptReader beads.RevisionTransitionReceiptReader, scope Scope, work beads.Bead, revision, workDigest, mapID, marker string) (beads.RevisionTransitionReceipt, error) {
 	baseRevision, err := canonicalWorkRevision(revision)
 	if err != nil {
 		return beads.RevisionTransitionReceipt{}, err
@@ -917,10 +919,10 @@ func reserveSource(writer beads.RevisionTransitionWriter, sourceReader beads.Dec
 			if readErr != nil {
 				return beads.RevisionTransitionReceipt{}, errors.Join(fmt.Errorf("reserve decision source: %w", transitionErr), readErr)
 			}
-			if err := validatePendingReservation(latest, scope, work.ID, revision, workDigest, mapID, holdProposalHash(marker), marker); err != nil {
+			if err := validatePendingReservation(latest, scope, work.ID, revision, workDigest, mapID, holdProposalHash(marker), marker, receiptReader); err != nil {
 				return beads.RevisionTransitionReceipt{}, errors.Join(fmt.Errorf("reserve decision source: %w", transitionErr), err)
 			}
-			actual, found, readErr := transitionReceipt(latest, receipt.ID)
+			actual, found, readErr := transitionReceipt(receiptReader, latest.ID, receipt.ID)
 			if readErr != nil || !found {
 				return beads.RevisionTransitionReceipt{}, errors.Join(ErrConflict, readErr)
 			}
@@ -931,7 +933,7 @@ func reserveSource(writer beads.RevisionTransitionWriter, sourceReader beads.Dec
 			if readErr != nil {
 				return beads.RevisionTransitionReceipt{}, readErr
 			}
-			if err := validatePendingReservation(latest, scope, work.ID, revision, workDigest, mapID, holdProposalHash(marker), marker); err != nil {
+			if err := validatePendingReservation(latest, scope, work.ID, revision, workDigest, mapID, holdProposalHash(marker), marker, receiptReader); err != nil {
 				return beads.RevisionTransitionReceipt{}, ErrConflict
 			}
 		}
@@ -940,10 +942,10 @@ func reserveSource(writer beads.RevisionTransitionWriter, sourceReader beads.Dec
 	if err != nil {
 		return beads.RevisionTransitionReceipt{}, fmt.Errorf("read reserved decision source: %w", err)
 	}
-	if err := validatePendingReservation(latest, scope, work.ID, revision, workDigest, mapID, holdProposalHash(marker), marker); err != nil {
+	if err := validatePendingReservation(latest, scope, work.ID, revision, workDigest, mapID, holdProposalHash(marker), marker, receiptReader); err != nil {
 		return beads.RevisionTransitionReceipt{}, err
 	}
-	actual, found, err := transitionReceipt(latest, receipt.ID)
+	actual, found, err := transitionReceipt(receiptReader, latest.ID, receipt.ID)
 	if err != nil || !found {
 		return beads.RevisionTransitionReceipt{}, ErrConflict
 	}
@@ -958,7 +960,7 @@ func holdProposalHash(marker string) string {
 	return hold.ProposalHash
 }
 
-func releaseSource(writer beads.RevisionTransitionWriter, sourceReader beads.DecisionFrontierSourceReader, scope Scope, workID, revision, workDigest, mapID, marker string) error {
+func releaseSource(writer beads.RevisionTransitionWriter, sourceReader beads.DecisionFrontierSourceReader, receiptReader beads.RevisionTransitionReceiptReader, scope Scope, workID, revision, workDigest, mapID, marker string) error {
 	baseRevision, err := canonicalWorkRevision(revision)
 	if err != nil {
 		return err
@@ -971,7 +973,7 @@ func releaseSource(writer beads.RevisionTransitionWriter, sourceReader beads.Dec
 	if err != nil || currentDigest != workDigest {
 		return ErrStale
 	}
-	reserved, found, err := transitionReceipt(work, reservationReceiptID(scope, mapID))
+	reserved, found, err := transitionReceipt(receiptReader, work.ID, reservationReceiptID(scope, mapID))
 	if err != nil || !found || !receiptMatches(reserved, scope, workID, mapID, "reserve", baseRevision) {
 		return ErrConflict
 	}
@@ -980,14 +982,14 @@ func releaseSource(writer beads.RevisionTransitionWriter, sourceReader beads.Dec
 		return ErrStale
 	}
 	if work.Metadata[beadmeta.DecisionFrontierHoldMetadataKey] == "" {
-		released, found, readErr := transitionReceipt(work, releaseReceiptID(scope, mapID))
+		released, found, readErr := transitionReceipt(receiptReader, work.ID, releaseReceiptID(scope, mapID))
 		if readErr == nil && found && receiptMatches(released, scope, workID, mapID, "release", reserved.ToRevision) &&
 			currentRevision == strconv.FormatInt(released.ToRevision, 10) {
 			return nil
 		}
 		return ErrStale
 	}
-	if err := validatePendingReservation(work, scope, workID, revision, workDigest, mapID, holdProposalHash(marker), marker); err != nil {
+	if err := validatePendingReservation(work, scope, workID, revision, workDigest, mapID, holdProposalHash(marker), marker, receiptReader); err != nil {
 		return err
 	}
 	receipt := beads.RevisionTransitionReceipt{
@@ -1001,7 +1003,7 @@ func releaseSource(writer beads.RevisionTransitionWriter, sourceReader beads.Dec
 		if readErr != nil {
 			return errors.Join(fmt.Errorf("release decision source: %w", transitionErr), readErr)
 		}
-		if err := verifyReleasedSource(latest, scope, workID, workDigest, mapID, reserved); err != nil {
+		if err := verifyReleasedSource(latest, scope, workID, workDigest, mapID, reserved, receiptReader); err != nil {
 			return errors.Join(fmt.Errorf("release decision source: %w", transitionErr), err)
 		}
 		return nil
@@ -1013,10 +1015,10 @@ func releaseSource(writer beads.RevisionTransitionWriter, sourceReader beads.Dec
 	if err != nil {
 		return err
 	}
-	return verifyReleasedSource(latest, scope, workID, workDigest, mapID, reserved)
+	return verifyReleasedSource(latest, scope, workID, workDigest, mapID, reserved, receiptReader)
 }
 
-func verifyReleasedSource(work beads.Bead, scope Scope, workID, workDigest, mapID string, reserved beads.RevisionTransitionReceipt) error {
+func verifyReleasedSource(work beads.Bead, scope Scope, workID, workDigest, mapID string, reserved beads.RevisionTransitionReceipt, receiptReader beads.RevisionTransitionReceiptReader) error {
 	currentRevision, err := WorkRevision(work)
 	if err != nil {
 		return ErrStale
@@ -1025,7 +1027,7 @@ func verifyReleasedSource(work beads.Bead, scope Scope, workID, workDigest, mapI
 	if err != nil || currentDigest != workDigest || work.Metadata[beadmeta.DecisionFrontierHoldMetadataKey] != "" {
 		return ErrStale
 	}
-	released, found, err := transitionReceipt(work, releaseReceiptID(scope, mapID))
+	released, found, err := transitionReceipt(receiptReader, work.ID, releaseReceiptID(scope, mapID))
 	if err != nil || !found || !receiptMatches(released, scope, workID, mapID, "release", reserved.ToRevision) ||
 		currentRevision != strconv.FormatInt(released.ToRevision, 10) {
 		return ErrStale
@@ -1033,11 +1035,11 @@ func verifyReleasedSource(work beads.Bead, scope Scope, workID, workDigest, mapI
 	return nil
 }
 
-func finalizeFrontier(writer beads.DecisionFrontierRecordWriter, transitionWriter beads.RevisionTransitionWriter, sourceReader beads.DecisionFrontierSourceReader, store beads.Store, scope Scope, workID, revision, workDigest, mapID, marker string) error {
+func finalizeFrontier(writer beads.DecisionFrontierRecordWriter, transitionWriter beads.RevisionTransitionWriter, sourceReader beads.DecisionFrontierSourceReader, receiptReader beads.RevisionTransitionReceiptReader, store beads.Store, scope Scope, workID, revision, workDigest, mapID, marker string) error {
 	if err := markMapResolved(writer, store, mapID); err != nil {
 		return err
 	}
-	return releaseSource(transitionWriter, sourceReader, scope, workID, revision, workDigest, mapID, marker)
+	return releaseSource(transitionWriter, sourceReader, receiptReader, scope, workID, revision, workDigest, mapID, marker)
 }
 
 func ensureImmutableRecord(writer beads.DecisionFrontierRecordWriter, store beads.Store, id, title, kind, initialState string, doc any) error {
@@ -1488,7 +1490,7 @@ func (s Service) advancePromptDelivery(ctx context.Context, store beads.Store, d
 }
 
 func conditionalCAS(store beads.Store, id, expected, next string) (bool, error) {
-	writer, _, _, err := requireStoreCapabilities(store)
+	writer, _, _, _, err := requireStoreCapabilities(store)
 	if err != nil {
 		return false, err
 	}
@@ -1507,7 +1509,7 @@ func setPromptState(store beads.Store, id, expected, next, reason string) error 
 	if err != nil {
 		return err
 	}
-	writer, _, _, err := requireStoreCapabilities(store)
+	writer, _, _, _, err := requireStoreCapabilities(store)
 	if err != nil {
 		return err
 	}
