@@ -16,7 +16,10 @@ go_library(
         "//internal/beadmeta",
         "//internal/beads",
         "//internal/config",
+        "//internal/coordclass",
         "//internal/qualification",
+        "//internal/storebinding",
+        "//internal/storeref",
     ],
 )
 
@@ -36,6 +39,7 @@ go_test(
         "//internal/beads",
         "//internal/config",
         "//internal/fsys",
+        "//internal/storebinding",
         "//internal/testenv",
     ],
 )

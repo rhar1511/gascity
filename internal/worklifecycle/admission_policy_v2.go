@@ -1,6 +1,7 @@
 package worklifecycle
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path"
@@ -9,19 +10,22 @@ import (
 
 	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/qualification"
+	"github.com/gastownhall/gascity/internal/storebinding"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 const (
 	// AdmissionPolicyProjectionV2Version versions the canonical input schema
 	// hashed by DigestAdmissionPolicyV2. Change it when the projected fields or
 	// their meaning changes.
-	AdmissionPolicyProjectionV2Version = 1
+	AdmissionPolicyProjectionV2Version = 2
 
 	admissionPolicyProjectionV2Domain = "gascity.lifecycle.routing-formula-policy.v2\n"
 	// AdmissionRouteResolverV2Version identifies the exact canonical-target
 	// matching and legacy-alias rejection rules projected into Q54 policy.
-	AdmissionRouteResolverV2Version = "exact-rig-pool-v1"
+	AdmissionRouteResolverV2Version = "exact-rig-pool-v2"
 
 	// AdmissionGraphPlacementSourceRig records that graph workflow placement
 	// follows the source rig store.
@@ -39,26 +43,67 @@ const (
 
 var errAdmissionPolicyV2Invalid = errors.New("admission policy v2 input is invalid")
 
+// AdmissionTargetResolutionContextV2 contains the authoritative expanded city
+// configuration and the caller's effective runtime suspension fact. A nil
+// RuntimeRigSuspended means that runtime state is unknown and fails closed.
+type AdmissionTargetResolutionContextV2 struct {
+	City                *config.City
+	RuntimeRigSuspended *bool
+}
+
 // CanonicalAdmissionPoolV2 is the resolved, rig-qualified pool identity and
-// the facts that allow it to receive generic admitted work. It contains no
-// filesystem paths or live runtime state.
+// the configuration and runtime facts that allow it to receive generic
+// admitted work. It contains no filesystem paths.
 type CanonicalAdmissionPoolV2 struct {
-	Identity                 string `json:"identity"`
-	PoolTemplate             bool   `json:"pool_template"`
-	Suspended                bool   `json:"suspended"`
-	SupportsGenericEphemeral bool   `json:"supports_generic_ephemeral"`
-	CustomSlingQueryAbsent   bool   `json:"custom_sling_query_absent"`
-	MaxActiveSessions        *int   `json:"max_active_sessions,omitempty"`
-	MinActiveSessions        int    `json:"min_active_sessions"`
+	Identity                   string `json:"identity"`
+	PoolTemplate               bool   `json:"pool_template"`
+	Suspended                  bool   `json:"suspended"`
+	SupportsGenericEphemeral   bool   `json:"supports_generic_ephemeral"`
+	CustomSlingQueryAbsent     bool   `json:"custom_sling_query_absent"`
+	AgentMaxActiveSessions     *int   `json:"agent_max_active_sessions,omitempty"`
+	RigMaxActiveSessions       *int   `json:"rig_max_active_sessions,omitempty"`
+	WorkspaceMaxActiveSessions *int   `json:"workspace_max_active_sessions,omitempty"`
+	MaxActiveSessions          *int   `json:"max_active_sessions,omitempty"`
+	InheritedMaxActiveSessions int    `json:"inherited_max_active_sessions"`
+	InheritedMaxSource         string `json:"inherited_max_source"`
+	MinActiveSessions          int    `json:"min_active_sessions"`
+	ConfigRigSuspendedOnStart  bool   `json:"config_rig_suspended_on_start"`
+	RuntimeRigSuspensionKnown  bool   `json:"runtime_rig_suspension_known"`
+	RuntimeRigSuspended        bool   `json:"runtime_rig_suspended"`
 }
 
 // ResolveCanonicalAdmissionPoolV2 accepts only an exact canonical identity
 // for one configured rig-scoped pool template. It does not normalize
 // pool slots or resolve migration-era bound/unbound aliases.
-func ResolveCanonicalAdmissionPoolV2(identity string, agents []config.Agent) (CanonicalAdmissionPoolV2, error) {
+func ResolveCanonicalAdmissionPoolV2(identity string, context AdmissionTargetResolutionContextV2) (CanonicalAdmissionPoolV2, error) {
 	if identity == "" || strings.TrimSpace(identity) != identity || !isRigQualifiedAdmissionIdentity(identity) {
 		return CanonicalAdmissionPoolV2{}, admissionPolicyV2Error("target identity is not a canonical rig-qualified identity")
 	}
+	if context.City == nil {
+		return CanonicalAdmissionPoolV2{}, admissionPolicyV2Error("authoritative city configuration is missing")
+	}
+	if context.RuntimeRigSuspended == nil {
+		return CanonicalAdmissionPoolV2{}, admissionPolicyV2Error("effective runtime rig suspension is unknown")
+	}
+	if *context.RuntimeRigSuspended {
+		return CanonicalAdmissionPoolV2{}, admissionPolicyV2Error("target rig is runtime-suspended")
+	}
+	identityRig, _ := config.ParseQualifiedName(identity)
+	var rig *config.Rig
+	for index := range context.City.Rigs {
+		candidate := &context.City.Rigs[index]
+		if candidate.Name != identityRig {
+			continue
+		}
+		if rig != nil {
+			return CanonicalAdmissionPoolV2{}, admissionPolicyV2Error("target rig configuration is ambiguous")
+		}
+		rig = candidate
+	}
+	if rig == nil {
+		return CanonicalAdmissionPoolV2{}, admissionPolicyV2Error("target rig is missing from authoritative city configuration")
+	}
+	agents := context.City.Agents
 	if isAdmissionPoolSlotSuffix(identity, agents) {
 		return CanonicalAdmissionPoolV2{}, admissionPolicyV2Error("target identity names a pool slot, not its base template")
 	}
@@ -89,33 +134,83 @@ func ResolveCanonicalAdmissionPoolV2(identity string, agents []config.Agent) (Ca
 	if agent.Suspended {
 		return CanonicalAdmissionPoolV2{}, admissionPolicyV2Error("target pool is suspended")
 	}
-	if !agent.SupportsGenericEphemeralSessions() {
-		return CanonicalAdmissionPoolV2{}, admissionPolicyV2Error("target pool does not support generic ephemeral sessions")
-	}
 	if agent.MinActiveSessions != nil && *agent.MinActiveSessions < 0 {
 		return CanonicalAdmissionPoolV2{}, admissionPolicyV2Error("target pool has an invalid minimum session capacity")
 	}
-	if max := agent.EffectiveMaxActiveSessions(); max != nil && (*max < -1 || (*max >= 0 && agent.EffectiveMinActiveSessions() > *max)) {
+	if !validAdmissionCapacity(agent.MaxActiveSessions) || !validAdmissionCapacity(rig.MaxActiveSessions) ||
+		!validAdmissionCapacity(context.City.Workspace.MaxActiveSessions) {
 		return CanonicalAdmissionPoolV2{}, admissionPolicyV2Error("target pool has invalid session capacity bounds")
 	}
-	customSlingQueryAbsent := strings.TrimSpace(agent.SlingQuery) == ""
+	max, maxSource := inheritedAdmissionCapacity(agent.MaxActiveSessions, rig.MaxActiveSessions, context.City.Workspace.MaxActiveSessions)
+	min := agent.EffectiveMinActiveSessions()
+	supportsGenericEphemeral := agent.SupportsGenericEphemeralSessions() && max != 0 &&
+		!admissionAncestorCapacityIsZero(rig.MaxActiveSessions, context.City.Workspace.MaxActiveSessions)
+	if !supportsGenericEphemeral ||
+		(max >= 0 && min > max) {
+		return CanonicalAdmissionPoolV2{}, admissionPolicyV2Error("target pool does not support generic ephemeral sessions within its inherited capacity")
+	}
+	customSlingQueryAbsent := normalizeAdmissionSlingQuery(agent.SlingQuery) == "" ||
+		normalizeAdmissionSlingQuery(agent.SlingQuery) == normalizeAdmissionSlingQuery(agent.DefaultSlingQuery())
 	if !customSlingQueryAbsent {
 		return CanonicalAdmissionPoolV2{}, admissionPolicyV2Error("target pool has a custom sling query")
 	}
 	var maxActiveSessions *int
-	if max := agent.EffectiveMaxActiveSessions(); max != nil {
-		maxValue := *max
+	if max != -1 {
+		maxValue := max
 		maxActiveSessions = &maxValue
 	}
+	agentMax := cloneAdmissionInt(agent.MaxActiveSessions)
+	rigMax := cloneAdmissionInt(rig.MaxActiveSessions)
+	workspaceMax := cloneAdmissionInt(context.City.Workspace.MaxActiveSessions)
 	return CanonicalAdmissionPoolV2{
-		Identity:                 canonical,
-		PoolTemplate:             true,
-		Suspended:                false,
-		SupportsGenericEphemeral: true,
-		CustomSlingQueryAbsent:   true,
-		MaxActiveSessions:        maxActiveSessions,
-		MinActiveSessions:        agent.EffectiveMinActiveSessions(),
+		Identity:                   canonical,
+		PoolTemplate:               true,
+		Suspended:                  agent.Suspended,
+		SupportsGenericEphemeral:   supportsGenericEphemeral,
+		CustomSlingQueryAbsent:     true,
+		AgentMaxActiveSessions:     agentMax,
+		RigMaxActiveSessions:       rigMax,
+		WorkspaceMaxActiveSessions: workspaceMax,
+		MaxActiveSessions:          maxActiveSessions,
+		InheritedMaxActiveSessions: max,
+		InheritedMaxSource:         maxSource,
+		MinActiveSessions:          min,
+		ConfigRigSuspendedOnStart:  rig.EffectiveSuspendedOnStart(),
+		RuntimeRigSuspensionKnown:  context.RuntimeRigSuspended != nil,
+		RuntimeRigSuspended:        *context.RuntimeRigSuspended,
 	}, nil
+}
+
+func inheritedAdmissionCapacity(agent, rig, workspace *int) (int, string) {
+	for _, candidate := range []struct {
+		name  string
+		value *int
+	}{{"agent", agent}, {"rig", rig}, {"workspace", workspace}} {
+		if candidate.value != nil {
+			return *candidate.value, candidate.name
+		}
+	}
+	return -1, "unlimited"
+}
+
+func admissionAncestorCapacityIsZero(rig, workspace *int) bool {
+	return (rig != nil && *rig == 0) || (workspace != nil && *workspace == 0)
+}
+
+func validAdmissionCapacity(value *int) bool {
+	return value == nil || *value >= -1
+}
+
+func cloneAdmissionInt(value *int) *int {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}
+
+func normalizeAdmissionSlingQuery(value string) string {
+	return strings.Join(strings.Fields(value), " ")
 }
 
 // AdmissionFormulaSourceV2 identifies one formula source by its stable
@@ -126,15 +221,87 @@ type AdmissionFormulaSourceV2 struct {
 	SHA256    string `json:"sha256"`
 }
 
+// AdmissionExternalAssetV2 identifies one loaded check script or external
+// dependency by a stable logical name and the hash of its bytes. It never
+// carries a local check_path.
+type AdmissionExternalAssetV2 struct {
+	LogicalID string `json:"logical_id"`
+	SHA256    string `json:"sha256"`
+}
+
+// AdmissionCheckClosureV2 maps one compiled step's check script to the full
+// logical dependency closure the caller resolved. Completeness and count
+// fields make unavailable check_path or dependency mappings fail closed.
+type AdmissionCheckClosureV2 struct {
+	StepID               string   `json:"step_id"`
+	CheckAssetLogicalID  string   `json:"check_asset_logical_id"`
+	DependencyLogicalIDs []string `json:"dependency_logical_ids"`
+	DependencyCount      int      `json:"dependency_count"`
+	DependenciesComplete bool     `json:"dependencies_complete"`
+}
+
+// AdmissionResolvedStoragePlanV2 is created only from a resolved
+// storebinding.StoragePlan. Its private fields prevent callers from asserting
+// an arbitrary graph binding name or digest in a policy projection.
+type AdmissionResolvedStoragePlanV2 struct {
+	planSHA256         string
+	graphBinding       string
+	graphBindingSHA256 string
+	graphClassStoreRef string
+}
+
+// NewAdmissionResolvedStoragePlanV2 captures the frozen plan digest, its
+// ClassGraph binding, and that binding's configuration digest.
+func NewAdmissionResolvedStoragePlanV2(plan *storebinding.StoragePlan) (AdmissionResolvedStoragePlanV2, error) {
+	if plan == nil {
+		return AdmissionResolvedStoragePlanV2{}, admissionPolicyV2Error("resolved storage plan is missing")
+	}
+	binding, assigned := plan.BindingFor(coordclass.ClassGraph)
+	if !assigned || !validCanonicalText(string(binding)) {
+		return AdmissionResolvedStoragePlanV2{}, admissionPolicyV2Error("resolved storage plan has no ClassGraph binding")
+	}
+	bindingDigest, exists := plan.BindingConfigDigests()[binding]
+	var graphClassStoreRef string
+	if binding != storebinding.ReservedWorkBinding {
+		var classes []coordclass.Class
+		for class, assigned := range plan.Assignments() {
+			if assigned == binding {
+				classes = append(classes, class)
+			}
+		}
+		graphClassStoreRef = string(storeref.ClassRef(classes))
+	}
+	proof := AdmissionResolvedStoragePlanV2{
+		planSHA256:         strings.TrimPrefix(string(plan.ConfigDigest()), "sha256:"),
+		graphBinding:       string(binding),
+		graphBindingSHA256: strings.TrimPrefix(string(bindingDigest), "sha256:"),
+		graphClassStoreRef: graphClassStoreRef,
+	}
+	if !exists || !validSHA256Hex(proof.planSHA256) || !validSHA256Hex(proof.graphBindingSHA256) {
+		return AdmissionResolvedStoragePlanV2{}, admissionPolicyV2Error("resolved storage plan binding or digest is incomplete")
+	}
+	return proof, nil
+}
+
+// MarshalJSON retains the opaque caller proof in the canonical projection.
+func (proof AdmissionResolvedStoragePlanV2) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		PlanSHA256         string `json:"plan_sha256"`
+		GraphBinding       string `json:"graph_binding"`
+		GraphBindingSHA256 string `json:"graph_binding_sha256"`
+		GraphClassStoreRef string `json:"graph_class_store_ref"`
+	}{proof.planSHA256, proof.graphBinding, proof.graphBindingSHA256, proof.graphClassStoreRef})
+}
+
 // AdmissionStorePlacementV2 captures the stable store references and
 // selection facts used when a workflow is materialized.
 type AdmissionStorePlacementV2 struct {
-	SourceStoreRef        string `json:"source_store_ref"`
-	GraphPlacementMode    string `json:"graph_placement_mode"`
-	GraphClassBinding     string `json:"graph_class_binding"`
-	GraphStoreRef         string `json:"graph_store_ref"`
-	WorkflowPlacementMode string `json:"workflow_placement_mode"`
-	WorkflowStoreRef      string `json:"workflow_store_ref"`
+	SourceStoreRef        string                         `json:"source_store_ref"`
+	GraphPlacementMode    string                         `json:"graph_placement_mode"`
+	ResolvedStoragePlan   AdmissionResolvedStoragePlanV2 `json:"resolved_storage_plan"`
+	GraphStoreRef         string                         `json:"graph_store_ref"`
+	WorkflowPlacementMode string                         `json:"workflow_placement_mode"`
+	WorkflowStoreRef      string                         `json:"workflow_store_ref"`
 }
 
 // AdmissionPolicyProjectionV2 is the complete, caller-resolved input to the
@@ -142,20 +309,32 @@ type AdmissionStorePlacementV2 struct {
 // effective workflow and every inherited or composed formula source. Their
 // LogicalID values come from stable formula identities, never source paths;
 // FormulaSourceCount must equal the source count from the compiled recipe.
+// ExternalAssets must include every check script and external asset whose
+// bytes affect the compiled recipe. CheckPathCount must equal the compiled
+// recipe's check_path count, and CheckClosures must map each one to its
+// complete external dependency set. A caller unable to resolve a check_path
+// or dependency must set the matching completeness flag false; the digest
+// rejects it.
 type AdmissionPolicyProjectionV2 struct {
-	SourceScope                 string                     `json:"source_scope"`
-	RouteResolverVersion        string                     `json:"route_resolver_version"`
-	Target                      CanonicalAdmissionPoolV2   `json:"target"`
-	Workflow                    string                     `json:"workflow"`
-	FormulaSources              []AdmissionFormulaSourceV2 `json:"formula_sources"`
-	FormulaSourceCount          int                        `json:"formula_source_count"`
-	FormulaCompilerVersion      string                     `json:"formula_compiler_version"`
-	FormulaSchemaVersion        string                     `json:"formula_schema_version"`
-	FormulaV2Enabled            bool                       `json:"formula_v2_enabled"`
-	EffectiveCompileVariables   map[string]string          `json:"effective_compile_variables"`
-	EffectiveComposedFormulaIDs []string                   `json:"effective_composed_formula_ids"`
-	MergeStrategy               string                     `json:"merge_strategy"`
-	StorePlacement              AdmissionStorePlacementV2  `json:"store_placement"`
+	SourceScope                  string                     `json:"source_scope"`
+	RouteResolverVersion         string                     `json:"route_resolver_version"`
+	Target                       CanonicalAdmissionPoolV2   `json:"target"`
+	Workflow                     string                     `json:"workflow"`
+	FormulaSources               []AdmissionFormulaSourceV2 `json:"formula_sources"`
+	FormulaSourceCount           int                        `json:"formula_source_count"`
+	ExternalAssets               []AdmissionExternalAssetV2 `json:"external_assets"`
+	ExternalAssetCount           int                        `json:"external_asset_count"`
+	ExternalAssetClosureComplete bool                       `json:"external_asset_closure_complete"`
+	CheckPathCount               int                        `json:"check_path_count"`
+	CheckMappingsComplete        bool                       `json:"check_mappings_complete"`
+	CheckClosures                []AdmissionCheckClosureV2  `json:"check_closures"`
+	FormulaCompilerVersion       string                     `json:"formula_compiler_version"`
+	FormulaSchemaVersion         string                     `json:"formula_schema_version"`
+	FormulaV2Enabled             bool                       `json:"formula_v2_enabled"`
+	EffectiveCompileVariables    map[string]string          `json:"effective_compile_variables"`
+	EffectiveComposedFormulaIDs  []string                   `json:"effective_composed_formula_ids"`
+	MergeStrategy                string                     `json:"merge_strategy"`
+	StorePlacement               AdmissionStorePlacementV2  `json:"store_placement"`
 }
 
 // DigestAdmissionPolicyV2 validates and hashes a canonical projection of the
@@ -187,13 +366,24 @@ func canonicalAdmissionPolicyProjectionV2(input AdmissionPolicyProjectionV2) (Ad
 		return AdmissionPolicyProjectionV2{}, admissionPolicyV2Error("route resolver version is missing or unsupported")
 	}
 	if !isRigQualifiedAdmissionIdentity(input.Target.Identity) || !input.Target.PoolTemplate ||
-		input.Target.Suspended || !input.Target.SupportsGenericEphemeral || !input.Target.CustomSlingQueryAbsent {
+		input.Target.Suspended || !input.Target.SupportsGenericEphemeral || !input.Target.CustomSlingQueryAbsent ||
+		!input.Target.RuntimeRigSuspensionKnown || input.Target.RuntimeRigSuspended {
 		return AdmissionPolicyProjectionV2{}, admissionPolicyV2Error("target is missing or not eligible for generic admitted work")
 	}
-	if input.Target.MinActiveSessions < 0 || (input.Target.MaxActiveSessions != nil && *input.Target.MaxActiveSessions < -1) ||
-		(input.Target.MaxActiveSessions != nil && *input.Target.MaxActiveSessions == 0) ||
-		(input.Target.MaxActiveSessions != nil && *input.Target.MaxActiveSessions >= 0 && input.Target.MinActiveSessions > *input.Target.MaxActiveSessions) {
+	if !validAdmissionCapacity(input.Target.AgentMaxActiveSessions) || !validAdmissionCapacity(input.Target.RigMaxActiveSessions) ||
+		!validAdmissionCapacity(input.Target.WorkspaceMaxActiveSessions) || input.Target.MinActiveSessions < 0 {
 		return AdmissionPolicyProjectionV2{}, admissionPolicyV2Error("target session capacity facts are invalid")
+	}
+	inheritedMax, inheritedSource := inheritedAdmissionCapacity(
+		input.Target.AgentMaxActiveSessions,
+		input.Target.RigMaxActiveSessions,
+		input.Target.WorkspaceMaxActiveSessions,
+	)
+	if inheritedMax != input.Target.InheritedMaxActiveSessions || inheritedSource != input.Target.InheritedMaxSource ||
+		!equalAdmissionCapacityPointer(input.Target.MaxActiveSessions, inheritedMax) || inheritedMax == 0 ||
+		admissionAncestorCapacityIsZero(input.Target.RigMaxActiveSessions, input.Target.WorkspaceMaxActiveSessions) ||
+		(inheritedMax >= 0 && input.Target.MinActiveSessions > inheritedMax) {
+		return AdmissionPolicyProjectionV2{}, admissionPolicyV2Error("target inherited capacity facts are inconsistent or ineligible")
 	}
 	if !validLogicalFormulaID(input.Workflow) {
 		return AdmissionPolicyProjectionV2{}, admissionPolicyV2Error("effective workflow identity is missing or non-canonical")
@@ -234,6 +424,15 @@ func canonicalAdmissionPolicyProjectionV2(input AdmissionPolicyProjectionV2) (Ad
 		return AdmissionPolicyProjectionV2{}, admissionPolicyV2Error("formula source closure does not include the effective workflow")
 	}
 
+	assets, assetIDs, err := canonicalAdmissionExternalAssetsV2(input)
+	if err != nil {
+		return AdmissionPolicyProjectionV2{}, err
+	}
+	checkClosures, err := canonicalAdmissionCheckClosuresV2(input, assetIDs)
+	if err != nil {
+		return AdmissionPolicyProjectionV2{}, err
+	}
+
 	composed := append([]string{}, input.EffectiveComposedFormulaIDs...)
 	seenComposed := make(map[string]struct{}, len(composed))
 	for _, id := range composed {
@@ -256,9 +455,87 @@ func canonicalAdmissionPolicyProjectionV2(input AdmissionPolicyProjectionV2) (Ad
 		variables[key] = value
 	}
 	input.FormulaSources = sources
+	input.ExternalAssets = assets
+	input.CheckClosures = checkClosures
 	input.EffectiveComposedFormulaIDs = composed
 	input.EffectiveCompileVariables = variables
+	input.Target.AgentMaxActiveSessions = cloneAdmissionInt(input.Target.AgentMaxActiveSessions)
+	input.Target.RigMaxActiveSessions = cloneAdmissionInt(input.Target.RigMaxActiveSessions)
+	input.Target.WorkspaceMaxActiveSessions = cloneAdmissionInt(input.Target.WorkspaceMaxActiveSessions)
+	input.Target.MaxActiveSessions = cloneAdmissionInt(input.Target.MaxActiveSessions)
 	return input, nil
+}
+
+func equalAdmissionCapacityPointer(value *int, inherited int) bool {
+	if inherited == -1 {
+		return value == nil
+	}
+	return value != nil && *value == inherited
+}
+
+func canonicalAdmissionExternalAssetsV2(input AdmissionPolicyProjectionV2) ([]AdmissionExternalAssetV2, map[string]struct{}, error) {
+	assets := append([]AdmissionExternalAssetV2(nil), input.ExternalAssets...)
+	if !input.ExternalAssetClosureComplete || input.ExternalAssetCount < 0 || len(assets) != input.ExternalAssetCount {
+		return nil, nil, admissionPolicyV2Error("external formula/check asset closure is missing or incomplete")
+	}
+	for index, asset := range assets {
+		if !validLogicalFormulaID(asset.LogicalID) || !validSHA256Hex(asset.SHA256) {
+			return nil, nil, admissionPolicyV2Error("external asset closure contains a missing or invalid identity/hash")
+		}
+		assets[index] = asset
+	}
+	sort.Slice(assets, func(i, j int) bool {
+		if assets[i].LogicalID == assets[j].LogicalID {
+			return assets[i].SHA256 < assets[j].SHA256
+		}
+		return assets[i].LogicalID < assets[j].LogicalID
+	})
+	assetIDs := make(map[string]struct{}, len(assets))
+	for index, asset := range assets {
+		if index > 0 && assets[index-1].LogicalID == asset.LogicalID {
+			return nil, nil, admissionPolicyV2Error("external asset closure contains an ambiguous duplicate identity")
+		}
+		assetIDs[asset.LogicalID] = struct{}{}
+	}
+	return assets, assetIDs, nil
+}
+
+func canonicalAdmissionCheckClosuresV2(input AdmissionPolicyProjectionV2, assetIDs map[string]struct{}) ([]AdmissionCheckClosureV2, error) {
+	closures := append([]AdmissionCheckClosureV2(nil), input.CheckClosures...)
+	if !input.CheckMappingsComplete || input.CheckPathCount < 0 || len(closures) != input.CheckPathCount {
+		return nil, admissionPolicyV2Error("check_path-to-asset mapping is missing or incomplete")
+	}
+	for index := range closures {
+		closure := &closures[index]
+		if !validLogicalFormulaID(closure.StepID) || !validLogicalFormulaID(closure.CheckAssetLogicalID) ||
+			!closure.DependenciesComplete || closure.DependencyCount < 0 || len(closure.DependencyLogicalIDs) != closure.DependencyCount {
+			return nil, admissionPolicyV2Error("check dependency mapping is missing or incomplete")
+		}
+		if _, exists := assetIDs[closure.CheckAssetLogicalID]; !exists {
+			return nil, admissionPolicyV2Error("check script is missing from the external asset closure")
+		}
+		dependencies := append([]string(nil), closure.DependencyLogicalIDs...)
+		sort.Strings(dependencies)
+		for index, dependency := range dependencies {
+			if !validLogicalFormulaID(dependency) {
+				return nil, admissionPolicyV2Error("check dependency identity is missing or non-canonical")
+			}
+			if _, exists := assetIDs[dependency]; !exists {
+				return nil, admissionPolicyV2Error("check dependency is missing from the external asset closure")
+			}
+			if index > 0 && dependencies[index-1] == dependency {
+				return nil, admissionPolicyV2Error("check dependency closure contains a duplicate identity")
+			}
+		}
+		closure.DependencyLogicalIDs = dependencies
+	}
+	sort.Slice(closures, func(i, j int) bool { return closures[i].StepID < closures[j].StepID })
+	for index := 1; index < len(closures); index++ {
+		if closures[index-1].StepID == closures[index].StepID {
+			return nil, admissionPolicyV2Error("check mapping contains a duplicate step identity")
+		}
+	}
+	return closures, nil
 }
 
 func validateAdmissionStorePlacementV2(sourceScope string, placement AdmissionStorePlacementV2) error {
@@ -276,15 +553,25 @@ func validateAdmissionStorePlacementV2(sourceScope string, placement AdmissionSt
 	}
 	switch placement.GraphPlacementMode {
 	case AdmissionGraphPlacementSourceRig:
-		if placement.GraphClassBinding != "" || placement.GraphStoreRef != placement.SourceStoreRef {
+		if placement.GraphStoreRef != placement.SourceStoreRef {
 			return admissionPolicyV2Error("source-rig graph placement does not match its source store")
 		}
 	case AdmissionGraphPlacementClass:
-		if !validCanonicalText(placement.GraphClassBinding) {
-			return admissionPolicyV2Error("graph-class placement is missing its selected binding identity")
+		if placement.ResolvedStoragePlan.graphBinding == string(storebinding.ReservedWorkBinding) {
+			if placement.GraphStoreRef != "city:"+city {
+				return admissionPolicyV2Error("graph placement does not match the resolved reserved-work binding")
+			}
+		} else if placement.ResolvedStoragePlan.graphClassStoreRef == "" ||
+			placement.GraphStoreRef != placement.ResolvedStoragePlan.graphClassStoreRef {
+			return admissionPolicyV2Error("graph placement does not match the resolved class binding")
 		}
 	default:
 		return admissionPolicyV2Error("graph placement mode is unknown")
+	}
+	if !validSHA256Hex(placement.ResolvedStoragePlan.planSHA256) ||
+		!validCanonicalText(placement.ResolvedStoragePlan.graphBinding) ||
+		!validSHA256Hex(placement.ResolvedStoragePlan.graphBindingSHA256) {
+		return admissionPolicyV2Error("graph placement has no resolved storage-plan binding proof")
 	}
 	switch placement.WorkflowPlacementMode {
 	case AdmissionWorkflowPlacementSource:
@@ -387,7 +674,22 @@ func validCanonicalStoreRef(value string) bool {
 		return false
 	}
 	kind, name, hasSeparator := strings.Cut(value, ":")
-	return hasSeparator && validCanonicalText(kind) && validCanonicalText(name) && !strings.Contains(name, ":")
+	if !hasSeparator || !validCanonicalText(name) || strings.Contains(name, ":") || name == "." || name == ".." {
+		return false
+	}
+	switch kind {
+	case "city", "rig":
+		return validCanonicalText(name)
+	case "class":
+		for _, char := range name {
+			if char < 'a' || char > 'z' {
+				return false
+			}
+		}
+		return name != ""
+	default:
+		return false
+	}
 }
 
 func validCanonicalText(value string) bool {

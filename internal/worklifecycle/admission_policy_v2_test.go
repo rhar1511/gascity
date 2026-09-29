@@ -1,11 +1,13 @@
 package worklifecycle
 
 import (
+	"context"
 	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/storebinding"
 )
 
 func TestResolveCanonicalAdmissionPoolV2(t *testing.T) {
@@ -13,7 +15,7 @@ func TestResolveCanonicalAdmissionPoolV2(t *testing.T) {
 	pool := config.Agent{Name: "worker", Dir: "rig-a", BindingName: "pack", MinActiveSessions: &maxOne}
 	wantIdentity := "rig-a/pack.worker"
 
-	target, err := ResolveCanonicalAdmissionPoolV2(wantIdentity, []config.Agent{pool})
+	target, err := ResolveCanonicalAdmissionPoolV2(wantIdentity, admissionTargetContext([]config.Agent{pool}))
 	if err != nil {
 		t.Fatalf("ResolveCanonicalAdmissionPoolV2() error = %v", err)
 	}
@@ -21,8 +23,155 @@ func TestResolveCanonicalAdmissionPoolV2(t *testing.T) {
 		!target.SupportsGenericEphemeral || !target.CustomSlingQueryAbsent {
 		t.Fatalf("resolved target = %+v, want eligible canonical pool %q", target, wantIdentity)
 	}
-	if target.MaxActiveSessions != nil || target.MinActiveSessions != 1 {
-		t.Fatalf("resolved capacity = max %v, min %d, want unlimited max and min 1", target.MaxActiveSessions, target.MinActiveSessions)
+	if target.InheritedMaxActiveSessions != -1 || target.InheritedMaxSource != "unlimited" || target.MinActiveSessions != 1 {
+		t.Fatalf("resolved capacity = max %d (%s), min %d, want unlimited max and min 1", target.InheritedMaxActiveSessions, target.InheritedMaxSource, target.MinActiveSessions)
+	}
+}
+
+func TestResolveCanonicalAdmissionPoolV2RequiresEffectiveRigSuspensionAndBindsConfig(t *testing.T) {
+	max := 3
+	agent := config.Agent{Name: "worker", Dir: "rig-a", MinActiveSessions: intPtr(1)}
+	baseCity := &config.City{
+		Agents:    []config.Agent{agent},
+		Workspace: config.Workspace{MaxActiveSessions: intPtr(12)},
+		Rigs:      []config.Rig{{Name: "rig-a", MaxActiveSessions: intPtr(max)}},
+	}
+	runtimeSuspended := false
+	target, err := ResolveCanonicalAdmissionPoolV2("rig-a/worker", AdmissionTargetResolutionContextV2{City: baseCity, RuntimeRigSuspended: &runtimeSuspended})
+	if err != nil {
+		t.Fatalf("ResolveCanonicalAdmissionPoolV2(base): %v", err)
+	}
+	if target.AgentMaxActiveSessions != nil || target.RigMaxActiveSessions == nil || *target.RigMaxActiveSessions != 3 ||
+		target.WorkspaceMaxActiveSessions == nil || *target.WorkspaceMaxActiveSessions != 12 ||
+		target.InheritedMaxActiveSessions != 3 || target.InheritedMaxSource != "rig" {
+		t.Fatalf("resolved capacity facts = %+v, want agent<-rig cap 3 and workspace cap 12", target)
+	}
+
+	agentLimit := 2
+	agentLimitedCity := *baseCity
+	agentLimitedCity.Agents = []config.Agent{{Name: "worker", Dir: "rig-a", MinActiveSessions: intPtr(1), MaxActiveSessions: &agentLimit}}
+	agentLimitedTarget, err := ResolveCanonicalAdmissionPoolV2("rig-a/worker", AdmissionTargetResolutionContextV2{City: &agentLimitedCity, RuntimeRigSuspended: &runtimeSuspended})
+	if err != nil {
+		t.Fatalf("ResolveCanonicalAdmissionPoolV2(agent override): %v", err)
+	}
+	if agentLimitedTarget.InheritedMaxActiveSessions != 2 || agentLimitedTarget.InheritedMaxSource != "agent" {
+		t.Fatalf("agent override capacity = %+v, want agent cap 2 and rig/workspace caps retained", agentLimitedTarget)
+	}
+
+	base := validAdmissionPolicyProjectionV2(t)
+	base.Target = target
+	baseDigest, err := DigestAdmissionPolicyV2(base)
+	if err != nil {
+		t.Fatalf("DigestAdmissionPolicyV2(base): %v", err)
+	}
+
+	changedRig := *baseCity
+	changedRig.Rigs = append([]config.Rig(nil), baseCity.Rigs...)
+	changedRig.Rigs[0].MaxActiveSessions = intPtr(4)
+	changedTarget, err := ResolveCanonicalAdmissionPoolV2("rig-a/worker", AdmissionTargetResolutionContextV2{City: &changedRig, RuntimeRigSuspended: &runtimeSuspended})
+	if err != nil {
+		t.Fatalf("ResolveCanonicalAdmissionPoolV2(changed rig cap): %v", err)
+	}
+	changed := base
+	changed.Target = changedTarget
+	changedDigest, err := DigestAdmissionPolicyV2(changed)
+	if err != nil {
+		t.Fatalf("DigestAdmissionPolicyV2(changed rig cap): %v", err)
+	}
+	if changedDigest == baseDigest {
+		t.Fatal("digest did not change when inherited rig capacity changed")
+	}
+
+	workspaceInherited := *baseCity
+	workspaceInherited.Rigs = []config.Rig{{Name: "rig-a"}}
+	workspaceTarget, err := ResolveCanonicalAdmissionPoolV2("rig-a/worker", AdmissionTargetResolutionContextV2{City: &workspaceInherited, RuntimeRigSuspended: &runtimeSuspended})
+	if err != nil {
+		t.Fatalf("ResolveCanonicalAdmissionPoolV2(workspace inherited cap): %v", err)
+	}
+	workspaceBase := base
+	workspaceBase.Target = workspaceTarget
+	workspaceBaseDigest, err := DigestAdmissionPolicyV2(workspaceBase)
+	if err != nil {
+		t.Fatalf("DigestAdmissionPolicyV2(workspace inherited cap): %v", err)
+	}
+	workspaceChanged := workspaceInherited
+	workspaceChanged.Workspace.MaxActiveSessions = intPtr(11)
+	workspaceChangedTarget, err := ResolveCanonicalAdmissionPoolV2("rig-a/worker", AdmissionTargetResolutionContextV2{City: &workspaceChanged, RuntimeRigSuspended: &runtimeSuspended})
+	if err != nil {
+		t.Fatalf("ResolveCanonicalAdmissionPoolV2(changed workspace cap): %v", err)
+	}
+	workspaceBase.Target = workspaceChangedTarget
+	workspaceChangedDigest, err := DigestAdmissionPolicyV2(workspaceBase)
+	if err != nil {
+		t.Fatalf("DigestAdmissionPolicyV2(changed workspace cap): %v", err)
+	}
+	if workspaceChangedDigest == workspaceBaseDigest {
+		t.Fatal("digest did not change when inherited workspace capacity changed")
+	}
+
+	changedConfigSuspension := *baseCity
+	changedConfigSuspension.Rigs = append([]config.Rig(nil), baseCity.Rigs...)
+	changedConfigSuspension.Rigs[0].SuspendedOnStart = true
+	configSuspendedTarget, err := ResolveCanonicalAdmissionPoolV2("rig-a/worker", AdmissionTargetResolutionContextV2{City: &changedConfigSuspension, RuntimeRigSuspended: &runtimeSuspended})
+	if err != nil {
+		t.Fatalf("ResolveCanonicalAdmissionPoolV2(config suspension): %v", err)
+	}
+	if !configSuspendedTarget.ConfigRigSuspendedOnStart || configSuspendedTarget.RuntimeRigSuspended {
+		t.Fatalf("suspension facts = %+v, want config start-suspended and runtime resumed", configSuspendedTarget)
+	}
+	changed = base
+	changed.Target = configSuspendedTarget
+	configSuspendedDigest, err := DigestAdmissionPolicyV2(changed)
+	if err != nil {
+		t.Fatalf("DigestAdmissionPolicyV2(config suspension): %v", err)
+	}
+	if configSuspendedDigest == baseDigest {
+		t.Fatal("digest did not change when rig config suspension changed")
+	}
+
+	if _, err := ResolveCanonicalAdmissionPoolV2("rig-a/worker", AdmissionTargetResolutionContextV2{City: baseCity}); err == nil {
+		t.Fatal("resolver accepted unknown runtime rig suspension")
+	}
+	zero := 0
+	for _, zeroRig := range []bool{true, false} {
+		zeroCapacityCity := &config.City{
+			Agents:    []config.Agent{{Name: "worker", Dir: "rig-a", MinActiveSessions: intPtr(1), MaxActiveSessions: &agentLimit}},
+			Workspace: config.Workspace{},
+			Rigs:      []config.Rig{{Name: "rig-a"}},
+		}
+		if zeroRig {
+			zeroCapacityCity.Rigs[0].MaxActiveSessions = &zero
+		} else {
+			zeroCapacityCity.Workspace.MaxActiveSessions = &zero
+		}
+		if _, err := ResolveCanonicalAdmissionPoolV2("rig-a/worker", AdmissionTargetResolutionContextV2{City: zeroCapacityCity, RuntimeRigSuspended: &runtimeSuspended}); err == nil {
+			t.Fatalf("resolver accepted a zero %s capacity despite agent override", map[bool]string{true: "rig", false: "workspace"}[zeroRig])
+		}
+	}
+	runtimeSuspended = true
+	if _, err := ResolveCanonicalAdmissionPoolV2("rig-a/worker", AdmissionTargetResolutionContextV2{City: baseCity, RuntimeRigSuspended: &runtimeSuspended}); err == nil {
+		t.Fatal("resolver accepted a runtime-suspended rig")
+	}
+}
+
+func TestResolveCanonicalAdmissionPoolV2AcceptsPinnedBuiltInSlingQuery(t *testing.T) {
+	maxOne := 1
+	pool := config.Agent{Name: "worker", Dir: "rig-a", MinActiveSessions: &maxOne}
+	pool.SlingQuery = "  " + strings.Join(strings.Fields(pool.DefaultSlingQuery()), "   ") + "  "
+	city := &config.City{Agents: []config.Agent{pool}, Rigs: []config.Rig{{Name: "rig-a"}}}
+	runtimeSuspended := false
+	target, err := ResolveCanonicalAdmissionPoolV2("rig-a/worker", AdmissionTargetResolutionContextV2{City: city, RuntimeRigSuspended: &runtimeSuspended})
+	if err != nil {
+		t.Fatalf("resolver rejected normalized built-in sling query: %v", err)
+	}
+	if !target.CustomSlingQueryAbsent {
+		t.Fatalf("target facts = %+v, want built-in query to be treated as no custom query", target)
+	}
+
+	pool.SlingQuery += " --extra"
+	city.Agents = []config.Agent{pool}
+	if _, err := ResolveCanonicalAdmissionPoolV2("rig-a/worker", AdmissionTargetResolutionContextV2{City: city, RuntimeRigSuspended: &runtimeSuspended}); err == nil {
+		t.Fatal("resolver accepted a custom sling query")
 	}
 }
 
@@ -34,6 +183,8 @@ func TestResolveCanonicalAdmissionPoolV2RejectsUnsafeIdentityAndTarget(t *testin
 	bound.Suspended = true
 	customQuery := base
 	customQuery.SlingQuery = "bd update {} --set-metadata custom=yes"
+	suspended := base
+	suspended.Suspended = true
 	noGeneric := base
 	zero := 0
 	noGeneric.MaxActiveSessions = &zero
@@ -52,7 +203,8 @@ func TestResolveCanonicalAdmissionPoolV2RejectsUnsafeIdentityAndTarget(t *testin
 		{name: "whitespace in rig component", identity: "rig-a /worker", agents: []config.Agent{base}},
 		{name: "whitespace in target component", identity: "rig-a/worker ", agents: []config.Agent{base}},
 		{name: "missing target", identity: "rig-a/other", agents: []config.Agent{base}},
-		{name: "suspended", identity: "rig-a/pack.worker", agents: []config.Agent{bound}},
+		{name: "agent suspended", identity: "rig-a/worker", agents: []config.Agent{suspended}},
+		{name: "legacy bound alias", identity: "rig-a/pack.worker", agents: []config.Agent{bound}},
 		{name: "custom sling query", identity: "rig-a/worker", agents: []config.Agent{customQuery}},
 		{name: "generic ephemeral disabled", identity: "rig-a/worker", agents: []config.Agent{noGeneric}},
 		{name: "invalid capacity bounds", identity: "rig-a/worker", agents: []config.Agent{{Name: "worker", Dir: "rig-a", MinActiveSessions: intPtr(2), MaxActiveSessions: intPtr(1)}}},
@@ -61,10 +213,24 @@ func TestResolveCanonicalAdmissionPoolV2RejectsUnsafeIdentityAndTarget(t *testin
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if _, err := ResolveCanonicalAdmissionPoolV2(test.identity, test.agents); err == nil {
+			if _, err := ResolveCanonicalAdmissionPoolV2(test.identity, admissionTargetContext(test.agents)); err == nil {
 				t.Fatalf("ResolveCanonicalAdmissionPoolV2(%q) unexpectedly succeeded", test.identity)
 			}
 		})
+	}
+}
+
+func TestResolveCanonicalAdmissionPoolV2RequiresUniqueConfiguredRig(t *testing.T) {
+	maxOne := 1
+	agent := config.Agent{Name: "worker", Dir: "rig-a", MinActiveSessions: &maxOne}
+	runtimeSuspended := false
+	city := &config.City{Agents: []config.Agent{agent}}
+	if _, err := ResolveCanonicalAdmissionPoolV2("rig-a/worker", AdmissionTargetResolutionContextV2{City: city, RuntimeRigSuspended: &runtimeSuspended}); err == nil {
+		t.Fatal("resolver accepted a target whose rig is absent from the city")
+	}
+	city.Rigs = []config.Rig{{Name: "rig-a"}, {Name: "rig-a"}}
+	if _, err := ResolveCanonicalAdmissionPoolV2("rig-a/worker", AdmissionTargetResolutionContextV2{City: city, RuntimeRigSuspended: &runtimeSuspended}); err == nil {
+		t.Fatal("resolver accepted an ambiguous duplicate rig configuration")
 	}
 }
 
@@ -106,7 +272,7 @@ func TestResolveCanonicalAdmissionPoolV2RejectsSlotsAliasesAndDuplicates(t *test
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if _, err := ResolveCanonicalAdmissionPoolV2(test.identity, test.agents); err == nil {
+			if _, err := ResolveCanonicalAdmissionPoolV2(test.identity, admissionTargetContext(test.agents)); err == nil {
 				t.Fatalf("ResolveCanonicalAdmissionPoolV2(%q) unexpectedly succeeded", test.identity)
 			}
 		})
@@ -114,19 +280,23 @@ func TestResolveCanonicalAdmissionPoolV2RejectsSlotsAliasesAndDuplicates(t *test
 }
 
 func TestDigestAdmissionPolicyV2IsStableForMapSourceOrderAndFilesystemPath(t *testing.T) {
-	first := validAdmissionPolicyProjectionV2()
+	first := validAdmissionPolicyProjectionV2(t)
 	first.FormulaSources = []AdmissionFormulaSourceV2{
 		{LogicalID: "mol-parent", SHA256: strings.Repeat("b", 64)},
 		{LogicalID: "mol-work", SHA256: strings.Repeat("a", 64)},
 	}
 	first.EffectiveCompileVariables = map[string]string{"component": "api", "mode": "safe"}
 
-	second := validAdmissionPolicyProjectionV2()
+	second := validAdmissionPolicyProjectionV2(t)
 	second.FormulaSources = []AdmissionFormulaSourceV2{
 		{LogicalID: "mol-work", SHA256: strings.Repeat("a", 64)},
 		{LogicalID: "mol-parent", SHA256: strings.Repeat("b", 64)},
 	}
 	second.EffectiveCompileVariables = map[string]string{"mode": "safe", "component": "api"}
+	first.ExternalAssets[0], first.ExternalAssets[3] = first.ExternalAssets[3], first.ExternalAssets[0]
+	first.CheckClosures[0].DependencyLogicalIDs[0], first.CheckClosures[0].DependencyLogicalIDs[1] =
+		first.CheckClosures[0].DependencyLogicalIDs[1], first.CheckClosures[0].DependencyLogicalIDs[0]
+	first.CheckClosures[0], first.CheckClosures[1] = first.CheckClosures[1], first.CheckClosures[0]
 
 	// Formula SourceIdentity.Path is process-local. Only its stable logical ID
 	// and content hash enter the projection.
@@ -154,7 +324,7 @@ func TestDigestAdmissionPolicyV2IsStableForMapSourceOrderAndFilesystemPath(t *te
 }
 
 func TestDigestAdmissionPolicyV2ChangesForReviewedPolicyInputs(t *testing.T) {
-	base := validAdmissionPolicyProjectionV2()
+	base := validAdmissionPolicyProjectionV2(t)
 	baseDigest, err := DigestAdmissionPolicyV2(base)
 	if err != nil {
 		t.Fatalf("DigestAdmissionPolicyV2(base): %v", err)
@@ -171,6 +341,8 @@ func TestDigestAdmissionPolicyV2ChangesForReviewedPolicyInputs(t *testing.T) {
 		}},
 		{name: "source scope", mutate: func(p *AdmissionPolicyProjectionV2) {
 			p.SourceScope = ScopeForStore("other-city", p.StorePlacement.SourceStoreRef)
+			p.StorePlacement.GraphStoreRef = "city:other-city"
+			p.StorePlacement.WorkflowStoreRef = "city:other-city"
 		}},
 		{name: "target identity", mutate: func(p *AdmissionPolicyProjectionV2) { p.Target.Identity = "rig-b/worker" }},
 		{name: "effective workflow", mutate: func(p *AdmissionPolicyProjectionV2) {
@@ -188,16 +360,24 @@ func TestDigestAdmissionPolicyV2ChangesForReviewedPolicyInputs(t *testing.T) {
 			p.FormulaSourceCount++
 		}},
 		{name: "merge behavior", mutate: func(p *AdmissionPolicyProjectionV2) { p.MergeStrategy = "direct" }},
-		{name: "pool capacity", mutate: func(p *AdmissionPolicyProjectionV2) { p.Target.MaxActiveSessions = intPtr(3) }},
+		{name: "pool capacity", mutate: func(p *AdmissionPolicyProjectionV2) {
+			p.Target.MaxActiveSessions = intPtr(3)
+			p.Target.AgentMaxActiveSessions = intPtr(3)
+			p.Target.InheritedMaxActiveSessions = 3
+			p.Target.InheritedMaxSource = "agent"
+		}},
 		{name: "minimum pool capacity", mutate: func(p *AdmissionPolicyProjectionV2) { p.Target.MinActiveSessions = 2 }},
 		{name: "source store placement", mutate: func(p *AdmissionPolicyProjectionV2) {
 			p.SourceScope = ScopeForStore("city-a", "rig:other")
 			p.StorePlacement.SourceStoreRef = "rig:other"
 		}},
-		{name: "graph store binding", mutate: func(p *AdmissionPolicyProjectionV2) { p.StorePlacement.GraphClassBinding = "other-graph" }},
-		{name: "graph store placement", mutate: func(p *AdmissionPolicyProjectionV2) {
-			p.StorePlacement.GraphStoreRef = "city:other"
-			p.StorePlacement.WorkflowStoreRef = "city:other"
+		{name: "resolved storage plan", mutate: func(p *AdmissionPolicyProjectionV2) {
+			p.StorePlacement.ResolvedStoragePlan = admissionStoragePlanBindingForTest(t, "another-storage-plan")
+		}},
+		{name: "source-rig graph placement", mutate: func(p *AdmissionPolicyProjectionV2) {
+			p.StorePlacement.GraphPlacementMode = AdmissionGraphPlacementSourceRig
+			p.StorePlacement.GraphStoreRef = p.StorePlacement.SourceStoreRef
+			p.StorePlacement.WorkflowStoreRef = p.StorePlacement.SourceStoreRef
 		}},
 		{name: "workflow placement mode", mutate: func(p *AdmissionPolicyProjectionV2) {
 			p.StorePlacement.WorkflowPlacementMode = "source"
@@ -206,7 +386,7 @@ func TestDigestAdmissionPolicyV2ChangesForReviewedPolicyInputs(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			changed := validAdmissionPolicyProjectionV2()
+			changed := validAdmissionPolicyProjectionV2(t)
 			test.mutate(&changed)
 			got, err := DigestAdmissionPolicyV2(changed)
 			if err != nil {
@@ -248,9 +428,12 @@ func TestDigestAdmissionPolicyV2RejectsIncompleteOrAmbiguousInputs(t *testing.T)
 		{name: "missing schema version", mutate: func(p *AdmissionPolicyProjectionV2) { p.FormulaSchemaVersion = "" }},
 		{name: "unsupported merge behavior", mutate: func(p *AdmissionPolicyProjectionV2) { p.MergeStrategy = "unknown" }},
 		{name: "missing source store", mutate: func(p *AdmissionPolicyProjectionV2) { p.StorePlacement.SourceStoreRef = "" }},
+		{name: "unsupported store ref kind", mutate: func(p *AdmissionPolicyProjectionV2) { p.StorePlacement.GraphStoreRef = "graph:arbitrary-binding" }},
 		{name: "graph store ref path", mutate: func(p *AdmissionPolicyProjectionV2) { p.StorePlacement.GraphStoreRef = "city:other/path" }},
 		{name: "unknown graph placement", mutate: func(p *AdmissionPolicyProjectionV2) { p.StorePlacement.GraphPlacementMode = "unknown" }},
-		{name: "missing graph binding", mutate: func(p *AdmissionPolicyProjectionV2) { p.StorePlacement.GraphClassBinding = "" }},
+		{name: "missing resolved plan proof", mutate: func(p *AdmissionPolicyProjectionV2) {
+			p.StorePlacement.ResolvedStoragePlan = AdmissionResolvedStoragePlanV2{}
+		}},
 		{name: "scope store mismatch", mutate: func(p *AdmissionPolicyProjectionV2) { p.SourceScope = ScopeForStore("city-a", "rig:other") }},
 		{name: "scope with extra store path", mutate: func(p *AdmissionPolicyProjectionV2) { p.SourceScope = "city:city-a/rig:source/child" }},
 		{name: "scope with empty city", mutate: func(p *AdmissionPolicyProjectionV2) { p.SourceScope = "city:/rig:source" }},
@@ -259,7 +442,7 @@ func TestDigestAdmissionPolicyV2RejectsIncompleteOrAmbiguousInputs(t *testing.T)
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			input := validAdmissionPolicyProjectionV2()
+			input := validAdmissionPolicyProjectionV2(t)
 			test.mutate(&input)
 			if _, err := DigestAdmissionPolicyV2(input); err == nil {
 				t.Fatalf("DigestAdmissionPolicyV2() unexpectedly accepted %s", test.name)
@@ -268,15 +451,85 @@ func TestDigestAdmissionPolicyV2RejectsIncompleteOrAmbiguousInputs(t *testing.T)
 	}
 }
 
-func validAdmissionPolicyProjectionV2() AdmissionPolicyProjectionV2 {
+func TestDigestAdmissionPolicyV2BindsExternalCheckAssetClosure(t *testing.T) {
+	base := validAdmissionPolicyProjectionV2(t)
+	baseDigest, err := DigestAdmissionPolicyV2(base)
+	if err != nil {
+		t.Fatalf("DigestAdmissionPolicyV2(base): %v", err)
+	}
+	changed := validAdmissionPolicyProjectionV2(t)
+	changed.ExternalAssets[0].SHA256 = strings.Repeat("c", 64)
+	changedDigest, err := DigestAdmissionPolicyV2(changed)
+	if err != nil {
+		t.Fatalf("DigestAdmissionPolicyV2(changed asset bytes): %v", err)
+	}
+	if baseDigest == changedDigest {
+		t.Fatal("digest did not change when check asset bytes changed")
+	}
+}
+
+func TestDigestAdmissionPolicyV2RejectsIncompleteExternalAssetClosure(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*AdmissionPolicyProjectionV2)
+	}{
+		{name: "asset count mismatch", mutate: func(p *AdmissionPolicyProjectionV2) { p.ExternalAssetCount++ }},
+		{name: "absolute external asset path as logical ID", mutate: func(p *AdmissionPolicyProjectionV2) { p.ExternalAssets[0].LogicalID = "/tmp/check.sh" }},
+		{name: "asset closure not complete", mutate: func(p *AdmissionPolicyProjectionV2) { p.ExternalAssetClosureComplete = false }},
+		{name: "check mapping unavailable", mutate: func(p *AdmissionPolicyProjectionV2) { p.CheckMappingsComplete = false }},
+		{name: "check count mismatch", mutate: func(p *AdmissionPolicyProjectionV2) { p.CheckPathCount++ }},
+		{name: "dependency closure not complete", mutate: func(p *AdmissionPolicyProjectionV2) { p.CheckClosures[0].DependenciesComplete = false }},
+		{name: "missing dependency asset mapping", mutate: func(p *AdmissionPolicyProjectionV2) {
+			p.CheckClosures[0].DependencyLogicalIDs = []string{"check-missing-dependency"}
+		}},
+		{name: "dependency count mismatch", mutate: func(p *AdmissionPolicyProjectionV2) { p.CheckClosures[0].DependencyCount++ }},
+		{name: "duplicate check step mapping", mutate: func(p *AdmissionPolicyProjectionV2) {
+			p.CheckClosures = append(p.CheckClosures, p.CheckClosures[0])
+			p.CheckPathCount++
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			input := validAdmissionPolicyProjectionV2(t)
+			test.mutate(&input)
+			if _, err := DigestAdmissionPolicyV2(input); err == nil {
+				t.Fatalf("DigestAdmissionPolicyV2() unexpectedly accepted %s", test.name)
+			}
+		})
+	}
+}
+
+func TestAdmissionResolvedStoragePlanV2BindsGraphClassStoreRef(t *testing.T) {
+	if _, err := NewAdmissionResolvedStoragePlanV2(nil); err == nil {
+		t.Fatal("NewAdmissionResolvedStoragePlanV2 accepted a nil plan")
+	}
+	input := validAdmissionPolicyProjectionV2(t)
+	input.StorePlacement.ResolvedStoragePlan = admissionGraphClassStoragePlanForTest(t)
+	input.StorePlacement.GraphStoreRef = "class:g"
+	input.StorePlacement.WorkflowStoreRef = "class:g"
+	if _, err := DigestAdmissionPolicyV2(input); err != nil {
+		t.Fatalf("DigestAdmissionPolicyV2(resolved graph class plan): %v", err)
+	}
+	input.StorePlacement.GraphStoreRef = "class:fake"
+	input.StorePlacement.WorkflowStoreRef = "class:fake"
+	if _, err := DigestAdmissionPolicyV2(input); err == nil {
+		t.Fatal("DigestAdmissionPolicyV2 accepted a graph store ref inconsistent with its resolved plan")
+	}
+}
+
+func validAdmissionPolicyProjectionV2(t *testing.T) AdmissionPolicyProjectionV2 {
+	t.Helper()
 	return AdmissionPolicyProjectionV2{
 		SourceScope:          ScopeForStore("city-a", "rig:source"),
 		RouteResolverVersion: AdmissionRouteResolverV2Version,
 		Target: CanonicalAdmissionPoolV2{
-			Identity:                 "rig-a/worker",
-			PoolTemplate:             true,
-			SupportsGenericEphemeral: true,
-			CustomSlingQueryAbsent:   true,
+			Identity:                   "rig-a/worker",
+			PoolTemplate:               true,
+			SupportsGenericEphemeral:   true,
+			CustomSlingQueryAbsent:     true,
+			InheritedMaxActiveSessions: -1,
+			InheritedMaxSource:         "unlimited",
+			RuntimeRigSuspensionKnown:  true,
 		},
 		Workflow:               "mol-work",
 		FormulaCompilerVersion: "2.0.0",
@@ -286,18 +539,166 @@ func validAdmissionPolicyProjectionV2() AdmissionPolicyProjectionV2 {
 			{LogicalID: "mol-work", SHA256: strings.Repeat("a", 64)},
 			{LogicalID: "mol-parent", SHA256: strings.Repeat("b", 64)},
 		},
-		FormulaSourceCount:          2,
+		FormulaSourceCount: 2,
+		ExternalAssets: []AdmissionExternalAssetV2{
+			{LogicalID: "check-implement", SHA256: strings.Repeat("d", 64)},
+			{LogicalID: "check-verify", SHA256: strings.Repeat("f", 64)},
+			{LogicalID: "script-lib/common", SHA256: strings.Repeat("e", 64)},
+			{LogicalID: "script-lib/extra", SHA256: strings.Repeat("c", 64)},
+		},
+		ExternalAssetCount:           4,
+		ExternalAssetClosureComplete: true,
+		CheckPathCount:               2,
+		CheckMappingsComplete:        true,
+		CheckClosures: []AdmissionCheckClosureV2{
+			{
+				StepID:               "mol-work/implement",
+				CheckAssetLogicalID:  "check-implement",
+				DependencyLogicalIDs: []string{"script-lib/common", "script-lib/extra"},
+				DependencyCount:      2,
+				DependenciesComplete: true,
+			},
+			{
+				StepID:               "mol-work/verify",
+				CheckAssetLogicalID:  "check-verify",
+				DependencyCount:      0,
+				DependenciesComplete: true,
+			},
+		},
 		EffectiveCompileVariables:   map[string]string{"component": "api"},
 		EffectiveComposedFormulaIDs: []string{"mol-parent"},
 		MergeStrategy:               "mr",
 		StorePlacement: AdmissionStorePlacementV2{
 			SourceStoreRef:        "rig:source",
 			GraphPlacementMode:    "graph-class",
-			GraphClassBinding:     "graph-primary",
+			ResolvedStoragePlan:   admissionStoragePlanBindingForTest(t, "default-storage-plan"),
 			GraphStoreRef:         "city:city-a",
 			WorkflowPlacementMode: "graph",
 			WorkflowStoreRef:      "city:city-a",
 		},
+	}
+}
+
+func admissionStoragePlanBindingForTest(t *testing.T, context string) AdmissionResolvedStoragePlanV2 {
+	t.Helper()
+	registry := storebinding.NewProviderRegistry()
+	if err := registry.Freeze(); err != nil {
+		t.Fatalf("freeze storage provider registry: %v", err)
+	}
+	city := &config.City{}
+	seed := byte('a')
+	if context != "default-storage-plan" {
+		seed = 'b'
+	}
+	pins := storebinding.WorkPinInputs{
+		Recorded:      true,
+		ConfigContext: storebinding.ConfigRefDigest("sha256:" + strings.Repeat(string(seed), 64)),
+		HQ: storebinding.WorkScopePin{
+			Scope:       storebinding.HQScope(),
+			Prefix:      "hq",
+			OpenerID:    "beads",
+			ComponentID: "work",
+			PhysicalID:  "hq-physical-" + context,
+		},
+	}
+	plan, err := storebinding.ResolveStoragePlan(registry, city.EffectiveStorage(), pins, "")
+	if err != nil {
+		t.Fatalf("resolve storage plan: %v", err)
+	}
+	proof, err := NewAdmissionResolvedStoragePlanV2(plan)
+	if err != nil {
+		t.Fatalf("construct storage plan proof: %v", err)
+	}
+	return proof
+}
+
+func admissionGraphClassStoragePlanForTest(t *testing.T) AdmissionResolvedStoragePlanV2 {
+	t.Helper()
+	registry := storebinding.NewProviderRegistry()
+	if err := registry.Register(admissionTestProviderFactory{}); err != nil {
+		t.Fatalf("register graph provider: %v", err)
+	}
+	if err := registry.Freeze(); err != nil {
+		t.Fatalf("freeze graph provider registry: %v", err)
+	}
+	city := &config.City{Storage: &config.StorageConfig{
+		Classes: config.StorageClasses{
+			Work:      config.StorageWorkBinding,
+			Graph:     "infra",
+			Sessions:  config.StorageWorkBinding,
+			Messaging: config.StorageWorkBinding,
+			Orders:    config.StorageWorkBinding,
+			Nudges:    config.StorageWorkBinding,
+		},
+		Bindings: map[string]config.StorageBindingConfig{
+			"infra": {Provider: "admission-test-provider", ConfigRef: "graph-store"},
+		},
+	}}
+	pins := storebinding.WorkPinInputs{
+		Recorded:      true,
+		ConfigContext: storebinding.ConfigRefDigest("sha256:" + strings.Repeat("a", 64)),
+		HQ: storebinding.WorkScopePin{
+			Scope:       storebinding.HQScope(),
+			Prefix:      "hq",
+			OpenerID:    "beads",
+			ComponentID: "work",
+			PhysicalID:  "hq-physical",
+		},
+	}
+	plan, err := storebinding.ResolveStoragePlan(registry, city.EffectiveStorage(), pins, "")
+	if err != nil {
+		t.Fatalf("resolve graph-class storage plan: %v", err)
+	}
+	proof, err := NewAdmissionResolvedStoragePlanV2(plan)
+	if err != nil {
+		t.Fatalf("construct graph-class storage plan proof: %v", err)
+	}
+	return proof
+}
+
+type admissionTestProviderFactory struct{}
+
+func (admissionTestProviderFactory) ID() storebinding.ProviderID { return "admission-test-provider" }
+
+func (admissionTestProviderFactory) New(storebinding.BindingSpec) (storebinding.Provider, error) {
+	return admissionTestProvider{}, nil
+}
+
+type admissionTestProvider struct{}
+
+func (admissionTestProvider) Inspect(context.Context, storebinding.BindingSpec) (storebinding.Inspection, error) {
+	return storebinding.Inspection{}, storebinding.ErrProviderUnavailable
+}
+
+func (admissionTestProvider) InspectFenced(context.Context, storebinding.FencedInspectionRequest) (storebinding.Descriptor, error) {
+	return storebinding.Descriptor{}, storebinding.ErrProviderUnavailable
+}
+
+func (admissionTestProvider) AcquireFence(context.Context, storebinding.MigrationGuardClaim, storebinding.FenceRequest) (storebinding.WriterFence, error) {
+	return nil, storebinding.ErrProviderUnavailable
+}
+
+func (admissionTestProvider) RetainedGuards() (storebinding.RetainedGuardLifecycle, bool) {
+	return nil, false
+}
+
+func (admissionTestProvider) BindingMigration() (storebinding.BindingMigrationLifecycle, bool) {
+	return nil, false
+}
+
+func (admissionTestProvider) WorkMigration() (storebinding.WorkMigrationLifecycle, bool) {
+	return nil, false
+}
+
+func (admissionTestProvider) Open(context.Context, storebinding.OpenRequest) (storebinding.OpenedBinding, error) {
+	return nil, storebinding.ErrProviderUnavailable
+}
+
+func admissionTargetContext(agents []config.Agent) AdmissionTargetResolutionContextV2 {
+	runtimeSuspended := false
+	return AdmissionTargetResolutionContextV2{
+		City:                &config.City{Agents: agents, Rigs: []config.Rig{{Name: "rig-a"}}},
+		RuntimeRigSuspended: &runtimeSuspended,
 	}
 }
 
