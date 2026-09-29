@@ -478,7 +478,10 @@ func (c *privateEvidenceHTTPClient) verifyContext(ctx context.Context) error {
 	if response.APIVersion != "v0" || response.BdVersion == "" || response.ProjectID == "" || response.Database == "" {
 		return fmt.Errorf("%w: context identity is incomplete", ErrPrivateEvidenceHTTPProtocol)
 	}
-	if response.ProjectID != c.projectID || response.Database != c.database || response.Backend != "dolt" || response.DoltMode != "server" {
+	// bd-owned proxied-server scopes are durable Dolt workspaces too; the
+	// project/database identity and required capabilities above still bind them.
+	serverMode := response.DoltMode == "server" || response.DoltMode == "proxied-server"
+	if response.ProjectID != c.projectID || response.Database != c.database || response.Backend != "dolt" || !serverMode {
 		return fmt.Errorf("%w: configured scope %q does not match the served Beads workspace", ErrPrivateEvidenceHTTPIdentity, c.scopeRef)
 	}
 	for _, required := range []string{"issues.casMetadata", "issues.create", "issues.get", "project.enforce"} {
