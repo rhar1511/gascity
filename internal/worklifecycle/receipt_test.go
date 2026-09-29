@@ -144,6 +144,18 @@ func TestAdmissionV2VerifierRejectsDelegatedOrAliasedSigners(t *testing.T) {
 		t.Fatal("directly constructed config reused the v2 admission key for acceptance")
 	}
 
+	sharedRecoveryKey := cfg
+	sharedRecoveryKey.RecoveryAuthorities = map[string]config.LifecycleRecoveryAuthority{
+		"operator": {
+			PublicKey: cfg.AdmissionV2Authorities["triage"],
+			Actions:   []string{"nudge"},
+			Scopes:    []string{"rig:pilot"},
+		},
+	}
+	if _, err := VerifyAdmissionReceiptV2(bead, sharedRecoveryKey, "rig:pilot"); err == nil {
+		t.Fatal("directly constructed config reused the v2 admission key for recovery")
+	}
+
 	cfg.AdmissionV2Authorities["delegate"] = cfg.AdmissionV2Authorities["triage"]
 	if _, err := VerifyAdmissionReceiptV2(bead, cfg, "rig:pilot"); err == nil {
 		t.Fatal("directly constructed multi-entry config authorized an undelegated signer alias")

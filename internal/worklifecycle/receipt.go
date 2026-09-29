@@ -250,6 +250,12 @@ func admissionV2KeyPurposeSeparated(cfg config.LifecycleConfig, identity string)
 			}
 		}
 	}
+	for _, authority := range cfg.RecoveryAuthorities {
+		other, err := base64.StdEncoding.DecodeString(strings.TrimSpace(authority.PublicKey))
+		if err == nil && bytes.Equal(publicKey, other) {
+			return false
+		}
+	}
 	return true
 }
 

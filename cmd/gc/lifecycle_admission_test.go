@@ -143,6 +143,7 @@ func TestLifecycleGraphDescendantAssignmentProtectsLiveSessionFromLegacyRestart(
 	if err != nil {
 		t.Fatal(err)
 	}
+	env.cfg.Lifecycle.AdmissionV2PrimaryAuthority = "triage"
 	env.cfg.Lifecycle.AdmissionV2Authorities = map[string]string{"triage": base64.StdEncoding.EncodeToString(admissionKey.Public().(ed25519.PublicKey))}
 	env.cfg.Lifecycle.AcceptanceAuthorities = map[string]string{"reviewer": base64.StdEncoding.EncodeToString(acceptanceKey.Public().(ed25519.PublicKey))}
 	scope := worklifecycle.ScopeForStore("test-city", "city:test-city")
@@ -257,8 +258,13 @@ func TestLifecycleGraphWorkflowLookupDoesNotFallBackAcrossDuplicateIDs(t *testin
 	if _, err := graphStore.Create(matchingRoot); err != nil {
 		t.Fatal(err)
 	}
-	if !lifecycleSlingResultMatches(current, store, graphStore, cfg, scope, digest, "worker", "review", "mr", rootID, true, reservation, "class:graph") {
-		t.Fatal("valid graph.v2 root in the selected authoritative store did not verify")
+	// TODO(Q54 integration): restore the positive
+	// TestLifecycleGraphV2DescendantClaimRevalidatesLiveSourceAndSkipsLegacyReclaim
+	// coverage after Q43 attachment and current-policy proof are wired at the
+	// materialization and claim boundaries. This staging slice intentionally
+	// cannot admit v2 from a matching marker alone.
+	if lifecycleSlingResultMatches(current, store, graphStore, cfg, scope, digest, "worker", "review", "mr", rootID, true, reservation, "class:graph") {
+		t.Fatal("matching graph.v2 root bypassed the pending v2 attachment and policy proof")
 	}
 }
 
