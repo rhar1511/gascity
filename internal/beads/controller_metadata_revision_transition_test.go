@@ -10,12 +10,14 @@ import (
 )
 
 type controllerRevisionTransitionFixture struct {
-	bead           Bead
-	receipts       map[string]RevisionTransitionReceipt
-	requests       map[string]ControllerMetadataTransitionRequest
-	calls          []ControllerMetadataTransitionRequest
-	nextRevision   int64
-	dropAfterWrite bool
+	bead                  Bead
+	receipts              map[string]RevisionTransitionReceipt
+	receiptEnvelopes      map[string]ControllerMetadataTransitionReceipt
+	requests              map[string]ControllerMetadataTransitionRequest
+	calls                 []ControllerMetadataTransitionRequest
+	nextRevision          int64
+	dropAfterWrite        bool
+	mutateReceiptEnvelope func(*ControllerMetadataTransitionReceipt)
 }
 
 func (f *controllerRevisionTransitionFixture) TransitionMetadata(issueID string, request ControllerMetadataTransitionRequest) (ControllerMetadataTransitionResult, error) {
@@ -59,6 +61,14 @@ func (f *controllerRevisionTransitionFixture) TransitionMetadata(issueID string,
 		f.receipts = make(map[string]RevisionTransitionReceipt)
 	}
 	f.receipts[sourceReceipt.ID] = sourceReceipt
+	if f.receiptEnvelopes == nil {
+		f.receiptEnvelopes = make(map[string]ControllerMetadataTransitionReceipt)
+	}
+	envelope := *fixtureControllerTransitionReceipt(issueID, request, f.nextRevision)
+	if f.mutateReceiptEnvelope != nil {
+		f.mutateReceiptEnvelope(&envelope)
+	}
+	f.receiptEnvelopes[sourceReceipt.ID] = cloneControllerMetadataTransitionReceipt(envelope)
 	if f.requests == nil {
 		f.requests = make(map[string]ControllerMetadataTransitionRequest)
 	}
@@ -117,6 +127,17 @@ func (f *controllerRevisionTransitionFixture) DecisionFrontierRevisionTransition
 	return receipt, found, nil
 }
 
+func (f *controllerRevisionTransitionFixture) ControllerMetadataTransitionReceipt(issueID, receiptID string) (ControllerMetadataTransitionReceipt, bool, error) {
+	if issueID != f.bead.ID {
+		return ControllerMetadataTransitionReceipt{}, false, ErrNotFound
+	}
+	receipt, found := f.receiptEnvelopes[receiptID]
+	if !found {
+		return ControllerMetadataTransitionReceipt{}, false, nil
+	}
+	return cloneControllerMetadataTransitionReceipt(receipt), true, nil
+}
+
 func cloneControllerMetadataTransitionRequest(request ControllerMetadataTransitionRequest) ControllerMetadataTransitionRequest {
 	if request.Expected != nil {
 		copy := append(json.RawMessage(nil), (*request.Expected)...)
@@ -150,7 +171,7 @@ func TestControllerMetadataRevisionTransitionRereadsAndBindsReserveAndRelease(t 
 	fixture := &controllerRevisionTransitionFixture{
 		bead: Bead{ID: issueID, Type: "task", Title: "source", Revision: baseRevision}, nextRevision: 23,
 	}
-	writer, err := NewControllerMetadataRevisionTransitionWriter(fixture, fixture, fixture)
+	writer, err := NewControllerMetadataRevisionTransitionWriter(fixture, fixture, fixture, fixture)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,6 +215,78 @@ func TestControllerMetadataRevisionTransitionRereadsAndBindsReserveAndRelease(t 
 	}
 }
 
+func TestBdStoreRevisionTransitionWriterRequiresCompleteControllerTransport(t *testing.T) {
+	unconfigured := NewBdStoreWithPrefix(t.TempDir(), nil, "gc")
+	if reader, ok := ControllerMetadataTransitionReceiptReaderFor(unconfigured); ok || reader != nil {
+		t.Fatal("unconfigured BdStore advertised full controller receipt envelopes")
+	}
+	if writer, ok := RevisionTransitionWriterFor(unconfigured); ok || writer != nil {
+		t.Fatal("unconfigured BdStore advertised controller-backed source transitions")
+	}
+
+	configured := controllerTransitionTestStore(t, &controllerTransitionTestTransport{
+		handler: controllerTransitionTestHandler(nil, true),
+	})
+	writer, ok := RevisionTransitionWriterFor(configured)
+	if !ok || writer == nil {
+		t.Fatal("fully configured BdStore did not compose the controller-backed source transition")
+	}
+	if reader, ok := ControllerMetadataTransitionReceiptReaderFor(configured); !ok || reader == nil {
+		t.Fatal("configured BdStore hid full controller receipt envelopes")
+	}
+}
+
+func TestControllerMetadataRevisionTransitionRejectsPersistedEnvelopeMarkerConflict(t *testing.T) {
+	const (
+		issueID  = "work-transition-envelope-conflict"
+		cityRef  = "city:adapter"
+		storeRef = "city:adapter"
+	)
+	const baseRevision = int64(7)
+	mapID := DecisionFrontierMapRecordID(cityRef, storeRef, issueID, "7")
+	reservationID := decisionFrontierStableID("frontier-transition", cityRef, storeRef, mapID, "reserve")
+	hold := decisionFrontierHoldBinding{
+		SchemaVersion: 1, CityRef: cityRef, StoreRef: storeRef, WorkID: issueID, MapID: mapID,
+		WorkRevision: "7", WorkDigest: "work-digest", ProposalHash: "proposal-hash", ReservationID: reservationID,
+	}
+	markerBytes, err := json.Marshal(hold)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tamperedHold := hold
+	tamperedHold.ProposalHash = "different-proposal-hash"
+	tamperedMarkerBytes, err := json.Marshal(tamperedHold)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tamperedMarker, err := json.Marshal(string(tamperedMarkerBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := &controllerRevisionTransitionFixture{
+		bead: Bead{ID: issueID, Type: "task", Title: "source", Revision: baseRevision}, nextRevision: 23,
+		mutateReceiptEnvelope: func(receipt *ControllerMetadataTransitionReceipt) {
+			receipt.Value = append(json.RawMessage(nil), tamperedMarker...)
+		},
+	}
+	writer, err := NewControllerMetadataRevisionTransitionWriter(fixture, fixture, fixture, fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestReceipt := RevisionTransitionReceipt{
+		ID: reservationID, CityRef: cityRef, StoreRef: storeRef, WorkID: issueID, MapID: mapID,
+		Operation: "reserve", FromRevision: baseRevision,
+	}
+	_, won, err := writer.CompareAndSetMetadataKeyWithReceipt(issueID, beadmeta.DecisionFrontierHoldMetadataKey, "", string(markerBytes), baseRevision, requestReceipt)
+	if won || !errors.Is(err, ErrDecisionFrontierTransitionReceiptCorrupt) {
+		t.Fatalf("conflicting persisted hold marker won=%v err=%v, want corrupt durable receipt", won, err)
+	}
+	projected, found, readErr := fixture.DecisionFrontierRevisionTransitionReceipt(issueID, reservationID)
+	if readErr != nil || !found || projected.ID != requestReceipt.ID || projected.ToRevision != 23 {
+		t.Fatalf("projected receipt = %+v found=%v err=%v, want same projected identity and revision", projected, found, readErr)
+	}
+}
+
 func TestControllerMetadataRevisionTransitionRecoversLostReplyFromExactReceiptAndSnapshot(t *testing.T) {
 	const (
 		issueID  = "work-transition-recovery"
@@ -212,7 +305,7 @@ func TestControllerMetadataRevisionTransitionRecoversLostReplyFromExactReceiptAn
 	fixture := &controllerRevisionTransitionFixture{
 		bead: Bead{ID: issueID, Type: "task", Title: "source", Revision: 5}, nextRevision: 19, dropAfterWrite: true,
 	}
-	writer, err := NewControllerMetadataRevisionTransitionWriter(fixture, fixture, fixture)
+	writer, err := NewControllerMetadataRevisionTransitionWriter(fixture, fixture, fixture, fixture)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,7 +339,7 @@ func TestControllerMetadataRevisionTransitionRejectsStaleRevisionBeforeWrite(t *
 		t.Fatal(err)
 	}
 	fixture := &controllerRevisionTransitionFixture{bead: Bead{ID: issueID, Revision: 8}}
-	writer, err := NewControllerMetadataRevisionTransitionWriter(fixture, fixture, fixture)
+	writer, err := NewControllerMetadataRevisionTransitionWriter(fixture, fixture, fixture, fixture)
 	if err != nil {
 		t.Fatal(err)
 	}

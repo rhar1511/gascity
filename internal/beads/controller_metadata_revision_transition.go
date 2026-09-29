@@ -16,26 +16,45 @@ import (
 var ErrControllerMetadataRevisionTransitionUnavailable = errors.New("controller metadata revision transition cannot prove its durable receipt")
 
 type controllerMetadataRevisionTransitionWriter struct {
-	writer        ControllerMetadataTransitionWriter
-	sourceReader  DecisionFrontierSourceReader
-	receiptReader RevisionTransitionReceiptReader
+	writer         ControllerMetadataTransitionWriter
+	sourceReader   DecisionFrontierSourceReader
+	receiptReader  RevisionTransitionReceiptReader
+	envelopeReader ControllerMetadataTransitionReceiptReader
+}
+
+var _ RevisionTransitionWriterHandleProvider = (*BdStore)(nil)
+
+// RevisionTransitionWriterHandle composes the controller-backed source
+// transition only when this BdStore exposes every required transport and
+// authoritative proof reader. A partial configuration stays unavailable.
+func (s *BdStore) RevisionTransitionWriterHandle() (RevisionTransitionWriter, bool) {
+	writer, writerOK := ControllerMetadataTransitionWriterFor(s)
+	sourceReader, sourceOK := DecisionFrontierSourceReaderFor(s)
+	receiptReader, receiptOK := RevisionTransitionReceiptReaderFor(s)
+	envelopeReader, envelopeOK := ControllerMetadataTransitionReceiptReaderFor(s)
+	if !writerOK || !sourceOK || !receiptOK || !envelopeOK {
+		return nil, false
+	}
+	adapted, err := NewControllerMetadataRevisionTransitionWriter(writer, sourceReader, receiptReader, envelopeReader)
+	return adapted, err == nil
 }
 
 // NewControllerMetadataRevisionTransitionWriter adapts the Q43 metadata
 // transition route to the decision-frontier source-transition contract. The
 // adapter is intentionally explicit: callers must provide the authoritative
-// source reader and exact durable receipt reader alongside the Q43 writer.
-func NewControllerMetadataRevisionTransitionWriter(writer ControllerMetadataTransitionWriter, sourceReader DecisionFrontierSourceReader, receiptReader RevisionTransitionReceiptReader) (RevisionTransitionWriter, error) {
-	if writer == nil || sourceReader == nil || receiptReader == nil {
+// source reader, projected source receipt reader, and full durable Q43 receipt
+// reader alongside the Q43 writer.
+func NewControllerMetadataRevisionTransitionWriter(writer ControllerMetadataTransitionWriter, sourceReader DecisionFrontierSourceReader, receiptReader RevisionTransitionReceiptReader, envelopeReader ControllerMetadataTransitionReceiptReader) (RevisionTransitionWriter, error) {
+	if writer == nil || sourceReader == nil || receiptReader == nil || envelopeReader == nil {
 		return nil, ErrControllerMetadataRevisionTransitionUnavailable
 	}
 	return controllerMetadataRevisionTransitionWriter{
-		writer: writer, sourceReader: sourceReader, receiptReader: receiptReader,
+		writer: writer, sourceReader: sourceReader, receiptReader: receiptReader, envelopeReader: envelopeReader,
 	}, nil
 }
 
 func (w controllerMetadataRevisionTransitionWriter) CompareAndSetMetadataKeyWithReceipt(id, key, expected, next string, expectedRevision int64, receipt RevisionTransitionReceipt) (Bead, bool, error) {
-	if w.writer == nil || w.sourceReader == nil || w.receiptReader == nil {
+	if w.writer == nil || w.sourceReader == nil || w.receiptReader == nil || w.envelopeReader == nil {
 		return Bead{}, false, ErrControllerMetadataRevisionTransitionUnavailable
 	}
 	if err := validateControllerMetadataRevisionTransitionInput(id, key, expected, next, expectedRevision, receipt); err != nil {
@@ -53,15 +72,12 @@ func (w controllerMetadataRevisionTransitionWriter) CompareAndSetMetadataKeyWith
 		return Bead{}, false, err
 	}
 
-	if prior, found, readErr := w.receiptReader.DecisionFrontierRevisionTransitionReceipt(id, receipt.ID); readErr != nil {
+	if _, found, readErr := controllerMetadataTransitionReceiptForRequest(w.envelopeReader, id, receipt, request, 0); readErr != nil {
 		return Bead{}, false, fmt.Errorf("read prior decision-frontier transition receipt: %w", readErr)
 	} else if found {
-		if !sameRevisionTransitionIdentity(prior, receipt) || prior.ToRevision == 0 {
-			return Bead{}, false, ErrDecisionFrontierTransitionReceiptCorrupt
-		}
 		return w.replayAndVerify(before, id, key, next, expectedRevision, receipt, request)
 	}
-	if err := validateControllerMetadataRevisionTransitionSource(before, key, expected, next, expectedRevision, receipt, w.receiptReader); err != nil {
+	if err := validateControllerMetadataRevisionTransitionSource(before, key, expected, next, expectedRevision, receipt, w.receiptReader, w.envelopeReader); err != nil {
 		return before, false, err
 	}
 
@@ -80,7 +96,7 @@ func (w controllerMetadataRevisionTransitionWriter) CompareAndSetMetadataKeyWith
 		if result.Replayed || result.Receipt != nil {
 			return Bead{}, false, fmt.Errorf("%w: refused transition returned an applied receipt", ErrControllerMetadataTransitionProtocol)
 		}
-		prior, found, receiptErr := w.receiptReader.DecisionFrontierRevisionTransitionReceipt(id, receipt.ID)
+		_, found, receiptErr := controllerMetadataTransitionReceiptForRequest(w.envelopeReader, id, receipt, request, 0)
 		if receiptErr != nil {
 			return Bead{}, false, fmt.Errorf("reread refused Q43 decision-frontier receipt: %w", receiptErr)
 		}
@@ -89,9 +105,6 @@ func (w controllerMetadataRevisionTransitionWriter) CompareAndSetMetadataKeyWith
 			return Bead{}, false, fmt.Errorf("read refused decision-frontier source: %w", readErr)
 		}
 		if found {
-			if !sameRevisionTransitionIdentity(prior, receipt) || prior.ToRevision == 0 {
-				return Bead{}, false, ErrDecisionFrontierTransitionReceiptCorrupt
-			}
 			return w.replayAndVerify(before, id, key, next, expectedRevision, receipt, request)
 		}
 		if current.ID != id || !controllerTransitionCurrentMatchesSource(result.Current, current, key) {
@@ -111,7 +124,7 @@ func (w controllerMetadataRevisionTransitionWriter) CompareAndSetMetadataKeyWith
 	if readErr != nil {
 		return Bead{}, false, fmt.Errorf("reread decision-frontier source after Q43 transition: %w", readErr)
 	}
-	committed, verifyErr := w.verifyCommitted(&before, current, id, key, next, expectedRevision, receipt, result.Receipt.ToVersion, &result.Current)
+	committed, verifyErr := w.verifyCommitted(&before, current, id, key, next, expectedRevision, receipt, request, result.Receipt.ToVersion, &result.Current)
 	if verifyErr != nil {
 		return Bead{}, false, verifyErr
 	}
@@ -125,11 +138,11 @@ func (w controllerMetadataRevisionTransitionWriter) replayAndVerify(before Bead,
 		if readErr != nil {
 			return Bead{}, false, fmt.Errorf("reread decision-frontier source after Q43 receipt replay: %w", readErr)
 		}
-		committed, verifyErr := w.verifyCommitted(nil, current, id, key, next, expectedRevision, expected, replay.Receipt.ToVersion, &replay.Current)
+		committed, verifyErr := w.verifyCommitted(nil, current, id, key, next, expectedRevision, expected, request, replay.Receipt.ToVersion, &replay.Current)
 		return committed, verifyErr == nil, verifyErr
 	}
 
-	actual, found, receiptErr := w.receiptReader.DecisionFrontierRevisionTransitionReceipt(id, expected.ID)
+	_, found, receiptErr := controllerMetadataTransitionReceiptForRequest(w.envelopeReader, id, expected, request, 0)
 	if receiptErr != nil {
 		return Bead{}, false, errors.Join(replayErr, fmt.Errorf("reread Q43 decision-frontier receipt: %w", receiptErr))
 	}
@@ -138,9 +151,6 @@ func (w controllerMetadataRevisionTransitionWriter) replayAndVerify(before Bead,
 		return Bead{}, false, errors.Join(replayErr, fmt.Errorf("reread decision-frontier source after Q43 receipt replay: %w", sourceErr))
 	}
 	if found {
-		if !sameRevisionTransitionIdentity(actual, expected) || actual.ToRevision == 0 {
-			return Bead{}, false, ErrDecisionFrontierTransitionReceiptCorrupt
-		}
 		return Bead{}, false, fmt.Errorf("%w: exact Q43 receipt content could not be re-established", ErrControllerMetadataRevisionTransitionUnavailable)
 	}
 	if current.ID != id || current.Revision != expectedRevision || current.Metadata[key] != requestMarkerValue(request.Expected) ||
@@ -154,14 +164,11 @@ func (w controllerMetadataRevisionTransitionWriter) replayAndVerify(before Bead,
 }
 
 func (w controllerMetadataRevisionTransitionWriter) recoverAmbiguous(before Bead, id, key, expectedMarker, next string, expectedRevision int64, expected RevisionTransitionReceipt, request ControllerMetadataTransitionRequest) (Bead, bool, error) {
-	actual, found, receiptErr := w.receiptReader.DecisionFrontierRevisionTransitionReceipt(id, expected.ID)
+	_, found, receiptErr := controllerMetadataTransitionReceiptForRequest(w.envelopeReader, id, expected, request, 0)
 	if receiptErr != nil {
 		return Bead{}, false, fmt.Errorf("reread Q43 decision-frontier receipt: %w", receiptErr)
 	}
 	if found {
-		if !sameRevisionTransitionIdentity(actual, expected) || actual.ToRevision == 0 {
-			return Bead{}, false, ErrDecisionFrontierTransitionReceiptCorrupt
-		}
 		return w.replayAndVerify(before, id, key, next, expectedRevision, expected, request)
 	}
 	current, sourceErr := w.sourceReader.DecisionFrontierSourceSnapshot(id)
@@ -191,7 +198,7 @@ func requestMarkerValue(raw *json.RawMessage) string {
 	return value
 }
 
-func (w controllerMetadataRevisionTransitionWriter) verifyCommitted(before *Bead, current Bead, id, key, next string, expectedRevision int64, expected RevisionTransitionReceipt, toRevision int64, responseCurrent *json.RawMessage) (Bead, error) {
+func (w controllerMetadataRevisionTransitionWriter) verifyCommitted(before *Bead, current Bead, id, key, next string, expectedRevision int64, expected RevisionTransitionReceipt, request ControllerMetadataTransitionRequest, toRevision int64, responseCurrent *json.RawMessage) (Bead, error) {
 	if current.ID != id || current.Revision != toRevision || current.Metadata[key] != next || toRevision == expectedRevision {
 		return Bead{}, fmt.Errorf("%w: source snapshot does not match the committed Q43 revision", ErrControllerMetadataRevisionTransitionUnavailable)
 	}
@@ -201,11 +208,11 @@ func (w controllerMetadataRevisionTransitionWriter) verifyCommitted(before *Bead
 	if responseCurrent != nil && !controllerTransitionCurrentMatchesSource(*responseCurrent, current, key) {
 		return Bead{}, fmt.Errorf("%w: Q43 result marker differs from the authoritative source snapshot", ErrControllerMetadataTransitionProtocol)
 	}
-	actual, found, err := w.receiptReader.DecisionFrontierRevisionTransitionReceipt(id, expected.ID)
+	_, found, err := controllerMetadataTransitionReceiptForRequest(w.envelopeReader, id, expected, request, toRevision)
 	if err != nil {
-		return Bead{}, fmt.Errorf("reread exact decision-frontier receipt: %w", err)
+		return Bead{}, fmt.Errorf("reread exact Q43 decision-frontier receipt: %w", err)
 	}
-	if !found || !sameRevisionTransitionIdentity(actual, expected) || actual.ToRevision != toRevision {
+	if !found {
 		return Bead{}, ErrDecisionFrontierTransitionReceiptCorrupt
 	}
 	return cloneBead(current), nil
@@ -235,7 +242,7 @@ func validateControllerMetadataRevisionTransitionInput(id, key, expected, next s
 	return nil
 }
 
-func validateControllerMetadataRevisionTransitionSource(current Bead, key, expected, next string, expectedRevision int64, receipt RevisionTransitionReceipt, receiptReader RevisionTransitionReceiptReader) error {
+func validateControllerMetadataRevisionTransitionSource(current Bead, key, expected, next string, expectedRevision int64, receipt RevisionTransitionReceipt, receiptReader RevisionTransitionReceiptReader, envelopeReader ControllerMetadataTransitionReceiptReader) error {
 	if current.Revision != expectedRevision || current.Metadata[key] != expected {
 		return &PreconditionFailedError{ID: current.ID, Expected: expectedRevision, Current: current.Revision}
 	}
@@ -262,14 +269,23 @@ func validateControllerMetadataRevisionTransitionSource(current Bead, key, expec
 	if current.Metadata[key] != expected || receipt.ID == hold.ReservationID {
 		return fmt.Errorf("%w: release source identity does not match its hold", ErrControllerMetadataTransitionProtocol)
 	}
-	reserved, found, err := receiptReader.DecisionFrontierRevisionTransitionReceipt(current.ID, hold.ReservationID)
+	baseRevision, err := strconv.ParseInt(hold.WorkRevision, 10, 64)
+	if err != nil {
+		return fmt.Errorf("parse matching reservation revision: %w", err)
+	}
+	reservation := RevisionTransitionReceipt{
+		ID: hold.ReservationID, CityRef: hold.CityRef, StoreRef: hold.StoreRef, WorkID: hold.WorkID,
+		MapID: hold.MapID, Operation: "reserve", FromRevision: baseRevision,
+	}
+	reservationRequest, err := controllerMetadataRequestForRevisionTransition(key, "", expected, baseRevision, reservation)
+	if err != nil {
+		return err
+	}
+	reserved, found, err := controllerMetadataTransitionReceiptForRequest(envelopeReader, current.ID, reservation, reservationRequest, expectedRevision)
 	if err != nil {
 		return fmt.Errorf("read matching reservation receipt: %w", err)
 	}
-	if !found || reserved.ID != hold.ReservationID || reserved.CityRef != receipt.CityRef || reserved.StoreRef != receipt.StoreRef ||
-		reserved.WorkID != receipt.WorkID || reserved.MapID != receipt.MapID || reserved.Operation != "reserve" ||
-		reserved.FromRevision == 0 || strconv.FormatInt(reserved.FromRevision, 10) != hold.WorkRevision ||
-		reserved.ToRevision != expectedRevision || reserved.ToRevision == reserved.FromRevision {
+	if !found || reserved.ToRevision != expectedRevision || reserved.ToRevision == reserved.FromRevision {
 		return fmt.Errorf("%w: release has no exact matching reservation receipt", ErrDecisionFrontierTransitionReceiptCorrupt)
 	}
 	return nil
@@ -342,6 +358,32 @@ func controllerMetadataRevisionTransitionResultMatches(result ControllerMetadata
 		return false
 	}
 	return true
+}
+
+func controllerMetadataTransitionReceiptForRequest(reader ControllerMetadataTransitionReceiptReader, issueID string, expected RevisionTransitionReceipt, request ControllerMetadataTransitionRequest, expectedToVersion int64) (RevisionTransitionReceipt, bool, error) {
+	if reader == nil {
+		return RevisionTransitionReceipt{}, false, ErrControllerMetadataRevisionTransitionUnavailable
+	}
+	actual, found, err := reader.ControllerMetadataTransitionReceipt(issueID, expected.ID)
+	if err != nil || !found {
+		return RevisionTransitionReceipt{}, found, err
+	}
+	projected, decodeErr := decodeDecisionFrontierControllerReceipt(actual)
+	if decodeErr != nil || !controllerMetadataTransitionReceiptMatchesRequest(actual, issueID, request) ||
+		!sameRevisionTransitionIdentity(projected, expected) || projected.ToRevision == 0 ||
+		expectedToVersion != 0 && projected.ToRevision != expectedToVersion {
+		return RevisionTransitionReceipt{}, true, ErrDecisionFrontierTransitionReceiptCorrupt
+	}
+	return projected, true, nil
+}
+
+func controllerMetadataTransitionReceiptMatchesRequest(actual ControllerMetadataTransitionReceipt, issueID string, request ControllerMetadataTransitionRequest) bool {
+	return actual.ReceiptID == request.ReceiptID && actual.IssueID == issueID && actual.Scope == request.Scope &&
+		actual.Kind == request.Kind && actual.Actor == request.Actor && actual.ExpectedVersion == request.ExpectedVersion &&
+		actual.ToVersion != 0 && actual.ToVersion != request.ExpectedVersion && actual.Key == request.Key &&
+		bytes.Equal(nilSafeRaw(rawControllerTransitionPointer(actual.Expected)), nilSafeRaw(request.Expected)) &&
+		bytes.Equal(nilSafeRaw(rawControllerTransitionPointer(actual.Value)), nilSafeRaw(request.Value)) &&
+		bytes.Equal(actual.Payload, request.Payload)
 }
 
 func controllerTransitionCurrentMatchesSource(raw json.RawMessage, current Bead, key string) bool {

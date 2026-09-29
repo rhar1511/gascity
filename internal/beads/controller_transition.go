@@ -73,6 +73,34 @@ type ControllerMetadataTransitionWriter interface {
 	TransitionMetadata(issueID string, request ControllerMetadataTransitionRequest) (ControllerMetadataTransitionResult, error)
 }
 
+// ControllerMetadataTransitionReceiptReader reads one immutable Q43 receipt
+// with its full durable request envelope. Implementations bind both query
+// identifiers to the returned receipt and preserve absent versus JSON null
+// Expected and Value fields.
+type ControllerMetadataTransitionReceiptReader interface {
+	ControllerMetadataTransitionReceipt(issueID, receiptID string) (ControllerMetadataTransitionReceipt, bool, error)
+}
+
+// ControllerMetadataTransitionReceiptReaderHandleProvider preserves
+// wrapper-owned routing and generation checks for exact Q43 receipt reads.
+type ControllerMetadataTransitionReceiptReaderHandleProvider interface {
+	ControllerMetadataTransitionReceiptReaderHandle() (ControllerMetadataTransitionReceiptReader, bool)
+}
+
+// ControllerMetadataTransitionReceiptReaderFor resolves only an explicitly
+// exposed Q43 receipt-reader handle or a direct implementation. It never
+// unwraps a store.
+func ControllerMetadataTransitionReceiptReaderFor(store Store) (ControllerMetadataTransitionReceiptReader, bool) {
+	if store == nil {
+		return nil, false
+	}
+	if provider, ok := store.(ControllerMetadataTransitionReceiptReaderHandleProvider); ok {
+		return provider.ControllerMetadataTransitionReceiptReaderHandle()
+	}
+	reader, ok := store.(ControllerMetadataTransitionReceiptReader)
+	return reader, ok
+}
+
 // ControllerMetadataTransitionWriterHandleProvider preserves wrapper-owned
 // routing, cache invalidation, and mutation-generation checks.
 type ControllerMetadataTransitionWriterHandleProvider interface {

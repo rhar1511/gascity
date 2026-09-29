@@ -33,6 +33,20 @@ func (s *sourceSnapshotWrapperTestStore) DecisionFrontierSourceReaderHandle() (D
 	return s, s != nil
 }
 
+// DecisionFrontierRevisionTransitionReceipt deliberately exists without an
+// explicit receipt-reader handle. It models wrappers whose method set is wider
+// than the capability of their backing source reader.
+func (s *sourceSnapshotWrapperTestStore) DecisionFrontierRevisionTransitionReceipt(issueID, receiptID string) (RevisionTransitionReceipt, bool, error) {
+	return RevisionTransitionReceipt{}, false, ErrConditionalWriteUnsupported
+}
+
+func TestRevisionTransitionReceiptReaderIsNotInferredFromSourceReader(t *testing.T) {
+	store := &sourceSnapshotWrapperTestStore{Store: NewMemStore()}
+	if reader, ok := RevisionTransitionReceiptReaderFor(store); ok || reader != nil {
+		t.Fatal("source-only wrapper falsely advertised exact receipt reads")
+	}
+}
+
 func TestDecisionFrontierSourceReaderForwardsThroughTypedStores(t *testing.T) {
 	backing := &sourceSnapshotWrapperTestStore{Store: NewMemStore()}
 	typed := []struct {

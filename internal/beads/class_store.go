@@ -248,23 +248,119 @@ func (s NudgesStore) DecisionFrontierSourceReaderHandle() (DecisionFrontierSourc
 	return DecisionFrontierSourceReaderFor(s.Store)
 }
 
+// RevisionTransitionReceiptReaderHandle forwards exact receipt reads through
+// this typed store view only when the underlying store explicitly supports it.
+func (s WorkStore) RevisionTransitionReceiptReaderHandle() (RevisionTransitionReceiptReader, bool) {
+	return RevisionTransitionReceiptReaderFor(s.Store)
+}
+
+func (s GraphStore) RevisionTransitionReceiptReaderHandle() (RevisionTransitionReceiptReader, bool) {
+	return RevisionTransitionReceiptReaderFor(s.Store)
+}
+
+func (s SessionStore) RevisionTransitionReceiptReaderHandle() (RevisionTransitionReceiptReader, bool) {
+	return RevisionTransitionReceiptReaderFor(s.Store)
+}
+
+func (s MailStore) RevisionTransitionReceiptReaderHandle() (RevisionTransitionReceiptReader, bool) {
+	return RevisionTransitionReceiptReaderFor(s.Store)
+}
+
+func (s OrdersStore) RevisionTransitionReceiptReaderHandle() (RevisionTransitionReceiptReader, bool) {
+	return RevisionTransitionReceiptReaderFor(s.Store)
+}
+
+func (s NudgesStore) RevisionTransitionReceiptReaderHandle() (RevisionTransitionReceiptReader, bool) {
+	return RevisionTransitionReceiptReaderFor(s.Store)
+}
+
+// ControllerMetadataTransitionReceiptReaderHandle forwards full durable Q43
+// receipt envelopes through this typed store view.
+func (s WorkStore) ControllerMetadataTransitionReceiptReaderHandle() (ControllerMetadataTransitionReceiptReader, bool) {
+	return ControllerMetadataTransitionReceiptReaderFor(s.Store)
+}
+
+func (s GraphStore) ControllerMetadataTransitionReceiptReaderHandle() (ControllerMetadataTransitionReceiptReader, bool) {
+	return ControllerMetadataTransitionReceiptReaderFor(s.Store)
+}
+
+func (s SessionStore) ControllerMetadataTransitionReceiptReaderHandle() (ControllerMetadataTransitionReceiptReader, bool) {
+	return ControllerMetadataTransitionReceiptReaderFor(s.Store)
+}
+
+func (s MailStore) ControllerMetadataTransitionReceiptReaderHandle() (ControllerMetadataTransitionReceiptReader, bool) {
+	return ControllerMetadataTransitionReceiptReaderFor(s.Store)
+}
+
+func (s OrdersStore) ControllerMetadataTransitionReceiptReaderHandle() (ControllerMetadataTransitionReceiptReader, bool) {
+	return ControllerMetadataTransitionReceiptReaderFor(s.Store)
+}
+
+func (s NudgesStore) ControllerMetadataTransitionReceiptReaderHandle() (ControllerMetadataTransitionReceiptReader, bool) {
+	return ControllerMetadataTransitionReceiptReaderFor(s.Store)
+}
+
+// RevisionTransitionWriterHandle forwards the complete atomic source
+// transition through this typed store view.
+func (s WorkStore) RevisionTransitionWriterHandle() (RevisionTransitionWriter, bool) {
+	return RevisionTransitionWriterFor(s.Store)
+}
+
+func (s GraphStore) RevisionTransitionWriterHandle() (RevisionTransitionWriter, bool) {
+	return RevisionTransitionWriterFor(s.Store)
+}
+
+func (s SessionStore) RevisionTransitionWriterHandle() (RevisionTransitionWriter, bool) {
+	return RevisionTransitionWriterFor(s.Store)
+}
+
+func (s MailStore) RevisionTransitionWriterHandle() (RevisionTransitionWriter, bool) {
+	return RevisionTransitionWriterFor(s.Store)
+}
+
+func (s OrdersStore) RevisionTransitionWriterHandle() (RevisionTransitionWriter, bool) {
+	return RevisionTransitionWriterFor(s.Store)
+}
+
+func (s NudgesStore) RevisionTransitionWriterHandle() (RevisionTransitionWriter, bool) {
+	return RevisionTransitionWriterFor(s.Store)
+}
+
 var (
-	_ ConditionalWritesResolveTargeter                 = WorkStore{}
-	_ ConditionalWritesResolveTargeter                 = GraphStore{}
-	_ ConditionalWritesResolveTargeter                 = SessionStore{}
-	_ ConditionalWritesResolveTargeter                 = MailStore{}
-	_ ConditionalWritesResolveTargeter                 = OrdersStore{}
-	_ ConditionalWritesResolveTargeter                 = NudgesStore{}
-	_ ControllerMetadataTransitionWriterHandleProvider = WorkStore{}
-	_ ControllerMetadataTransitionWriterHandleProvider = GraphStore{}
-	_ ControllerMetadataTransitionWriterHandleProvider = SessionStore{}
-	_ ControllerMetadataTransitionWriterHandleProvider = MailStore{}
-	_ ControllerMetadataTransitionWriterHandleProvider = OrdersStore{}
-	_ ControllerMetadataTransitionWriterHandleProvider = NudgesStore{}
-	_ DecisionFrontierSourceReaderHandleProvider       = WorkStore{}
-	_ DecisionFrontierSourceReaderHandleProvider       = GraphStore{}
-	_ DecisionFrontierSourceReaderHandleProvider       = SessionStore{}
-	_ DecisionFrontierSourceReaderHandleProvider       = MailStore{}
-	_ DecisionFrontierSourceReaderHandleProvider       = OrdersStore{}
-	_ DecisionFrontierSourceReaderHandleProvider       = NudgesStore{}
+	_ ConditionalWritesResolveTargeter                        = WorkStore{}
+	_ ConditionalWritesResolveTargeter                        = GraphStore{}
+	_ ConditionalWritesResolveTargeter                        = SessionStore{}
+	_ ConditionalWritesResolveTargeter                        = MailStore{}
+	_ ConditionalWritesResolveTargeter                        = OrdersStore{}
+	_ ConditionalWritesResolveTargeter                        = NudgesStore{}
+	_ ControllerMetadataTransitionWriterHandleProvider        = WorkStore{}
+	_ ControllerMetadataTransitionWriterHandleProvider        = GraphStore{}
+	_ ControllerMetadataTransitionWriterHandleProvider        = SessionStore{}
+	_ ControllerMetadataTransitionWriterHandleProvider        = MailStore{}
+	_ ControllerMetadataTransitionWriterHandleProvider        = OrdersStore{}
+	_ ControllerMetadataTransitionWriterHandleProvider        = NudgesStore{}
+	_ DecisionFrontierSourceReaderHandleProvider              = WorkStore{}
+	_ DecisionFrontierSourceReaderHandleProvider              = GraphStore{}
+	_ DecisionFrontierSourceReaderHandleProvider              = SessionStore{}
+	_ DecisionFrontierSourceReaderHandleProvider              = MailStore{}
+	_ DecisionFrontierSourceReaderHandleProvider              = OrdersStore{}
+	_ DecisionFrontierSourceReaderHandleProvider              = NudgesStore{}
+	_ RevisionTransitionReceiptReaderHandleProvider           = WorkStore{}
+	_ RevisionTransitionReceiptReaderHandleProvider           = GraphStore{}
+	_ RevisionTransitionReceiptReaderHandleProvider           = SessionStore{}
+	_ RevisionTransitionReceiptReaderHandleProvider           = MailStore{}
+	_ RevisionTransitionReceiptReaderHandleProvider           = OrdersStore{}
+	_ RevisionTransitionReceiptReaderHandleProvider           = NudgesStore{}
+	_ ControllerMetadataTransitionReceiptReaderHandleProvider = WorkStore{}
+	_ ControllerMetadataTransitionReceiptReaderHandleProvider = GraphStore{}
+	_ ControllerMetadataTransitionReceiptReaderHandleProvider = SessionStore{}
+	_ ControllerMetadataTransitionReceiptReaderHandleProvider = MailStore{}
+	_ ControllerMetadataTransitionReceiptReaderHandleProvider = OrdersStore{}
+	_ ControllerMetadataTransitionReceiptReaderHandleProvider = NudgesStore{}
+	_ RevisionTransitionWriterHandleProvider                  = WorkStore{}
+	_ RevisionTransitionWriterHandleProvider                  = GraphStore{}
+	_ RevisionTransitionWriterHandleProvider                  = SessionStore{}
+	_ RevisionTransitionWriterHandleProvider                  = MailStore{}
+	_ RevisionTransitionWriterHandleProvider                  = OrdersStore{}
+	_ RevisionTransitionWriterHandleProvider                  = NudgesStore{}
 )

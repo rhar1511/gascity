@@ -36,6 +36,10 @@ func (s *ambiguousTransitionStore) DecisionFrontierSourceReaderHandle() (beads.D
 	return beads.DecisionFrontierSourceReaderFor(s.Store)
 }
 
+func (s *ambiguousTransitionStore) RevisionTransitionReceiptReaderHandle() (beads.RevisionTransitionReceiptReader, bool) {
+	return beads.RevisionTransitionReceiptReaderFor(s.Store)
+}
+
 func (s *ambiguousTransitionStore) CompareAndSetMetadataKeyWithReceipt(id, key, expected, next string, revision int64, receipt beads.RevisionTransitionReceipt) (beads.Bead, bool, error) {
 	bead, won, err := s.writer.CompareAndSetMetadataKeyWithReceipt(id, key, expected, next, revision, receipt)
 	if err == nil && won && s.failNext {
@@ -78,6 +82,10 @@ func (s *failingRecordCreateStore) DecisionFrontierRecordWriterHandle() (beads.D
 
 func (s *failingRecordCreateStore) DecisionFrontierSourceReaderHandle() (beads.DecisionFrontierSourceReader, bool) {
 	return beads.DecisionFrontierSourceReaderFor(s.Store)
+}
+
+func (s *failingRecordCreateStore) RevisionTransitionReceiptReaderHandle() (beads.RevisionTransitionReceiptReader, bool) {
+	return beads.RevisionTransitionReceiptReaderFor(s.Store)
 }
 
 func (s *failingRecordCreateStore) CreateDecisionFrontierRecord(b beads.Bead) (beads.Bead, error) {
@@ -128,6 +136,10 @@ func (s *offsetRevisionStore) DecisionFrontierRecordWriterHandle() (beads.Decisi
 }
 
 func (s *offsetRevisionStore) DecisionFrontierSourceReaderHandle() (beads.DecisionFrontierSourceReader, bool) {
+	return s, true
+}
+
+func (s *offsetRevisionStore) RevisionTransitionReceiptReaderHandle() (beads.RevisionTransitionReceiptReader, bool) {
 	return s, true
 }
 

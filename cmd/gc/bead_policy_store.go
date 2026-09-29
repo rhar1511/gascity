@@ -36,12 +36,15 @@ type beadPolicyGraphStore struct {
 }
 
 var (
-	_ beads.ConditionalAssignmentReleaser                    = (*beadPolicyStore)(nil)
-	_ beads.ConditionalWritesResolveTargeter                 = (*beadPolicyStore)(nil)
-	_ beads.PrivateEvidenceMetadataCASWriterHandleProvider   = (*beadPolicyStore)(nil)
-	_ beads.PrivateEvidenceArchiveReaderHandleProvider       = (*beadPolicyStore)(nil)
-	_ beads.ControllerMetadataTransitionWriterHandleProvider = (*beadPolicyStore)(nil)
-	_ beads.DecisionFrontierSourceReaderHandleProvider       = (*beadPolicyStore)(nil)
+	_ beads.ConditionalAssignmentReleaser                           = (*beadPolicyStore)(nil)
+	_ beads.ConditionalWritesResolveTargeter                        = (*beadPolicyStore)(nil)
+	_ beads.PrivateEvidenceMetadataCASWriterHandleProvider          = (*beadPolicyStore)(nil)
+	_ beads.PrivateEvidenceArchiveReaderHandleProvider              = (*beadPolicyStore)(nil)
+	_ beads.ControllerMetadataTransitionWriterHandleProvider        = (*beadPolicyStore)(nil)
+	_ beads.ControllerMetadataTransitionReceiptReaderHandleProvider = (*beadPolicyStore)(nil)
+	_ beads.DecisionFrontierSourceReaderHandleProvider              = (*beadPolicyStore)(nil)
+	_ beads.RevisionTransitionReceiptReaderHandleProvider           = (*beadPolicyStore)(nil)
+	_ beads.RevisionTransitionWriterHandleProvider                  = (*beadPolicyStore)(nil)
 )
 
 // ConditionalWritesResolveTarget declares the wrapped store as the
@@ -78,6 +81,20 @@ func (s *beadPolicyStore) ControllerMetadataTransitionWriterHandle() (beads.Cont
 // source-snapshot capability through the policy layer.
 func (s *beadPolicyStore) DecisionFrontierSourceReaderHandle() (beads.DecisionFrontierSourceReader, bool) {
 	return beads.DecisionFrontierSourceReaderFor(s.Store)
+}
+
+// RevisionTransitionReceiptReaderHandle preserves the backing exact-receipt
+// reader through the policy layer without inferring support from source reads.
+func (s *beadPolicyStore) RevisionTransitionReceiptReaderHandle() (beads.RevisionTransitionReceiptReader, bool) {
+	return beads.RevisionTransitionReceiptReaderFor(s.Store)
+}
+
+func (s *beadPolicyStore) ControllerMetadataTransitionReceiptReaderHandle() (beads.ControllerMetadataTransitionReceiptReader, bool) {
+	return beads.ControllerMetadataTransitionReceiptReaderFor(s.Store)
+}
+
+func (s *beadPolicyStore) RevisionTransitionWriterHandle() (beads.RevisionTransitionWriter, bool) {
+	return beads.RevisionTransitionWriterFor(s.Store)
 }
 
 var (

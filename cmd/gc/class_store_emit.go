@@ -493,6 +493,20 @@ func (s *emittingClassStore) DecisionFrontierSourceReaderHandle() (beads.Decisio
 	return s, true
 }
 
+// RevisionTransitionReceiptReaderHandle exposes this wrapper's receipt method
+// only when the backing store explicitly provides exact receipt reads.
+func (s *emittingClassStore) RevisionTransitionReceiptReaderHandle() (beads.RevisionTransitionReceiptReader, bool) {
+	reader, ok := beads.RevisionTransitionReceiptReaderFor(s.Store)
+	if !ok || reader == nil {
+		return nil, false
+	}
+	return s, true
+}
+
+func (s *emittingClassStore) ControllerMetadataTransitionReceiptReaderHandle() (beads.ControllerMetadataTransitionReceiptReader, bool) {
+	return beads.ControllerMetadataTransitionReceiptReaderFor(s.Store)
+}
+
 // RevisionTransitionWriterHandle preserves the backing store's atomic hold
 // and receipt transition while keeping its private metadata out of generic
 // bead events.

@@ -1,6 +1,7 @@
 package beads
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -94,8 +95,19 @@ func TestBdStoreDecisionFrontierReceiptReaderBindsQ43EnvelopeAndPayload(t *testi
 	if actual != want {
 		t.Fatalf("receipt = %+v, want %+v", actual, want)
 	}
-	if transport.contextCount != 1 || transport.receiptGetCount != 1 {
-		t.Fatalf("requests: context=%d receipt-get=%d, want one each", transport.contextCount, transport.receiptGetCount)
+	envelopeReader, ok := ControllerMetadataTransitionReceiptReaderFor(store)
+	if !ok || envelopeReader == nil {
+		t.Fatal("configured BdStore did not expose its full Q43 receipt envelope reader")
+	}
+	envelope, found, err := envelopeReader.ControllerMetadataTransitionReceipt(issueID, receiptID)
+	if err != nil || !found || envelope.ReceiptID != receiptID || envelope.IssueID != issueID || envelope.Scope != storeRef ||
+		envelope.Kind != controllerDecisionFrontierTransitionKind || envelope.Actor != privateEvidenceActor ||
+		envelope.ExpectedVersion != 9 || envelope.ToVersion != 23 || envelope.Key != beadmeta.DecisionFrontierHoldMetadataKey ||
+		len(envelope.Expected) != 0 || !bytes.Equal(envelope.Value, value) || !bytes.Equal(envelope.Payload, payload) {
+		t.Fatalf("full Q43 envelope = %+v found=%v err=%v, want exact expected/value/payload request envelope", envelope, found, err)
+	}
+	if transport.contextCount != 2 || transport.receiptGetCount != 2 {
+		t.Fatalf("requests: context=%d receipt-get=%d, want one each per reader contract", transport.contextCount, transport.receiptGetCount)
 	}
 	if _, _, err := reader.DecisionFrontierRevisionTransitionReceipt("gc/other", receiptID); !errors.Is(err, ErrDecisionFrontierTransitionReceiptCorrupt) {
 		t.Fatalf("wrong issue receipt error = %v, want corrupt receipt", err)

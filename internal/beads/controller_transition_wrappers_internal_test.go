@@ -16,6 +16,23 @@ type controllerTransitionWrapperTestStore struct {
 	transitionFn func(string, ControllerMetadataTransitionRequest)
 }
 
+type revisionTransitionWrapperTestStore struct {
+	Store
+	transitionFn func(string)
+}
+
+func (s *revisionTransitionWrapperTestStore) RevisionTransitionWriterHandle() (RevisionTransitionWriter, bool) {
+	return s, s != nil
+}
+
+func (s *revisionTransitionWrapperTestStore) CompareAndSetMetadataKeyWithReceipt(id, key, expected, next string, expectedRevision int64, receipt RevisionTransitionReceipt) (Bead, bool, error) {
+	if s.transitionFn != nil {
+		s.transitionFn(id)
+	}
+	bead, err := s.Store.Get(id)
+	return bead, err == nil, err
+}
+
 func (s *controllerTransitionWrapperTestStore) Get(id string) (Bead, error) {
 	s.mu.Lock()
 	s.getCalls++
@@ -128,6 +145,67 @@ func TestProxiedControllerMetadataTransitionUsesGenerationBracket(t *testing.T) 
 	}
 }
 
+func TestCachingRevisionTransitionEvictsOwner(t *testing.T) {
+	mem := NewMemStore()
+	owner, err := mem.Create(Bead{Title: "revision transition owner", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	backing := &revisionTransitionWrapperTestStore{Store: mem}
+	backing.transitionFn = func(id string) {
+		if err := backing.SetMetadata(id, "gc.transition_test", "updated"); err != nil {
+			t.Errorf("update transition owner: %v", err)
+		}
+	}
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+	if _, err := cache.Get(owner.ID); err != nil {
+		t.Fatalf("initial cached Get: %v", err)
+	}
+	writer, ok := RevisionTransitionWriterFor(cache)
+	if !ok || writer == nil {
+		t.Fatal("CachingStore hid the complete revision transition writer")
+	}
+	if _, won, err := writer.CompareAndSetMetadataKeyWithReceipt(owner.ID, "gc.test", "", "next", owner.Revision, RevisionTransitionReceipt{}); err != nil || !won {
+		t.Fatalf("cached revision transition: won=%v err=%v", won, err)
+	}
+	got, err := cache.Get(owner.ID)
+	if err != nil || got.Metadata["gc.transition_test"] != "updated" {
+		t.Fatalf("cached owner after transition = %+v, %v", got, err)
+	}
+}
+
+func TestProxiedRevisionTransitionUsesOneGenerationBracket(t *testing.T) {
+	root := t.TempDir()
+	writeProxyRecordForControllerTransitionTest(t, root, 4001, 45123, "generation-one")
+	mem := NewMemStore()
+	owner, err := mem.Create(Bead{Title: "revision transition owner", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeStore := &revisionTransitionWrapperTestStore{Store: mem}
+	writeStore.transitionFn = func(string) {
+		writeProxyRecordForControllerTransitionTest(t, root, 4002, 45987, "generation-two")
+	}
+	native := newNativeDoltStoreForTest(newNativeDoltMemStorage(), WithProxiedReadOnly())
+	store, err := NewProxiedStore(native, writeStore, PinForTest("/scope", root, "beads"))
+	if err != nil {
+		t.Fatalf("NewProxiedStore: %v", err)
+	}
+	writer, ok := RevisionTransitionWriterFor(store)
+	if !ok || writer == nil {
+		t.Fatal("ProxiedStore hid the complete revision transition writer")
+	}
+	if _, won, err := writer.CompareAndSetMetadataKeyWithReceipt(owner.ID, "gc.test", "", "next", owner.Revision, RevisionTransitionReceipt{}); err != nil || !won {
+		t.Fatalf("proxied revision transition: won=%v err=%v", won, err)
+	}
+	if !store.Demoted() {
+		t.Fatal("proxy generation change during revision transition did not stand down the native read leaf")
+	}
+}
+
 func writeProxyRecordForControllerTransitionTest(t *testing.T, root string, pid, port int, generation string) {
 	t.Helper()
 	rootID, err := proxyendpoint.RootID(root)
@@ -151,3 +229,4 @@ func writeProxyRecordForControllerTransitionTest(t *testing.T, root string, pid,
 }
 
 var _ ControllerMetadataTransitionWriter = (*controllerTransitionWrapperTestStore)(nil)
+var _ RevisionTransitionWriterHandleProvider = (*revisionTransitionWrapperTestStore)(nil)

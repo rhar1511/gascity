@@ -30,10 +30,13 @@ import (
 // honest cache action after a fenced write is a miss. The refresh, when it
 // succeeds, feeds the change notification verbatim and nothing else.
 var (
-	_ ConditionalWriter                          = (*CachingStore)(nil)
-	_ conditionalWritesModeCarrier               = (*CachingStore)(nil)
-	_ conditionalWriteCapabilityProber           = (*CachingStore)(nil)
-	_ DecisionFrontierSourceReaderHandleProvider = (*CachingStore)(nil)
+	_ ConditionalWriter                                       = (*CachingStore)(nil)
+	_ conditionalWritesModeCarrier                            = (*CachingStore)(nil)
+	_ conditionalWriteCapabilityProber                        = (*CachingStore)(nil)
+	_ DecisionFrontierSourceReaderHandleProvider              = (*CachingStore)(nil)
+	_ RevisionTransitionReceiptReaderHandleProvider           = (*CachingStore)(nil)
+	_ ControllerMetadataTransitionReceiptReaderHandleProvider = (*CachingStore)(nil)
+	_ RevisionTransitionWriterHandleProvider                  = (*CachingStore)(nil)
 )
 
 // DecisionFrontierSourceReaderHandle delegates the source snapshot directly to
@@ -43,6 +46,48 @@ func (c *CachingStore) DecisionFrontierSourceReaderHandle() (DecisionFrontierSou
 		return nil, false
 	}
 	return DecisionFrontierSourceReaderFor(c.backing)
+}
+
+// RevisionTransitionReceiptReaderHandle delegates exact receipt reads directly
+// to the backing reader. Receipt payloads never enter the ordinary bead cache.
+func (c *CachingStore) RevisionTransitionReceiptReaderHandle() (RevisionTransitionReceiptReader, bool) {
+	if c == nil {
+		return nil, false
+	}
+	return RevisionTransitionReceiptReaderFor(c.backing)
+}
+
+func (c *CachingStore) ControllerMetadataTransitionReceiptReaderHandle() (ControllerMetadataTransitionReceiptReader, bool) {
+	if c == nil {
+		return nil, false
+	}
+	return ControllerMetadataTransitionReceiptReaderFor(c.backing)
+}
+
+type cachingRevisionTransitionWriter struct {
+	cache  *CachingStore
+	writer RevisionTransitionWriter
+}
+
+func (w cachingRevisionTransitionWriter) CompareAndSetMetadataKeyWithReceipt(id, key, expected, next string, expectedRevision int64, receipt RevisionTransitionReceipt) (Bead, bool, error) {
+	bead, won, err := w.writer.CompareAndSetMetadataKeyWithReceipt(id, key, expected, next, expectedRevision, receipt)
+	if err != nil {
+		w.cache.applyConditionalWriteFailure(id, err)
+		return bead, won, err
+	}
+	w.cache.evictForConditionalWrite(id)
+	return bead, won, nil
+}
+
+func (c *CachingStore) RevisionTransitionWriterHandle() (RevisionTransitionWriter, bool) {
+	if c == nil {
+		return nil, false
+	}
+	writer, ok := RevisionTransitionWriterFor(c.backing)
+	if !ok || writer == nil {
+		return nil, false
+	}
+	return cachingRevisionTransitionWriter{cache: c, writer: writer}, true
 }
 
 type cachingPrivateEvidenceMetadataCASWriter struct {

@@ -691,20 +691,44 @@ type RevisionTransitionReceiptReader interface {
 	DecisionFrontierRevisionTransitionReceipt(issueID, receiptID string) (RevisionTransitionReceipt, bool, error)
 }
 
-// RevisionTransitionReceiptReaderFor resolves receipt reads only through the
-// authoritative decision-frontier source reader. Wrappers must preserve that
-// reader's routing and generation checks before they can expose its receipt
-// reader too.
+// RevisionTransitionReceiptReaderHandleProvider exposes exact receipt reads
+// only when a wrapper can preserve the backing reader's routing and generation
+// checks. A source-reader handle alone is not proof of receipt-read support.
+type RevisionTransitionReceiptReaderHandleProvider interface {
+	RevisionTransitionReceiptReaderHandle() (RevisionTransitionReceiptReader, bool)
+}
+
+// RevisionTransitionReceiptReaderFor resolves exact receipt reads only from a
+// direct supported store or a wrapper that explicitly exposes a safe handle.
+// In particular, it never infers this capability from a source-reader handle:
+// wrappers can implement receipt methods structurally even when their backing
+// reader cannot serve them.
 func RevisionTransitionReceiptReaderFor(store Store) (RevisionTransitionReceiptReader, bool) {
 	if store == nil {
 		return nil, false
 	}
-	sourceReader, ok := DecisionFrontierSourceReaderFor(store)
-	if !ok || sourceReader == nil {
+	if provider, ok := store.(RevisionTransitionReceiptReaderHandleProvider); ok {
+		return provider.RevisionTransitionReceiptReaderHandle()
+	}
+	switch typed := store.(type) {
+	case *MemStore:
+		return typed, typed != nil
+	case *SQLiteStore:
+		if typed == nil || !typed.hasRevisionColumn {
+			return nil, false
+		}
+		return typed, true
+	case *BdStore:
+		if typed == nil {
+			return nil, false
+		}
+		if source, ok := typed.DecisionFrontierSourceReaderHandle(); !ok || source == nil {
+			return nil, false
+		}
+		return typed, true
+	default:
 		return nil, false
 	}
-	reader, ok := sourceReader.(RevisionTransitionReceiptReader)
-	return reader, ok
 }
 
 func appendRevisionTransitionReceipt(raw string, receipt RevisionTransitionReceipt, toRevision int64) (string, error) {
