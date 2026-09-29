@@ -150,6 +150,47 @@ func TestControllerBeadsPermitIssuerBindsOnlyLinkEndpoints(t *testing.T) {
 	}
 }
 
+func TestControllerBeadsPermitIssuerBindsGenericProtectedMutationClaims(t *testing.T) {
+	privateKey := ed25519.NewKeyFromSeed([]byte("0123456789abcdef0123456789abcdef"))
+	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	issuer, err := NewControllerBeadsPermitIssuer(ControllerBeadsPermitIssuerConfig{
+		Audience: "audience-a", ProjectID: "project-a", Database: "beads_fixture",
+		KeyID: "key-a", Issuer: "issuer-a", Lifetime: time.Minute,
+		Signer: privateKey, Now: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("NewControllerBeadsPermitIssuer: %v", err)
+	}
+	request := ControllerProtectedMutationRequest{
+		Operation: "issue.revision_transition", ResourceIDs: []string{"bd-record", "bd-record"},
+		RequestDigest: "9dc1875d200aa59ac356d13e9ab59e6999c4789f3c9f7823ddcf347405f9dde0",
+	}
+	token, err := issuer.IssueProtectedMutation(request, "replay-transition-identifier-0001")
+	if err != nil {
+		t.Fatalf("IssueProtectedMutation: %v", err)
+	}
+	parts := strings.Split(token, ".")
+	if len(parts) != 2 {
+		t.Fatalf("permit token has %d segments, want 2", len(parts))
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil || base64.RawURLEncoding.EncodeToString(payload) != parts[0] {
+		t.Fatalf("permit payload is not canonical raw URL base64: %v", err)
+	}
+	var claims controllerBeadsPermitClaimsV1
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		t.Fatalf("decode permit claims: %v", err)
+	}
+	signature, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil || !ed25519.Verify(privateKey.Public().(ed25519.PublicKey), append([]byte(controllerBeadsPermitSigningDomain), payload...), signature) {
+		t.Fatal("generic protected-mutation signature did not verify")
+	}
+	if claims.Operation != request.Operation || claims.RequestDigest != request.RequestDigest || claims.ReplayID != "replay-transition-identifier-0001" ||
+		!reflect.DeepEqual(claims.ResourceIDs, []string{"bd-record"}) {
+		t.Fatalf("generic permit claims = %#v, want operation/digest/replay and deduplicated sorted resource", claims)
+	}
+}
+
 func controllerBeadsFrontierDigestRequest(withLinks bool) ControllerProtectedCreateAndLinkRequest {
 	request := ControllerProtectedCreateAndLinkRequest{
 		Actor: "controller-a",

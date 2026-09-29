@@ -22,8 +22,8 @@ var (
 	// ErrRemoteDecisionFrontierRecordShape reports fields the protected remote
 	// create contract cannot preserve exactly.
 	ErrRemoteDecisionFrontierRecordShape = errors.New("remote decision-frontier record shape unsupported")
-	// ErrRemoteDecisionFrontierCASUnsupported records the adapter's deliberate
-	// fail-closed boundary until a protected remote record-CAS transport exists.
+	// ErrRemoteDecisionFrontierCASUnsupported records that the protected
+	// metadata-CAS dependencies were not explicitly configured.
 	ErrRemoteDecisionFrontierCASUnsupported = fmt.Errorf("remote decision-frontier record CAS unavailable: %w", ErrConditionalWriteUnsupported)
 )
 
@@ -41,38 +41,50 @@ type DecisionFrontierLinkWriter interface {
 	EnsureDecisionFrontierLink(sourceID, targetID, depType string) error
 }
 
-// RemoteDecisionFrontierRecordWriterConfig injects the only external
-// capabilities used by RemoteDecisionFrontierRecordWriter. The actor is
-// controller-authored request identity and must be configured by trusted
-// controller code. BatchTimeout bounds only the batch transport call; the
-// injected local permit issuer and link writer own their own execution bounds.
-type RemoteDecisionFrontierRecordWriterConfig struct {
-	Actor           string
-	ProtectionClass string
-	BatchTimeout    time.Duration
-	PermitIssuer    ControllerProtectedCreateAndLinkPermitIssuer
-	BatchWriter     ControllerProtectedCreateAndLinkWriter
-	LinkWriter      DecisionFrontierLinkWriter
+// DecisionFrontierMetadataRecordReader reads one exact record snapshot from
+// the same authoritative Beads workspace as the configured Q43 writer. Get
+// must reject a response whose returned ID differs from the requested ID and
+// include the authoritative revision and metadata values.
+type DecisionFrontierMetadataRecordReader interface {
+	Get(id string) (Bead, error)
 }
 
-// RemoteDecisionFrontierRecordWriter adapts remote protected record creation
-// and decision-frontier linking to the local record-writer surface. The
-// controller permit issuer, protected batch writer, and narrow link writer are
-// injected; this type performs no startup, credential, or store wiring.
-//
-// This type deliberately does not expose itself as a usable
-// DecisionFrontierRecordWriter capability handle. Its record CAS method is
-// unavailable, and Service's current capability check treats that handle as
-// complete even though Answer needs CAS before it can safely advance a ticket.
-// A future integration must add and verify remote CAS before exposing this
-// adapter through a store's DecisionFrontierRecordWriterHandle.
+// RemoteDecisionFrontierRecordWriterConfig injects the external capabilities
+// used by RemoteDecisionFrontierRecordWriter. Actor and ProtectionClass are
+// controller-authored policy and must be configured by trusted controller
+// code. Metadata transition scope, kind, reader, issuer, and writer are an
+// all-or-none opt-in for the inert remote CAS slice.
+type RemoteDecisionFrontierRecordWriterConfig struct {
+	Actor                    string
+	ProtectionClass          string
+	BatchTimeout             time.Duration
+	PermitIssuer             ControllerProtectedCreateAndLinkPermitIssuer
+	BatchWriter              ControllerProtectedCreateAndLinkWriter
+	LinkWriter               DecisionFrontierLinkWriter
+	MetadataTransitionScope  string
+	MetadataTransitionKind   string
+	MetadataRecordReader     DecisionFrontierMetadataRecordReader
+	MetadataPermitIssuer     ControllerProtectedMutationPermitIssuer
+	MetadataTransitionWriter ControllerMetadataTransitionWriter
+}
+
+// RemoteDecisionFrontierRecordWriter adapts remote protected record creation,
+// metadata CAS, and decision-frontier linking to the local record-writer
+// surface. Its external capabilities are injected; this type performs no
+// startup, credential, or store wiring. It deliberately refuses its capability
+// handle so the new CAS slice cannot affect production routing yet.
 type RemoteDecisionFrontierRecordWriter struct {
-	actor           string
-	protectionClass string
-	batchTimeout    time.Duration
-	permitIssuer    ControllerProtectedCreateAndLinkPermitIssuer
-	batchWriter     ControllerProtectedCreateAndLinkWriter
-	linkWriter      DecisionFrontierLinkWriter
+	actor                    string
+	protectionClass          string
+	batchTimeout             time.Duration
+	permitIssuer             ControllerProtectedCreateAndLinkPermitIssuer
+	batchWriter              ControllerProtectedCreateAndLinkWriter
+	linkWriter               DecisionFrontierLinkWriter
+	metadataTransitionScope  string
+	metadataTransitionKind   string
+	metadataRecordReader     DecisionFrontierMetadataRecordReader
+	metadataPermitIssuer     ControllerProtectedMutationPermitIssuer
+	metadataTransitionWriter ControllerMetadataTransitionWriter
 }
 
 var (
@@ -100,17 +112,24 @@ func NewRemoteDecisionFrontierRecordWriter(config RemoteDecisionFrontierRecordWr
 	if config.BatchTimeout < 0 || config.BatchTimeout > controllerDecisionFrontierMaxBatchTimeout {
 		return nil, ErrRemoteDecisionFrontierWriterUnavailable
 	}
+	if err := validateRemoteDecisionFrontierMetadataCASConfig(config); err != nil {
+		return nil, err
+	}
 	return &RemoteDecisionFrontierRecordWriter{
 		actor: config.Actor, protectionClass: config.ProtectionClass,
 		batchTimeout: config.BatchTimeout, permitIssuer: config.PermitIssuer,
 		batchWriter: config.BatchWriter, linkWriter: config.LinkWriter,
+		metadataTransitionScope:  config.MetadataTransitionScope,
+		metadataTransitionKind:   config.MetadataTransitionKind,
+		metadataRecordReader:     config.MetadataRecordReader,
+		metadataPermitIssuer:     config.MetadataPermitIssuer,
+		metadataTransitionWriter: config.MetadataTransitionWriter,
 	}, nil
 }
 
-// DecisionFrontierRecordWriterHandle intentionally refuses to advertise the
-// adapter through the store capability resolver. The current service checks
-// the combined interface before Ensure/Answer, so publishing a writer whose
-// CAS always fails would let those flows start with incomplete authority.
+// DecisionFrontierRecordWriterHandle intentionally keeps this inert adapter
+// out of the store capability resolver until the complete production read,
+// permit, transition, and recovery wiring has been reviewed.
 func (*RemoteDecisionFrontierRecordWriter) DecisionFrontierRecordWriterHandle() (DecisionFrontierRecordWriter, bool) {
 	return nil, false
 }
@@ -162,10 +181,15 @@ func (w *RemoteDecisionFrontierRecordWriter) CreateDecisionFrontierRecord(record
 	return cloneBead(record), nil
 }
 
-// CompareAndSetDecisionFrontierRecordMetadataKey always fails closed. The
-// available protected batchApply contract has no remote decision-record CAS.
-func (*RemoteDecisionFrontierRecordWriter) CompareAndSetDecisionFrontierRecordMetadataKey(string, string, string, string) (bool, error) {
-	return false, ErrRemoteDecisionFrontierCASUnsupported
+// CompareAndSetDecisionFrontierRecordMetadataKey uses the configured exact
+// record reader, generic Beads permit issuer, and Q43 metadata transition
+// transport. This inert source slice is not exposed through a capability
+// handle until production wiring and the complete remote contract are reviewed.
+func (w *RemoteDecisionFrontierRecordWriter) CompareAndSetDecisionFrontierRecordMetadataKey(id, key, expected, next string) (bool, error) {
+	if w == nil || w.metadataRecordReader == nil || w.metadataPermitIssuer == nil || w.metadataTransitionWriter == nil {
+		return false, ErrRemoteDecisionFrontierCASUnsupported
+	}
+	return w.compareAndSetDecisionFrontierRecordMetadataKey(id, key, expected, next)
 }
 
 // EnsureDecisionFrontierLink delegates to the explicitly injected narrow link

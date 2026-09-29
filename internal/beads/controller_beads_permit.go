@@ -61,6 +61,21 @@ type ControllerBeadsPermitIssuer struct {
 	now       func() time.Time
 }
 
+// ControllerProtectedMutationRequest uses Beads' generic protected-mutation
+// vocabulary. RequestDigest must be the exact digest expected by the pinned
+// Beads operation; ResourceIDs are canonicalized before signing.
+type ControllerProtectedMutationRequest struct {
+	Operation     string
+	ResourceIDs   []string
+	RequestDigest string
+}
+
+// ControllerProtectedMutationPermitIssuer issues a permit bound to one exact
+// Beads operation, resource set, and request digest.
+type ControllerProtectedMutationPermitIssuer interface {
+	IssueProtectedMutation(request ControllerProtectedMutationRequest, replayID string) (string, error)
+}
+
 // NewControllerBeadsPermitIssuer validates exact workspace bindings and an
 // injected Ed25519 signer. The Beads verifier caps grants at five minutes.
 func NewControllerBeadsPermitIssuer(config ControllerBeadsPermitIssuerConfig) (*ControllerBeadsPermitIssuer, error) {
@@ -126,7 +141,26 @@ func (i *ControllerBeadsPermitIssuer) IssueProtectedLink(request ControllerProte
 	return i.signProtectedBatch(digest, resources, replayID)
 }
 
+// IssueProtectedMutation signs one generic protected Beads mutation. The
+// caller owns the operation policy and must provide the exact digest computed
+// for the pinned Beads request type.
+func (i *ControllerBeadsPermitIssuer) IssueProtectedMutation(request ControllerProtectedMutationRequest, replayID string) (string, error) {
+	if i == nil || !validControllerBeadsPermitAtom(request.Operation, 200) ||
+		!validControllerBeadsPermitSHA256(request.RequestDigest) || !validControllerBeadsPermitReplayID(replayID) {
+		return "", ErrControllerBeadsPermitRequest
+	}
+	resources, err := controllerBeadsProtectedResourceIDs(request.ResourceIDs...)
+	if err != nil {
+		return "", fmt.Errorf("%w: invalid resource set", ErrControllerBeadsPermitRequest)
+	}
+	return i.signProtectedMutation(request.Operation, request.RequestDigest, resources, replayID)
+}
+
 func (i *ControllerBeadsPermitIssuer) signProtectedBatch(digest string, resources []string, replayID string) (string, error) {
+	return i.signProtectedMutation(controllerBeadsPermitOperation, digest, resources, replayID)
+}
+
+func (i *ControllerBeadsPermitIssuer) signProtectedMutation(operation, digest string, resources []string, replayID string) (string, error) {
 	if i == nil || i.signer == nil || len(i.publicKey) != ed25519.PublicKeySize {
 		return "", ErrControllerBeadsPermitRequest
 	}
@@ -140,7 +174,7 @@ func (i *ControllerBeadsPermitIssuer) signProtectedBatch(digest string, resource
 		Audience:      i.audience,
 		ProjectID:     i.projectID,
 		Database:      i.database,
-		Operation:     controllerBeadsPermitOperation,
+		Operation:     operation,
 		ResourceIDs:   resources,
 		RequestDigest: digest,
 		ReplayID:      replayID,
@@ -312,7 +346,7 @@ func canonicalControllerBeadsPermitClaims(claims controllerBeadsPermitClaimsV1) 
 	if claims.SchemaVersion != controllerBeadsPermitSchemaV1 || claims.Purpose != controllerBeadsPermitPurpose ||
 		!validControllerBeadsPermitAtom(claims.KeyID, 200) || !validControllerBeadsPermitAtom(claims.Issuer, 256) ||
 		!validControllerBeadsPermitAtom(claims.Audience, 255) || !validControllerBeadsPermitAtom(claims.ProjectID, 255) ||
-		!validControllerBeadsPermitAtom(claims.Database, 255) || claims.Operation != controllerBeadsPermitOperation ||
+		!validControllerBeadsPermitAtom(claims.Database, 255) || !validControllerBeadsPermitAtom(claims.Operation, 200) ||
 		!validControllerBeadsPermitSHA256(claims.RequestDigest) || !validControllerBeadsPermitReplayID(claims.ReplayID) {
 		return nil, ErrControllerBeadsPermitRequest
 	}
