@@ -4,8 +4,9 @@ This contribution supplies Inktree's consumer policy for the role-neutral
 `internal/coordinationnotify` primitives. It maps known router reason strings
 to the released coordination reason codes, assigns fixed neutral copy, and
 keeps both `live_dispatch` and `notification_dispatch` off. The pack is replay
-only; it defines no order, transport binding, worker, route, or delivery
-action.
+only by default; it defines no order, worker, or route action. Its bounded
+Forgejo canary command requires an explicit synthetic issue, token, and
+notification-only override, while route dispatch remains off.
 
 The generic package owns deterministic envelope construction, assertion and
 record projections, fixed-template rendering, switch validation, and bounded
@@ -42,6 +43,63 @@ go test ./internal/coordinationnotify \
 The live consumer still needs a separately reviewed ordinary-pack adapter and
 operator-managed identity/channel bindings. This contribution does not install
 itself or alter a city.
+
+## Synthetic Forgejo canary
+
+After offline evidence and exact-head review pass, the authorized synthetic
+canary can target one open `req-syn-*` issue whose author is attested by the
+same Forgejo token. The command turns on notification delivery for that run
+only; `live_dispatch` remains off. It refuses an unattested author, records no
+credentials or author identifier, posts fixed rendered copy, and uses both the
+stable notification ID and a durable ledger snapshot to suppress a same-epoch
+re-fire.
+
+```sh
+FORGEJO_TOKEN_FILE=/path/to/mode-600-token
+GIT_DIR="$(git rev-parse --git-dir)" GIT_WORK_TREE="$PWD" \
+  go run ./contrib/inktree-coordination-notifications/cmd/forgejo-canary \
+  --token-file "$FORGEJO_TOKEN_FILE" \
+  --repo inktri/inktree --issue <synthetic-issue-number> \
+  --request-id req-syn-0003 --bead-id inktree-syn0003 \
+  --authorization /path/to/canary-authorization.json \
+  --verification contrib/inktree-coordination-notifications/evidence/verification.json \
+  --out /path/outside/worktree/forgejo-canary.json
+```
+
+The mode-0400 authorization document and output must remain outside the clean
+reviewed worktree. The authorization document must bind the synthetic request,
+repository, issue, opaque binding ID, and exact reviewed 40-hex source head, and
+explicitly attest the offline gates, independent review, and synthetic canary
+authorization. The command also verifies the retained policy/corpus hashes and
+refuses redirects, unrelated comments, arbitrary HTTPS origins, and source-head
+drift before any write. It also verifies that the running Go binary was built
+from that clean reviewed head. Run the exact command twice. The first run must
+retain one Forgejo comment receipt; the second must retain
+`same_epoch_refire_suppressed: true` without a second comment. This command is
+not a live route or worker dispatch path.
+
+The authorization file is an operator-local control in the same trust domain as
+the mode-0600 token; processes running as that operator can access both. A
+durable intent is written and synced before the sole POST. If the POST outcome
+is uncertain and no comment is visible, the command fails closed and will not
+retry that request. Do not delete the intent to force a retry: inspect Forgejo
+and the retained state, then authorize a new synthetic request if delivery was
+not accepted.
+
+```json
+{
+  "version": "inktree-forgejo-canary-authorization/v1",
+  "request_id": "req-syn-0003",
+  "repository": "inktri/inktree",
+  "issue": 1234,
+  "binding_id": "binding-0123456789abcdef0123456789abcdef",
+  "reviewed_head": "0123456789abcdef0123456789abcdef01234567",
+  "verification_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "offline_gates_passed": true,
+  "independent_review_passed": true,
+  "synthetic_canary_authorized": true
+}
+```
 
 ## HITL contract for the future consumer adapter
 

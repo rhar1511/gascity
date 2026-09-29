@@ -193,8 +193,8 @@ func TestDispatchSwitchesAreIndependent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !item.Decision.RenderAllowed || item.Decision.Deliver {
-		t.Fatalf("live switch did not independently block delivery: %#v", item.Decision)
+	if !item.Decision.RenderAllowed || !item.Decision.Deliver || item.Decision.LiveDispatch {
+		t.Fatalf("route dispatch switch incorrectly blocked notification delivery: %#v", item.Decision)
 	}
 	policy.Switches = Switches{LiveDispatchValue: "on", NotificationDispatchValue: "off"}
 	item, err = Build(policy, input)

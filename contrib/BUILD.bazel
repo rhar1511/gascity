@@ -17,6 +17,7 @@ filegroup(
     ) + [
         "//contrib/inktree-coordination-notifications:bazel_repo_srcs",
         "//contrib/inktree-coordination-notifications/cmd/evidence:bazel_repo_srcs",
+        "//contrib/inktree-coordination-notifications/cmd/forgejo-canary:bazel_repo_srcs",
     ],
 )
 
