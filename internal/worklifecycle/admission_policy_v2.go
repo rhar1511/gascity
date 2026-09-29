@@ -53,9 +53,11 @@ type AdmissionTargetResolutionContextV2 struct {
 
 // CanonicalAdmissionPoolV2 is the resolved, rig-qualified pool identity and
 // the configuration and runtime facts that allow it to receive generic
-// admitted work. It contains no filesystem paths.
+// admitted work, including its exact effective default sling formula. It
+// contains no filesystem paths.
 type CanonicalAdmissionPoolV2 struct {
 	Identity                   string `json:"identity"`
+	DefaultSlingFormula        string `json:"default_sling_formula"`
 	PoolTemplate               bool   `json:"pool_template"`
 	Suspended                  bool   `json:"suspended"`
 	SupportsGenericEphemeral   bool   `json:"supports_generic_ephemeral"`
@@ -154,6 +156,10 @@ func ResolveCanonicalAdmissionPoolV2(identity string, context AdmissionTargetRes
 	if !customSlingQueryAbsent {
 		return CanonicalAdmissionPoolV2{}, admissionPolicyV2Error("target pool has a custom sling query")
 	}
+	defaultSlingFormula := agent.EffectiveDefaultSlingFormula()
+	if !validLogicalFormulaID(defaultSlingFormula) {
+		return CanonicalAdmissionPoolV2{}, admissionPolicyV2Error("target pool has no canonical effective default sling formula")
+	}
 	var maxActiveSessions *int
 	if max != -1 {
 		maxValue := max
@@ -164,6 +170,7 @@ func ResolveCanonicalAdmissionPoolV2(identity string, context AdmissionTargetRes
 	workspaceMax := cloneAdmissionInt(context.City.Workspace.MaxActiveSessions)
 	return CanonicalAdmissionPoolV2{
 		Identity:                   canonical,
+		DefaultSlingFormula:        defaultSlingFormula,
 		PoolTemplate:               true,
 		Suspended:                  agent.Suspended,
 		SupportsGenericEphemeral:   supportsGenericEphemeral,
@@ -365,7 +372,7 @@ func canonicalAdmissionPolicyProjectionV2(input AdmissionPolicyProjectionV2) (Ad
 	if input.RouteResolverVersion != AdmissionRouteResolverV2Version {
 		return AdmissionPolicyProjectionV2{}, admissionPolicyV2Error("route resolver version is missing or unsupported")
 	}
-	if !isRigQualifiedAdmissionIdentity(input.Target.Identity) || !input.Target.PoolTemplate ||
+	if !isRigQualifiedAdmissionIdentity(input.Target.Identity) || !validLogicalFormulaID(input.Target.DefaultSlingFormula) || !input.Target.PoolTemplate ||
 		input.Target.Suspended || !input.Target.SupportsGenericEphemeral || !input.Target.CustomSlingQueryAbsent ||
 		!input.Target.RuntimeRigSuspensionKnown || input.Target.RuntimeRigSuspended {
 		return AdmissionPolicyProjectionV2{}, admissionPolicyV2Error("target is missing or not eligible for generic admitted work")
@@ -387,6 +394,9 @@ func canonicalAdmissionPolicyProjectionV2(input AdmissionPolicyProjectionV2) (Ad
 	}
 	if !validLogicalFormulaID(input.Workflow) {
 		return AdmissionPolicyProjectionV2{}, admissionPolicyV2Error("effective workflow identity is missing or non-canonical")
+	}
+	if input.Workflow != input.Target.DefaultSlingFormula {
+		return AdmissionPolicyProjectionV2{}, admissionPolicyV2Error("effective workflow does not match the target pool's configured default sling formula")
 	}
 	if !validCanonicalText(input.FormulaCompilerVersion) {
 		return AdmissionPolicyProjectionV2{}, admissionPolicyV2Error("formula compiler version is missing or non-canonical")

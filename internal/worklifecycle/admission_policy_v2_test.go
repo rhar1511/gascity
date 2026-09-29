@@ -12,14 +12,15 @@ import (
 
 func TestResolveCanonicalAdmissionPoolV2(t *testing.T) {
 	maxOne := 1
-	pool := config.Agent{Name: "worker", Dir: "rig-a", BindingName: "pack", MinActiveSessions: &maxOne}
+	defaultFormula := "mol-work"
+	pool := config.Agent{Name: "worker", Dir: "rig-a", BindingName: "pack", MinActiveSessions: &maxOne, DefaultSlingFormula: &defaultFormula}
 	wantIdentity := "rig-a/pack.worker"
 
 	target, err := ResolveCanonicalAdmissionPoolV2(wantIdentity, admissionTargetContext([]config.Agent{pool}))
 	if err != nil {
 		t.Fatalf("ResolveCanonicalAdmissionPoolV2() error = %v", err)
 	}
-	if target.Identity != wantIdentity || !target.PoolTemplate || target.Suspended ||
+	if target.Identity != wantIdentity || target.DefaultSlingFormula != defaultFormula || !target.PoolTemplate || target.Suspended ||
 		!target.SupportsGenericEphemeral || !target.CustomSlingQueryAbsent {
 		t.Fatalf("resolved target = %+v, want eligible canonical pool %q", target, wantIdentity)
 	}
@@ -30,7 +31,8 @@ func TestResolveCanonicalAdmissionPoolV2(t *testing.T) {
 
 func TestResolveCanonicalAdmissionPoolV2RequiresEffectiveRigSuspensionAndBindsConfig(t *testing.T) {
 	max := 3
-	agent := config.Agent{Name: "worker", Dir: "rig-a", MinActiveSessions: intPtr(1)}
+	defaultFormula := "mol-work"
+	agent := config.Agent{Name: "worker", Dir: "rig-a", MinActiveSessions: intPtr(1), DefaultSlingFormula: &defaultFormula}
 	baseCity := &config.City{
 		Agents:    []config.Agent{agent},
 		Workspace: config.Workspace{MaxActiveSessions: intPtr(12)},
@@ -49,7 +51,7 @@ func TestResolveCanonicalAdmissionPoolV2RequiresEffectiveRigSuspensionAndBindsCo
 
 	agentLimit := 2
 	agentLimitedCity := *baseCity
-	agentLimitedCity.Agents = []config.Agent{{Name: "worker", Dir: "rig-a", MinActiveSessions: intPtr(1), MaxActiveSessions: &agentLimit}}
+	agentLimitedCity.Agents = []config.Agent{{Name: "worker", Dir: "rig-a", MinActiveSessions: intPtr(1), MaxActiveSessions: &agentLimit, DefaultSlingFormula: &defaultFormula}}
 	agentLimitedTarget, err := ResolveCanonicalAdmissionPoolV2("rig-a/worker", AdmissionTargetResolutionContextV2{City: &agentLimitedCity, RuntimeRigSuspended: &runtimeSuspended})
 	if err != nil {
 		t.Fatalf("ResolveCanonicalAdmissionPoolV2(agent override): %v", err)
@@ -156,7 +158,8 @@ func TestResolveCanonicalAdmissionPoolV2RequiresEffectiveRigSuspensionAndBindsCo
 
 func TestResolveCanonicalAdmissionPoolV2AcceptsPinnedBuiltInSlingQuery(t *testing.T) {
 	maxOne := 1
-	pool := config.Agent{Name: "worker", Dir: "rig-a", MinActiveSessions: &maxOne}
+	defaultFormula := "mol-work"
+	pool := config.Agent{Name: "worker", Dir: "rig-a", MinActiveSessions: &maxOne, DefaultSlingFormula: &defaultFormula}
 	pool.SlingQuery = "  " + strings.Join(strings.Fields(pool.DefaultSlingQuery()), "   ") + "  "
 	city := &config.City{Agents: []config.Agent{pool}, Rigs: []config.Rig{{Name: "rig-a"}}}
 	runtimeSuspended := false
@@ -172,6 +175,34 @@ func TestResolveCanonicalAdmissionPoolV2AcceptsPinnedBuiltInSlingQuery(t *testin
 	city.Agents = []config.Agent{pool}
 	if _, err := ResolveCanonicalAdmissionPoolV2("rig-a/worker", AdmissionTargetResolutionContextV2{City: city, RuntimeRigSuspended: &runtimeSuspended}); err == nil {
 		t.Fatal("resolver accepted a custom sling query")
+	}
+}
+
+func TestResolveCanonicalAdmissionPoolV2RequiresCanonicalDefaultFormula(t *testing.T) {
+	empty := ""
+	spaced := " mol-work"
+	unsafe := "../mol-work"
+	tests := []struct {
+		name    string
+		formula *string
+	}{
+		{name: "unset"},
+		{name: "explicitly empty", formula: &empty},
+		{name: "noncanonical whitespace", formula: &spaced},
+		{name: "unsafe path", formula: &unsafe},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runtimeSuspended := false
+			city := &config.City{
+				Agents: []config.Agent{{Name: "worker", Dir: "rig-a", MinActiveSessions: intPtr(1), DefaultSlingFormula: test.formula}},
+				Rigs:   []config.Rig{{Name: "rig-a"}},
+			}
+			context := AdmissionTargetResolutionContextV2{City: city, RuntimeRigSuspended: &runtimeSuspended}
+			if _, err := ResolveCanonicalAdmissionPoolV2("rig-a/worker", context); err == nil {
+				t.Fatal("resolver accepted a missing or noncanonical effective default formula")
+			}
+		})
 	}
 }
 
@@ -347,6 +378,7 @@ func TestDigestAdmissionPolicyV2ChangesForReviewedPolicyInputs(t *testing.T) {
 		{name: "target identity", mutate: func(p *AdmissionPolicyProjectionV2) { p.Target.Identity = "rig-b/worker" }},
 		{name: "effective workflow", mutate: func(p *AdmissionPolicyProjectionV2) {
 			p.Workflow = "mol-other"
+			p.Target.DefaultSlingFormula = "mol-other"
 			p.FormulaSources = append(p.FormulaSources, AdmissionFormulaSourceV2{LogicalID: "mol-other", SHA256: strings.Repeat("d", 64)})
 			p.FormulaSourceCount++
 		}},
@@ -396,6 +428,55 @@ func TestDigestAdmissionPolicyV2ChangesForReviewedPolicyInputs(t *testing.T) {
 				t.Fatalf("digest did not change for %s", test.name)
 			}
 		})
+	}
+}
+
+func TestDigestAdmissionPolicyV2BindsTargetDefaultFormula(t *testing.T) {
+	base := validAdmissionPolicyProjectionV2(t)
+	runtimeSuspended := false
+	defaultFormula := "mol-work"
+	city := &config.City{
+		Agents: []config.Agent{{Name: "worker", Dir: "rig-a", MinActiveSessions: intPtr(1), DefaultSlingFormula: &defaultFormula}},
+		Rigs:   []config.Rig{{Name: "rig-a"}},
+	}
+	target, err := ResolveCanonicalAdmissionPoolV2("rig-a/worker", AdmissionTargetResolutionContextV2{
+		City: city, RuntimeRigSuspended: &runtimeSuspended,
+	})
+	if err != nil {
+		t.Fatalf("ResolveCanonicalAdmissionPoolV2(base): %v", err)
+	}
+	base.Target = target
+	baseDigest, err := DigestAdmissionPolicyV2(base)
+	if err != nil {
+		t.Fatalf("DigestAdmissionPolicyV2(base): %v", err)
+	}
+
+	changedFormula := "mol-other"
+	changedCity := *city
+	changedCity.Agents = append([]config.Agent(nil), city.Agents...)
+	changedCity.Agents[0].DefaultSlingFormula = &changedFormula
+	changedTarget, err := ResolveCanonicalAdmissionPoolV2("rig-a/worker", AdmissionTargetResolutionContextV2{
+		City: &changedCity, RuntimeRigSuspended: &runtimeSuspended,
+	})
+	if err != nil {
+		t.Fatalf("ResolveCanonicalAdmissionPoolV2(changed default): %v", err)
+	}
+	changed := validAdmissionPolicyProjectionV2(t)
+	changed.Target = changedTarget
+	changed.Workflow = "mol-other"
+	changed.FormulaSources[0].LogicalID = "mol-other"
+	changedDigest, err := DigestAdmissionPolicyV2(changed)
+	if err != nil {
+		t.Fatalf("DigestAdmissionPolicyV2(changed target default): %v", err)
+	}
+	if changedDigest == baseDigest {
+		t.Fatal("digest did not change when the target's effective default formula changed")
+	}
+
+	mismatched := validAdmissionPolicyProjectionV2(t)
+	mismatched.Target = changedTarget
+	if _, err := DigestAdmissionPolicyV2(mismatched); err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("DigestAdmissionPolicyV2(mismatched workflow) error = %v, want target default mismatch", err)
 	}
 }
 
@@ -524,6 +605,7 @@ func validAdmissionPolicyProjectionV2(t *testing.T) AdmissionPolicyProjectionV2 
 		RouteResolverVersion: AdmissionRouteResolverV2Version,
 		Target: CanonicalAdmissionPoolV2{
 			Identity:                   "rig-a/worker",
+			DefaultSlingFormula:        "mol-work",
 			PoolTemplate:               true,
 			SupportsGenericEphemeral:   true,
 			CustomSlingQueryAbsent:     true,
@@ -696,6 +778,12 @@ func (admissionTestProvider) Open(context.Context, storebinding.OpenRequest) (st
 
 func admissionTargetContext(agents []config.Agent) AdmissionTargetResolutionContextV2 {
 	runtimeSuspended := false
+	for index := range agents {
+		if agents[index].DefaultSlingFormula == nil {
+			defaultFormula := "mol-work"
+			agents[index].DefaultSlingFormula = &defaultFormula
+		}
+	}
 	return AdmissionTargetResolutionContextV2{
 		City:                &config.City{Agents: agents, Rigs: []config.Rig{{Name: "rig-a"}}},
 		RuntimeRigSuspended: &runtimeSuspended,
