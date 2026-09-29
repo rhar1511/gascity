@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -18,6 +19,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -334,6 +336,11 @@ type graphPrivateEvidenceTransport struct {
 	token          string
 	configRevision string
 	bdLauncher     string
+	client         *http.Client
+}
+
+func newGraphPrivateEvidenceHTTPClient() *http.Client {
+	return &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{Proxy: nil}}
 }
 
 const graphFixtureCityDatabase = "hq"
@@ -374,6 +381,33 @@ func TestBoundedTailBufferKeepsRecentOutput(t *testing.T) {
 	}
 	if got, want := output.String(), "econd"; got != want {
 		t.Fatalf("output = %q, want %q", got, want)
+	}
+}
+
+func TestGraphIssueReadsReuseHTTPConnection(t *testing.T) {
+	var connections atomic.Int64
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintln(w, `{"id":"gc-test","status":"open","metadata":{}}`)
+	}))
+	server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			connections.Add(1)
+		}
+	}
+	server.Start()
+	t.Cleanup(server.Close)
+
+	client := newGraphPrivateEvidenceHTTPClient()
+	t.Cleanup(client.CloseIdleConnections)
+	transport := graphPrivateEvidenceTransport{endpoint: server.URL, client: client}
+	for range 4 {
+		if _, err := readGraphBeadOverHTTPContext(context.Background(), transport, "gc-test"); err != nil {
+			t.Fatalf("read graph issue: %v", err)
+		}
+	}
+	if got := connections.Load(); got != 1 {
+		t.Fatalf("issue reads opened %d HTTP connections, want one reused connection", got)
 	}
 }
 
@@ -1379,9 +1413,11 @@ func startGraphPrivateEvidenceService(t *testing.T, cityEnv []string, cityDir, c
 	if err != nil {
 		t.Fatalf("installed Beads service did not expose its authenticated graph context: %v", err)
 	}
+	issueClient := newGraphPrivateEvidenceHTTPClient()
+	t.Cleanup(issueClient.CloseIdleConnections)
 	return graphPrivateEvidenceTransport{
 		endpoint: endpoint, projectID: loadedIdentity.projectID, database: loadedIdentity.database,
-		scopeRef: "city:" + cityName, tokenFile: tokenFile, token: token,
+		scopeRef: "city:" + cityName, tokenFile: tokenFile, token: token, client: issueClient,
 	}
 }
 
@@ -1408,6 +1444,9 @@ func listGraphIssuesOverHTTP(t *testing.T, transport graphPrivateEvidenceTranspo
 }
 
 func readGraphIssuesOverHTTP(ctx context.Context, transport graphPrivateEvidenceTransport) ([]graphBead, error) {
+	if transport.client == nil {
+		return nil, errors.New("graph issue transport has no HTTP client")
+	}
 	query := url.Values{
 		"all":               {"true"},
 		"include_templates": {"true"},
@@ -1415,7 +1454,6 @@ func readGraphIssuesOverHTTP(ctx context.Context, transport graphPrivateEvidence
 		"include_infra":     {"true"},
 		"limit":             {"100"},
 	}
-	client := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{Proxy: nil}}
 	var issues []graphBead
 	cursor := ""
 	for pageNumber := 0; pageNumber < 16; pageNumber++ {
@@ -1428,9 +1466,9 @@ func readGraphIssuesOverHTTP(ctx context.Context, transport graphPrivateEvidence
 		}
 		request.Header.Set("Authorization", "Bearer "+transport.token)
 		request.Header.Set("Bd-Project-Id", transport.projectID)
-		response, err := client.Do(request)
+		response, err := transport.client.Do(request)
 		if err != nil {
-			return nil, errors.New("could not read graph issues through installed service")
+			return nil, fmt.Errorf("could not read graph issues through installed service: %s", safeGraphHTTPTransportError(err, transport.token))
 		}
 		var page struct {
 			Items      []graphBead `json:"items"`
@@ -1513,6 +1551,9 @@ func readGraphBeadOverHTTP(t *testing.T, transport graphPrivateEvidenceTransport
 }
 
 func readGraphBeadOverHTTPContext(ctx context.Context, transport graphPrivateEvidenceTransport, beadID string) (graphBead, error) {
+	if transport.client == nil {
+		return graphBead{}, errors.New("graph issue transport has no HTTP client")
+	}
 	endpoint := transport.endpoint + "/v0/beads/issues/" + url.PathEscape(beadID)
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
@@ -1520,10 +1561,9 @@ func readGraphBeadOverHTTPContext(ctx context.Context, transport graphPrivateEvi
 	}
 	request.Header.Set("Authorization", "Bearer "+transport.token)
 	request.Header.Set("Bd-Project-Id", transport.projectID)
-	client := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{Proxy: nil}}
-	response, err := client.Do(request)
+	response, err := transport.client.Do(request)
 	if err != nil {
-		return graphBead{}, errors.New("could not read graph issue through installed service")
+		return graphBead{}, fmt.Errorf("could not read graph issue through installed service: %s", safeGraphHTTPTransportError(err, transport.token))
 	}
 	if response.StatusCode != http.StatusOK {
 		if err := response.Body.Close(); err != nil {
@@ -1546,6 +1586,14 @@ func readGraphBeadOverHTTPContext(ctx context.Context, transport graphPrivateEvi
 		}
 	}
 	return bead, nil
+}
+
+func safeGraphHTTPTransportError(err error, token string) string {
+	message := err.Error()
+	if token != "" {
+		message = strings.ReplaceAll(message, token, "[redacted]")
+	}
+	return message
 }
 
 func isGraphPrivateEvidenceMetadataKey(key string) bool {
