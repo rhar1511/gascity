@@ -10,9 +10,17 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
-// CompileProvenanceSchemaVersion versions CompileProvenance's source contract.
-// Increment it if fields change meaning or new compiler inputs are added.
-const CompileProvenanceSchemaVersion = 1
+// CompileProvenanceSchemaVersion versions CompileProvenance's data contract.
+// Increment it when fields are added, removed, or change meaning. This is
+// separate from FormulaCompilerImplementationVersion, which identifies the
+// compiler semantics that produced a Recipe.
+const CompileProvenanceSchemaVersion = 2
+
+// FormulaCompilerImplementationVersion identifies the formula compiler
+// implementation semantics that produced a Recipe. Increment it whenever a
+// compiler change can alter Recipe output or provenance for the same inputs,
+// even if the formula requirement capability remains unchanged.
+const FormulaCompilerImplementationVersion = "gascity-formula-compiler-v1"
 
 // CompileSourceMode describes the configured Source implementation.
 type CompileSourceMode string
@@ -69,19 +77,20 @@ const (
 // opt-in formula compilation. Paths are process-local evidence only; formula
 // names are the stable identities used by admission policy.
 type CompileProvenance struct {
-	SchemaVersion             int
-	CompilerCapability        string
-	FormulaV2Enabled          bool
-	EffectiveCompileVariables map[string]string
-	Source                    CompileSourceDescriptor
-	FormulaSources            []SourceIdentity
-	LoadedFormulas            []SourceIdentity
-	SourceReads               []CompileSourceRead
-	ExternalAssets            []ExternalAssetRead
-	Trace                     []CompileTraceEntry
-	CheckPaths                []CompileCheckPath
-	Status                    CompileProvenanceStatus
-	UnavailableReasons        []CompileProvenanceReason
+	SchemaVersion                 int
+	CompilerImplementationVersion string
+	CompilerCapability            string
+	FormulaV2Enabled              bool
+	EffectiveCompileVariables     map[string]string
+	Source                        CompileSourceDescriptor
+	FormulaSources                []SourceIdentity
+	LoadedFormulas                []SourceIdentity
+	SourceReads                   []CompileSourceRead
+	ExternalAssets                []ExternalAssetRead
+	Trace                         []CompileTraceEntry
+	CheckPaths                    []CompileCheckPath
+	Status                        CompileProvenanceStatus
+	UnavailableReasons            []CompileProvenanceReason
 }
 
 // CompileSourceDescriptor identifies the configured Source semantics used by
@@ -233,13 +242,14 @@ func (r *compileProvenanceRecorder) addUnavailableReason(reason CompileProvenanc
 
 func (r *compileProvenanceRecorder) finish(recipe *Recipe, compileVars map[string]string, formulaV2Enabled bool) CompileProvenance {
 	provenance := CompileProvenance{
-		SchemaVersion:             CompileProvenanceSchemaVersion,
-		CompilerCapability:        activeFormulaCompilerCapability(formulaV2Enabled),
-		FormulaV2Enabled:          formulaV2Enabled,
-		EffectiveCompileVariables: cloneStringMap(compileVars),
-		Source:                    r.descriptor,
-		Trace:                     append([]CompileTraceEntry(nil), r.trace...),
-		Status:                    CompileProvenanceAvailable,
+		SchemaVersion:                 CompileProvenanceSchemaVersion,
+		CompilerImplementationVersion: FormulaCompilerImplementationVersion,
+		CompilerCapability:            activeFormulaCompilerCapability(formulaV2Enabled),
+		FormulaV2Enabled:              formulaV2Enabled,
+		EffectiveCompileVariables:     cloneStringMap(compileVars),
+		Source:                        r.descriptor,
+		Trace:                         append([]CompileTraceEntry(nil), r.trace...),
+		Status:                        CompileProvenanceAvailable,
 	}
 	if recipe != nil {
 		provenance.FormulaSources = append([]SourceIdentity(nil), recipe.FormulaSources...)

@@ -292,6 +292,44 @@ title = "Task"
 	}
 }
 
+func TestCompileImplementationVersionIsSeparateFromRequirementCapability(t *testing.T) {
+	previous := IsFormulaV2Enabled()
+	t.Cleanup(func() { SetFormulaV2Enabled(previous) })
+	t.Setenv("GC_FORMULA_REF", "")
+	dir := t.TempDir()
+	writeFormulaTestFile(t, filepath.Join(dir, "legacy.toml"), `formula = "legacy"
+version = 1
+
+[[steps]]
+id = "task"
+title = "Task"
+`)
+
+	var implementationVersions []string
+	var capabilities []string
+	for _, v2Enabled := range []bool{false, true} {
+		SetFormulaV2Enabled(v2Enabled)
+		_, provenance, err := CompileWithProvenance(context.Background(), "legacy", []string{dir}, nil)
+		if err != nil {
+			t.Fatalf("CompileWithProvenance with v2=%t: %v", v2Enabled, err)
+		}
+		implementationVersions = append(implementationVersions, provenance.CompilerImplementationVersion)
+		capabilities = append(capabilities, provenance.CompilerCapability)
+		if provenance.CompilerImplementationVersion != FormulaCompilerImplementationVersion {
+			t.Fatalf("CompilerImplementationVersion = %q, want %q", provenance.CompilerImplementationVersion, FormulaCompilerImplementationVersion)
+		}
+		if provenance.CompilerImplementationVersion == provenance.CompilerCapability {
+			t.Fatalf("implementation version and requirement capability must be distinct: %q", provenance.CompilerCapability)
+		}
+	}
+	if !slices.Equal(implementationVersions, []string{FormulaCompilerImplementationVersion, FormulaCompilerImplementationVersion}) {
+		t.Fatalf("implementation versions = %v, want stable compiler implementation identity", implementationVersions)
+	}
+	if !slices.Equal(capabilities, []string{defaultFormulaCompilerCapability, currentFormulaCompilerCapability}) {
+		t.Fatalf("requirement capabilities = %v, want legacy then formula-v2 capability", capabilities)
+	}
+}
+
 func TestCompileWithProvenanceRecordsComposeAndAspectOrder(t *testing.T) {
 	enableV2ForTest(t)
 	t.Setenv("GC_FORMULA_REF", "")
