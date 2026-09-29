@@ -345,6 +345,59 @@ after = { id = "{step.id}.audit", title = "Audit" }
 	}
 }
 
+func TestCompileWithProvenanceComposeMapTargetOrderIsDeterministic(t *testing.T) {
+	enableV2ForTest(t)
+	t.Setenv("GC_FORMULA_REF", "")
+	dir := t.TempDir()
+	writeFormulaTestFile(t, filepath.Join(dir, "root.toml"), `formula = "root"
+version = 1
+
+[requires]
+formula_compiler = ">=2.0.0"
+
+[[steps]]
+id = "impl.zeta"
+title = "Zeta"
+
+[[steps]]
+id = "impl.alpha"
+title = "Alpha"
+
+[[steps]]
+id = "impl.mu"
+title = "Mu"
+
+[[compose.map]]
+select = "impl.*"
+with = "decorate"
+`)
+	writeFormulaTestFile(t, filepath.Join(dir, "decorate.toml"), `formula = "decorate"
+version = 1
+type = "expansion"
+
+[[template]]
+id = "{target}.decorated"
+title = "Decorated {target.title}"
+`)
+
+	want := []string{"impl.alpha", "impl.mu", "impl.zeta"}
+	for attempt := 0; attempt < 12; attempt++ {
+		_, provenance, err := CompileWithProvenance(context.Background(), "root", []string{dir}, nil)
+		if err != nil {
+			t.Fatalf("CompileWithProvenance attempt %d: %v", attempt, err)
+		}
+		var got []string
+		for _, entry := range provenance.Trace {
+			if entry.Kind == CompileTraceComposeMap {
+				got = append(got, entry.TargetStepID)
+			}
+		}
+		if !slices.Equal(got, want) {
+			t.Fatalf("attempt %d compose-map trace targets = %v, want stable order %v", attempt, got, want)
+		}
+	}
+}
+
 func TestCompileProvenanceRejectsAmbiguousNamesAndUnboundReads(t *testing.T) {
 	recorder := newCompileProvenanceRecorder(FSSource{})
 	recorder.recordFormula(SourceIdentity{Path: "/one/shared.toml", FormulaName: "shared", ContentSHA256: strings.Repeat("a", 64)})

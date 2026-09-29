@@ -17,6 +17,7 @@ package formula
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -137,6 +138,11 @@ func applyExpansionsWithVars(steps []*Step, compose *ComposeRules, parser *Parse
 				toExpand = append(toExpand, step)
 			}
 		}
+		// stepMap iteration is unordered. Use stable target order so the
+		// transformation and its compiler provenance are reproducible.
+		slices.SortFunc(toExpand, func(left, right *Step) int {
+			return strings.Compare(left.ID, right.ID)
+		})
 
 		// Expand each matching step
 		for _, targetStep := range toExpand {
