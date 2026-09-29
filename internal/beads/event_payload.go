@@ -1,6 +1,10 @@
 package beads
 
-import "encoding/json"
+import (
+	"encoding/json"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
+)
 
 // EncodeBeadEventPayload marshals a canonical raw bead-event snapshot. A bd
 // status-based indefinite deferral is restored only for its normalized open
@@ -10,6 +14,10 @@ func EncodeBeadEventPayload(b Bead) (json.RawMessage, error) {
 	if b.Status == "open" && b.IndefinitelyDeferred {
 		b.Status = "deferred"
 	}
+	// Event payloads leave the authoritative store boundary and are consumed by
+	// city and supervisor subscribers. Redact a copied map so lifecycle code can
+	// continue using the raw credential held by the stored bead.
+	b.Metadata = beadmeta.RedactGenericMetadata(b.Metadata)
 	return json.Marshal(b)
 }
 

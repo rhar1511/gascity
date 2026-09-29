@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -27,6 +29,7 @@ import (
 	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/graphv2"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/spf13/cobra"
@@ -2520,37 +2523,20 @@ func assertWorkflowDeleteSetLeavesNothingStranded(store beads.Store, ids []strin
 }
 
 func deleteWorkflowBeads(store beads.Store, ids []string) (int, []error) {
-	deleted := 0
-	var errs []error
-	deleting := make(map[string]struct{}, len(ids))
-	for _, id := range ids {
-		deleting[id] = struct{}{}
+	if err := assertWorkflowDeleteSetLeavesNothingStranded(store, ids); err != nil {
+		return 0, []error{err}
 	}
-	for _, id := range ids {
-		if err := assertWorkflowDeleteLeavesNothingStranded(store, id, deleting); err != nil {
-			// The guard's errors already name the bead; prefixing it again
-			// would print the id twice on delete-source's delete_error= line.
-			errs = append(errs, err)
-			continue
-		}
-		if err := deleteWorkflowBeadUnguarded(store, id); err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", id, err))
-			continue
-		}
-		deleted++
+	deleted, err := purgeWorkflowBeads(store, ids)
+	if err != nil {
+		return deleted, []error{err}
 	}
-	return deleted, errs
+	return deleted, nil
 }
 
-// deleteWorkflowBeadsBatch removes exactly the given ids using the store's
-// batched delete when the backend implements beads.BatchDeleter (one
-// `bd delete … --force` per chunk, which orphans external dependents and lets
-// the schema's ON DELETE CASCADE drop the deleted beads' own edge rows), and
-// otherwise deletes each bead individually. On the sqlite/Dolt graph store this
-// collapses an O(subprocess-per-edge) closure teardown into O(chunks), which
-// keeps a large wisp-GC purge from blocking the controller tick for minutes.
-// It is not dependent-recursive: beads outside the collected closure that
-// depend on a deleted bead are preserved.
+// deleteWorkflowBeadsBatch removes exactly the given ids after a set-level
+// stranding check. The historical name remains because this is the closure-GC
+// entry point, but security-sensitive deletion is revision-fenced per row;
+// beads outside the collected closure are preserved.
 func deleteWorkflowBeadsBatch(store beads.Store, ids []string) error {
 	if len(ids) == 0 {
 		return nil
@@ -2558,21 +2544,133 @@ func deleteWorkflowBeadsBatch(store beads.Store, ids []string) error {
 	if err := assertWorkflowDeleteSetLeavesNothingStranded(store, ids); err != nil {
 		return err
 	}
-	if cd, ok := store.(beads.BatchDeleter); ok {
-		// A policy/capability wrapper advertises BatchDeleter to forward it, but
-		// reports ErrBatchDeleteUnsupported when its own backing lacks the
-		// capability; treat that as "not batchable" and fall through to the
-		// per-bead path rather than surfacing it as a delete failure.
-		if err := cd.DeleteBatch(ids); !errors.Is(err, beads.ErrBatchDeleteUnsupported) {
-			return err
+	_, err := purgeWorkflowBeads(store, ids)
+	return err
+}
+
+type workflowPurgeFence struct {
+	id       string
+	revision int64
+}
+
+// purgeWorkflowBeads applies the same evidence/fence/revision policy as the
+// API hard-delete path. Batch deletion is intentionally bypassed because it
+// cannot prove the post-fence revision of each row.
+func purgeWorkflowBeads(store beads.Store, ids []string) (int, error) {
+	writer, ok := beads.ConditionalWriterFor(store)
+	if !ok || !beads.InspectConditionalWrites(store).Capable {
+		return 0, beads.ErrConditionalWriteUnsupported
+	}
+
+	candidates := make([]workflowPurgeFence, 0)
+	for _, id := range ids {
+		b, err := store.Get(id)
+		if err != nil {
+			return 0, fmt.Errorf("preflight %s: %w", id, err)
+		}
+		if session.HasRequestEvidence(b) {
+			return 0, fmt.Errorf("%s: %w", id, session.ErrRequestEvidenceRetained)
+		}
+		if session.IsRequestPurgeFenced(b) {
+			return 0, fmt.Errorf("%s: session request purge is already in progress", id)
+		}
+		if session.IsSessionBeadOrRepairable(b) {
+			candidates = append(candidates, workflowPurgeFence{id: id, revision: b.Revision})
 		}
 	}
-	for _, id := range ids {
-		// Already guarded at the set level above; the per-bead guard would
-		// re-walk the same closure once per member.
-		if err := deleteWorkflowBeadUnguarded(store, id); err != nil {
-			return err
+
+	var tokenBytes [16]byte
+	if len(candidates) > 0 {
+		if _, err := rand.Read(tokenBytes[:]); err != nil {
+			return 0, fmt.Errorf("generate workflow purge fence: %w", err)
 		}
+	}
+	token := hex.EncodeToString(tokenBytes[:])
+	acquired := make(map[string]struct{}, len(candidates))
+	rollback := func() {
+		for id := range acquired {
+			if released, err := writer.CompareAndSetMetadataKey(id, beadmeta.SessionRequestPurgeFenceMetadataKey, token, ""); err != nil {
+				log.Printf("workflow purge fence rollback failed for %s: %v", id, err)
+			} else if !released {
+				log.Printf("workflow purge fence rollback lost ownership for %s; leaving current fence intact", id)
+			}
+		}
+	}
+	for _, candidate := range candidates {
+		acquired[candidate.id] = struct{}{} // Include commit-ambiguous failures in rollback.
+		if err := writer.UpdateIfMatch(candidate.id, candidate.revision, beads.UpdateOpts{Metadata: map[string]string{
+			beadmeta.SessionRequestPurgeFenceMetadataKey: token,
+		}}); err != nil {
+			rollback()
+			return 0, fmt.Errorf("acquire workflow purge fence for %s: %w", candidate.id, err)
+		}
+	}
+
+	if _, err := store.CloseAll(ids, map[string]string{
+		beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
+		"close_reason":              sourceworkflow.WorkflowSkippedCloseReason,
+	}); err != nil {
+		rollback()
+		return 0, fmt.Errorf("close workflow purge set: %w", err)
+	}
+
+	type verifiedRow struct {
+		id       string
+		revision int64
+	}
+	verified := make([]verifiedRow, 0, len(ids))
+	for _, id := range ids {
+		b, err := store.Get(id)
+		if err != nil {
+			rollback()
+			return 0, fmt.Errorf("verify workflow purge %s: %w", id, err)
+		}
+		if session.HasRequestEvidence(b) {
+			rollback()
+			return 0, fmt.Errorf("%s: %w", id, session.ErrRequestEvidenceRetained)
+		}
+		if _, fenced := acquired[id]; fenced && (b.Status != "closed" || session.RequestPurgeFence(b) != token) {
+			rollback()
+			return 0, fmt.Errorf("%s: session purge fence was not preserved", id)
+		}
+		verified = append(verified, verifiedRow{id: id, revision: b.Revision})
+	}
+
+	deleted := 0
+	for _, row := range verified {
+		if err := deleteWorkflowBeadIfMatch(store, writer, row.id, row.revision); err != nil {
+			return deleted, fmt.Errorf("%s: %w", row.id, err)
+		}
+		deleted++
+	}
+	return deleted, nil
+}
+
+func deleteWorkflowBeadIfMatch(store beads.Store, writer beads.ConditionalWriter, id string, revision int64) error {
+	downDeps, err := store.DepList(id, "down")
+	if err != nil {
+		return fmt.Errorf("list down deps: %w", err)
+	}
+	upDeps, err := store.DepList(id, "up")
+	if err != nil {
+		return fmt.Errorf("list up deps: %w", err)
+	}
+	removedDown := make([]beads.Dep, 0, len(downDeps))
+	for _, dep := range downDeps {
+		if err := store.DepRemove(id, dep.DependsOnID); err != nil {
+			return withWorkflowDeleteRestoreError(fmt.Errorf("remove down dep %s -> %s: %w", id, dep.DependsOnID, err), restoreWorkflowDeleteDeps(store, removedDown, nil))
+		}
+		removedDown = append(removedDown, dep)
+	}
+	removedUp := make([]beads.Dep, 0, len(upDeps))
+	for _, dep := range upDeps {
+		if err := store.DepRemove(dep.IssueID, id); err != nil {
+			return withWorkflowDeleteRestoreError(fmt.Errorf("remove up dep %s -> %s: %w", dep.IssueID, id, err), restoreWorkflowDeleteDeps(store, removedDown, removedUp))
+		}
+		removedUp = append(removedUp, dep)
+	}
+	if err := writer.DeleteIfMatch(id, revision); err != nil {
+		return withWorkflowDeleteRestoreError(fmt.Errorf("delete bead: %w", err), restoreWorkflowDeleteDeps(store, removedDown, removedUp))
 	}
 	return nil
 }
@@ -2586,49 +2684,18 @@ func deleteWorkflowBead(store beads.Store, id string) error {
 	if err := assertWorkflowDeleteLeavesNothingStranded(store, id, nil); err != nil {
 		return err
 	}
-	return deleteWorkflowBeadUnguarded(store, id)
-}
-
-// deleteWorkflowBeadUnguarded is the raw graph delete — dep unwind, then
-// Delete, with dep restoration on failure. It performs NO stranding check;
-// call it only after assertWorkflowDeleteLeavesNothingStranded (or its
-// set-level twin) has cleared the bead.
-func deleteWorkflowBeadUnguarded(store beads.Store, id string) error {
-	downDeps, err := store.DepList(id, "down")
+	row, err := store.Get(id)
 	if err != nil {
-		return fmt.Errorf("list down deps: %w", err)
+		return err
 	}
-	upDeps, err := store.DepList(id, "up")
-	if err != nil {
-		return fmt.Errorf("list up deps: %w", err)
-	}
-	removedDown := make([]beads.Dep, 0, len(downDeps))
-	for _, dep := range downDeps {
-		if err := store.DepRemove(id, dep.DependsOnID); err != nil {
-			return withWorkflowDeleteRestoreError(
-				fmt.Errorf("remove down dep %s -> %s: %w", id, dep.DependsOnID, err),
-				restoreWorkflowDeleteDeps(store, removedDown, nil),
-			)
+	if _, ok := beads.ConditionalWriterFor(store); !ok {
+		if session.IsSessionBeadOrRepairable(row) || session.HasRequestEvidence(row) {
+			return fmt.Errorf("conditional writes unsupported")
 		}
-		removedDown = append(removedDown, dep)
+		return store.Delete(id)
 	}
-	removedUp := make([]beads.Dep, 0, len(upDeps))
-	for _, dep := range upDeps {
-		if err := store.DepRemove(dep.IssueID, id); err != nil {
-			return withWorkflowDeleteRestoreError(
-				fmt.Errorf("remove up dep %s -> %s: %w", dep.IssueID, id, err),
-				restoreWorkflowDeleteDeps(store, removedDown, removedUp),
-			)
-		}
-		removedUp = append(removedUp, dep)
-	}
-	if err := store.Delete(id); err != nil {
-		return withWorkflowDeleteRestoreError(
-			fmt.Errorf("delete bead: %w", err),
-			restoreWorkflowDeleteDeps(store, removedDown, removedUp),
-		)
-	}
-	return nil
+	_, err = purgeWorkflowBeads(store, []string{id})
+	return err
 }
 
 func withWorkflowDeleteRestoreError(primary, restoreErr error) error {

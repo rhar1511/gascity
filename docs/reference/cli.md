@@ -4148,6 +4148,7 @@ gc session
 | [gc session pin](#gc-session-pin) | Keep a session awake |
 | [gc session prune](#gc-session-prune) | Close old dormant sessions |
 | [gc session rename](#gc-session-rename) | Rename a session |
+| [gc session request](#gc-session-request) | Submit, inspect, and acknowledge tracked session requests |
 | [gc session reset](#gc-session-reset) | Restart a session fresh while preserving the bead |
 | [gc session submit](#gc-session-submit) | Submit a message with semantic delivery intent |
 | [gc session suspend](#gc-session-suspend) | Suspend a session (save state, free resources) |
@@ -4380,6 +4381,48 @@ gc session rename <session-id-or-alias> <title> [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--json` | bool |  | emit JSONL |
+
+## gc session request
+
+Submit, inspect, and acknowledge tracked session requests
+
+```
+gc session request
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc session request ack](#gc-session-request-ack) | Acknowledge receipt from this session execution |
+| [gc session request get](#gc-session-request-get) | Read the server's durable request receipt |
+| [gc session request submit](#gc-session-request-submit) | Submit a request to an exact live execution |
+
+## gc session request ack
+
+Acknowledge receipt using GC_SESSION_ID, GC_RUNTIME_EPOCH, and GC_INSTANCE_TOKEN from this execution. An acknowledgement does not verify the requested effect.
+
+```
+gc session request ack <request-id>
+```
+
+## gc session request get
+
+Read the server's durable request receipt
+
+```
+gc session request get <session-id> <request-id>
+```
+
+## gc session request submit
+
+Submit a request to an exact live execution
+
+```
+gc session request submit <session-id> <request-id> <message...> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--generation` | int |  | exact intended execution generation |
 
 ## gc session reset
 

@@ -306,6 +306,13 @@ func (h *SessionHandle) Message(ctx context.Context, req MessageRequest) (result
 	if err != nil {
 		return MessageResult{}, err
 	}
+	if req.RequestID != "" || req.Generation != 0 {
+		if req.Delivery != "" && req.Delivery != DeliveryIntentDefault {
+			return MessageResult{}, fmt.Errorf("tracked requests require default delivery")
+		}
+		receipt, err := h.manager.SubmitRequest(ctx, id, req.RequestID, req.Generation, req.Text)
+		return MessageResult{Receipt: &receipt}, err
+	}
 	resumeCommand, err := h.startCommand(id)
 	if err != nil {
 		return MessageResult{}, err

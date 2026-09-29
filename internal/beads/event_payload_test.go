@@ -1,9 +1,13 @@
 package beads
 
 import (
+	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
 // TestDecodeBeadEventPayloadRawCanonical proves the canonical raw-bead shape
@@ -104,6 +108,89 @@ func TestEncodeBeadEventPayloadPreservesOnlyActiveStatusBasedDeferral(t *testing
 				t.Fatalf("wire status = %q, want %q; payload=%s", wire.Status, tt.want, payload)
 			}
 		})
+	}
+}
+
+func TestEncodeBeadEventPayloadRedactsCredentialCopy(t *testing.T) {
+	metadata := map[string]string{
+		beadmeta.SessionInstanceTokenMetadataKey: "instance-secret",
+		"execution_token":                        "execution-secret",
+		beadmeta.Namespace + "instance_token":    "namespaced-instance-secret",
+		beadmeta.Namespace + "execution_token":   "namespaced-execution-secret",
+		"generation":                             "4",
+	}
+	payload, err := EncodeBeadEventPayload(Bead{ID: "gc-session", Metadata: metadata})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{"instance-secret", "execution-secret", "namespaced-instance-secret", "namespaced-execution-secret"} {
+		if strings.Contains(string(payload), secret) {
+			t.Fatalf("event payload leaked %q: %s", secret, payload)
+		}
+	}
+	if !strings.Contains(string(payload), `"generation":"4"`) {
+		t.Fatalf("event payload removed safe metadata: %s", payload)
+	}
+	if metadata[beadmeta.SessionInstanceTokenMetadataKey] != "instance-secret" || metadata["execution_token"] != "execution-secret" {
+		t.Fatalf("encoder mutated authoritative metadata: %#v", metadata)
+	}
+}
+
+func TestCachingStoreFullUpdateEventRedactsCredentialWithoutMutatingStorage(t *testing.T) {
+	backing := &MemStore{HonorExplicitIDs: true}
+	created, err := backing.Create(Bead{ID: "gc-session", Title: "before", Metadata: map[string]string{
+		beadmeta.SessionInstanceTokenMetadataKey: "runtime-secret",
+		"generation":                             "5",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload json.RawMessage
+	cache := NewCachingStoreForTest(backing, func(_ string, _ string, p json.RawMessage) { payload = p })
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	title := "after"
+	if err := cache.Update(created.ID, UpdateOpts{Title: &title}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(payload), "runtime-secret") || strings.Contains(string(payload), `"instance_token"`) {
+		t.Fatalf("full-update event leaked credential: %s", payload)
+	}
+	stored, err := backing.Get(created.ID)
+	if err != nil || stored.Metadata[beadmeta.SessionInstanceTokenMetadataKey] != "runtime-secret" {
+		t.Fatalf("runtime storage lost credential: %+v, %v", stored, err)
+	}
+}
+
+func TestCachingStoreConditionalUpdateEventRedactsCredentialWithoutMutatingStorage(t *testing.T) {
+	backing := &MemStore{HonorExplicitIDs: true}
+	created, err := backing.Create(Bead{ID: "gc-session-cas", Title: "before", Metadata: map[string]string{
+		beadmeta.SessionInstanceTokenMetadataKey: "conditional-runtime-secret",
+		"generation":                             "6",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload json.RawMessage
+	cache := NewCachingStoreForTest(backing, func(_ string, _ string, p json.RawMessage) { payload = p })
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	current, err := cache.Get(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	title := "after"
+	if err := cache.UpdateIfMatch(created.ID, current.Revision, UpdateOpts{Title: &title}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(payload), "conditional-runtime-secret") || strings.Contains(string(payload), `"instance_token"`) {
+		t.Fatalf("conditional-update event leaked credential: %s", payload)
+	}
+	stored, err := backing.Get(created.ID)
+	if err != nil || stored.Metadata[beadmeta.SessionInstanceTokenMetadataKey] != "conditional-runtime-secret" {
+		t.Fatalf("runtime storage lost credential: %+v, %v", stored, err)
 	}
 }
 

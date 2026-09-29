@@ -40,6 +40,27 @@ func TestSplitGlobalFlagsSkipsGlobalFlagValues(t *testing.T) {
 	}
 }
 
+func TestRequestsJSONOutputRecognizesDocumentedForms(t *testing.T) {
+	for _, args := range [][]string{
+		{"--json", "list"},
+		{"list", "--json"},
+		{"--json=true", "show", "bd-1"},
+		{"--format", "json", "list"},
+		{"list", "--format", "json"},
+		{"--format=json", "ready"},
+		{"list", "--format=json"},
+	} {
+		if !RequestsJSONOutput(args) {
+			t.Errorf("RequestsJSONOutput(%v) = false", args)
+		}
+	}
+	for _, args := range [][]string{{"list"}, {"list", "--format", "table"}, {"--format=table", "list"}, {"--json=false", "list"}} {
+		if RequestsJSONOutput(args) {
+			t.Errorf("RequestsJSONOutput(%v) = true", args)
+		}
+	}
+}
+
 // TestGlobalValueFlagsIsComplete pins the global value-flag set against bd's
 // own persistent-flag list. A flag missing from this table silently reopens the
 // bypass below: SplitGlobalFlags would read that flag's value as the verb, and

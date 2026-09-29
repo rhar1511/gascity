@@ -7868,11 +7868,138 @@ type failingDeleteStore struct {
 	restoreCalls int
 }
 
+type workflowPurgeRaceStore struct {
+	*beads.MemStore
+	beforeFence  func()
+	afterClose   func()
+	beforeDelete func()
+}
+
+func (s *workflowPurgeRaceStore) UpdateIfMatch(id string, revision int64, opts beads.UpdateOpts) error {
+	if _, fencing := opts.Metadata[beadmeta.SessionRequestPurgeFenceMetadataKey]; fencing && s.beforeFence != nil {
+		before := s.beforeFence
+		s.beforeFence = nil
+		before()
+	}
+	return s.MemStore.UpdateIfMatch(id, revision, opts)
+}
+
+func (s *workflowPurgeRaceStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	n, err := s.MemStore.CloseAll(ids, metadata)
+	if err == nil && s.afterClose != nil {
+		after := s.afterClose
+		s.afterClose = nil
+		after()
+	}
+	return n, err
+}
+
+func (s *workflowPurgeRaceStore) DeleteIfMatch(id string, revision int64) error {
+	if s.beforeDelete != nil {
+		before := s.beforeDelete
+		s.beforeDelete = nil
+		before()
+	}
+	return s.MemStore.DeleteIfMatch(id, revision)
+}
+
+func newWorkflowPurgeRaceSession(t *testing.T) (*workflowPurgeRaceStore, string) {
+	t.Helper()
+	mem := &beads.MemStore{HonorExplicitIDs: true}
+	b, err := mem.Create(beads.Bead{
+		ID: "session-1", Type: session.BeadType, Status: "closed", Labels: []string{session.LabelSession},
+		Metadata: map[string]string{"generation": "1", "instance_token": "secret"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &workflowPurgeRaceStore{MemStore: mem}, b.ID
+}
+
+func TestCLIWorkflowPurgeRetainsInitialRequestEvidence(t *testing.T) {
+	store, id := newWorkflowPurgeRaceSession(t)
+	if err := store.Update(id, beads.UpdateOpts{Metadata: map[string]string{
+		beadmeta.SessionRequestReceiptPrefix + "existing": "{}",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	deleted, errs := deleteWorkflowBeads(store, []string{id})
+	if deleted != 0 || len(errs) != 1 || !errors.Is(errs[0], session.ErrRequestEvidenceRetained) {
+		t.Fatalf("deleteWorkflowBeads = (%d, %v), want retained-evidence refusal", deleted, errs)
+	}
+	b, err := store.Get(id)
+	if err != nil || session.IsRequestPurgeFenced(b) {
+		t.Fatalf("initial-evidence refusal mutated row: %+v, %v", b, err)
+	}
+}
+
+func TestCLIWorkflowPurgeReceiptWinsBeforeFence(t *testing.T) {
+	store, id := newWorkflowPurgeRaceSession(t)
+	store.beforeFence = func() {
+		if err := store.Update(id, beads.UpdateOpts{Metadata: map[string]string{
+			beadmeta.SessionRequestReceiptPrefix + "winner": "{}",
+		}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	deleted, errs := deleteWorkflowBeads(store, []string{id})
+	if deleted != 0 || len(errs) != 1 {
+		t.Fatalf("deleteWorkflowBeads = (%d, %v), want fence conflict", deleted, errs)
+	}
+	b, err := store.Get(id)
+	if err != nil || !session.HasRequestEvidence(b) || session.IsRequestPurgeFenced(b) {
+		t.Fatalf("winning receipt was not retained cleanly: %+v, %v", b, err)
+	}
+}
+
+func TestCLIWorkflowPurgeReceiptAfterFenceAbortsBeforeCleanup(t *testing.T) {
+	store, id := newWorkflowPurgeRaceSession(t)
+	store.afterClose = func() {
+		if err := store.Update(id, beads.UpdateOpts{Metadata: map[string]string{
+			beadmeta.SessionRequestReceiptPrefix + "late": "{}",
+		}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	deleted, errs := deleteWorkflowBeads(store, []string{id})
+	if deleted != 0 || len(errs) != 1 || !errors.Is(errs[0], session.ErrRequestEvidenceRetained) {
+		t.Fatalf("deleteWorkflowBeads = (%d, %v), want post-fence evidence refusal", deleted, errs)
+	}
+	b, err := store.Get(id)
+	if err != nil || !session.HasRequestEvidence(b) || session.IsRequestPurgeFenced(b) {
+		t.Fatalf("post-fence evidence result = %+v, %v", b, err)
+	}
+}
+
+func TestCLIWorkflowPurgeRevisionDriftPreservesRow(t *testing.T) {
+	store, id := newWorkflowPurgeRaceSession(t)
+	store.beforeDelete = func() {
+		description := "concurrent mutation"
+		if err := store.Update(id, beads.UpdateOpts{Description: &description}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	deleted, errs := deleteWorkflowBeads(store, []string{id})
+	if deleted != 0 || len(errs) != 1 {
+		t.Fatalf("deleteWorkflowBeads = (%d, %v), want stale-revision refusal", deleted, errs)
+	}
+	if _, err := store.Get(id); err != nil {
+		t.Fatalf("revision drift row was deleted: %v", err)
+	}
+}
+
 func (s *failingDeleteStore) Delete(id string) error {
 	if id == s.failID {
 		return fmt.Errorf("delete failed")
 	}
 	return s.MemStore.Delete(id)
+}
+
+func (s *failingDeleteStore) DeleteIfMatch(id string, revision int64) error {
+	if id == s.failID {
+		return fmt.Errorf("delete failed")
+	}
+	return s.MemStore.DeleteIfMatch(id, revision)
 }
 
 func (s *failingDeleteStore) DepAdd(issueID, dependsOnID, depType string) error {

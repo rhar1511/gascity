@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -139,6 +140,34 @@ func (s *prefixedAliasStore) Update(id string, opts beads.UpdateOpts) error {
 		opts.ParentID = &parentID
 	}
 	return s.base.Update(s.aliasToBase(id), opts)
+}
+
+func (s *prefixedAliasStore) UpdateIfMatch(id string, revision int64, opts beads.UpdateOpts) error {
+	switch {
+	case opts.Status != nil && *opts.Status == "open":
+		s.reopenCalls++
+	case opts.Status != nil && *opts.Status == "closed":
+		s.closeCalls++
+	default:
+		s.updateCalls++
+	}
+	if opts.ParentID != nil {
+		parentID := s.aliasToBase(*opts.ParentID)
+		opts.ParentID = &parentID
+	}
+	return s.base.UpdateIfMatch(s.aliasToBase(id), revision, opts)
+}
+
+func (s *prefixedAliasStore) CloseIfMatch(id string, revision int64) error {
+	return s.base.CloseIfMatch(s.aliasToBase(id), revision)
+}
+
+func (s *prefixedAliasStore) DeleteIfMatch(id string, revision int64) error {
+	return s.base.DeleteIfMatch(s.aliasToBase(id), revision)
+}
+
+func (s *prefixedAliasStore) CompareAndSetMetadataKey(id, key, expected, next string) (bool, error) {
+	return s.base.CompareAndSetMetadataKey(s.aliasToBase(id), key, expected, next)
 }
 
 func (s *prefixedAliasStore) Close(id string) error {
@@ -533,6 +562,272 @@ func TestBeadCRUD(t *testing.T) {
 	}
 }
 
+func TestGenericBeadAPIHidesExecutionCredentialButPreservesLifecycleAccess(t *testing.T) {
+	state := newFakeState(t)
+	store := state.stores["myrig"]
+	b, err := store.Create(beads.Bead{
+		Title: "worker", Type: session.BeadType, Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"generation": "7", "instance_token": "raw-secret-token", "state": "active",
+			beadmeta.SessionRequestReceiptPrefix + "history": `{}`,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := newTestCityHandler(t, state)
+
+	for _, path := range []string{"/bead/" + b.ID, "/beads?all=true&rig=myrig"} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, cityURL(state, path), nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s = %d: %s", path, rec.Code, rec.Body.String())
+		}
+		if strings.Contains(rec.Body.String(), "raw-secret-token") || strings.Contains(rec.Body.String(), `"instance_token"`) {
+			t.Fatalf("GET %s leaked execution credential: %s", path, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), `"generation":"7"`) {
+			t.Fatalf("GET %s lost safe generation metadata: %s", path, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), beadmeta.SessionRequestReceiptPrefix+"history") {
+			t.Fatalf("GET %s hid historical request evidence: %s", path, rec.Body.String())
+		}
+	}
+
+	info, err := session.NewStore(beads.SessionStore{Store: store}).Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.InstanceToken != "raw-secret-token" {
+		t.Fatalf("lifecycle token = %q, want retained raw token", info.InstanceToken)
+	}
+}
+
+func TestGenericBeadAPIRejectsExecutionIdentityWrites(t *testing.T) {
+	state := newFakeState(t)
+	store := state.stores["myrig"]
+	b, err := store.Create(beads.Bead{Title: "worker", Metadata: map[string]string{
+		"session_name":   "original-runtime",
+		"generation":     "1",
+		"instance_token": "original",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := newTestCityHandler(t, state)
+
+	tests := []struct {
+		method string
+		path   string
+		body   string
+	}{
+		{http.MethodPost, "/beads", `{"rig":"myrig","title":"forged","metadata":{"instance_token":"chosen"}}`},
+		{http.MethodPost, "/bead/" + b.ID + "/update", `{"metadata":{"instance_token":"replacement"}}`},
+		{http.MethodPatch, "/bead/" + b.ID, `{"metadata":{"gc.execution_token":"replacement"}}`},
+		{http.MethodPost, "/bead/" + b.ID + "/update", `{"metadata":{"session_name":"retargeted-runtime"}}`},
+		{http.MethodPatch, "/bead/" + b.ID, `{"metadata":{"generation":"2"}}`},
+	}
+	for _, tc := range tests {
+		req := httptest.NewRequest(tc.method, cityURL(state, tc.path), strings.NewReader(tc.body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-GC-Request", "true")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("%s %s = %d, want 403: %s", tc.method, tc.path, rec.Code, rec.Body.String())
+		}
+	}
+	got, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Metadata["instance_token"] != "original" || got.Metadata["session_name"] != "original-runtime" || got.Metadata["generation"] != "1" {
+		t.Fatalf("generic write replaced execution identity: %+v", got.Metadata)
+	}
+}
+
+type genericMutationRaceStore struct {
+	*beads.MemStore
+	beforeUpdate func()
+}
+
+func (s *genericMutationRaceStore) UpdateIfMatch(id string, revision int64, opts beads.UpdateOpts) error {
+	if s.beforeUpdate != nil {
+		before := s.beforeUpdate
+		s.beforeUpdate = nil
+		before()
+	}
+	return s.MemStore.UpdateIfMatch(id, revision, opts)
+}
+
+func TestGenericBeadAPIRejectsTypeChangeWithRequestEvidence(t *testing.T) {
+	state := newFakeState(t)
+	store := state.stores["myrig"]
+	b, err := store.Create(beads.Bead{Title: "historical", Type: "task", Metadata: map[string]string{
+		beadmeta.SessionRequestReceiptPrefix + "history": `{}`,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := newTestCityHandler(t, state)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPatch, cityURL(state, "/bead/"+b.ID), strings.NewReader(`{"type":"bug"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-GC-Request", "true")
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("type change = %d, want 409: %s", rec.Code, rec.Body.String())
+	}
+	got, err := store.Get(b.ID)
+	if err != nil || got.Type != "task" || !session.HasRequestEvidence(got) {
+		t.Fatalf("historical evidence row changed: %+v, %v", got, err)
+	}
+}
+
+func TestGenericBeadAPIFailsClosedWhenPurgeFenceRacesUpdate(t *testing.T) {
+	state := newFakeState(t)
+	base := &beads.MemStore{IDPrefix: "myrig"}
+	store := &genericMutationRaceStore{MemStore: base}
+	state.stores["myrig"] = store
+	b, err := store.Create(beads.Bead{Title: "before", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.beforeUpdate = func() {
+		if ok, err := base.CompareAndSetMetadataKey(b.ID, beadmeta.SessionRequestPurgeFenceMetadataKey, "", "purge-owner"); err != nil || !ok {
+			t.Fatalf("install racing fence = (%v, %v)", ok, err)
+		}
+	}
+	h := newTestCityHandler(t, state)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPatch, cityURL(state, "/bead/"+b.ID), strings.NewReader(`{"metadata":{"safe_note":"after"}}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-GC-Request", "true")
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("racing update = %d, want 409: %s", rec.Code, rec.Body.String())
+	}
+	got, err := base.Get(b.ID)
+	if err != nil || got.Metadata["safe_note"] != "" || !session.IsRequestPurgeFenced(got) {
+		t.Fatalf("racing update crossed fence: %+v, %v", got, err)
+	}
+}
+
+func TestBeadAssignFailsClosedWhenLifecycleEvidenceRaces(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		install func(t *testing.T, store *beads.MemStore, id string)
+		verify  func(beads.Bead) bool
+	}{
+		{
+			name: "purge_fence",
+			install: func(t *testing.T, store *beads.MemStore, id string) {
+				if ok, err := store.CompareAndSetMetadataKey(id, beadmeta.SessionRequestPurgeFenceMetadataKey, "", "purge-owner"); err != nil || !ok {
+					t.Fatalf("install racing fence = (%v, %v)", ok, err)
+				}
+			},
+			verify: session.IsRequestPurgeFenced,
+		},
+		{
+			name: "request_evidence",
+			install: func(t *testing.T, store *beads.MemStore, id string) {
+				if err := store.SetMetadata(id, beadmeta.SessionRequestReceiptPrefix+"racing", `{}`); err != nil {
+					t.Fatalf("install racing evidence: %v", err)
+				}
+			},
+			verify: session.HasRequestEvidence,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := newFakeState(t)
+			base := &beads.MemStore{IDPrefix: "myrig"}
+			store := &genericMutationRaceStore{MemStore: base}
+			state.stores["myrig"] = store
+			b, err := store.Create(beads.Bead{Title: "before", Type: "task"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			store.beforeUpdate = func() { tc.install(t, base, b.ID) }
+			rec := httptest.NewRecorder()
+			req := newPostRequest(cityURL(state, "/bead/")+b.ID+"/assign", strings.NewReader(`{"assignee":"worker-1"}`))
+			newTestCityHandler(t, state).ServeHTTP(rec, req)
+			if rec.Code != http.StatusConflict {
+				t.Fatalf("racing assignment = %d, want 409: %s", rec.Code, rec.Body.String())
+			}
+			got, err := base.Get(b.ID)
+			if err != nil || got.Assignee != "" || !tc.verify(got) {
+				t.Fatalf("racing assignment crossed lifecycle update: %+v, %v", got, err)
+			}
+		})
+	}
+}
+
+func TestGenericBeadAPIParentUpdatesLoseRevisionRace(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{name: "parent_only", body: `{"parent":"new-parent"}`},
+		{name: "combined", body: `{"parent":"new-parent","title":"after"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := newFakeState(t)
+			base := &beads.MemStore{IDPrefix: "myrig"}
+			store := &genericMutationRaceStore{MemStore: base}
+			state.stores["myrig"] = store
+			b, err := store.Create(beads.Bead{Title: "before", Type: "task"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			store.beforeUpdate = func() {
+				if err := base.SetMetadata(b.ID, "racing", "winner"); err != nil {
+					t.Fatalf("install racing update: %v", err)
+				}
+			}
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPatch, cityURL(state, "/bead/"+b.ID), strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-GC-Request", "true")
+			newTestCityHandler(t, state).ServeHTTP(rec, req)
+			if rec.Code != http.StatusConflict {
+				t.Fatalf("racing parent update = %d, want 409: %s", rec.Code, rec.Body.String())
+			}
+			got, err := base.Get(b.ID)
+			if err != nil || got.ParentID != "" || got.Title != "before" || got.Metadata["racing"] != "winner" {
+				t.Fatalf("racing parent update partially committed: %+v, %v", got, err)
+			}
+		})
+	}
+}
+
+func TestGenericBeadAPILabelRemovalLosesRaceToRequestEvidence(t *testing.T) {
+	state := newFakeState(t)
+	base := &beads.MemStore{IDPrefix: "myrig"}
+	store := &genericMutationRaceStore{MemStore: base}
+	state.stores["myrig"] = store
+	b, err := store.Create(beads.Bead{Title: "session", Type: session.BeadType, Labels: []string{session.LabelSession, "worker"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.beforeUpdate = func() {
+		if err := base.SetMetadata(b.ID, beadmeta.SessionRequestReceiptPrefix+"racing", `{}`); err != nil {
+			t.Fatalf("install racing receipt = %v", err)
+		}
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPatch, cityURL(state, "/bead/"+b.ID), strings.NewReader(`{"remove_labels":["gc:session"]}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-GC-Request", "true")
+	newTestCityHandler(t, state).ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("racing label removal = %d, want 409: %s", rec.Code, rec.Body.String())
+	}
+	got, err := base.Get(b.ID)
+	if err != nil || !session.HasRequestEvidence(got) || !slices.Contains(got.Labels, session.LabelSession) {
+		t.Fatalf("racing receipt lost session identity: %+v, %v", got, err)
+	}
+}
+
 type laggyParentProjectionStore struct {
 	beads.Store
 	pendingChildren map[string]string
@@ -566,6 +861,10 @@ func (s *laggyParentProjectionStore) Update(id string, opts beads.UpdateOpts) er
 	return nil
 }
 
+func (s *laggyParentProjectionStore) ConditionalWriterHandle() (beads.ConditionalWriter, bool) {
+	return beads.ConditionalWriterFor(s.Store)
+}
+
 func (s *laggyParentProjectionStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 	items, err := s.Store.List(query)
 	if err != nil {
@@ -593,6 +892,10 @@ func (s *laggyParentProjectionStore) WaitForParentProjection(_ context.Context, 
 type projectionConflictStore struct {
 	beads.Store
 	waitCalls int
+}
+
+func (s *projectionConflictStore) ConditionalWriterHandle() (beads.ConditionalWriter, bool) {
+	return beads.ConditionalWriterFor(s.Store)
 }
 
 func (s *projectionConflictStore) WaitForParentProjection(_ context.Context, _, _, _ string) error {

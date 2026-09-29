@@ -70,6 +70,7 @@ type beadWire struct {
 	Ephemeral   bool                       `json:"ephemeral,omitempty"`
 	NoHistory   bool                       `json:"no_history,omitempty"`
 	DeferUntil  *time.Time                 `json:"defer_until,omitempty"`
+	Revision    int64                      `json:"revision"`
 }
 
 // marshalCreate converts a Bead to JSON for the exec script's create operation.

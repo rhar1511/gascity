@@ -267,6 +267,15 @@ type BeadEventPayload struct {
 // IsEventPayload marks BeadEventPayload as an events.Payload variant.
 func (BeadEventPayload) IsEventPayload() {}
 
+// MarshalJSON applies the same copy-on-redact policy as UnmarshalJSON so a
+// typed payload constructed in-process cannot bypass the public event boundary.
+func (p BeadEventPayload) MarshalJSON() ([]byte, error) {
+	type beadEventPayloadWire struct {
+		Bead beads.Bead `json:"bead"`
+	}
+	return json.Marshal(beadEventPayloadWire{Bead: redactGenericBead(p.Bead)})
+}
+
 // UnmarshalJSON decodes a bead.* event payload via the shared canonical decoder
 // (beads.DecodeBeadEventPayload): the raw bead snapshot CachingStore.notifyChange
 // emits, with the wrapped {"bead": ...} form accepted as a tolerant fallback. A
@@ -278,7 +287,7 @@ func (p *BeadEventPayload) UnmarshalJSON(data []byte) error {
 	if !ok {
 		return fmt.Errorf("decode bead event payload: not a bead snapshot with an id: %s", data)
 	}
-	p.Bead = bead
+	p.Bead = redactGenericBead(bead)
 	return nil
 }
 

@@ -1,0 +1,94 @@
+package session
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strconv"
+	"time"
+
+	"github.com/gastownhall/gascity/internal/beads"
+)
+
+// SubmitRequest sends a tracked request only to the execution selected when
+// acceptance was persisted. Session-name metadata changes cannot retarget it.
+// It never wakes, resumes, interrupts, or restarts a session. The durable send
+// reservation precedes provider I/O. After an uncertain send, retries read the
+// existing receipt rather than risking a second delivery. The mutation lock
+// fences cooperating in-process incarnation changes; provider/credential
+// isolation is still required against external writers and runtime replacement.
+func (m *Manager) SubmitRequest(ctx context.Context, id, requestID string, generation int, message string) (RequestReceipt, error) {
+	var result RequestReceipt
+	err := withSessionMutationLock(id, func() error {
+		front := NewStore(beads.SessionStore{Store: m.store})
+		accepted, err := front.AcceptRequest(id, requestID, generation, message, time.Now())
+		if err != nil {
+			return err
+		}
+		result = accepted.RequestReceipt
+		if result.Delivery != RequestDeliveryPending {
+			return nil
+		}
+		targetName := accepted.targetSessionName
+		b, err := front.requestReceiptBead(id)
+		if err != nil {
+			return err
+		}
+		info := infoFromPersistedBead(b)
+		if info.Generation != strconv.Itoa(generation) || requestDigest(info.InstanceToken) != accepted.executionTokenDigest || info.Closed || pendingConversationRestart(b) || (info.State != StateActive && info.State != StateAwake) || !m.sp.IsRunning(targetName) {
+			return ErrRequestConflict
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := m.pendingInteractionLocked(targetName); err != nil {
+			return err
+		}
+		claimed := false
+		result, err = front.mutateRequestReceipt(id, requestID, func(current beads.Bead, record *storedRequestReceipt) (bool, error) {
+			claimed = false
+			if current.Metadata["generation"] != strconv.Itoa(generation) || requestDigest(current.Metadata["instance_token"]) != record.ExecutionTokenDigest || record.TargetSessionName != targetName || current.Status == "closed" {
+				return false, ErrRequestConflict
+			}
+			if record.Delivery != RequestDeliveryPending {
+				return false, nil
+			}
+			stamp := time.Now().UTC()
+			record.DeliveryAttemptedAt = &stamp
+			record.Delivery = RequestDeliveryUnknown
+			claimed = true
+			return true, nil
+		})
+		if err != nil || !claimed {
+			return err
+		}
+		// JSON keeps arbitrary message text distinct from the request identity.
+		envelope, err := json.Marshal(struct {
+			RequestID       string `json:"request_id"`
+			SessionID       string `json:"session_id"`
+			Generation      int    `json:"generation"`
+			Instruction     string `json:"instruction"`
+			AcknowledgeWith string `json:"acknowledge_with"`
+			Message         string `json:"message"`
+		}{
+			RequestID:       requestID,
+			SessionID:       id,
+			Generation:      generation,
+			Instruction:     "Acknowledge receipt before acting by running the command in acknowledge_with.",
+			AcknowledgeWith: fmt.Sprintf("gc session request ack %q", requestID),
+			Message:         message,
+		})
+		if err != nil {
+			return err
+		}
+		sendErr := m.nudgeSession(ctx, targetName, string(envelope), false)
+		delivery := RequestDeliveryAccepted
+		if sendErr != nil {
+			delivery = RequestDeliveryUnknown
+		}
+		result, err = front.RecordRequestDelivery(id, requestID, generation, delivery, time.Now())
+		return errors.Join(sendErr, err)
+	})
+	return result, err
+}

@@ -991,6 +991,9 @@ func (s *Server) humaHandleSessionClose(ctx context.Context, input *SessionClose
 	// Optional: permanently delete the bead after closing.
 	if input.Delete {
 		if err := deleteSessionBeadAfterClose(store.Store, id); err != nil {
+			if errors.Is(err, session.ErrRequestEvidenceRetained) {
+				return nil, apierr.SessionConflict.Msg(err.Error())
+			}
 			log.Printf("gc api: deleting bead after close %s: %v", id, err)
 			return nil, apierr.Internal.Msg("closed but delete failed: " + err.Error())
 		}

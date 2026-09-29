@@ -211,6 +211,7 @@ func (w *beadWire) toBead() beads.Bead {
 		Ephemeral:   w.Ephemeral,
 		NoHistory:   w.NoHistory,
 		DeferUntil:  cloneTimePtr(w.DeferUntil),
+		Revision:    w.Revision,
 	}
 }
 
@@ -530,7 +531,14 @@ func (s *Store) Tx(_ string, fn func(beads.Tx) error) error {
 
 // Delete permanently removes a bead by calling the "delete" subcommand.
 func (s *Store) Delete(id string) error {
-	if _, err := s.run(nil, "delete", "--force", id); err != nil {
+	b, err := s.Get(id)
+	if err != nil {
+		return err
+	}
+	if b.Revision <= 0 {
+		return beads.ErrConditionalWriteUnsupported
+	}
+	if _, err := s.run(nil, "delete", id, strconv.FormatInt(b.Revision, 10)); err != nil {
 		return err
 	}
 	s.localMu.Lock()

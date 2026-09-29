@@ -220,7 +220,10 @@
               "nudge-drop",
               "beads-city-migrate-proxied",
               "factory-validate",
-              "controller-reconcile"
+              "controller-reconcile",
+              "session-request-ack",
+              "session-request-get",
+              "session-request-submit"
             ]
           },
           "event_id": {

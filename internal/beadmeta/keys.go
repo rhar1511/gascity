@@ -29,6 +29,11 @@
 // engdocs/design/beads-dolt-contract-redesign.md for the storage contract.
 package beadmeta
 
+import (
+	"fmt"
+	"strings"
+)
+
 // Namespace is the reserved prefix for every engine-minted bead-metadata key.
 // Runtime guards that reserve the namespace (e.g. rejecting caller-supplied
 // "gc."-prefixed keys) compare against this single source of truth.
@@ -353,6 +358,79 @@ const FormulaVarPrefix = Namespace + "var."
 // so it is declared as a prefix here rather than re-enumerated in this file.
 const IdemPrefix = Namespace + "idem."
 
+// SessionRequestReceiptPrefix is the dynamic key family for durable session
+// request receipts. The request ID is the open-world suffix.
+const SessionRequestReceiptPrefix = Namespace + "session_request.v1."
+
+// SessionRequestPurgeFenceMetadataKey blocks new request acceptance and reopen
+// while a workflow hard purge is closing and validating selected sessions.
+const SessionRequestPurgeFenceMetadataKey = Namespace + "session_request_purge_fence"
+
+// SessionInstanceTokenMetadataKey is the raw execution-incarnation credential.
+// It is deliberately bare for compatibility with the persisted session schema.
+const SessionInstanceTokenMetadataKey = "instance_token"
+
+var executionCredentialMetadataKeys = map[string]struct{}{
+	SessionInstanceTokenMetadataKey: {},
+	"execution_token":               {},
+	Namespace + "instance_token":    {},
+	Namespace + "execution_token":   {},
+}
+
+var executionIdentityMetadataKeys = map[string]struct{}{
+	"session_name":                  {},
+	"sessionName":                   {},
+	SessionNameMetadataKey:          {},
+	SessionNameCamelMetadataKey:     {},
+	"generation":                    {},
+	Namespace + "generation":        {},
+	SessionInstanceTokenMetadataKey: {},
+	"execution_token":               {},
+	Namespace + "instance_token":    {},
+	Namespace + "execution_token":   {},
+}
+
+// IsExecutionCredentialMetadataKey reports metadata that grants execution
+// identity and therefore must never cross a generic bead boundary.
+func IsExecutionCredentialMetadataKey(key string) bool {
+	_, ok := executionCredentialMetadataKeys[key]
+	return ok
+}
+
+// IsGenericMutationReservedKey reports metadata owned by a privileged session
+// protocol rather than generic bead create/update tooling.
+func IsGenericMutationReservedKey(key string) bool {
+	_, executionIdentity := executionIdentityMetadataKeys[key]
+	return executionIdentity ||
+		strings.HasPrefix(key, SessionRequestReceiptPrefix) ||
+		key == SessionRequestPurgeFenceMetadataKey
+}
+
+// ValidateGenericMetadata rejects authority-bearing metadata on generic writes.
+func ValidateGenericMetadata(metadata map[string]string) error {
+	for key := range metadata {
+		if IsGenericMutationReservedKey(key) {
+			return fmt.Errorf("metadata key %q is reserved for the session lifecycle", key)
+		}
+	}
+	return nil
+}
+
+// RedactGenericMetadata returns a copy without execution credentials. Protocol
+// evidence remains visible; only credential material is removed.
+func RedactGenericMetadata(metadata map[string]string) map[string]string {
+	if metadata == nil {
+		return nil
+	}
+	out := make(map[string]string, len(metadata))
+	for key, value := range metadata {
+		if !IsExecutionCredentialMetadataKey(key) {
+			out[key] = value
+		}
+	}
+	return out
+}
+
 // Directory keys: a deliberate non-"gc."-prefixed sibling family on bead
 // metadata, declared here so the vocabulary has one home. Their read/write
 // fallback semantics (canonical-then-legacy) live with their owner in
@@ -583,6 +661,7 @@ var KnownMetadataKeys = []string{
 	SessionIDCamelMetadataKey,
 	SessionNameMetadataKey,
 	SessionNameCamelMetadataKey,
+	SessionRequestPurgeFenceMetadataKey,
 	SourceBeadIDMetadataKey,
 	SourceStepSpecMetadataKey,
 	SourceStoreRefMetadataKey,
@@ -626,6 +705,7 @@ var KnownMetadataKeys = []string{
 var KnownMetadataPrefixes = []string{
 	FormulaVarPrefix,
 	IdemPrefix,
+	SessionRequestReceiptPrefix,
 }
 
 // SessionAffinityMetadataKeys are the metadata keys that pin a work bead to a

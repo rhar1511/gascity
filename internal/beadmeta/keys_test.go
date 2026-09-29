@@ -76,3 +76,29 @@ func TestPinnedValues(t *testing.T) {
 		}
 	}
 }
+
+func TestGenericMutationReservesEveryExecutionIdentityAlias(t *testing.T) {
+	aliases := []string{
+		"session_name",
+		"sessionName",
+		SessionNameMetadataKey,
+		SessionNameCamelMetadataKey,
+		"generation",
+		Namespace + "generation",
+		SessionInstanceTokenMetadataKey,
+		"execution_token",
+		Namespace + "instance_token",
+		Namespace + "execution_token",
+	}
+	for _, key := range aliases {
+		if !IsGenericMutationReservedKey(key) {
+			t.Errorf("execution identity alias %q is not reserved", key)
+		}
+		if err := ValidateGenericMetadata(map[string]string{key: "retargeted"}); err == nil {
+			t.Errorf("generic mutation accepted execution identity alias %q", key)
+		}
+	}
+	if err := ValidateGenericMetadata(map[string]string{"ordinary": "value"}); err != nil {
+		t.Fatalf("ordinary metadata rejected: %v", err)
+	}
+}
