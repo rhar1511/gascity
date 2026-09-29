@@ -462,8 +462,7 @@ func validateOfflineAdmission(ctx context.Context, config canaryConfig) (string,
 	head := config.SourceHead
 	headChecks := 0
 	if head == "" {
-		command := exec.CommandContext(ctx, "git", "rev-parse", "HEAD")
-		command.Dir = config.WorkDir
+		command := gitCommand(ctx, config.WorkDir, "rev-parse", "HEAD")
 		output, err := command.Output()
 		if err != nil {
 			return "", 1, canaryAuthorization{}, fmt.Errorf("resolve canary source head: %w", err)
@@ -524,6 +523,12 @@ func validateOfflineAdmission(ctx context.Context, config canaryConfig) (string,
 	return head, headChecks, authorization, nil
 }
 
+func gitCommand(ctx context.Context, dir string, arguments ...string) *exec.Cmd {
+	command := exec.CommandContext(ctx, "git", arguments...)
+	command.Dir = dir
+	return command
+}
+
 func readAuthorization(path string) (canaryAuthorization, error) {
 	if err := validatePrivateFile(path, 0o400, "synthetic canary authorization"); err != nil {
 		return canaryAuthorization{}, err
@@ -540,8 +545,7 @@ func readAuthorization(path string) (canaryAuthorization, error) {
 }
 
 func validateReviewedWorktree(ctx context.Context, config canaryConfig) error {
-	rootCommand := exec.CommandContext(ctx, "git", "rev-parse", "--show-toplevel")
-	rootCommand.Dir = config.WorkDir
+	rootCommand := gitCommand(ctx, config.WorkDir, "rev-parse", "--show-toplevel")
 	rootData, err := rootCommand.Output()
 	if err != nil {
 		return fmt.Errorf("resolve reviewed worktree: %w", err)
@@ -569,8 +573,7 @@ func validateReviewedWorktree(ctx context.Context, config canaryConfig) error {
 			return errors.New("canary authorization and output must be outside the reviewed worktree")
 		}
 	}
-	statusCommand := exec.CommandContext(ctx, "git", "status", "--porcelain=v1", "--untracked-files=all", "--no-renames", "-z")
-	statusCommand.Dir = root
+	statusCommand := gitCommand(ctx, root, "status", "--porcelain=v1", "--untracked-files=all", "--no-renames", "-z")
 	statusData, err := statusCommand.Output()
 	if err != nil {
 		return fmt.Errorf("inspect reviewed worktree: %w", err)
@@ -624,8 +627,7 @@ func readReviewedEvidenceFile(ctx context.Context, config canaryConfig, path, la
 	if err != nil {
 		return nil, fmt.Errorf("resolve opened %s: %w", label, err)
 	}
-	rootCommand := exec.CommandContext(ctx, "git", "rev-parse", "--show-toplevel")
-	rootCommand.Dir = config.WorkDir
+	rootCommand := gitCommand(ctx, config.WorkDir, "rev-parse", "--show-toplevel")
 	rootData, err := rootCommand.Output()
 	if err != nil {
 		return nil, fmt.Errorf("resolve reviewed worktree for %s: %w", label, err)
@@ -638,8 +640,7 @@ func readReviewedEvidenceFile(ctx context.Context, config canaryConfig, path, la
 	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
 		return nil, fmt.Errorf("%s must resolve inside the reviewed worktree", label)
 	}
-	trackedCommand := exec.CommandContext(ctx, "git", "ls-files", "--error-unmatch", "--", relative)
-	trackedCommand.Dir = root
+	trackedCommand := gitCommand(ctx, root, "ls-files", "--error-unmatch", "--", relative)
 	if err := trackedCommand.Run(); err != nil {
 		return nil, fmt.Errorf("%s must be tracked at the reviewed head", label)
 	}
@@ -685,8 +686,7 @@ func validateStableOutputDirectory(ctx context.Context, config canaryConfig, dir
 	if err != nil {
 		return fmt.Errorf("resolve stable canary output directory: %w", err)
 	}
-	rootCommand := exec.CommandContext(ctx, "git", "rev-parse", "--show-toplevel")
-	rootCommand.Dir = config.WorkDir
+	rootCommand := gitCommand(ctx, config.WorkDir, "rev-parse", "--show-toplevel")
 	rootData, err := rootCommand.Output()
 	if err != nil {
 		return err
