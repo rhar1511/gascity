@@ -6,8 +6,11 @@ import { setActiveCity } from '../api/cityBase';
 import { invalidate } from '../api/cache';
 import { NowProvider } from '../contexts/NowContext';
 import type { SupervisorBead } from '../supervisor/beadReads';
+import type { PRActionQueue } from '../supervisor/prActions';
 
 const PROJECT = 'gascity';
+const HEAD_SHA = 'a'.repeat(40);
+const BASE_SHA = 'b'.repeat(40);
 
 type StubMode =
   | { kind: 'ok'; beads: SupervisorBead[] }
@@ -16,8 +19,16 @@ type StubMode =
 
 let stubMode: StubMode = { kind: 'ok', beads: [sampleBead()] };
 let updateMode: 'ok' | 'reject' = 'ok';
+let stubPRQueue = unavailablePRQueue();
+let failPRQueueAfterAction = false;
+let prQueueFailed = false;
 let stubSessions: Array<Record<string, unknown>> = [];
-const supervisorWrites: Array<{ method: string; path: string; body?: unknown }> = [];
+const supervisorWrites: Array<{
+  method: string;
+  path: string;
+  body?: unknown;
+  headers?: Record<string, string>;
+}> = [];
 
 function setStub(mode: StubMode) {
   stubMode = mode;
@@ -27,9 +38,13 @@ beforeEach(() => {
   setActiveCity('test-city');
   supervisorWrites.length = 0;
   updateMode = 'ok';
+  stubPRQueue = unavailablePRQueue();
+  failPRQueueAfterAction = false;
+  prQueueFailed = false;
   stubSessions = [];
   setStub({ kind: 'ok', beads: [sampleBead()] });
   invalidate('workbench:queue:');
+  invalidate('workbench:pr-actions:');
   vi.stubGlobal(
     'fetch',
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -47,7 +62,38 @@ beforeEach(() => {
         } else {
           capturedBody = parseBody(init?.body);
         }
-        supervisorWrites.push({ method, path: url.pathname, body: capturedBody });
+        supervisorWrites.push({
+          method,
+          path: url.pathname,
+          body: capturedBody,
+          ...(input instanceof Request
+            ? { headers: Object.fromEntries(input.headers.entries()) }
+            : {}),
+        });
+        if (url.pathname.endsWith('/pr-actions')) {
+          if (failPRQueueAfterAction) {
+            failPRQueueAfterAction = false;
+            prQueueFailed = true;
+          }
+          return jsonResponse({
+            id: 'action-1',
+            action: (capturedBody as { action?: string } | undefined)?.action ?? 'prepare',
+            status: 'verified',
+            outcome: 'review_queued',
+            idempotency_key: input instanceof Request ? input.headers.get('Idempotency-Key') : '',
+            monitor: 'main',
+            owner: 'acme',
+            repo: 'widget',
+            pull_request: 42,
+            work_id: `${PROJECT}-0001`,
+            attempt_id: 's-active',
+            head_sha: HEAD_SHA,
+            base_sha: BASE_SHA,
+            policy_version: 'policy-v1',
+            actor_key_id: 'dashboard',
+            created_at: new Date().toISOString(),
+          });
+        }
         if (/\/mail$/.test(url.pathname)) return jsonResponse({ id: 'm-1' });
         if (/\/sling$/.test(url.pathname)) return jsonResponse({ ok: true });
         if (beadMatch && updateMode === 'ok') return jsonResponse({ ok: true });
@@ -65,6 +111,11 @@ beforeEach(() => {
       }
       if (url.pathname === '/v0/city/test-city/sessions' && method === 'GET') {
         return jsonResponse({ items: stubSessions, total: stubSessions.length });
+      }
+      if (url.pathname === '/v0/city/test-city/pr-actions/queue' && method === 'GET') {
+        if (prQueueFailed)
+          return jsonResponse({ error: 'queue temporarily unavailable' }, { status: 503 });
+        return jsonResponse(stubPRQueue);
       }
       if (/\/attempts\/diff$/.test(url.pathname) && method === 'GET') {
         return jsonResponse({
@@ -523,9 +574,137 @@ describe('WorkbenchPage', () => {
     ];
     renderPage('/workbench?bead=gascity-0001');
     const actions = await screen.findByLabelText('Pull request actions');
-    expect(actions.textContent).toMatch(/verdicts/i);
+    expect(actions.textContent).toMatch(/signed policy is unavailable/i);
     expect(within(actions).queryByRole('button', { name: /prepare pr|queue pr/i })).toBeNull();
     expect(supervisorWrites.some((write) => write.path.endsWith('/mail'))).toBe(false);
+  });
+
+  it('executes a queue-review action only from the exact fresh server verdict', async () => {
+    setStub({
+      kind: 'ok',
+      beads: [
+        {
+          ...sampleBead(),
+          metadata: { 'gc.work_commit': HEAD_SHA },
+        } as unknown as SupervisorBead,
+      ],
+    });
+    stubSessions = [
+      {
+        id: 's-active',
+        session_name: 'worker-1',
+        state: 'active',
+        running: true,
+        active_bead: `${PROJECT}-0001`,
+        created_at: '2026-01-02T00:00:00Z',
+      },
+    ];
+    stubPRQueue = availablePRQueue();
+    renderPage('/workbench?bead=gascity-0001');
+
+    const queueAction = await screen.findByRole('button', { name: /queue pr for review/i });
+    expect(screen.getByText(/server verdict · clean/i)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /merge/i })).toBeNull();
+    fireEvent.click(queueAction);
+
+    await screen.findByText(/last server receipt: queue_review · verified · review_queued/i);
+    const request = supervisorWrites.find((write) => write.path.endsWith('/pr-actions'));
+    expect(request?.body).toEqual({
+      action: 'queue_review',
+      monitor: 'main',
+      owner: 'acme',
+      repo: 'widget',
+      pull_request: 42,
+      head_sha: HEAD_SHA,
+      base_sha: BASE_SHA,
+      policy_version: 'policy-v1',
+      work_id: `${PROJECT}-0001`,
+      attempt_id: 's-active',
+    });
+    expect(request?.headers?.['x-gc-request']).toBe('dashboard');
+    expect(request?.headers?.['idempotency-key']).toMatch(/^workbench-/);
+  });
+
+  it('keeps the action idempotency key and disables retries until a failed queue refresh recovers', async () => {
+    setStub({
+      kind: 'ok',
+      beads: [
+        { ...sampleBead(), metadata: { 'gc.work_commit': HEAD_SHA } } as unknown as SupervisorBead,
+      ],
+    });
+    stubSessions = [
+      {
+        id: 's-active',
+        session_name: 'worker-1',
+        state: 'active',
+        running: true,
+        active_bead: `${PROJECT}-0001`,
+        created_at: '2026-01-02T00:00:00Z',
+      },
+    ];
+    stubPRQueue = availablePRQueue();
+    failPRQueueAfterAction = true;
+    renderPage('/workbench?bead=gascity-0001');
+
+    fireEvent.click(await screen.findByRole('button', { name: /queue pr for review/i }));
+    const actions = screen.getByLabelText('Pull request actions');
+    const actionAlert = await within(actions).findByRole('alert');
+    expect(actionAlert.textContent).toMatch(/queue temporarily unavailable/i);
+    expect(
+      (within(actions).getByRole('button', { name: /queue pr for review/i }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+
+    prQueueFailed = false;
+    fireEvent.click(within(actions).getByRole('button', { name: /refresh pr verdict/i }));
+    await waitFor(() =>
+      expect(
+        (within(actions).getByRole('button', { name: /queue pr for review/i }) as HTMLButtonElement)
+          .disabled,
+      ).toBe(false),
+    );
+    fireEvent.click(within(actions).getByRole('button', { name: /queue pr for review/i }));
+    await waitFor(() =>
+      expect(supervisorWrites.filter((write) => write.path.endsWith('/pr-actions'))).toHaveLength(
+        2,
+      ),
+    );
+
+    const actionRequests = supervisorWrites.filter((write) => write.path.endsWith('/pr-actions'));
+    expect(actionRequests[0]?.headers?.['idempotency-key']).toMatch(/^workbench-/);
+    expect(actionRequests[1]?.headers?.['idempotency-key']).toBe(
+      actionRequests[0]?.headers?.['idempotency-key'],
+    );
+  });
+
+  it('does not expose a server action when the attempt evidence does not match', async () => {
+    setStub({
+      kind: 'ok',
+      beads: [
+        {
+          ...sampleBead(),
+          metadata: { 'gc.work_commit': HEAD_SHA },
+        } as unknown as SupervisorBead,
+      ],
+    });
+    stubSessions = [
+      {
+        id: 's-active',
+        session_name: 'worker-1',
+        state: 'active',
+        running: true,
+        active_bead: `${PROJECT}-0001`,
+        created_at: '2026-01-02T00:00:00Z',
+      },
+    ];
+    stubPRQueue = availablePRQueue({ attempt_id: 'another-session' });
+    renderPage('/workbench?bead=gascity-0001');
+
+    const queueAction = await screen.findByRole('button', { name: /queue pr for review/i });
+    const actions = screen.getByLabelText('Pull request actions');
+    expect(queueAction.hasAttribute('disabled')).toBe(true);
+    expect(actions.textContent).toMatch(/no exact work and attempt evidence/i);
+    expect(supervisorWrites.some((write) => write.path.endsWith('/pr-actions'))).toBe(false);
   });
 
   it('does not claim session delivery merely because mail was accepted (gp-bod)', async () => {
@@ -641,6 +820,91 @@ function beadListPayload(items: ReadonlyArray<SupervisorBead>): {
   total: number;
 } {
   return { items, total: items.length };
+}
+
+function unavailablePRQueue(): PRActionQueue {
+  return {
+    availability: 'unavailable',
+    policy_state: 'unavailable',
+    policy_detail: 'signed policy is unavailable',
+    policy_version: '',
+    observed_at: new Date().toISOString(),
+    fresh_until: new Date(Date.now() + 60_000).toISOString(),
+    sources: [],
+    items: [],
+  };
+}
+
+function availablePRQueue({
+  attempt_id = 's-active',
+}: { attempt_id?: string } = {}): PRActionQueue {
+  const observedAt = new Date().toISOString();
+  const freshUntil = new Date(Date.now() + 60_000).toISOString();
+  return {
+    availability: 'ready',
+    policy_state: 'ready',
+    policy_version: 'policy-v1',
+    observed_at: observedAt,
+    fresh_until: freshUntil,
+    sources: [{ monitor: 'main', owner: 'acme', repo: 'widget', rig: 'app', state: 'ready' }],
+    items: [
+      {
+        monitor: 'main',
+        owner: 'acme',
+        repo: 'widget',
+        pull_request: 42,
+        title: 'Add a feature',
+        url: 'https://github.com/acme/widget/pull/42',
+        base_ref_name: 'main',
+        head_ref_name: 'work-1',
+        head_sha: HEAD_SHA,
+        base_sha: BASE_SHA,
+        merge_state: 'CLEAN',
+        is_draft: false,
+        policy_version: 'policy-v1',
+        observed_at: observedAt,
+        fresh_until: freshUntil,
+        work_records: [
+          {
+            id: `${PROJECT}-0001`,
+            status: 'open',
+            candidate_sha: HEAD_SHA,
+            base_sha: BASE_SHA,
+            current_revision: true,
+          },
+        ],
+        evidence_state: 'verified',
+        attempt_evidence: [
+          {
+            store_ref: 'rig:app',
+            work_id: `${PROJECT}-0001`,
+            attempt_id,
+            base_sha: BASE_SHA,
+            candidate_sha: HEAD_SHA,
+            diff_sha256: 'c'.repeat(64),
+            diff_source: 'candidate_commit_delta',
+            working_tree_status: 'clean',
+          },
+        ],
+        action_receipts: [],
+        actions: [
+          {
+            action: 'prepare',
+            available: true,
+            requires_human_approval: false,
+            reason: 'eligible',
+          },
+          {
+            action: 'queue_review',
+            available: true,
+            requires_human_approval: false,
+            reason: 'server verified immutable evidence',
+          },
+          { action: 'merge', available: true, requires_human_approval: true, reason: 'approval' },
+        ],
+      },
+    ],
+  };
 }
 
 function sampleBead(): SupervisorBead {
