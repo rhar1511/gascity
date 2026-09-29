@@ -13,7 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/coordinationnotify"
 )
 
-//go:embed policy.json
+//go:embed policy.json replay/corpus.v1.json
 var policyFS embed.FS
 
 // Policy loads the versioned Inktree mapping and fixed copy table.
@@ -22,6 +22,29 @@ func Policy() (coordinationnotify.Policy, error) {
 	if err != nil {
 		return coordinationnotify.Policy{}, fmt.Errorf("read embedded Inktree policy: %w", err)
 	}
+	return ParsePolicy(data)
+}
+
+// PolicyDocument returns the exact retained policy bytes used by Policy.
+func PolicyDocument() ([]byte, error) {
+	data, err := policyFS.ReadFile("policy.json")
+	if err != nil {
+		return nil, fmt.Errorf("read embedded Inktree policy: %w", err)
+	}
+	return append([]byte(nil), data...), nil
+}
+
+// ReplayCorpusDocument returns the exact retained synthetic replay corpus.
+func ReplayCorpusDocument() ([]byte, error) {
+	data, err := policyFS.ReadFile("replay/corpus.v1.json")
+	if err != nil {
+		return nil, fmt.Errorf("read embedded Inktree replay corpus: %w", err)
+	}
+	return append([]byte(nil), data...), nil
+}
+
+// ParsePolicy strictly parses a retained policy document for offline replay.
+func ParsePolicy(data []byte) (coordinationnotify.Policy, error) {
 	var policy coordinationnotify.Policy
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()

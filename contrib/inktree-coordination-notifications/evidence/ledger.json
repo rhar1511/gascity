@@ -13,16 +13,21 @@
       {
         "dedup_key": "coord-hold-inktree-syn0003",
         "hold_epoch": 1,
+        "event_id": "evt-syn-0003",
         "channel": "discord",
         "attempt": 1,
+        "elapsed_seconds": 0,
         "suppressed": false
       },
       {
         "dedup_key": "coord-hold-inktree-syn0003",
         "hold_epoch": 1,
+        "event_id": "evt-syn-0003",
         "channel": "discord",
-        "attempt": 2,
-        "suppressed": true
+        "attempt": 1,
+        "elapsed_seconds": 0,
+        "suppressed": true,
+        "suppression_cause": "duplicate_event"
       }
     ]
   }

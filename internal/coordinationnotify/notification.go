@@ -180,9 +180,10 @@ type Projection struct {
 
 var (
 	beadIDPattern        = regexp.MustCompile(`^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?:\.[a-z0-9]+)*$`)
+	bindingIDPattern     = regexp.MustCompile(`^binding-[0-9a-f]{32}$`)
 	hashPattern          = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	versionPattern       = regexp.MustCompile(`^[A-Za-z0-9._/-]+$`)
-	replayCommandPattern = regexp.MustCompile(`^replay-coordination --corpus [A-Za-z0-9._/-]+ --policy [A-Za-z0-9._/-]+ --out [A-Za-z0-9._/-]+$`)
+	replayCommandPattern = regexp.MustCompile(`^go run \./[A-Za-z0-9._/-]+ --corpus [A-Za-z0-9._/-]+ --policy [A-Za-z0-9._/-]+ --out [A-Za-z0-9._/-]+$`)
 )
 
 // Build maps a consumer source reason, validates closed vocabularies, and
@@ -215,7 +216,10 @@ func Build(policy Policy, input Input) (Projection, error) {
 		return Projection{}, fmt.Errorf("invalid reason mapping for %q/%q", input.Status, input.SourceReason)
 	}
 	if input.Status == "route" || input.Status == "hard_failure" {
-		return Projection{Decision: decision(policy.Switches, input.Mode)}, nil
+		outcome := decision(policy.Switches, input.Mode)
+		outcome.RenderAllowed = false
+		outcome.Deliver = false
+		return Projection{Decision: outcome}, nil
 	}
 	if input.Status != "hold" && input.Status != "abstain" {
 		return Projection{}, fmt.Errorf("unknown coordination status %q", input.Status)
@@ -225,6 +229,9 @@ func Build(policy Policy, input Input) (Projection, error) {
 	}
 	if input.Channel != "discord" && input.Channel != "pr_update" {
 		return Projection{}, fmt.Errorf("unknown notification channel %q", input.Channel)
+	}
+	if input.Channel == policy.Delivery.FailoverChannel {
+		return Projection{}, errors.New("notification primary and failover channels must differ")
 	}
 	if input.RecipientRole != "author" && input.RecipientRole != "maintainer" && input.RecipientRole != "operator" {
 		return Projection{}, fmt.Errorf("unknown recipient role %q", input.RecipientRole)
@@ -241,8 +248,8 @@ func Build(policy Policy, input Input) (Projection, error) {
 	if input.BindingSource == "configured" && input.RecipientRole != "maintainer" {
 		return Projection{}, errors.New("configured binding must resolve to maintainer")
 	}
-	if input.BindingID == "" || strings.ContainsAny(input.BindingID, "@/?#") {
-		return Projection{}, errors.New("binding ID must be a non-address identifier")
+	if !bindingIDPattern.MatchString(input.BindingID) {
+		return Projection{}, errors.New("binding ID must be an opaque binding record key")
 	}
 	if !hashPattern.MatchString(input.EnvelopeHash) || !hashPattern.MatchString(input.RouterConfigHash) {
 		return Projection{}, errors.New("decision hashes must be lowercase sha256 values")
@@ -360,13 +367,15 @@ func validateDelivery(d DeliveryPolicy) error {
 	if d.FailoverChannel != "discord" && d.FailoverChannel != "pr_update" {
 		return fmt.Errorf("unknown failover channel %q", d.FailoverChannel)
 	}
-	if len(d.BackoffSeconds) == 0 || len(d.BackoffSeconds) > d.MaxAttempts {
+	if len(d.BackoffSeconds) < d.MaxAttempts-1 || len(d.BackoffSeconds) > d.MaxAttempts {
 		return errors.New("notification backoff schedule is invalid")
 	}
+	elapsed := 0
 	for _, delay := range d.BackoffSeconds {
-		if delay < 0 || delay > d.DeadlineSeconds {
-			return errors.New("notification backoff exceeds delivery deadline")
+		if delay < 0 || delay > d.DeadlineSeconds-elapsed {
+			return errors.New("notification backoff schedule is invalid")
 		}
+		elapsed += delay
 	}
 	return nil
 }

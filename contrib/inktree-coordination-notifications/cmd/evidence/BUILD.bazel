@@ -29,7 +29,10 @@ go_test(
         "testenv_import_test.go",
     ],
     embed = [":evidence_lib"],
-    deps = ["//internal/testenv"],
+    deps = [
+        "//contrib/inktree-coordination-notifications",
+        "//internal/testenv",
+    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
