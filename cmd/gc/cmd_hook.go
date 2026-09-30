@@ -493,7 +493,8 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 			LifecycleCity:                 cfg,
 			LifecycleCityPath:             cityPath,
 			ResolveLifecycleStore:         resolveLifecycleStore,
-			TrustedLifecycleScope:         cfg.Lifecycle.AdmissionEnabled && a.WorkQuery == "",
+			TrustedLifecycleScope:         a.WorkQuery == "",
+			RequireAuthoritativeClaimRead: true,
 			VerifyLifecycleTransitionHead: verifyLifecycleTransitionHead,
 			CheckFormulaAction:            formulaActionCheck,
 			RuntimeActor:                  strings.TrimSpace(os.Getenv("BEADS_ACTOR")),
@@ -763,6 +764,10 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 		storeOpts.Env = queryEnv
 		if len(claimStore.env) > 0 {
 			storeOpts.Env = claimStore.env
+		}
+		if claimStore.inferMissingSourceStoreRef {
+			storeOpts.ClaimSourceStoreRef = claimStore.sourceStoreRef
+			storeOpts.TrustedLifecycleScope = strings.TrimSpace(claimStore.sourceStoreRef) != ""
 		}
 		storeOpts.CheckFormulaAction = hookStoreFormulaActionCheck(storeOpts.CheckFormulaAction, claimStore, true)
 		storeDir := workDir

@@ -4767,7 +4767,7 @@
             "type": "string"
           },
           "source_store_ref": {
-            "description": "Authoritative store reference observed by the controller-owned ready query; the city work store uses the empty reference.",
+            "description": "Canonical store reference emitted by gc ready: city:\u003ccity_name\u003e for the city work store or rig:\u003crig_name\u003e for a rig store.",
             "maxLength": 200,
             "type": "string"
           },

@@ -2471,7 +2471,7 @@ type LifecycleClaimSubmitRequest struct {
 	// SessionId Managed session bead ID.
 	SessionId string `json:"session_id"`
 
-	// SourceStoreRef Authoritative store reference observed by the controller-owned ready query; the city work store uses the empty reference.
+	// SourceStoreRef Canonical store reference emitted by gc ready: city:<city_name> for the city work store or rig:<rig_name> for a rig store.
 	SourceStoreRef string `json:"source_store_ref"`
 
 	// WorkId Exact admitted work bead ID.

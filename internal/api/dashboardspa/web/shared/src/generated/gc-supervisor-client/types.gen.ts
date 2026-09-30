@@ -1693,7 +1693,7 @@ export type LifecycleClaimSubmitRequest = {
      */
     session_id: string;
     /**
-     * Authoritative store reference observed by the controller-owned ready query; the city work store uses the empty reference.
+     * Canonical store reference emitted by gc ready: city:<city_name> for the city work store or rig:<rig_name> for a rig store.
      */
     source_store_ref: string;
     /**

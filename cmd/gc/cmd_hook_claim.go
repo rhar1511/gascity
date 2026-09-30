@@ -21,6 +21,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/executionevent"
 	"github.com/gastownhall/gascity/internal/git"
+	"github.com/gastownhall/gascity/internal/worklifecycle"
 )
 
 const hookClaimCommandName = "hook"
@@ -172,9 +173,18 @@ type hookClaimOptions struct {
 	// rows use revision-conditional writes; they never fall back to bd claim.
 	CheckFormulaAction formulaActionCandidateCheck
 	// TrustedLifecycleScope is true only when the production query is gc's
-	// generated default work query. A custom worker-authored query cannot
-	// supply lifecycle store identity.
+	// generated default work query or a custom query's exact controller-selected
+	// single-store scope is available.
 	TrustedLifecycleScope bool
+	// ClaimSourceStoreRef is set by the controller only when a custom query ran
+	// against one exact store. It supplies provenance omitted by that query and
+	// rejects a candidate that claims a different source store.
+	ClaimSourceStoreRef string
+	// RequireAuthoritativeClaimRead requires claim candidates to be replaced
+	// with a read from the exact controller-selected source store before any
+	// existing-assignment or generic claim path is selected. This prevents a
+	// partial/custom projection from hiding durable lifecycle enrollment.
+	RequireAuthoritativeClaimRead bool
 	// VerifyLifecycleTransitionHead builds a read-only verifier from controller
 	// config and exact stores, then validates the source's durable Q43/Q54 head
 	// before a lifecycle descendant is claimable.
@@ -497,13 +507,25 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 		fmt.Fprintf(stderr, "gc hook --claim: requires JSON work_query output to identify claim candidates: %v\n", err) //nolint:errcheck
 		return hookClaimResult{terminal: true, code: 1}
 	}
+	if opts.RequireAuthoritativeClaimRead {
+		candidates, err = assignTrustedHookClaimProvenance(candidates, *opts)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc hook --claim: refusing candidate set without exact source-store provenance: %v\n", err) //nolint:errcheck
+			return hookClaimResult{terminal: true, code: 1}
+		}
+		candidates, err = rereadHookClaimCandidates(candidates, *opts)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc hook --claim: refusing candidate set without authoritative source reads: %v\n", err) //nolint:errcheck
+			return hookClaimResult{terminal: true, code: 1}
+		}
+	}
 	for _, skip := range skipped {
 		fmt.Fprintf(stderr, "gc hook --claim: skipping undecodable bead %s: %v\n", skip.ID, skip.Err) //nolint:errcheck
 	}
 	candidates = filterHookLifecycleCandidates(candidates, *opts, stderr)
 	if opts.CheckFormulaAction != nil {
 		for i := range candidates {
-			state, err := opts.CheckFormulaAction(context.Background(), candidates[i])
+			state, err := checkHookFormulaAction(context.Background(), *opts, candidates[i])
 			if err != nil {
 				fmt.Fprintf(stderr, "gc hook --claim: formula compatibility check failed for %s: %v\n", candidates[i].ID, err) //nolint:errcheck
 				return hookClaimResult{terminal: true, code: 1}
@@ -516,6 +538,12 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 				candidates[i] = state.Bead
 			}
 		}
+	}
+	if opts.RequireAuthoritativeClaimRead {
+		// Formula compatibility results have been re-read from the exact source
+		// store by checkHookFormulaAction. Re-run lifecycle classification because
+		// that authoritative read may expose enrollment omitted by the projection.
+		candidates = filterHookLifecycleCandidates(candidates, *opts, stderr)
 	}
 	if len(candidates) == 0 {
 		return hookClaimResult{}
@@ -585,6 +613,89 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 	return eligibleResult
 }
 
+func rereadHookClaimCandidates(candidates []beads.Bead, opts hookClaimOptions) ([]beads.Bead, error) {
+	needsSourceRead := false
+	for _, candidate := range candidates {
+		if !hookClaimCandidateIsMessage(candidate) {
+			needsSourceRead = true
+			break
+		}
+	}
+	if !needsSourceRead {
+		return candidates, nil
+	}
+	if !opts.TrustedLifecycleScope {
+		return nil, errors.New("work query does not provide trusted source-store provenance")
+	}
+	if opts.ResolveLifecycleStore == nil {
+		return nil, errors.New("authoritative source-store resolver is unavailable")
+	}
+	currentCandidates := make([]beads.Bead, len(candidates))
+	copy(currentCandidates, candidates)
+	for i, projected := range currentCandidates {
+		if hookClaimCandidateIsMessage(projected) {
+			continue
+		}
+		if strings.TrimSpace(projected.ID) == "" || strings.TrimSpace(projected.ID) != projected.ID {
+			return nil, errors.New("candidate has no canonical bead ID")
+		}
+		storeRef := strings.TrimSpace(projected.SourceStoreRef)
+		if storeRef == "" || storeRef != projected.SourceStoreRef {
+			return nil, fmt.Errorf("candidate %s has no exact source-store reference", projected.ID)
+		}
+		store, err := opts.ResolveLifecycleStore(storeRef)
+		if err != nil {
+			return nil, fmt.Errorf("resolve source store %s for candidate %s: %w", storeRef, projected.ID, err)
+		}
+		if store == nil {
+			return nil, fmt.Errorf("resolve source store %s for candidate %s: resolver returned nil", storeRef, projected.ID)
+		}
+		current, err := store.Get(projected.ID)
+		if err != nil {
+			return nil, fmt.Errorf("read canonical candidate %s from source store %s: %w", projected.ID, storeRef, err)
+		}
+		if current.ID != projected.ID {
+			return nil, fmt.Errorf("source store %s returned %s while reading candidate %s", storeRef, current.ID, projected.ID)
+		}
+		current.SourceStoreRef = storeRef
+		current.LifecycleScope = projected.LifecycleScope
+		currentCandidates[i] = current
+	}
+	return currentCandidates, nil
+}
+
+func assignTrustedHookClaimProvenance(candidates []beads.Bead, opts hookClaimOptions) ([]beads.Bead, error) {
+	storeRef := strings.TrimSpace(opts.ClaimSourceStoreRef)
+	if storeRef == "" {
+		return candidates, nil
+	}
+	if storeRef != opts.ClaimSourceStoreRef || !opts.TrustedLifecycleScope {
+		return nil, errors.New("controller-selected claim store provenance is unavailable or malformed")
+	}
+	cityName := loadedCityName(opts.LifecycleCity, opts.LifecycleCityPath)
+	scope := worklifecycle.ScopeForStore(cityName, storeRef)
+	if scope == "" {
+		return nil, errors.New("cannot derive lifecycle scope for controller-selected claim store")
+	}
+	withProvenance := make([]beads.Bead, len(candidates))
+	copy(withProvenance, candidates)
+	for i := range withProvenance {
+		candidate := &withProvenance[i]
+		if hookClaimCandidateIsMessage(*candidate) {
+			continue
+		}
+		if candidate.SourceStoreRef != "" && candidate.SourceStoreRef != storeRef {
+			return nil, fmt.Errorf("candidate %s source store %q does not match controller-selected store %q", candidate.ID, candidate.SourceStoreRef, storeRef)
+		}
+		if candidate.LifecycleScope != "" && candidate.LifecycleScope != scope {
+			return nil, fmt.Errorf("candidate %s lifecycle scope does not match controller-selected store", candidate.ID)
+		}
+		candidate.SourceStoreRef = storeRef
+		candidate.LifecycleScope = scope
+	}
+	return withProvenance, nil
+}
+
 func checkHookFormulaAction(ctx context.Context, opts hookClaimOptions, candidate beads.Bead) (formulaActionCandidate, error) {
 	if opts.CheckFormulaAction == nil {
 		return formulaActionCandidate{Bead: candidate}, nil
@@ -593,8 +704,33 @@ func checkHookFormulaAction(ctx context.Context, opts hookClaimOptions, candidat
 	if err != nil {
 		return formulaActionCandidate{}, err
 	}
-	if state.Bead.ID != "" && state.Bead.ID != candidate.ID {
+	if state.Bead.ID == "" {
+		state.Bead = candidate
+	}
+	if state.Bead.ID != candidate.ID {
 		return formulaActionCandidate{}, fmt.Errorf("formula compatibility lookup changed bead identity")
+	}
+	if state.Bead.SourceStoreRef != "" && state.Bead.SourceStoreRef != candidate.SourceStoreRef {
+		return formulaActionCandidate{}, fmt.Errorf("formula compatibility lookup changed source-store provenance")
+	}
+	if state.Bead.LifecycleScope != "" && state.Bead.LifecycleScope != candidate.LifecycleScope {
+		return formulaActionCandidate{}, fmt.Errorf("formula compatibility lookup changed lifecycle-scope provenance")
+	}
+	if state.Bead.SourceStoreRef == "" {
+		state.Bead.SourceStoreRef = candidate.SourceStoreRef
+	}
+	if state.Bead.LifecycleScope == "" {
+		state.Bead.LifecycleScope = candidate.LifecycleScope
+	}
+	if opts.RequireAuthoritativeClaimRead {
+		canonical, err := rereadHookClaimCandidates([]beads.Bead{state.Bead}, opts)
+		if err != nil {
+			return formulaActionCandidate{}, err
+		}
+		if len(canonical) != 1 {
+			return formulaActionCandidate{}, fmt.Errorf("formula compatibility lookup lost candidate %s", candidate.ID)
+		}
+		state.Bead = canonical[0]
 	}
 	return state, nil
 }
@@ -1013,6 +1149,9 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 					return hookClaimResult{terminal: true, code: 1}
 				}
 				candidate = state.Bead
+				if lifecycleEnrollmentEvidence(candidate) {
+					continue
+				}
 			}
 			if ops.claimWindowSpent() {
 				return refuseExpiredHookClaimWindow(candidate.ID, ops, stderr)

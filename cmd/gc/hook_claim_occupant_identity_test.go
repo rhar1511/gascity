@@ -226,7 +226,7 @@ func TestCmdHookClaimCustomQueryRefusesMissingCanonicalBead(t *testing.T) {
 	if stdout.Len() != 0 {
 		t.Fatalf("canonical-read refusal wrote a claim result: %q", stdout.String())
 	}
-	if !strings.Contains(stderr.String(), "reading canonical formula action "+beadID) {
+	if !strings.Contains(stderr.String(), "read canonical candidate "+beadID) {
 		t.Fatalf("stderr does not identify the missing canonical row: %s", stderr.String())
 	}
 	logData, err := os.ReadFile(logPath)
