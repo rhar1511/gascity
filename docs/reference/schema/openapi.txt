@@ -4705,6 +4705,90 @@
         ],
         "type": "object"
       },
+      "LifecycleClaimSubmitOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "claim_generation": {
+            "type": "string"
+          },
+          "receipt_id": {
+            "type": "string"
+          },
+          "replayed": {
+            "type": "boolean"
+          },
+          "work_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "work_id",
+          "actor",
+          "claim_generation",
+          "receipt_id",
+          "replayed"
+        ],
+        "type": "object"
+      },
+      "LifecycleClaimSubmitRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "expected_revision": {
+            "description": "Source revision observed by the claim candidate query.",
+            "format": "int64",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "expected_transition_head": {
+            "description": "Lifecycle transition head observed by the claim candidate query.",
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "instance_token": {
+            "description": "Current managed runtime instance token.",
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "runtime_epoch": {
+            "description": "Canonical positive managed runtime epoch.",
+            "maxLength": 32,
+            "minLength": 1,
+            "type": "string"
+          },
+          "session_id": {
+            "description": "Managed session bead ID.",
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "source_store_ref": {
+            "description": "Authoritative store reference observed by the controller-owned ready query; the city work store uses the empty reference.",
+            "maxLength": 200,
+            "type": "string"
+          },
+          "work_id": {
+            "description": "Exact admitted work bead ID.",
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "work_id",
+          "source_store_ref",
+          "expected_revision",
+          "expected_transition_head",
+          "session_id",
+          "instance_token",
+          "runtime_epoch"
+        ],
+        "type": "object"
+      },
       "LifecycleRecoverySubmitOutputBody": {
         "additionalProperties": false,
         "properties": {
@@ -39467,6 +39551,170 @@
           }
         },
         "summary": "Get v0 city by city name health"
+      }
+    },
+    "/v0/city/{cityName}/lifecycle/claims": {
+      "post": {
+        "description": "Authenticates the current managed session incarnation, atomically appends a Q54 ClaimIdentity transition for exact admitted work, then stamps and verifies the reciprocal session claim.",
+        "operationId": "claim-admitted-lifecycle-work",
+        "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LifecycleClaimSubmitRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LifecycleClaimSubmitOutputBody"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Bad Request",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Forbidden",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Not Found",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Conflict",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Service Unavailable",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          }
+        },
+        "summary": "Claim admitted work through its durable lifecycle transition"
       }
     },
     "/v0/city/{cityName}/lifecycle/recovery-requests": {

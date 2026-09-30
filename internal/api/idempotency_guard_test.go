@@ -49,6 +49,13 @@ var pendingIdempotency = map[string]bool{
 // be classified, so a new create at ANY status (201, 202, …) that is neither
 // wired nor triaged fails the test.
 var exemptFromIdempotency = map[string]bool{
+	// Enrolled claims derive a deterministic transition receipt from the
+	// authenticated runtime incarnation and resulting claim generation. The
+	// controller replays that exact receipt and repairs the reciprocal session
+	// stamp after an ambiguous response, so a separate HTTP idempotency key would
+	// create a competing identity. Proof: LifecycleClaimIdentity replay tests.
+	"claim-admitted-lifecycle-work": true,
+
 	// Signed recovery requests use the mandatory body request_id, work ID and
 	// authoritative scope to derive one durable intent ID. Exact replay returns
 	// that intent; different signed content with the same identity conflicts.

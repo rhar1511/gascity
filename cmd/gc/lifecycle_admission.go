@@ -1642,66 +1642,6 @@ func lifecycleAuthoritativeCandidate(candidate beads.Bead, opts hookClaimOptions
 	return store, current, true
 }
 
-// lifecycleConditionalClaim is the only claim writer for enrolled work. It
-// fences the exact row revision and re-reads both the work row and its signed
-// source/root lineage after the write. Stores without real revision CAS hold
-// lifecycle work; the legacy `bd update --claim` path is never a fallback.
-func lifecycleConditionalClaim(candidate beads.Bead, actor string, readyAssignment bool, opts hookClaimOptions, compatibilityChecks ...formulaActionCandidateCheck) (beads.Bead, bool, error) {
-	store, current, ok := lifecycleAuthoritativeCandidate(candidate, opts)
-	if !ok {
-		return beads.Bead{}, false, nil
-	}
-	actor = strings.TrimSpace(actor)
-	if actor == "" || !hookClaimHasIdentity(actor, opts.IdentityCandidates) || current.Revision == 0 {
-		return beads.Bead{}, false, nil
-	}
-	status := strings.ToLower(strings.TrimSpace(current.Status))
-	if status != "open" {
-		return beads.Bead{}, false, nil
-	}
-	if len(compatibilityChecks) > 0 && compatibilityChecks[0] != nil {
-		state, err := compatibilityChecks[0](context.Background(), current)
-		if err != nil {
-			return beads.Bead{}, false, fmt.Errorf("validating formula compatibility before lifecycle claim: %w", err)
-		}
-		if state.Bead.ID != current.ID || state.Bead.Revision != current.Revision ||
-			state.Bead.SourceStoreRef != current.SourceStoreRef {
-			return beads.Bead{}, false, fmt.Errorf("formula compatibility candidate changed before lifecycle claim")
-		}
-	}
-	owner := strings.TrimSpace(current.Assignee)
-	if readyAssignment {
-		if owner == "" || !hookClaimHasIdentity(owner, opts.IdentityCandidates) || owner != actor {
-			return beads.Bead{}, false, nil
-		}
-	} else if owner != "" {
-		return beads.Bead{}, false, nil
-	}
-	writer, supported := beads.ConditionalWriterFor(store)
-	if !supported || !beads.InspectConditionalWrites(store).Capable {
-		return beads.Bead{}, false, beads.ErrConditionalWriteUnsupported
-	}
-	if err := writer.UpdateIfMatch(current.ID, current.Revision, beads.UpdateOpts{
-		Status:   stringPtr("in_progress"),
-		Assignee: stringPtr(actor),
-	}); err != nil {
-		return beads.Bead{}, false, err
-	}
-	claimed, err := store.Get(current.ID)
-	if err != nil {
-		return beads.Bead{}, true, fmt.Errorf("lifecycle claim %s committed but readback failed: %w", current.ID, err)
-	}
-	claimed.SourceStoreRef = candidate.SourceStoreRef
-	claimed.LifecycleScope = candidate.LifecycleScope
-	if strings.TrimSpace(claimed.Assignee) != actor || !strings.EqualFold(strings.TrimSpace(claimed.Status), "in_progress") {
-		return claimed, true, fmt.Errorf("lifecycle claim %s readback does not show in_progress owned by %s", current.ID, actor)
-	}
-	if _, _, stillEligible := lifecycleAuthoritativeCandidate(claimed, opts); !stillEligible {
-		return claimed, true, fmt.Errorf("lifecycle claim %s lost current admission or lineage after its fenced write", current.ID)
-	}
-	return claimed, true, nil
-}
-
 func hookLifecycleRouteMatches(cfg *config.City, route string, candidates []string) bool {
 	if cfg == nil || strings.TrimSpace(route) == "" {
 		return false

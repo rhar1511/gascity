@@ -1663,6 +1663,45 @@ export type InputRoot = {
     unavailable_reason?: string;
 };
 
+export type LifecycleClaimSubmitOutputBody = {
+    actor: string;
+    claim_generation: string;
+    receipt_id: string;
+    replayed: boolean;
+    work_id: string;
+};
+
+export type LifecycleClaimSubmitRequest = {
+    /**
+     * Source revision observed by the claim candidate query.
+     */
+    expected_revision: number;
+    /**
+     * Lifecycle transition head observed by the claim candidate query.
+     */
+    expected_transition_head: string;
+    /**
+     * Current managed runtime instance token.
+     */
+    instance_token: string;
+    /**
+     * Canonical positive managed runtime epoch.
+     */
+    runtime_epoch: string;
+    /**
+     * Managed session bead ID.
+     */
+    session_id: string;
+    /**
+     * Authoritative store reference observed by the controller-owned ready query; the city work store uses the empty reference.
+     */
+    source_store_ref: string;
+    /**
+     * Exact admitted work bead ID.
+     */
+    work_id: string;
+};
+
 export type LifecycleRecoverySubmitOutputBody = {
     intent_id: string;
     request_id: string;
@@ -14871,6 +14910,66 @@ export type GetV0CityByCityNameHealthResponses = {
 };
 
 export type GetV0CityByCityNameHealthResponse = GetV0CityByCityNameHealthResponses[keyof GetV0CityByCityNameHealthResponses];
+
+export type ClaimAdmittedLifecycleWorkData = {
+    body: LifecycleClaimSubmitRequest;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/lifecycle/claims';
+};
+
+export type ClaimAdmittedLifecycleWorkErrors = {
+    /**
+     * Bad Request
+     */
+    400: ErrorModel;
+    /**
+     * Forbidden
+     */
+    403: ErrorModel;
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type ClaimAdmittedLifecycleWorkError = ClaimAdmittedLifecycleWorkErrors[keyof ClaimAdmittedLifecycleWorkErrors];
+
+export type ClaimAdmittedLifecycleWorkResponses = {
+    /**
+     * OK
+     */
+    200: LifecycleClaimSubmitOutputBody;
+};
+
+export type ClaimAdmittedLifecycleWorkResponse = ClaimAdmittedLifecycleWorkResponses[keyof ClaimAdmittedLifecycleWorkResponses];
 
 export type SubmitLifecycleRecoveryRequestData = {
     body: RecoveryRequest;

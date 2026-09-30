@@ -491,6 +491,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 			JSON:                          opts.JSON,
 			Lifecycle:                     cfg.Lifecycle,
 			LifecycleCity:                 cfg,
+			LifecycleCityPath:             cityPath,
 			ResolveLifecycleStore:         resolveLifecycleStore,
 			TrustedLifecycleScope:         cfg.Lifecycle.AdmissionEnabled && a.WorkQuery == "",
 			VerifyLifecycleTransitionHead: verifyLifecycleTransitionHead,

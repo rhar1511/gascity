@@ -162,6 +162,7 @@ type hookClaimOptions struct {
 	JSON               bool
 	Lifecycle          config.LifecycleConfig
 	LifecycleCity      *config.City
+	LifecycleCityPath  string
 	// ResolveLifecycleStore returns the exact city/rig/class store named by
 	// trusted gc ready provenance. Lifecycle checks never substitute a
 	// different store when this resolver fails.
@@ -306,6 +307,10 @@ type hookClaimOps struct {
 	// restampHookAdoption). Only a CAS may back it: a lost CAS is how the
 	// caller learns someone else took the bead.
 	RestampAdopted hookClaimRestampFunc
+	// ClaimLifecycle is the only enrolled-work claim path. It submits the
+	// observed source head and managed session incarnation to the controller,
+	// which performs the typed Q54 transition and reciprocal stamp.
+	ClaimLifecycle hookLifecycleClaimFunc
 }
 
 type (
@@ -329,8 +334,15 @@ type (
 	// moves an in_progress bead from one exact assignee to another only while
 	// it still carries fromAssignee, reporting whether it now carries
 	// toAssignee.
-	hookClaimRestampFunc func(context.Context, string, []string, string, string, string) (bool, error)
+	hookClaimRestampFunc   func(context.Context, string, []string, string, string, string) (bool, error)
+	hookLifecycleClaimFunc func(context.Context, beads.Bead, hookClaimOptions) (beads.Bead, hookLifecycleClaimResult, error)
 )
+
+type hookLifecycleClaimResult struct {
+	Generation string
+	ReceiptID  string
+	Replayed   bool
+}
 
 type hookClaimJSONResult struct {
 	SchemaVersion        string   `json:"schema_version"`
@@ -345,6 +357,10 @@ type hookClaimJSONResult struct {
 	ContinuationGroup    string   `json:"continuation_group,omitempty"`
 	ContinuationAssigned []string `json:"continuation_assigned,omitempty"`
 	DrainAcknowledged    bool     `json:"drain_acknowledged,omitempty"`
+	// Internal handoff from claim selection to the result writer. These values
+	// are intentionally absent from the public hook result contract.
+	lifecycleClaimGeneration string `json:"-"`
+	lifecycleClaimReceiptID  string `json:"-"`
 }
 
 // hookClaimResult is the outcome of attempting a claim against one store's
@@ -692,6 +708,9 @@ func (ops *hookClaimOps) applyDefaults() {
 	if ops.RestampAdopted == nil {
 		ops.RestampAdopted = hookClaimRestampWithBdStore
 	}
+	if ops.ClaimLifecycle == nil {
+		ops.ClaimLifecycle = hookClaimLifecycleWork
+	}
 	if ops.EmitHookClaimReclaimedStale == nil {
 		ops.EmitHookClaimReclaimedStale = hookEmitClaimReclaimedStale
 	}
@@ -845,19 +864,21 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 		var claimed beads.Bead
 		var ok bool
 		var err error
+		var lifecycleClaim hookLifecycleClaimResult
 		switch {
 		case lifecycleEnrollmentEvidence(candidate):
-			if opts.CheckFormulaAction != nil {
-				claimed, ok, err = lifecycleConditionalClaim(candidate, claimActor, true, opts, opts.CheckFormulaAction)
-			} else {
-				claimed, ok, err = lifecycleConditionalClaim(candidate, claimActor, true, opts)
-			}
+			claimed, lifecycleClaim, err = ops.ClaimLifecycle(ctx, candidate, opts)
+			ok = err == nil
 		case actionState.Required:
 			claimed, ok, err = conditionalFormulaActionClaim(ctx, actionState, claimActor, true, opts)
 		default:
 			claimed, ok, err = ops.Claim(ctx, dir, opts.Env, candidate.ID, claimActor)
 		}
 		if err != nil {
+			if lifecycleEnrollmentEvidence(candidate) {
+				fmt.Fprintf(stderr, "gc hook --claim: holding enrolled ready assignment %s because its controller transition did not complete: %v\n", candidate.ID, err) //nolint:errcheck
+				return hookClaimResult{terminal: true, code: 1}
+			}
 			if !ok && (hookClaimBeadIsElsewhere(err) || hookClaimBindingRefusedTheClaim(err)) {
 				// The read federated and the write did not: the assigned tier
 				// reads city-wide, so a graph step in a relocated class store
@@ -921,6 +942,10 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 		}
 		if result.Assignee == "" {
 			result.Assignee = claimActor
+		}
+		if lifecycleEnrollmentEvidence(claimed) {
+			result.lifecycleClaimGeneration = lifecycleClaim.Generation
+			result.lifecycleClaimReceiptID = lifecycleClaim.ReceiptID
 		}
 		return hookClaimResult{terminal: true, code: writeHookClaimWorkResultForBead(result, claimed, opts, ops, dir, true, stdout, stderr)}
 	}
@@ -1030,19 +1055,21 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 		var claimed beads.Bead
 		var ok bool
 		var err error
+		var lifecycleClaim hookLifecycleClaimResult
 		switch {
 		case lifecycleEnrollmentEvidence(candidate):
-			if opts.CheckFormulaAction != nil {
-				claimed, ok, err = lifecycleConditionalClaim(candidate, opts.Assignee, false, opts, opts.CheckFormulaAction)
-			} else {
-				claimed, ok, err = lifecycleConditionalClaim(candidate, opts.Assignee, false, opts)
-			}
+			claimed, lifecycleClaim, err = ops.ClaimLifecycle(ctx, candidate, opts)
+			ok = err == nil
 		case actionState.Required:
 			claimed, ok, err = conditionalFormulaActionClaim(ctx, actionState, opts.Assignee, false, opts)
 		default:
 			claimed, ok, err = ops.Claim(ctx, dir, opts.Env, candidate.ID, opts.Assignee)
 		}
 		if err != nil {
+			if lifecycleEnrollmentEvidence(candidate) {
+				fmt.Fprintf(stderr, "gc hook --claim: holding enrolled work %s because its controller transition did not complete: %v\n", candidate.ID, err) //nolint:errcheck
+				return hookClaimResult{terminal: true, code: 1}
+			}
 			if ok {
 				// The atomic mutation committed, but its canonical readback failed.
 				// Stop immediately: trying another candidate or draining would strand
@@ -1111,6 +1138,10 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 			// succeeded -- a reclaim followed by a lost claim race reports nothing,
 			// since the bead was never ours to begin with.
 			ops.EmitHookClaimReclaimedStale(result.BeadID, reclaimedFrom, result.Assignee)
+		}
+		if lifecycleEnrollmentEvidence(claimed) {
+			result.lifecycleClaimGeneration = lifecycleClaim.Generation
+			result.lifecycleClaimReceiptID = lifecycleClaim.ReceiptID
 		}
 		return hookClaimResult{terminal: true, code: writeHookClaimWorkResultForBead(result, claimed, opts, ops, dir, true, stdout, stderr)}
 	}
@@ -1367,6 +1398,7 @@ func hookClaimCandidateIsMessage(candidate beads.Bead) bool {
 // turn legitimately made. A held claim that goes undelivered is re-served to the
 // next turn by the existing-assignment tier instead.
 func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, minted bool, stdout, stderr io.Writer) int {
+	enrolled := lifecycleEnrollmentEvidence(bead)
 	// F-B straddle. The CAS was STARTED inside the window and LANDED outside it:
 	// the claim-write child carries its own ceiling, so a claim can commit after
 	// the invoking turn is already gone. That is the same parked claim by another
@@ -1374,9 +1406,13 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 	if minted && ops.claimWindowSpent() {
 		cause := fmt.Sprintf("claim of %s landed after the %s claim window closed (invocation age %s); releasing it rather than parking it",
 			bead.ID, ops.claimWindowOrDefault(), ops.invocationAge().Round(time.Millisecond))
+		if enrolled {
+			fmt.Fprintf(stderr, "gc hook --claim: %s; keeping the durable lifecycle claim for same-session replay\n", cause) //nolint:errcheck
+			return 1
+		}
 		return unwindUndeliveredHookClaim(hookClaimReleaseReasonStraddled, cause, bead, opts, ops, dir, stderr)
 	}
-	if opts.CheckFormulaAction != nil {
+	if !enrolled && opts.CheckFormulaAction != nil {
 		state, err := checkHookFormulaAction(context.Background(), opts, bead)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc hook --claim: formula compatibility changed before delivery of %s: %v\n", bead.ID, err) //nolint:errcheck
@@ -1394,41 +1430,62 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 	result.ContinuationGroup = strings.TrimSpace(bead.Metadata[beadmeta.ContinuationGroupMetadataKey])
 	var durable beads.Bead
 	var stamped bool
-	if lifecycleEnrollmentEvidence(bead) {
-		var ok bool
-		durable, ok = stampLifecycleHookClaimIdentity(bead, opts, ops, dir, stderr)
-		if !ok {
-			// The claim remains with the same owner, but no worker gets a receipt
-			// until the controller can conditionally persist the execution identity.
-			fmt.Fprintf(stderr, "gc hook --claim: lifecycle assignment %s remains held because its execution identity could not be revision-fenced\n", bead.ID) //nolint:errcheck
+	if enrolled {
+		if result.lifecycleClaimReceiptID == "" || result.lifecycleClaimGeneration == "" {
+			var lifecycleResult hookLifecycleClaimResult
+			var err error
+			durable, lifecycleResult, err = ops.ClaimLifecycle(context.Background(), bead, opts)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc hook --claim: lifecycle assignment %s remains held because controller replay or reciprocal repair failed: %v\n", bead.ID, err) //nolint:errcheck
+				return 1
+			}
+			result.lifecycleClaimGeneration = lifecycleResult.Generation
+			result.lifecycleClaimReceiptID = lifecycleResult.ReceiptID
+		} else {
+			durable = bead
+		}
+		if result.lifecycleClaimReceiptID == "" || result.lifecycleClaimGeneration == "" ||
+			strings.TrimSpace(durable.Assignee) == "" ||
+			strings.TrimSpace(durable.Metadata[beadmeta.SessionIDMetadataKey]) != strings.TrimSpace(opts.SessionID) ||
+			durable.Metadata[beadmeta.ClaimGenerationMetadataKey] != result.lifecycleClaimGeneration ||
+			!strings.EqualFold(strings.TrimSpace(durable.Status), "in_progress") {
+			fmt.Fprintf(stderr, "gc hook --claim: lifecycle assignment %s readback does not match its durable claim receipt\n", bead.ID) //nolint:errcheck
 			return 1
 		}
-		stamped = strings.TrimSpace(durable.Metadata[beadmeta.SessionIDMetadataKey]) != "" &&
-			strings.EqualFold(strings.TrimSpace(durable.Status), "in_progress")
+		result.Assignee = durable.Assignee
+		stamped = true
 	} else {
 		durable, stamped = stampHookClaimIdentity(bead, opts, ops, dir, stderr)
 	}
 	if stamped && hookClaimLifecycleCandidate(durable, opts) {
 		ops.EmitExecutionStepStarted(durable, dir, opts.Env, opts.Assignee)
 	}
-	claimStamp := durable
-	if strings.TrimSpace(claimStamp.ID) == "" {
-		claimStamp = bead
+	if !enrolled {
+		claimStamp := durable
+		if strings.TrimSpace(claimStamp.ID) == "" {
+			claimStamp = bead
+		}
+		stampHookSessionCurrentClaim(claimStamp, opts, ops, stderr)
 	}
-	stampHookSessionCurrentClaim(claimStamp, opts, ops, stderr)
 	publishHookClaimRunMap(bead, opts, ops, stderr)
-	assigned, err := preassignHookContinuationGroup(bead, opts, ops, dir)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc hook --claim: preassigning continuation group for %s: %v\n", bead.ID, err) //nolint:errcheck
-		return 1
+	if !enrolled {
+		assigned, err := preassignHookContinuationGroup(bead, opts, ops, dir)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc hook --claim: preassigning continuation group for %s: %v\n", bead.ID, err) //nolint:errcheck
+			return 1
+		}
+		result.ContinuationAssigned = assigned
 	}
-	result.ContinuationAssigned = assigned
 	if writeErr := writeHookClaimResultLine(result, opts.JSON, stdout); writeErr != nil {
 		// F-C. The claim is won but its result never left the process — the
 		// orphaned tool call's signature is EPIPE on a stdout whose reader the
 		// provider already closed. A closed pipe cannot deliver, so nobody will
 		// execute this claim; give it back instead of parking it.
 		cause := fmt.Sprintf("writing result for %s: %v", bead.ID, writeErr)
+		if enrolled {
+			fmt.Fprintf(stderr, "gc hook --claim: %s; durable lifecycle claim and reciprocal stamp remain available for same-session replay\n", cause) //nolint:errcheck
+			return 1
+		}
 		if !minted {
 			fmt.Fprintf(stderr, "gc hook --claim: %s\n", cause) //nolint:errcheck
 			return 1
@@ -1860,42 +1917,6 @@ func stampHookClaimIdentity(bead beads.Bead, opts hookClaimOptions, ops hookClai
 		return beads.Bead{}, false
 	}
 	return readback, true
-}
-
-// stampLifecycleHookClaimIdentity persists claim-time identity through the
-// exact trusted store and a revision CAS. Lifecycle work never falls back to
-// the legacy unconditional metadata writer after its fenced claim.
-func stampLifecycleHookClaimIdentity(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) (beads.Bead, bool) {
-	store, current, ok := lifecycleAuthoritativeCandidate(bead, opts)
-	if !ok || !hookClaimHasIdentity(current.Assignee, opts.IdentityCandidates) ||
-		!strings.EqualFold(strings.TrimSpace(current.Status), "in_progress") || current.Revision == 0 {
-		return beads.Bead{}, false
-	}
-	patch := hookClaimIdentityPatch(current, opts, ops, dir)
-	if len(patch) == 0 {
-		return current, true
-	}
-	writer, supported := beads.ConditionalWriterFor(store)
-	if !supported || !beads.InspectConditionalWrites(store).Capable {
-		return beads.Bead{}, false
-	}
-	if err := writer.UpdateIfMatch(current.ID, current.Revision, beads.UpdateOpts{Metadata: patch}); err != nil {
-		fmt.Fprintf(stderr, "gc hook --claim: conditionally stamping lifecycle identity on %s: %v\n", current.ID, err) //nolint:errcheck
-		return beads.Bead{}, false
-	}
-	readback, err := store.Get(current.ID)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc hook --claim: reading lifecycle identity on %s: %v\n", current.ID, err) //nolint:errcheck
-		return beads.Bead{}, false
-	}
-	readback.SourceStoreRef = bead.SourceStoreRef
-	readback.LifecycleScope = bead.LifecycleScope
-	_, verified, ok := lifecycleAuthoritativeCandidate(readback, opts)
-	if !ok || !hookClaimHasIdentity(verified.Assignee, opts.IdentityCandidates) ||
-		!strings.EqualFold(strings.TrimSpace(verified.Status), "in_progress") {
-		return beads.Bead{}, false
-	}
-	return verified, true
 }
 
 // hookClaimLifecycleCandidate reports whether a bead can be a session-owned

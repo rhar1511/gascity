@@ -834,6 +834,24 @@ export const zInputRoot = z.object({
     unavailable_reason: z.string().optional()
 });
 
+export const zLifecycleClaimSubmitOutputBody = z.object({
+    actor: z.string(),
+    claim_generation: z.string(),
+    receipt_id: z.string(),
+    replayed: z.boolean(),
+    work_id: z.string()
+});
+
+export const zLifecycleClaimSubmitRequest = z.object({
+    expected_revision: z.coerce.bigint().gte(BigInt(1)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    expected_transition_head: z.string().min(1).max(200),
+    instance_token: z.string().min(1).max(512),
+    runtime_epoch: z.string().min(1).max(32),
+    session_id: z.string().min(1).max(200),
+    source_store_ref: z.string().max(200),
+    work_id: z.string().min(1).max(200)
+});
+
 export const zLifecycleRecoverySubmitOutputBody = z.object({
     intent_id: z.string(),
     request_id: z.string(),
@@ -9040,6 +9058,21 @@ export const zGetV0CityByCityNameHealthPath = z.object({
  * OK
  */
 export const zGetV0CityByCityNameHealthResponse = zHealthOutputBody;
+
+export const zClaimAdmittedLifecycleWorkBody = zLifecycleClaimSubmitRequest;
+
+export const zClaimAdmittedLifecycleWorkHeaders = z.object({
+    'X-GC-Request': z.string().min(1)
+});
+
+export const zClaimAdmittedLifecycleWorkPath = z.object({
+    cityName: z.string().min(1).regex(/\S/)
+});
+
+/**
+ * OK
+ */
+export const zClaimAdmittedLifecycleWorkResponse = zLifecycleClaimSubmitOutputBody;
 
 export const zSubmitLifecycleRecoveryRequestBody = zRecoveryRequest;
 
