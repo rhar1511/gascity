@@ -17,7 +17,10 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 )
 
-const recoveryRequestDomain = "gascity.lifecycle.recovery-request.v1\n"
+const (
+	recoveryRequestDomain         = "gascity.lifecycle.recovery-request.v1\n"
+	recoveryBudgetOperationDomain = "gascity.lifecycle.recovery-budget-operation.v1\n"
+)
 
 var (
 	// ErrRecoveryRequestInvalid means a signed recovery request is malformed,
@@ -158,6 +161,17 @@ func RecoveryRequestDigest(request RecoveryRequest) (string, error) {
 	return hex.EncodeToString(digest[:]), nil
 }
 
+// RecoveryBudgetOperationID derives the stable Q54 operation identity for one
+// exact signed recovery request. The signed request ID alone is insufficient:
+// reusing it with changed signed content must not address the same operation.
+func RecoveryBudgetOperationID(requestID, requestDigest string) (string, error) {
+	if !validSessionRequestID(requestID) || !validDigest(requestDigest) {
+		return "", ErrRecoveryRequestInvalid
+	}
+	digest := sha256.Sum256([]byte(recoveryBudgetOperationDomain + requestID + "\x00" + requestDigest))
+	return "lifecycle-recovery-budget-v1:" + hex.EncodeToString(digest[:]), nil
+}
+
 // RecoveryIntent is the durable, controller-readable form of one authorized
 // recovery request. It is stored as a separate held infrastructure bead.
 type RecoveryIntent struct {
@@ -251,8 +265,8 @@ func DecodeRecoveryIntent(bead beads.Bead) (RecoveryIntent, error) {
 // whose signed admission and workflow materialization still match. Descendant
 // rows are never recovery targets under the initial nudge-only authority.
 func ValidateRecoveryWorkEvidence(bead beads.Bead, cfg config.LifecycleConfig, scope string) error {
-	decision := EvaluateAdmission(bead, cfg, scope)
-	if !decision.Requested || !decision.Admitted {
+	receipt, err := VerifyAdmissionReceiptV2(bead, cfg, scope)
+	if err != nil {
 		return fmt.Errorf("recovery target has no trusted admission: %w", ErrRecoveryWorkStale)
 	}
 	var marker struct {
@@ -273,9 +287,9 @@ func ValidateRecoveryWorkEvidence(bead beads.Bead, cfg config.LifecycleConfig, s
 	if err := decodeStrict(bead.Metadata[beadmeta.LifecycleMaterializationMetadataKey], &marker); err != nil {
 		return fmt.Errorf("recovery target workflow materialization is invalid: %w", ErrRecoveryWorkStale)
 	}
-	digest, err := AdmissionDigestV2(decision.Receipt)
+	digest, err := AdmissionDigestV2(receipt)
 	if err != nil || marker.Version != 1 || marker.State != "attached" || marker.Scope != scope || marker.Contract != digest ||
-		marker.Route == "" || marker.Workflow != decision.Receipt.Workflow || marker.MergeStrategy != decision.Receipt.MergeStrategy ||
+		marker.Route == "" || marker.Route != receipt.Route || marker.Workflow != receipt.Workflow || marker.MergeStrategy != receipt.MergeStrategy ||
 		marker.Token == "" || marker.WorkflowID == "" || marker.SourceID != bead.ID || marker.SourceStoreRef == "" ||
 		marker.WorkflowStoreRef == "" || marker.AdmissionReceipt != bead.Metadata[beadmeta.LifecycleAdmissionReceiptV2MetadataKey] {
 		return fmt.Errorf("recovery target workflow is not the attached admitted source: %w", ErrRecoveryWorkStale)

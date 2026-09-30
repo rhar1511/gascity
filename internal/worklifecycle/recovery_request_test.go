@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -14,6 +15,26 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 )
+
+func TestRecoveryBudgetOperationIDBindsRequestDigest(t *testing.T) {
+	digestA := strings.Repeat("a", 64)
+	digestB := strings.Repeat("b", 64)
+	first, err := RecoveryBudgetOperationID("request-1", digestA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replay, err := RecoveryBudgetOperationID("request-1", digestA)
+	if err != nil || replay != first {
+		t.Fatalf("exact recovery request operation ID = %q, err=%v; want stable %q", replay, err, first)
+	}
+	changed, err := RecoveryBudgetOperationID("request-1", digestB)
+	if err != nil || changed == first {
+		t.Fatalf("changed signed request digest operation ID = %q, err=%v; want a distinct identity", changed, err)
+	}
+	if _, err := RecoveryBudgetOperationID("request-1", "invalid"); err == nil {
+		t.Fatal("invalid request digest produced a budget operation identity")
+	}
+}
 
 func TestRecoveryRequestVerificationBindsAuthorityScopeAndWindow(t *testing.T) {
 	public, private, err := ed25519.GenerateKey(rand.Reader)

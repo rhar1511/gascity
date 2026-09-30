@@ -25,7 +25,7 @@ func TestTransitionChainAppliesEveryLifecycleStepWithExactPermitBinding(t *testi
 		operation string
 		patch     func(beads.Bead) SourceWorkPatch
 	}{
-		{step: TransitionStepReservation, operation: "reserve-1", patch: func(bead beads.Bead) SourceWorkPatch {
+		{step: TransitionStepReservation, operation: "reserve-1", patch: func(_ beads.Bead) SourceWorkPatch {
 			return SourceWorkPatch{Metadata: map[string]MetadataStringPatch{
 				beadmeta.LifecycleMaterializationMetadataKey: {Value: fixture.materializationValue("reserved", "")},
 			}}
@@ -33,19 +33,17 @@ func TestTransitionChainAppliesEveryLifecycleStepWithExactPermitBinding(t *testi
 		{step: TransitionStepAttachedMaterialization, operation: "materialize-1", patch: func(bead beads.Bead) SourceWorkPatch {
 			return fixture.attachedMaterializationPatch(bead)
 		}},
-		{step: TransitionStepClaimIdentity, operation: "claim-1", patch: func(bead beads.Bead) SourceWorkPatch {
+		{step: TransitionStepClaimIdentity, operation: "claim-1", patch: func(_ beads.Bead) SourceWorkPatch {
 			return claimIdentityTestPatch()
 		}},
-		{step: TransitionStepRecoveryBudget, operation: "recovery-1", patch: func(bead beads.Bead) SourceWorkPatch {
+		{step: TransitionStepRecoveryBudget, operation: "recovery-1", patch: func(_ beads.Bead) SourceWorkPatch {
 			return SourceWorkPatch{}
 		}},
-		{step: TransitionStepCompletionBudget, operation: "completion-1", patch: func(bead beads.Bead) SourceWorkPatch {
+		{step: TransitionStepCompletionBudget, operation: "completion-1", patch: func(_ beads.Bead) SourceWorkPatch {
 			return SourceWorkPatch{}
 		}},
-		{step: TransitionStepClose, operation: "close-1", patch: func(bead beads.Bead) SourceWorkPatch {
-			patch := metadataTransition(bead, beadmeta.LifecycleCompletionReceiptMetadataKey, fixture.completionReceiptValue(t, nil))
-			patch.Status = &StringTransition{Expected: "in_progress", Value: "closed"}
-			return patch
+		{step: TransitionStepClose, operation: "close-1", patch: func(_ beads.Bead) SourceWorkPatch {
+			return SourceWorkPatch{Status: &StringTransition{Expected: "in_progress", Value: "closed"}}
 		}},
 	}
 
@@ -60,10 +58,13 @@ func TestTransitionChainAppliesEveryLifecycleStepWithExactPermitBinding(t *testi
 			IssueID: fixture.work.ID, Step: tc.step, OperationID: tc.operation, PriorReceiptID: parentID,
 			Evidence: fixture.evidence, Patch: tc.patch(current),
 		}
-		if tc.step == TransitionStepRecoveryBudget {
+		switch tc.step {
+		case TransitionStepRecoveryBudget:
 			request = fixture.recoveryBudgetRequest(t, previous, tc.operation)
-		} else if tc.step == TransitionStepCompletionBudget {
+		case TransitionStepCompletionBudget:
 			request = fixture.completionBudgetRequest(t, previous, fixture.completionReceiptValue(t, nil))
+		case TransitionStepClose:
+			request.CompletionReceipt = fixture.completionReceiptValue(t, nil)
 		}
 		got, err := fixture.chain.Apply(request)
 		if err != nil {
@@ -329,11 +330,7 @@ func TestTransitionChainRejectsSkippedLifecyclePredecessors(t *testing.T) {
 		request := TransitionRequest{
 			IssueID: fixture.work.ID, Step: TransitionStepClose, OperationID: "close-1",
 			PriorReceiptID: claim.Receipt.ReceiptID, Evidence: fixture.evidence,
-			Patch: func() SourceWorkPatch {
-				patch := metadataTransition(beads.Bead{}, beadmeta.LifecycleCompletionReceiptMetadataKey, `{"version":1,"accepted":true}`)
-				patch.Status = &StringTransition{Expected: "in_progress", Value: "closed"}
-				return patch
-			}(),
+			Patch: SourceWorkPatch{Status: &StringTransition{Expected: "in_progress", Value: "closed"}},
 		}
 		if _, err := fixture.chain.Apply(request); !errors.Is(err, ErrTransitionChainInvalid) {
 			t.Fatalf("close directly from claim = %v, want predecessor refusal", err)
@@ -1075,23 +1072,23 @@ func claimIdentityTestPatch() SourceWorkPatch {
 }
 
 func cloneSourceWorkPatch(patch SourceWorkPatch) SourceWorkPatch {
-	copy := SourceWorkPatch{Metadata: make(map[string]MetadataStringPatch, len(patch.Metadata))}
+	cloned := SourceWorkPatch{Metadata: make(map[string]MetadataStringPatch, len(patch.Metadata))}
 	for key, value := range patch.Metadata {
 		if value.Expected != nil {
 			expected := *value.Expected
 			value.Expected = &expected
 		}
-		copy.Metadata[key] = value
+		cloned.Metadata[key] = value
 	}
 	if patch.Status != nil {
 		value := *patch.Status
-		copy.Status = &value
+		cloned.Status = &value
 	}
 	if patch.Assignee != nil {
 		value := *patch.Assignee
-		copy.Assignee = &value
+		cloned.Assignee = &value
 	}
-	return copy
+	return cloned
 }
 
 func applyTestReservation(t *testing.T, fixture *transitionChainFixture) TransitionResult {
@@ -1186,8 +1183,12 @@ func (f *transitionChainFixture) recoveryBudgetRequest(t *testing.T, parent bead
 	if previousRaw != "" {
 		change.Expected = &previousRaw
 	}
+	operationID, err := RecoveryBudgetOperationID(recoveryRequest.RequestID, digest)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return TransitionRequest{
-		IssueID: f.work.ID, Step: TransitionStepRecoveryBudget, OperationID: recoveryRequest.RequestID,
+		IssueID: f.work.ID, Step: TransitionStepRecoveryBudget, OperationID: operationID,
 		PriorReceiptID: parent.ReceiptID, Evidence: f.evidence, RecoveryRequest: &recoveryRequest,
 		Patch: SourceWorkPatch{Metadata: map[string]MetadataStringPatch{beadmeta.LifecycleRecoveryStateMetadataKey: change}},
 	}
@@ -1273,11 +1274,10 @@ func (f *transitionChainFixture) completionBudgetRequest(t *testing.T, parent be
 }
 
 func closeTestRequest(fixture *transitionChainFixture, parent TransitionResult, completion string) TransitionRequest {
-	patch := metadataTransition(beads.Bead{}, beadmeta.LifecycleCompletionReceiptMetadataKey, completion)
-	patch.Status = &StringTransition{Expected: "in_progress", Value: "closed"}
 	return TransitionRequest{
 		IssueID: fixture.work.ID, Step: TransitionStepClose, OperationID: "close-1",
-		PriorReceiptID: parent.Receipt.ReceiptID, Evidence: fixture.evidence, Patch: patch,
+		PriorReceiptID: parent.Receipt.ReceiptID, Evidence: fixture.evidence,
+		CompletionReceipt: completion, Patch: SourceWorkPatch{Status: &StringTransition{Expected: "in_progress", Value: "closed"}},
 	}
 }
 
@@ -1382,6 +1382,7 @@ func newTransitionChainFixture(t *testing.T) *transitionChainFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
+	now := time.Date(2026, time.September, 30, 12, 0, 0, 0, time.UTC)
 	work := beads.Bead{ID: "work-1", Type: "task", Status: "open", Revision: 41, Labels: []string{AdmissionIntentLabel}, Metadata: map[string]string{}}
 	admission := AdmissionReceiptV2{
 		Version: 2, WorkItemID: work.ID, Scope: scope, ExpectedWorkRevision: work.Revision,
@@ -1393,6 +1394,19 @@ func newTransitionChainFixture(t *testing.T) *transitionChainFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
+	admissionDigest, err := AdmissionDigestV2(admission)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completionReceipt, err := SignCompletionReceipt(CompletionReceipt{
+		Version: 1, WorkItemID: work.ID, Scope: scope, AdmissionDigest: admissionDigest,
+		DeliverableRef: "artifact://work-1/patch", VerificationRef: "checks://work-1/required",
+		AcceptedBy: "reviewer", AcceptedAt: now.Format(time.RFC3339Nano),
+	}, acceptancePrivate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	work.Metadata[beadmeta.LifecycleCompletionReceiptMetadataKey] = completionReceipt
 	store := &transitionChainTestStore{
 		source: work, q43Receipts: map[string]beads.ControllerMetadataTransitionReceipt{},
 		patchReceipts: map[string]beads.RevisionTransitionPatchReceipt{}, nextRevision: 1000,
@@ -1405,7 +1419,7 @@ func newTransitionChainFixture(t *testing.T) *transitionChainFixture {
 	fixture := &transitionChainFixture{
 		store: store, permits: &transitionChainPermitIssuer{token: "permit-token"}, work: work,
 		policy: policy, cfg: cfg, attachment: attachment, acceptancePrivate: acceptancePrivate, recoveryPrivate: recoveryPrivate,
-		now:              time.Date(2026, time.September, 30, 12, 0, 0, 0, time.UTC),
+		now:              now,
 		evidence:         TransitionEvidence{Attachment: attachment},
 		policyResolver:   &transitionChainPolicyResolver{policy: policy},
 		workflowVerifier: &transitionChainWorkflowVerifier{},
@@ -1630,43 +1644,43 @@ func applyTransitionPatchToTestBead(source *beads.Bead, patch beads.RevisionTran
 }
 
 func cloneTransitionTestBead(source beads.Bead) beads.Bead {
-	copy := source
-	copy.Metadata = make(map[string]string, len(source.Metadata))
+	cloned := source
+	cloned.Metadata = make(map[string]string, len(source.Metadata))
 	for key, value := range source.Metadata {
-		copy.Metadata[key] = value
+		cloned.Metadata[key] = value
 	}
-	copy.Labels = append([]string(nil), source.Labels...)
-	return copy
+	cloned.Labels = append([]string(nil), source.Labels...)
+	return cloned
 }
 
 func cloneTransitionPatchRequest(request beads.RevisionTransitionPatchRequest) beads.RevisionTransitionPatchRequest {
-	copy := request
-	copy.Patch.Metadata = append([]beads.RevisionTransitionMetadataPatch(nil), request.Patch.Metadata...)
-	for index := range copy.Patch.Metadata {
-		copy.Patch.Metadata[index].Expected = cloneRawMessagePointer(request.Patch.Metadata[index].Expected)
-		copy.Patch.Metadata[index].Value = cloneRawMessagePointer(request.Patch.Metadata[index].Value)
+	cloned := request
+	cloned.Patch.Metadata = append([]beads.RevisionTransitionMetadataPatch(nil), request.Patch.Metadata...)
+	for index := range cloned.Patch.Metadata {
+		cloned.Patch.Metadata[index].Expected = cloneRawMessagePointer(request.Patch.Metadata[index].Expected)
+		cloned.Patch.Metadata[index].Value = cloneRawMessagePointer(request.Patch.Metadata[index].Value)
 	}
 	if request.Patch.Status != nil {
 		value := *request.Patch.Status
-		copy.Patch.Status = &value
+		cloned.Patch.Status = &value
 	}
 	if request.Patch.Assignee != nil {
 		value := *request.Patch.Assignee
-		copy.Patch.Assignee = &value
+		cloned.Patch.Assignee = &value
 	}
 	if request.Patch.Labels != nil {
 		value := *request.Patch.Labels
 		value.Expected = append([]string(nil), value.Expected...)
 		value.Value = append([]string(nil), value.Value...)
-		copy.Patch.Labels = &value
+		cloned.Patch.Labels = &value
 	}
-	return copy
+	return cloned
 }
 
 func cloneRawMessagePointer(raw *json.RawMessage) *json.RawMessage {
 	if raw == nil {
 		return nil
 	}
-	copy := append(json.RawMessage(nil), (*raw)...)
-	return &copy
+	cloned := append(json.RawMessage(nil), (*raw)...)
+	return &cloned
 }

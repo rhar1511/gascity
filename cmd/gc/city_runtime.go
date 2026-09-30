@@ -2659,7 +2659,14 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		mailProviderName = override
 	}
 	recoveryOutbox := lifecycleRecoveryOutbox{store: cr.mailBeadStore().Store, sessionStore: sessStore.Store, providerName: mailProviderName}
-	reconcileLifecycleRecoveryRequests(ctx, cr.cityName, cr.cityPath, cr.cfg, store, rigStores, sessStore, cr.sp, cr.stderr, recoveryOutbox)
+	var permitResolver *hostBeadsPermitResolver
+	if cr.cs != nil {
+		permitResolver = cr.cs.beadsPermitResolver
+	}
+	reconcileLifecycleRecoveryRequestsWithPermitResolver(
+		ctx, cr.cityName, cr.cityPath, cr.cfg, store, rigStores, sessStore, cr.sp, cr.stderr,
+		permitResolver, cr.compatibilityAuthority, recoveryOutbox,
+	)
 	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.lifecycle_recovery_requests", recoveryPhaseStart, nil)
 	assignedWorkBeads := result.AssignedWorkBeads
 	assignedWorkStoreRefs := result.AssignedWorkStoreRefs
@@ -3807,9 +3814,16 @@ func (cr *CityRuntime) buildDesiredState(sessionBeads *sessionBeadSnapshot, trac
 	// Admission reservation and materialization run at the controller edge,
 	// where the exact host-authorized permit issuer is available. The desired
 	// state builder remains a projection and cannot issue protected mutations.
+	workStore := cr.cityWorkStore().Store
+	rigStores := unwrapWorkStores(cr.workBeadStores())
+	suspendedRigPaths := buildSuspendedRigPathsForCity(cr.cfg, cr.cityPath)
 	reconcileLifecycleAdmissionWithPermitResolver(
-		cr.cityName, cr.cityPath, cr.cfg, cr.cityWorkStore().Store,
-		unwrapWorkStores(cr.workBeadStores()), buildSuspendedRigPathsForCity(cr.cfg, cr.cityPath),
+		cr.cityName, cr.cityPath, cr.cfg, workStore,
+		rigStores, suspendedRigPaths,
+		cr.stderr, permitResolver, cr.compatibilityAuthority,
+	)
+	reconcileLifecycleCompletionsWithPermitResolver(
+		cr.cityName, cr.cityPath, cr.cfg, workStore, rigStores, suspendedRigPaths,
 		cr.stderr, permitResolver, cr.compatibilityAuthority,
 	)
 	var result DesiredStateResult

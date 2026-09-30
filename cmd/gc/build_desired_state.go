@@ -494,7 +494,6 @@ func buildDesiredStateWithSessionBeadsAt(
 
 	// Pre-compute suspended rig paths (config + runtime state).
 	suspendedRigPaths := buildSuspendedRigPathsForCity(cfg, cityPath)
-	reconcileLifecycleCompletions(cityName, cityPath, cfg, store, rigStores, suspendedRigPaths, stderr)
 	bp.sessionCensusRigStores = cloneSessionCensusRigStores(rigStores)
 	bp.sessionCensusSuspendedRigPaths = cloneSessionCensusSuspendedRigPaths(suspendedRigPaths)
 
