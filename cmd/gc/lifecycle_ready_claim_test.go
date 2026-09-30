@@ -232,6 +232,99 @@ func TestReadyJSONCarriesTrustedLifecycleScopeIntoHookClaim(t *testing.T) {
 	}
 }
 
+func TestLifecycleGraphV2ClassStoreDescendantIsHeldBeforeClaim(t *testing.T) {
+	const (
+		classRef = "class:graph"
+		rootID   = "gcg-root"
+		childID  = "gcg-step"
+	)
+	lineage, err := encodeLifecycleMaterialization(lifecycleMaterialization{
+		Version: 1, State: "lineage_pending", Scope: worklifecycle.ScopeForStore("pilot", "city:pilot"),
+		Contract: "admission-digest", Route: "pilot/worker", Workflow: "review", MergeStrategy: "mr",
+		Token: "controller-token", SourceID: "work-1", SourceStoreRef: "city:pilot", WorkflowStoreRef: classRef,
+		AdmissionReceipt: "signed-v2-admission",
+	})
+	if err != nil {
+		t.Fatalf("encode lifecycle lineage: %v", err)
+	}
+	store := beads.NewMemStore()
+	store.HonorExplicitIDs = true
+	root, err := store.Create(beads.Bead{
+		ID: rootID, Type: "molecule", Status: "open",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:                     beadmeta.KindWorkflow,
+			beadmeta.FormulaContractMetadataKey:          beadmeta.FormulaContractGraphV2,
+			beadmeta.FormulaNameMetadataKey:              "review",
+			beadmeta.LifecycleMaterializationMetadataKey: lineage,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create relocated graph root: %v", err)
+	}
+	child, err := store.Create(beads.Bead{
+		ID: childID, Type: "task", Status: "open", ParentID: root.ID,
+		Metadata: map[string]string{
+			beadmeta.RootBeadIDMetadataKey: root.ID,
+			beadmeta.RoutedToMetadataKey:   "pilot/worker",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create relocated graph descendant: %v", err)
+	}
+	readyJSON, err := json.Marshal(toReadyBeads([]beads.Bead{child}, nil, map[string]readyLeg{
+		child.ID: {sourceStoreRef: classRef, cityName: "pilot"},
+	}))
+	if err != nil {
+		t.Fatalf("encode ready projection: %v", err)
+	}
+
+	var writes lifecycleClaimWriteCounters
+	ops := lifecycleProjectionClaimOps(string(readyJSON), store, &writes)
+	opts := hookClaimOptions{
+		Assignee: "session-1", SessionID: "session-1", IdentityCandidates: []string{"session-1"},
+		RouteTargets: []string{"pilot/worker"}, Env: []string{"GC_SESSION_ID=session-1"}, JSON: true,
+		Lifecycle: config.LifecycleConfig{AdmissionEnabled: true}, TrustedLifecycleScope: true,
+		RequireAuthoritativeClaimRead: true,
+		ResolveLifecycleStore: func(ref string) (beads.Store, error) {
+			if ref != classRef {
+				return nil, beads.ErrNotFound
+			}
+			return store, nil
+		},
+	}
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("gc ready --json", "/city", opts, ops, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("hook claim exit = %d, want 1 for an unacknowledged no-work drain; stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+	writes.assertNoMutation(t)
+	if !strings.Contains(stderr.String(), "holding lifecycle descendant gcg-step") ||
+		!strings.Contains(stderr.String(), "graph.v2 lifecycle descendant has no verified own Q43/Q54 transition head") {
+		t.Fatalf("stderr = %q, want an explicit graph.v2 descendant hold reason", stderr.String())
+	}
+
+	// A raw metadata string is not proof of a descendant Q54 transition and
+	// must not open the generic claim path either.
+	child.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey] = "unverified-q54-head"
+	readyJSON, err = json.Marshal(toReadyBeads([]beads.Bead{child}, nil, map[string]readyLeg{
+		child.ID: {sourceStoreRef: classRef, cityName: "pilot"},
+	}))
+	if err != nil {
+		t.Fatalf("encode ready projection with unverified head: %v", err)
+	}
+	ops = lifecycleProjectionClaimOps(string(readyJSON), store, &writes)
+	stdout.Reset()
+	stderr.Reset()
+	code = doHookClaim("gc ready --json", "/city", opts, ops, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("hook claim with unverified head exit = %d, want 1 for an unacknowledged no-work drain; stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+	writes.assertNoMutation(t)
+	if !strings.Contains(stderr.String(), "graph.v2 lifecycle descendant has no verified own Q43/Q54 transition head") {
+		t.Fatalf("stderr = %q, want the graph.v2 descendant hold despite an unverified head", stderr.String())
+	}
+}
+
 type lifecycleHoldDuringClaimStore struct {
 	*beads.MemStore
 }

@@ -2021,8 +2021,10 @@ func extmsgBindingRecordFromWire(record genclient.SessionBindingRecord) extmsg.S
 }
 
 // ClaimLifecycleWork asks the controller to atomically claim one already-v2-
-// admitted work item for the authenticated managed session incarnation. It
-// never falls back to a local generic status or identity write.
+// admitted work item for the authenticated managed session incarnation. Its
+// source_store_ref must name the city or a rig; relocated class-store refs are
+// not supported by this Q54 endpoint. It never falls back to a local generic
+// status or identity write.
 func (c *Client) ClaimLifecycleWork(parent context.Context, request LifecycleClaimSubmitRequest) (LifecycleClaimResult, error) {
 	if err := c.requireCityScope(); err != nil {
 		return LifecycleClaimResult{}, err

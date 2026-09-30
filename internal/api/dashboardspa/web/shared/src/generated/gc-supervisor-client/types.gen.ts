@@ -1693,7 +1693,7 @@ export type LifecycleClaimSubmitRequest = {
      */
     session_id: string;
     /**
-     * Canonical store reference emitted by gc ready: city:<city_name> for the city work store or rig:<rig_name> for a rig store.
+     * Q54 source scope accepted by this endpoint: city:<city_name> for the city work store or rig:<rig_name> for a rig store. Relocated class:<classes> references are not supported.
      */
     source_store_ref: string;
     /**

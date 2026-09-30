@@ -1317,9 +1317,43 @@ func lifecycleProtectedWork(bead beads.Bead, cfg *config.City) bool {
 	return false
 }
 
+// lifecycleGraphV2ClassDescendantHoldReason prevents a graph.v2 descendant in
+// a relocated graph store from falling through to the generic claim path when
+// its lifecycle admission belongs to the workflow root. Formula-v1 descendants
+// continue through the existing verified lifecycleLineageCurrent proof.
+// Graph-v2 descendants remain held until a per-descendant Q43/Q54 transition
+// is separately demonstrated; this check does not add a cross-store protocol.
+func lifecycleGraphV2ClassDescendantHoldReason(candidate beads.Bead, opts hookClaimOptions) string {
+	storeRef := strings.TrimSpace(candidate.SourceStoreRef)
+	if !opts.TrustedLifecycleScope || !storeref.IsClassRef(storeRef) || coordclass.Classify(candidate) != coordclass.ClassGraph {
+		return ""
+	}
+	rootID := strings.TrimSpace(candidate.Metadata[beadmeta.RootBeadIDMetadataKey])
+	if rootID == "" || rootID == candidate.ID || opts.ResolveLifecycleStore == nil {
+		return ""
+	}
+	store, err := opts.ResolveLifecycleStore(storeRef)
+	if err != nil || store == nil {
+		return ""
+	}
+	root, err := store.Get(rootID)
+	if err != nil || root.ID != rootID || root.Metadata[beadmeta.KindMetadataKey] != beadmeta.KindWorkflow ||
+		!strings.EqualFold(strings.TrimSpace(root.Metadata[beadmeta.FormulaContractMetadataKey]), beadmeta.FormulaContractGraphV2) {
+		return ""
+	}
+	if strings.TrimSpace(root.Metadata[beadmeta.LifecycleMaterializationMetadataKey]) == "" {
+		return ""
+	}
+	return "graph.v2 lifecycle descendant has no verified own Q43/Q54 transition head in the relocated class store; descendant claims remain held pending separate transition proof"
+}
+
 func filterHookLifecycleCandidates(candidates []beads.Bead, opts hookClaimOptions, stderr io.Writer) []beads.Bead {
 	filtered := make([]beads.Bead, 0, len(candidates))
 	for _, bead := range candidates {
+		if reason := lifecycleGraphV2ClassDescendantHoldReason(bead, opts); reason != "" {
+			fmt.Fprintf(stderr, "gc hook --claim: holding lifecycle descendant %s: %s\n", bead.ID, reason) //nolint:errcheck
+			continue
+		}
 		if !opts.Lifecycle.AdmissionEnabled {
 			if !lifecycleEnrollmentEvidence(bead) {
 				filtered = append(filtered, bead)

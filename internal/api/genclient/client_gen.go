@@ -2471,7 +2471,7 @@ type LifecycleClaimSubmitRequest struct {
 	// SessionId Managed session bead ID.
 	SessionId string `json:"session_id"`
 
-	// SourceStoreRef Canonical store reference emitted by gc ready: city:<city_name> for the city work store or rig:<rig_name> for a rig store.
+	// SourceStoreRef Q54 source scope accepted by this endpoint: city:<city_name> for the city work store or rig:<rig_name> for a rig store. Relocated class:<classes> references are not supported.
 	SourceStoreRef string `json:"source_store_ref"`
 
 	// WorkId Exact admitted work bead ID.

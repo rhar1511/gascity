@@ -4767,7 +4767,7 @@
             "type": "string"
           },
           "source_store_ref": {
-            "description": "Canonical store reference emitted by gc ready: city:\u003ccity_name\u003e for the city work store or rig:\u003crig_name\u003e for a rig store.",
+            "description": "Q54 source scope accepted by this endpoint: city:\u003ccity_name\u003e for the city work store or rig:\u003crig_name\u003e for a rig store. Relocated class:\u003cclasses\u003e references are not supported.",
             "maxLength": 200,
             "type": "string"
           },

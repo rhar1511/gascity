@@ -22,7 +22,7 @@ import (
 // exact evidence, and protected-mutation permit.
 type LifecycleClaimSubmitRequest struct {
 	WorkID                 string `json:"work_id" minLength:"1" maxLength:"200" doc:"Exact admitted work bead ID."`
-	SourceStoreRef         string `json:"source_store_ref" maxLength:"200" doc:"Canonical store reference emitted by gc ready: city:<city_name> for the city work store or rig:<rig_name> for a rig store."`
+	SourceStoreRef         string `json:"source_store_ref" maxLength:"200" doc:"Q54 source scope accepted by this endpoint: city:<city_name> for the city work store or rig:<rig_name> for a rig store. Relocated class:<classes> references are not supported."`
 	ExpectedRevision       int64  `json:"expected_revision" minimum:"1" doc:"Source revision observed by the claim candidate query."`
 	ExpectedTransitionHead string `json:"expected_transition_head" minLength:"1" maxLength:"200" doc:"Lifecycle transition head observed by the claim candidate query."`
 	SessionID              string `json:"session_id" minLength:"1" maxLength:"200" doc:"Managed session bead ID."`
