@@ -231,6 +231,7 @@
               "reference/gastown-command-map",
               "reference/config",
               "reference/trust-boundaries",
+              "reference/rsi-trusted-evaluation",
               "reference/api",
               "reference/session-request-receipts",
               "reference/events",

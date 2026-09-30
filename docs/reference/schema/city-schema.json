@@ -1220,6 +1220,10 @@
           "$ref": "#/$defs/DaemonConfig",
           "description": "Daemon configures controller daemon settings."
         },
+        "rsi": {
+          "$ref": "#/$defs/RSIConfig",
+          "description": "RSI points the controller at trusted signed evaluation and human\napproval records. An unset evaluator leaves promotion fail-closed."
+        },
         "orders": {
           "$ref": "#/$defs/OrdersConfig",
           "description": "Orders configures order settings: skip list, max_timeout cap, and\nper-order overrides."
@@ -2591,6 +2595,33 @@
       "additionalProperties": false,
       "type": "object",
       "description": "ProviderSpec defines a named provider's startup parameters."
+    },
+    "RSIConfig": {
+      "properties": {
+        "evaluation_file": {
+          "type": "string",
+          "description": "Per-gate evaluation path template containing exactly one {gate_id} token."
+        },
+        "evaluation_key_id": {
+          "type": "string"
+        },
+        "evaluation_public_key": {
+          "type": "string"
+        },
+        "human_approval_file": {
+          "type": "string",
+          "description": "Per-gate approval path template containing exactly one {gate_id} token."
+        },
+        "human_approval_key_id": {
+          "type": "string"
+        },
+        "human_approval_public_key": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "RSIConfig points the controller at signed, controller-owned evaluation and human-approval records."
     },
     "Rig": {
       "properties": {

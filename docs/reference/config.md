@@ -34,6 +34,7 @@ City is the top-level configuration for a Gas City instance.
 | `dolt` | DoltConfig |  |  | Dolt configures optional dolt server connection overrides. |
 | `formulas` | FormulasConfig |  |  | Formulas is the legacy [formulas] table; authored [formulas].dir is rejected at config load. Formulas live in the well-known formulas/ directory. |
 | `daemon` | DaemonConfig |  |  | Daemon configures controller daemon settings. |
+| `rsi` | RSIConfig |  |  | RSI points the controller at trusted signed evaluation and human approval records. An unset evaluator leaves promotion fail-closed. |
 | `orders` | OrdersConfig |  |  | Orders configures order settings: skip list, max_timeout cap, and per-order overrides. |
 | `api` | APIConfig |  |  | API configures the optional HTTP API server. |
 | `chat_sessions` | ChatSessionsConfig |  |  | ChatSessions configures chat session behavior (auto-suspend). |
@@ -743,6 +744,19 @@ ProviderSpec defines a named provider's startup parameters.
 | `title_model` | string |  |  | TitleModel is the OptionsSchema model key used for title generation. Resolved via the "model" option in OptionsSchema to get FlagArgs. Defaults to the cheapest/fastest model for each provider. Examples: "haiku" (claude), "o4-mini" (codex), "gemini-2.5-flash" (gemini) |
 | `acp_command` | string |  |  | ACPCommand overrides Command when the session transport is ACP. When empty, Command is used for both tmux and ACP transports. |
 | `acp_args` | []string |  |  | ACPArgs overrides Args when the session transport is ACP. When nil, Args is used for both tmux and ACP transports. |
+
+## RSIConfig
+
+RSIConfig points the controller at signed, controller-owned evaluation and human-approval records.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `evaluation_file` | string |  |  | Per-gate evaluation path template containing exactly one &#123;gate_id&#125; token. |
+| `evaluation_key_id` | string |  |  |  |
+| `evaluation_public_key` | string |  |  |  |
+| `human_approval_file` | string |  |  | Per-gate approval path template containing exactly one &#123;gate_id&#125; token. |
+| `human_approval_key_id` | string |  |  |  |
+| `human_approval_public_key` | string |  |  |  |
 
 ## Rig
 

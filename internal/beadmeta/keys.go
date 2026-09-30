@@ -212,9 +212,10 @@ const (
 	RSIRoleMetadataKey                  = "gc.rsi_role"
 	RSIAuthorityClassMetadataKey        = "gc.rsi_authority_class"
 	RSICandidateInputMetadataKey        = "gc.rsi_candidate_input"
+	RSIExecutionBindingMetadataKey      = "gc.rsi_execution_binding"
+	RSIManualApprovalMetadataKey        = "gc.rsi_manual_approval_required"
 	RSIPromoteMetadataKey               = "gc.rsi_promote"
 	RSIReasonMetadataKey                = "gc.rsi_reason"
-	RSIManualApprovalMetadataKey        = "gc.rsi_manual_approval_required"
 	ReasoningMetadataKey                = "gc.reasoning"
 	RequiredArtifactMetadataKey         = "gc.required_artifact"
 	RequiredArtifactsMetadataKey        = "gc.required_artifacts"
@@ -402,6 +403,7 @@ func IsExecutionCredentialMetadataKey(key string) bool {
 func IsGenericMutationReservedKey(key string) bool {
 	_, executionIdentity := executionIdentityMetadataKeys[key]
 	return executionIdentity ||
+		key == RSIExecutionBindingMetadataKey ||
 		strings.HasPrefix(key, SessionRequestReceiptPrefix) ||
 		key == SessionRequestPurgeFenceMetadataKey
 }
@@ -630,9 +632,10 @@ var KnownMetadataKeys = []string{
 	RSIRoleMetadataKey,
 	RSIAuthorityClassMetadataKey,
 	RSICandidateInputMetadataKey,
+	RSIExecutionBindingMetadataKey,
+	RSIManualApprovalMetadataKey,
 	RSIPromoteMetadataKey,
 	RSIReasonMetadataKey,
-	RSIManualApprovalMetadataKey,
 	ReasoningMetadataKey,
 	RequiredArtifactMetadataKey,
 	RequiredArtifactsMetadataKey,
