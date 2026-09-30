@@ -26,9 +26,9 @@ import (
 
 // reconcileLifecycleAdmission discovers explicitly admitted, not-yet-routed
 // work on the controller's authoritative routed-work legs. A signed receipt
-// supplies the route and workflow contract. A unique conditional reservation
-// grants exactly one controller pass permission to invoke the existing sling
-// materializer; later passes hold an incomplete reservation for review.
+// supplies the route and workflow contract; exact current Q43 attachment and
+// recomputed current-policy proof are required before it reaches the guarded
+// reservation write.
 func reconcileLifecycleAdmission(
 	cityName string,
 	cityPath string,
@@ -84,12 +84,13 @@ func reconcileLifecycleAdmission(
 				continue
 			}
 			scope := lifecycleScopeForRef(cityName, cfg, leg.ref)
-			admission := worklifecycle.EvaluateAdmission(bead, cfg.Lifecycle, scope)
-			if !admission.Requested {
+			baseAdmission := worklifecycle.EvaluateAdmission(bead, cfg.Lifecycle, scope)
+			if !baseAdmission.Requested {
 				continue
 			}
-			if !admission.Admitted {
-				fmt.Fprintf(stderr, "lifecycle admission: holding %s: %s\n", bead.ID, admission.Reason) //nolint:errcheck
+			receipt, err := worklifecycle.VerifyAdmissionReceiptV2(bead, cfg.Lifecycle, scope)
+			if err != nil {
+				fmt.Fprintf(stderr, "lifecycle admission: holding %s: %s\n", bead.ID, err) //nolint:errcheck
 				continue
 			}
 			if _, ok := ready[bead.ID]; !ok {
@@ -101,67 +102,103 @@ func reconcileLifecycleAdmission(
 			if !demandRowServable(bead) || beads.IsDeferred(bead, time.Now()) {
 				continue
 			}
-			route := agentutil.NormalizePoolRouteTarget(cfg, admission.Receipt.Route)
-			agentCfg := findAgentByTemplate(cfg, route)
-			if agentCfg == nil || agentCfg.Suspended || !agentCfg.SupportsGenericEphemeralSessions() {
-				fmt.Fprintf(stderr, "lifecycle admission: %s has an unusable configured route %q\n", bead.ID, route) //nolint:errcheck
+			adapter, err := worklifecycle.NewAdmissionAttachmentAdapter(leg.store)
+			if err != nil {
+				fmt.Fprintf(stderr, "lifecycle admission: holding %s: v2 admission requires verified attachment and current route-policy proof: %v\n", bead.ID, err) //nolint:errcheck
 				continue
 			}
-			if strings.TrimSpace(agentCfg.EffectiveDefaultSlingFormula()) != admission.Receipt.Workflow {
-				fmt.Fprintf(stderr, "lifecycle admission: %s signed workflow %q does not match route %q configured workflow %q\n", bead.ID, admission.Receipt.Workflow, route, agentCfg.EffectiveDefaultSlingFormula()) //nolint:errcheck
+			current, attachmentProof, err := adapter.VerifyCurrent(bead.ID, cfg.Lifecycle, scope)
+			if err != nil {
+				fmt.Fprintf(stderr, "lifecycle admission: holding %s: v2 admission requires verified attachment and current route-policy proof: %v\n", bead.ID, err) //nolint:errcheck
 				continue
 			}
-			if isCustomSlingQuery(*agentCfg) {
-				fmt.Fprintf(stderr, "lifecycle admission: %s route %q uses a custom sling_query; controller materialization is held\n", bead.ID, route) //nolint:errcheck
+			if current.ID != bead.ID || !rootStoreRefMatchesCandidate(current.Metadata[beadmeta.RootStoreRefMetadataKey], leg.ref) {
+				fmt.Fprintf(stderr, "lifecycle admission: holding %s: verified Q43 source no longer belongs to selected store %s\n", bead.ID, leg.ref) //nolint:errcheck
 				continue
 			}
-			routes := controllerDemandRouteCandidates(bead)
+			currentReceipt, err := worklifecycle.VerifyAdmissionReceiptV2(current, cfg.Lifecycle, scope)
+			if err != nil {
+				fmt.Fprintf(stderr, "lifecycle admission: holding %s: %v\n", bead.ID, err) //nolint:errcheck
+				continue
+			}
+			currentReady, err := beads.HandlesFor(leg.store).Live.Ready(beads.ReadyQuery{TierMode: beads.FederatedReadTier})
+			if err != nil {
+				fmt.Fprintf(stderr, "lifecycle admission: rereading ready work in %s for %s: %v\n", leg.ref, bead.ID, err) //nolint:errcheck
+				continue
+			}
+			isReady := false
+			for _, row := range currentReady {
+				if row.ID == current.ID {
+					isReady = true
+					break
+				}
+			}
+			if !isReady || !demandRowServable(current) || beads.IsDeferred(current, time.Now()) {
+				continue
+			}
+			route := currentReceipt.Route
+			routes := controllerDemandRouteCandidates(current)
 			if len(routes) != 0 {
 				matches := false
 				for _, current := range routes {
-					if agentutil.NormalizePoolRouteTarget(cfg, current) == route {
+					if current == route {
 						matches = true
 						break
 					}
 				}
 				if !matches {
 					fmt.Fprintf(stderr, "lifecycle admission: %s route conflicts with its signed admission receipt; preserving current route\n", bead.ID) //nolint:errcheck
-				} else if !lifecycleWorkflowAttached(bead) {
-					fmt.Fprintf(stderr, "lifecycle admission: %s already has route metadata but no attached workflow evidence; preserving route and holding work\n", bead.ID) //nolint:errcheck
+				} else if !lifecycleWorkflowAttached(current) {
+					fmt.Fprintf(stderr, "lifecycle admission: %s already has route metadata but no attached workflow evidence; preserving route and holding work\n", current.ID) //nolint:errcheck
 				}
 				continue
 			}
-			if lifecycleWorkflowAttached(bead) {
-				fmt.Fprintf(stderr, "lifecycle admission: %s has workflow evidence without a route; preserving it for review\n", bead.ID) //nolint:errcheck
+			if lifecycleWorkflowAttached(current) {
+				fmt.Fprintf(stderr, "lifecycle admission: %s has workflow evidence without a route; preserving it for review\n", current.ID) //nolint:errcheck
 				continue
 			}
-			if bead.Revision == 0 {
-				fmt.Fprintf(stderr, "lifecycle admission: %s has no usable revision; workflow materialization held\n", bead.ID) //nolint:errcheck
+			if current.Revision == 0 {
+				fmt.Fprintf(stderr, "lifecycle admission: %s has no usable revision; workflow materialization held\n", current.ID) //nolint:errcheck
 				continue
 			}
 			writer, ok := beads.ConditionalWriterFor(leg.store)
 			if !ok {
-				fmt.Fprintf(stderr, "lifecycle admission: %s store does not support revision-conditional writes; workflow materialization held\n", bead.ID) //nolint:errcheck
+				fmt.Fprintf(stderr, "lifecycle admission: %s store does not support revision-conditional writes; workflow materialization held\n", current.ID) //nolint:errcheck
 				continue
 			}
-			digest, err := worklifecycle.AdmissionDigestV2(admission.Receipt)
-			if err != nil {
-				fmt.Fprintf(stderr, "lifecycle admission: hashing admission contract for %s: %v\n", bead.ID, err) //nolint:errcheck
-				continue
-			}
-			previous := strings.TrimSpace(bead.Metadata[beadmeta.LifecycleMaterializationMetadataKey])
+			previous := strings.TrimSpace(current.Metadata[beadmeta.LifecycleMaterializationMetadataKey])
 			if previous != "" {
-				fmt.Fprintf(stderr, "lifecycle admission: %s has an incomplete prior materialization reservation; holding for review\n", bead.ID) //nolint:errcheck
+				fmt.Fprintf(stderr, "lifecycle admission: %s has an incomplete prior materialization reservation; holding for review\n", current.ID) //nolint:errcheck
 				continue
 			}
-			deps, graphStoreRef, err := lifecycleSlingDeps(cityName, cityPath, cfg, store, rigStores, suspendedRigPaths, leg, legs, runner, authority)
+			policy, err := buildLifecycleAdmissionPolicy(current, currentReceipt, scope, cityName, cityPath, cfg, store, rigStores, leg, legs, runner, authority)
 			if err != nil {
-				fmt.Fprintf(stderr, "lifecycle admission: preparing workflow materialization for %s: %v\n", bead.ID, err) //nolint:errcheck
+				fmt.Fprintf(stderr, "lifecycle admission: holding %s: v2 admission requires verified attachment and current route-policy proof: %v\n", current.ID, err) //nolint:errcheck
+				continue
+			}
+			admission := worklifecycle.EvaluateAdmissionWithProof(current, cfg.Lifecycle, scope, worklifecycle.AdmissionProofInputsV2{
+				Attachment: &attachmentProof, PolicyProjection: &policy.projection,
+			})
+			if !admission.Admitted {
+				fmt.Fprintf(stderr, "lifecycle admission: holding %s: %s\n", current.ID, admission.Reason) //nolint:errcheck
+				continue
+			}
+			receipt = admission.Receipt
+			route = receipt.Route
+			agentCfg := &policy.target
+			deps, graphStoreRef := policy.deps, policy.graphStoreRef
+			if agentCfg.Suspended || !agentCfg.SupportsGenericEphemeralSessions() || isCustomSlingQuery(*agentCfg) {
+				fmt.Fprintf(stderr, "lifecycle admission: %s exact route %q is no longer eligible in current config\n", current.ID, route) //nolint:errcheck
+				continue
+			}
+			digest, err := worklifecycle.AdmissionDigestV2(receipt)
+			if err != nil {
+				fmt.Fprintf(stderr, "lifecycle admission: hashing admission contract for %s: %v\n", current.ID, err) //nolint:errcheck
 				continue
 			}
 			token, err := lifecycleReservationToken()
 			if err != nil {
-				fmt.Fprintf(stderr, "lifecycle admission: creating materialization reservation token for %s: %v\n", bead.ID, err) //nolint:errcheck
+				fmt.Fprintf(stderr, "lifecycle admission: creating materialization reservation token for %s: %v\n", current.ID, err) //nolint:errcheck
 				continue
 			}
 			reservationValue, err := encodeLifecycleMaterialization(lifecycleMaterialization{
@@ -170,22 +207,26 @@ func reconcileLifecycleAdmission(
 				Scope:            scope,
 				Contract:         digest,
 				Route:            route,
-				Workflow:         admission.Receipt.Workflow,
-				MergeStrategy:    admission.Receipt.MergeStrategy,
+				Workflow:         receipt.Workflow,
+				MergeStrategy:    receipt.MergeStrategy,
 				Token:            token,
-				SourceID:         bead.ID,
+				SourceID:         current.ID,
 				SourceStoreRef:   leg.ref,
 				WorkflowStoreRef: graphStoreRef,
-				AdmissionReceipt: bead.Metadata[beadmeta.LifecycleAdmissionReceiptV2MetadataKey],
+				AdmissionReceipt: current.Metadata[beadmeta.LifecycleAdmissionReceiptV2MetadataKey],
 			})
 			if err != nil {
-				fmt.Fprintf(stderr, "lifecycle admission: encoding materialization reservation for %s: %v\n", bead.ID, err) //nolint:errcheck
+				fmt.Fprintf(stderr, "lifecycle admission: encoding materialization reservation for %s: %v\n", current.ID, err) //nolint:errcheck
 				continue
 			}
-			if err := writer.UpdateIfMatch(bead.ID, bead.Revision, beads.UpdateOpts{
+			// This remains an ordinary conditional mutation. The Q54 proof gate
+			// does not authorize the reservation write; transition-chain
+			// integration must replace this first write before materialization can
+			// proceed for an attached admission receipt.
+			if err := writer.UpdateIfMatch(current.ID, current.Revision, beads.UpdateOpts{
 				Metadata: map[string]string{beadmeta.LifecycleMaterializationMetadataKey: reservationValue},
 			}); err != nil {
-				fmt.Fprintf(stderr, "lifecycle admission: reserving workflow materialization for %s: %v\n", bead.ID, err) //nolint:errcheck
+				fmt.Fprintf(stderr, "lifecycle admission: reserving workflow materialization for %s: %v\n", current.ID, err) //nolint:errcheck
 				continue
 			}
 			lineageValue, err := encodeLifecycleMaterialization(lifecycleMaterialization{
@@ -234,7 +275,7 @@ func reconcileLifecycleAdmission(
 				fmt.Fprintf(stderr, "lifecycle admission: sling did not report an attached workflow for %s; work remains held\n", bead.ID) //nolint:errcheck
 				continue
 			}
-			current, err := leg.store.Get(bead.ID)
+			current, err = leg.store.Get(bead.ID)
 			if err != nil {
 				fmt.Fprintf(stderr, "lifecycle admission: verifying attached workflow for %s: %v\n", bead.ID, err) //nolint:errcheck
 				continue

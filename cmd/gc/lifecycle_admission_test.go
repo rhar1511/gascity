@@ -66,12 +66,20 @@ func TestLifecycleAdmissionConcurrentPassesDoNotMaterializeWithoutProof(t *testi
 }
 
 func TestLifecycleAdmissionDoesNotResumeReservationWithoutV2Proof(t *testing.T) {
-	store, cfg, cityPath := lifecycleAdmissionFixture(t)
-	row, err := store.Get("work-1")
+	baseStore, cfg, cityPath := lifecycleAdmissionFixture(t)
+	row, err := baseStore.Get("work-1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.SetMetadata(row.ID, beadmeta.LifecycleMaterializationMetadataKey, `{"version":1,"state":"reserved","scope":"city:pilot/city:pilot","contract":"prior","route":"worker","workflow":"review","merge_strategy":"mr","token":"prior-owner"}`); err != nil {
+	const priorReservation = `{"version":1,"state":"reserved","scope":"city:pilot/city:pilot","contract":"prior","route":"worker","workflow":"review","merge_strategy":"mr","token":"prior-owner"}`
+	store := &beads.MemStore{IDPrefix: "work", HonorExplicitIDs: true}
+	if _, err := store.Create(beads.Bead{
+		ID: row.ID, Title: row.Title, Type: row.Type, Status: row.Status, Labels: row.Labels,
+		Metadata: map[string]string{
+			beadmeta.LifecycleAdmissionReceiptV2MetadataKey: row.Metadata[beadmeta.LifecycleAdmissionReceiptV2MetadataKey],
+			beadmeta.LifecycleMaterializationMetadataKey:    priorReservation,
+		},
+	}); err != nil {
 		t.Fatal(err)
 	}
 	var stderr bytes.Buffer
@@ -80,7 +88,7 @@ func TestLifecycleAdmissionDoesNotResumeReservationWithoutV2Proof(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if current.Metadata[beadmeta.LifecycleMaterializationMetadataKey] != `{"version":1,"state":"reserved","scope":"city:pilot/city:pilot","contract":"prior","route":"worker","workflow":"review","merge_strategy":"mr","token":"prior-owner"}` {
+	if current.Metadata[beadmeta.LifecycleMaterializationMetadataKey] != priorReservation {
 		t.Fatalf("unproved pass changed prior reservation: %v", current.Metadata)
 	}
 	if current.Metadata[beadmeta.RoutedToMetadataKey] != "" || current.Metadata[beadmeta.MoleculeIDMetadataKey] != "" {
