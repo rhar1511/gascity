@@ -219,15 +219,16 @@ func TestLifecycleGraphWorkflowLookupDoesNotFallBackAcrossDuplicateIDs(t *testin
 		t.Fatal(err)
 	}
 	inputConvoy := "input-convoy"
-	if err := store.Update(source.ID, beads.UpdateOpts{Metadata: map[string]string{
-		beadmeta.LifecycleMaterializationMetadataKey: reservation,
-		beadmeta.RoutedToMetadataKey:                 "pilot/worker",
-		beadmeta.MergeStrategyMetadataKey:            "mr",
-		beadmeta.WorkflowIDMetadataKey:               rootID,
-	}, ParentID: &inputConvoy}); err != nil {
-		t.Fatal(err)
-	}
-	current, err := store.Get(source.ID)
+	// Seed this reserved source at creation. Ordinary updates to lifecycle-enrolled
+	// work are blocked, and the test only needs to model the persisted state that
+	// the controller's authorized transition path would produce.
+	source.Metadata[beadmeta.LifecycleMaterializationMetadataKey] = reservation
+	source.Metadata[beadmeta.RoutedToMetadataKey] = "pilot/worker"
+	source.Metadata[beadmeta.MergeStrategyMetadataKey] = "mr"
+	source.Metadata[beadmeta.WorkflowIDMetadataKey] = rootID
+	source.ParentID = inputConvoy
+	store = &beads.MemStore{IDPrefix: "work", HonorExplicitIDs: true}
+	current, err := store.Create(source)
 	if err != nil {
 		t.Fatal(err)
 	}
