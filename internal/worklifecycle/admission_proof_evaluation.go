@@ -51,7 +51,7 @@ func verifyAdmissionProofAttachment(bead beads.Bead, receipt AdmissionReceiptV2,
 	}
 	if proof.SchemaVersion != 1 || proof.WorkItemID != bead.ID || proof.Scope != receipt.Scope ||
 		proof.FromRevision != receipt.ExpectedWorkRevision || proof.ToRevision != bead.Revision ||
-		proof.ToRevision <= proof.FromRevision {
+		proof.ToRevision == 0 || proof.ToRevision == proof.FromRevision {
 		return fmt.Errorf("%w: Q43 proof does not identify this receipt at the current work revision", ErrAdmissionAttachmentInvalid)
 	}
 	digest, err := AdmissionDigestV2(receipt)

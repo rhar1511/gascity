@@ -19,6 +19,19 @@ func TestEvaluateAdmissionWithProofRequiresCurrentAttachmentAndPolicy(t *testing
 		}
 	})
 
+	t.Run("opaque revision token may decrease", func(t *testing.T) {
+		current := bead
+		current.Revision = 5
+		changed := inputs
+		attachment := *inputs.Attachment
+		attachment.ToRevision = current.Revision
+		changed.Attachment = &attachment
+		got := EvaluateAdmissionWithProof(current, cfg, inputs.PolicyProjection.SourceScope, changed)
+		if !got.Requested || !got.Admitted {
+			t.Fatalf("lower distinct current revision token decision = %+v, want admitted", got)
+		}
+	})
+
 	t.Run("missing attachment", func(t *testing.T) {
 		changed := inputs
 		changed.Attachment = nil
