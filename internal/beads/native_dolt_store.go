@@ -1534,6 +1534,13 @@ func (s *NativeDoltStore) applySetMetadataBatchInTx(ctx context.Context, tx bead
 	if issue == nil {
 		return fmt.Errorf("bead %q: %w", id, ErrNotFound)
 	}
+	current, err := beadFromNativeIssue(issue)
+	if err != nil {
+		return err
+	}
+	if err := ValidateLifecycleMutation(current, UpdateOpts{Metadata: kvs}); err != nil {
+		return fmt.Errorf("setting lifecycle metadata on %q: %w", id, err)
+	}
 	raw, err := metadataRawWithOverrides(issue.Metadata, kvs)
 	if err != nil {
 		return fmt.Errorf("parsing metadata for bead %q: %w", id, err)

@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	beadslib "github.com/steveyegge/beads"
 	beadops "github.com/steveyegge/beads/issueops"
 )
@@ -1469,6 +1470,98 @@ func TestNativeDoltStoreTxCoalescesWritesIntoSingleCommit(t *testing.T) {
 	if gotMembership.Metadata["role"] != "member" {
 		t.Fatalf("membership metadata = %#v, want created-in-tx fields", gotMembership.Metadata)
 	}
+}
+
+func TestNativeDoltStoreTxSetMetadataBatchRejectsProtectedKeysAndRollsBack(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		key  string
+		want error
+	}{
+		{name: "decision frontier namespace", key: beadmeta.DecisionFrontierMetadataPrefix + "caller_forged", want: ErrDecisionFrontierMutationBlocked},
+		{name: "lifecycle transition head", key: beadmeta.LifecycleTransitionHeadMetadataKey, want: ErrLifecycleMutationBlocked},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, currentIssue, commitCount := newNativeDoltTxMetadataStoreForTest()
+			err := store.Tx("protected metadata rollback", func(tx Tx) error {
+				if err := tx.SetMetadataBatch("gc-tx-metadata", map[string]string{"prior_write": "must roll back"}); err != nil {
+					return err
+				}
+				return tx.SetMetadataBatch("gc-tx-metadata", map[string]string{tc.key: "forged"})
+			})
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("Tx protected metadata error = %v, want %v", err, tc.want)
+			}
+			if got := commitCount(); got != 0 {
+				t.Fatalf("commits = %d, want 0 after rejected protected metadata write", got)
+			}
+			metadata := map[string]string{}
+			if err := json.Unmarshal(currentIssue().Metadata, &metadata); err != nil {
+				t.Fatalf("unmarshal stored metadata: %v", err)
+			}
+			if metadata["initial"] != "yes" || metadata["prior_write"] != "" || metadata[tc.key] != "" {
+				t.Fatalf("metadata after rejected Tx = %#v, want original metadata with all tx writes rolled back", metadata)
+			}
+		})
+	}
+}
+
+func TestNativeDoltStoreTxSetMetadataBatchAllowsOrdinaryMetadata(t *testing.T) {
+	store, currentIssue, commitCount := newNativeDoltTxMetadataStoreForTest()
+	if err := store.Tx("ordinary metadata", func(tx Tx) error {
+		return tx.SetMetadataBatch("gc-tx-metadata", map[string]string{"phase": "committed"})
+	}); err != nil {
+		t.Fatalf("Tx ordinary SetMetadataBatch: %v", err)
+	}
+	if got := commitCount(); got != 1 {
+		t.Fatalf("commits = %d, want 1", got)
+	}
+	metadata := map[string]string{}
+	if err := json.Unmarshal(currentIssue().Metadata, &metadata); err != nil {
+		t.Fatalf("unmarshal stored metadata: %v", err)
+	}
+	if metadata["initial"] != "yes" || metadata["phase"] != "committed" {
+		t.Fatalf("metadata after Tx = %#v, want initial=yes and phase=committed", metadata)
+	}
+}
+
+func newNativeDoltTxMetadataStoreForTest() (*NativeDoltStore, func() *beadslib.Issue, func() int) {
+	issue := &beadslib.Issue{
+		ID:        "gc-tx-metadata",
+		Title:     "transaction metadata",
+		Status:    beadslib.StatusOpen,
+		IssueType: beadslib.TypeTask,
+		Metadata:  json.RawMessage(`{"initial":"yes"}`),
+	}
+	commits := 0
+	storage := &nativeDoltStorageSpy{}
+	storage.getIssue = func(_ context.Context, id string) (*beadslib.Issue, error) {
+		if id != issue.ID {
+			return nil, ErrNotFound
+		}
+		return cloneNativeIssueForTest(issue), nil
+	}
+	storage.updateIssue = func(_ context.Context, id string, updates map[string]interface{}, _ string) error {
+		if id != issue.ID {
+			return ErrNotFound
+		}
+		metadata, ok := updates["metadata"].(json.RawMessage)
+		if !ok {
+			return fmt.Errorf("metadata update had type %T, want json.RawMessage", updates["metadata"])
+		}
+		issue.Metadata = append(json.RawMessage(nil), metadata...)
+		return nil
+	}
+	storage.runInTransaction = func(_ context.Context, _ string, fn func(beadslib.Transaction) error) error {
+		before := cloneNativeIssueForTest(issue)
+		if err := fn(nativeDoltTransactionForTest{storage: storage}); err != nil {
+			issue = before
+			return err
+		}
+		commits++
+		return nil
+	}
+	return newNativeDoltStoreForTest(storage), func() *beadslib.Issue { return issue }, func() int { return commits }
 }
 
 // TestNativeDoltStoreTxRollsBackOnError verifies the coalesced transaction is
