@@ -1,0 +1,7 @@
+{
+  "delivery_attempted": false,
+  "kind": "offline_replay_fixture",
+  "note": "synthetic local evidence only; not a Forgejo receipt or live canary",
+  "notification_id": "notif-8d5756c23d0801e8",
+  "request_id": "req-syn-0003"
+}

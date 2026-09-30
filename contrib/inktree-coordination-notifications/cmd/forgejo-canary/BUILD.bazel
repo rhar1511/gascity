@@ -1,0 +1,48 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
+
+exports_files(glob(
+    ["**"],
+    exclude = ["BUILD.bazel"],
+))
+
+go_library(
+    name = "forgejo-canary_lib",
+    srcs = ["main.go"],
+    importpath = "github.com/gastownhall/gascity/contrib/inktree-coordination-notifications/cmd/forgejo-canary",
+    visibility = ["//visibility:private"],
+    deps = [
+        "//contrib/inktree-coordination-notifications",
+        "//internal/coordinationnotify",
+    ],
+)
+
+go_binary(
+    name = "forgejo-canary",
+    embed = [":forgejo-canary_lib"],
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "forgejo-canary_test",
+    srcs = [
+        "main_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":forgejo-canary_lib"],
+    deps = [
+        "//contrib/inktree-coordination-notifications",
+        "//internal/testenv",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

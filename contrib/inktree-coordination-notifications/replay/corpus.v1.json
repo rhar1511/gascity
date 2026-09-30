@@ -1,0 +1,68 @@
+{
+  "corpus_version": "inktree-coordination-notification-replay/v1",
+  "cases": [
+    {
+      "case_id": "route-single-rig",
+      "status": "route",
+      "source_reason": "single_rig",
+      "bead_id": "inktree-syn0001",
+      "expect_reason_code": "route.single_rig",
+      "expect_notification": false,
+      "expect_projection_hash": "00efc974d0722a4b13f1d168e3719d1bdf4171200c5f1cd39218aebccade78b0"
+    },
+    {
+      "case_id": "route-multi-rig-dag",
+      "status": "route",
+      "source_reason": "multi_rig_dag",
+      "bead_id": "inktree-syn0002",
+      "expect_reason_code": "route.multi_rig_dag",
+      "expect_notification": false,
+      "expect_projection_hash": "00efc974d0722a4b13f1d168e3719d1bdf4171200c5f1cd39218aebccade78b0"
+    },
+    {
+      "case_id": "hold-ambiguous-rig",
+      "status": "hold",
+      "source_reason": "jev_selected_hold",
+      "bead_id": "inktree-syn0003",
+      "expect_reason_code": "hold.ambiguous_rig",
+      "expect_notification": true,
+      "expect_projection_hash": "14c6b54b569142a0f2a708e1aa89d51ef87e807888d1f6c9b16b4322e39b7211"
+    },
+    {
+      "case_id": "hold-missing-evidence",
+      "status": "hold",
+      "source_reason": "missing_evidence",
+      "bead_id": "inktree-syn0004",
+      "expect_reason_code": "hold.missing_evidence",
+      "expect_notification": true,
+      "expect_projection_hash": "99602d96b4302ae94ac3858ee9a9c3d39f3d743b3532391f1fe06ae09080bbaf"
+    },
+    {
+      "case_id": "hold-irreversible-risk",
+      "status": "hold",
+      "source_reason": "irreversible_risk",
+      "bead_id": "inktree-syn0005",
+      "expect_reason_code": "hold.irreversible_risk",
+      "expect_notification": true,
+      "expect_projection_hash": "189224ec25cb0e170aa82c1e63eac51d33f7fcc8058201d8e2a2f0b30d0b6af3"
+    },
+    {
+      "case_id": "abstain-unsupported-class",
+      "status": "abstain",
+      "source_reason": "unsupported_class",
+      "bead_id": "inktree-syn0006",
+      "expect_reason_code": "abstain.unsupported_class",
+      "expect_notification": true,
+      "expect_projection_hash": "3fc6c97326f76b5da3792a42d0a4d951361242fd1ada8c57914daefe2cc51427"
+    },
+    {
+      "case_id": "hard-failure-policy-violation",
+      "status": "hard_failure",
+      "source_reason": "policy_violation",
+      "bead_id": "inktree-syn0007",
+      "expect_reason_code": "hard_failure.policy_violation",
+      "expect_notification": false,
+      "expect_projection_hash": "00efc974d0722a4b13f1d168e3719d1bdf4171200c5f1cd39218aebccade78b0"
+    }
+  ]
+}
