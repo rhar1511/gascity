@@ -123,6 +123,27 @@ type SigningKeyProvider interface {
 	PrivateKey(context.Context, string) (ed25519.PrivateKey, error)
 }
 
+// SigningKeyProviderFunc adapts a trusted startup callback to the provider
+// interface. Key selection and custody remain the callback's responsibility;
+// this adapter only validates and isolates the returned key bytes.
+type SigningKeyProviderFunc func(context.Context, string) (ed25519.PrivateKey, error)
+
+// PrivateKey forwards the exact context and key ID to the configured callback
+// and returns an isolated copy of a valid Ed25519 private key.
+func (f SigningKeyProviderFunc) PrivateKey(ctx context.Context, keyID string) (ed25519.PrivateKey, error) {
+	if f == nil {
+		return nil, ErrUnavailable
+	}
+	key, err := f(ctx, keyID)
+	if err != nil {
+		return nil, err
+	}
+	if len(key) != ed25519.PrivateKeySize {
+		return nil, ErrUnavailable
+	}
+	return append(ed25519.PrivateKey(nil), key...), nil
+}
+
 // RetentionSink durably and immutably retains the exact signed record through retainUntil.
 // Implementations must not return success unless they can honor the full
 // retention period, and must reject replacement of an existing observation

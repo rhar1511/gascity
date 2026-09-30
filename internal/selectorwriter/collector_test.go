@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -71,6 +72,85 @@ type fixtureKeyProvider struct{ key ed25519.PrivateKey }
 
 func (p fixtureKeyProvider) PrivateKey(context.Context, string) (ed25519.PrivateKey, error) {
 	return append(ed25519.PrivateKey(nil), p.key...), nil
+}
+
+func TestSigningKeyProviderFuncForwardsContextAndExactKeyID(t *testing.T) {
+	type contextKey struct{}
+	ctx := context.WithValue(context.Background(), contextKey{}, "collector startup")
+	_, wantKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const keyID = "root-host-collector-key-2026-09"
+	called := false
+	provider := SigningKeyProviderFunc(func(gotContext context.Context, gotKeyID string) (ed25519.PrivateKey, error) {
+		called = true
+		if gotContext != ctx {
+			t.Errorf("callback context = %v, want exact supplied context", gotContext)
+		}
+		if gotKeyID != keyID {
+			t.Errorf("callback key ID = %q, want %q", gotKeyID, keyID)
+		}
+		return wantKey, nil
+	})
+
+	gotKey, err := provider.PrivateKey(ctx, keyID)
+	if err != nil {
+		t.Fatalf("provider returned error: %v", err)
+	}
+	if !called || !bytes.Equal(gotKey, wantKey) {
+		t.Fatalf("provider result called=%t key matches=%t", called, bytes.Equal(gotKey, wantKey))
+	}
+}
+
+func TestSigningKeyProviderFuncFailsClosedForNilCallbackErrorAndInvalidKey(t *testing.T) {
+	ctx := context.Background()
+	if key, err := SigningKeyProviderFunc(nil).PrivateKey(ctx, "collector-key"); err == nil || key != nil {
+		t.Fatalf("nil callback returned key=%t err=%v, want no key and an error", key != nil, err)
+	}
+
+	callbackErr := errors.New("key source unavailable")
+	provider := SigningKeyProviderFunc(func(context.Context, string) (ed25519.PrivateKey, error) {
+		return make(ed25519.PrivateKey, ed25519.PrivateKeySize), callbackErr
+	})
+	if key, err := provider.PrivateKey(ctx, "collector-key"); !errors.Is(err, callbackErr) || key != nil {
+		t.Fatalf("callback failure returned key=%t err=%v, want original error and no key", key != nil, err)
+	}
+
+	for _, size := range []int{0, ed25519.PrivateKeySize - 1, ed25519.PrivateKeySize + 1} {
+		t.Run(fmt.Sprintf("key length %d", size), func(t *testing.T) {
+			provider := SigningKeyProviderFunc(func(context.Context, string) (ed25519.PrivateKey, error) {
+				return make(ed25519.PrivateKey, size), nil
+			})
+			if key, err := provider.PrivateKey(ctx, "collector-key"); !errors.Is(err, ErrUnavailable) || key != nil {
+				t.Fatalf("invalid key returned key=%t err=%v, want unavailable and no key", key != nil, err)
+			}
+		})
+	}
+}
+
+func TestSigningKeyProviderFuncReturnsIsolatedKeyCopy(t *testing.T) {
+	_, sourceKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := append(ed25519.PrivateKey(nil), sourceKey...)
+	provider := SigningKeyProviderFunc(func(context.Context, string) (ed25519.PrivateKey, error) {
+		return sourceKey, nil
+	})
+	gotKey, err := provider.PrivateKey(context.Background(), "collector-key")
+	if err != nil {
+		t.Fatalf("provider returned error: %v", err)
+	}
+
+	sourceKey[0] ^= 0xff
+	if !bytes.Equal(gotKey, original) {
+		t.Fatal("provider result changed when callback-owned key bytes changed")
+	}
+	gotKey[1] ^= 0xff
+	if !bytes.Equal(sourceKey[1:], original[1:]) {
+		t.Fatal("callback-owned key bytes changed when provider result changed")
+	}
 }
 
 type fixtureClock struct{ now time.Time }
@@ -357,6 +437,35 @@ func TestVerifierRejectsTamperedLedgerAndBindingMismatch(t *testing.T) {
 	}
 	if _, err := verifier.Verify(context.Background(), raw, f.now.Add(MaxObservationAge+time.Second), f.hostID, f.bootID); err == nil {
 		t.Fatal("stale signed record was accepted")
+	}
+}
+
+func TestVerifierPinsAndCopiesExplicitPublicKey(t *testing.T) {
+	f := newCollectorFixture(t)
+	raw := f.collect(t)
+	originalPublicKey := append(ed25519.PublicKey(nil), f.public...)
+	verifier, err := NewVerifier(f.collector.KeyID, f.public)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.public[0] ^= 0xff
+	if !bytes.Equal(verifier.key, originalPublicKey) {
+		t.Fatal("verifier key changed when caller-owned public-key bytes changed")
+	}
+	if _, err := verifier.Verify(context.Background(), raw, f.now, f.hostID, f.bootID); err != nil {
+		t.Fatalf("verifier failed to use its pinned public key: %v", err)
+	}
+
+	otherPublicKey, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherVerifier, err := NewVerifier(f.collector.KeyID, otherPublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := otherVerifier.Verify(context.Background(), raw, f.now, f.hostID, f.bootID); !errors.Is(err, ErrSignature) {
+		t.Fatalf("record signed by a different key returned %v, want ErrSignature", err)
 	}
 }
 
