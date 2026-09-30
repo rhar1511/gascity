@@ -224,6 +224,70 @@ func TestLifecycleRecoveryQ54LostResponseConsumesBudgetWithoutDelivery(t *testin
 	}
 }
 
+func TestLifecycleRecoveryQ54RechecksWorkflowAtEffectBoundary(t *testing.T) {
+	setup := newLifecycleAdmissionTransitionSetup(t)
+	claim := prepareLifecycleQ54Claim(t, setup)
+	privateKey := setLifecycleRecoveryAuthority(t, setup)
+	work, err := setup.store.Get(setup.source.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker, ok := lifecycleMaterializationFor(work)
+	if !ok || marker.State != "attached" {
+		t.Fatalf("recovery source has no attached workflow marker: %+v", marker)
+	}
+	workflow, err := setup.store.Get(marker.WorkflowID)
+	if err != nil {
+		t.Fatalf("read attached workflow root: %v", err)
+	}
+	request := lifecycleRecoveryRequest(t, setup, claim, privateKey, "q54-workflow-race", work.Revision)
+	persistLifecycleRecoveryIntent(t, setup.store, request)
+	setup.store.afterNextPatch = func(kind string) {
+		if kind != lifecycleRecoveryBudgetKind {
+			return
+		}
+		closed := "closed"
+		if err := setup.store.MemStore.Update(workflow.ID, beads.UpdateOpts{Status: &closed}); err != nil {
+			t.Errorf("close attached workflow after recovery reservation: %v", err)
+		}
+	}
+
+	var logs strings.Builder
+	runLifecycleRecovery(setup, claim, &logs)
+	current, err := setup.store.Get(work.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workflow, err = setup.store.Get(workflow.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if workflow.Status != "closed" || current.Status != "in_progress" ||
+		current.Revision == work.Revision || typedLifecyclePatchCount(setup.store, lifecycleRecoveryBudgetKind) != 1 {
+		t.Fatalf("race fixture did not close workflow after consuming budget: work status/revision=%s/%d -> %d workflow=%s", current.Status, work.Revision, current.Revision, workflow.Status)
+	}
+	setup.store.mu.Lock()
+	var budgetReceipt beads.RevisionTransitionPatchReceipt
+	for _, receipt := range setup.store.patchReceipts {
+		if receipt.Kind == lifecycleRecoveryBudgetKind {
+			budgetReceipt = receipt
+			break
+		}
+	}
+	setup.store.mu.Unlock()
+	if budgetReceipt.ReceiptID == "" || current.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey] != budgetReceipt.ReceiptID ||
+		current.Revision != budgetReceipt.ToVersion {
+		t.Fatalf("workflow mutation changed the source Q54 head: source revision/head=%d/%s budget receipt=%+v", current.Revision,
+			current.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey], budgetReceipt)
+	}
+	if got := claim.provider.CountCalls("Nudge", claim.info.SessionName); got != 0 {
+		t.Fatalf("recovery sent %d nudges after attached workflow ceased to be current", got)
+	}
+	if !strings.Contains(logs.String(), "lost a prerequisite before delivery") {
+		t.Fatalf("controller did not report the final workflow fence: %s", logs.String())
+	}
+}
+
 func TestLifecycleRecoveryQ54HoldsStaleRevisionAndTamperedHead(t *testing.T) {
 	for _, tc := range []struct {
 		name       string

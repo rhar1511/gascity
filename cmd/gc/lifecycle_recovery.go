@@ -161,7 +161,7 @@ func reconcileLifecycleRecoveryRequestsWithPermitResolver(
 			work, err := leg.store.Get(request.WorkItemID)
 			if err != nil || work.Revision != request.ExpectedRevision || worklifecycle.ValidateRecoveryTargetTuple(work, request) != nil ||
 				!recoveryAttemptBindingMatchesWork(binding, work) ||
-				worklifecycle.ValidateRecoveryWorkEvidence(work, cfg.Lifecycle, scope) != nil ||
+				worklifecycle.ValidateRecoveryWorkEnvelopeEvidence(work, cfg.Lifecycle, scope) != nil ||
 				!lifecycleRecoveryAttachedWorkflowMatches(work, leg.ref, leg.store, storesByRef, cfg, scope) {
 				fmt.Fprintf(stderr, "lifecycle recovery: target %s changed or lost attached-workflow evidence; no attempt reserved\n", request.WorkItemID) //nolint:errcheck
 				continue
@@ -260,7 +260,7 @@ func reconcileLifecycleRecoveryRequestsWithPermitResolver(
 				fmt.Fprintf(stderr, "lifecycle recovery: reserved request %s lacks its exact current Q54 receipt; slot remains consumed (%v)\n", request.RequestID, errors.Join(headErr, readErr, worklifecycle.ErrTransitionChainReceipt)) //nolint:errcheck
 				continue
 			}
-			if !recoveryEffectRecheck(leg.store, front, provider, work, request, binding, cfg, scope,
+			if !recoveryEffectRecheck(leg.ref, storesByRef, leg.store, front, provider, work, request, binding, cfg, scope,
 				currentHead.ToVersion, currentHead.ReceiptID, transition.chain, transition.evidence, time.Now().UTC()) {
 				fmt.Fprintf(stderr, "lifecycle recovery: reserved request %s lost a prerequisite before delivery; slot remains consumed\n", request.RequestID) //nolint:errcheck
 				continue
@@ -389,7 +389,7 @@ func recoverySessionTupleMatches(front *session.Store, request worklifecycle.Rec
 	return err == nil && claim == work.ID
 }
 
-func recoveryEffectRecheck(store beads.Store, front *session.Store, provider runtime.Provider, previous beads.Bead,
+func recoveryEffectRecheck(sourceRef string, storesByRef map[string]beads.Store, store beads.Store, front *session.Store, provider runtime.Provider, previous beads.Bead,
 	request worklifecycle.RecoveryRequest, binding session.RequestAttemptBinding, cfg *config.City, scope string,
 	reservedRevision int64, reservedHeadID string, chain *worklifecycle.TransitionChain,
 	evidence worklifecycle.TransitionEvidence, now time.Time,
@@ -403,7 +403,8 @@ func recoveryEffectRecheck(store beads.Store, front *session.Store, provider run
 	current, err := store.Get(request.WorkItemID)
 	if err != nil || current.Revision != reservedRevision || worklifecycle.ValidateRecoveryTargetTuple(current, request) != nil ||
 		!recoveryAttemptBindingMatchesWork(binding, current) ||
-		worklifecycle.ValidateRecoveryWorkEvidence(current, cfg.Lifecycle, scope) != nil {
+		worklifecycle.ValidateRecoveryWorkEnvelopeEvidence(current, cfg.Lifecycle, scope) != nil ||
+		!lifecycleRecoveryAttachedWorkflowMatches(current, sourceRef, store, storesByRef, cfg, scope) {
 		return false
 	}
 	head, err := chain.CurrentHead(request.WorkItemID, evidence)

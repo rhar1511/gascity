@@ -17,6 +17,15 @@ import (
 	"github.com/gastownhall/gascity/internal/worklifecycle"
 )
 
+type lifecycleRecoveryAdmissionTestState struct {
+	State
+	verify func(context.Context, LifecycleRecoveryAdmissionRequest) error
+}
+
+func (s *lifecycleRecoveryAdmissionTestState) VerifyLifecycleRecoveryAdmission(ctx context.Context, request LifecycleRecoveryAdmissionRequest) error {
+	return s.verify(ctx, request)
+}
+
 func TestLifecycleRecoverySubmitRejectsV2WithoutAttachmentAndPolicyProof(t *testing.T) {
 	state := newFakeState(t)
 	state.cfg.Rigs = nil
@@ -145,7 +154,17 @@ func TestLifecycleRecoverySubmitRejectsV2WithoutAttachmentAndPolicyProof(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := &Server{state: state}
+	server := &Server{state: &lifecycleRecoveryAdmissionTestState{
+		State: state,
+		verify: func(_ context.Context, request LifecycleRecoveryAdmissionRequest) error {
+			adapter, err := worklifecycle.NewAdmissionAttachmentAdapter(request.WorkStore)
+			if err != nil {
+				return err
+			}
+			_, _, err = adapter.VerifyForTransition(request.Work.ID, state.cfg.Lifecycle, request.Scope)
+			return err
+		},
+	}}
 	input := &LifecycleRecoverySubmitInput{CityScope: CityScope{CityName: state.cityName}, Body: request}
 	if _, err := server.humaHandleLifecycleRecoverySubmit(context.Background(), input); err == nil || !strings.Contains(err.Error(), "current, attached lifecycle admission") {
 		t.Fatalf("recovery intake error = %v, want v2 attachment/policy proof hold", err)

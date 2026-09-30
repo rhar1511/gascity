@@ -33,6 +33,23 @@ type LifecycleRecoverySubmitOutput struct {
 	}
 }
 
+// LifecycleRecoveryAdmissionRequest gives the controller proof verifier the
+// exact row and store selected by the API's authoritative residency plan.
+type LifecycleRecoveryAdmissionRequest struct {
+	Work             beads.Bead
+	WorkStore        beads.Store
+	WorkStoreRef     storeref.StoreRef
+	Scope            string
+	ExpectedRevision int64
+}
+
+// LifecycleRecoveryAdmissionVerifier is an optional controller capability.
+// It proves the exact Q43 attachment, current route policy, and attached
+// workflow before recovery intent can be accepted.
+type LifecycleRecoveryAdmissionVerifier interface {
+	VerifyLifecycleRecoveryAdmission(context.Context, LifecycleRecoveryAdmissionRequest) error
+}
+
 func registerLifecycleRecoveryRoutes(sm *SupervisorMux) {
 	cityRegister(sm, huma.Operation{
 		OperationID:   "submit-lifecycle-recovery-request",
@@ -45,7 +62,7 @@ func registerLifecycleRecoveryRoutes(sm *SupervisorMux) {
 	}, (*Server).humaHandleLifecycleRecoverySubmit)
 }
 
-func (s *Server) humaHandleLifecycleRecoverySubmit(_ context.Context, input *LifecycleRecoverySubmitInput) (*LifecycleRecoverySubmitOutput, error) {
+func (s *Server) humaHandleLifecycleRecoverySubmit(ctx context.Context, input *LifecycleRecoverySubmitInput) (*LifecycleRecoverySubmitOutput, error) {
 	cfg := s.state.Config()
 	if cfg == nil {
 		return nil, apierr.ServiceUnavailable.Msg("lifecycle recovery configuration unavailable")
@@ -79,9 +96,6 @@ func (s *Server) humaHandleLifecycleRecoverySubmit(_ context.Context, input *Lif
 	if err != nil || scope != input.Body.Scope {
 		return nil, apierr.Forbidden.Msg("recovery request does not name the authoritative work store scope")
 	}
-	if err := worklifecycle.ValidateRecoveryWorkEvidence(work, cfg.Lifecycle, scope); err != nil {
-		return nil, apierr.ConflictWrongState.Msg("work item has no current, attached lifecycle admission")
-	}
 	if work.Revision != input.Body.ExpectedRevision || work.Status != "in_progress" || work.Assignee != input.Body.Owner {
 		return nil, apierr.ConflictWrongState.Msg("work revision or current owner changed")
 	}
@@ -106,6 +120,16 @@ func (s *Server) humaHandleLifecycleRecoverySubmit(_ context.Context, input *Lif
 	}
 	if info.Closed || info.Generation != input.Body.SessionGeneration || claim != work.ID {
 		return nil, apierr.ConflictWrongState.Msg("session generation or reciprocal claim changed")
+	}
+	verifier, ok := s.state.(LifecycleRecoveryAdmissionVerifier)
+	if !ok {
+		return nil, apierr.ServiceUnavailable.Msg("controller lifecycle admission verifier is unavailable")
+	}
+	if err := verifier.VerifyLifecycleRecoveryAdmission(ctx, LifecycleRecoveryAdmissionRequest{
+		Work: work, WorkStore: owner.Store, WorkStoreRef: owner.Ref,
+		Scope: scope, ExpectedRevision: input.Body.ExpectedRevision,
+	}); err != nil {
+		return nil, apierr.ConflictWrongState.Msg("work item has no current, attached lifecycle admission")
 	}
 	intent, _, err := worklifecycle.PersistRecoveryIntent(owner.Store, idPrefix, input.Body, digest)
 	if err != nil {

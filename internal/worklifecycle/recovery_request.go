@@ -261,10 +261,11 @@ func DecodeRecoveryIntent(bead beads.Bead) (RecoveryIntent, error) {
 	return intent, nil
 }
 
-// ValidateRecoveryWorkEvidence requires a direct, attached lifecycle source
-// whose signed admission and workflow materialization still match. Descendant
-// rows are never recovery targets under the initial nudge-only authority.
-func ValidateRecoveryWorkEvidence(bead beads.Bead, cfg config.LifecycleConfig, scope string) error {
+// ValidateRecoveryWorkEnvelopeEvidence checks the signed admission envelope
+// and the source's attached-workflow marker fields. It does not prove the Q43
+// attachment, current route policy, or current workflow row; callers must
+// verify those separately before treating the source as admitted.
+func ValidateRecoveryWorkEnvelopeEvidence(bead beads.Bead, cfg config.LifecycleConfig, scope string) error {
 	receipt, err := VerifyAdmissionReceiptV2(bead, cfg, scope)
 	if err != nil {
 		return fmt.Errorf("recovery target has no trusted admission: %w", ErrRecoveryWorkStale)
