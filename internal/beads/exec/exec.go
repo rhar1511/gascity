@@ -243,6 +243,9 @@ func coerceMetadata(raw map[string]json.RawMessage) map[string]string {
 
 // Create persists a new bead: script create (stdin: JSON)
 func (s *Store) Create(b beads.Bead) (beads.Bead, error) {
+	if err := beads.ValidateDecisionFrontierCreate(b); err != nil {
+		return beads.Bead{}, fmt.Errorf("exec beads create: %w", err)
+	}
 	if b.Type == "" {
 		b.Type = "task"
 	}

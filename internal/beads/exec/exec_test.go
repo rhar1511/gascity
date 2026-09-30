@@ -120,6 +120,42 @@ func TestCreate(t *testing.T) {
 	}
 }
 
+func TestCreateRejectsControllerReservedMetadata(t *testing.T) {
+	dir := t.TempDir()
+	invoked := filepath.Join(dir, "create-invoked")
+	script := writeScript(t, dir, `
+case "$1" in
+  create)
+    touch "`+invoked+`"
+    cat > /dev/null
+    echo '{"id":"EX-1","title":"test","status":"open","type":"task"}'
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	for _, tc := range []struct {
+		name string
+		key  string
+		want error
+	}{
+		{name: "lifecycle transition head", key: beadmeta.LifecycleTransitionHeadMetadataKey, want: beads.ErrLifecycleMutationBlocked},
+		{name: "decision frontier record", key: beadmeta.DecisionFrontierRecordMetadataKey, want: beads.ErrDecisionFrontierMutationBlocked},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := NewStore(script).Create(beads.Bead{
+				Title: "forged controller record", Type: "task",
+				Metadata: map[string]string{tc.key: "forged"},
+			})
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("Create(metadata[%q]) = %v, want %v", tc.key, err, tc.want)
+			}
+			if _, err := os.Stat(invoked); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("Create(metadata[%q]) reached exec script: %v", tc.key, err)
+			}
+		})
+	}
+}
+
 func TestCreate_stdinReachesScript(t *testing.T) {
 	dir := t.TempDir()
 	outFile := filepath.Join(dir, "stdin.json")
