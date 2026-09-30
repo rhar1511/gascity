@@ -1,6 +1,7 @@
 package rsipolicy
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -8,23 +9,25 @@ import (
 )
 
 func passingInput() Input {
+	workUnits := []string{"work-01", "work-02", "work-03", "work-04", "work-05", "work-06", "work-07", "work-08", "work-09", "work-10"}
 	return Input{
-		Objective: "reduce discovery latency without changing behavior",
+		Objective:      "reduce discovery latency without changing behavior",
+		AuthorityClass: "optimization",
 		Current: Bundle{
 			ID:             "bundle-001",
-			TypesCommit:    "types-commit",
-			AICommit:       "ai-commit",
-			FrontendCommit: "frontend-commit",
-			InktreeCommit:  "inktree-commit",
-			EvalSuiteHash:  "suite-v1",
+			TypesCommit:    strings.Repeat("1", 40),
+			AICommit:       strings.Repeat("2", 40),
+			FrontendCommit: strings.Repeat("3", 40),
+			InktreeCommit:  strings.Repeat("4", 40),
+			EvalSuiteHash:  strings.Repeat("a", 64),
 		},
 		Candidate: Bundle{
 			ID:             "bundle-002",
-			TypesCommit:    "types-commit",
-			AICommit:       "ai-commit-candidate",
-			FrontendCommit: "frontend-commit",
-			InktreeCommit:  "inktree-commit",
-			EvalSuiteHash:  "suite-v1",
+			TypesCommit:    strings.Repeat("1", 40),
+			AICommit:       strings.Repeat("5", 40),
+			FrontendCommit: strings.Repeat("3", 40),
+			InktreeCommit:  strings.Repeat("4", 40),
+			EvalSuiteHash:  strings.Repeat("a", 64),
 			Parent:         "bundle-001",
 		},
 		Baseline: Metrics{
@@ -48,8 +51,13 @@ func passingInput() Input {
 			MaxDependencies: 4,
 		},
 		Review: Review{
-			Improver: "jules",
-			Judges:   []string{"correctness", "performance"},
+			Improver:        "jules",
+			ImproverSession: "session-improver",
+			Judges:          []string{"correctness", "performance"},
+			Executions: []JudgeExecutionIdentity{
+				{LaneID: "correctness", ActorID: "judge-a", SessionID: "session-a"},
+				{LaneID: "performance", ActorID: "judge-b", SessionID: "session-b"},
+			},
 			Summary: reviewquorum.Summary{
 				Subject: "candidate:bundle-002",
 				BaseRef: "bundle-001",
@@ -62,6 +70,15 @@ func passingInput() Input {
 		},
 		Attempts:    1,
 		MaxAttempts: 3,
+		WorkAccounting: WorkAccounting{
+			AcceptanceSetSHA256:    HashAcceptanceUnitIDs(workUnits),
+			AcceptanceUnitIDs:      workUnits,
+			BaselineUsefulUnitIDs:  []string{"work-01", "work-02", "work-03", "work-04", "work-05", "work-06", "work-07", "work-08"},
+			CandidateUsefulUnitIDs: []string{"work-01", "work-02", "work-03", "work-04", "work-05", "work-06", "work-07", "work-08", "work-09"},
+			BaselineWorkerTime:     WorkerTime{ImplementationHours: 8, RecoveryHours: 1, EvaluationHours: 1},
+			CandidateWorkerTime:    WorkerTime{ImplementationHours: 7, RecoveryHours: 1, EvaluationHours: 2},
+		},
+		HumanApprovalVerified: true,
 	}
 }
 
@@ -214,6 +231,7 @@ func TestReviewFinalizedSummaryUsesGoQuorumFinalizer(t *testing.T) {
 func TestEvaluateRequiresHumanApprovalForSensitiveAuthority(t *testing.T) {
 	input := passingInput()
 	input.AuthorityClass = "safety_policy"
+	input.HumanApprovalVerified = false
 
 	decision := Evaluate(input)
 	if decision.Promote {
@@ -224,6 +242,34 @@ func TestEvaluateRequiresHumanApprovalForSensitiveAuthority(t *testing.T) {
 	}
 	if !containsReason(decision.Reasons, ReasonHumanApprovalRequired) {
 		t.Errorf("reasons %v do not contain %q", decision.Reasons, ReasonHumanApprovalRequired)
+	}
+}
+
+func TestEvaluateRejectsUnknownAuthorityClassAndMissingHumanApproval(t *testing.T) {
+	input := passingInput()
+	input.AuthorityClass = "safety-policy"
+	input.HumanApprovalVerified = false
+
+	decision := Evaluate(input)
+	if decision.Promote {
+		t.Fatal("Promote = true, want false for unknown authority and no human approval")
+	}
+	for _, reason := range []string{ReasonUnknownAuthorityClass, ReasonHumanApprovalRequired} {
+		if !containsReason(decision.Reasons, reason) {
+			t.Errorf("reasons %v do not contain %q", decision.Reasons, reason)
+		}
+	}
+}
+
+func TestEvaluateRequiresControllerVerifiedHumanApproval(t *testing.T) {
+	input := passingInput()
+	input.HumanApprovalVerified = false
+	decision := Evaluate(input)
+	if decision.Promote {
+		t.Fatal("policy authorized promotion without controller-verified human approval")
+	}
+	if !decision.ManualApprovalRequired {
+		t.Fatal("ManualApprovalRequired = false, want true")
 	}
 }
 
@@ -240,28 +286,53 @@ func TestEvaluateRequiresJudgeIDsToMatchFinalizedLanes(t *testing.T) {
 	}
 }
 
-func TestCandidateEvidenceBuildsPolicyInputWithoutMergingJudgeData(t *testing.T) {
+func TestCandidateProposalContainsOnlyCandidateBundle(t *testing.T) {
 	input := passingInput()
-	evidence := CandidateEvidence{
-		Objective:        input.Objective,
-		Current:          input.Current,
-		Candidate:        input.Candidate,
-		Baseline:         input.Baseline,
-		CandidateMetrics: input.CandidateMetrics,
-		Limits:           input.Limits,
-		AuthorityClass:   input.AuthorityClass,
-		Attempts:         input.Attempts,
-		MaxAttempts:      input.MaxAttempts,
-		Improver:         input.Review.Improver,
-		Judges:           input.Review.Judges,
-		ReviewSubject:    "candidate:bundle-002",
-		ReviewBaseRef:    "bundle-001",
+	raw, err := json.Marshal(CandidateProposal{Candidate: input.Candidate})
+	if err != nil {
+		t.Fatalf("marshal proposal: %v", err)
 	}
-	got := evidence.Input(input.Review.Summary.Lanes)
-	if got.Candidate.ID != input.Candidate.ID || got.Current.ID != input.Current.ID {
-		t.Fatalf("bundle lineage = %q/%q, want %q/%q", got.Current.ID, got.Candidate.ID, input.Current.ID, input.Candidate.ID)
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		t.Fatalf("decode proposal: %v", err)
 	}
-	if got.Review.Improver != input.Review.Improver || len(got.Review.LaneOutputs) != 2 {
-		t.Fatalf("review input = %+v, want improver and two lanes", got.Review)
+	if len(fields) != 1 || fields["candidate"] == nil {
+		t.Fatalf("candidate proposal fields = %v, want only candidate bundle", fields)
+	}
+}
+
+func TestTrustedMeasurementsRequireCompleteJSONFields(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		raw  string
+		dst  any
+	}{
+		{name: "metrics", raw: `{"score":1}`, dst: &Metrics{}},
+		{name: "limits", raw: `{"min_safety_score":0.9}`, dst: &Limits{}},
+		{name: "worker time", raw: `{"implementation_hours":1}`, dst: &WorkerTime{}},
+		{name: "work accounting", raw: `{"acceptance_set_sha256":"x"}`, dst: &WorkAccounting{}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := json.Unmarshal([]byte(test.raw), test.dst); err == nil {
+				t.Fatal("incomplete trusted data decoded without error")
+			}
+		})
+	}
+}
+
+func TestEvaluateRejectsInvalidLimitsAndDuplicateAcceptanceUnits(t *testing.T) {
+	input := passingInput()
+	input.Limits.MaxCostUSD = 0
+	input.WorkAccounting.AcceptanceUnitIDs = append(input.WorkAccounting.AcceptanceUnitIDs, input.WorkAccounting.AcceptanceUnitIDs[0])
+	input.WorkAccounting.AcceptanceSetSHA256 = HashAcceptanceUnitIDs(input.WorkAccounting.AcceptanceUnitIDs)
+
+	decision := Evaluate(input)
+	if decision.Promote {
+		t.Fatal("Promote = true, want false for invalid limits and duplicate acceptance units")
+	}
+	for _, reason := range []string{ReasonInvalidLimits, ReasonWorkAccountingInvalid} {
+		if !containsReason(decision.Reasons, reason) {
+			t.Errorf("reasons %v do not contain %q", decision.Reasons, reason)
+		}
 	}
 }

@@ -373,14 +373,17 @@ func TestRSIFormulaPinsCandidateJudgeAndGateSeparation(t *testing.T) {
 	if !strings.Contains(produce, "bead-specific worktree") || !strings.Contains(produce, "fixed maximum of three") {
 		t.Fatal("candidate step must require an isolated worktree and bounded attempts")
 	}
-	if !strings.Contains(correctness, "independent of the improver") || !strings.Contains(performance, "independent of the improver") {
-		t.Fatal("judge steps must be independent of the improver")
+	for name, description := range map[string]string{"correctness": correctness, "performance": performance} {
+		if !strings.Contains(description, "independent of the improver") || !strings.Contains(description, "held-out evaluation data") {
+			t.Fatalf("%s judge must be independent and excluded from held-out data", name)
+		}
 	}
 	for _, required := range []string{
-		"internal/rsipolicy.Evaluate",
-		"Go review finalizer",
+		"signed evaluation manifest",
+		"key they cannot access",
+		"controller-reserved execution binding",
+		"human signature approves this exact evaluation",
 		"rollback bundle",
-		"human approval gate",
 	} {
 		if !strings.Contains(gate, required) {
 			t.Fatalf("promote-gate step missing %q", required)

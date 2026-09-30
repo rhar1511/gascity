@@ -155,6 +155,9 @@ func processAttemptControl(store beads.Store, bead beads.Bead, opts ProcessOptio
 			beadmeta.AttemptLogMetadataKey: attemptLog,
 			beadmeta.OutcomeMetadataKey:    beadmeta.OutcomePass,
 		}
+		if strategy.kind == "retry" {
+			closeMetadata[beadmeta.ClosedByAttemptMetadataKey] = strconv.Itoa(attemptNum)
+		}
 		clearControllerSpawnErrorMetadata(closeMetadata)
 		if outputJSON := attempt.Metadata[beadmeta.OutputJSONMetadataKey]; outputJSON != "" {
 			closeMetadata[beadmeta.OutputJSONMetadataKey] = outputJSON

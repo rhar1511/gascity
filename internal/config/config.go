@@ -274,6 +274,9 @@ type City struct {
 	Formulas FormulasConfig `toml:"formulas,omitempty"`
 	// Daemon configures controller daemon settings.
 	Daemon DaemonConfig `toml:"daemon,omitempty"`
+	// RSI points the controller at trusted signed evaluation and human
+	// approval records. An unset evaluator leaves promotion fail-closed.
+	RSI RSIConfig `toml:"rsi,omitempty"`
 	// Orders configures order settings: skip list, max_timeout cap, and
 	// per-order overrides.
 	Orders OrdersConfig `toml:"orders,omitempty"`
@@ -4744,6 +4747,9 @@ func Parse(data []byte) (*City, error) {
 		return nil, err
 	}
 	if err := validateGuardedRelease(cfg.Beads.GuardedRelease); err != nil {
+		return nil, err
+	}
+	if err := validateRSIConfig(cfg.RSI); err != nil {
 		return nil, err
 	}
 	// Parse sees one layer. Cross-layer storage invariants (six-class

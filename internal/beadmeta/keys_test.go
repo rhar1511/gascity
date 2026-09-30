@@ -89,6 +89,7 @@ func TestGenericMutationReservesEveryExecutionIdentityAlias(t *testing.T) {
 		"execution_token",
 		Namespace + "instance_token",
 		Namespace + "execution_token",
+		RSIExecutionBindingMetadataKey,
 	}
 	for _, key := range aliases {
 		if !IsGenericMutationReservedKey(key) {
