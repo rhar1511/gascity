@@ -35,6 +35,9 @@ var (
 	ErrRecoveryEscalationTargetConflict = errors.New("recovery escalation target conflicts with persisted request")
 	// ErrRecoveryScopeMismatch means persisted state belongs to another store scope.
 	ErrRecoveryScopeMismatch = errors.New("recovery state scope does not match work item scope")
+	// ErrRecoveryEscalationRequestInvalid means a signed escalation request is
+	// malformed, stale, or not authorized by the configured recovery authority.
+	ErrRecoveryEscalationRequestInvalid = errors.New("recovery escalation request is invalid")
 )
 
 // RecoveryAttempt is a durable reservation made before an automatic recovery
@@ -58,10 +61,11 @@ type RecoveryAttempt struct {
 // mail.DedupSender when it publishes the request; delivery remains a separate
 // outcome.
 type RecoveryEscalation struct {
-	ID          string `json:"id"`
-	Target      string `json:"target"`
-	RequestedAt string `json:"requested_at"`
-	DedupKey    string `json:"dedup_key"`
+	ID          string                     `json:"id"`
+	Target      string                     `json:"target"`
+	RequestedAt string                     `json:"requested_at"`
+	DedupKey    string                     `json:"dedup_key"`
+	Request     *RecoveryEscalationRequest `json:"request,omitempty"`
 }
 
 // RecoveryState is versioned JSON stored under
@@ -540,6 +544,13 @@ func validateRecoveryState(state RecoveryState, beadID, scope string) error {
 	if _, err := time.Parse(time.RFC3339Nano, state.Escalation.RequestedAt); err != nil {
 		return fmt.Errorf("recovery state for %q: %w: escalation timestamp is invalid", beadID, ErrRecoveryStateInvalid)
 	}
+	if request := state.Escalation.Request; request != nil {
+		requestID, err := recoveryEscalationID(*request)
+		if request.WorkItemID != beadID || request.Scope != scope || request.Target != state.Escalation.Target ||
+			request.IssuedAt != state.Escalation.RequestedAt || err != nil || requestID != state.Escalation.ID {
+			return fmt.Errorf("recovery state for %q: %w: escalation request differs from its deterministic record", beadID, ErrRecoveryStateInvalid)
+		}
+	}
 	return nil
 }
 
@@ -547,6 +558,10 @@ func cloneRecoveryState(state RecoveryState) RecoveryState {
 	state.Attempts = append([]RecoveryAttempt(nil), state.Attempts...)
 	if state.Escalation != nil {
 		escalation := *state.Escalation
+		if escalation.Request != nil {
+			request := *escalation.Request
+			escalation.Request = &request
+		}
 		state.Escalation = &escalation
 	}
 	return state

@@ -93,8 +93,17 @@ func TestParseLifecycleValidatesTrustedAuthorities(t *testing.T) {
 			want: "cannot contain wildcards",
 		},
 		{
+			name: "unsupported recovery authority action",
+			toml: "[lifecycle]\nadmission_enabled = true\nrecovery_enabled = true\nescalation_target = \"ops\"\n[lifecycle.admission_authorities]\ntriage = \"" + key + "\"\n[lifecycle.acceptance_authorities]\nreviewer = \"" + otherKey + "\"\n[lifecycle.recovery_authorities]\noperator = { public_key = \"" + recoveryKey + "\", actions = [\"mail\"], scopes = [\"city:test/city:test\"] }\n",
+			want: "unsupported action",
+		},
+		{
 			name: "valid opt-in config",
 			toml: "[lifecycle]\nadmission_enabled = true\nrecovery_enabled = true\nescalation_target = \"ops\"\n[lifecycle.admission_authorities]\ntriage = \"" + key + "\"\n[lifecycle.acceptance_authorities]\nreviewer = \"" + otherKey + "\"\n" + recoveryTable,
+		},
+		{
+			name: "valid opt-in escalation authority",
+			toml: "[lifecycle]\nadmission_enabled = true\nrecovery_enabled = true\nescalation_target = \"ops\"\n[lifecycle.admission_authorities]\ntriage = \"" + key + "\"\n[lifecycle.acceptance_authorities]\nreviewer = \"" + otherKey + "\"\n[lifecycle.recovery_authorities]\noperator = { public_key = \"" + recoveryKey + "\", actions = [\"nudge\", \"escalate\"], scopes = [\"city:test/city:test\"] }\n",
 		},
 		{
 			name: "valid distinct v2 admission key",

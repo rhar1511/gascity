@@ -392,6 +392,10 @@ func ValidateLifecycleMutation(current Bead, opts UpdateOpts) error {
 	if HasLifecycleRecoveryIntent(current) {
 		return ErrLifecycleIntentImmutable
 	}
+	if next, writingTransitionHead := opts.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey]; writingTransitionHead &&
+		(!HasLifecycleEvidence(current) || next != current.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey]) {
+		return ErrLifecycleMutationBlocked
+	}
 	if _, writingRecoveryState := opts.Metadata[beadmeta.LifecycleRecoveryStateMetadataKey]; writingRecoveryState && !opts.lifecycleRecoveryStateWrite {
 		return ErrLifecycleMutationBlocked
 	}
@@ -461,7 +465,8 @@ func ValidateLifecycleMutation(current Bead, opts UpdateOpts) error {
 // the durable recovery budget. Generic Update/SetMetadata/metadata-CAS paths
 // cannot replace that state. This method requires a conditional writer and
 // fences the update to the caller's opaque row revision and the exact metadata
-// value it read.
+// value it read. Admitted lifecycle sources must use their typed transition
+// chain, including before its first transition-head receipt exists.
 func UpdateLifecycleRecoveryStateIfMatch(store Store, id string, expectedRevision int64, expectedState, nextState string) error {
 	if store == nil {
 		return errors.New("lifecycle recovery state store is required")
@@ -477,7 +482,7 @@ func UpdateLifecycleRecoveryStateIfMatch(store Store, id string, expectedRevisio
 	if current.ID != id || current.Revision != expectedRevision || current.Metadata[beadmeta.LifecycleRecoveryStateMetadataKey] != expectedState {
 		return &PreconditionFailedError{ID: id, Expected: expectedRevision, Current: current.Revision}
 	}
-	if current.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey] != "" {
+	if HasLifecycleAdmissionReceipt(current) || current.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey] != "" {
 		return ErrLifecycleMutationBlocked
 	}
 	return writer.UpdateIfMatch(id, expectedRevision, UpdateOpts{
@@ -529,9 +534,12 @@ func IsDecisionFrontierRecord(b Bead) bool {
 }
 
 // ValidateDecisionFrontierCreate rejects controller-reserved metadata on an
-// ordinary Create path. A dedicated controller capability validates and
-// creates immutable records.
+// ordinary Create path, including lifecycle transition heads. Dedicated
+// controller capabilities validate their own writes.
 func ValidateDecisionFrontierCreate(b Bead) error {
+	if _, supplied := b.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey]; supplied {
+		return ErrLifecycleMutationBlocked
+	}
 	for key := range b.Metadata {
 		if beadmeta.IsDecisionFrontierMetadataKey(key) {
 			return ErrDecisionFrontierMutationBlocked

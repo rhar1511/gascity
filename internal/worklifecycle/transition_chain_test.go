@@ -488,6 +488,202 @@ func TestTransitionChainRecoveryBudgetIsRequestBoundAndAppendOnly(t *testing.T) 
 	}
 }
 
+func TestTransitionChainPersistsRecoveryEscalationAndReplaysAfterRestart(t *testing.T) {
+	fixture := newTransitionChainFixture(t)
+	claim := applyTestClaim(t, fixture, applyTestAttachment(t, fixture, applyTestReservation(t, fixture)))
+	first, err := fixture.chain.Apply(fixture.recoveryBudgetRequest(t, claim.Receipt, "recovery-request-1"))
+	if err != nil {
+		t.Fatalf("first recovery budget: %v", err)
+	}
+	second, err := fixture.chain.Apply(fixture.recoveryBudgetRequest(t, first.Receipt, "recovery-request-2"))
+	if err != nil {
+		t.Fatalf("second recovery budget: %v", err)
+	}
+
+	escalation := fixture.recoveryEscalationRequest(t, second.Receipt, "escalation-request-1")
+	result, err := fixture.chain.Apply(escalation)
+	if err != nil {
+		t.Fatalf("persist authorized recovery escalation: %v", err)
+	}
+	if result.Receipt.Kind != transitionStepKind(TransitionStepRecoveryEscalation) || result.Receipt.PriorReceiptID != second.Receipt.ReceiptID {
+		t.Fatalf("escalation receipt = %+v, want a direct recovery-budget child", result.Receipt)
+	}
+	state, err := decodeCanonicalRecoveryState(
+		fixture.store.source.Metadata[beadmeta.LifecycleRecoveryStateMetadataKey], fixture.work.ID, fixture.policy.SourceScope,
+	)
+	if err != nil || state.Escalation == nil || state.Escalation.Request == nil || *state.Escalation.Request != *escalation.RecoveryEscalationRequest {
+		t.Fatalf("persisted escalation = %+v err=%v, want exact signed request", state.Escalation, err)
+	}
+	wantEscalationID, err := recoveryEscalationID(*escalation.RecoveryEscalationRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Escalation.ID != wantEscalationID ||
+		state.Escalation.Target != fixture.cfg.EscalationTarget ||
+		state.Escalation.DedupKey != recoveryEscalationDedupKey(fixture.policy.SourceScope, fixture.work.ID, state.Escalation.ID) {
+		t.Fatalf("escalation identity is not derived from its authorization: %+v", state.Escalation)
+	}
+	if len(fixture.permits.requests) == 0 || fixture.permits.requests[len(fixture.permits.requests)-1].replayID != result.Receipt.ReceiptID {
+		t.Fatalf("escalation permit is not bound to its exact receipt: %+v", fixture.permits.requests)
+	}
+	escalationPatchRequest := fixture.store.patchRequests[len(fixture.store.patchRequests)-1]
+	escalationPermit := fixture.permits.requests[len(fixture.permits.requests)-1]
+	escalationDigest, err := beads.RevisionTransitionPatchProtectedMutationDigest(fixture.work.ID, escalationPatchRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if escalationPermit.request.Operation != beads.RevisionTransitionPatchProtectedMutationOperation ||
+		!reflect.DeepEqual(escalationPermit.request.ResourceIDs, []string{fixture.work.ID}) ||
+		escalationPermit.request.RequestDigest != escalationDigest {
+		t.Fatalf("escalation permit = %+v, want exact operation, source, and patch digest", escalationPermit.request)
+	}
+
+	completion := fixture.completionBudgetRequest(t, result.Receipt, fixture.completionReceiptValue(t, nil))
+	completionResult, err := fixture.chain.Apply(completion)
+	if err != nil {
+		t.Fatalf("continue chain from recovery escalation to completion budget: %v", err)
+	}
+
+	restarted, err := NewTransitionChain(fixture.chainConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.chain = restarted
+	head, err := fixture.chain.CurrentHead(fixture.work.ID, fixture.evidence)
+	if err != nil || head.ReceiptID != completionResult.Receipt.ReceiptID {
+		t.Fatalf("current head after restart = %+v err=%v", head, err)
+	}
+	fixture.now = fixture.now.Add(2 * time.Hour)
+	replay, err := fixture.chain.Apply(escalation)
+	if err != nil || !replay.Replayed || replay.Receipt.ReceiptID != result.Receipt.ReceiptID {
+		t.Fatalf("expired historical escalation replay = %+v err=%v, want exact receipt", replay, err)
+	}
+}
+
+func TestTransitionChainRejectsInvalidRecoveryEscalation(t *testing.T) {
+	t.Run("not exhausted", func(t *testing.T) {
+		fixture := newTransitionChainFixture(t)
+		claim := applyTestClaim(t, fixture, applyTestAttachment(t, fixture, applyTestReservation(t, fixture)))
+		first, err := fixture.chain.Apply(fixture.recoveryBudgetRequest(t, claim.Receipt, "recovery-request-1"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		request := fixture.rawRecoveryEscalationRequest(t, first.Receipt, "escalation-request-1")
+		assertEscalationRejectedWithoutSideEffects(t, fixture, request)
+	})
+
+	for _, tc := range []struct {
+		name   string
+		mutate func(*testing.T, *transitionChainFixture, *TransitionRequest)
+	}{
+		{name: "modified signed target", mutate: func(_ *testing.T, _ *transitionChainFixture, request *TransitionRequest) {
+			request.RecoveryEscalationRequest.Target = "different-recipient"
+		}},
+		{name: "signed target differs from configured recipient", mutate: func(t *testing.T, fixture *transitionChainFixture, request *TransitionRequest) {
+			proof := *request.RecoveryEscalationRequest
+			proof.Target = "different-recipient"
+			var err error
+			*request.RecoveryEscalationRequest, err = SignRecoveryEscalationRequest(proof, fixture.recoveryPrivate)
+			if err != nil {
+				t.Fatal(err)
+			}
+			current, err := fixture.store.DecisionFrontierSourceSnapshot(fixture.work.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request.Patch, err = BuildRecoveryEscalationPatch(current.Metadata[beadmeta.LifecycleRecoveryStateMetadataKey], *request.RecoveryEscalationRequest)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "expired authorization", mutate: func(_ *testing.T, fixture *transitionChainFixture, _ *TransitionRequest) {
+			fixture.now = fixture.now.Add(2 * time.Hour)
+		}},
+		{name: "wrong signed parent revision", mutate: func(t *testing.T, fixture *transitionChainFixture, request *TransitionRequest) {
+			proof := *request.RecoveryEscalationRequest
+			proof.ExpectedRevision++
+			var err error
+			*request.RecoveryEscalationRequest, err = SignRecoveryEscalationRequest(proof, fixture.recoveryPrivate)
+			if err != nil {
+				t.Fatal(err)
+			}
+			current, err := fixture.store.DecisionFrontierSourceSnapshot(fixture.work.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request.Patch, err = BuildRecoveryEscalationPatch(current.Metadata[beadmeta.LifecycleRecoveryStateMetadataKey], *request.RecoveryEscalationRequest)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "changed previous recovery attempt", mutate: func(t *testing.T, _ *transitionChainFixture, request *TransitionRequest) {
+			change := request.Patch.Metadata[beadmeta.LifecycleRecoveryStateMetadataKey]
+			var state RecoveryState
+			if err := json.Unmarshal([]byte(change.Value), &state); err != nil {
+				t.Fatal(err)
+			}
+			state.Attempts[0].ID = "ffffffffffffffffffffffffffffffff"
+			encoded, err := json.Marshal(state)
+			if err != nil {
+				t.Fatal(err)
+			}
+			change.Value = string(encoded)
+			request.Patch.Metadata[beadmeta.LifecycleRecoveryStateMetadataKey] = change
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newTransitionChainFixture(t)
+			claim := applyTestClaim(t, fixture, applyTestAttachment(t, fixture, applyTestReservation(t, fixture)))
+			first, err := fixture.chain.Apply(fixture.recoveryBudgetRequest(t, claim.Receipt, "recovery-request-1"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			second, err := fixture.chain.Apply(fixture.recoveryBudgetRequest(t, first.Receipt, "recovery-request-2"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := fixture.recoveryEscalationRequest(t, second.Receipt, "escalation-request-1")
+			tc.mutate(t, fixture, &request)
+			assertEscalationRejectedWithoutSideEffects(t, fixture, request)
+		})
+	}
+
+	t.Run("authority lacks escalation action", func(t *testing.T) {
+		fixture := newTransitionChainFixture(t)
+		claim := applyTestClaim(t, fixture, applyTestAttachment(t, fixture, applyTestReservation(t, fixture)))
+		first, err := fixture.chain.Apply(fixture.recoveryBudgetRequest(t, claim.Receipt, "recovery-request-1"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		second, err := fixture.chain.Apply(fixture.recoveryBudgetRequest(t, first.Receipt, "recovery-request-2"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		request := fixture.recoveryEscalationRequest(t, second.Receipt, "escalation-request-1")
+		authority := fixture.cfg.RecoveryAuthorities["recovery"]
+		authority.Actions = []string{"nudge"}
+		fixture.cfg.RecoveryAuthorities["recovery"] = authority
+		chain, err := NewTransitionChain(fixture.chainConfig())
+		if err != nil {
+			t.Fatal(err)
+		}
+		fixture.chain = chain
+		assertEscalationRejectedWithoutSideEffects(t, fixture, request)
+	})
+}
+
+func assertEscalationRejectedWithoutSideEffects(t *testing.T, fixture *transitionChainFixture, request TransitionRequest) {
+	t.Helper()
+	beforeWrites, beforePermits := len(fixture.store.patchRequests), len(fixture.permits.requests)
+	if _, err := fixture.chain.Apply(request); !errors.Is(err, ErrTransitionChainInvalid) &&
+		!errors.Is(err, ErrTransitionChainEvidence) && !errors.Is(err, ErrTransitionChainStale) {
+		t.Fatalf("invalid recovery escalation error = %v, want invalid/evidence/stale refusal", err)
+	}
+	if len(fixture.store.patchRequests) != beforeWrites || len(fixture.permits.requests) != beforePermits {
+		t.Fatalf("invalid escalation reached patch/permit: %d->%d, %d->%d", beforeWrites, len(fixture.store.patchRequests), beforePermits, len(fixture.permits.requests))
+	}
+}
+
 func rewriteRecoveryRequestState(t *testing.T, request *TransitionRequest, mutate func(*RecoveryState)) {
 	t.Helper()
 	change := request.Patch.Metadata[beadmeta.LifecycleRecoveryStateMetadataKey]
@@ -997,6 +1193,72 @@ func (f *transitionChainFixture) recoveryBudgetRequest(t *testing.T, parent bead
 	}
 }
 
+func (f *transitionChainFixture) recoveryEscalationRequest(t *testing.T, parent beads.RevisionTransitionPatchReceipt, requestID string) TransitionRequest {
+	t.Helper()
+	current, err := f.store.DecisionFrontierSourceSnapshot(f.work.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof, err := SignRecoveryEscalationRequest(RecoveryEscalationRequest{
+		Version: 1, RequestID: requestID, Scope: f.policy.SourceScope, WorkItemID: f.work.ID,
+		ExpectedRevision: parent.ToVersion, Target: f.cfg.EscalationTarget,
+		IssuedAt: f.now.Add(-time.Minute).Format(time.RFC3339Nano), ExpiresAt: f.now.Add(time.Hour).Format(time.RFC3339Nano),
+		AuthorizedBy: "recovery",
+	}, f.recoveryPrivate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	patch, err := BuildRecoveryEscalationPatch(current.Metadata[beadmeta.LifecycleRecoveryStateMetadataKey], proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return TransitionRequest{
+		IssueID: f.work.ID, Step: TransitionStepRecoveryEscalation, OperationID: proof.RequestID,
+		PriorReceiptID: parent.ReceiptID, Evidence: f.evidence, RecoveryEscalationRequest: &proof, Patch: patch,
+	}
+}
+
+func (f *transitionChainFixture) rawRecoveryEscalationRequest(t *testing.T, parent beads.RevisionTransitionPatchReceipt, requestID string) TransitionRequest {
+	t.Helper()
+	current, err := f.store.DecisionFrontierSourceSnapshot(f.work.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof, err := SignRecoveryEscalationRequest(RecoveryEscalationRequest{
+		Version: 1, RequestID: requestID, Scope: f.policy.SourceScope, WorkItemID: f.work.ID,
+		ExpectedRevision: parent.ToVersion, Target: f.cfg.EscalationTarget,
+		IssuedAt: f.now.Add(-time.Minute).Format(time.RFC3339Nano), ExpiresAt: f.now.Add(time.Hour).Format(time.RFC3339Nano),
+		AuthorizedBy: "recovery",
+	}, f.recoveryPrivate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	priorRaw := current.Metadata[beadmeta.LifecycleRecoveryStateMetadataKey]
+	state, err := decodeCanonicalRecoveryState(priorRaw, f.work.ID, f.policy.SourceScope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := recoveryEscalationID(proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.Escalation = &RecoveryEscalation{
+		ID: id, Target: proof.Target, RequestedAt: proof.IssuedAt,
+		DedupKey: recoveryEscalationDedupKey(proof.Scope, proof.WorkItemID, id), Request: &proof,
+	}
+	nextRaw, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return TransitionRequest{
+		IssueID: f.work.ID, Step: TransitionStepRecoveryEscalation, OperationID: proof.RequestID,
+		PriorReceiptID: parent.ReceiptID, Evidence: f.evidence, RecoveryEscalationRequest: &proof,
+		Patch: SourceWorkPatch{Metadata: map[string]MetadataStringPatch{
+			beadmeta.LifecycleRecoveryStateMetadataKey: {Expected: &priorRaw, Value: string(nextRaw)},
+		}},
+	}
+}
+
 func (f *transitionChainFixture) completionBudgetRequest(t *testing.T, parent beads.RevisionTransitionPatchReceipt, completionReceipt string) TransitionRequest {
 	t.Helper()
 	value, err := BuildCompletionBudgetMetadata(f.work.ID, f.policy.SourceScope, f.attachment.ReceiptDigest, completionReceipt)
@@ -1110,7 +1372,7 @@ func newTransitionChainFixture(t *testing.T) *transitionChainFixture {
 		AdmissionV2Authorities:      map[string]string{"triage": base64.StdEncoding.EncodeToString(admissionPublic)},
 		AcceptanceAuthorities:       map[string]string{"reviewer": base64.StdEncoding.EncodeToString(acceptancePublic)},
 		RecoveryAuthorities: map[string]config.LifecycleRecoveryAuthority{"recovery": {
-			PublicKey: base64.StdEncoding.EncodeToString(recoveryPublic), Actions: []string{"nudge"}, Scopes: []string{scope},
+			PublicKey: base64.StdEncoding.EncodeToString(recoveryPublic), Actions: []string{"nudge", "escalate"}, Scopes: []string{scope},
 		}},
 		EscalationTarget:        "human",
 		CompletionReceiptMaxAge: "168h",

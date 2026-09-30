@@ -88,6 +88,9 @@ func TestV2AdmissionReceiptIsDurableAndCannotBeClearedByGenericMutation(t *testi
 	if !HasLifecycleEvidence(created) || !HasLifecycleAdmissionReceipt(created) {
 		t.Fatal("v2-only evidence was not recognized as durable lifecycle enrollment")
 	}
+	if err := UpdateLifecycleRecoveryStateIfMatch(store, created.ID, created.Revision, "", `{"version":1}`); !errors.Is(err, ErrLifecycleMutationBlocked) {
+		t.Fatalf("legacy recovery write on v2-enrolled work before the first head error = %v, want blocked", err)
+	}
 	if err := store.SetMetadata(created.ID, beadmeta.LifecycleAdmissionReceiptV2MetadataKey, ""); !errors.Is(err, ErrLifecycleMutationBlocked) {
 		t.Fatalf("clearing v2 admission receipt error = %v, want lifecycle mutation refusal", err)
 	}
@@ -140,9 +143,16 @@ func TestLifecycleTransitionHeadProtectsLegacyMutationAndDeletePaths(t *testing.
 		ID: "transition-head-fence", Type: "task", Status: "open",
 		Metadata: map[string]string{
 			beadmeta.LifecycleAdmissionReceiptV2MetadataKey: "durable admission evidence",
-			beadmeta.LifecycleTransitionHeadMetadataKey:     "gc-lifecycle-patch-v1-current",
 		},
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Seed the state that only the typed transition-patch writer can create.
+	store.mu.Lock()
+	store.beads[store.indexOfLocked(created.ID)].Metadata[beadmeta.LifecycleTransitionHeadMetadataKey] = "gc-lifecycle-patch-v1-current"
+	store.mu.Unlock()
+	created, err = store.Get(created.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,6 +164,29 @@ func TestLifecycleTransitionHeadProtectsLegacyMutationAndDeletePaths(t *testing.
 	}
 	if err := UpdateLifecycleRecoveryStateIfMatch(store, created.ID, created.Revision, "", `{"version":1}`); !errors.Is(err, ErrLifecycleMutationBlocked) {
 		t.Fatalf("legacy recovery write after transition head error = %v, want blocked", err)
+	}
+}
+
+func TestLifecycleTransitionHeadCannotBeForgedBeforeEnrollment(t *testing.T) {
+	store := NewMemStore()
+	if _, err := store.Create(Bead{
+		ID: "forged-transition-head-create", Type: "task", Status: "open",
+		Metadata: map[string]string{beadmeta.LifecycleTransitionHeadMetadataKey: "gc-lifecycle-patch-v1-forged"},
+	}); !errors.Is(err, ErrLifecycleMutationBlocked) {
+		t.Fatalf("generic create with lifecycle transition head = %v, want blocked", err)
+	}
+
+	created, err := store.Create(Bead{ID: "forged-transition-head-update", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Update(created.ID, UpdateOpts{Metadata: map[string]string{
+		beadmeta.LifecycleTransitionHeadMetadataKey: "gc-lifecycle-patch-v1-forged",
+	}}); !errors.Is(err, ErrLifecycleMutationBlocked) {
+		t.Fatalf("generic pre-enrollment head update = %v, want blocked", err)
+	}
+	if err := store.SetMetadata(created.ID, beadmeta.LifecycleTransitionHeadMetadataKey, "gc-lifecycle-patch-v1-forged"); !errors.Is(err, ErrLifecycleMutationBlocked) {
+		t.Fatalf("generic pre-enrollment head SetMetadata = %v, want blocked", err)
 	}
 }
 

@@ -63,6 +63,7 @@ const (
 	TransitionStepAttachedMaterialization TransitionStep = "attached_materialization"
 	TransitionStepClaimIdentity           TransitionStep = "claim_identity"
 	TransitionStepRecoveryBudget          TransitionStep = "recovery_budget"
+	TransitionStepRecoveryEscalation      TransitionStep = "recovery_escalation"
 	TransitionStepCompletionBudget        TransitionStep = "completion_budget"
 	TransitionStepClose                   TransitionStep = "close"
 )
@@ -72,6 +73,7 @@ const (
 	transitionKindAttachedMaterialization = "lifecycle_source_materialization_v1"
 	transitionKindClaimIdentity           = "lifecycle_source_claim_identity_v1"
 	transitionKindRecoveryBudget          = "lifecycle_source_recovery_budget_v1"
+	transitionKindRecoveryEscalation      = "lifecycle_source_recovery_escalation_v1"
 	transitionKindCompletionBudget        = "lifecycle_source_completion_budget_v1"
 	transitionKindClose                   = "lifecycle_source_close_v1"
 )
@@ -221,8 +223,9 @@ type TransitionRequest struct {
 	// RecoveryRequest carries the separately signed proof for a recovery
 	// budget transition. Its request ID, digest, and expected revision must
 	// match the appended recovery attempt and this transition's parent.
-	RecoveryRequest *RecoveryRequest
-	Patch           SourceWorkPatch
+	RecoveryRequest           *RecoveryRequest
+	RecoveryEscalationRequest *RecoveryEscalationRequest
+	Patch                     SourceWorkPatch
 }
 
 type completionBudgetMetadata struct {
@@ -364,6 +367,14 @@ func (c *TransitionChain) Apply(request TransitionRequest) (TransitionResult, er
 		}
 		if err := validateRecoveryTargetRowFromBead(source, *request.RecoveryRequest); err != nil {
 			return TransitionResult{}, fmt.Errorf("recovery request target differs from the current source: %w", errors.Join(ErrTransitionChainStale, err))
+		}
+	}
+	if request.Step == TransitionStepRecoveryEscalation {
+		if _, err := VerifyRecoveryEscalationRequest(*request.RecoveryEscalationRequest, c.admissionConfig, c.now()); err != nil {
+			return TransitionResult{}, fmt.Errorf("verify current recovery escalation authorization: %w", errors.Join(ErrTransitionChainEvidence, err))
+		}
+		if source.Status != "in_progress" {
+			return TransitionResult{}, fmt.Errorf("recovery escalation source is not currently in progress: %w", ErrTransitionChainStale)
 		}
 	}
 	if request.Step == TransitionStepClose {
@@ -560,7 +571,7 @@ func (c *TransitionChain) verifyParentChain(issueID, receiptID string, attachmen
 		if parentReceipt.ReceiptID != id {
 			return transitionParent{}, fmt.Errorf("parent patch reader returned receipt %q for requested ID %q: %w", parentReceipt.ReceiptID, id, ErrTransitionChainReceipt)
 		}
-		parentInfo, err := validateStoredTransitionPatchReceipt(parentReceipt, issueID, c.scope, evidence)
+		parentInfo, err := validateStoredTransitionPatchReceipt(parentReceipt, issueID, c.scope, evidence, c.admissionConfig)
 		if err != nil {
 			return transitionParent{}, err
 		}
@@ -580,6 +591,12 @@ func (c *TransitionChain) verifyParentChain(issueID, receiptID string, attachmen
 				return transitionParent{}, fmt.Errorf("stored recovery budget is not an append-only request reservation: %w", errors.Join(ErrTransitionChainReceipt, err))
 			}
 		}
+		if parentInfo.Step == TransitionStepRecoveryEscalation {
+			if err := validateRecoveryEscalationAppend(parentInfo.Patch, upstream.Patch, upstream.Step, issueID, c.scope,
+				parentReceipt.ExpectedVersion, c.admissionConfig, nil); err != nil {
+				return transitionParent{}, fmt.Errorf("stored recovery escalation is not authorized and append-only: %w", errors.Join(ErrTransitionChainReceipt, err))
+			}
+		}
 		return parentInfo, nil
 	}
 
@@ -597,8 +614,10 @@ func validateTransitionPredecessor(step TransitionStep, parent transitionParent)
 		allowed = parent.Step == TransitionStepAttachedMaterialization
 	case TransitionStepRecoveryBudget:
 		allowed = parent.Step == TransitionStepClaimIdentity || parent.Step == TransitionStepRecoveryBudget
+	case TransitionStepRecoveryEscalation:
+		allowed = parent.Step == TransitionStepRecoveryBudget
 	case TransitionStepCompletionBudget:
-		allowed = parent.Step == TransitionStepClaimIdentity || parent.Step == TransitionStepRecoveryBudget
+		allowed = parent.Step == TransitionStepClaimIdentity || parent.Step == TransitionStepRecoveryBudget || parent.Step == TransitionStepRecoveryEscalation
 	case TransitionStepClose:
 		allowed = parent.Step == TransitionStepCompletionBudget
 	}
@@ -648,6 +667,15 @@ func (c *TransitionChain) verifyRecoveryBudgetTransition(source beads.Bead, requ
 		return fmt.Errorf("appended recovery attempt does not bind the exact signed request: %w", ErrTransitionChainEvidence)
 	}
 	return nil
+}
+
+func (c *TransitionChain) verifyRecoveryEscalationTransition(request TransitionRequest, parent transitionParent) error {
+	proof := request.RecoveryEscalationRequest
+	if proof == nil || request.OperationID != proof.RequestID {
+		return fmt.Errorf("recovery escalation requires its exact signed request ID: %w", ErrTransitionChainEvidence)
+	}
+	return validateRecoveryEscalationAppend(request.Patch, parent.Patch, parent.Step, request.IssueID, c.scope,
+		parent.ToVersion, c.admissionConfig, proof)
 }
 
 func (c *TransitionChain) verifyCloseReceipt(source beads.Bead, evidence verifiedTransitionEvidence, parent transitionParent, patch SourceWorkPatch) error {
@@ -761,7 +789,61 @@ func sameRecoveryEscalation(left, right *RecoveryEscalation) bool {
 	if left == nil || right == nil {
 		return left == nil && right == nil
 	}
-	return *left == *right
+	if left.ID != right.ID || left.Target != right.Target || left.RequestedAt != right.RequestedAt || left.DedupKey != right.DedupKey {
+		return false
+	}
+	if left.Request == nil || right.Request == nil {
+		return left.Request == nil && right.Request == nil
+	}
+	return *left.Request == *right.Request
+}
+
+func validateRecoveryEscalationAppend(patch, parentPatch SourceWorkPatch, parentStep TransitionStep, workID, scope string,
+	expectedRevision int64, cfg config.LifecycleConfig, supplied *RecoveryEscalationRequest) error {
+	change, ok := patch.Metadata[beadmeta.LifecycleRecoveryStateMetadataKey]
+	parentChange, parentOK := parentPatch.Metadata[beadmeta.LifecycleRecoveryStateMetadataKey]
+	if !ok || !parentOK || change.Expected == nil || *change.Expected != parentChange.Value || parentStep != TransitionStepRecoveryBudget {
+		return fmt.Errorf("recovery escalation must compare its direct recovery-budget parent state: %w", ErrTransitionChainInvalid)
+	}
+	prior, err := decodeCanonicalRecoveryState(parentChange.Value, workID, scope)
+	if err != nil || len(prior.Attempts) != MaxRecoveryAttempts || prior.Escalation != nil {
+		return fmt.Errorf("recovery escalation requires two attempts and no prior escalation: %w", errors.Join(ErrTransitionChainInvalid, err))
+	}
+	expectedPrior, err := decodeCanonicalRecoveryState(*change.Expected, workID, scope)
+	if err != nil || !sameRecoveryState(expectedPrior, prior) {
+		return fmt.Errorf("recovery escalation expected state differs from its parent: %w", errors.Join(ErrTransitionChainInvalid, err))
+	}
+	next, err := decodeCanonicalRecoveryState(change.Value, workID, scope)
+	if err != nil || len(next.Attempts) != len(prior.Attempts) || next.Escalation == nil || next.Escalation.Request == nil {
+		return fmt.Errorf("recovery escalation must preserve attempts and append one escalation: %w", errors.Join(ErrTransitionChainInvalid, err))
+	}
+	for index := range prior.Attempts {
+		if next.Attempts[index] != prior.Attempts[index] {
+			return fmt.Errorf("recovery escalation changed prior attempt %d: %w", index, ErrTransitionChainInvalid)
+		}
+	}
+	request := *next.Escalation.Request
+	if supplied != nil && *supplied != request {
+		return fmt.Errorf("recovery escalation state differs from the supplied signed request: %w", ErrTransitionChainEvidence)
+	}
+	if _, err := VerifyRecoveryEscalationRequestProof(request, cfg); err != nil {
+		return fmt.Errorf("verify stored recovery escalation request: %w", errors.Join(ErrTransitionChainEvidence, err))
+	}
+	if request.WorkItemID != workID || request.Scope != scope || request.ExpectedRevision != expectedRevision || expectedRevision == 0 {
+		return fmt.Errorf("recovery escalation request differs from its source parent revision: %w", ErrTransitionChainStale)
+	}
+	wantID, err := recoveryEscalationID(request)
+	if err != nil {
+		return fmt.Errorf("derive deterministic recovery escalation ID: %w", errors.Join(ErrTransitionChainInvalid, err))
+	}
+	want := &RecoveryEscalation{
+		ID: wantID, Target: request.Target, RequestedAt: request.IssuedAt,
+		DedupKey: recoveryEscalationDedupKey(scope, workID, wantID), Request: &request,
+	}
+	if !sameRecoveryEscalation(next.Escalation, want) {
+		return fmt.Errorf("recovery escalation fields are not derived from its signed request: %w", ErrTransitionChainInvalid)
+	}
+	return nil
 }
 
 func validateStoredRecoveryBudget(patch SourceWorkPatch, receiptID, workID, scope string, expectedVersion int64) error {
@@ -957,6 +1039,7 @@ func validateTransitionStepPatch(step TransitionStep, patch SourceWorkPatch) err
 		TransitionStepReservation:             {beadmeta.LifecycleMaterializationMetadataKey: {}},
 		TransitionStepAttachedMaterialization: {beadmeta.LifecycleMaterializationMetadataKey: {}},
 		TransitionStepRecoveryBudget:          {beadmeta.LifecycleRecoveryStateMetadataKey: {}},
+		TransitionStepRecoveryEscalation:      {beadmeta.LifecycleRecoveryStateMetadataKey: {}},
 		TransitionStepCompletionBudget:        {beadmeta.LifecycleCompletionBudgetMetadataKey: {}},
 		TransitionStepClose:                   {beadmeta.LifecycleCompletionReceiptMetadataKey: {}},
 		TransitionStepClaimIdentity: {
@@ -979,7 +1062,7 @@ func validateTransitionStepPatch(step TransitionStep, patch SourceWorkPatch) err
 			beadmeta.MergeStrategyMetadataKey:            {},
 		}
 	}
-	if step == TransitionStepRecoveryBudget || step == TransitionStepCompletionBudget || step == TransitionStepClose {
+	if step == TransitionStepRecoveryBudget || step == TransitionStepRecoveryEscalation || step == TransitionStepCompletionBudget || step == TransitionStepClose {
 		if len(patch.Metadata) != 1 {
 			return fmt.Errorf("step %q must set exactly one metadata key: %w", step, ErrTransitionChainInvalid)
 		}
@@ -1151,6 +1234,10 @@ func (c *TransitionChain) validateTransitionStepPatchEvidence(request Transition
 		if err := c.verifyRecoveryBudgetTransition(source, request, parent); err != nil {
 			return err
 		}
+	case TransitionStepRecoveryEscalation:
+		if err := c.verifyRecoveryEscalationTransition(request, parent); err != nil {
+			return err
+		}
 	case TransitionStepCompletionBudget:
 		if err := validateCompletionBudgetPatch(request.Patch, source.ID, c.scope, evidence.Attachment.ReceiptDigest); err != nil {
 			return err
@@ -1223,7 +1310,7 @@ func verifyTransitionPatchReceipt(receipt beads.RevisionTransitionPatchReceipt, 
 	return canonical, digest, nil
 }
 
-func validateStoredTransitionPatchReceipt(receipt beads.RevisionTransitionPatchReceipt, issueID, scope string, evidence verifiedTransitionEvidence) (transitionParent, error) {
+func validateStoredTransitionPatchReceipt(receipt beads.RevisionTransitionPatchReceipt, issueID, scope string, evidence verifiedTransitionEvidence, admissionConfig config.LifecycleConfig) (transitionParent, error) {
 	if receipt.IssueID != issueID || receipt.Scope != scope || receipt.ToVersion == 0 || receipt.ToVersion == receipt.ExpectedVersion {
 		return transitionParent{}, fmt.Errorf("stored parent patch receipt has wrong identity or version: %w", ErrTransitionChainReceipt)
 	}
@@ -1266,6 +1353,20 @@ func validateStoredTransitionPatchReceipt(receipt beads.RevisionTransitionPatchR
 	} else if step == TransitionStepRecoveryBudget {
 		if err := validateStoredRecoveryBudget(sourcePatch, receipt.ReceiptID, issueID, scope, receipt.ExpectedVersion); err != nil {
 			return transitionParent{}, err
+		}
+	} else if step == TransitionStepRecoveryEscalation {
+		change := sourcePatch.Metadata[beadmeta.LifecycleRecoveryStateMetadataKey]
+		state, err := decodeCanonicalRecoveryState(change.Value, issueID, scope)
+		if err != nil || state.Escalation == nil || state.Escalation.Request == nil {
+			return transitionParent{}, fmt.Errorf("stored recovery escalation has no signed request: %w", errors.Join(ErrTransitionChainReceipt, err))
+		}
+		request := *state.Escalation.Request
+		wantReceiptID, idErr := transitionReceiptID(issueID, scope, TransitionStepRecoveryEscalation, request.RequestID)
+		if idErr != nil || wantReceiptID != receipt.ReceiptID || request.ExpectedRevision != receipt.ExpectedVersion {
+			return transitionParent{}, fmt.Errorf("stored recovery escalation request is not bound to its deterministic receipt: %w", errors.Join(ErrTransitionChainReceipt, idErr))
+		}
+		if _, err := VerifyRecoveryEscalationRequestProof(request, admissionConfig); err != nil {
+			return transitionParent{}, fmt.Errorf("stored recovery escalation authorization is invalid: %w", errors.Join(ErrTransitionChainReceipt, err))
 		}
 	} else if step == TransitionStepCompletionBudget {
 		change := sourcePatch.Metadata[beadmeta.LifecycleCompletionBudgetMetadataKey]
@@ -1443,6 +1544,8 @@ func transitionStepKind(step TransitionStep) string {
 		return transitionKindClaimIdentity
 	case TransitionStepRecoveryBudget:
 		return transitionKindRecoveryBudget
+	case TransitionStepRecoveryEscalation:
+		return transitionKindRecoveryEscalation
 	case TransitionStepCompletionBudget:
 		return transitionKindCompletionBudget
 	case TransitionStepClose:
@@ -1455,7 +1558,7 @@ func transitionStepKind(step TransitionStep) string {
 func transitionStepForKind(kind string) (TransitionStep, bool) {
 	for _, step := range []TransitionStep{
 		TransitionStepReservation, TransitionStepAttachedMaterialization, TransitionStepClaimIdentity,
-		TransitionStepRecoveryBudget, TransitionStepCompletionBudget, TransitionStepClose,
+		TransitionStepRecoveryBudget, TransitionStepRecoveryEscalation, TransitionStepCompletionBudget, TransitionStepClose,
 	} {
 		if transitionStepKind(step) == kind {
 			return step, true

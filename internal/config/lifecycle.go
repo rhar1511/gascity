@@ -64,6 +64,13 @@ type LifecycleConfig struct {
 	CompletionClockSkew string `toml:"completion_clock_skew,omitempty"`
 }
 
+// LifecycleRecoveryActionNudge and LifecycleRecoveryActionEscalate are the
+// only recovery authority actions accepted by lifecycle configuration.
+const (
+	LifecycleRecoveryActionNudge    = "nudge"
+	LifecycleRecoveryActionEscalate = "escalate"
+)
+
 // LifecycleRecoveryAuthority grants one signing identity exact recovery
 // actions in exact city/store scopes. Wildcards are not supported: operators
 // must list each enabled scope explicitly.
@@ -171,7 +178,7 @@ func validateRecoveryAuthorities(cfg LifecycleConfig) error {
 		seenActions := make(map[string]struct{}, len(authority.Actions))
 		for _, action := range authority.Actions {
 			action = strings.TrimSpace(action)
-			if action != "nudge" {
+			if action != LifecycleRecoveryActionNudge && action != LifecycleRecoveryActionEscalate {
 				return fmt.Errorf("lifecycle.recovery_authorities.%s has unsupported action %q", identity, action)
 			}
 			if _, exists := seenActions[action]; exists {
