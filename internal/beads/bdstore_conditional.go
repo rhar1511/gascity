@@ -457,7 +457,7 @@ func (s *BdStore) DeleteIfMatch(id string, expectedRevision int64) error {
 		return err
 	}
 	if current.Revision == expectedRevision {
-		if err := protectAttemptEvidenceDelete(current); err != nil {
+		if err := protectRetainedEvidenceDelete(current); err != nil {
 			return err
 		}
 		if err := ValidateLifecycleDelete(current); err != nil {

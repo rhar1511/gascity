@@ -276,6 +276,30 @@ func (e RunStepStatus) Valid() bool {
 	}
 }
 
+// Defines values for SessionPermissionModeBodyAuthorityProfile.
+const (
+	Design   SessionPermissionModeBodyAuthorityProfile = "design"
+	Operator SessionPermissionModeBodyAuthorityProfile = "operator"
+	Router   SessionPermissionModeBodyAuthorityProfile = "router"
+	Worker   SessionPermissionModeBodyAuthorityProfile = "worker"
+)
+
+// Valid indicates whether the value is a known member of the SessionPermissionModeBodyAuthorityProfile enum.
+func (e SessionPermissionModeBodyAuthorityProfile) Valid() bool {
+	switch e {
+	case Design:
+		return true
+	case Operator:
+		return true
+	case Router:
+		return true
+	case Worker:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for SessionStreamStructuredMessageEventOperation.
 const (
 	SessionStreamStructuredMessageEventOperationReset    SessionStreamStructuredMessageEventOperation = "reset"
@@ -1199,6 +1223,7 @@ type AttemptActionRecords struct {
 type AttemptEvidenceRead struct {
 	Acknowledgements  Facet                 `json:"acknowledgements"`
 	Actions           Facet                 `json:"actions"`
+	Artifacts         *[]PayloadArtifact    `json:"artifacts,omitempty"`
 	AttemptId         string                `json:"attempt_id"`
 	BaseReason        *string               `json:"base_reason,omitempty"`
 	BaseSha           *string               `json:"base_sha,omitempty"`
@@ -1949,28 +1974,29 @@ type EventStreamEnvelope struct {
 
 // Evidence defines model for Evidence.
 type Evidence struct {
-	Acknowledgements  Facet           `json:"acknowledgements"`
-	Actions           Facet           `json:"actions"`
-	AttemptId         string          `json:"attempt_id"`
-	BaseReason        *string         `json:"base_reason,omitempty"`
-	BaseSha           *string         `json:"base_sha,omitempty"`
-	BaseStatus        string          `json:"base_status"`
-	CandidateReason   *string         `json:"candidate_reason,omitempty"`
-	CandidateSha      *string         `json:"candidate_sha,omitempty"`
-	CandidateStatus   string          `json:"candidate_status"`
-	CapturedAt        time.Time       `json:"captured_at"`
-	Diff              DiffSnapshot    `json:"diff"`
-	Identity          Identity        `json:"identity"`
-	Outcome           *string         `json:"outcome,omitempty"`
-	PermissionScope   PermissionScope `json:"permission_scope"`
-	Policy            Facet           `json:"policy"`
-	Redaction         Facet           `json:"redaction"`
-	SchemaVersion     int64           `json:"schema_version"`
-	SourceReason      *string         `json:"source_reason,omitempty"`
-	SourceStatus      string          `json:"source_status"`
-	StoreRef          *string         `json:"store_ref,omitempty"`
-	WorkingTreeStatus string          `json:"working_tree_status"`
-	WorkspaceDiff     DiffSnapshot    `json:"workspace_diff"`
+	Acknowledgements  Facet              `json:"acknowledgements"`
+	Actions           Facet              `json:"actions"`
+	Artifacts         *[]PayloadArtifact `json:"artifacts,omitempty"`
+	AttemptId         string             `json:"attempt_id"`
+	BaseReason        *string            `json:"base_reason,omitempty"`
+	BaseSha           *string            `json:"base_sha,omitempty"`
+	BaseStatus        string             `json:"base_status"`
+	CandidateReason   *string            `json:"candidate_reason,omitempty"`
+	CandidateSha      *string            `json:"candidate_sha,omitempty"`
+	CandidateStatus   string             `json:"candidate_status"`
+	CapturedAt        time.Time          `json:"captured_at"`
+	Diff              DiffSnapshot       `json:"diff"`
+	Identity          Identity           `json:"identity"`
+	Outcome           *string            `json:"outcome,omitempty"`
+	PermissionScope   PermissionScope    `json:"permission_scope"`
+	Policy            Facet              `json:"policy"`
+	Redaction         Facet              `json:"redaction"`
+	SchemaVersion     int64              `json:"schema_version"`
+	SourceReason      *string            `json:"source_reason,omitempty"`
+	SourceStatus      string             `json:"source_status"`
+	StoreRef          *string            `json:"store_ref,omitempty"`
+	WorkingTreeStatus string             `json:"working_tree_status"`
+	WorkspaceDiff     DiffSnapshot       `json:"workspace_diff"`
 }
 
 // ExecutionClaimWindowExpiredPayload defines model for ExecutionClaimWindowExpiredPayload.
@@ -3349,6 +3375,25 @@ type PatchOKResponseBody struct {
 	Status string `json:"status"`
 }
 
+// PayloadArtifact defines model for PayloadArtifact.
+type PayloadArtifact struct {
+	Bytes     *int64  `json:"bytes,omitempty"`
+	MediaType string  `json:"media_type"`
+	Name      string  `json:"name"`
+	Reason    *string `json:"reason,omitempty"`
+	Sha256    *string `json:"sha256,omitempty"`
+	Status    string  `json:"status"`
+}
+
+// PayloadRead defines model for PayloadRead.
+type PayloadRead struct {
+	Bytes   int64   `json:"bytes"`
+	Content string  `json:"content"`
+	Reason  *string `json:"reason,omitempty"`
+	Sha256  string  `json:"sha256"`
+	Status  string  `json:"status"`
+}
+
 // PendingInteraction defines model for PendingInteraction.
 type PendingInteraction struct {
 	Kind      string             `json:"kind"`
@@ -3719,12 +3764,41 @@ type RecoveryRequest struct {
 	WorkItemId        string `json:"work_item_id"`
 }
 
+// RequestAttemptAttribution defines model for RequestAttemptAttribution.
+type RequestAttemptAttribution struct {
+	Reason    *string                  `json:"reason,omitempty"`
+	Reference *RequestAttemptReference `json:"reference,omitempty"`
+	Status    string                   `json:"status"`
+}
+
 // RequestAttemptBinding defines model for RequestAttemptBinding.
 type RequestAttemptBinding struct {
 	AttemptId    string   `json:"attempt_id"`
 	Identity     Identity `json:"identity"`
 	StoreRef     string   `json:"store_ref"`
 	WorkRevision string   `json:"work_revision"`
+}
+
+// RequestAttemptReference defines model for RequestAttemptReference.
+type RequestAttemptReference struct {
+	AttemptId    string `json:"attempt_id"`
+	StoreRef     string `json:"store_ref"`
+	WorkId       string `json:"work_id"`
+	WorkRevision string `json:"work_revision"`
+}
+
+// RequestEvent defines model for RequestEvent.
+type RequestEvent struct {
+	At                 time.Time                  `json:"at"`
+	AttemptAttribution *RequestAttemptAttribution `json:"attempt_attribution,omitempty"`
+	Delivery           *string                    `json:"delivery,omitempty"`
+	Generation         int64                      `json:"generation"`
+	Kind               string                     `json:"kind"`
+	MessageDigest      string                     `json:"message_digest"`
+	RequestId          string                     `json:"request_id"`
+	Sequence           int64                      `json:"sequence"`
+	SessionId          string                     `json:"session_id"`
+	TranscriptEvidence *RequestTranscriptEvidence `json:"transcript_evidence,omitempty"`
 }
 
 // RequestFailedPayload defines model for RequestFailedPayload.
@@ -3745,6 +3819,25 @@ type RequestFailedPayload struct {
 // RequestFailedPayloadOperation Which operation failed.
 type RequestFailedPayloadOperation string
 
+// RequestLedger defines model for RequestLedger.
+type RequestLedger struct {
+	AttemptAttribution *RequestAttemptAttribution `json:"attempt_attribution,omitempty"`
+	Digest             *string                    `json:"digest,omitempty"`
+	Events             *[]RequestEvent            `json:"events,omitempty"`
+	Status             string                     `json:"status"`
+	TranscriptEvidence *RequestTranscriptEvidence `json:"transcript_evidence,omitempty"`
+	UnavailableReason  *string                    `json:"unavailable_reason,omitempty"`
+}
+
+// RequestLedgerProjection defines model for RequestLedgerProjection.
+type RequestLedgerProjection struct {
+	Digest            *string           `json:"digest,omitempty"`
+	Requests          *[]RequestReceipt `json:"requests"`
+	SessionId         string            `json:"session_id"`
+	Status            string            `json:"status"`
+	UnavailableReason *string           `json:"unavailable_reason,omitempty"`
+}
+
 // RequestReceipt defines model for RequestReceipt.
 type RequestReceipt struct {
 	AcceptedAt          time.Time              `json:"accepted_at"`
@@ -3754,10 +3847,34 @@ type RequestReceipt struct {
 	DeliveryAttemptedAt *time.Time             `json:"delivery_attempted_at,omitempty"`
 	Effect              string                 `json:"effect"`
 	Generation          int64                  `json:"generation"`
+	Ledger              *RequestLedger         `json:"ledger,omitempty"`
 	MessageDigest       string                 `json:"message_digest"`
 	ProviderResultAt    *time.Time             `json:"provider_result_at,omitempty"`
 	RequestId           string                 `json:"request_id"`
 	SessionId           string                 `json:"session_id"`
+}
+
+// RequestTranscriptEvidence defines model for RequestTranscriptEvidence.
+type RequestTranscriptEvidence struct {
+	References             *[]RequestTranscriptReference `json:"references,omitempty"`
+	Status                 string                        `json:"status"`
+	ToolStatus             string                        `json:"tool_status"`
+	ToolUnavailableReason  *string                       `json:"tool_unavailable_reason,omitempty"`
+	TranscriptGenerationId *string                       `json:"transcript_generation_id,omitempty"`
+	TranscriptStreamId     *string                       `json:"transcript_stream_id,omitempty"`
+	UnavailableReason      *string                       `json:"unavailable_reason,omitempty"`
+}
+
+// RequestTranscriptReference defines model for RequestTranscriptReference.
+type RequestTranscriptReference struct {
+	EntryId                string  `json:"entry_id"`
+	Generation             int64   `json:"generation"`
+	Kind                   string  `json:"kind"`
+	RequestId              string  `json:"request_id"`
+	SessionId              string  `json:"session_id"`
+	ToolId                 *string `json:"tool_id,omitempty"`
+	TranscriptGenerationId string  `json:"transcript_generation_id"`
+	TranscriptStreamId     string  `json:"transcript_stream_id"`
 }
 
 // RigActionBody defines model for RigActionBody.
@@ -4245,9 +4362,24 @@ type SessionPendingResponse struct {
 
 // SessionPermissionModeBody defines model for SessionPermissionModeBody.
 type SessionPermissionModeBody struct {
+	// AuthorityProfile Provider-independent launch authority profile.
+	AuthorityProfile *SessionPermissionModeBodyAuthorityProfile `json:"authority_profile,omitempty"`
+
+	// Authorization Dedicated signed session-authority grant for this exact transition.
+	Authorization *string `json:"authorization,omitempty"`
+
+	// EffectiveConfigSha256 Exact effective loaded configuration identity.
+	EffectiveConfigSha256 *string `json:"effective_config_sha256,omitempty"`
+
+	// ExpectedGeneration Exact current session execution generation.
+	ExpectedGeneration *int64 `json:"expected_generation,omitempty"`
+
 	// PermissionMode Provider schema value for the permission_mode option.
 	PermissionMode string `json:"permission_mode"`
 }
+
+// SessionPermissionModeBodyAuthorityProfile Provider-independent launch authority profile.
+type SessionPermissionModeBodyAuthorityProfile string
 
 // SessionPoolSlotRetiredAtDrainDeadlinePayload defines model for SessionPoolSlotRetiredAtDrainDeadlinePayload.
 type SessionPoolSlotRetiredAtDrainDeadlinePayload struct {
@@ -4561,6 +4693,7 @@ type SessionStructuredHistory struct {
 	Generation            SessionStructuredGeneration    `json:"generation"`
 	LogicalConversationId *string                        `json:"logical_conversation_id,omitempty"`
 	ProviderSessionId     *string                        `json:"provider_session_id,omitempty"`
+	RequestLedger         *RequestLedgerProjection       `json:"request_ledger,omitempty"`
 	TailState             SessionStructuredTailState     `json:"tail_state"`
 	TranscriptStreamId    string                         `json:"transcript_stream_id"`
 }
@@ -20373,6 +20506,9 @@ type ClientInterface interface {
 	// GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptId request
 	GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptId(ctx context.Context, cityName string, id string, attemptID string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdArtifactBySha256 request
+	GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdArtifactBySha256(ctx context.Context, cityName string, id string, attemptID string, sha256 string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// GetV0CityByCityNameBeadByIdAttemptsDiff request
 	GetV0CityByCityNameBeadByIdAttemptsDiff(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -21290,6 +21426,18 @@ func (c *Client) ListV0CityByCityNameBeadByIdAttemptEvidence(ctx context.Context
 
 func (c *Client) GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptId(ctx context.Context, cityName string, id string, attemptID string, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdRequest(c.Server, cityName, id, attemptID)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdArtifactBySha256(ctx context.Context, cityName string, id string, attemptID string, sha256 string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdArtifactBySha256Request(c.Server, cityName, id, attemptID, sha256)
 	if err != nil {
 		return nil, err
 	}
@@ -25088,6 +25236,61 @@ func NewGetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdRequest(server stri
 	}
 
 	operationPath := fmt.Sprintf("/v0/city/%s/bead/%s/attempt-evidence/%s", pathParam0, pathParam1, pathParam2)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewGetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdArtifactBySha256Request generates requests for GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdArtifactBySha256
+func NewGetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdArtifactBySha256Request(server string, cityName string, id string, attemptID string, sha256 string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam2 string
+
+	pathParam2, err = runtime.StyleParamWithOptions("simple", false, "attemptID", attemptID, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam3 string
+
+	pathParam3, err = runtime.StyleParamWithOptions("simple", false, "sha256", sha256, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/bead/%s/attempt-evidence/%s/artifact/%s", pathParam0, pathParam1, pathParam2, pathParam3)
 	if operationPath[0] == '/' {
 		operationPath = "." + operationPath
 	}
@@ -34980,6 +35183,9 @@ type ClientWithResponsesInterface interface {
 	// GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdWithResponse request
 	GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdWithResponse(ctx context.Context, cityName string, id string, attemptID string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdResponse, error)
 
+	// GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdArtifactBySha256WithResponse request
+	GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdArtifactBySha256WithResponse(ctx context.Context, cityName string, id string, attemptID string, sha256 string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdArtifactBySha256Response, error)
+
 	// GetV0CityByCityNameBeadByIdAttemptsDiffWithResponse request
 	GetV0CityByCityNameBeadByIdAttemptsDiffWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameBeadByIdAttemptsDiffResponse, error)
 
@@ -36190,6 +36396,33 @@ func (r GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdResponse) Status() 
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdArtifactBySha256Response struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON200                   *PayloadRead
+	ApplicationproblemJSON403 *ErrorModel
+	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON422 *ErrorModel
+	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON503 *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdArtifactBySha256Response) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdArtifactBySha256Response) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -40605,6 +40838,15 @@ func (c *ClientWithResponses) GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemp
 	return ParseGetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdResponse(rsp)
 }
 
+// GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdArtifactBySha256WithResponse request returning *GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdArtifactBySha256Response
+func (c *ClientWithResponses) GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdArtifactBySha256WithResponse(ctx context.Context, cityName string, id string, attemptID string, sha256 string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdArtifactBySha256Response, error) {
+	rsp, err := c.GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdArtifactBySha256(ctx, cityName, id, attemptID, sha256, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdArtifactBySha256Response(rsp)
+}
+
 // GetV0CityByCityNameBeadByIdAttemptsDiffWithResponse request returning *GetV0CityByCityNameBeadByIdAttemptsDiffResponse
 func (c *ClientWithResponses) GetV0CityByCityNameBeadByIdAttemptsDiffWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameBeadByIdAttemptsDiffResponse, error) {
 	rsp, err := c.GetV0CityByCityNameBeadByIdAttemptsDiff(ctx, cityName, id, reqEditors...)
@@ -43783,6 +44025,67 @@ func ParseGetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdResponse(rsp *htt
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest AttemptEvidenceRead
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON403 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdArtifactBySha256Response parses an HTTP response from a GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdArtifactBySha256WithResponse call
+func ParseGetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdArtifactBySha256Response(rsp *http.Response) (*GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdArtifactBySha256Response, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdArtifactBySha256Response{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest PayloadRead
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -70,6 +72,84 @@ func TestCLICloseGateCapturesWorkbenchAttemptBeforeClose(t *testing.T) {
 	}
 	if evidence.Identity.Kind != attemptevidence.KindWorkbench || evidence.Identity.SessionGeneration != "3" || evidence.Permission.WorkspaceRoot != canonicalRepo {
 		t.Fatalf("captured workbench identity/scope = %+v %+v", evidence.Identity, evidence.Permission)
+	}
+	storedOwner, err := store.Get(owner.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reference attemptevidence.Reference
+	if err := json.Unmarshal([]byte(storedOwner.Metadata[beadmeta.AttemptEvidenceReferenceMetadataKey]), &reference); err != nil {
+		t.Fatalf("decode exact attempt reference from execution record: %v", err)
+	}
+	if reference.AttemptID != attemptID || reference.DiffSHA256 != evidence.Diff.SHA256 {
+		t.Fatalf("execution record reference = %+v, want exact attempt %s digest %s", reference, attemptID, evidence.Diff.SHA256)
+	}
+}
+
+func TestControlAttemptArchivesExactLogsAndOutputJSONAsDigestReferences(t *testing.T) {
+	cityDir := t.TempDir()
+	store, err := beads.OpenFileStore(fsys.OSFS{}, filepath.Join(cityDir, "beads.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo, baseSHA := newCLIAttemptEvidenceRepo(t)
+	control, err := store.Create(beads.Bead{Title: "retry control", Type: "task", Metadata: map[string]string{
+		beadmeta.RootStoreRefMetadataKey:    "city:test-city",
+		beadmeta.WorkDirMetadataKey:         repo,
+		beadmeta.WorktreeBaseSHAMetadataKey: baseSHA,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout := strings.Repeat("verification output\n", 2048)
+	sarif := `{"version":"2.1.0","runs":[{"results":[]}]}`
+	attempt, err := store.Create(beads.Bead{Title: "retry execution", Type: "task", Status: "closed", Metadata: map[string]string{
+		beadmeta.WorkDirMetadataKey:         repo,
+		beadmeta.WorktreeBaseSHAMetadataKey: baseSHA,
+		beadmeta.StdoutMetadataKey:          stdout,
+		beadmeta.StderrMetadataKey:          "warning: check output",
+		beadmeta.OutputJSONMetadataKey:      sarif,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := captureControlAttemptEvidence(context.Background(), store, cityDir, cityDir, &config.City{}, control, attempt, 2, "passed"); err != nil {
+		t.Fatalf("capture control evidence: %v", err)
+	}
+	identity := attemptevidence.Identity{Kind: attemptevidence.KindRetry, OwnerBeadID: control.ID, ExecutionBeadID: attempt.ID}
+	attemptID, err := attemptevidence.AttemptID(identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence, err := attemptevidence.Read(store, control.ID, attemptID)
+	if err != nil {
+		t.Fatalf("read exact control attempt: %v", err)
+	}
+	if len(evidence.Artifacts) != 3 {
+		t.Fatalf("captured attempt artifacts = %#v, want stdout/stderr/output_json", evidence.Artifacts)
+	}
+	attemptRow, err := store.Get(attempt.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reference attemptevidence.Reference
+	if err := json.Unmarshal([]byte(attemptRow.Metadata[beadmeta.AttemptEvidenceReferenceMetadataKey]), &reference); err != nil {
+		t.Fatalf("decode execution reference: %v", err)
+	}
+	if reference.AttemptID != attemptID || len(reference.Artifacts) != 3 {
+		t.Fatalf("execution reference = %+v, want attempt %s and three artifact digests", reference, attemptID)
+	}
+	want := map[string]string{"stdout": stdout, "stderr": "warning: check output", "output_json": sarif}
+	for _, artifact := range evidence.Artifacts {
+		payload, err := attemptevidence.ReadPayload(store, attemptevidence.PayloadReference{
+			Name: artifact.Name, MediaType: artifact.MediaType, SHA256: artifact.SHA256, Bytes: artifact.Bytes,
+		})
+		if err != nil {
+			t.Fatalf("read %s payload: %v", artifact.Name, err)
+		}
+		if payload.Status != attemptevidence.StatusAvailable || string(payload.Content) != want[artifact.Name] {
+			t.Fatalf("%s payload status=%q bytes=%d, want exact %d-byte content", artifact.Name, payload.Status, len(payload.Content), len(want[artifact.Name]))
+		}
 	}
 }
 

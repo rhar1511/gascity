@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/sessionauthority"
 )
 
 func withTestStdin(t *testing.T, input string, fn func()) {
@@ -63,6 +65,67 @@ func TestBdStoreBridgeBeadRedactsAttemptEvidenceMetadata(t *testing.T) {
 	}
 	if metadata[beadmeta.AttemptEvidenceArchivePayloadMetadataKey] != privateValue {
 		t.Fatal("bridge projection mutated the store-owned metadata map")
+	}
+}
+
+func TestBdStoreBridgeRefusesSessionAuthorityMetadata(t *testing.T) {
+	t.Setenv(sessionauthority.HostTrustFileEnv, "/host/session-authority.json")
+	dir := t.TempDir()
+	tests := []struct {
+		name  string
+		op    string
+		args  []string
+		input string
+	}{
+		{
+			name:  "create proof",
+			op:    "create",
+			input: `{"title":"forged","metadata":{"gc.authority_authorization.v1":"forged"}}`,
+		},
+		{
+			name:  "update clears profile",
+			op:    "update",
+			args:  []string{"gc-session"},
+			input: `{"metadata":{"gc.authority_profile":""}}`,
+		},
+		{
+			name:  "update clears overrides",
+			op:    "update",
+			args:  []string{"gc-session"},
+			input: `{"metadata":{"template_overrides":"{}"}}`,
+		},
+		{
+			name: "set metadata clears history",
+			op:   "set-metadata",
+			args: []string{"gc-session", sessionauthority.MetadataTransitions},
+		},
+		{
+			name:  "create request receipt",
+			op:    "create",
+			input: `{"title":"forged","metadata":{"gc.session_request.v1.r1":"{}"}}`,
+		},
+		{
+			name: "set request receipt",
+			op:   "set-metadata",
+			args: []string{"gc-session", beadmeta.SessionRequestReceiptPrefix + "r1"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := runBdStoreBridge(tt.op, tt.args, dir, "127.0.0.1", "3307", "root", strings.NewReader(tt.input), io.Discard)
+			if err == nil || !strings.Contains(err.Error(), "controller-owned session") {
+				t.Fatalf("runBdStoreBridge error = %v, want controller-owned metadata refusal", err)
+			}
+		})
+	}
+
+	t.Setenv(sessionauthority.HostTrustFileEnv, "")
+	err := validateBdStoreBridgeAuthorityMetadata(
+		map[string]string{"template_overrides": "{}"},
+		map[string]string{sessionauthority.MetadataTransitions: `[{"outcome":"accepted"}]`},
+	)
+	if err == nil || !strings.Contains(err.Error(), "controller-owned session authority metadata") {
+		t.Fatalf("protected session without ambient trust error = %v, want authority metadata refusal", err)
 	}
 }
 

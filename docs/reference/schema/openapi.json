@@ -964,6 +964,15 @@
           "actions": {
             "$ref": "#/components/schemas/Facet"
           },
+          "artifacts": {
+            "items": {
+              "$ref": "#/components/schemas/PayloadArtifact"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "attempt_id": {
             "type": "string"
           },
@@ -3309,6 +3318,15 @@
           },
           "actions": {
             "$ref": "#/components/schemas/Facet"
+          },
+          "artifacts": {
+            "items": {
+              "$ref": "#/components/schemas/PayloadArtifact"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
           },
           "attempt_id": {
             "type": "string"
@@ -7084,6 +7102,65 @@
         ],
         "type": "object"
       },
+      "PayloadArtifact": {
+        "additionalProperties": false,
+        "properties": {
+          "bytes": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "media_type": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "sha256": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "media_type",
+          "status"
+        ],
+        "type": "object"
+      },
+      "PayloadRead": {
+        "additionalProperties": false,
+        "properties": {
+          "bytes": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "content": {
+            "contentEncoding": "base64",
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "sha256": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "sha256",
+          "bytes",
+          "content"
+        ],
+        "type": "object"
+      },
       "PendingInteraction": {
         "additionalProperties": false,
         "properties": {
@@ -8239,6 +8316,24 @@
         ],
         "type": "object"
       },
+      "RequestAttemptAttribution": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "type": "string"
+          },
+          "reference": {
+            "$ref": "#/components/schemas/RequestAttemptReference"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "type": "object"
+      },
       "RequestAttemptBinding": {
         "additionalProperties": false,
         "properties": {
@@ -8260,6 +8355,78 @@
           "attempt_id",
           "work_revision",
           "identity"
+        ],
+        "type": "object"
+      },
+      "RequestAttemptReference": {
+        "additionalProperties": false,
+        "properties": {
+          "attempt_id": {
+            "type": "string"
+          },
+          "store_ref": {
+            "type": "string"
+          },
+          "work_id": {
+            "type": "string"
+          },
+          "work_revision": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "store_ref",
+          "work_id",
+          "attempt_id",
+          "work_revision"
+        ],
+        "type": "object"
+      },
+      "RequestEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "attempt_attribution": {
+            "$ref": "#/components/schemas/RequestAttemptAttribution"
+          },
+          "delivery": {
+            "type": "string"
+          },
+          "generation": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "message_digest": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "sequence": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "transcript_evidence": {
+            "$ref": "#/components/schemas/RequestTranscriptEvidence"
+          }
+        },
+        "required": [
+          "sequence",
+          "kind",
+          "session_id",
+          "generation",
+          "request_id",
+          "message_digest",
+          "at"
         ],
         "type": "object"
       },
@@ -8299,6 +8466,71 @@
         ],
         "type": "object"
       },
+      "RequestLedger": {
+        "additionalProperties": false,
+        "properties": {
+          "attempt_attribution": {
+            "$ref": "#/components/schemas/RequestAttemptAttribution"
+          },
+          "digest": {
+            "type": "string"
+          },
+          "events": {
+            "items": {
+              "$ref": "#/components/schemas/RequestEvent"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "status": {
+            "type": "string"
+          },
+          "transcript_evidence": {
+            "$ref": "#/components/schemas/RequestTranscriptEvidence"
+          },
+          "unavailable_reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "type": "object"
+      },
+      "RequestLedgerProjection": {
+        "additionalProperties": false,
+        "properties": {
+          "digest": {
+            "type": "string"
+          },
+          "requests": {
+            "items": {
+              "$ref": "#/components/schemas/RequestReceipt"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "unavailable_reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "status",
+          "requests"
+        ],
+        "type": "object"
+      },
       "RequestReceipt": {
         "additionalProperties": false,
         "properties": {
@@ -8327,6 +8559,9 @@
             "format": "int64",
             "type": "integer"
           },
+          "ledger": {
+            "$ref": "#/components/schemas/RequestLedger"
+          },
           "message_digest": {
             "type": "string"
           },
@@ -8349,6 +8584,83 @@
           "accepted_at",
           "delivery",
           "effect"
+        ],
+        "type": "object"
+      },
+      "RequestTranscriptEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "references": {
+            "items": {
+              "$ref": "#/components/schemas/RequestTranscriptReference"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "status": {
+            "type": "string"
+          },
+          "tool_status": {
+            "type": "string"
+          },
+          "tool_unavailable_reason": {
+            "type": "string"
+          },
+          "transcript_generation_id": {
+            "type": "string"
+          },
+          "transcript_stream_id": {
+            "type": "string"
+          },
+          "unavailable_reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "tool_status"
+        ],
+        "type": "object"
+      },
+      "RequestTranscriptReference": {
+        "additionalProperties": false,
+        "properties": {
+          "entry_id": {
+            "type": "string"
+          },
+          "generation": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "tool_id": {
+            "type": "string"
+          },
+          "transcript_generation_id": {
+            "type": "string"
+          },
+          "transcript_stream_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "generation",
+          "request_id",
+          "transcript_stream_id",
+          "transcript_generation_id",
+          "entry_id",
+          "kind"
         ],
         "type": "object"
       },
@@ -9421,6 +9733,32 @@
       "SessionPermissionModeBody": {
         "additionalProperties": false,
         "properties": {
+          "authority_profile": {
+            "description": "Provider-independent launch authority profile.",
+            "enum": [
+              "design",
+              "router",
+              "worker",
+              "operator"
+            ],
+            "type": "string"
+          },
+          "authorization": {
+            "description": "Dedicated signed session-authority grant for this exact transition.",
+            "type": "string"
+          },
+          "effective_config_sha256": {
+            "description": "Exact effective loaded configuration identity.",
+            "maxLength": 64,
+            "minLength": 64,
+            "type": "string"
+          },
+          "expected_generation": {
+            "description": "Exact current session execution generation.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
           "permission_mode": {
             "description": "Provider schema value for the permission_mode option.",
             "minLength": 1,
@@ -10263,6 +10601,10 @@
           },
           "provider_session_id": {
             "type": "string"
+          },
+          "request_ledger": {
+            "$ref": "#/components/schemas/RequestLedgerProjection",
+            "description": "Current durable session request status and append-only lifecycle transcript. Availability is explicit for legacy records or unavailable storage."
           },
           "tail_state": {
             "$ref": "#/components/schemas/SessionStructuredTailState"
@@ -31611,6 +31953,163 @@
           }
         },
         "summary": "Get v0 city by city name bead by ID attempt evidence by attempt ID"
+      }
+    },
+    "/v0/city/{cityName}/bead/{id}/attempt-evidence/{attemptID}/artifact/{sha256}": {
+      "get": {
+        "operationId": "get-v0-city-by-city-name-bead-by-id-attempt-evidence-by-attempt-id-artifact-by-sha256",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Work bead ID that owns the captured execution attempt.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Work bead ID that owns the captured execution attempt.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Exact immutable attempt ID.",
+            "in": "path",
+            "name": "attemptID",
+            "required": true,
+            "schema": {
+              "description": "Exact immutable attempt ID.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Exact content digest listed by this attempt.",
+            "in": "path",
+            "name": "sha256",
+            "required": true,
+            "schema": {
+              "description": "Exact content digest listed by this attempt.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PayloadRead"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "description": "Age in seconds of the CachingStore snapshot that served this response (0 if not applicable).",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
+              "X-GC-Index": {
+                "schema": {
+                  "description": "Latest event sequence number.",
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Forbidden",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Not Found",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Service Unavailable",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          }
+        },
+        "summary": "Get v0 city by city name bead by ID attempt evidence by attempt ID artifact by sha256"
       }
     },
     "/v0/city/{cityName}/bead/{id}/attempts/diff": {

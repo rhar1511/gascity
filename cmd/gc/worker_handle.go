@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,8 +16,11 @@ import (
 	"github.com/gastownhall/gascity/internal/processenv"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/sessionauthority"
 	"github.com/gastownhall/gascity/internal/worker"
 )
+
+const sessionAuthorityPermissionModeOptionKey = "permission_mode"
 
 func workerSessionCatalogWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City) (*worker.SessionCatalog, error) {
 	factory, err := workerFactoryWithConfig(cityPath, store, sp, cfg)
@@ -599,6 +603,16 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 	if cfg == nil {
 		return nil, nil
 	}
+	overrides, overridesErr := session.ParseTemplateOverrides(metadata)
+	if overridesErr != nil {
+		if sessionAuthorityLaunchProtected(info, metadata) {
+			return nil, fmt.Errorf("session %s: invalid authority-controlled template overrides: %w", info.ID, overridesErr)
+		}
+		overrides = nil
+	}
+	if err := verifySessionAuthorityLaunch(cfg, info, metadata, strings.TrimSpace(overrides[sessionAuthorityPermissionModeOptionKey])); err != nil {
+		return nil, fmt.Errorf("session %s: authority-controlled launch rejected: %w", info.ID, err)
+	}
 	resolved, configuredTransport := resolveWorkerRuntimeProviderWithConfigAndMetadata(cfg, info, sessionKind, metadata)
 	if resolved == nil {
 		return nil, nil
@@ -622,7 +636,7 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 		return nil, err
 	}
 	resumeCommand := firstNonEmptyGCString(resolved.ResumeCommand, info.ResumeCommand)
-	if overrides, err := session.ParseTemplateOverrides(metadata); err == nil && strings.TrimSpace(resumeCommand) != "" {
+	if overridesErr == nil && strings.TrimSpace(resumeCommand) != "" {
 		resumeProvider := *resolved
 		resumeProvider.ResumeCommand = resumeCommand
 		if command, err := config.BuildProviderResumeCommand(&resumeProvider, overrides); err == nil && strings.TrimSpace(command) != "" {
@@ -691,6 +705,44 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 			SessionIDFlag: resolved.SessionIDFlag,
 		},
 	}, nil
+}
+
+func sessionAuthorityLaunchProtected(info session.Info, metadata map[string]string) bool {
+	return sessionauthority.EnforcementEnabled() || sessionAuthorityPreviouslyProtected(info, metadata)
+}
+
+func sessionAuthorityPreviouslyProtected(info session.Info, metadata map[string]string) bool {
+	return strings.TrimSpace(firstNonEmptyGCString(metadata[sessionauthority.MetadataProfile], info.AuthorityProfile)) != "" ||
+		strings.TrimSpace(firstNonEmptyGCString(metadata[sessionauthority.MetadataAuthorization], info.AuthorityAuthorization)) != "" ||
+		strings.TrimSpace(firstNonEmptyGCString(metadata[sessionauthority.MetadataTransitions], info.AuthorityTransitions)) != ""
+}
+
+func verifySessionAuthorityLaunch(cfg *config.City, info session.Info, metadata map[string]string, permissionMode string) error {
+	profile := strings.TrimSpace(firstNonEmptyGCString(metadata[sessionauthority.MetadataProfile], info.AuthorityProfile))
+	authorization := strings.TrimSpace(firstNonEmptyGCString(metadata[sessionauthority.MetadataAuthorization], info.AuthorityAuthorization))
+	previouslyProtected := sessionAuthorityPreviouslyProtected(info, metadata)
+	if strings.TrimSpace(permissionMode) == "" && profile == "" && authorization == "" && !previouslyProtected {
+		return nil
+	}
+	if !sessionauthority.EnforcementEnabled() && !previouslyProtected {
+		return nil
+	}
+	generation, err := strconv.ParseUint(strings.TrimSpace(firstNonEmptyGCString(metadata["generation"], info.Generation)), 10, 64)
+	if err != nil || generation == 0 || cfg == nil {
+		return sessionauthority.ErrUnavailable
+	}
+	snapshot := cfg.QualificationSnapshot()
+	if strings.TrimSpace(snapshot.EffectiveConfigIdentitySHA256) == "" {
+		return sessionauthority.ErrUnavailable
+	}
+	return sessionauthority.VerifyLaunch(
+		config.EffectiveCityName(cfg, ""), info.ID, generation,
+		snapshot.EffectiveConfigIdentitySHA256,
+		sessionauthority.Profile(profile),
+		permissionMode,
+		authorization,
+		previouslyProtected,
+	)
 }
 
 func resolvedWorkerRuntimeProviderLabel(resolved *config.ResolvedProvider, transport string, info session.Info) string {

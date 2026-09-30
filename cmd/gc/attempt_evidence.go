@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -98,12 +99,16 @@ func captureWorkbenchAttemptEvidenceFromStores(ctx context.Context, archiveStore
 			StoreRef: storeRef, WorkID: bead.ID,
 			RepositoryRoot: repoDir, WorkspaceRoot: workDir,
 		},
-		WorkDir: workDir,
-		BaseSHA: strings.TrimSpace(bead.Metadata[beadmeta.WorktreeBaseSHAMetadataKey]),
-		Outcome: strings.TrimSpace(bead.Metadata[beadmeta.WorkOutcomeMetadataKey]),
+		WorkDir:   workDir,
+		BaseSHA:   strings.TrimSpace(bead.Metadata[beadmeta.WorktreeBaseSHAMetadataKey]),
+		Outcome:   strings.TrimSpace(bead.Metadata[beadmeta.WorkOutcomeMetadataKey]),
+		Artifacts: attemptEvidenceArtifacts(bead),
 	}
-	_, err = attemptevidence.Capture(ctx, archiveStore, spec)
-	return err
+	evidence, err := attemptevidence.Capture(ctx, archiveStore, spec)
+	if err != nil {
+		return err
+	}
+	return stampAttemptEvidenceReference(archiveStore, bead.ID, evidence, storeRef)
 }
 
 func captureWorkbenchBeforeAssignmentRelease(ctx context.Context, cityPath string, cfg *config.City, archiveStore, sessionReadStore beads.Store, bead beads.Bead) error {
@@ -252,11 +257,75 @@ func captureControlAttemptEvidence(ctx context.Context, store beads.Store, cityP
 			StoreRef: storeRef, WorkID: control.ID, WorkspaceRoot: workDir,
 		},
 		BaseSHA: baseSHA, Outcome: fmt.Sprintf("attempt_%d:%s", attemptNum, outcome),
+		Artifacts: attemptEvidenceArtifacts(attempt),
 	}
-	if _, err := attemptevidence.Capture(ctx, store, spec); err != nil {
+	evidence, err := attemptevidence.Capture(ctx, store, spec)
+	if err != nil {
 		return fmt.Errorf("capture %s control %s execution %s: %w", kind, control.ID, attempt.ID, err)
 	}
-	return nil
+	return stampAttemptEvidenceReference(store, attempt.ID, evidence, storeRef)
+}
+
+func attemptEvidenceArtifacts(attempt beads.Bead) []attemptevidence.PayloadArtifact {
+	artifacts := make([]attemptevidence.PayloadArtifact, 0, 3)
+	for _, item := range []struct {
+		name      string
+		mediaType string
+		key       string
+	}{
+		{name: "stdout", mediaType: "text/plain", key: beadmeta.StdoutMetadataKey},
+		{name: "stderr", mediaType: "text/plain", key: beadmeta.StderrMetadataKey},
+		{name: "output_json", mediaType: "application/json", key: beadmeta.OutputJSONMetadataKey},
+	} {
+		content, present := attempt.Metadata[item.key]
+		artifact := attemptevidence.PayloadArtifact{Name: item.name, MediaType: item.mediaType}
+		if !present {
+			artifact.Status = attemptevidence.StatusMissing
+			artifact.Reason = "attempt_artifact_metadata_absent"
+		} else {
+			artifact.Status = attemptevidence.StatusAvailable
+			artifact.Content = make([]byte, len(content))
+			copy(artifact.Content, content)
+		}
+		artifacts = append(artifacts, artifact)
+	}
+	return artifacts
+}
+
+func stampAttemptEvidenceReference(store beads.Store, recordID string, evidence attemptevidence.Evidence, storeRef string) error {
+	if store == nil {
+		return errors.New("attempt evidence reference store is unavailable")
+	}
+	encoded, err := json.Marshal(attemptevidence.EvidenceReference(evidence, storeRef))
+	if err != nil {
+		return fmt.Errorf("marshal attempt evidence reference for %s: %w", recordID, err)
+	}
+	value := string(encoded)
+	record, err := store.Get(recordID)
+	if err != nil {
+		return fmt.Errorf("read attempt evidence reference record %s: %w", recordID, err)
+	}
+	if existing := strings.TrimSpace(record.Metadata[beadmeta.AttemptEvidenceReferenceMetadataKey]); existing != "" {
+		if existing != value {
+			return fmt.Errorf("attempt evidence reference on %s conflicts with the sealed attempt", recordID)
+		}
+		return nil
+	}
+	outcome, writeErr := beads.ApplyMetadataCAS(store, recordID, beadmeta.AttemptEvidenceReferenceMetadataKey, "", value)
+	if writeErr == nil && (outcome == beads.MetadataCASSwapped || outcome == beads.MetadataCASAlreadyNext) {
+		return nil
+	}
+	current, readErr := store.Get(recordID)
+	if readErr != nil {
+		return errors.Join(fmt.Errorf("write attempt evidence reference on %s: %w", recordID, writeErr), readErr)
+	}
+	if current.Metadata[beadmeta.AttemptEvidenceReferenceMetadataKey] == value {
+		return nil
+	}
+	if writeErr != nil {
+		return fmt.Errorf("write attempt evidence reference on %s: %w", recordID, writeErr)
+	}
+	return fmt.Errorf("attempt evidence reference on %s conflicted with a different value", recordID)
 }
 
 func attemptEvidenceStoreRef(cityPath, storePath string, cfg *config.City, control beads.Bead) (string, error) {

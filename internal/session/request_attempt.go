@@ -29,7 +29,15 @@ func (s *Store) AcceptRequestForAttempt(sessionID, requestID string, generation 
 	if !validRequestAttemptBinding(binding, sessionID, generation) {
 		return RequestAcceptance{}, ErrRequestConflict
 	}
-	return s.acceptRequest(sessionID, requestID, generation, message, &binding, now)
+	reference, err := NewRequestAttemptReference(binding.StoreRef, binding.Identity.OwnerBeadID, binding.AttemptID, binding.WorkRevision)
+	if err != nil {
+		return RequestAcceptance{}, err
+	}
+	attribution, err := AvailableRequestAttemptAttribution(reference)
+	if err != nil {
+		return RequestAcceptance{}, err
+	}
+	return s.acceptRequest(sessionID, requestID, generation, message, &binding, attribution, now)
 }
 
 func validRequestAttemptBinding(binding RequestAttemptBinding, sessionID string, generation int) bool {

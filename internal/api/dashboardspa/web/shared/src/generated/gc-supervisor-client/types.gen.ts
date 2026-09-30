@@ -297,6 +297,7 @@ export type AttemptActionRecords = {
 export type AttemptEvidenceRead = {
     acknowledgements: Facet;
     actions: Facet;
+    artifacts?: Array<PayloadArtifact> | null;
     attempt_id: string;
     base_reason?: string;
     base_sha?: string;
@@ -1101,6 +1102,7 @@ export type EventStreamEnvelope = {
 export type Evidence = {
     acknowledgements: Facet;
     actions: Facet;
+    artifacts?: Array<PayloadArtifact> | null;
     attempt_id: string;
     base_reason?: string;
     base_sha?: string;
@@ -2708,6 +2710,23 @@ export type PatchOkResponseBody = {
     status: string;
 };
 
+export type PayloadArtifact = {
+    bytes?: number;
+    media_type: string;
+    name: string;
+    reason?: string;
+    sha256?: string;
+    status: string;
+};
+
+export type PayloadRead = {
+    bytes: number;
+    content: string;
+    reason?: string;
+    sha256: string;
+    status: string;
+};
+
 export type PendingInteraction = {
     kind: string;
     metadata?: {
@@ -3128,11 +3147,37 @@ export type RecoveryRequest = {
     work_item_id: string;
 };
 
+export type RequestAttemptAttribution = {
+    reason?: string;
+    reference?: RequestAttemptReference;
+    status: string;
+};
+
 export type RequestAttemptBinding = {
     attempt_id: string;
     identity: Identity;
     store_ref: string;
     work_revision: string;
+};
+
+export type RequestAttemptReference = {
+    attempt_id: string;
+    store_ref: string;
+    work_id: string;
+    work_revision: string;
+};
+
+export type RequestEvent = {
+    at: string;
+    attempt_attribution?: RequestAttemptAttribution;
+    delivery?: string;
+    generation: number;
+    kind: string;
+    message_digest: string;
+    request_id: string;
+    sequence: number;
+    session_id: string;
+    transcript_evidence?: RequestTranscriptEvidence;
 };
 
 export type RequestFailedPayload = {
@@ -3154,6 +3199,23 @@ export type RequestFailedPayload = {
     request_id: string;
 };
 
+export type RequestLedger = {
+    attempt_attribution?: RequestAttemptAttribution;
+    digest?: string;
+    events?: Array<RequestEvent> | null;
+    status: string;
+    transcript_evidence?: RequestTranscriptEvidence;
+    unavailable_reason?: string;
+};
+
+export type RequestLedgerProjection = {
+    digest?: string;
+    requests: Array<RequestReceipt> | null;
+    session_id: string;
+    status: string;
+    unavailable_reason?: string;
+};
+
 export type RequestReceipt = {
     accepted_at: string;
     acknowledged_at?: string;
@@ -3162,10 +3224,32 @@ export type RequestReceipt = {
     delivery_attempted_at?: string;
     effect: string;
     generation: number;
+    ledger?: RequestLedger;
     message_digest: string;
     provider_result_at?: string;
     request_id: string;
     session_id: string;
+};
+
+export type RequestTranscriptEvidence = {
+    references?: Array<RequestTranscriptReference> | null;
+    status: string;
+    tool_status: string;
+    tool_unavailable_reason?: string;
+    transcript_generation_id?: string;
+    transcript_stream_id?: string;
+    unavailable_reason?: string;
+};
+
+export type RequestTranscriptReference = {
+    entry_id: string;
+    generation: number;
+    kind: string;
+    request_id: string;
+    session_id: string;
+    tool_id?: string;
+    transcript_generation_id: string;
+    transcript_stream_id: string;
 };
 
 export type RigActionBody = {
@@ -3762,6 +3846,22 @@ export type SessionPendingResponse = {
 
 export type SessionPermissionModeBody = {
     /**
+     * Provider-independent launch authority profile.
+     */
+    authority_profile?: 'design' | 'router' | 'worker' | 'operator';
+    /**
+     * Dedicated signed session-authority grant for this exact transition.
+     */
+    authorization?: string;
+    /**
+     * Exact effective loaded configuration identity.
+     */
+    effective_config_sha256?: string;
+    /**
+     * Exact current session execution generation.
+     */
+    expected_generation?: number;
+    /**
      * Provider schema value for the permission_mode option.
      */
     permission_mode: string;
@@ -4135,6 +4235,10 @@ export type SessionStructuredHistory = {
     generation: SessionStructuredGeneration;
     logical_conversation_id?: string;
     provider_session_id?: string;
+    /**
+     * Current durable session request status and append-only lifecycle transcript. Availability is explicit for legacy records or unavailable storage.
+     */
+    request_ledger?: RequestLedgerProjection;
     tail_state: SessionStructuredTailState;
     transcript_stream_id: string;
 };
@@ -11851,6 +11955,64 @@ export type GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdResponses = {
 };
 
 export type GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdResponse = GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdResponses[keyof GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdResponses];
+
+export type GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdArtifactBySha256Data = {
+    body?: never;
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Work bead ID that owns the captured execution attempt.
+         */
+        id: string;
+        /**
+         * Exact immutable attempt ID.
+         */
+        attemptID: string;
+        /**
+         * Exact content digest listed by this attempt.
+         */
+        sha256: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/bead/{id}/attempt-evidence/{attemptID}/artifact/{sha256}';
+};
+
+export type GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdArtifactBySha256Errors = {
+    /**
+     * Forbidden
+     */
+    403: ErrorModel;
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdArtifactBySha256Error = GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdArtifactBySha256Errors[keyof GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdArtifactBySha256Errors];
+
+export type GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdArtifactBySha256Responses = {
+    /**
+     * OK
+     */
+    200: PayloadRead;
+};
+
+export type GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdArtifactBySha256Response = GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdArtifactBySha256Responses[keyof GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdArtifactBySha256Responses];
 
 export type GetV0CityByCityNameBeadByIdAttemptsDiffData = {
     body?: never;

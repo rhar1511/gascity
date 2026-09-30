@@ -2887,7 +2887,7 @@ func (s *BdStore) preflightLifecycleDelete(id string) error {
 		}
 		return fmt.Errorf("checking lifecycle delete target %q: %w", id, err)
 	}
-	if err := protectAttemptEvidenceDelete(current); err != nil {
+	if err := protectRetainedEvidenceDelete(current); err != nil {
 		return fmt.Errorf("deleting bead %q: %w", id, err)
 	}
 	if err := ValidateLifecycleDelete(current); err != nil {

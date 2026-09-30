@@ -28,6 +28,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/session/sessiontest"
+	"github.com/gastownhall/gascity/internal/sessionauthority"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 	"github.com/gastownhall/gascity/internal/shellquote"
 	"github.com/gastownhall/gascity/internal/testutil"
@@ -1403,26 +1404,27 @@ func TestPrepareStartCandidateReloadsOverridesBeforeWake(t *testing.T) {
 		t.Fatalf("SetMetadata(template_overrides): %v", err)
 	}
 
-	prepared, err := prepareStartCandidate(startCandidate{
-		info: sessiontest.SeedBead(t, session),
-		tp: TemplateParams{
-			TemplateName: "worker",
-			SessionName:  "worker",
-			Command:      "codex --ask-for-approval on-request",
-			ResolvedProvider: &config.ResolvedProvider{
-				Name:          "codex",
-				ResumeFlag:    "resume",
-				ResumeStyle:   "subcommand",
-				ResumeCommand: "codex resume {{.SessionKey}} --ask-for-approval on-request",
-				OptionsSchema: []config.ProviderOption{{
-					Key: "permission_mode",
-					Choices: []config.OptionChoice{
-						{Value: "default", FlagArgs: []string{"--ask-for-approval", "on-request"}},
-						{Value: "plan", FlagArgs: []string{"--ask-for-approval", "never"}},
-					},
-				}},
-			},
+	tp := TemplateParams{
+		TemplateName: "worker",
+		SessionName:  "worker",
+		Command:      "codex --ask-for-approval on-request",
+		ResolvedProvider: &config.ResolvedProvider{
+			Name:          "codex",
+			ResumeFlag:    "resume",
+			ResumeStyle:   "subcommand",
+			ResumeCommand: "codex resume {{.SessionKey}} --ask-for-approval on-request",
+			OptionsSchema: []config.ProviderOption{{
+				Key: "permission_mode",
+				Choices: []config.OptionChoice{
+					{Value: "default", FlagArgs: []string{"--ask-for-approval", "on-request"}},
+					{Value: "plan", FlagArgs: []string{"--ask-for-approval", "never"}},
+				},
+			}},
 		},
+	}
+	prepared, err := prepareStartCandidate(startCandidate{
+		info:  sessiontest.SeedBead(t, session),
+		tp:    tp,
 		order: 0,
 	}, &config.City{}, store, &clock.Fake{Time: time.Date(2026, 5, 13, 12, 0, 0, 0, time.UTC)})
 	if err != nil {
@@ -1434,6 +1436,15 @@ func TestPrepareStartCandidateReloadsOverridesBeforeWake(t *testing.T) {
 	want := "codex resume --ask-for-approval never abc-123"
 	if prepared.cfg.Command != want {
 		t.Fatalf("prepared.cfg.Command = %q, want %q", prepared.cfg.Command, want)
+	}
+
+	t.Setenv(sessionauthority.HostTrustFileEnv, filepath.Join(t.TempDir(), "missing-trust.json"))
+	current, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := buildPreparedStart(startCandidate{info: sessiontest.SeedBead(t, current), tp: tp}, &config.City{}, store); !errors.Is(err, sessionauthority.ErrUnavailable) {
+		t.Fatalf("protected raw permission_mode launch = %v, want authority unavailable", err)
 	}
 }
 

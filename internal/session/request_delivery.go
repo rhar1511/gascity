@@ -2,7 +2,6 @@ package session
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"strconv"
 	"time"
@@ -21,9 +20,7 @@ func (m *Manager) SubmitRequest(ctx context.Context, id, requestID string, gener
 }
 
 // SubmitRequestForAttempt accepts controller-verified attempt attribution and
-// uses the same live-only, single-send protocol as SubmitRequest. The caller
-// must verify the authoritative work record before supplying the binding;
-// this method additionally fences the session generation and reciprocal claim.
+// uses the same live-only, single-send protocol as SubmitRequest.
 func (m *Manager) SubmitRequestForAttempt(ctx context.Context, id, requestID string, generation int, message string, binding RequestAttemptBinding) (RequestReceipt, error) {
 	if !validRequestAttemptBinding(binding, id, generation) {
 		return RequestReceipt{}, ErrRequestConflict
@@ -31,11 +28,8 @@ func (m *Manager) SubmitRequestForAttempt(ctx context.Context, id, requestID str
 	return m.submitRequest(ctx, id, requestID, generation, message, &binding, false)
 }
 
-// SubmitRequestForAttemptExact is the recovery-controller path. Unlike the
-// general SubmitRequestForAttempt retry contract, it requires the entire stored
-// binding, including the original work revision, to match at the atomic send
-// reservation. This prevents a pending receipt created after controller
-// preflight from being delivered under a different signed work revision.
+// SubmitRequestForAttemptExact additionally requires the complete stored
+// binding, including its original work revision, at the send reservation.
 func (m *Manager) SubmitRequestForAttemptExact(ctx context.Context, id, requestID string, generation int, message string, binding RequestAttemptBinding) (RequestReceipt, error) {
 	if !validRequestAttemptBinding(binding, id, generation) {
 		return RequestReceipt{}, ErrRequestConflict
@@ -61,7 +55,12 @@ func (m *Manager) submitRequest(ctx context.Context, id, requestID string, gener
 			return err
 		}
 		front := NewStore(beads.SessionStore{Store: m.store})
-		accepted, err := front.acceptRequest(id, requestID, generation, message, binding, time.Now())
+		var accepted RequestAcceptance
+		if binding == nil {
+			accepted, err = front.AcceptRequest(id, requestID, generation, message, time.Now())
+		} else {
+			accepted, err = front.AcceptRequestForAttempt(id, requestID, generation, message, *binding, time.Now())
+		}
 		if err != nil {
 			return err
 		}
@@ -84,6 +83,11 @@ func (m *Manager) submitRequest(ctx context.Context, id, requestID string, gener
 			stamp := time.Now().UTC()
 			record.DeliveryAttemptedAt = &stamp
 			record.Delivery = RequestDeliveryUnknown
+			if record.Version == 2 {
+				if err := appendRequestEvent(record, RequestEventDeliveryAttempt, stamp, "", nil); err != nil {
+					return false, err
+				}
+			}
 			claimed = true
 			return true, nil
 		})
@@ -91,12 +95,7 @@ func (m *Manager) submitRequest(ctx context.Context, id, requestID string, gener
 			return err
 		}
 		// JSON keeps arbitrary message text distinct from the request identity.
-		envelope, err := json.Marshal(struct {
-			RequestID  string `json:"request_id"`
-			SessionID  string `json:"session_id"`
-			Generation int    `json:"generation"`
-			Message    string `json:"message"`
-		}{requestID, id, generation, message})
+		envelope, err := marshalTrackedRequestEnvelope(requestID, id, generation, message)
 		if err != nil {
 			return err
 		}

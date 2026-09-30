@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/sessionauthority"
 	"github.com/spf13/cobra"
 )
 
@@ -350,6 +352,12 @@ func bdRigQualifiedMetadataRefusal(cfg *config.City, bdArgs []string) (string, b
 	}
 
 	validate := func(key, value string) (string, bool) {
+		if strings.HasPrefix(strings.TrimSpace(key), beadmeta.SessionRequestReceiptPrefix) {
+			return fmt.Sprintf("gc bd: refusing controller-owned session request receipt metadata %q; use the tracked session protocol\n", key), true
+		}
+		if protectedSessionAuthorityMetadata(key) {
+			return fmt.Sprintf("gc bd: refusing controller-owned session authority metadata %q; use the signed session permission-mode API\n", key), true
+		}
 		if key != beadmeta.LeaseOwnerMetadataKey && key != beadmeta.RoutedToMetadataKey {
 			return "", false
 		}
@@ -370,6 +378,20 @@ func bdRigQualifiedMetadataRefusal(cfg *config.City, bdArgs []string) (string, b
 		}
 		value := ""
 		switch {
+		case arg == "--unset-metadata":
+			if i+1 >= len(args) {
+				return fmt.Sprintf("gc bd: refusing %s without a value before write\n", arg), true
+			}
+			i++
+			if msg, refused := validate(args[i], ""); refused {
+				return msg, true
+			}
+			continue
+		case strings.HasPrefix(arg, "--unset-metadata="):
+			if msg, refused := validate(strings.TrimPrefix(arg, "--unset-metadata="), ""); refused {
+				return msg, true
+			}
+			continue
 		case arg == "--set-metadata" || arg == "--metadata":
 			if i+1 >= len(args) {
 				return fmt.Sprintf("gc bd: refusing %s without a value before write\n", arg), true
@@ -407,12 +429,12 @@ func bdRigQualifiedMetadataRefusal(cfg *config.City, bdArgs []string) (string, b
 			return fmt.Sprintf("gc bd: refusing malformed --metadata value before write: %v\n", err), true
 		}
 		for key, rawValue := range metadata {
-			if key != beadmeta.LeaseOwnerMetadataKey && key != beadmeta.RoutedToMetadataKey {
-				continue
-			}
 			var metadataValue string
 			if err := json.Unmarshal(rawValue, &metadataValue); err != nil {
-				return fmt.Sprintf("gc bd: refusing non-string %s before write\n", key), true
+				if strings.HasPrefix(strings.TrimSpace(key), beadmeta.SessionRequestReceiptPrefix) || protectedSessionAuthorityMetadata(key) || key == beadmeta.LeaseOwnerMetadataKey || key == beadmeta.RoutedToMetadataKey {
+					return fmt.Sprintf("gc bd: refusing non-string %s before write\n", key), true
+				}
+				continue
 			}
 			if msg, refused := validate(key, metadataValue); refused {
 				return msg, true
@@ -420,6 +442,142 @@ func bdRigQualifiedMetadataRefusal(cfg *config.City, bdArgs []string) (string, b
 		}
 	}
 	return "", false
+}
+
+func bdMetadataMutationKeys(bdArgs []string) (map[string]struct{}, bool) {
+	verb, args := bdflags.SplitGlobalFlags(bdArgs)
+	if verb == "new" {
+		verb = "create"
+	}
+	if verb != "create" && verb != "update" {
+		return nil, true
+	}
+	valueFlags := bdflags.ValueFlags(verb)
+	keys := make(map[string]struct{})
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			break
+		}
+		value := ""
+		switch {
+		case arg == "--unset-metadata":
+			if i+1 >= len(args) {
+				return nil, false
+			}
+			i++
+			keys[strings.TrimSpace(args[i])] = struct{}{}
+			continue
+		case strings.HasPrefix(arg, "--unset-metadata="):
+			keys[strings.TrimSpace(strings.TrimPrefix(arg, "--unset-metadata="))] = struct{}{}
+			continue
+		case arg == "--set-metadata" || arg == "--metadata":
+			if i+1 >= len(args) {
+				return nil, false
+			}
+			i++
+			value = args[i]
+		case strings.HasPrefix(arg, "--set-metadata="):
+			value = strings.TrimPrefix(arg, "--set-metadata=")
+		case strings.HasPrefix(arg, "--metadata="):
+			value = strings.TrimPrefix(arg, "--metadata=")
+		default:
+			if !strings.Contains(arg, "=") && valueFlags[arg] && i+1 < len(args) {
+				i++
+			}
+			continue
+		}
+		if strings.HasPrefix(arg, "--set-metadata") {
+			key, _, ok := strings.Cut(value, "=")
+			if !ok || strings.TrimSpace(key) == "" {
+				return nil, false
+			}
+			keys[strings.TrimSpace(key)] = struct{}{}
+			continue
+		}
+		if strings.HasPrefix(strings.TrimSpace(value), "@") {
+			return nil, false
+		}
+		var metadata map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(value), &metadata); err != nil {
+			return nil, false
+		}
+		for key := range metadata {
+			keys[strings.TrimSpace(key)] = struct{}{}
+		}
+	}
+	return keys, true
+}
+
+func bdPersistedProtectedMutationRefusal(bdArgs, writeIDs []string, current map[string]beads.Bead) (string, bool) {
+	verb, verbArgs, _ := bdRelocatedClassVerb(bdArgs)
+	if verb == "delete" && bdCascadeDeleteRequested(verbArgs) {
+		return "gc bd: refusing cascade delete because the full dependency closure cannot be checked for retained session evidence\n", true
+	}
+	for id, bead := range current {
+		if verb == "delete" && beads.HasRetainedSessionRequestEvidence(bead) {
+			return fmt.Sprintf("gc bd: refusing delete of %q because its session request evidence has no deletion policy\n", id), true
+		}
+	}
+	keys, ok := bdMetadataMutationKeys(bdArgs)
+	if !ok {
+		return "gc bd: cannot safely inspect protected metadata mutation before write\n", true
+	}
+	requiresCurrent := verb == "delete"
+	for key := range keys {
+		if sessionAuthorityOptionMetadata(key) {
+			requiresCurrent = true
+		}
+	}
+	if requiresCurrent {
+		for _, id := range writeIDs {
+			if _, ok := current[id]; !ok {
+				return fmt.Sprintf("gc bd: refusing protected mutation of %q because its current metadata could not be verified\n", id), true
+			}
+		}
+	}
+	for id, bead := range current {
+		for key := range keys {
+			if sessionauthority.ProtectsMetadataMutation(key, bead.Metadata) {
+				return fmt.Sprintf("gc bd: refusing controller-owned session authority metadata %q on protected bead %q; use the signed session permission-mode API\n", key, id), true
+			}
+		}
+	}
+	return "", false
+}
+
+func bdCascadeDeleteRequested(args []string) bool {
+	for _, arg := range args {
+		if arg == "--cascade" {
+			return true
+		}
+		value, ok := strings.CutPrefix(arg, "--cascade=")
+		if !ok {
+			continue
+		}
+		enabled, err := strconv.ParseBool(strings.TrimSpace(value))
+		if err != nil || enabled {
+			return true
+		}
+	}
+	return false
+}
+
+func protectedSessionAuthorityMetadata(key string) bool {
+	return sessionauthority.ProtectsMetadataMutation(key, nil)
+}
+
+func sessionAuthorityOptionMetadata(key string) bool {
+	switch strings.TrimSpace(key) {
+	case sessionauthority.MetadataTemplateOverrides, sessionauthority.MetadataPermissionModeOption:
+		return true
+	default:
+		return false
+	}
+}
+
+func sessionAuthorityMetadataPreviouslyProtected(metadata map[string]string) bool {
+	return sessionauthority.HasAuthorityMetadata(metadata)
 }
 
 func doBd(args []string, stdout, stderr io.Writer) int {
@@ -593,8 +751,10 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	var (
 		guardStore beads.Store
 		guardBeads map[string]beads.Bead
+		guardIDs   []string
 	)
 	if writeIDs, writeOK, ambiguous := bdMutationWriteIDs(bdArgs); writeOK {
+		guardIDs = writeIDs
 		if ambiguous {
 			fmt.Fprintf(stderr, "gc bd: cannot safely verify bead IDs (unrecognized flag in args %v); aborting to prevent substring-resolution mutation of the wrong bead\n", bdArgs) //nolint:errcheck // best-effort stderr
 			return 1
@@ -622,6 +782,10 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 				}
 			}
 		}
+	}
+	if msg, refused := bdPersistedProtectedMutationRefusal(bdArgs, guardIDs, guardBeads); refused {
+		fmt.Fprint(stderr, msg) //nolint:errcheck // best-effort stderr
+		return 1
 	}
 
 	// Work-record close gate (ADR-0009): a close routed through the SDK seam

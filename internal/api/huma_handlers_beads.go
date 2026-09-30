@@ -9,6 +9,7 @@ import (
 	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/sessionauthority"
 	"github.com/gastownhall/gascity/internal/worklifecycle"
 )
 
@@ -650,7 +651,7 @@ func (s *Server) humaHandleBeadGraph(_ context.Context, input *BeadGraphInput) (
 	if err != nil {
 		return nil, apierr.Internal.Msg(err.Error())
 	}
-	if beads.IsAttemptEvidenceArchive(root) {
+	if beads.IsProtectedAttemptEvidenceRecord(root) {
 		return nil, apierr.BeadNotFound.Msg("bead " + rootID + " not found")
 	}
 	visibleGraph := make([]beads.Bead, 0, len(graphBeads))
@@ -696,7 +697,7 @@ func (s *Server) humaHandleBeadGet(_ context.Context, input *BeadGetInput) (*Ind
 	if err != nil {
 		return nil, err
 	}
-	if beads.IsAttemptEvidenceArchive(b) {
+	if beads.IsProtectedAttemptEvidenceRecord(b) {
 		return nil, apierr.BeadNotFound.Msg("bead " + id + " not found")
 	}
 	b, _ = publicAttemptEvidenceBead(b)
@@ -714,7 +715,7 @@ func (s *Server) humaHandleBeadDeps(_ context.Context, input *BeadDepsInput) (*I
 	if err != nil {
 		return nil, err
 	}
-	if beads.IsAttemptEvidenceArchive(parent) {
+	if beads.IsProtectedAttemptEvidenceRecord(parent) {
 		return nil, apierr.BeadNotFound.Msg("bead " + id + " not found")
 	}
 	children, err := store.List(beads.ListQuery{
@@ -761,6 +762,9 @@ func (s *Server) humaHandleBeadCreate(ctx context.Context, input *BeadCreateInpu
 		return nil, err
 	}
 	if err := validateSessionRequestMetadata(input.Body.Metadata); err != nil {
+		return nil, err
+	}
+	if err := validateSessionAuthorityMetadata(input.Body.Metadata, nil); err != nil {
 		return nil, err
 	}
 	// Idempotency: run the create at most once per Idempotency-Key. The helper
@@ -924,6 +928,9 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 	if err := validateSessionRequestMetadata(body.Metadata); err != nil {
 		return nil, err
 	}
+	if err := validateSessionAuthorityMetadata(body.Metadata, nil); err != nil {
+		return nil, err
+	}
 
 	opts := beads.UpdateOpts{
 		Title:        body.Title,
@@ -951,6 +958,9 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 		return nil, err
 	}
 	if err := rejectAttemptEvidenceArchive(current); err != nil {
+		return nil, err
+	}
+	if err := validateSessionAuthorityMetadata(body.Metadata, current.Metadata); err != nil {
 		return nil, err
 	}
 	if body.Assignee != nil {
@@ -998,6 +1008,15 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 	resp := &OKResponse{}
 	resp.Body.Status = "updated"
 	return resp, nil
+}
+
+func validateSessionAuthorityMetadata(metadata, current map[string]string) error {
+	for key := range metadata {
+		if sessionauthority.ProtectsMetadataMutation(key, current) {
+			return apierr.Forbidden.Msg("session authority metadata is reserved for the controller")
+		}
+	}
+	return nil
 }
 
 // humaHandleBeadDelete is the Huma-typed handler for DELETE /v0/bead/{id}.

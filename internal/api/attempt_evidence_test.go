@@ -2,8 +2,11 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -48,9 +51,15 @@ func TestAttemptEvidencePublicReadRequiresExactScopeAuthorization(t *testing.T) 
 		},
 	}
 	evidence := attemptevidence.MakeUnavailable(spec, attemptID, "source_absent_before_capture")
-	if _, err := attemptevidence.Seal(store, evidence); err != nil {
+	artifactContent := []byte("private exact-attempt stdout")
+	evidence.Artifacts = []attemptevidence.PayloadArtifact{{
+		Name: "stdout", MediaType: "text/plain", Status: attemptevidence.StatusAvailable, Content: artifactContent,
+	}}
+	sealed, err := attemptevidence.Seal(store, evidence)
+	if err != nil {
 		t.Fatalf("Seal evidence: %v", err)
 	}
+	artifactDigest := sealed.Artifacts[0].SHA256
 	if err := store.Delete(owner.ID); err != nil {
 		t.Fatalf("Delete owner after durable archive: %v", err)
 	}
@@ -105,6 +114,38 @@ func TestAttemptEvidencePublicReadRequiresExactScopeAuthorization(t *testing.T) 
 	}
 	if response.AttemptID != attemptID || response.Permission.RepositoryRoot != "/private/repository" {
 		t.Fatalf("attempt body = %+v, want exact persisted attempt provenance; raw=%s", response, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), string(artifactContent)) {
+		t.Fatal("exact attempt metadata response embedded raw artifact content")
+	}
+
+	artifactPath := cityURL(state, "/bead/"+owner.ID+"/attempt-evidence/"+attemptID+"/artifact/"+artifactDigest)
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, artifactPath, nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("authorized artifact read status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	var payload attemptevidence.PayloadRead
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode artifact response: %v", err)
+	}
+	if payload.Status != attemptevidence.StatusAvailable || payload.SHA256 != artifactDigest || string(payload.Content) != string(artifactContent) {
+		t.Fatalf("artifact response = %#v, want exact verified content", payload)
+	}
+
+	srv.attemptEvidenceReadAuthorizer = attemptEvidenceAuthorizerFunc(func(context.Context, attemptevidence.ReadAuthorizationRequest) error {
+		return ErrAttemptEvidenceReadDenied
+	})
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, artifactPath, nil))
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("denied artifact read status = %d, want 403: %s", w.Code, w.Body.String())
+	}
+	srv.attemptEvidenceReadAuthorizer = authorizer
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, cityURL(state, "/bead/"+owner.ID+"/attempt-evidence/"+attemptID+"/artifact/"+strings.Repeat("f", 64)), nil))
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("unreferenced artifact read status = %d, want 404: %s", w.Code, w.Body.String())
 	}
 }
 
@@ -299,6 +340,22 @@ func TestGenericBeadReadsHideAttemptEvidencePayloadAndArchiveRows(t *testing.T) 
 	if err != nil || len(archives) != 1 {
 		t.Fatalf("list archive rows = %d, error %v", len(archives), err)
 	}
+	payloadContent := []byte("secret")
+	payloadDigest := fmt.Sprintf("%x", sha256.Sum256(payloadContent))
+	payload, err := beads.CreatePrivatePayloadValue(store, beads.Bead{
+		ID:    beads.AttemptEvidencePayloadID(payloadDigest),
+		Title: "private content payload", Type: "molecule", Status: "closed",
+		Metadata: beads.StringMap{
+			beadmeta.AttemptEvidencePayloadDigestMetadataKey: payloadDigest,
+			beadmeta.AttemptEvidencePayloadDataMetadataKey:   base64.StdEncoding.EncodeToString(payloadContent),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create payload: %v", err)
+	}
+	if err := store.SetMetadata(owner.ID, beadmeta.SessionRequestReceiptPrefix+"private-request", `{"message_digest":"private"}`); err != nil {
+		t.Fatalf("SetMetadata request receipt: %v", err)
+	}
 
 	srv := New(state)
 	ownerOutput, err := srv.humaHandleBeadGet(context.Background(), &BeadGetInput{ID: owner.ID})
@@ -306,7 +363,7 @@ func TestGenericBeadReadsHideAttemptEvidencePayloadAndArchiveRows(t *testing.T) 
 		t.Fatalf("generic owner GET: %v", err)
 	}
 	for key := range ownerOutput.Body.Metadata {
-		if isAttemptEvidenceMetadataKey(key) {
+		if isPrivateGenericBeadMetadataKey(key) {
 			t.Fatalf("generic owner GET exposed reserved attempt metadata key %q", key)
 		}
 	}
@@ -314,16 +371,19 @@ func TestGenericBeadReadsHideAttemptEvidencePayloadAndArchiveRows(t *testing.T) 
 	if err == nil || archiveOutput != nil {
 		t.Fatal("generic bead GET exposed the private archive row")
 	}
+	if payloadOutput, err := srv.humaHandleBeadGet(context.Background(), &BeadGetInput{ID: payload.ID}); err == nil || payloadOutput != nil {
+		t.Fatal("generic bead GET exposed the private content payload row")
+	}
 	listOutput, err := srv.humaHandleBeadList(context.Background(), &BeadListInput{All: true, Type: "molecule"})
 	if err != nil {
 		t.Fatalf("generic bead list: %v", err)
 	}
 	for _, b := range listOutput.Body.Items {
-		if beads.IsAttemptEvidenceArchive(b) || b.ID == archives[0].ID {
-			t.Fatalf("generic bead list exposed archive row %+v", b)
+		if beads.IsProtectedAttemptEvidenceRecord(b) || b.ID == archives[0].ID || b.ID == payload.ID {
+			t.Fatalf("generic bead list exposed protected attempt evidence row %+v", b)
 		}
 		for key := range b.Metadata {
-			if isAttemptEvidenceMetadataKey(key) {
+			if isPrivateGenericBeadMetadataKey(key) {
 				t.Fatalf("generic bead list exposed reserved attempt metadata key %q", key)
 			}
 		}

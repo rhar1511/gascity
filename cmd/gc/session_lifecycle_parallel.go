@@ -1039,7 +1039,33 @@ func buildPreparedStartWithWorkDirResolver(
 	// Build complete options: effective defaults + explicit overrides so
 	// unoverridden defaults are preserved when replaceSchemaFlags strips all
 	// schema flags.
-	sessionOverrides := parseSessionTemplateOverridesForLaunch(candidate.info)
+	sessionOverrides, overridesErr := parseSessionTemplateOverridesForLaunch(candidate.info)
+	if overridesErr != nil {
+		if sessionAuthorityLaunchProtected(candidate.info, nil) {
+			return nil, candidate.info, fmt.Errorf("session %s: invalid authority-controlled template overrides: %w", candidate.info.ID, overridesErr)
+		}
+		sessionOverrides = nil
+	}
+
+	// Work beads may carry one-shot provider option overrides as opt_<key>
+	// metadata, where <key> is an OptionsSchema key such as "model" or
+	// "effort". Apply them after core/live hash calculation because they are
+	// dispatch inputs from the current work bead, not durable session config.
+	// Explicit session template_overrides still win per key.
+	dispatchOptions := resolveTaskOptionOverrides(store, tp.ResolvedProvider, taskWorkDirAssignees(candidate, cfg)...)
+	launchOverrides := sessionOverrides
+	if len(dispatchOptions) > 0 {
+		launchOverrides = make(map[string]string, len(dispatchOptions)+len(sessionOverrides))
+		for k, v := range dispatchOptions {
+			launchOverrides[k] = v
+		}
+		for k, v := range sessionOverrides {
+			launchOverrides[k] = v
+		}
+	}
+	if err := verifySessionAuthorityLaunch(cfg, candidate.info, nil, strings.TrimSpace(launchOverrides[sessionAuthorityPermissionModeOptionKey])); err != nil {
+		return nil, candidate.info, fmt.Errorf("session %s: authority-controlled launch rejected: %w", candidate.info.ID, err)
+	}
 	applySchemaOptionOverridesForLaunch(&agentCfg, &tp, candidate.info.ID, sessionOverrides)
 
 	coreHash := runtime.CoreFingerprint(agentCfg)
@@ -1052,20 +1078,7 @@ func buildPreparedStartWithWorkDirResolver(
 	provisionHash := runtime.ProvisionFingerprint(agentCfg)
 	launchHash := runtime.LaunchFingerprint(agentCfg)
 
-	// Work beads may carry one-shot provider option overrides as opt_<key>
-	// metadata, where <key> is an OptionsSchema key such as "model" or
-	// "effort". Apply them after core/live hash calculation because they are
-	// dispatch inputs from the current work bead, not durable session config.
-	// Explicit session template_overrides still win per key.
-	dispatchOptions := resolveTaskOptionOverrides(store, tp.ResolvedProvider, taskWorkDirAssignees(candidate, cfg)...)
 	if len(dispatchOptions) > 0 {
-		launchOverrides := make(map[string]string, len(dispatchOptions))
-		for k, v := range dispatchOptions {
-			launchOverrides[k] = v
-		}
-		for k, v := range sessionOverrides {
-			launchOverrides[k] = v
-		}
 		applySchemaOptionOverridesForLaunch(&agentCfg, &tp, candidate.info.ID, launchOverrides)
 	}
 
@@ -1430,13 +1443,13 @@ func sessionTriggerBeadEnv(info sessionpkg.Info) map[string]string {
 // off the typed twin (Info.TemplateOverrides, verbatim) instead of re-projecting the
 // raw bead. template_overrides is not mutated on the start-prep path, so the
 // append-captured Info is coherent here.
-func parseSessionTemplateOverridesForLaunch(info sessionpkg.Info) map[string]string {
+func parseSessionTemplateOverridesForLaunch(info sessionpkg.Info) (map[string]string, error) {
 	overrides, err := sessionpkg.ParseTemplateOverridesFromInfo(info)
 	if err != nil {
 		log.Printf("session %s: invalid template_overrides JSON: %v", info.ID, err)
-		return nil
+		return nil, err
 	}
-	return overrides
+	return overrides, nil
 }
 
 func applySchemaOptionOverridesForLaunch(agentCfg *runtime.Config, tp *TemplateParams, sessionID string, overrides map[string]string) {

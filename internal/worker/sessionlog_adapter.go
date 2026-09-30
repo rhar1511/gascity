@@ -463,6 +463,7 @@ func normalizeEntry(provider, path, sessionID string, order int, entry *sessionl
 		Status:     ResultStatusFinal,
 		Provenance: provenance,
 	}
+	normalized.parentEntryID, normalized.parentKnown = explicitParentLink(entry)
 	if normalized.ID != entry.UUID {
 		normalized.Provenance.Derived = true
 	}
@@ -482,6 +483,73 @@ func normalizeEntry(provider, path, sessionID string, order int, entry *sessionl
 		normalized.UserPrompt = parseHistoryUserPrompt(normalized.Text)
 	}
 	return normalized
+}
+
+// explicitParentLink keeps only parent IDs present in the provider's raw
+// record. Several readers fill ParentUUID from file order for display and DAG
+// repair; that inferred value cannot establish request/tool lineage.
+func explicitParentLink(entry *sessionlog.Entry) (string, bool) {
+	if entry == nil || len(entry.Raw) == 0 {
+		return "", false
+	}
+	parentID, present, unambiguous := rawExplicitParentID(entry.Raw)
+	if !present || !unambiguous {
+		return "", false
+	}
+	if parentID == "" {
+		return "", entry.ParentUUID == "" && entry.LogicalParentUUID == ""
+	}
+	if parentID == entry.ParentUUID || parentID == entry.LogicalParentUUID {
+		return parentID, true
+	}
+	return "", false
+}
+
+func rawExplicitParentID(raw json.RawMessage) (string, bool, bool) {
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &root); err != nil || root == nil {
+		return "", false, false
+	}
+	fieldNames := []string{"parentUuid", "parentUUID", "parent_uuid", "parentId", "parentID", "parent_id", "logicalParentUuid", "logicalParentUUID", "logical_parent_uuid"}
+	objects := []map[string]json.RawMessage{root}
+	for _, container := range []string{"message", "payload", "data", "event", "info"} {
+		if nestedRaw, ok := root[container]; ok {
+			var nested map[string]json.RawMessage
+			if json.Unmarshal(nestedRaw, &nested) == nil && nested != nil {
+				objects = append(objects, nested)
+			}
+		}
+	}
+
+	var (
+		parentID  string
+		present   bool
+		observed  bool
+		ambiguous bool
+	)
+	for _, object := range objects {
+		for _, field := range fieldNames {
+			value, ok := object[field]
+			if !ok {
+				continue
+			}
+			present = true
+			var decoded string
+			if string(bytes.TrimSpace(value)) != "null" {
+				if err := json.Unmarshal(value, &decoded); err != nil {
+					return "", true, false
+				}
+			}
+			if observed && parentID != decoded {
+				ambiguous = true
+			}
+			if !observed {
+				parentID = decoded
+				observed = true
+			}
+		}
+	}
+	return parentID, present, !ambiguous
 }
 
 func normalizedHistoryEntryID(entry *sessionlog.Entry, order int) string {

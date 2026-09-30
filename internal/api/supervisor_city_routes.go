@@ -210,6 +210,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	cityGet(sm, "/bead/{id}", (*Server).humaHandleBeadGet, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
 	cityGet(sm, "/bead/{id}/attempt-evidence", (*Server).humaHandleAttemptEvidenceList, errorStatuses(http.StatusForbidden, http.StatusNotFound, http.StatusServiceUnavailable))
 	cityGet(sm, "/bead/{id}/attempt-evidence/{attemptID}", (*Server).humaHandleAttemptEvidenceGet, errorStatuses(http.StatusForbidden, http.StatusNotFound, http.StatusServiceUnavailable))
+	cityGet(sm, "/bead/{id}/attempt-evidence/{attemptID}/artifact/{sha256}", (*Server).humaHandleAttemptEvidenceArtifact, errorStatuses(http.StatusForbidden, http.StatusNotFound, http.StatusServiceUnavailable))
 	cityGet(sm, "/bead/{id}/deps", (*Server).humaHandleBeadDeps, errorStatuses(http.StatusNotFound))
 	cityGet(sm, "/bead/{id}/attempts/diff", (*Server).humaHandleBeadAttemptsDiff, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
 	cityPost(sm, "/bead/{id}/close", (*Server).humaHandleBeadClose, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict))

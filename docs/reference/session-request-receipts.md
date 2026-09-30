@@ -79,6 +79,26 @@ receipts and unavailable or corrupt evidence remain distinct.
 Generic bead create/update endpoints reject session receipt metadata. Receipt
 creation and acknowledgement must use the tracked session protocol.
 
+## Append-only request ledger
+
+New receipts include an append-only event ledger bound to the exact session,
+execution generation, request ID, and message digest. Its folded view is also
+attached to structured transcript responses beside the live provider
+transcript. Acceptance, delivery reservation, provider result, session
+acknowledgement, and the unverified effect remain separate events. Unknown
+provider outcomes stay recorded and are never retried implicitly.
+
+Attempt attribution in the ledger is derived from the controller-verified
+`attempt` binding when one is available. Otherwise the ledger records an
+explicit unavailable reason. Legacy version-1 receipts remain readable, but
+their event history is explicitly unavailable; the server does not invent
+events from flattened fields.
+
+The ledger also persists exact, generation-bound references to provider
+transcript entries and tool events. It stores references and digests rather
+than provider payload copies. Missing, ambiguous, stale, or unavailable
+references remain explicit.
+
 ## Deployment requirements
 
 Writes require a backend with conditional row updates. The protocol refuses

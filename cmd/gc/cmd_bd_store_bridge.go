@@ -155,6 +155,9 @@ func runBdStoreBridge(op string, args []string, dir, host, port, user string, st
 		if err := decodeJSON(stdin, &req); err != nil {
 			return err
 		}
+		if err := validateBdStoreBridgeAuthorityMetadata(req.Metadata, nil); err != nil {
+			return err
+		}
 		created, err := store.Create(beads.Bead{
 			Title:       req.Title,
 			Type:        req.Type,
@@ -189,6 +192,9 @@ func runBdStoreBridge(op string, args []string, dir, host, port, user string, st
 		if err := decodeJSON(stdin, &req); err != nil {
 			return err
 		}
+		if err := validateBdStoreBridgeAuthorityMetadata(req.Metadata, nil); err != nil {
+			return err
+		}
 		opts := beads.UpdateOpts{
 			Title:        req.Title,
 			Status:       req.Status,
@@ -203,6 +209,9 @@ func runBdStoreBridge(op string, args []string, dir, host, port, user string, st
 		}
 		current, err := store.Get(args[0])
 		if err != nil {
+			return err
+		}
+		if err := validateBdStoreBridgeAuthorityMetadata(req.Metadata, current.Metadata); err != nil {
 			return err
 		}
 		if err := worklifecycle.ValidateEnrolledMutation(current, opts); err != nil {
@@ -286,6 +295,21 @@ func runBdStoreBridge(op string, args []string, dir, host, port, user string, st
 		if len(args) < 2 {
 			return fmt.Errorf("usage: set-metadata <id> <key>")
 		}
+		if strings.HasPrefix(strings.TrimSpace(args[1]), beadmeta.SessionRequestReceiptPrefix) {
+			return fmt.Errorf("refusing controller-owned session request receipt metadata %q; use the tracked session protocol", args[1])
+		}
+		if protectedSessionAuthorityMetadata(args[1]) {
+			return fmt.Errorf("refusing controller-owned session authority metadata %q; use the signed session permission-mode API", args[1])
+		}
+		if sessionAuthorityOptionMetadata(args[1]) {
+			current, err := store.Get(args[0])
+			if err != nil {
+				return err
+			}
+			if sessionAuthorityMetadataPreviouslyProtected(current.Metadata) {
+				return fmt.Errorf("refusing controller-owned session authority metadata %q on a protected session; use the signed session permission-mode API", args[1])
+			}
+		}
 		value, err := io.ReadAll(stdin)
 		if err != nil {
 			return fmt.Errorf("read stdin: %w", err)
@@ -322,6 +346,18 @@ func runBdStoreBridge(op string, args []string, dir, host, port, user string, st
 	default:
 		return fmt.Errorf("unsupported operation %q", op)
 	}
+}
+
+func validateBdStoreBridgeAuthorityMetadata(metadata, current map[string]string) error {
+	for key := range metadata {
+		if strings.HasPrefix(strings.TrimSpace(key), beadmeta.SessionRequestReceiptPrefix) {
+			return fmt.Errorf("refusing controller-owned session request receipt metadata %q; use the tracked session protocol", key)
+		}
+		if protectedSessionAuthorityMetadata(key) || (sessionAuthorityOptionMetadata(key) && sessionAuthorityMetadataPreviouslyProtected(current)) {
+			return fmt.Errorf("refusing controller-owned session authority metadata %q; use the signed session permission-mode API", key)
+		}
+	}
+	return nil
 }
 
 func bdStoreBridgeEnv(dir, host, port, user, password string) map[string]string {

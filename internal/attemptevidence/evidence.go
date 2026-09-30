@@ -41,6 +41,9 @@ const (
 	StatusMissing = "missing"
 	// StatusPending means a capture reservation exists but is not yet sealed.
 	StatusPending = "pending"
+	// StatusCorrupt means an immutable payload reference exists but its stored
+	// content failed digest or size verification.
+	StatusCorrupt = "corrupt"
 
 	// WorkingTreeClean means no mutable worktree changes were found.
 	WorkingTreeClean = "clean"
@@ -57,9 +60,11 @@ const (
 	// DiffEncoding identifies the compressed JSON encoding used for stored diffs.
 	DiffEncoding = "gzip+json"
 
-	archiveLabel      = "gc:attempt-evidence"
-	maxDiffInputBytes = 16 << 20
-	maxEvidenceBytes  = 64 << 10
+	archiveLabel          = "gc:attempt-evidence"
+	maxDiffInputBytes     = 16 << 20
+	maxEvidenceBytes      = 64 << 10
+	maxPayloadBytes       = 16 << 20
+	maxStoredPayloadBytes = 24 << 20
 )
 
 var (
@@ -115,14 +120,27 @@ type ReadAuthorizationRequest struct {
 // Reference is the compact cross-surface reference stored by policy/action
 // records. It binds those records to one immutable attempt and its exact diff.
 type Reference struct {
-	StoreRef          string `json:"store_ref"`
-	WorkID            string `json:"work_id"`
-	AttemptID         string `json:"attempt_id"`
-	BaseSHA           string `json:"base_sha,omitempty"`
-	CandidateSHA      string `json:"candidate_sha,omitempty"`
-	DiffSHA256        string `json:"diff_sha256,omitempty"`
-	DiffSource        string `json:"diff_source"`
-	WorkingTreeStatus string `json:"working_tree_status"`
+	StoreRef          string             `json:"store_ref"`
+	WorkID            string             `json:"work_id"`
+	AttemptID         string             `json:"attempt_id"`
+	BaseSHA           string             `json:"base_sha,omitempty"`
+	CandidateSHA      string             `json:"candidate_sha,omitempty"`
+	DiffSHA256        string             `json:"diff_sha256,omitempty"`
+	DiffSource        string             `json:"diff_source"`
+	WorkingTreeStatus string             `json:"working_tree_status"`
+	Artifacts         []PayloadReference `json:"artifacts,omitempty"`
+}
+
+// PayloadReference is the immutable digest and size address for one raw
+// attempt artifact. Name and media type describe its source role without
+// carrying or revealing content.
+type PayloadReference struct {
+	Name      string `json:"name"`
+	MediaType string `json:"media_type"`
+	Status    string `json:"status,omitempty"`
+	Reason    string `json:"reason,omitempty"`
+	SHA256    string `json:"sha256"`
+	Bytes     int64  `json:"bytes"`
 }
 
 // Facet records whether a related policy/action/acknowledgement fact could be
@@ -156,8 +174,9 @@ type Evidence struct {
 	WorkingTreeStatus string `json:"working_tree_status"`
 	CandidateReason   string `json:"candidate_reason,omitempty"`
 
-	Diff          DiffSnapshot `json:"diff"`
-	WorkspaceDiff DiffSnapshot `json:"workspace_diff"`
+	Diff          DiffSnapshot      `json:"diff"`
+	WorkspaceDiff DiffSnapshot      `json:"workspace_diff"`
+	Artifacts     []PayloadArtifact `json:"artifacts,omitempty"`
 
 	Policy           Facet `json:"policy"`
 	Actions          Facet `json:"actions"`
@@ -176,11 +195,24 @@ type Reader interface {
 	References(store beads.Store, storeRef, ownerBeadID string) ([]Reference, error)
 }
 
+// CompactReader resolves exact attempt metadata without loading payload bytes.
+// Authorization layers use it before deciding whether a caller may hydrate
+// private content.
+type CompactReader interface {
+	ReadCompact(store beads.Store, ownerBeadID, attemptID string) (Evidence, error)
+}
+
 // StoreReader adapts the package's validated archive reads to Reader.
 type StoreReader struct{}
 
 func (StoreReader) Read(store beads.Store, ownerBeadID, attemptID string) (Evidence, error) {
 	return Read(store, ownerBeadID, attemptID)
+}
+
+// ReadCompact returns one exact attempt with digest references and no payload
+// bytes loaded.
+func (StoreReader) ReadCompact(store beads.Store, ownerBeadID, attemptID string) (Evidence, error) {
+	return ReadCompact(store, ownerBeadID, attemptID)
 }
 
 // List returns all validated archives for one owner in deterministic order.
@@ -204,6 +236,20 @@ type DiffSnapshot struct {
 	SHA256            string `json:"sha256,omitempty"`
 	UncompressedBytes int64  `json:"uncompressed_bytes,omitempty"`
 	Payload           []byte `json:"payload,omitempty"`
+}
+
+// PayloadArtifact is an exact-attempt reference to immutable raw evidence such
+// as stdout, stderr, SARIF, or binary output. Content is present only while a
+// caller is sealing an attempt; it is never written into the compact attempt
+// record or exposed as an Evidence JSON field.
+type PayloadArtifact struct {
+	Name      string `json:"name"`
+	MediaType string `json:"media_type"`
+	Status    string `json:"status"`
+	Reason    string `json:"reason,omitempty"`
+	SHA256    string `json:"sha256,omitempty"`
+	Bytes     int64  `json:"bytes,omitempty"`
+	Content   []byte `json:"-"`
 }
 
 type diffBundle struct {
@@ -231,6 +277,7 @@ type CaptureSpec struct {
 	WorkDir     string
 	BaseSHA     string
 	Outcome     string
+	Artifacts   []PayloadArtifact
 	RequestRefs []string
 	Now         func() time.Time
 }
@@ -257,10 +304,19 @@ func AttemptID(identity Identity) (string, error) {
 // EvidenceReference extracts the exact digest/revision tuple needed by a
 // policy/action record to bind itself to this snapshot.
 func EvidenceReference(e Evidence, storeRef string) Reference {
+	artifacts := make([]PayloadReference, 0, len(e.Artifacts))
+	for _, artifact := range e.Artifacts {
+		artifacts = append(artifacts, PayloadReference{
+			Name: artifact.Name, MediaType: artifact.MediaType,
+			Status: artifact.Status, Reason: artifact.Reason,
+			SHA256: artifact.SHA256, Bytes: artifact.Bytes,
+		})
+	}
 	return Reference{
 		StoreRef: storeRef, WorkID: e.Identity.OwnerBeadID, AttemptID: e.AttemptID,
 		BaseSHA: e.BaseSHA, CandidateSHA: e.CandidateSHA, DiffSHA256: e.Diff.SHA256,
 		DiffSource: e.Diff.Source, WorkingTreeStatus: e.WorkingTreeStatus,
+		Artifacts: artifacts,
 	}
 }
 
@@ -303,12 +359,12 @@ func Capture(ctx context.Context, store beads.Store, spec CaptureSpec) (Evidence
 		if err := ensureArchive(store, prior); err != nil {
 			return Evidence{}, err
 		}
-		return prior, nil
+		return hydrateCaptureEvidencePayloads(store, prior)
 	}
 	if prior, found, err := readArchive(store, spec.Identity.OwnerBeadID, attemptID); err != nil {
 		return Evidence{}, err
 	} else if found {
-		return prior, nil
+		return hydrateCaptureEvidencePayloads(store, prior)
 	}
 	if _, err := store.Get(spec.Identity.OwnerBeadID); err != nil {
 		return Evidence{}, fmt.Errorf("capturing attempt evidence owner %q: %w", spec.Identity.OwnerBeadID, err)
@@ -318,6 +374,7 @@ func Capture(ctx context.Context, store beads.Store, spec CaptureSpec) (Evidence
 	if err != nil {
 		return Evidence{}, err
 	}
+	evidence.Artifacts = append([]PayloadArtifact(nil), spec.Artifacts...)
 	return Seal(store, evidence)
 }
 
@@ -336,13 +393,6 @@ func Seal(store beads.Store, proposed Evidence) (Evidence, error) {
 	if !beads.SupportsPrivatePayloadValues(store) {
 		return Evidence{}, ErrPrivatePayloadTransportUnsupported
 	}
-	encoded, err := json.Marshal(proposed)
-	if err != nil {
-		return Evidence{}, fmt.Errorf("marshal attempt evidence %s: %w", proposed.AttemptID, err)
-	}
-	if len(encoded) > maxEvidenceBytes {
-		return Evidence{}, fmt.Errorf("attempt %s: %w (%d > %d bytes)", proposed.AttemptID, ErrCaptureTooLarge, len(encoded), maxEvidenceBytes)
-	}
 	key := ownerIndexKey(proposed.AttemptID)
 	existingValue, _, err := beads.ReadPrivateEvidenceMetadataKey(store, proposed.Identity.OwnerBeadID, key)
 	if err != nil {
@@ -359,9 +409,22 @@ func Seal(store beads.Store, proposed Evidence) (Evidence, error) {
 		if err := ensureArchive(store, sealed); err != nil {
 			return Evidence{}, err
 		}
-		return sealed, nil
+		return hydrateCaptureEvidencePayloads(store, sealed)
 	}
-
+	compact, err := compactEvidencePayloads(store, proposed)
+	if err != nil {
+		return Evidence{}, err
+	}
+	if err := validateEvidence(compact); err != nil {
+		return Evidence{}, fmt.Errorf("validating compact attempt evidence: %w", err)
+	}
+	encoded, err := json.Marshal(compact)
+	if err != nil {
+		return Evidence{}, fmt.Errorf("marshal attempt evidence %s: %w", proposed.AttemptID, err)
+	}
+	if len(encoded) > maxEvidenceBytes {
+		return Evidence{}, fmt.Errorf("attempt %s: %w (%d > %d bytes)", proposed.AttemptID, ErrCaptureTooLarge, len(encoded), maxEvidenceBytes)
+	}
 	encodedValue := string(encoded)
 	outcome, casErr := beads.ApplyPrivateEvidenceMetadataCAS(store, proposed.Identity.OwnerBeadID, key, "", encodedValue)
 	if casErr != nil || outcome == beads.MetadataCASConflict {
@@ -377,25 +440,36 @@ func Seal(store beads.Store, proposed Evidence) (Evidence, error) {
 			}
 			return Evidence{}, fmt.Errorf("sealing attempt evidence %s: metadata CAS conflict without a readable winner", proposed.AttemptID)
 		}
-		if err := sameIdentity(sealed, proposed); err != nil {
+		if err := sameIdentity(sealed, compact); err != nil {
 			return Evidence{}, err
 		}
 		if err := ensureArchive(store, sealed); err != nil {
 			return Evidence{}, err
 		}
-		return sealed, nil
+		return hydrateCaptureEvidencePayloads(store, sealed)
 	}
 
-	if err := ensureArchive(store, proposed); err != nil {
+	if err := ensureArchive(store, compact); err != nil {
 		return Evidence{}, err
 	}
-	return proposed, nil
+	return hydrateCaptureEvidencePayloads(store, compact)
 }
 
 // Read returns exactly attemptID for ownerBeadID. It consults the owner's
 // first-write index first and the independent archive second, including after
 // the source owner has been deleted. It never follows a latest pointer.
 func Read(store beads.Store, ownerBeadID, attemptID string) (Evidence, error) {
+	evidence, err := ReadCompact(store, ownerBeadID, attemptID)
+	if err != nil {
+		return Evidence{}, err
+	}
+	return hydrateEvidencePayloads(store, evidence)
+}
+
+// ReadCompact returns exactly attemptID for ownerBeadID without loading
+// content-addressed payload bytes. It consults the owner index first and the
+// independent archive second, including after the owner bead is deleted.
+func ReadCompact(store beads.Store, ownerBeadID, attemptID string) (Evidence, error) {
 	if store == nil {
 		return Evidence{}, errors.New("reading attempt evidence: bead store is unavailable")
 	}
@@ -797,6 +871,11 @@ func validateEvidence(e Evidence) error {
 	if err := validateDiffSnapshot(e.WorkspaceDiff, DiffSourceWorkingTree, e.SourceStatus == StatusAvailable); err != nil {
 		return fmt.Errorf("validating workspace diff: %w", err)
 	}
+	for i, artifact := range e.Artifacts {
+		if err := validatePayloadArtifact(artifact); err != nil {
+			return fmt.Errorf("validating attempt artifact %d: %w", i, err)
+		}
+	}
 	for name, facet := range map[string]Facet{
 		"policy": e.Policy, "actions": e.Actions,
 		"acknowledgements": e.Acknowledgements, "redaction": e.Redaction,
@@ -812,7 +891,7 @@ func validateEvidence(e Evidence) error {
 }
 
 func validateDiffSnapshot(diff DiffSnapshot, wantSource string, expectedAvailable bool) error {
-	if diff.Status != StatusAvailable && diff.Status != StatusUnavailable && diff.Status != StatusMissing {
+	if diff.Status != StatusAvailable && diff.Status != StatusUnavailable && diff.Status != StatusMissing && diff.Status != StatusCorrupt {
 		return fmt.Errorf("invalid attempt evidence diff status %q", diff.Status)
 	}
 	if expectedAvailable && diff.Status != StatusAvailable {
@@ -825,14 +904,47 @@ func validateDiffSnapshot(diff DiffSnapshot, wantSource string, expectedAvailabl
 		if diff.Source != wantSource {
 			return fmt.Errorf("diff source is %q, want %q", diff.Source, wantSource)
 		}
-		if diff.Encoding != DiffEncoding || diff.SHA256 == "" || len(diff.Payload) == 0 {
-			return errors.New("available attempt diff is missing its encoding, digest, or payload")
+		if diff.Encoding != DiffEncoding || !isPayloadDigest(diff.SHA256) {
+			return errors.New("available attempt diff is missing its encoding or valid content digest")
 		}
-		if _, _, err := DecodeDiff(diff); err != nil {
-			return fmt.Errorf("validating attempt diff: %w", err)
+		if len(diff.Payload) != 0 {
+			if _, _, err := DecodeDiff(diff); err != nil {
+				return fmt.Errorf("validating attempt diff: %w", err)
+			}
 		}
 	} else if strings.TrimSpace(diff.Reason) == "" {
 		return errors.New("unavailable attempt diff is missing a reason")
+	}
+	return nil
+}
+
+func validatePayloadArtifact(artifact PayloadArtifact) error {
+	if strings.TrimSpace(artifact.Name) == "" || strings.TrimSpace(artifact.MediaType) == "" {
+		return errors.New("attempt artifact is missing its name or media type")
+	}
+	if artifact.Status != StatusAvailable && artifact.Status != StatusUnavailable && artifact.Status != StatusMissing && artifact.Status != StatusPending && artifact.Status != StatusCorrupt {
+		return fmt.Errorf("invalid attempt artifact status %q", artifact.Status)
+	}
+	if artifact.Status != StatusAvailable {
+		if strings.TrimSpace(artifact.Reason) == "" {
+			return fmt.Errorf("attempt artifact status %q is missing a reason", artifact.Status)
+		}
+		return nil
+	}
+	if artifact.Content != nil {
+		if len(artifact.Content) > maxPayloadBytes {
+			return ErrCaptureTooLarge
+		}
+		if artifact.SHA256 != "" && artifact.SHA256 != payloadDigest(artifact.Content) {
+			return errors.New("attempt artifact digest does not match its content")
+		}
+		if artifact.Bytes != 0 && artifact.Bytes != int64(len(artifact.Content)) {
+			return errors.New("attempt artifact size does not match its content")
+		}
+		return nil
+	}
+	if !isPayloadDigest(artifact.SHA256) || artifact.Bytes < 0 {
+		return errors.New("available attempt artifact is missing its content digest or size")
 	}
 	return nil
 }
@@ -870,7 +982,7 @@ func compressDiff(bundle diffBundle, source string) (DiffSnapshot, error) {
 	if err := writer.Close(); err != nil {
 		return DiffSnapshot{}, fmt.Errorf("finish compressed diff bundle: %w", err)
 	}
-	if compressed.Len() > maxEvidenceBytes/2 {
+	if compressed.Len() > maxStoredPayloadBytes {
 		return DiffSnapshot{}, fmt.Errorf("compressed diff: %w", ErrCaptureTooLarge)
 	}
 	digest := sha256.Sum256(compressed.Bytes())

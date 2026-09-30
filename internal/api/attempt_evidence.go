@@ -117,12 +117,21 @@ func attemptEvidenceRefForLeg(leg storeref.Leg, cityName string) (string, bool) 
 }
 
 func (s *Server) exactAttemptEvidence(_ context.Context, ownerID, attemptID string) (attemptevidence.Evidence, error) {
+	_, store, err := s.exactAttemptEvidenceStore(ownerID, attemptID)
+	if err != nil {
+		return attemptevidence.Evidence{}, err
+	}
+	return attemptevidence.Read(store, ownerID, attemptID)
+}
+
+func (s *Server) exactAttemptEvidenceStore(ownerID, attemptID string) (attemptevidence.Evidence, beads.Store, error) {
 	plan, err := s.attemptEvidencePlan()
 	if err != nil {
-		return attemptevidence.Evidence{}, apierr.ServiceUnavailable.Msg("attempt evidence residency is unavailable: " + err.Error())
+		return attemptevidence.Evidence{}, nil, apierr.ServiceUnavailable.Msg("attempt evidence residency is unavailable: " + err.Error())
 	}
 	reader := s.attemptEvidenceReader()
 	var found *attemptevidence.Evidence
+	var foundStore beads.Store
 	var scopeErr error
 	walk, walkErr := storeref.Walk(plan, func(leg storeref.Leg) (bool, error) {
 		ref, workLeg := attemptEvidenceRefForLeg(leg, s.state.CityName())
@@ -130,7 +139,13 @@ func (s *Server) exactAttemptEvidence(_ context.Context, ownerID, attemptID stri
 			return false, nil
 		}
 		candidate := attemptEvidenceStore{ref: ref, store: leg.Store}
-		evidence, readErr := reader.Read(candidate.store, ownerID, attemptID)
+		var evidence attemptevidence.Evidence
+		var readErr error
+		if compactReader, ok := reader.(attemptevidence.CompactReader); ok {
+			evidence, readErr = compactReader.ReadCompact(candidate.store, ownerID, attemptID)
+		} else {
+			evidence, readErr = reader.Read(candidate.store, ownerID, attemptID)
+		}
 		if errors.Is(readErr, attemptevidence.ErrNotFound) {
 			return false, nil
 		}
@@ -150,21 +165,22 @@ func (s *Server) exactAttemptEvidence(_ context.Context, ownerID, attemptID stri
 		}
 		evidenceCopy := evidence
 		found = &evidenceCopy
+		foundStore = candidate.store
 		return false, nil
 	})
 	if walkErr != nil {
-		return attemptevidence.Evidence{}, apierr.ServiceUnavailable.Msg("attempt evidence read failed: " + walkErr.Error())
+		return attemptevidence.Evidence{}, nil, apierr.ServiceUnavailable.Msg("attempt evidence read failed: " + walkErr.Error())
 	}
 	if scopeErr != nil {
-		return attemptevidence.Evidence{}, apierr.ServiceUnavailable.Msg(scopeErr.Error())
+		return attemptevidence.Evidence{}, nil, apierr.ServiceUnavailable.Msg(scopeErr.Error())
 	}
 	if walk.Partial {
-		return attemptevidence.Evidence{}, apierr.ServiceUnavailable.Msg("attempt evidence read was incomplete; one or more configured stores could not be checked")
+		return attemptevidence.Evidence{}, nil, apierr.ServiceUnavailable.Msg("attempt evidence read was incomplete; one or more configured stores could not be checked")
 	}
 	if found == nil {
-		return attemptevidence.Evidence{}, apierr.BeadNotFound.Msg("attempt evidence " + attemptID + " not found for work " + ownerID)
+		return attemptevidence.Evidence{}, nil, apierr.BeadNotFound.Msg("attempt evidence " + attemptID + " not found for work " + ownerID)
 	}
-	return *found, nil
+	return *found, foundStore, nil
 }
 
 func (s *Server) listAttemptEvidence(_ context.Context, ownerID string) ([]attemptevidence.Evidence, error) {
@@ -269,11 +285,11 @@ func (s *Server) authorizeAttemptEvidence(ctx context.Context, authorizer Attemp
 }
 
 func publicAttemptEvidenceBead(b beads.Bead) (beads.Bead, bool) {
-	if _, privatePayload := b.Metadata[beadmeta.AttemptEvidenceArchivePayloadMetadataKey]; privatePayload {
+	if beads.IsProtectedAttemptEvidenceRecord(b) {
 		return beads.Bead{}, false
 	}
 	for key := range b.Metadata {
-		if isAttemptEvidenceMetadataKey(key) {
+		if isPrivateGenericBeadMetadataKey(key) {
 			if b.Metadata == nil {
 				break
 			}
@@ -282,11 +298,15 @@ func publicAttemptEvidenceBead(b beads.Bead) (beads.Bead, bool) {
 		}
 	}
 	for key := range b.Metadata {
-		if isAttemptEvidenceMetadataKey(key) {
+		if isPrivateGenericBeadMetadataKey(key) {
 			delete(b.Metadata, key)
 		}
 	}
 	return b, true
+}
+
+func isPrivateGenericBeadMetadataKey(key string) bool {
+	return isAttemptEvidenceMetadataKey(key) || strings.HasPrefix(key, beadmeta.SessionRequestReceiptPrefix)
 }
 
 func isAttemptEvidenceMetadataKey(key string) bool {
@@ -294,6 +314,10 @@ func isAttemptEvidenceMetadataKey(key string) bool {
 		key == beadmeta.AttemptEvidenceArchiveOwnerIDMetadataKey ||
 		key == beadmeta.AttemptEvidenceArchivePayloadMetadataKey ||
 		key == beadmeta.AttemptEvidenceArchiveDigestMetadataKey ||
+		key == beadmeta.AttemptEvidencePayloadDataMetadataKey ||
+		key == beadmeta.AttemptEvidencePayloadDigestMetadataKey ||
+		key == beadmeta.AttemptEvidenceReferenceMetadataKey ||
+		key == beadmeta.StdoutMetadataKey || key == beadmeta.StderrMetadataKey || key == beadmeta.OutputJSONMetadataKey ||
 		strings.HasPrefix(key, beadmeta.AttemptEvidenceIndexPrefix)
 }
 
@@ -307,7 +331,7 @@ func validateAttemptEvidenceMetadata(metadata map[string]string) error {
 }
 
 func rejectAttemptEvidenceArchive(b beads.Bead) error {
-	if beads.IsAttemptEvidenceArchive(b) {
+	if beads.IsProtectedAttemptEvidenceRecord(b) {
 		return apierr.Forbidden.Msg("immutable attempt-evidence archive rows cannot be accessed through generic bead operations")
 	}
 	return nil
@@ -339,12 +363,55 @@ func (s *Server) humaHandleAttemptEvidenceGet(ctx context.Context, input *Attemp
 	if err != nil {
 		return nil, err
 	}
-	evidence, err := s.exactAttemptEvidence(ctx, input.ID, input.AttemptID)
+	evidence, store, err := s.exactAttemptEvidenceStore(input.ID, input.AttemptID)
 	if err != nil {
 		return nil, err
 	}
 	if err := s.authorizeAttemptEvidence(ctx, authorizer, evidence); err != nil {
 		return nil, err
 	}
+	evidence, err = attemptevidence.Read(store, input.ID, input.AttemptID)
+	if err != nil {
+		return nil, apierr.ServiceUnavailable.Msg("attempt evidence payload read failed: " + err.Error())
+	}
 	return &IndexOutput[AttemptEvidenceRead]{Index: s.latestIndex(), Body: AttemptEvidenceRead{Evidence: evidence, RelatedRecords: s.attemptRelatedRecords(evidence)}}, nil
+}
+
+// humaHandleAttemptEvidenceArtifact exposes raw content only after the exact
+// attempt's stored permission scope authorizes the request. The requested
+// digest must already appear in that exact attempt's artifact references.
+func (s *Server) humaHandleAttemptEvidenceArtifact(ctx context.Context, input *AttemptEvidenceArtifactGetInput) (*IndexOutput[attemptevidence.PayloadRead], error) {
+	authorizer, err := s.requireAttemptEvidenceAuthorizer(ctx)
+	if err != nil {
+		return nil, err
+	}
+	evidence, store, err := s.exactAttemptEvidenceStore(input.ID, input.AttemptID)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.authorizeAttemptEvidence(ctx, authorizer, evidence); err != nil {
+		return nil, err
+	}
+	var reference *attemptevidence.PayloadReference
+	for i := range evidence.Artifacts {
+		artifact := evidence.Artifacts[i]
+		if artifact.SHA256 != input.SHA256 {
+			continue
+		}
+		ref := attemptevidence.PayloadReference{
+			Name: artifact.Name, MediaType: artifact.MediaType,
+			Status: artifact.Status, Reason: artifact.Reason,
+			SHA256: artifact.SHA256, Bytes: artifact.Bytes,
+		}
+		reference = &ref
+		break
+	}
+	if reference == nil {
+		return nil, apierr.BeadNotFound.Msg("attempt artifact " + input.SHA256 + " not found for attempt " + input.AttemptID)
+	}
+	payload, err := attemptevidence.ReadPayload(store, *reference)
+	if err != nil {
+		return nil, apierr.ServiceUnavailable.Msg("attempt artifact read failed: " + err.Error())
+	}
+	return &IndexOutput[attemptevidence.PayloadRead]{Index: s.latestIndex(), Body: payload}, nil
 }

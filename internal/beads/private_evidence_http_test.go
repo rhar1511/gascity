@@ -508,6 +508,36 @@ func TestBdStorePrivateEvidenceReadinessProbesUnadvertisedListRoute(t *testing.T
 	}
 }
 
+func TestBdStoreContentPayloadCapabilityAndArgvFailClosed(t *testing.T) {
+	var calls atomic.Int32
+	store := NewBdStore(t.TempDir(), func(_, _ string, _ ...string) ([]byte, error) {
+		calls.Add(1)
+		return nil, errors.New("runner must not receive private payload content")
+	}, WithBdStorePrivateEvidenceHTTP(PrivateEvidenceHTTPConfig{
+		Endpoint: "http://127.0.0.1:1", ProjectID: "project-a", Database: "gc_fixture",
+		ScopeRef: "rig:fixture", TokenFile: privateEvidenceTokenFile(t),
+	}))
+	if SupportsPrivatePayloadValues(store) {
+		t.Fatal("BdStore advertised content-payload support without a deterministic private payload creator")
+	}
+	metadata := map[string]string{
+		beadmeta.AttemptEvidencePayloadDigestMetadataKey: strings.Repeat("a", 64),
+		beadmeta.AttemptEvidencePayloadDataMetadataKey:   "cHJpdmF0ZQ==",
+	}
+	if _, err := store.Create(Bead{ID: "gc-private", Title: "private", Metadata: metadata}); err == nil {
+		t.Fatal("BdStore Create accepted content-payload metadata")
+	}
+	if err := store.Update("gc-private", UpdateOpts{Metadata: metadata}); err == nil {
+		t.Fatal("BdStore Update accepted content-payload metadata")
+	}
+	if err := store.SetMetadata("gc-private", beadmeta.AttemptEvidencePayloadDataMetadataKey, "cHJpdmF0ZQ=="); err == nil {
+		t.Fatal("BdStore SetMetadata accepted content-payload metadata")
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("private content payload invoked bd runner %d times", calls.Load())
+	}
+}
+
 func TestBdFailureDetailRedactsPrivateEvidenceOutput(t *testing.T) {
 	for _, output := range []string{
 		`{"metadata":{"gc.attempt_evidence.archive_payload.v1":"opaque evidence"}}`,

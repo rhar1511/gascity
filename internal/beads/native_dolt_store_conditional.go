@@ -20,6 +20,9 @@ var (
 // transaction, but only while the exact opaque row version still matches.
 // It returns the final in-transaction row only after the transaction commits.
 func (s *NativeDoltStore) CloseWithMetadataIfMatch(id string, expectedRevision int64, metadata map[string]string) (Bead, error) {
+	if err := rejectAttemptEvidencePayloadMetadataWrite(metadata); err != nil {
+		return Bead{}, err
+	}
 	if err := s.readOnlyGuard(); err != nil {
 		return Bead{}, err
 	}
@@ -41,6 +44,13 @@ func (s *NativeDoltStore) CloseWithMetadataIfMatch(id string, expectedRevision i
 			}
 			if issue == nil {
 				return fmt.Errorf("bead %q: %w", id, ErrNotFound)
+			}
+			storedMetadata, err := metadataMapFromNative(issue.Metadata)
+			if err != nil {
+				return fmt.Errorf("parsing metadata for bead %q: %w", id, err)
+			}
+			if err := protectAttemptEvidenceRecordMutation(Bead{ID: id, Metadata: storedMetadata}); err != nil {
+				return err
 			}
 			if issue.RowVersion != expectedRevision {
 				return &PreconditionFailedError{
@@ -112,6 +122,9 @@ func (s *NativeDoltStore) probeConditionalWriteCapability() (bool, string) {
 // UpdateIfMatch applies row-backed opts only while id still has
 // expectedRevision.
 func (s *NativeDoltStore) UpdateIfMatch(id string, expectedRevision int64, opts UpdateOpts) error {
+	if err := rejectAttemptEvidencePayloadMetadataWrite(opts.Metadata); err != nil {
+		return err
+	}
 	if err := s.readOnlyGuard(); err != nil {
 		return err
 	}
@@ -138,6 +151,9 @@ func (s *NativeDoltStore) UpdateIfMatch(id string, expectedRevision int64, opts 
 	}
 	if err := ValidateLifecycleMutation(current, opts); err != nil {
 		return fmt.Errorf("conditional update lifecycle bead %q: %w", id, err)
+	}
+	if err := protectAttemptEvidenceUpdate(current, opts); err != nil {
+		return err
 	}
 
 	updates, err := s.nativeUpdates(ctx, storage, id, opts)
@@ -184,8 +200,16 @@ func (s *NativeDoltStore) CloseIfMatch(id string, expectedRevision int64) error 
 	if err != nil {
 		return err
 	}
+	if err := protectAttemptEvidencePayloadMutation(currentBead); err != nil {
+		return err
+	}
 	if current.RowVersion == expectedRevision && HasLifecycleRecoveryIntent(currentBead) {
 		return ErrLifecycleIntentImmutable
+	}
+	if current.RowVersion == expectedRevision {
+		if err := ValidateDecisionFrontierClose(currentBead); err != nil {
+			return err
+		}
 	}
 	// See UpdateIfMatch: wrap only the checked write so a transient
 	// serialization conflict is retried while a version mismatch still
@@ -235,7 +259,7 @@ func (s *NativeDoltStore) DeleteIfMatch(id string, expectedRevision int64) error
 			if err != nil {
 				return err
 			}
-			if err := protectAttemptEvidenceDelete(current); err != nil {
+			if err := protectRetainedEvidenceDelete(current); err != nil {
 				return err
 			}
 			if err := ValidateLifecycleDelete(current); err != nil {
@@ -303,6 +327,9 @@ func (s *NativeDoltStore) conditionalWriteError(
 // objects, and arrays. The transaction compares through that public string
 // view, then replaces only the selected raw JSON member with a JSON string.
 func (s *NativeDoltStore) CompareAndSetMetadataKey(id, key, expected, next string) (bool, error) {
+	if err := rejectAttemptEvidencePayloadMetadataKeyWrite(key); err != nil {
+		return false, err
+	}
 	if err := s.readOnlyGuard(); err != nil {
 		return false, err
 	}
@@ -334,6 +361,9 @@ func (s *NativeDoltStore) CompareAndSetMetadataKey(id, key, expected, next strin
 		metadata, err := metadataMapFromNative(issue.Metadata)
 		if err != nil {
 			return fmt.Errorf("parsing metadata for bead %q: %w", id, err)
+		}
+		if err := protectAttemptEvidenceRecordMutation(Bead{ID: id, Metadata: metadata}); err != nil {
+			return err
 		}
 		if metadata[key] != expected {
 			// A genuine lost race. Returning nil commits an empty transaction

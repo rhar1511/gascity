@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/sessionauthority"
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
@@ -47,6 +48,10 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.LegacySessionName != nil {
 		writeError(w, http.StatusBadRequest, "invalid", "session_name is no longer accepted; use alias")
+		return
+	}
+	if sessionauthority.EnforcementEnabled() && strings.TrimSpace(body.Options[sessionPermissionModeOptionKey]) != "" {
+		writeError(w, http.StatusBadRequest, "invalid_option_value", "permission_mode requires a signed authority-profile transition after session creation")
 		return
 	}
 
@@ -292,6 +297,9 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 			writeError(w, http.StatusBadRequest, "invalid_option_value", optErr.Error())
 			return
 		}
+	}
+	if sessionauthority.EnforcementEnabled() {
+		delete(optMeta, sessionPermissionModeOptionKey)
 	}
 
 	template := providerName

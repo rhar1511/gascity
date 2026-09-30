@@ -71,6 +71,7 @@ var nativeStoreMethodKinds = map[string]nativeStoreMethodKind{
 	// Create at all.
 	"ApplyGraphPlan":              nativeStoreMutation,
 	"ApplyGraphPlanWithStorage":   nativeStoreMutation,
+	"CreatePrivatePayloadValue":   nativeStoreMutation,
 	"CreateWithForeignID":         nativeStoreMutation,
 	"CloseIfMatch":                nativeStoreMutation,
 	"CloseWithMetadataIfMatch":    nativeStoreMutation,

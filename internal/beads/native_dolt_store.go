@@ -1345,7 +1345,37 @@ func (s *NativeDoltStore) Create(b Bead) (Bead, error) {
 	if err := ValidateDecisionFrontierCreate(b); err != nil {
 		return Bead{}, err
 	}
+	if err := rejectAttemptEvidencePayloadMetadataWrite(b.Metadata); err != nil {
+		return Bead{}, err
+	}
 	return s.create(b, false)
+}
+
+// CreatePrivatePayloadValue creates one digest-addressed payload row or
+// returns the row already occupying that deterministic ID. The dedicated
+// capability does not alter ordinary Create ID or namespace semantics.
+func (s *NativeDoltStore) CreatePrivatePayloadValue(b Bead) (Bead, error) {
+	if err := s.readOnlyGuard(); err != nil {
+		return Bead{}, err
+	}
+	if err := validatePrivatePayloadCreate(b); err != nil {
+		return Bead{}, err
+	}
+	if existing, err := s.Get(b.ID); err == nil {
+		return existing, nil
+	} else if !errors.Is(err, ErrNotFound) {
+		return Bead{}, err
+	}
+	created, err := s.create(b, true)
+	if err == nil {
+		return created, nil
+	}
+	if existing, readErr := s.Get(b.ID); readErr == nil {
+		return existing, nil
+	} else if !errors.Is(readErr, ErrNotFound) {
+		return Bead{}, errors.Join(err, readErr)
+	}
+	return Bead{}, err
 }
 
 // CreateWithForeignID persists a new bead KEEPING its explicit id whatever
@@ -1363,6 +1393,9 @@ func (s *NativeDoltStore) CreateWithForeignID(b Bead) (Bead, error) {
 		return Bead{}, fmt.Errorf("creating bead with foreign id: empty id")
 	}
 	if err := ValidateDecisionFrontierCreate(b); err != nil {
+		return Bead{}, err
+	}
+	if err := rejectAttemptEvidencePayloadMetadataWrite(b.Metadata); err != nil {
 		return Bead{}, err
 	}
 	return s.create(b, true)
@@ -1444,6 +1477,9 @@ func (s *NativeDoltStore) Get(id string) (Bead, error) {
 
 // Update modifies an existing bead through the upstream beads storage layer.
 func (s *NativeDoltStore) Update(id string, opts UpdateOpts) error {
+	if err := rejectAttemptEvidencePayloadMetadataWrite(opts.Metadata); err != nil {
+		return err
+	}
 	if err := s.readOnlyGuard(); err != nil {
 		return err
 	}
@@ -1474,6 +1510,9 @@ func (s *NativeDoltStore) Update(id string, opts UpdateOpts) error {
 // shared by the standalone Update (one op, one commit) and the multi-write
 // Store.Tx path (many ops, one commit) so both routes have identical semantics.
 func (s *NativeDoltStore) applyUpdateInTx(ctx context.Context, tx beadslib.Transaction, id string, opts UpdateOpts) error {
+	if err := rejectAttemptEvidencePayloadMetadataWrite(opts.Metadata); err != nil {
+		return err
+	}
 	issue, err := tx.GetIssue(ctx, id)
 	if err != nil {
 		return nativeStoreError(id, err)
@@ -1483,6 +1522,9 @@ func (s *NativeDoltStore) applyUpdateInTx(ctx context.Context, tx beadslib.Trans
 	}
 	current, err := beadFromNativeIssue(issue)
 	if err != nil {
+		return err
+	}
+	if err := protectAttemptEvidenceUpdate(current, opts); err != nil {
 		return err
 	}
 	if err := ValidateLifecycleMutation(current, opts); err != nil {
@@ -1524,6 +1566,9 @@ func (s *NativeDoltStore) applyUpdateInTx(ctx context.Context, tx beadslib.Trans
 // transaction. Mirrors SetMetadataBatch, sharing the read-modify-write path so
 // the Store.Tx route coalesces with sibling writes into a single commit.
 func (s *NativeDoltStore) applySetMetadataBatchInTx(ctx context.Context, tx beadslib.Transaction, id string, kvs map[string]string) error {
+	if err := rejectAttemptEvidencePayloadMetadataWrite(kvs); err != nil {
+		return err
+	}
 	if len(kvs) == 0 {
 		return nil
 	}
@@ -1536,6 +1581,9 @@ func (s *NativeDoltStore) applySetMetadataBatchInTx(ctx context.Context, tx bead
 	}
 	current, err := beadFromNativeIssue(issue)
 	if err != nil {
+		return err
+	}
+	if err := protectAttemptEvidenceRecordMutation(current); err != nil {
 		return err
 	}
 	if err := ValidateLifecycleMutation(current, UpdateOpts{Metadata: kvs}); err != nil {
@@ -1557,6 +1605,9 @@ func (s *NativeDoltStore) applyCloseInTx(ctx context.Context, tx beadslib.Transa
 	}
 	if current == nil {
 		return fmt.Errorf("bead %q: %w", id, ErrNotFound)
+	}
+	if err := protectNativeAttemptEvidencePayloadIssue(current); err != nil {
+		return err
 	}
 	if current.Status == beadslib.StatusClosed {
 		return nil
@@ -1583,6 +1634,9 @@ func (s *NativeDoltStore) applyCloseInTx(ctx context.Context, tx beadslib.Transa
 // copy that needs the exemption runs through CreateWithForeignID on the store,
 // not inside a caller's transaction.
 func (s *NativeDoltStore) applyCreateInTx(ctx context.Context, tx beadslib.Transaction, b Bead) (Bead, error) {
+	if err := rejectAttemptEvidencePayloadMetadataWrite(b.Metadata); err != nil {
+		return Bead{}, err
+	}
 	if err := checkPinnedIDNamespace("native dolt tx create", b.ID, s.reservedPrefixes); err != nil {
 		return Bead{}, err
 	}
@@ -1637,6 +1691,9 @@ func (s *NativeDoltStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, e
 		if issue == nil || issue.Status != beadslib.StatusInProgress || issue.Assignee != expectedAssignee {
 			return nil
 		}
+		if err := protectNativeAttemptEvidenceRecordIssue(issue); err != nil {
+			return err
+		}
 		if err := tx.UpdateIssue(ctx, id, map[string]interface{}{
 			"status":   "open",
 			"assignee": "",
@@ -1685,6 +1742,9 @@ func (s *NativeDoltStore) closeOnce(ctx context.Context, storage beadslib.Storag
 	}
 	if current == nil {
 		return fmt.Errorf("bead %q: %w", id, ErrNotFound)
+	}
+	if err := protectNativeAttemptEvidencePayloadIssue(current); err != nil {
+		return err
 	}
 	if current.Status == beadslib.StatusClosed {
 		return nil
@@ -1741,6 +1801,9 @@ func (s *NativeDoltStore) reopenOnce(ctx context.Context, storage beadslib.Stora
 	if err != nil {
 		return err
 	}
+	if err := protectAttemptEvidenceRecordMutation(bead); err != nil {
+		return err
+	}
 	open := "open"
 	if err := ValidateLifecycleMutation(bead, UpdateOpts{Status: &open}); err != nil {
 		return fmt.Errorf("reopening lifecycle bead %q: %w", id, err)
@@ -1761,8 +1824,45 @@ func (s *NativeDoltStore) reopenOnce(ctx context.Context, storage beadslib.Stora
 	return nativeStoreError(id, err)
 }
 
+// protectNativeAttemptEvidencePayloadIssue rejects status and ownership writes
+// without making unrelated malformed legacy metadata block Close/Reopen. A
+// canonical payload ID is sufficient proof even when its metadata is damaged;
+// otherwise valid or partial payload markers in parseable metadata are proof.
+func protectNativeAttemptEvidencePayloadIssue(issue *beadslib.Issue) error {
+	if issue == nil {
+		return nil
+	}
+	if digest, ok := strings.CutPrefix(issue.ID, "gc-ep-"); ok && AttemptEvidencePayloadID(digest) == issue.ID {
+		return protectAttemptEvidencePayloadMutation(Bead{ID: issue.ID, Metadata: StringMap{
+			beadmeta.AttemptEvidencePayloadDigestMetadataKey: digest,
+		}})
+	}
+	metadata, err := metadataMapFromNative(issue.Metadata)
+	if err != nil {
+		return nil
+	}
+	return protectAttemptEvidencePayloadMetadataMutation(metadata)
+}
+
+func protectNativeAttemptEvidenceRecordIssue(issue *beadslib.Issue) error {
+	if issue == nil {
+		return nil
+	}
+	if err := protectNativeAttemptEvidencePayloadIssue(issue); err != nil {
+		return err
+	}
+	metadata, err := metadataMapFromNative(issue.Metadata)
+	if err != nil {
+		return nil
+	}
+	return protectAttemptEvidenceRecordMutation(Bead{ID: issue.ID, Metadata: metadata})
+}
+
 // CloseAll closes multiple beads and sets metadata on each newly closed bead.
 func (s *NativeDoltStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	if err := rejectAttemptEvidencePayloadMetadataWrite(metadata); err != nil {
+		return 0, err
+	}
 	if err := s.readOnlyGuard(); err != nil {
 		return 0, err
 	}
@@ -2252,6 +2352,9 @@ func retryNativeDoltWrite(attempt func() error, retryable func(error) bool) erro
 // and silently undoes the other writer's keys — a fence activation was lost
 // that way to a one-key stamp.
 func (s *NativeDoltStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if err := rejectAttemptEvidencePayloadMetadataWrite(kvs); err != nil {
+		return err
+	}
 	if err := s.readOnlyGuard(); err != nil {
 		return err
 	}
@@ -2314,6 +2417,9 @@ func (s *NativeDoltStore) setMetadataBatchOnce(ctx context.Context, storage bead
 	}
 	current, err := beadFromNativeIssue(issue)
 	if err != nil {
+		return err
+	}
+	if err := protectAttemptEvidenceRecordMutation(current); err != nil {
 		return err
 	}
 	if err := ValidateLifecycleMutation(current, UpdateOpts{Metadata: kvs}); err != nil {
@@ -2443,7 +2549,7 @@ func (s *NativeDoltStore) Delete(id string) error {
 	if err != nil {
 		return err
 	}
-	if err := protectAttemptEvidenceDelete(current); err != nil {
+	if err := protectRetainedEvidenceDelete(current); err != nil {
 		return err
 	}
 	storage, release, err := s.acquireStorage()
@@ -2467,7 +2573,7 @@ func (s *NativeDoltStore) Delete(id string) error {
 			if convertErr != nil {
 				return convertErr
 			}
-			if guardErr := protectAttemptEvidenceDelete(current); guardErr != nil {
+			if guardErr := protectRetainedEvidenceDelete(current); guardErr != nil {
 				return guardErr
 			}
 			if guardErr := ValidateLifecycleDelete(current); guardErr != nil {

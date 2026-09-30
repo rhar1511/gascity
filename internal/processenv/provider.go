@@ -106,6 +106,7 @@ var providerCredentialEnvKeys = map[string]bool{
 var ControllerOnlyEnvKeys = []string{
 	"GC_BEADS_PROTECTED_MUTATION_AUTHORITY_DIR",
 	"GC_CONTROLLER_TOKEN",
+	"GC_SESSION_AUTHORITY_TRUST_FILE",
 }
 
 // ControllerOnlyEnvOverlay returns ControllerOnlyEnvKeys pinned to the empty

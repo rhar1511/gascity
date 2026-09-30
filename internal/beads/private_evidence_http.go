@@ -377,7 +377,10 @@ func (s *BdStore) ReadPrivateEvidenceMetadataKey(id, key string) (string, bool, 
 }
 
 func isPrivateEvidenceValueKey(key string) bool {
-	return strings.HasPrefix(key, beadmeta.AttemptEvidenceIndexPrefix) || key == beadmeta.AttemptEvidenceArchivePayloadMetadataKey
+	return strings.HasPrefix(key, beadmeta.AttemptEvidenceIndexPrefix) ||
+		key == beadmeta.AttemptEvidenceArchivePayloadMetadataKey ||
+		key == beadmeta.AttemptEvidencePayloadDigestMetadataKey ||
+		key == beadmeta.AttemptEvidencePayloadDataMetadataKey
 }
 
 func hasPrivateEvidenceValueMetadata(metadata map[string]string) bool {

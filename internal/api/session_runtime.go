@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
@@ -14,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/processenv"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/sessionauthority"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 	"github.com/gastownhall/gascity/internal/worker"
 )
@@ -498,9 +500,34 @@ func (s *Server) resolveWorkerSessionRuntime(info session.Info) (*worker.Resolve
 	return s.resolveWorkerSessionRuntimeWithMetadata(info, "", nil)
 }
 
+func (s *Server) sessionAuthorityConfigSHA() string {
+	if provider, ok := s.state.(CompatibilityRuntimeIdentityProvider); ok {
+		if identity, err := provider.CompatibilityRuntimeIdentity(); err == nil {
+			return strings.ToLower(strings.TrimSpace(identity.Snapshot.EffectiveConfigIdentitySHA256))
+		}
+	}
+	if provider, ok := s.state.(QualificationProvider); ok {
+		return strings.ToLower(strings.TrimSpace(provider.QualificationReport().Qualification.EffectiveConfigIdentitySHA256))
+	}
+	if cfg := s.state.Config(); cfg != nil {
+		return strings.ToLower(strings.TrimSpace(cfg.QualificationSnapshot().EffectiveConfigIdentitySHA256))
+	}
+	return ""
+}
+
 func (s *Server) resolveWorkerSessionRuntimeWithMetadata(info session.Info, _ string, metadata map[string]string) (*worker.ResolvedRuntime, error) {
 	if metadata == nil {
 		metadata = s.sessionMetadata(info.ID)
+	}
+	overrides, overridesErr := session.ParseTemplateOverrides(metadata)
+	if overridesErr != nil {
+		if sessionAuthorityRuntimeProtected(info, metadata) {
+			return nil, fmt.Errorf("session %s: invalid authority-controlled template overrides: %w", info.ID, overridesErr)
+		}
+		overrides = nil
+	}
+	if err := s.verifySessionAuthorityRuntime(info, metadata, strings.TrimSpace(overrides[sessionPermissionModeOptionKey])); err != nil {
+		return nil, fmt.Errorf("session %s: authority-controlled launch rejected: %w", info.ID, err)
 	}
 	resolved, workDir, transport, ambiguous := s.resolveSessionRuntimeWithMetadata(info, metadata)
 	if resolved == nil {
@@ -518,7 +545,7 @@ func (s *Server) resolveWorkerSessionRuntimeWithMetadata(info session.Info, _ st
 		command = fallbackSessionRuntimeCommand(resolved, transport, info.Command, info.Provider)
 	}
 	resumeCommand := firstNonEmptyString(resolved.ResumeCommand, info.ResumeCommand)
-	if overrides, err := session.ParseTemplateOverrides(metadata); err == nil {
+	if overridesErr == nil {
 		if command, err := config.BuildProviderResumeCommand(resolved, overrides); err == nil && strings.TrimSpace(command) != "" {
 			resumeCommand = command
 		}
@@ -541,6 +568,38 @@ func (s *Server) resolveWorkerSessionRuntimeWithMetadata(info session.Info, _ st
 		return nil, err
 	}
 	return &runtimeCfg, nil
+}
+
+func sessionAuthorityRuntimeProtected(info session.Info, metadata map[string]string) bool {
+	return sessionauthority.EnforcementEnabled() || sessionAuthorityRuntimePreviouslyProtected(info, metadata)
+}
+
+func sessionAuthorityRuntimePreviouslyProtected(info session.Info, metadata map[string]string) bool {
+	return strings.TrimSpace(firstNonEmptyString(metadata[sessionauthority.MetadataProfile], info.AuthorityProfile)) != "" ||
+		strings.TrimSpace(firstNonEmptyString(metadata[sessionauthority.MetadataAuthorization], info.AuthorityAuthorization)) != "" ||
+		strings.TrimSpace(firstNonEmptyString(metadata[sessionauthority.MetadataTransitions], info.AuthorityTransitions)) != ""
+}
+
+func (s *Server) verifySessionAuthorityRuntime(info session.Info, metadata map[string]string, permissionMode string) error {
+	profile := strings.TrimSpace(firstNonEmptyString(metadata[sessionauthority.MetadataProfile], info.AuthorityProfile))
+	authorization := strings.TrimSpace(firstNonEmptyString(metadata[sessionauthority.MetadataAuthorization], info.AuthorityAuthorization))
+	previouslyProtected := sessionAuthorityRuntimePreviouslyProtected(info, metadata)
+	if strings.TrimSpace(permissionMode) == "" && profile == "" && authorization == "" && !previouslyProtected {
+		return nil
+	}
+	if !sessionauthority.EnforcementEnabled() && !previouslyProtected {
+		return nil
+	}
+	generation, err := strconv.ParseUint(strings.TrimSpace(firstNonEmptyString(metadata["generation"], info.Generation)), 10, 64)
+	configSHA := s.sessionAuthorityConfigSHA()
+	if err != nil || generation == 0 || configSHA == "" {
+		return sessionauthority.ErrUnavailable
+	}
+	return sessionauthority.VerifyLaunch(
+		s.state.CityName(), info.ID, generation, configSHA,
+		sessionauthority.Profile(profile), permissionMode, authorization,
+		previouslyProtected,
+	)
 }
 
 func storedSessionProvesACPTransport(resolved *config.ResolvedProvider, configuredTransport, storedCommand string, metadata map[string]string) bool {

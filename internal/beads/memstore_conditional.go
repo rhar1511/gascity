@@ -144,6 +144,9 @@ func (m *MemStore) EnsureDecisionFrontierLink(sourceID, targetID, depType string
 // expectedRevision, otherwise it returns *PreconditionFailedError. When the
 // instance has DisableConditionalWrites set it returns ErrConditionalWriteUnsupported.
 func (m *MemStore) UpdateIfMatch(id string, expectedRevision int64, opts UpdateOpts) error {
+	if err := rejectAttemptEvidencePayloadMetadataWrite(opts.Metadata); err != nil {
+		return err
+	}
 	if err := validateConditionalUpdateOpts(opts); err != nil {
 		return fmt.Errorf("conditional update %s: %w", id, err)
 	}
@@ -158,6 +161,9 @@ func (m *MemStore) UpdateIfMatch(id string, expectedRevision int64, opts UpdateO
 	}
 	if m.beads[i].Revision != expectedRevision {
 		return &PreconditionFailedError{ID: id, Expected: expectedRevision, Current: m.beads[i].Revision}
+	}
+	if err := protectAttemptEvidenceUpdate(m.beads[i], opts); err != nil {
+		return err
 	}
 	if err := ValidateLifecycleMutation(m.beads[i], opts); err != nil {
 		return fmt.Errorf("conditional update lifecycle bead %q: %w", id, err)
@@ -183,6 +189,9 @@ func (m *MemStore) CloseIfMatch(id string, expectedRevision int64) error {
 	}
 	if HasLifecycleRecoveryIntent(m.beads[i]) {
 		return ErrLifecycleIntentImmutable
+	}
+	if err := protectAttemptEvidencePayloadMutation(m.beads[i]); err != nil {
+		return err
 	}
 	if err := ValidateDecisionFrontierClose(m.beads[i]); err != nil {
 		return err
@@ -214,7 +223,7 @@ func (m *MemStore) DeleteIfMatch(id string, expectedRevision int64) error {
 	if err := ValidateDecisionFrontierDelete(m.beads[i]); err != nil {
 		return err
 	}
-	if err := protectAttemptEvidenceDelete(m.beads[i]); err != nil {
+	if err := protectRetainedEvidenceDelete(m.beads[i]); err != nil {
 		return err
 	}
 	if err := ValidateLifecycleDelete(m.beads[i]); err != nil {
@@ -232,6 +241,9 @@ func (m *MemStore) CompareAndSetMetadataKey(id, key, expected, next string) (boo
 	if isDecisionFrontierControlKey(key) {
 		return false, ErrDecisionFrontierMutationBlocked
 	}
+	if err := rejectAttemptEvidencePayloadMetadataKeyWrite(key); err != nil {
+		return false, err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.DisableConditionalWrites {
@@ -243,6 +255,9 @@ func (m *MemStore) CompareAndSetMetadataKey(id, key, expected, next string) (boo
 	}
 	if IsDecisionFrontierRecord(m.beads[i]) {
 		return false, ErrDecisionFrontierMutationBlocked
+	}
+	if err := protectAttemptEvidenceRecordMutation(m.beads[i]); err != nil {
+		return false, err
 	}
 	if m.beads[i].Metadata[key] != expected {
 		return false, nil

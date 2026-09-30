@@ -32,6 +32,9 @@ var (
 
 // UpdateIfMatch applies opts only when the stored revision matches.
 func (s *SQLiteStore) UpdateIfMatch(id string, expectedRevision int64, opts UpdateOpts) error {
+	if err := rejectAttemptEvidencePayloadMetadataWrite(opts.Metadata); err != nil {
+		return err
+	}
 	if err := s.ensureOpen(); err != nil {
 		return err
 	}
@@ -39,6 +42,9 @@ func (s *SQLiteStore) UpdateIfMatch(id string, expectedRevision int64, opts Upda
 		return ErrEmptyConditionalUpdate
 	}
 	return s.conditionalWrite(id, expectedRevision, func(ctx context.Context, tx *sql.Tx, b Bead) error {
+		if err := protectAttemptEvidenceUpdate(b, opts); err != nil {
+			return err
+		}
 		if err := ValidateLifecycleMutation(b, opts); err != nil {
 			return fmt.Errorf("conditional update lifecycle bead %q: %w", id, err)
 		}
@@ -56,6 +62,9 @@ func (s *SQLiteStore) CloseIfMatch(id string, expectedRevision int64) error {
 	return s.conditionalWrite(id, expectedRevision, func(ctx context.Context, tx *sql.Tx, b Bead) error {
 		if HasLifecycleRecoveryIntent(b) {
 			return ErrLifecycleIntentImmutable
+		}
+		if err := protectAttemptEvidencePayloadMutation(b); err != nil {
+			return err
 		}
 		if err := ValidateDecisionFrontierClose(b); err != nil {
 			return err
@@ -75,7 +84,7 @@ func (s *SQLiteStore) DeleteIfMatch(id string, expectedRevision int64) error {
 		if err := ValidateDecisionFrontierDelete(current); err != nil {
 			return err
 		}
-		if err := protectAttemptEvidenceDelete(current); err != nil {
+		if err := protectRetainedEvidenceDelete(current); err != nil {
 			return err
 		}
 		if err := ValidateLifecycleDelete(current); err != nil {
@@ -107,6 +116,9 @@ func (s *SQLiteStore) CompareAndSetMetadataKey(id, key, expected, next string) (
 	if isDecisionFrontierControlKey(key) {
 		return false, ErrDecisionFrontierMutationBlocked
 	}
+	if err := rejectAttemptEvidencePayloadMetadataKeyWrite(key); err != nil {
+		return false, err
+	}
 	if err := s.ensureOpen(); err != nil {
 		return false, err
 	}
@@ -131,6 +143,9 @@ func (s *SQLiteStore) CompareAndSetMetadataKey(id, key, expected, next string) (
 		}
 		if IsDecisionFrontierRecord(b) {
 			return ErrDecisionFrontierMutationBlocked
+		}
+		if err := protectAttemptEvidenceRecordMutation(b); err != nil {
+			return err
 		}
 		if b.Metadata[key] != expected {
 			return tx.Commit() // genuine mismatch: caller lost, not an error
@@ -437,7 +452,7 @@ func (s *SQLiteStore) deleteBatchChunk(chunk []string) error {
 		}
 		defer tx.Rollback() //nolint:errcheck
 		for _, id := range chunk {
-			protected, err := sqliteAttemptEvidenceArchiveIDTx(ctx, tx, id)
+			protected, err := sqliteProtectedAttemptEvidenceRecordIDTx(ctx, tx, id)
 			if err != nil {
 				return fmt.Errorf("deleting batch bead %q: checking archive protection: %w", id, err)
 			}
@@ -453,6 +468,9 @@ func (s *SQLiteStore) deleteBatchChunk(chunk []string) error {
 			}
 			if err := ValidateDecisionFrontierDelete(current); err != nil {
 				return fmt.Errorf("deleting batch bead %q: %w", id, err)
+			}
+			if err := protectRetainedEvidenceDelete(current); err != nil {
+				return err
 			}
 		}
 		if err := s.guardAndFenceIncomingDependenciesTx(ctx, tx, chunk, chunk); err != nil {

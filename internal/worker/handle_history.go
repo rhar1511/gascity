@@ -3,7 +3,9 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"strconv"
 	"strings"
+	"time"
 
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
@@ -118,6 +120,61 @@ func (h *SessionHandle) historyWithRequest(req HistoryRequest) (*HistorySnapshot
 	if err != nil {
 		return nil, err
 	}
+	requestStore := h.manager.PersistedStore()
+	requestLedger, ledgerErr := requestStore.ListRequestLedger(id)
+	if ledgerErr != nil {
+		if requestLedger.Status == "" {
+			requestLedger.Status = sessionpkg.RequestLedgerUnavailable
+			requestLedger.UnavailableReason = "storage_unavailable"
+		}
+	} else {
+		generation, generationErr := strconv.Atoi(info.Generation)
+		if generationErr == nil && generation > 0 {
+			persistFailures, historicalRequests := 0, 0
+			provider := ""
+			if fullHistoryRequest(req) {
+				provider = h.historyProvider(info)
+			}
+			for _, receipt := range requestLedger.Requests {
+				if receipt.Generation != generation {
+					historicalRequests++
+					continue
+				}
+				if !fullHistoryRequest(req) {
+					continue
+				}
+				if receipt.DeliveryAttemptedAt == nil {
+					continue
+				}
+				evidence := deriveRequestTranscriptEvidence(snapshot, receipt, provider, true)
+				if _, err := requestStore.RecordRequestTranscriptEvidence(id, receipt.RequestID, generation, evidence, time.Now().UTC()); err != nil {
+					persistFailures++
+				}
+			}
+			if fullHistoryRequest(req) {
+				requestLedger, ledgerErr = requestStore.ListRequestLedger(id)
+				if ledgerErr != nil && requestLedger.Status == "" {
+					requestLedger.Status = sessionpkg.RequestLedgerUnavailable
+					requestLedger.UnavailableReason = "storage_unavailable"
+				}
+			}
+			if persistFailures > 0 {
+				snapshot.Diagnostics = append(snapshot.Diagnostics, HistoryDiagnostic{
+					Code: "request_transcript_evidence_write_failed", Message: "transcript references were not persisted; request evidence remains unavailable", Count: persistFailures,
+				})
+			}
+			if historicalRequests > 0 {
+				snapshot.Diagnostics = append(snapshot.Diagnostics, HistoryDiagnostic{
+					Code: "request_transcript_historical_generation", Message: "requests from other execution generations remain historical and were not joined to this transcript", Count: historicalRequests,
+				})
+			}
+		} else {
+			snapshot.Diagnostics = append(snapshot.Diagnostics, HistoryDiagnostic{
+				Code: "request_transcript_generation_unavailable", Message: "current execution generation could not be validated for transcript references", Count: 1,
+			})
+		}
+	}
+	snapshot.RequestLedger = &requestLedger
 	h.maybePersistDerivedSessionKey(id, info, snapshot)
 	// After any session-key persist, so the keyed transcript path can resolve.
 	h.writeTranscriptSessionMeta()
@@ -129,6 +186,10 @@ func (h *SessionHandle) historyWithRequest(req HistoryRequest) (*HistorySnapshot
 		return cloneHistorySnapshot(snapshot), nil
 	}
 	return h.mergeLoadedHistorySnapshot(snapshot), nil
+}
+
+func fullHistoryRequest(req HistoryRequest) bool {
+	return req.TailCompactions == 0 && strings.TrimSpace(req.BeforeEntryID) == "" && strings.TrimSpace(req.AfterEntryID) == ""
 }
 
 func (h *SessionHandle) maybePersistDerivedSessionKey(id string, info sessionpkg.Info, snapshot *HistorySnapshot) {
@@ -155,8 +216,15 @@ func (h *SessionHandle) mergeLoadedHistorySnapshot(current *HistorySnapshot) *Hi
 	defer h.mu.Unlock()
 
 	raw := historyGeneration{
-		TranscriptStreamID: strings.TrimSpace(current.TranscriptStreamID),
-		GenerationID:       strings.TrimSpace(current.Generation.ID),
+		TranscriptStreamID:  strings.TrimSpace(current.TranscriptStreamID),
+		GenerationID:        strings.TrimSpace(current.Generation.ID),
+		RequestLedgerDigest: "",
+	}
+	if current.RequestLedger != nil {
+		raw.RequestLedgerDigest = current.RequestLedger.Digest + ":" + string(current.RequestLedger.Status) + ":" + current.RequestLedger.UnavailableReason
+	}
+	for _, diagnostic := range current.Diagnostics {
+		raw.RequestLedgerDigest += ":diagnostic:" + diagnostic.Code + ":" + strconv.Itoa(diagnostic.Count)
 	}
 	if h.history != nil && raw == h.historyRaw {
 		return cloneHistorySnapshot(h.history)
@@ -354,10 +422,68 @@ func cloneHistorySnapshot(snapshot *HistorySnapshot) *HistorySnapshot {
 	}
 	cloned := *snapshot
 	cloned.Diagnostics = append([]HistoryDiagnostic(nil), snapshot.Diagnostics...)
+	cloned.RequestLedger = cloneSessionRequestLedger(snapshot.RequestLedger)
 	cloned.TailState.OpenToolUseIDs = append([]string(nil), snapshot.TailState.OpenToolUseIDs...)
 	cloned.TailState.PendingInteractionIDs = append([]string(nil), snapshot.TailState.PendingInteractionIDs...)
 	cloned.Pagination = cloneTranscriptPagination(snapshot.Pagination)
 	cloned.Entries = cloneHistoryEntries(snapshot.Entries)
+	return &cloned
+}
+
+func cloneSessionRequestLedger(ledger *sessionpkg.RequestLedgerProjection) *sessionpkg.RequestLedgerProjection {
+	if ledger == nil {
+		return nil
+	}
+	cloned := *ledger
+	cloned.Requests = append([]sessionpkg.RequestReceipt(nil), ledger.Requests...)
+	for idx := range cloned.Requests {
+		if ledger.Requests[idx].DeliveryAttemptedAt != nil {
+			stamp := ledger.Requests[idx].DeliveryAttemptedAt.UTC()
+			cloned.Requests[idx].DeliveryAttemptedAt = &stamp
+		}
+		if ledger.Requests[idx].ProviderResultAt != nil {
+			stamp := ledger.Requests[idx].ProviderResultAt.UTC()
+			cloned.Requests[idx].ProviderResultAt = &stamp
+		}
+		if ledger.Requests[idx].AcknowledgedAt != nil {
+			stamp := ledger.Requests[idx].AcknowledgedAt.UTC()
+			cloned.Requests[idx].AcknowledgedAt = &stamp
+		}
+		if ledger.Requests[idx].Ledger != nil {
+			projection := *ledger.Requests[idx].Ledger
+			projection.Events = append([]sessionpkg.RequestEvent(nil), ledger.Requests[idx].Ledger.Events...)
+			for eventIdx := range projection.Events {
+				if projection.Events[eventIdx].Attribution != nil {
+					attribution := *projection.Events[eventIdx].Attribution
+					if attribution.Reference != nil {
+						reference := *attribution.Reference
+						attribution.Reference = &reference
+					}
+					projection.Events[eventIdx].Attribution = &attribution
+				}
+				projection.Events[eventIdx].TranscriptEvidence = cloneWorkerRequestTranscriptEvidence(projection.Events[eventIdx].TranscriptEvidence)
+			}
+			if ledger.Requests[idx].Ledger.AttemptAttribution != nil {
+				attribution := *ledger.Requests[idx].Ledger.AttemptAttribution
+				if attribution.Reference != nil {
+					reference := *attribution.Reference
+					attribution.Reference = &reference
+				}
+				projection.AttemptAttribution = &attribution
+			}
+			projection.TranscriptEvidence = cloneWorkerRequestTranscriptEvidence(projection.TranscriptEvidence)
+			cloned.Requests[idx].Ledger = &projection
+		}
+	}
+	return &cloned
+}
+
+func cloneWorkerRequestTranscriptEvidence(evidence *sessionpkg.RequestTranscriptEvidence) *sessionpkg.RequestTranscriptEvidence {
+	if evidence == nil {
+		return nil
+	}
+	cloned := *evidence
+	cloned.References = append([]sessionpkg.RequestTranscriptReference(nil), evidence.References...)
 	return &cloned
 }
 

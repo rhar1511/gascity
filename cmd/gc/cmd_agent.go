@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/sessionauthority"
 	"github.com/spf13/cobra"
 )
 
@@ -38,7 +39,45 @@ Describe what this agent should do here.
 // in cmd_config.go and cmd_start.go that intentionally use config.Load to
 // discover remote packs before fetching them.
 func loadCityConfig(cityPath string, warningWriter ...io.Writer) (*config.City, error) {
+	if sessionauthority.EnforcementEnabled() {
+		return loadSessionAuthorityCityConfig(cityPath, warningWriter...)
+	}
 	return loadCityConfigFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), warningWriter...)
+}
+
+// loadSessionAuthorityCityConfig captures the same effective identity the
+// controller publishes: exact loader inputs, registered runtime name, and
+// absolute rig paths. Direct CLI launch paths must not verify a grant against
+// an earlier, differently normalized config snapshot.
+func loadSessionAuthorityCityConfig(cityPath string, warningWriter ...io.Writer) (*config.City, error) {
+	loadCityConfigCalls.Add(1)
+	fs := fsys.OSFS{}
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	warnings := resolveLoadCityConfigWarningWriter(warningWriter...)
+	if err := ensureBuiltinPacksForConfigLoad(fs, tomlPath, warnings); err != nil {
+		return nil, err
+	}
+	loadOptions := skipRevisionSnapshot
+	loadOptions.CaptureQualificationInputs = true
+	cfg, prov, err := config.LoadWithIncludesOptions(fs, tomlPath, loadOptions)
+	if err != nil {
+		return nil, err
+	}
+	emitLoadCityConfigWarnings(warnings, prov)
+	warnMissingRequiredBuiltinImports(fs, cfg, tomlPath, warnings)
+	if err := validatePackRuntimeRegistrations(cfg); err != nil {
+		return nil, err
+	}
+	applyFeatureFlags(cfg)
+	cityName := loadedCityName(cfg, cityPath)
+	if entry, registered, err := registeredCityEntry(cityPath); err != nil {
+		return nil, fmt.Errorf("resolve registered city identity for session authority: %w", err)
+	} else if registered {
+		cityName = entry.EffectiveName()
+	}
+	applyRuntimeCityIdentity(cfg, cityName)
+	resolveRigPathsAndRefreshQualification(cityPath, cfg, prov)
+	return cfg, nil
 }
 
 // skipRevisionSnapshot is the load option shared by the loaders in this file.

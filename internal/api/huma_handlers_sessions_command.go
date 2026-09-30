@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/sessionauthority"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 	"github.com/gastownhall/gascity/internal/worker"
 )
@@ -45,6 +47,9 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 	body := input.Body
 	if body.LegacySessionName != nil {
 		return nil, apierr.InvalidRequest.Msg("session_name is no longer accepted; use alias")
+	}
+	if sessionauthority.EnforcementEnabled() && strings.TrimSpace(body.Options[sessionPermissionModeOptionKey]) != "" {
+		return nil, apierr.InvalidRequest.Msg("permission_mode requires a signed authority-profile transition after session creation")
 	}
 
 	kind := body.Kind
@@ -261,6 +266,9 @@ func (s *Server) humaCreateProviderSession(_ context.Context, store beads.Sessio
 			}
 			return nil, apierr.InvalidRequest.Msg(optErr.Error())
 		}
+	}
+	if sessionauthority.EnforcementEnabled() {
+		delete(optMeta, sessionPermissionModeOptionKey)
 	}
 
 	template := providerName
@@ -616,15 +624,23 @@ func (s *Server) updateSessionPermissionMode(idRef string, body SessionPermissio
 	if err != nil {
 		return nil, humaSessionManagerError(err)
 	}
+	protectedRequest := sessionauthority.EnforcementEnabled() || sessionauthority.HasAuthorityMetadata(b.Metadata) || strings.TrimSpace(body.AuthorityProfile) != "" ||
+		body.ExpectedGeneration != 0 || strings.TrimSpace(body.EffectiveConfigSHA256) != "" || strings.TrimSpace(body.Authorization) != ""
+	reject := func(reason string, rejection error) error {
+		if !protectedRequest {
+			return rejection
+		}
+		return s.denySessionAuthorityTransition(store.Store, id, info, body, reason, rejection)
+	}
 	if info.Closed {
-		return nil, apierr.SessionConflict.Msg("conflict: session is closed")
+		return nil, reject("session_closed", apierr.SessionConflict.Msg("conflict: session is closed"))
 	}
 	if session.IsTemplateOverrideRuntimeActive(info.State) {
-		return nil, apierr.SessionConflict.Msg("conflict: session is running; permission_mode changes use schema options and apply only before the next launch")
+		return nil, reject("session_active", apierr.SessionConflict.Msg("conflict: session is running; permission_mode changes use schema options and apply only before the next launch"))
 	}
 	cfg := s.state.Config()
 	if cfg == nil {
-		return nil, apierr.ServiceUnavailable.Msg("city config not loaded yet")
+		return nil, reject("config_unavailable", apierr.ServiceUnavailable.Msg("city config not loaded yet"))
 	}
 	agent, agentFound := findAgent(cfg, info.Template)
 	if session.UseAgentTemplateForProviderResolution(legacySessionKind(b.Metadata), b.Metadata, info.Provider, agent.Provider, agentFound) {
@@ -636,20 +652,92 @@ func (s *Server) updateSessionPermissionMode(idRef string, body SessionPermissio
 	resolved, resolveErr := resolveProviderForSessionOptions(info, b.Metadata, cfg)
 	if resolved == nil {
 		if resolveErr != nil {
-			return nil, apierr.SessionConflict.Msg("conflict: session provider no longer resolves: " + resolveErr.Error())
+			return nil, reject("provider_unavailable", apierr.SessionConflict.Msg("conflict: session provider no longer resolves: "+resolveErr.Error()))
 		}
-		return nil, apierr.NotImplemented.Msg("unsupported: session provider does not accept schema options")
+		return nil, reject("provider_options_unsupported", apierr.NotImplemented.Msg("unsupported: session provider does not accept schema options"))
 	}
 	if !providerHasOption(resolved.OptionsSchema, sessionPermissionModeOptionKey) {
-		return nil, apierr.NotImplemented.Msg("unsupported: session provider does not define permission_mode in options_schema")
+		return nil, reject("permission_mode_unsupported", apierr.NotImplemented.Msg("unsupported: session provider does not define permission_mode in options_schema"))
 	}
 
 	mode := strings.TrimSpace(body.PermissionMode)
 	if _, optErr := config.ResolveExplicitOptions(resolved.OptionsSchema, map[string]string{sessionPermissionModeOptionKey: mode}); optErr != nil {
-		return nil, apierr.InvalidRequest.Msg(optErr.Error())
+		return nil, reject("provider_mode_invalid", apierr.InvalidRequest.Msg(optErr.Error()))
 	}
-
-	if _, err := mgr.UpdateTemplateOverrides(id, map[string]string{sessionPermissionModeOptionKey: mode}); err != nil {
+	if !protectedRequest {
+		if _, err := mgr.UpdateTemplateOverrides(id, map[string]string{sessionPermissionModeOptionKey: mode}); err != nil {
+			return nil, humaSessionManagerError(err)
+		}
+		s.state.Poke()
+		info, presponse, err := sessionGetEnriched(session.NewStore(store), mgr, id)
+		if err != nil {
+			return nil, humaSessionManagerError(err)
+		}
+		resp := sessionResponseWithReason(info, presponse, s.state.Config(), s.state.SessionProvider(), strings.TrimSpace(s.state.CityPath()) != "")
+		return &IndexOutput[sessionResponse]{Index: s.latestIndex(), Body: resp}, nil
+	}
+	generation, genErr := strconv.ParseUint(strings.TrimSpace(info.Generation), 10, 64)
+	profile := sessionauthority.Profile(strings.TrimSpace(body.AuthorityProfile))
+	configSHA := strings.ToLower(strings.TrimSpace(body.EffectiveConfigSHA256))
+	actualConfigSHA := s.sessionAuthorityConfigSHA()
+	if genErr != nil || generation == 0 || body.ExpectedGeneration != generation || configSHA == "" || configSHA != actualConfigSHA || !profile.Valid() {
+		return nil, s.denySessionAuthorityTransition(store.Store, id, info, body, "stale_or_invalid_scope", apierr.SessionConflict.Msg("conflict: session authority transition scope is stale or invalid"))
+	}
+	fromProfile := sessionauthority.ProfileDesign
+	if raw := strings.TrimSpace(b.Metadata[sessionauthority.MetadataProfile]); raw != "" {
+		fromProfile = sessionauthority.Profile(raw)
+		if !fromProfile.Valid() {
+			return nil, s.denySessionAuthorityTransition(store.Store, id, info, body, "current_profile_invalid", apierr.SessionConflict.Msg("conflict: current session authority profile is invalid"))
+		}
+	}
+	verifier, verifyErr := sessionauthority.LoadHostVerifier()
+	if verifyErr != nil {
+		return nil, s.denySessionAuthorityTransition(store.Store, id, info, body, "authority_unavailable", apierr.ServiceUnavailable.Msg("session authority is unavailable"))
+	}
+	if current, decodeErr := sessionauthority.DecodeAuthorization(b.Metadata[sessionauthority.MetadataAuthorization]); decodeErr == nil &&
+		current.Token == strings.TrimSpace(body.Authorization) && current.Claims.ToProfile == profile {
+		overrides, overrideErr := session.ParseTemplateOverrides(b.Metadata)
+		retryWant := sessionauthority.Expectation{
+			City: strings.TrimSpace(s.state.CityName()), SessionID: id, Generation: generation,
+			EffectiveConfigSHA256: actualConfigSHA, FromProfile: current.Claims.FromProfile,
+			ToProfile: profile, PermissionMode: mode,
+		}
+		if overrideErr == nil && strings.TrimSpace(overrides[sessionPermissionModeOptionKey]) == mode && verifier.VerifyStored(current, retryWant) == nil {
+			info, presponse, err := sessionGetEnriched(session.NewStore(store), mgr, id)
+			if err != nil {
+				return nil, humaSessionManagerError(err)
+			}
+			resp := sessionResponseWithReason(info, presponse, s.state.Config(), s.state.SessionProvider(), strings.TrimSpace(s.state.CityPath()) != "")
+			return &IndexOutput[sessionResponse]{Index: s.latestIndex(), Body: resp}, nil
+		}
+	}
+	want := sessionauthority.Expectation{
+		City: strings.TrimSpace(s.state.CityName()), SessionID: id, Generation: generation,
+		EffectiveConfigSHA256: actualConfigSHA, FromProfile: fromProfile, ToProfile: profile, PermissionMode: mode,
+	}
+	auth, verifyErr := verifier.Verify(strings.TrimSpace(body.Authorization), want)
+	if verifyErr != nil {
+		return nil, s.denySessionAuthorityTransition(store.Store, id, info, body, "authorization_rejected", apierr.Forbidden.Msg("session authority grant rejected"))
+	}
+	record := sessionauthority.TransitionRecord{
+		AttemptedAt: time.Now().UTC().Format(time.RFC3339Nano), Outcome: "accepted", Reason: "authorized",
+		SessionID: id, Generation: generation, EffectiveConfigSHA256: actualConfigSHA,
+		FromProfile: fromProfile, ToProfile: profile, PermissionMode: mode,
+		AuthorizationID: auth.Claims.AuthorizationID, Principal: auth.Principal,
+	}
+	if _, err := mgr.UpdateAuthorityProfile(id, generation, mode, profile, auth, record); err != nil {
+		if errors.Is(err, sessionauthority.ErrReplay) {
+			return nil, reject("authorization_replayed", apierr.SessionConflict.Msg("conflict: session authority grant was already used"))
+		}
+		if errors.Is(err, session.ErrSessionActive) {
+			return nil, reject("session_state_changed", humaSessionManagerError(err))
+		}
+		if errors.Is(err, session.ErrSessionClosed) {
+			return nil, reject("session_closed", humaSessionManagerError(err))
+		}
+		if errors.Is(err, sessionauthority.ErrTargetMismatch) {
+			return nil, reject("authorization_state_mismatch", apierr.SessionConflict.Msg("conflict: session authority state changed"))
+		}
 		return nil, humaSessionManagerError(err)
 	}
 	s.state.Poke()
@@ -663,6 +751,52 @@ func (s *Server) updateSessionPermissionMode(idRef string, body SessionPermissio
 		Index: s.latestIndex(),
 		Body:  resp,
 	}, nil
+}
+
+func (s *Server) denySessionAuthorityTransition(store beads.Store, id string, info session.Info, body SessionPermissionModeBody, reason string, rejection error) error {
+	generation, _ := strconv.ParseUint(strings.TrimSpace(info.Generation), 10, 64)
+	if generation == 0 {
+		generation = body.ExpectedGeneration
+	}
+	configSHA := strings.ToLower(strings.TrimSpace(body.EffectiveConfigSHA256))
+	if actual := s.sessionAuthorityConfigSHA(); actual != "" {
+		configSHA = actual
+	}
+	from := sessionauthority.ProfileDesign
+	to := sessionauthority.Profile(strings.TrimSpace(body.AuthorityProfile))
+	if b, err := store.Get(id); err == nil {
+		from = sessionauthority.ProfileFromMetadata(b.Metadata)
+	}
+	if generation == 0 || !from.Valid() || strings.TrimSpace(body.PermissionMode) == "" {
+		return rejection
+	}
+	record := sessionauthority.TransitionRecord{
+		AttemptedAt: time.Now().UTC().Format(time.RFC3339Nano), Outcome: "denied", Reason: reason,
+		SessionID: id, Generation: generation, EffectiveConfigSHA256: configSHA,
+		FromProfile: from, ToProfile: to, PermissionMode: strings.TrimSpace(body.PermissionMode),
+	}
+	writer, ok := store.(beads.ConditionalWriter)
+	if !ok {
+		return apierr.ServiceUnavailable.Msg("cannot record denied session authority transition")
+	}
+	for range 8 {
+		b, err := store.Get(id)
+		if err != nil {
+			return humaStoreError(err)
+		}
+		raw, err := sessionauthority.AppendTransition(b.Metadata[sessionauthority.MetadataTransitions], record)
+		if err != nil {
+			return apierr.ServiceUnavailable.Msg("cannot record denied session authority transition")
+		}
+		err = writer.UpdateIfMatch(id, b.Revision, beads.UpdateOpts{Metadata: map[string]string{sessionauthority.MetadataTransitions: raw}})
+		if err == nil {
+			return rejection
+		}
+		if !beads.IsPreconditionFailed(err) {
+			return humaStoreError(err)
+		}
+	}
+	return apierr.ServiceUnavailable.Msg("cannot record denied session authority transition")
 }
 
 func providerHasOption(schema []config.ProviderOption, key string) bool {

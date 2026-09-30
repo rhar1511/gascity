@@ -581,6 +581,9 @@ func (s *SQLiteStore) CreateWithForeignID(b Bead) (Bead, error) {
 	if err := ValidateDecisionFrontierCreate(b); err != nil {
 		return Bead{}, err
 	}
+	if err := rejectAttemptEvidencePayloadMetadataWrite(b.Metadata); err != nil {
+		return Bead{}, err
+	}
 	return s.create(b, true, false)
 }
 
@@ -590,6 +593,9 @@ func (s *SQLiteStore) CreateWithForeignID(b Bead) (Bead, error) {
 // namespaces when the store is fenced (WithSQLiteStoreReservedIDPrefixes).
 func (s *SQLiteStore) Create(b Bead) (Bead, error) {
 	if err := ValidateDecisionFrontierCreate(b); err != nil {
+		return Bead{}, err
+	}
+	if err := rejectAttemptEvidencePayloadMetadataWrite(b.Metadata); err != nil {
 		return Bead{}, err
 	}
 	return s.create(b, false, false)
@@ -605,6 +611,33 @@ func (s *SQLiteStore) CreateDecisionFrontierRecord(b Bead) (Bead, error) {
 		return Bead{}, err
 	}
 	return s.create(b, false, true)
+}
+
+// CreatePrivatePayloadValue creates one digest-addressed payload row or
+// returns the row already occupying that deterministic ID. The dedicated
+// capability does not alter ordinary Create ID or namespace semantics.
+func (s *SQLiteStore) CreatePrivatePayloadValue(b Bead) (Bead, error) {
+	if err := s.ensureOpen(); err != nil {
+		return Bead{}, err
+	}
+	if err := validatePrivatePayloadCreate(b); err != nil {
+		return Bead{}, err
+	}
+	if existing, err := s.Get(b.ID); err == nil {
+		return existing, nil
+	} else if !errors.Is(err, ErrNotFound) {
+		return Bead{}, err
+	}
+	created, err := s.create(b, true, false)
+	if err == nil {
+		return created, nil
+	}
+	if existing, readErr := s.Get(b.ID); readErr == nil {
+		return existing, nil
+	} else if !errors.Is(readErr, ErrNotFound) {
+		return Bead{}, errors.Join(err, readErr)
+	}
+	return Bead{}, err
 }
 
 // create is the shared body. allowForeign is the CreateWithForeignID
@@ -1167,6 +1200,9 @@ func applySQLiteUpdateOpts(b Bead, opts UpdateOpts) Bead {
 
 // Update modifies fields of an existing bead.
 func (s *SQLiteStore) Update(id string, opts UpdateOpts) error {
+	if err := rejectAttemptEvidencePayloadMetadataWrite(opts.Metadata); err != nil {
+		return err
+	}
 	if err := s.ensureOpen(); err != nil {
 		return err
 	}
@@ -1179,6 +1215,9 @@ func (s *SQLiteStore) Update(id string, opts UpdateOpts) error {
 		defer tx.Rollback() //nolint:errcheck
 		b, err := s.getTx(ctx, tx, id)
 		if err != nil {
+			return err
+		}
+		if err := protectAttemptEvidenceUpdate(b, opts); err != nil {
 			return err
 		}
 		before := b
@@ -1223,6 +1262,9 @@ func (s *SQLiteStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error
 		}
 		if HasDecisionFrontierHold(b) {
 			return ErrDecisionFrontierMutationBlocked
+		}
+		if err := protectAttemptEvidenceRecordMutation(b); err != nil {
+			return err
 		}
 		before := b
 		b.Status = "open"
@@ -1280,6 +1322,9 @@ func (s *SQLiteStore) Reopen(id string) error {
 
 // CloseAll closes multiple beads and applies metadata to each closed bead.
 func (s *SQLiteStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	if err := rejectAttemptEvidencePayloadMetadataWrite(metadata); err != nil {
+		return 0, err
+	}
 	if err := s.ensureOpen(); err != nil {
 		return 0, err
 	}
@@ -1638,6 +1683,9 @@ func (s *SQLiteStore) SetMetadata(id, key, value string) error {
 
 // SetMetadataBatch atomically sets multiple metadata keys on a bead.
 func (s *SQLiteStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if err := rejectAttemptEvidencePayloadMetadataWrite(kvs); err != nil {
+		return err
+	}
 	if err := s.ensureOpen(); err != nil {
 		return err
 	}
@@ -1729,6 +1777,9 @@ func (t *sqliteStoreTx) Create(b Bead) (Bead, error) {
 	if err := ValidateDecisionFrontierCreate(b); err != nil {
 		return Bead{}, err
 	}
+	if err := rejectAttemptEvidencePayloadMetadataWrite(b.Metadata); err != nil {
+		return Bead{}, err
+	}
 	if err := t.store.checkPinnedIDNamespace(b.ID); err != nil {
 		return Bead{}, err
 	}
@@ -1757,8 +1808,14 @@ func (t *sqliteStoreTx) Create(b Bead) (Bead, error) {
 }
 
 func (t *sqliteStoreTx) Update(id string, opts UpdateOpts) error {
+	if err := rejectAttemptEvidencePayloadMetadataWrite(opts.Metadata); err != nil {
+		return err
+	}
 	b, err := t.store.getTx(t.ctx, t.tx, id)
 	if err != nil {
+		return err
+	}
+	if err := protectAttemptEvidenceUpdate(b, opts); err != nil {
 		return err
 	}
 	if err := ValidateLifecycleMutation(b, opts); err != nil {
@@ -1774,6 +1831,9 @@ func (t *sqliteStoreTx) Update(id string, opts UpdateOpts) error {
 }
 
 func (t *sqliteStoreTx) SetMetadataBatch(id string, kvs map[string]string) error {
+	if err := rejectAttemptEvidencePayloadMetadataWrite(kvs); err != nil {
+		return err
+	}
 	if len(kvs) == 0 {
 		return nil
 	}
@@ -1783,6 +1843,9 @@ func (t *sqliteStoreTx) SetMetadataBatch(id string, kvs map[string]string) error
 func (t *sqliteStoreTx) Close(id string) error {
 	b, err := t.store.getTx(t.ctx, t.tx, id)
 	if err != nil {
+		return err
+	}
+	if err := protectAttemptEvidencePayloadMutation(b); err != nil {
 		return err
 	}
 	if b.Status == "closed" {
@@ -1815,10 +1878,17 @@ func (s *SQLiteStore) Delete(id string) error {
 		if err != nil {
 			return fmt.Errorf("deleting bead %q: %w", id, err)
 		}
+		protected, err := sqliteProtectedAttemptEvidenceRecordIDTx(context.Background(), tx, id)
+		if err != nil {
+			return fmt.Errorf("deleting bead %q: checking evidence protection: %w", id, err)
+		}
+		if protected {
+			return fmt.Errorf("deleting bead %q: %w", id, ErrProtectedAttemptEvidenceArchive)
+		}
 		if err := ValidateDecisionFrontierDelete(current); err != nil {
 			return fmt.Errorf("deleting bead %q: %w", id, err)
 		}
-		if err := protectAttemptEvidenceDelete(current); err != nil {
+		if err := protectRetainedEvidenceDelete(current); err != nil {
 			return err
 		}
 		if err := ValidateLifecycleDelete(current); err != nil {
@@ -1853,20 +1923,19 @@ func (s *SQLiteStore) Delete(id string) error {
 	return nil
 }
 
-func sqliteAttemptEvidenceArchiveIDTx(ctx context.Context, tx *sql.Tx, id string) (bool, error) {
+func sqliteProtectedAttemptEvidenceRecordIDTx(ctx context.Context, tx *sql.Tx, id string) (bool, error) {
 	var found int
 	err := tx.QueryRowContext(ctx, `
 		SELECT EXISTS (
-			SELECT 1 FROM metadata a
-			JOIN metadata o ON o.bead_id=a.bead_id
-			JOIN metadata p ON p.bead_id=a.bead_id
-			WHERE a.bead_id=? AND a.meta_key=? AND a.meta_value<>''
-			  AND o.meta_key=? AND o.meta_value<>''
-			  AND p.meta_key=? AND p.meta_value<>''
+			SELECT 1 FROM metadata m
+			WHERE m.bead_id=? AND m.meta_key IN (?, ?, ?, ?, ?, ?)
 		)`, id,
 		beadmeta.AttemptEvidenceArchiveAttemptIDMetadataKey,
 		beadmeta.AttemptEvidenceArchiveOwnerIDMetadataKey,
-		beadmeta.AttemptEvidenceArchivePayloadMetadataKey).Scan(&found)
+		beadmeta.AttemptEvidenceArchivePayloadMetadataKey,
+		beadmeta.AttemptEvidenceArchiveDigestMetadataKey,
+		beadmeta.AttemptEvidencePayloadDigestMetadataKey,
+		beadmeta.AttemptEvidencePayloadDataMetadataKey).Scan(&found)
 	return found != 0, err
 }
 
@@ -2099,10 +2168,11 @@ func (s *SQLiteStore) purgeTerminal(ctx context.Context, olderThan time.Duration
 		  AND COALESCE(NULLIF(updated_at,0), created_at) < ?
 		  AND NOT EXISTS (
 			SELECT 1 FROM metadata m
-			WHERE m.bead_id=beads.id
-			  AND m.meta_key=? AND m.meta_value<>''
-		  AND EXISTS (SELECT 1 FROM metadata o WHERE o.bead_id=beads.id AND o.meta_key=? AND o.meta_value<>'')
-		  AND EXISTS (SELECT 1 FROM metadata p WHERE p.bead_id=beads.id AND p.meta_key=? AND p.meta_value<>'')
+			WHERE m.bead_id=beads.id AND m.meta_key IN (?, ?, ?, ?, ?, ?)
+		  )
+		  AND NOT EXISTS (
+			SELECT 1 FROM metadata m
+			WHERE m.bead_id=beads.id AND m.meta_key LIKE ?
 		  )
 		  AND NOT EXISTS (
 			SELECT 1 FROM metadata m
@@ -2115,6 +2185,10 @@ func (s *SQLiteStore) purgeTerminal(ctx context.Context, olderThan time.Duration
 		beadmeta.AttemptEvidenceArchiveAttemptIDMetadataKey,
 		beadmeta.AttemptEvidenceArchiveOwnerIDMetadataKey,
 		beadmeta.AttemptEvidenceArchivePayloadMetadataKey,
+		beadmeta.AttemptEvidenceArchiveDigestMetadataKey,
+		beadmeta.AttemptEvidencePayloadDigestMetadataKey,
+		beadmeta.AttemptEvidencePayloadDataMetadataKey,
+		beadmeta.SessionRequestReceiptPrefix+"%",
 		beadmeta.LifecycleRecoveryStateMetadataKey,
 		beadmeta.LifecycleRecoveryIntentMetadataKey,
 		beadmeta.LifecycleRecoveryIntentDigestKey)

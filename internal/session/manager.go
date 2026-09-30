@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 	"time"
 
@@ -23,6 +24,7 @@ import (
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/proctable"
+	"github.com/gastownhall/gascity/internal/sessionauthority"
 )
 
 // State represents the runtime state of a chat session.
@@ -324,6 +326,13 @@ type Info struct {
 	// whitespace fidelity the TrimSpace path relies on, so the mirror keeps the
 	// raw string. Additive, internal-only (absent from the HTTP wire).
 	Generation string // generation (raw)
+	// AuthorityProfile, AuthorityAuthorization, and AuthorityTransitions are the
+	// controller-owned launch-profile state, signed proof, and durable audit
+	// marker. They remain raw so launch-time verification can reject malformed,
+	// missing, or stale records without normalization.
+	AuthorityProfile       string // gc.authority_profile (raw)
+	AuthorityAuthorization string // gc.authority_authorization.v1 (raw)
+	AuthorityTransitions   string // gc.authority_transitions.v1 (raw)
 	// StartedConfigHash is the RAW started_config_hash metadata, verbatim — the
 	// Core fingerprint captured when the session last started. The reconciler's
 	// config-drift detection reads it both as a direct string compare (stored
@@ -1774,6 +1783,115 @@ func (m *Manager) UpdateTemplateOverrides(id string, updates map[string]string) 
 	}
 	return merged, nil
 }
+
+// UpdateAuthorityProfile atomically records an accepted, signed authority
+// transition and applies its provider permission mode for the next launch.
+// The session generation and row revision are checked in the same write.
+func (m *Manager) UpdateAuthorityProfile(id string, expectedGeneration uint64, mode string, profile sessionauthority.Profile, auth sessionauthority.Authorization, record sessionauthority.TransitionRecord) (map[string]string, error) {
+	var merged map[string]string
+	err := withSessionMutationLock(id, func() error {
+		b, sessName, err := m.loadSessionBead(id, true)
+		if err != nil {
+			return err
+		}
+		if strings.EqualFold(strings.TrimSpace(b.Status), "closed") {
+			return ErrSessionClosed
+		}
+		generation, err := strconv.ParseUint(strings.TrimSpace(b.Metadata["generation"]), 10, 64)
+		if err != nil || generation == 0 || generation != expectedGeneration {
+			return fmt.Errorf("%w: session generation changed", ErrSessionActive)
+		}
+		mode = strings.TrimSpace(mode)
+		if auth.Claims.SessionID != id || auth.Claims.Generation != expectedGeneration ||
+			auth.Claims.ToProfile != profile || auth.Claims.PermissionMode != mode ||
+			record.Outcome != "accepted" || record.SessionID != id || record.Generation != expectedGeneration ||
+			record.EffectiveConfigSHA256 != auth.Claims.EffectiveConfigSHA256 || record.FromProfile != auth.Claims.FromProfile ||
+			record.ToProfile != profile || record.PermissionMode != mode || record.AuthorizationID != auth.Claims.AuthorizationID ||
+			record.Principal != auth.Principal {
+			return sessionauthority.ErrTargetMismatch
+		}
+		state := State(b.Metadata["state"])
+		if IsTemplateOverrideRuntimeActive(state) || templateOverrideWakeInFlight(b.Metadata, state, m.now()) || (strings.TrimSpace(sessName) != "" && m.sp != nil && m.sp.IsRunning(sessName)) {
+			return fmt.Errorf("%w: authority profile applies only before the next launch", ErrSessionActive)
+		}
+		overrides, err := ParseTemplateOverrides(b.Metadata)
+		if err != nil {
+			return fmt.Errorf("parse template overrides: %w", err)
+		}
+		if overrides == nil {
+			overrides = make(map[string]string)
+		}
+		storedMode := strings.TrimSpace(overrides[sessionPermissionModeOptionKey])
+		overrides[sessionPermissionModeOptionKey] = mode
+		seen, err := sessionauthority.AuthorizationIDSeen(b.Metadata[sessionauthority.MetadataTransitions], auth.Claims.AuthorizationID)
+		if err != nil {
+			return err
+		}
+		if currentRaw := strings.TrimSpace(b.Metadata[sessionauthority.MetadataAuthorization]); currentRaw != "" {
+			current, decodeErr := sessionauthority.DecodeAuthorization(currentRaw)
+			if decodeErr != nil {
+				return decodeErr
+			}
+			if current.Claims.AuthorizationID == auth.Claims.AuthorizationID && current.Token == auth.Token &&
+				b.Metadata[sessionauthority.MetadataProfile] == string(profile) && storedMode == mode && seen {
+				merged = make(map[string]string, len(overrides))
+				for key, value := range overrides {
+					merged[key] = value
+				}
+				return nil
+			}
+		}
+		if seen {
+			return sessionauthority.ErrReplay
+		}
+		currentProfile := sessionauthority.ProfileDesign
+		if currentRaw := strings.TrimSpace(b.Metadata[sessionauthority.MetadataProfile]); currentRaw != "" {
+			currentProfile = sessionauthority.Profile(currentRaw)
+			if !currentProfile.Valid() {
+				return sessionauthority.ErrTargetMismatch
+			}
+		}
+		if currentProfile != auth.Claims.FromProfile {
+			return sessionauthority.ErrTargetMismatch
+		}
+		rawOverrides, err := json.Marshal(overrides)
+		if err != nil {
+			return err
+		}
+		rawAuth, err := sessionauthority.EncodeAuthorization(auth)
+		if err != nil {
+			return err
+		}
+		rawTransitions, err := sessionauthority.AppendTransition(b.Metadata[sessionauthority.MetadataTransitions], record)
+		if err != nil {
+			return err
+		}
+		writer, ok := m.store.(beads.ConditionalWriter)
+		if !ok {
+			return errors.New("session store does not support conditional authority transitions")
+		}
+		if err := writer.UpdateIfMatch(id, b.Revision, beads.UpdateOpts{Metadata: map[string]string{
+			"template_overrides": string(rawOverrides),
+			beadmeta.OptionMetadataPrefix + sessionPermissionModeOptionKey: strings.TrimSpace(mode),
+			sessionauthority.MetadataProfile:                               string(profile),
+			sessionauthority.MetadataAuthorization:                         rawAuth,
+			sessionauthority.MetadataTransitions:                           rawTransitions,
+		}}); err != nil {
+			if beads.IsPreconditionFailed(err) {
+				return fmt.Errorf("%w: session changed during authority transition", ErrSessionActive)
+			}
+			return err
+		}
+		merged = make(map[string]string, len(overrides))
+		for key, value := range overrides {
+			merged[key] = value
+		}
+		return nil
+	})
+	return merged, err
+}
+
+const sessionPermissionModeOptionKey = "permission_mode"
 
 // IsTemplateOverrideRuntimeActive reports whether a session state is too live
 // for template override changes that only apply on the next launch.

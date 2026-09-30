@@ -121,15 +121,30 @@ func (m *MemStore) Create(b Bead) (Bead, error) {
 	if err := ValidateDecisionFrontierCreate(b); err != nil {
 		return Bead{}, err
 	}
+	if err := rejectAttemptEvidencePayloadMetadataWrite(b.Metadata); err != nil {
+		return Bead{}, err
+	}
 	return m.create(b)
 }
 
 func (m *MemStore) create(b Bead) (Bead, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.createLocked(b, m.HonorExplicitIDs, false)
+}
 
+func (m *MemStore) createWithExplicitID(b Bead) (Bead, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if strings.TrimSpace(b.ID) == "" {
+		return Bead{}, fmt.Errorf("creating bead with explicit id: empty id")
+	}
+	return m.createLocked(b, true, true)
+}
+
+func (m *MemStore) createLocked(b Bead, honorExplicit, preserveStatus bool) (Bead, error) {
 	explicit := strings.TrimSpace(b.ID)
-	if m.HonorExplicitIDs && explicit != "" {
+	if honorExplicit && explicit != "" {
 		if m.beadExistsLocked(explicit) {
 			return Bead{}, fmt.Errorf("creating bead %q: duplicate id", explicit)
 		}
@@ -146,7 +161,9 @@ func (m *MemStore) create(b Bead) (Bead, error) {
 	// Set directly rather than through setBeadStatus: create is not a status
 	// transition over an existing bead, so a caller-supplied
 	// IndefinitelyDeferred must survive into the store instead of being cleared.
-	b.Status = "open"
+	if !preserveStatus || b.Status == "" {
+		b.Status = "open"
+	}
 	if b.Type == "" {
 		b.Type = "task"
 	}
@@ -293,11 +310,17 @@ func (m *MemStore) applyUpdateLocked(i int, opts UpdateOpts) {
 // Update modifies fields of an existing bead. Only non-nil fields in opts
 // are applied. Returns a wrapped ErrNotFound if the ID does not exist.
 func (m *MemStore) Update(id string, opts UpdateOpts) error {
+	if err := rejectAttemptEvidencePayloadMetadataWrite(opts.Metadata); err != nil {
+		return err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	i := m.indexOfLocked(id)
 	if i < 0 {
 		return fmt.Errorf("updating bead %q: %w", id, ErrNotFound)
+	}
+	if err := protectAttemptEvidenceUpdate(m.beads[i], opts); err != nil {
+		return err
 	}
 	if err := ValidateLifecycleMutation(m.beads[i], opts); err != nil {
 		return fmt.Errorf("updating lifecycle bead %q: %w", id, err)
@@ -321,6 +344,9 @@ func (m *MemStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error) {
 		if HasDecisionFrontierHold(m.beads[i]) {
 			return false, ErrDecisionFrontierMutationBlocked
 		}
+		if err := protectAttemptEvidenceRecordMutation(m.beads[i]); err != nil {
+			return false, err
+		}
 		setBeadStatus(&m.beads[i], "open")
 		m.beads[i].Assignee = ""
 		m.beads[i].UpdatedAt = time.Now()
@@ -338,6 +364,9 @@ func (m *MemStore) Close(id string) error {
 	defer m.mu.Unlock()
 	for i := range m.beads {
 		if m.beads[i].ID == id {
+			if err := protectAttemptEvidencePayloadMutation(m.beads[i]); err != nil {
+				return err
+			}
 			if m.beads[i].Status == "closed" {
 				return nil
 			}
@@ -360,6 +389,9 @@ func (m *MemStore) Reopen(id string) error {
 	defer m.mu.Unlock()
 	for i := range m.beads {
 		if m.beads[i].ID == id {
+			if err := protectAttemptEvidenceRecordMutation(m.beads[i]); err != nil {
+				return err
+			}
 			if m.beads[i].Status == "open" && !m.beads[i].IndefinitelyDeferred {
 				return nil
 			}
@@ -385,6 +417,9 @@ func (m *MemStore) Reopen(id string) error {
 
 // CloseAll closes multiple beads in a single batch and sets metadata on each.
 func (m *MemStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	if err := rejectAttemptEvidencePayloadMetadataWrite(metadata); err != nil {
+		return 0, err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	idSet := make(map[string]bool, len(ids))
@@ -395,10 +430,13 @@ func (m *MemStore) CloseAll(ids []string, metadata map[string]string) (int, erro
 		if !idSet[m.beads[i].ID] || m.beads[i].Status == "closed" {
 			continue
 		}
+		closedStatus := "closed"
+		if err := protectAttemptEvidenceUpdate(m.beads[i], UpdateOpts{Status: &closedStatus, Metadata: metadata}); err != nil {
+			return 0, err
+		}
 		if err := ValidateLifecycleClose(m.beads[i]); err != nil {
 			return 0, fmt.Errorf("closing lifecycle bead %q: %w", m.beads[i].ID, err)
 		}
-		closedStatus := "closed"
 		if err := ValidateLifecycleMutation(m.beads[i], UpdateOpts{Status: &closedStatus, Metadata: metadata}); err != nil {
 			return 0, fmt.Errorf("closing lifecycle bead %q: %w", m.beads[i].ID, err)
 		}
@@ -610,10 +648,16 @@ func (m *MemStore) ListByMetadata(filters map[string]string, limit int, opts ...
 // SetMetadata sets a key-value metadata pair on a bead. Returns a wrapped
 // ErrNotFound if the bead does not exist.
 func (m *MemStore) SetMetadata(id, key, value string) error {
+	if err := rejectAttemptEvidencePayloadMetadataKeyWrite(key); err != nil {
+		return err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for i, b := range m.beads {
 		if b.ID == id {
+			if err := protectAttemptEvidenceRecordMutation(b); err != nil {
+				return err
+			}
 			if err := ValidateLifecycleMutation(b, UpdateOpts{Metadata: map[string]string{key: value}}); err != nil {
 				return fmt.Errorf("setting lifecycle metadata on %q: %w", id, err)
 			}
@@ -631,6 +675,9 @@ func (m *MemStore) SetMetadata(id, key, value string) error {
 
 // SetMetadataBatch atomically sets multiple key-value metadata pairs on a bead.
 func (m *MemStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if err := rejectAttemptEvidencePayloadMetadataWrite(kvs); err != nil {
+		return err
+	}
 	if len(kvs) == 0 {
 		return nil
 	}
@@ -638,6 +685,9 @@ func (m *MemStore) SetMetadataBatch(id string, kvs map[string]string) error {
 	defer m.mu.Unlock()
 	for i, b := range m.beads {
 		if b.ID == id {
+			if err := protectAttemptEvidenceRecordMutation(b); err != nil {
+				return err
+			}
 			if err := ValidateLifecycleMutation(b, UpdateOpts{Metadata: kvs}); err != nil {
 				return fmt.Errorf("setting lifecycle metadata batch on %q: %w", id, err)
 			}
@@ -712,7 +762,7 @@ func (m *MemStore) Delete(id string) error {
 			if err := ValidateDecisionFrontierDelete(b); err != nil {
 				return err
 			}
-			if err := protectAttemptEvidenceDelete(b); err != nil {
+			if err := protectRetainedEvidenceDelete(b); err != nil {
 				return err
 			}
 			if err := ValidateLifecycleDelete(b); err != nil {

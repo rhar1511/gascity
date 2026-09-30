@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
+	"github.com/gastownhall/gascity/internal/sessionauthority"
 )
 
 // infoKeySpec is one metadata key's codec: how a raw metadata value becomes
@@ -160,6 +161,9 @@ var infoKeyCodec = []infoKeySpec{
 	{SessionCircuitStateMetadataKey, func(i *Info, v string) { i.SessionCircuitState = v }},
 	{ResetCommittedAtKey, func(i *Info, v string) { i.ResetCommittedAt = v }},
 	{"generation", func(i *Info, v string) { i.Generation = v }},
+	{sessionauthority.MetadataProfile, func(i *Info, v string) { i.AuthorityProfile = v }},
+	{sessionauthority.MetadataAuthorization, func(i *Info, v string) { i.AuthorityAuthorization = v }},
+	{sessionauthority.MetadataTransitions, func(i *Info, v string) { i.AuthorityTransitions = v }},
 	{"started_config_hash", func(i *Info, v string) { i.StartedConfigHash = v }},
 	{"pin_awake", func(i *Info, v string) { i.PinAwake = v }},
 

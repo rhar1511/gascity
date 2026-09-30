@@ -3,6 +3,7 @@ package beads
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -331,6 +332,39 @@ func (fs *FileStore) Create(b Bead) (Bead, error) {
 	}
 	snap := fs.snapshotLocked()
 	result, err := fs.MemStore.Create(b)
+	if err != nil {
+		return Bead{}, err
+	}
+	if err := fs.save(); err != nil {
+		fs.restoreFrom(snap.seq, snap.beads, snap.deps)
+		return Bead{}, err
+	}
+	return result, nil
+}
+
+// CreatePrivatePayloadValue atomically creates a content-addressed payload row
+// under its deterministic ID, returning the existing row when another writer
+// already created it. Generic Create retains its ordinary ID-minting rules.
+func (fs *FileStore) CreatePrivatePayloadValue(b Bead) (Bead, error) {
+	if err := validatePrivatePayloadCreate(b); err != nil {
+		return Bead{}, err
+	}
+	fs.fmu.Lock()
+	defer fs.fmu.Unlock()
+	if err := fs.locker.Lock(); err != nil {
+		return Bead{}, err
+	}
+	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
+	if err := fs.reloadFromDisk(); err != nil {
+		return Bead{}, err
+	}
+	if existing, err := fs.MemStore.Get(b.ID); err == nil {
+		return existing, nil
+	} else if !errors.Is(err, ErrNotFound) {
+		return Bead{}, err
+	}
+	snap := fs.snapshotLocked()
+	result, err := fs.createWithExplicitID(b)
 	if err != nil {
 		return Bead{}, err
 	}

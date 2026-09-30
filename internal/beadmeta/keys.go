@@ -44,6 +44,9 @@ const (
 	AttemptEvidenceArchiveOwnerIDMetadataKey   = "gc.attempt_evidence.archive_owner_id"
 	AttemptEvidenceArchivePayloadMetadataKey   = "gc.attempt_evidence.archive_payload.v1"
 	AttemptEvidenceArchiveDigestMetadataKey    = "gc.attempt_evidence.archive_digest"
+	AttemptEvidencePayloadDataMetadataKey      = "gc.attempt_evidence.content_payload.v1"
+	AttemptEvidencePayloadDigestMetadataKey    = "gc.attempt_evidence.content_digest"
+	AttemptEvidenceReferenceMetadataKey        = "gc.attempt_evidence.reference.v1"
 	AttemptMetadataKey                         = "gc.attempt"
 	BondMetadataKey                            = "gc.bond"
 	BondVarsMetadataKey                        = "gc.bond_vars"
@@ -527,6 +530,9 @@ var KnownMetadataKeys = []string{
 	AttemptEvidenceArchiveOwnerIDMetadataKey,
 	AttemptEvidenceArchivePayloadMetadataKey,
 	AttemptEvidenceArchiveDigestMetadataKey,
+	AttemptEvidencePayloadDataMetadataKey,
+	AttemptEvidencePayloadDigestMetadataKey,
+	AttemptEvidenceReferenceMetadataKey,
 	AttemptMetadataKey,
 	BondMetadataKey,
 	BondVarsMetadataKey,

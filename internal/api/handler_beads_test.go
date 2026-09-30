@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/importsvc"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/sessionauthority"
 )
 
 type prefixedAliasStore struct {
@@ -1160,6 +1161,63 @@ func TestBeadCreatePersistsMetadataAndParent(t *testing.T) {
 	}
 	if got.Metadata["real_world_app.contract.role"] != "child" || got.Metadata["real_world_app.contract.run_id"] != "run-1" {
 		t.Fatalf("stored metadata = %#v, want real-world app metadata", got.Metadata)
+	}
+}
+
+func TestBeadCreateRejectsSessionAuthorityMetadata(t *testing.T) {
+	state := newFakeState(t)
+	h := newTestCityHandler(t, state)
+
+	for _, tc := range []struct {
+		name        string
+		trustFile   string
+		metadataKey string
+	}{
+		{name: "proof is always protected", metadataKey: sessionauthority.MetadataAuthorization},
+		{name: "launch options are protected during enforcement", trustFile: "/host/session-authority.json", metadataKey: sessionauthority.MetadataTemplateOverrides},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(sessionauthority.HostTrustFileEnv, tc.trustFile)
+			body := `{"rig":"myrig","title":"forged","metadata":{"` + tc.metadataKey + `":"forged"}}`
+			req := newPostRequest(cityURL(state, "/beads"), bytes.NewBufferString(body))
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("create status = %d, want %d: %s", rec.Code, http.StatusForbidden, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestBeadUpdateRejectsAuthorityOptionAfterEnforcementIsDisabled(t *testing.T) {
+	state := newFakeState(t)
+	store := state.stores["myrig"]
+	b, err := store.Create(beads.Bead{
+		Title: "protected session",
+		Metadata: map[string]string{
+			sessionauthority.MetadataProfile: string(sessionauthority.ProfileWorker),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	h := newTestCityHandler(t, state)
+	t.Setenv(sessionauthority.HostTrustFileEnv, "")
+
+	body := `{"metadata":{"template_overrides":"{}"}}`
+	req := newPostRequest(cityURL(state, "/bead/")+b.ID+"/update", bytes.NewBufferString(body))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("update status = %d, want %d: %s", rec.Code, http.StatusForbidden, rec.Body.String())
+	}
+
+	got, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if _, ok := got.Metadata[sessionauthority.MetadataTemplateOverrides]; ok {
+		t.Fatalf("generic API persisted protected launch options: %#v", got.Metadata)
 	}
 }
 

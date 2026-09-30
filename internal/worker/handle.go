@@ -329,8 +329,9 @@ var (
 )
 
 type historyGeneration struct {
-	TranscriptStreamID string
-	GenerationID       string
+	TranscriptStreamID  string
+	GenerationID        string
+	RequestLedgerDigest string
 }
 
 func cloneHistoryRaw(raw json.RawMessage) json.RawMessage {
