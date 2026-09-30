@@ -1235,6 +1235,10 @@
           "$ref": "#/$defs/RSIConfig",
           "description": "RSI points the controller at trusted signed evaluation and human\napproval records. An unset evaluator leaves promotion fail-closed."
         },
+        "decision_frontier": {
+          "$ref": "#/$defs/DecisionFrontierConfig",
+          "description": "DecisionFrontier configures optional delivery of persisted human-decision\nprompts. An empty target leaves prompt delivery disabled."
+        },
         "orders": {
           "$ref": "#/$defs/OrdersConfig",
           "description": "Orders configures order settings: skip list, max_timeout cap, and\nper-order overrides."
@@ -1496,6 +1500,17 @@
       "additionalProperties": false,
       "type": "object",
       "description": "DaemonConfig holds controller daemon settings."
+    },
+    "DecisionFrontierConfig": {
+      "properties": {
+        "prompt_target": {
+          "type": "string",
+          "description": "PromptTarget is a config-facing identity for one configured named session.\nThe controller resolves it to the canonical identity and requires persisted\nevidence for that exact session execution before delivery."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "DecisionFrontierConfig configures the optional human prompt target for decision-frontier records."
     },
     "DoctorConfig": {
       "properties": {

@@ -38,8 +38,8 @@ type SessionPromptDelivery struct {
 // NewSessionPromptDelivery creates a provider adapter for one configured live
 // session target. Target resolution remains a persisted session-store read.
 func NewSessionPromptDelivery(target string, sessions PromptSessionReader, submitter PromptRequestSubmitter) (*SessionPromptDelivery, error) {
-	target = strings.TrimSpace(target)
-	if target == "" || strings.HasPrefix(target, "template:") || sessions == nil || submitter == nil {
+	if target == "" || strings.TrimSpace(target) != target || target != sessiondomain.NormalizeNamedSessionTarget(target) ||
+		strings.HasPrefix(target, "template:") || sessions == nil || submitter == nil {
 		return nil, fmt.Errorf("%w: a live session target, session reader, and request submitter are required", ErrUnavailable)
 	}
 	return &SessionPromptDelivery{target: target, sessions: sessions, submitter: submitter}, nil
@@ -61,6 +61,9 @@ func (d *SessionPromptDelivery) ResolveDecisionPrompt(ctx context.Context, reque
 	if err != nil {
 		return PromptBinding{}, errors.Join(ErrUnavailable, fmt.Errorf("read resolved session %s: %w", sessionID, err))
 	}
+	if err := configuredPromptTarget(info, d.target, sessionID); err != nil {
+		return PromptBinding{}, err
+	}
 	generation, err := persistedSessionGeneration(info, response, sessionID, true)
 	if err != nil {
 		return PromptBinding{}, err
@@ -78,6 +81,20 @@ func (d *SessionPromptDelivery) DeliverDecisionPrompt(ctx context.Context, reque
 	generation, err := validPromptDeliveryBinding(binding, request)
 	if err != nil {
 		return PromptResult{}, err
+	}
+	info, response, err := d.sessions.GetPersistedResponse(binding.SessionID)
+	if err != nil {
+		return PromptResult{}, errors.Join(ErrUnavailable, fmt.Errorf("read bound session %s before delivery: %w", binding.SessionID, err))
+	}
+	if err := configuredPromptTarget(info, d.target, binding.SessionID); err != nil {
+		return PromptResult{}, err
+	}
+	currentGeneration, err := persistedSessionGeneration(info, response, binding.SessionID, true)
+	if err != nil {
+		return PromptResult{}, err
+	}
+	if currentGeneration != generation {
+		return PromptResult{}, fmt.Errorf("%w: bound session generation changed from %d to %d", ErrConflict, generation, currentGeneration)
 	}
 	body, err := promptMessageJSON(request)
 	if err != nil {
@@ -125,6 +142,9 @@ func (d *SessionPromptDelivery) ReconcileDecisionPrompt(ctx context.Context, req
 		if err != nil {
 			return err
 		}
+		if err := configuredPromptTarget(info, d.target, binding.SessionID); err != nil {
+			return err
+		}
 		if int64(generation) != binding.ExecutionGeneration {
 			return fmt.Errorf("%w: bound session generation changed from %d to %d", ErrConflict, binding.ExecutionGeneration, generation)
 		}
@@ -165,6 +185,14 @@ func (d *SessionPromptDelivery) validateRequest(ctx context.Context, request Pro
 		request.PresentationVersion != promptPresentationVersion || request.MessageDigest == "" ||
 		request.MessageDigest != promptMessageDigest(request) {
 		return fmt.Errorf("%w: persisted decision prompt identity or digest is invalid", ErrConflict)
+	}
+	return nil
+}
+
+func configuredPromptTarget(info sessiondomain.Info, target, sessionID string) error {
+	if info.ID != sessionID || !info.ConfiguredNamedSession ||
+		info.ConfiguredNamedIdentity != target {
+		return fmt.Errorf("%w: session %q is not the configured named target %q", ErrConflict, sessionID, target)
 	}
 	return nil
 }

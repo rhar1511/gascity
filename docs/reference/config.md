@@ -36,6 +36,7 @@ City is the top-level configuration for a Gas City instance.
 | `daemon` | DaemonConfig |  |  | Daemon configures controller daemon settings. |
 | `lifecycle` | LifecycleConfig |  |  | Lifecycle configures the opt-in, evidence-backed work admission and recovery contract. Both gates default to disabled; see LifecycleConfig. |
 | `rsi` | RSIConfig |  |  | RSI points the controller at trusted signed evaluation and human approval records. An unset evaluator leaves promotion fail-closed. |
+| `decision_frontier` | DecisionFrontierConfig |  |  | DecisionFrontier configures optional delivery of persisted human-decision prompts. An empty target leaves prompt delivery disabled. |
 | `orders` | OrdersConfig |  |  | Orders configures order settings: skip list, max_timeout cap, and per-order overrides. |
 | `api` | APIConfig |  |  | API configures the optional HTTP API server. |
 | `chat_sessions` | ChatSessionsConfig |  |  | ChatSessions configures chat session behavior (auto-suspend). |
@@ -374,6 +375,14 @@ DaemonConfig holds controller daemon settings.
 | `start_ready_timeout` | string |  | `5m` | StartReadyTimeout is how long `gc start` and `gc register` wait for the supervisor to report the city as Running. Cities with many registered or adopted sessions take longer to start because the per-tick wake budget (max_wakes_per_tick) throttles startup: wall time to wake N sessions is roughly ceil(N / max_wakes_per_tick) * patrol_interval. At the defaults (5 wakes / 30s), ~40 sessions need ~4 minutes. Duration string (e.g., "5m", "10m"). Defaults to DefaultStartReadyTimeout (5m). When set, this value replaces the default start/register budget; [session].startup_timeout may still extend the effective wait for a slow single session. |
 | `tick_debounce` | string |  |  | TickDebounce coalesces bursty event-driven ticks (pokeCh, controlDispatcherCh) within this window. A first event in a quiet period arms a timer; subsequent events arriving before the timer fires are dropped (the single delayed tick re-reads authoritative state covering all collapsed events). Zero (the default) disables debouncing — each event fires its own tick, matching pre-existing behavior. Duration string (e.g., "250ms", "500ms"). Trade-off: adds tick latency up to this value when set. |
 | `auto_prune_worker_dir` | boolean |  | `true` | AutoPruneWorkerDir controls whether the reconciler removes a pool-managed session's worker_dir (agent worktree) after the session bead is closed. Removal is gated on: path lives under the city's .gc/worktrees/ tree, clean working tree, no unpushed commits, no stashed work. Nil (unset) defaults to true so pool worktrees do not accumulate without bound across pool recycles. Set to false to retain worktrees for post-session diagnostics. |
+
+## DecisionFrontierConfig
+
+DecisionFrontierConfig configures the optional human prompt target for decision-frontier records.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `prompt_target` | string |  |  | PromptTarget is a config-facing identity for one configured named session. The controller resolves it to the canonical identity and requires persisted evidence for that exact session execution before delivery. |
 
 ## DoctorConfig
 

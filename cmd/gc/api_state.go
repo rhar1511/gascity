@@ -25,6 +25,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
 	"github.com/gastownhall/gascity/internal/coordclass"
+	"github.com/gastownhall/gascity/internal/decisionfrontier"
 	"github.com/gastownhall/gascity/internal/emergency"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/executionevent"
@@ -2052,6 +2053,46 @@ func (cs *controllerState) SessionsBeadStore() beads.SessionStore {
 	return beads.SessionStore{Store: resolveSessionStore(cs.storageRoutes, cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv)}
 }
 
+// DecisionFrontierService composes optional prompt delivery from one captured
+// controller generation. The target comes only from city config, resolves to a
+// unique configured named session, and is canonicalized before the adapter is
+// built. Missing or invalid configuration leaves the domain service's protected
+// Beads persistence available while prompt delivery remains disabled.
+func (cs *controllerState) DecisionFrontierService() decisionfrontier.Service {
+	if cs == nil {
+		return decisionfrontier.Service{}
+	}
+	cs.mu.RLock()
+	cfg, sp := cs.cfg, cs.sp
+	target := ""
+	if cfg != nil {
+		target = cfg.DecisionFrontier.PromptTarget
+	}
+	if cfg == nil || target == "" || strings.TrimSpace(target) != target ||
+		session.NormalizeNamedSessionTarget(target) != target || strings.HasPrefix(target, "template:") ||
+		sp == nil || cs.compatibilityRoutesClosed {
+		cs.mu.RUnlock()
+		return decisionfrontier.Service{}
+	}
+	spec, found, err := session.ResolveNamedSessionSpecForConfigTarget(cfg, cs.cityName, target, "")
+	if err != nil || !found || strings.TrimSpace(spec.Identity) == "" {
+		cs.mu.RUnlock()
+		return decisionfrontier.Service{}
+	}
+	store := resolveSessionStore(cs.storageRoutes, cs.cityBeadStore, cfg, cs.cityPath, cs.eventProv)
+	cs.mu.RUnlock()
+	if store == nil {
+		return decisionfrontier.Service{}
+	}
+
+	manager := session.NewManagerWithOptions(store, sp)
+	delivery, err := decisionfrontier.NewSessionPromptDelivery(spec.Identity, manager.PersistedStore(), manager)
+	if err != nil {
+		return decisionfrontier.Service{}
+	}
+	return decisionfrontier.Service{Delivery: delivery}
+}
+
 // GraphBeadStore returns the store backing graph-class beads. At the default backend
 // resolveGraphStore returns cityBeadStore, so this is byte-identical to CityBeadStore;
 // when [beads.classes.graph] is relocated it returns the dedicated graph store at the
@@ -2175,6 +2216,7 @@ func (cs *controllerState) SerializeConfigWrite(fn func() error) error {
 }
 
 var _ api.ConfigWriteSerializer = (*controllerState)(nil)
+var _ api.DecisionFrontierServiceProvider = (*controllerState)(nil)
 
 // SuspendAgent writes suspended=true to durable agent config.
 // Uses configedit.Editor for provenance-aware edit (inline vs discovered vs patch).

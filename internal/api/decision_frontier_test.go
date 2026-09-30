@@ -101,7 +101,7 @@ func TestDecisionFrontierAPIEnsureReplayReadAndAnswerAuthority(t *testing.T) {
 		"work_revision": revision,
 		"proposal":      proposal,
 		// These unknown caller fields must not be accepted as authority scope.
-		"city_ref": "city:forged", "store_ref": "rig:forged",
+		"city_ref": "city:forged", "store_ref": "rig:forged", "prompt_target": "caller-selected",
 	}
 	path := cityURL(state, "/bead/"+work.ID+"/decision-frontier")
 	forgedResponse := postDecisionFrontier(t, handler, path, "frontier-forged-scope", forgedScope)

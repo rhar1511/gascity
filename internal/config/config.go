@@ -281,6 +281,9 @@ type City struct {
 	// RSI points the controller at trusted signed evaluation and human
 	// approval records. An unset evaluator leaves promotion fail-closed.
 	RSI RSIConfig `toml:"rsi,omitempty"`
+	// DecisionFrontier configures optional delivery of persisted human-decision
+	// prompts. An empty target leaves prompt delivery disabled.
+	DecisionFrontier DecisionFrontierConfig `toml:"decision_frontier,omitempty"`
 	// Orders configures order settings: skip list, max_timeout cap, and
 	// per-order overrides.
 	Orders OrdersConfig `toml:"orders,omitempty"`
@@ -456,6 +459,16 @@ type City struct {
 	qualificationInputs       qualification.InputClosure `toml:"-" json:"-"`
 	qualificationSnapshot     *qualification.Snapshot    `toml:"-" json:"-"`
 	packCompatibilityBindings []PackCompatibilityBinding `toml:"-" json:"-"`
+}
+
+// DecisionFrontierConfig configures the optional human prompt target for
+// decision-frontier records. PromptTarget must resolve to one configured
+// named session; leaving it empty keeps prompt delivery disabled.
+type DecisionFrontierConfig struct {
+	// PromptTarget is a config-facing identity for one configured named session.
+	// The controller resolves it to the canonical identity and requires persisted
+	// evidence for that exact session execution before delivery.
+	PromptTarget string `toml:"prompt_target,omitempty"`
 }
 
 // NamedSession defines a canonical persistent session backed by an agent

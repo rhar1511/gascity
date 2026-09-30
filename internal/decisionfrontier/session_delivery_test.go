@@ -52,6 +52,12 @@ func TestSessionPromptDeliveryResolveRejectsAmbiguityAndInvalidExecution(t *test
 			wantErrIs: sessiondomain.ErrAmbiguous,
 		},
 		{
+			name:      "missing target execution",
+			target:    "ops",
+			reader:    promptSessionReaderFake{resolveErr: fmt.Errorf("%w: ops", sessiondomain.ErrSessionNotFound)},
+			wantErrIs: sessiondomain.ErrSessionNotFound,
+		},
+		{
 			name:   "generation missing",
 			target: "ops",
 			reader: promptSessionReaderFake{resolvedID: "session-42", info: sessiondomain.Info{ID: "session-42", State: sessiondomain.StateActive, MetadataState: string(sessiondomain.StateActive)}, response: sessiondomain.PersistedResponse{Status: "open"}},
@@ -103,6 +109,7 @@ func TestNewSessionPromptDeliveryRejectsFactoryTargetsAndMissingPorts(t *testing
 		submitter PromptRequestSubmitter
 	}{
 		{name: "empty target", target: " ", reader: reader, submitter: submitter},
+		{name: "padded target", target: " ops ", reader: reader, submitter: submitter},
 		{name: "template target", target: "template:operator", reader: reader, submitter: submitter},
 		{name: "missing reader", target: "ops", submitter: submitter},
 		{name: "missing submitter", target: "ops", reader: reader},
@@ -215,6 +222,79 @@ func TestSessionPromptDeliveryRejectsBindingMismatchBeforeSubmit(t *testing.T) {
 	}
 	if submitter.calls != 0 {
 		t.Fatalf("invalid binding reached submitter %d times", submitter.calls)
+	}
+}
+
+func TestSessionPromptDeliveryRejectsDifferentConfiguredIdentityBeforeSubmit(t *testing.T) {
+	request := promptRequestForDeliveryTest()
+	binding := PromptBinding{SessionID: "session-42", ExecutionGeneration: 7, RequestID: request.ID}
+	reader := &promptSessionReaderFake{
+		resolvedID: binding.SessionID,
+		info: sessiondomain.Info{
+			ID: binding.SessionID, State: sessiondomain.StateActive, MetadataState: string(sessiondomain.StateActive), Generation: "7",
+			ConfiguredNamedSession: true, ConfiguredNamedIdentity: "other",
+		},
+		response: sessiondomain.PersistedResponse{Status: "open"},
+	}
+	submitter := &promptSessionSubmitterFake{}
+	delivery := newPromptDeliveryForTest(t, "ops", reader, submitter)
+	if _, err := delivery.ResolveDecisionPrompt(context.Background(), request); !errors.Is(err, ErrConflict) {
+		t.Fatalf("ResolveDecisionPrompt() error = %v, want ErrConflict", err)
+	}
+	if _, err := delivery.DeliverDecisionPrompt(context.Background(), request, binding); !errors.Is(err, ErrConflict) {
+		t.Fatalf("DeliverDecisionPrompt() error = %v, want ErrConflict", err)
+	}
+	if _, err := delivery.ReconcileDecisionPrompt(context.Background(), request, binding); !errors.Is(err, ErrConflict) {
+		t.Fatalf("ReconcileDecisionPrompt() error = %v, want ErrConflict", err)
+	}
+	if submitter.calls != 0 || reader.receiptCalls != 0 {
+		t.Fatalf("wrong configured identity reached delivery: sends=%d receipt reads=%d", submitter.calls, reader.receiptCalls)
+	}
+}
+
+func TestSessionPromptDeliveryRejectsSessionWithoutConfiguredNamedEvidence(t *testing.T) {
+	request := promptRequestForDeliveryTest()
+	reader := &promptSessionReaderFake{
+		resolvedID: "session-42",
+		info: sessiondomain.Info{
+			ID: "session-42", State: sessiondomain.StateActive, MetadataState: string(sessiondomain.StateActive), Generation: "7",
+			ConfiguredNamedIdentity: "ops",
+		},
+		response: sessiondomain.PersistedResponse{Status: "open"},
+	}
+	submitter := &promptSessionSubmitterFake{}
+	delivery := newPromptDeliveryForTest(t, "ops", reader, submitter)
+	if _, err := delivery.ResolveDecisionPrompt(context.Background(), request); !errors.Is(err, ErrConflict) {
+		t.Fatalf("ResolveDecisionPrompt() error = %v, want ErrConflict", err)
+	}
+	if _, err := delivery.DeliverDecisionPrompt(context.Background(), request, PromptBinding{
+		SessionID: "session-42", ExecutionGeneration: 7, RequestID: request.ID,
+	}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("DeliverDecisionPrompt() error = %v, want ErrConflict", err)
+	}
+	if submitter.calls != 0 {
+		t.Fatalf("session without configured-named evidence reached provider submitter %d times", submitter.calls)
+	}
+}
+
+func TestSessionPromptDeliveryRejectsChangedGenerationBeforeSubmit(t *testing.T) {
+	request := promptRequestForDeliveryTest()
+	reader := &promptSessionReaderFake{
+		resolvedID: "session-42",
+		info: sessiondomain.Info{
+			ID: "session-42", State: sessiondomain.StateActive, MetadataState: string(sessiondomain.StateActive), Generation: "8",
+			ConfiguredNamedSession: true, ConfiguredNamedIdentity: "ops",
+		},
+		response: sessiondomain.PersistedResponse{Status: "open"},
+	}
+	submitter := &promptSessionSubmitterFake{}
+	delivery := newPromptDeliveryForTest(t, "ops", reader, submitter)
+	binding := PromptBinding{SessionID: "session-42", ExecutionGeneration: 7, RequestID: request.ID}
+	if _, err := delivery.DeliverDecisionPrompt(context.Background(), request, binding); !errors.Is(err, ErrConflict) {
+		t.Fatalf("DeliverDecisionPrompt() error = %v, want ErrConflict", err)
+	}
+	if submitter.calls != 0 {
+		t.Fatalf("changed execution generation reached provider submitter %d times", submitter.calls)
 	}
 }
 
@@ -411,6 +491,15 @@ func promptReceiptForTest(request PromptRequest, binding PromptBinding, delivery
 
 func newPromptDeliveryForTest(t *testing.T, target string, reader *promptSessionReaderFake, submitter *promptSessionSubmitterFake) *SessionPromptDelivery {
 	t.Helper()
+	if reader.info.ID == "" && reader.resolvedID == "" {
+		reader.resolvedID = "session-42"
+		reader.info = sessiondomain.Info{ID: reader.resolvedID, State: sessiondomain.StateActive, MetadataState: string(sessiondomain.StateActive), Generation: "7"}
+		reader.response = sessiondomain.PersistedResponse{Status: "open"}
+	}
+	if reader.info.ConfiguredNamedIdentity == "" {
+		reader.info.ConfiguredNamedSession = true
+		reader.info.ConfiguredNamedIdentity = target
+	}
 	delivery, err := NewSessionPromptDelivery(target, reader, submitter)
 	if err != nil {
 		t.Fatal(err)
