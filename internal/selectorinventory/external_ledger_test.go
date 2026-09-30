@@ -249,6 +249,83 @@ func TestJoinExternalLedgerAcceptsExactCanonicalEvidence(t *testing.T) {
 	}
 }
 
+func TestJoinExternalLedgerAcceptsSequencedEmptyWindowCheckpoints(t *testing.T) {
+	fixture := newQuietExternalLedgerTestFixture(t)
+	result := JoinExternalLedger(fixture.raw, fixture.expected, fixture.registry)
+	if result.Status != StatusAvailable || result.IssueCode != "" || result.Evidence == nil || !result.Evidence.Valid() {
+		t.Fatalf("quiet-window join = %#v, want available evidence", result)
+	}
+	if fixture.ledger.SequenceStart != 103 || fixture.ledger.SequenceEnd != 104 || len(fixture.ledger.Sequences) != 2 {
+		t.Fatalf("quiet-window global sequence = %d..%d with %d checkpoints, want 103..104", fixture.ledger.SequenceStart, fixture.ledger.SequenceEnd, len(fixture.ledger.Sequences))
+	}
+}
+
+func TestJoinExternalLedgerRejectsMalformedEmptyWindowCheckpoints(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*externalLedgerTestFixture)
+	}{
+		{name: "coverage gap", mutate: func(f *externalLedgerTestFixture) {
+			coverage := *f.ledger.Sequences[1].CoverageWindow
+			coverage.Start = coverage.Start.Add(time.Second)
+			f.ledger.Sequences[1].CoverageWindow = &coverage
+		}},
+		{name: "checkpoint digest does not bind interval", mutate: func(f *externalLedgerTestFixture) {
+			first := *f.ledger.Sequences[0].CoverageWindow
+			second := *f.ledger.Sequences[1].CoverageWindow
+			boundary := first.End.Add(time.Second)
+			first.End = boundary
+			second.Start = boundary
+			f.ledger.Sequences[0].CoverageWindow = &first
+			f.ledger.Sequences[1].CoverageWindow = &second
+		}},
+		{name: "mixed order row", mutate: func(f *externalLedgerTestFixture) {
+			f.ledger.Sequences[1].EntryKind = ""
+			f.ledger.Sequences[1].CoverageWindow = nil
+		}},
+		{name: "wrong scope", mutate: func(f *externalLedgerTestFixture) {
+			f.ledger.Sequences[0].SourceScope = "audit.secondary"
+		}},
+		{name: "missing checkpoint window", mutate: func(f *externalLedgerTestFixture) {
+			f.ledger.Sequences[0].CoverageWindow = nil
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newQuietExternalLedgerTestFixture(t)
+			test.mutate(fixture)
+			fixture.refresh(t)
+			result := JoinExternalLedger(fixture.raw, fixture.expected, fixture.registry)
+			assertExternalJoinUnavailable(t, result, "ledger_sequence_gap_or_ambiguity")
+		})
+	}
+}
+
+func newQuietExternalLedgerTestFixture(t *testing.T) *externalLedgerTestFixture {
+	t.Helper()
+	fixture := newExternalLedgerTestFixture(t)
+	fixture.ledger.ExternalScope = []string{"audit.secondary", "orders"}
+	fixture.expected.ExternalScope = append([]string(nil), fixture.ledger.ExternalScope...)
+	fixture.ledger.SourceCoverage = []ExternalSourceCoverage{
+		{ScopeID: "audit.secondary", Status: StatusAvailable, Complete: true, Capture: fixture.ledger.Capture},
+		{ScopeID: "orders", Status: StatusAvailable, Complete: true, Capture: fixture.ledger.Capture},
+	}
+	capture := fixture.ledger.Capture
+	midpoint := capture.Start.Add(capture.End.Sub(capture.Start) / 2)
+	firstCoverage := CaptureWindow{Start: capture.Start, End: midpoint}
+	secondCoverage := CaptureWindow{Start: midpoint, End: capture.End}
+	fixture.ledger.SequenceStart = 103
+	fixture.ledger.SequenceEnd = 104
+	fixture.ledger.Sequences = []LedgerSequence{
+		{Sequence: 103, SourceScope: "orders", EntrySHA256: LedgerSequenceCoverageCheckpointDigest(103, firstCoverage),
+			EntryKind: LedgerSequenceKindCoverageCheckpoint, CoverageWindow: &firstCoverage},
+		{Sequence: 104, SourceScope: "orders", EntrySHA256: LedgerSequenceCoverageCheckpointDigest(104, secondCoverage),
+			EntryKind: LedgerSequenceKindCoverageCheckpoint, CoverageWindow: &secondCoverage},
+	}
+	fixture.refresh(t)
+	return fixture
+}
+
 func TestJoinExternalLedgerRejectsSequenceGapsAndDuplicates(t *testing.T) {
 	for _, test := range []struct {
 		name   string

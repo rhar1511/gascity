@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -78,7 +79,9 @@ type IdentityReader interface {
 }
 
 // OrderLedgerSnapshot is a bounded, read-only view of the canonical Gas City
-// order sequence and its retention watermark for one requested window.
+// order sequence and its retention watermark for one requested window. A
+// quiet window uses sequenced coverage-checkpoint rows, not an empty sequence
+// or a fabricated order attempt.
 type OrderLedgerSnapshot struct {
 	Coverage       selectorinventory.ExternalSourceCoverage
 	EvidenceSHA256 string
@@ -96,10 +99,13 @@ type LinuxScopeSnapshot struct {
 }
 
 // OrderLedgerReader reads the canonical order ledger without changing it.
-// It must return every retained sequence in the requested fixed window.
-// Current orders.OrderRun data has only per-order event cursors and prunes
-// closed runs, so RecentRunsAll cannot satisfy this contract as a retained
-// global ledger adapter.
+// It must return every retained sequence in the requested fixed window. For a
+// quiet window, it may return only global-sequence coverage-checkpoint rows;
+// those rows must partition the exact requested window and use the canonical
+// checkpoint digest for their sequence and coverage interval. Current
+// orders.OrderRun data has only per-order event cursors and prunes closed runs,
+// so RecentRunsAll cannot satisfy this contract as a retained global ledger
+// adapter.
 type OrderLedgerReader interface {
 	ReadOrderLedger(context.Context, selectorinventory.CaptureWindow, selectorinventory.Limits) (OrderLedgerSnapshot, error)
 }
@@ -139,6 +145,12 @@ func (f SigningKeyProviderFunc) PrivateKey(ctx context.Context, keyID string) (e
 		return nil, err
 	}
 	if len(key) != ed25519.PrivateKeySize {
+		return nil, ErrUnavailable
+	}
+	canonical := ed25519.NewKeyFromSeed(key[:ed25519.SeedSize])
+	consistent := subtle.ConstantTimeCompare(canonical, key) == 1
+	clear(canonical)
+	if !consistent {
 		return nil, ErrUnavailable
 	}
 	return append(ed25519.PrivateKey(nil), key...), nil
@@ -470,10 +482,40 @@ func validOrderSnapshot(snapshot OrderLedgerSnapshot, window selectorinventory.C
 		uint64(len(snapshot.Sequences)) != snapshot.SequenceEnd-snapshot.SequenceStart+1 {
 		return false
 	}
+	checkpointCount := 0
 	for index, sequence := range snapshot.Sequences {
 		if sequence.Sequence != snapshot.SequenceStart+uint64(index) || sequence.SourceScope != ScopeOrders || !validDigest(sequence.EntrySHA256) {
 			return false
 		}
+		switch sequence.EntryKind {
+		case "":
+			if sequence.CoverageWindow != nil {
+				return false
+			}
+		case selectorinventory.LedgerSequenceKindCoverageCheckpoint:
+			if sequence.CoverageWindow == nil || !validCapture(*sequence.CoverageWindow) ||
+				sequence.CoverageWindow.Start.Location() != time.UTC || sequence.CoverageWindow.End.Location() != time.UTC ||
+				sequence.CoverageWindow.Start.Before(window.Start) || sequence.CoverageWindow.End.After(window.End) ||
+				sequence.EntrySHA256 != selectorinventory.LedgerSequenceCoverageCheckpointDigest(sequence.Sequence, *sequence.CoverageWindow) {
+				return false
+			}
+			checkpointCount++
+		default:
+			return false
+		}
+	}
+	if checkpointCount > 0 {
+		if checkpointCount != len(snapshot.Sequences) {
+			return false
+		}
+		coveredThrough := window.Start
+		for _, sequence := range snapshot.Sequences {
+			if !sequence.CoverageWindow.Start.Equal(coveredThrough) {
+				return false
+			}
+			coveredThrough = sequence.CoverageWindow.End
+		}
+		return coveredThrough.Equal(window.End)
 	}
 	return true
 }

@@ -127,6 +127,16 @@ func TestSigningKeyProviderFuncFailsClosedForNilCallbackErrorAndInvalidKey(t *te
 			}
 		})
 	}
+	t.Run("inconsistent canonical public half", func(t *testing.T) {
+		key := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x5a}, ed25519.SeedSize))
+		key[ed25519.SeedSize] ^= 0xff
+		provider := SigningKeyProviderFunc(func(context.Context, string) (ed25519.PrivateKey, error) {
+			return key, nil
+		})
+		if got, err := provider.PrivateKey(ctx, "collector-key"); !errors.Is(err, ErrUnavailable) || got != nil {
+			t.Fatalf("inconsistent key returned key=%t err=%v, want unavailable and no key", got != nil, err)
+		}
+	})
 }
 
 func TestSigningKeyProviderFuncReturnsIsolatedKeyCopy(t *testing.T) {
@@ -332,6 +342,108 @@ func TestCollectorSignsCanonicalExternalLedgerWithMandatoryScopes(t *testing.T) 
 		if ledgerEvidence.SourceCoverage[index].ScopeID != scope {
 			t.Fatalf("source coverage order = %#v, want canonical order %#v", ledgerEvidence.SourceCoverage, MandatoryScopes())
 		}
+	}
+}
+
+func TestCollectorSignsExactQuietOrderWindowCheckpoint(t *testing.T) {
+	f := newCollectorFixture(t)
+	setQuietOrderWindowCheckpoint(f)
+	raw := f.collect(t)
+	verifier, err := NewVerifier(f.collector.KeyID, f.public)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verified, err := verifier.Verify(context.Background(), raw, f.now, f.hostID, f.bootID)
+	if err != nil {
+		t.Fatalf("verify quiet-window record: %v", err)
+	}
+	var ledger selectorinventory.ExternalLedgerEvidence
+	if err := json.Unmarshal(verified.ExternalLedgerJSON(), &ledger); err != nil {
+		t.Fatalf("decode quiet-window ledger: %v", err)
+	}
+	if ledger.SequenceStart != 42 || ledger.SequenceEnd != 43 || len(ledger.Sequences) != 2 {
+		t.Fatalf("quiet-window sequence bounds/rows = %d..%d/%d, want checkpoint sequences 42..43", ledger.SequenceStart, ledger.SequenceEnd, len(ledger.Sequences))
+	}
+	coveredThrough := f.window.Start
+	for _, checkpoint := range ledger.Sequences {
+		if checkpoint.EntryKind != selectorinventory.LedgerSequenceKindCoverageCheckpoint ||
+			checkpoint.SourceScope != ScopeOrders || checkpoint.CoverageWindow == nil ||
+			!checkpoint.CoverageWindow.Start.Equal(coveredThrough) {
+			t.Fatalf("quiet-window checkpoint = %#v, want contiguous order-scope coverage", checkpoint)
+		}
+		coveredThrough = checkpoint.CoverageWindow.End
+	}
+	if !coveredThrough.Equal(f.window.End) {
+		t.Fatalf("quiet-window checkpoints cover through %s, want %s", coveredThrough, f.window.End)
+	}
+}
+
+func TestCollectorRejectsMalformedQuietOrderWindowCheckpoint(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(*collectorFixture)
+	}{
+		{name: "missing checkpoint", setup: func(f *collectorFixture) { f.orders.snapshot.Sequences = nil }},
+		{name: "coverage starts late", setup: func(f *collectorFixture) {
+			sequence := f.orders.snapshot.Sequences[0]
+			coverage := *sequence.CoverageWindow
+			coverage.Start = coverage.Start.Add(time.Second)
+			sequence.CoverageWindow = &coverage
+			f.orders.snapshot.Sequences[0] = sequence
+		}},
+		{name: "checkpoint digest does not bind interval", setup: func(f *collectorFixture) {
+			first := f.orders.snapshot.Sequences[0]
+			second := f.orders.snapshot.Sequences[1]
+			firstCoverage := *first.CoverageWindow
+			secondCoverage := *second.CoverageWindow
+			boundary := firstCoverage.End.Add(time.Second)
+			firstCoverage.End = boundary
+			secondCoverage.Start = boundary
+			first.CoverageWindow = &firstCoverage
+			second.CoverageWindow = &secondCoverage
+			f.orders.snapshot.Sequences[0] = first
+			f.orders.snapshot.Sequences[1] = second
+		}},
+		{name: "mixed order entry", setup: func(f *collectorFixture) {
+			f.orders.snapshot.Sequences = append(f.orders.snapshot.Sequences, selectorinventory.LedgerSequence{
+				Sequence: f.orders.snapshot.SequenceEnd + 1, SourceScope: ScopeOrders, EntrySHA256: digest("order-entry-after-checkpoint"),
+			})
+			f.orders.snapshot.SequenceEnd++
+		}},
+		{name: "checkpoint digest missing", setup: func(f *collectorFixture) {
+			sequence := f.orders.snapshot.Sequences[0]
+			sequence.EntrySHA256 = ""
+			f.orders.snapshot.Sequences[0] = sequence
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			f := newCollectorFixture(t)
+			setQuietOrderWindowCheckpoint(f)
+			test.setup(f)
+			if _, err := f.collector.Collect(context.Background(), f.request()); err == nil {
+				t.Fatal("collector signed malformed quiet-window order evidence")
+			}
+			if f.retained.calls != 0 {
+				t.Fatal("malformed quiet-window evidence reached retention")
+			}
+		})
+	}
+}
+
+func setQuietOrderWindowCheckpoint(f *collectorFixture) {
+	midpoint := f.window.Start.Add(f.window.End.Sub(f.window.Start) / 2)
+	firstCoverage := selectorinventory.CaptureWindow{Start: f.window.Start, End: midpoint}
+	secondCoverage := selectorinventory.CaptureWindow{Start: midpoint, End: f.window.End}
+	f.orders.snapshot.SequenceStart = 42
+	f.orders.snapshot.SequenceEnd = 43
+	f.orders.snapshot.Sequences = []selectorinventory.LedgerSequence{
+		{Sequence: 42, SourceScope: ScopeOrders,
+			EntrySHA256: selectorinventory.LedgerSequenceCoverageCheckpointDigest(42, firstCoverage),
+			EntryKind:   selectorinventory.LedgerSequenceKindCoverageCheckpoint, CoverageWindow: &firstCoverage},
+		{Sequence: 43, SourceScope: ScopeOrders,
+			EntrySHA256: selectorinventory.LedgerSequenceCoverageCheckpointDigest(43, secondCoverage),
+			EntryKind:   selectorinventory.LedgerSequenceKindCoverageCheckpoint, CoverageWindow: &secondCoverage},
 	}
 }
 

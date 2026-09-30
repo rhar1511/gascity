@@ -22,6 +22,10 @@ const (
 	// ExternalLedgerSchemaVersion identifies canonical external ledger records.
 	ExternalLedgerSchemaVersion = 1
 
+	// LedgerSequenceKindCoverageCheckpoint marks an order-scope sequence entry
+	// that proves an exact interval contained no order attempts.
+	LedgerSequenceKindCoverageCheckpoint = "coverage_checkpoint"
+
 	maxExternalLedgerBytes   = 4 << 20
 	maxExternalLedgerEntries = 100000
 	maxExternalLedgerScopes  = 1024
@@ -33,14 +37,20 @@ const (
 	externalInventoryDomain    = "gascity.selectorinventory.external-writers.v1\n"
 	inflightResolutionDomain   = "gascity.selectorinventory.inflight-resolution.v1\n"
 	joinedEvidenceDomain       = "gascity.selectorinventory.joined-evidence.v1\n"
+	coverageCheckpointDomain   = "gascity.selectorinventory.order-coverage-checkpoint.v1\n"
 )
 
 // LedgerSequence is one retained sequence position. EntrySHA256 identifies
 // the retained canonical entry without copying its payload into this package.
+// CoverageWindow is present only for an order-scope coverage checkpoint; a
+// checkpoint is a sequenced ledger record that proves its exact interval had
+// no order attempts.
 type LedgerSequence struct {
-	Sequence    uint64 `json:"sequence"`
-	SourceScope string `json:"source_scope"`
-	EntrySHA256 string `json:"entry_sha256"`
+	Sequence       uint64         `json:"sequence"`
+	SourceScope    string         `json:"source_scope"`
+	EntrySHA256    string         `json:"entry_sha256"`
+	EntryKind      string         `json:"entry_kind,omitempty"`
+	CoverageWindow *CaptureWindow `json:"coverage_window,omitempty"`
 }
 
 // ExternalSourceCoverage records complete coverage for one configured source
@@ -133,6 +143,33 @@ func CanonicalizeExternalLedger(evidence ExternalLedgerEvidence) (ExternalLedger
 		return ExternalLedgerEvidence{}, nil, errors.New("external ledger exceeds the size limit")
 	}
 	return evidence, encoded, nil
+}
+
+// LedgerSequenceCoverageCheckpointDigest returns the canonical entry digest
+// for a sequenced checkpoint asserting that its exact order-scope interval
+// contained no order attempts. Trusted order-ledger adapters must use this
+// digest for checkpoint rows so the sequence, kind, scope, and interval are
+// bound together.
+func LedgerSequenceCoverageCheckpointDigest(sequence uint64, window CaptureWindow) string {
+	if sequence == 0 || !validCaptureWindow(window) || !canonicalUTC(window.Start) || !canonicalUTC(window.End) {
+		return ""
+	}
+	payload := struct {
+		Sequence       uint64        `json:"sequence"`
+		SourceScope    string        `json:"source_scope"`
+		EntryKind      string        `json:"entry_kind"`
+		CoverageWindow CaptureWindow `json:"coverage_window"`
+	}{
+		Sequence: sequence, SourceScope: "orders", EntryKind: LedgerSequenceKindCoverageCheckpoint, CoverageWindow: window,
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return ""
+	}
+	hash := sha256.New()
+	_, _ = hash.Write([]byte(coverageCheckpointDomain))
+	_, _ = hash.Write(encoded)
+	return hex.EncodeToString(hash.Sum(nil))
 }
 
 // ExternalLedgerExpectation contains trusted controller facts, required
@@ -402,12 +439,44 @@ func validateExternalSequence(evidence ExternalLedgerEvidence) string {
 	for _, scope := range evidence.ExternalScope {
 		allowed[scope] = struct{}{}
 	}
+	checkpointCount := 0
 	for index, entry := range evidence.Sequences {
 		if entry.Sequence != evidence.SequenceStart+uint64(index) || !validSHA256Digest(entry.EntrySHA256) {
 			return "ledger_sequence_gap_or_ambiguity"
 		}
 		if _, exists := allowed[entry.SourceScope]; !exists {
 			return "external_scope_mismatch"
+		}
+		switch entry.EntryKind {
+		case "":
+			if entry.CoverageWindow != nil {
+				return "ledger_sequence_gap_or_ambiguity"
+			}
+		case LedgerSequenceKindCoverageCheckpoint:
+			if entry.SourceScope != "orders" || entry.CoverageWindow == nil || !validCaptureWindow(*entry.CoverageWindow) ||
+				!canonicalUTC(entry.CoverageWindow.Start) || !canonicalUTC(entry.CoverageWindow.End) ||
+				entry.CoverageWindow.Start.Before(evidence.Capture.Start) || entry.CoverageWindow.End.After(evidence.Capture.End) ||
+				entry.EntrySHA256 != LedgerSequenceCoverageCheckpointDigest(entry.Sequence, *entry.CoverageWindow) {
+				return "ledger_sequence_gap_or_ambiguity"
+			}
+			checkpointCount++
+		default:
+			return "ledger_sequence_gap_or_ambiguity"
+		}
+	}
+	if checkpointCount > 0 {
+		if checkpointCount != len(evidence.Sequences) {
+			return "ledger_sequence_gap_or_ambiguity"
+		}
+		coveredThrough := evidence.Capture.Start
+		for _, entry := range evidence.Sequences {
+			if !entry.CoverageWindow.Start.Equal(coveredThrough) {
+				return "ledger_sequence_gap_or_ambiguity"
+			}
+			coveredThrough = entry.CoverageWindow.End
+		}
+		if !coveredThrough.Equal(evidence.Capture.End) {
+			return "ledger_sequence_gap_or_ambiguity"
 		}
 	}
 	return ""
