@@ -339,13 +339,28 @@ func EvaluateCompletionAt(bead beads.Bead, cfg config.LifecycleConfig, scope str
 	if !admission.Requested || !admission.Admitted {
 		return CompletionDecision{Reason: "work item has no verified admission contract"}
 	}
+	return evaluateCompletionReceiptAt(bead, cfg, scope, admission.Receipt, now)
+}
+
+// evaluateCompletionReceiptAt verifies completion against an admission that
+// the caller has already proven through the v2 signature, Q43 attachment, and
+// current policy path. Unlike EvaluateCompletionAt, it does not call
+// EvaluateAdmission, which intentionally holds v2 work before those proofs are
+// supplied.
+func evaluateCompletionReceiptAt(bead beads.Bead, cfg config.LifecycleConfig, scope string, admission AdmissionReceiptV2, now time.Time) CompletionDecision {
 	decision := CompletionDecision{Reason: "completion receipt is missing"}
+	encoded := bead.Metadata[beadmeta.LifecycleCompletionReceiptMetadataKey]
 	var receipt CompletionReceipt
-	if err := decodeStrict(bead.Metadata[beadmeta.LifecycleCompletionReceiptMetadataKey], &receipt); err != nil {
+	if err := decodeStrict(encoded, &receipt); err != nil {
 		decision.Reason = "completion receipt is invalid: " + err.Error()
 		return decision
 	}
-	if receipt.Version != 1 || strings.TrimSpace(receipt.WorkItemID) != bead.ID || strings.TrimSpace(receipt.Scope) == "" || strings.TrimSpace(receipt.Scope) != strings.TrimSpace(scope) {
+	canonical, err := json.Marshal(receipt)
+	if err != nil || !bytes.Equal(canonical, []byte(encoded)) {
+		decision.Reason = "completion receipt is not canonical JSON"
+		return decision
+	}
+	if receipt.Version != 1 || receipt.WorkItemID != bead.ID || receipt.Scope == "" || receipt.Scope != scope {
 		decision.Reason = "completion receipt does not identify this work item, store scope, and version"
 		return decision
 	}
@@ -371,12 +386,12 @@ func EvaluateCompletionAt(bead beads.Bead, cfg config.LifecycleConfig, scope str
 		decision.Reason = "completion receipt is older than the configured freshness window"
 		return decision
 	}
-	digest, err := AdmissionDigestV2(admission.Receipt)
+	digest, err := AdmissionDigestV2(admission)
 	if err != nil || receipt.AdmissionDigest != digest {
 		decision.Reason = "completion receipt does not bind to the current admission contract"
 		return decision
 	}
-	if receipt.AcceptedBy != admission.Receipt.AcceptanceAuthority {
+	if receipt.AcceptedBy != admission.AcceptanceAuthority {
 		decision.Reason = "completion signer differs from the acceptance authority named at admission"
 		return decision
 	}

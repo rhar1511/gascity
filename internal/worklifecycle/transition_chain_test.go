@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -42,7 +43,7 @@ func TestTransitionChainAppliesEveryLifecycleStepWithExactPermitBinding(t *testi
 			return metadataTransition(bead, beadmeta.LifecycleCompletionBudgetMetadataKey, `{"version":1,"reserved":true}`)
 		}},
 		{step: TransitionStepClose, operation: "close-1", patch: func(bead beads.Bead) SourceWorkPatch {
-			patch := metadataTransition(bead, beadmeta.LifecycleCompletionReceiptMetadataKey, `{"version":1,"accepted":true}`)
+			patch := metadataTransition(bead, beadmeta.LifecycleCompletionReceiptMetadataKey, fixture.completionReceiptValue(t, nil))
 			patch.Status = &StringTransition{Expected: "in_progress", Value: "closed"}
 			return patch
 		}},
@@ -89,6 +90,9 @@ func TestTransitionChainAppliesEveryLifecycleStepWithExactPermitBinding(t *testi
 	}
 	if len(fixture.store.patchRequests) != len(steps) {
 		t.Fatalf("patch calls = %d, want %d", len(fixture.store.patchRequests), len(steps))
+	}
+	if fixture.policyResolver.calls != len(steps) || len(fixture.workflowVerifier.calls) != 1 {
+		t.Fatalf("proof calls: policy=%d workflow=%d, want policy for every step and one workflow verification", fixture.policyResolver.calls, len(fixture.workflowVerifier.calls))
 	}
 	if previous.Kind != transitionStepKind(TransitionStepClose) || previous.PriorReceiptID != fixture.store.patchRequests[len(steps)-2].ReceiptID {
 		t.Fatalf("close receipt = %+v, want direct parent from completion budget", previous)
@@ -157,6 +161,144 @@ func TestTransitionChainRequiresExactAttachedAndClaimMetadataSets(t *testing.T) 
 	})
 	if _, err := fixture.chain.Apply(claim); err != nil {
 		t.Fatalf("Apply exact claim identity: %v", err)
+	}
+}
+
+func TestTransitionChainRejectsSkippedLifecyclePredecessors(t *testing.T) {
+	t.Run("claim requires attached materialization", func(t *testing.T) {
+		fixture := newTransitionChainFixture(t)
+		request := TransitionRequest{
+			IssueID: fixture.work.ID, Step: TransitionStepClaimIdentity, OperationID: "claim-1",
+			PriorReceiptID: fixture.attachment.ReceiptID, Evidence: fixture.evidence, Patch: claimIdentityTestPatch(),
+		}
+		if _, err := fixture.chain.Apply(request); !errors.Is(err, ErrTransitionChainInvalid) {
+			t.Fatalf("claim directly from Q43 = %v, want predecessor refusal", err)
+		}
+		if len(fixture.store.patchRequests) != 0 {
+			t.Fatalf("skipped claim reached writer %d times, want zero", len(fixture.store.patchRequests))
+		}
+	})
+
+	t.Run("recovery requires claim or recovery", func(t *testing.T) {
+		fixture := newTransitionChainFixture(t)
+		reservation := applyTestReservation(t, fixture)
+		current, err := fixture.store.DecisionFrontierSourceSnapshot(fixture.work.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request := TransitionRequest{
+			IssueID: fixture.work.ID, Step: TransitionStepRecoveryBudget, OperationID: "recovery-1",
+			PriorReceiptID: reservation.Receipt.ReceiptID, Evidence: fixture.evidence,
+			Patch: metadataTransition(current, beadmeta.LifecycleRecoveryStateMetadataKey, `{"version":1,"attempts":[]}`),
+		}
+		if _, err := fixture.chain.Apply(request); !errors.Is(err, ErrTransitionChainInvalid) {
+			t.Fatalf("recovery directly from reservation = %v, want predecessor refusal", err)
+		}
+	})
+
+	t.Run("completion budget requires claim or recovery", func(t *testing.T) {
+		fixture := newTransitionChainFixture(t)
+		attached := applyTestAttachment(t, fixture, applyTestReservation(t, fixture))
+		request := TransitionRequest{
+			IssueID: fixture.work.ID, Step: TransitionStepCompletionBudget, OperationID: "completion-1",
+			PriorReceiptID: attached.Receipt.ReceiptID, Evidence: fixture.evidence,
+			Patch: metadataTransition(beads.Bead{}, beadmeta.LifecycleCompletionBudgetMetadataKey, `{"version":1,"reserved":true}`),
+		}
+		if _, err := fixture.chain.Apply(request); !errors.Is(err, ErrTransitionChainInvalid) {
+			t.Fatalf("completion budget directly from attachment = %v, want predecessor refusal", err)
+		}
+	})
+
+	t.Run("close requires completion budget", func(t *testing.T) {
+		fixture := newTransitionChainFixture(t)
+		claim := applyTestClaim(t, fixture, applyTestAttachment(t, fixture, applyTestReservation(t, fixture)))
+		request := TransitionRequest{
+			IssueID: fixture.work.ID, Step: TransitionStepClose, OperationID: "close-1",
+			PriorReceiptID: claim.Receipt.ReceiptID, Evidence: fixture.evidence,
+			Patch: func() SourceWorkPatch {
+				patch := metadataTransition(beads.Bead{}, beadmeta.LifecycleCompletionReceiptMetadataKey, `{"version":1,"accepted":true}`)
+				patch.Status = &StringTransition{Expected: "in_progress", Value: "closed"}
+				return patch
+			}(),
+		}
+		if _, err := fixture.chain.Apply(request); !errors.Is(err, ErrTransitionChainInvalid) {
+			t.Fatalf("close directly from claim = %v, want predecessor refusal", err)
+		}
+	})
+}
+
+func TestTransitionChainAllowsRepeatedRecoveryAndExactCompletionReplayOnly(t *testing.T) {
+	claimOnly := newTransitionChainFixture(t)
+	claimOnlyReceipt := applyTestClaim(t, claimOnly, applyTestAttachment(t, claimOnly, applyTestReservation(t, claimOnly)))
+	applyTestCompletionBudget(t, claimOnly, claimOnlyReceipt)
+
+	fixture := newTransitionChainFixture(t)
+	claim := applyTestClaim(t, fixture, applyTestAttachment(t, fixture, applyTestReservation(t, fixture)))
+	current, err := fixture.store.DecisionFrontierSourceSnapshot(fixture.work.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recoveryOne := TransitionRequest{
+		IssueID: fixture.work.ID, Step: TransitionStepRecoveryBudget, OperationID: "recovery-1",
+		PriorReceiptID: claim.Receipt.ReceiptID, Evidence: fixture.evidence,
+		Patch: metadataTransition(current, beadmeta.LifecycleRecoveryStateMetadataKey, `{"version":1,"attempts":[]}`),
+	}
+	recoveryResult, err := fixture.chain.Apply(recoveryOne)
+	if err != nil {
+		t.Fatalf("first recovery budget: %v", err)
+	}
+	current, err = fixture.store.DecisionFrontierSourceSnapshot(fixture.work.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	priorRecovery := current.Metadata[beadmeta.LifecycleRecoveryStateMetadataKey]
+	recoveryTwo := TransitionRequest{
+		IssueID: fixture.work.ID, Step: TransitionStepRecoveryBudget, OperationID: "recovery-2",
+		PriorReceiptID: recoveryResult.Receipt.ReceiptID, Evidence: fixture.evidence,
+		Patch: SourceWorkPatch{Metadata: map[string]MetadataStringPatch{
+			beadmeta.LifecycleRecoveryStateMetadataKey: {Expected: &priorRecovery, Value: `{"version":1,"attempts":["next"]}`},
+		}},
+	}
+	if _, err := fixture.chain.Apply(recoveryTwo); err != nil {
+		t.Fatalf("repeated recovery budget: %v", err)
+	}
+
+	completion := TransitionRequest{
+		IssueID: fixture.work.ID, Step: TransitionStepCompletionBudget, OperationID: "completion-1",
+		PriorReceiptID: recoveryResult.Receipt.ReceiptID, Evidence: fixture.evidence,
+		Patch: metadataTransition(beads.Bead{}, beadmeta.LifecycleCompletionBudgetMetadataKey, `{"version":1,"reserved":true}`),
+	}
+	// Completion may branch from the latest recovery receipt, so use the second
+	// recovery receipt as its direct parent.
+	completion.PriorReceiptID = recoveryTwo.PriorReceiptID
+	completion.PriorReceiptID, err = transitionReceiptID(fixture.work.ID, fixture.policy.SourceScope, TransitionStepRecoveryBudget, "recovery-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	completionResult, err := fixture.chain.Apply(completion)
+	if err != nil {
+		t.Fatalf("completion budget after recovery: %v", err)
+	}
+	// A durable exact receipt remains replayable after acceptance freshness
+	// expires; freshness is required for a new close transition.
+	fixture.now = fixture.now.Add(200 * time.Hour)
+	replay, err := fixture.chain.Apply(completion)
+	if err != nil || !replay.Replayed || replay.Receipt.ReceiptID != completionResult.Receipt.ReceiptID {
+		t.Fatalf("exact completion replay = %+v err %v, want same receipt replay", replay, err)
+	}
+	current, err = fixture.store.DecisionFrontierSourceSnapshot(fixture.work.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	priorCompletion := current.Metadata[beadmeta.LifecycleCompletionBudgetMetadataKey]
+	completionRetry := completion
+	completionRetry.OperationID = "completion-2"
+	completionRetry.PriorReceiptID = completionResult.Receipt.ReceiptID
+	completionRetry.Patch = SourceWorkPatch{Metadata: map[string]MetadataStringPatch{
+		beadmeta.LifecycleCompletionBudgetMetadataKey: {Expected: &priorCompletion, Value: `{"version":1,"reserved":false}`},
+	}}
+	if _, err := fixture.chain.Apply(completionRetry); !errors.Is(err, ErrTransitionChainInvalid) {
+		t.Fatalf("new completion budget step after completion = %v, want predecessor refusal", err)
 	}
 }
 
@@ -281,12 +423,13 @@ func TestTransitionChainRejectsConflictsRacesAndBrokenParentProofs(t *testing.T)
 		}
 	})
 
-	t.Run("changed current policy proof", func(t *testing.T) {
+	t.Run("stale current policy resolver result", func(t *testing.T) {
 		fixture := newTransitionChainFixture(t)
 		request := fixture.firstReservationRequest()
-		request.Evidence.Policy.FormulaSources[0].SHA256 = strings.Repeat("9", 64)
+		fixture.policyResolver.policy.FormulaSources = append([]AdmissionFormulaSourceV2(nil), fixture.policyResolver.policy.FormulaSources...)
+		fixture.policyResolver.policy.FormulaSources[0].SHA256 = strings.Repeat("9", 64)
 		if _, err := fixture.chain.Apply(request); !errors.Is(err, ErrTransitionChainEvidence) {
-			t.Fatalf("changed policy error = %v, want evidence refusal", err)
+			t.Fatalf("stale resolver result = %v, want evidence refusal", err)
 		}
 		if len(fixture.store.patchRequests) != 0 {
 			t.Fatalf("changed policy proof reached writer %d times, want zero", len(fixture.store.patchRequests))
@@ -308,6 +451,114 @@ func TestTransitionChainFailsClosedOnPermitFailureAndUnsupportedCapability(t *te
 	config.PatchWriter = nil
 	if _, err := NewTransitionChain(config); !errors.Is(err, ErrTransitionChainUnavailable) {
 		t.Fatalf("constructor with unsupported patch capability error = %v, want unavailable", err)
+	}
+	for _, mutate := range []struct {
+		name string
+		fn   func(*TransitionChainConfig)
+	}{
+		{name: "policy resolver", fn: func(config *TransitionChainConfig) { config.PolicyResolver = nil }},
+		{name: "workflow evidence verifier", fn: func(config *TransitionChainConfig) { config.WorkflowEvidenceVerifier = nil }},
+		{name: "clock", fn: func(config *TransitionChainConfig) { config.Now = nil }},
+	} {
+		t.Run("missing "+mutate.name, func(t *testing.T) {
+			config := fixture.chainConfig()
+			mutate.fn(&config)
+			if _, err := NewTransitionChain(config); !errors.Is(err, ErrTransitionChainUnavailable) {
+				t.Fatalf("constructor without %s error = %v, want unavailable", mutate.name, err)
+			}
+		})
+	}
+}
+
+func TestTransitionChainRequiresCurrentPolicyAndWorkflowEvidenceCapabilities(t *testing.T) {
+	t.Run("resolver error", func(t *testing.T) {
+		fixture := newTransitionChainFixture(t)
+		fixture.policyResolver.err = errors.New("current policy unavailable")
+		if _, err := fixture.chain.Apply(fixture.firstReservationRequest()); !errors.Is(err, ErrTransitionChainEvidence) {
+			t.Fatalf("Apply with resolver error = %v, want evidence refusal", err)
+		}
+		if len(fixture.store.patchRequests) != 0 {
+			t.Fatalf("resolver failure reached writer %d times, want zero", len(fixture.store.patchRequests))
+		}
+	})
+
+	t.Run("workflow verifier mismatch", func(t *testing.T) {
+		fixture := newTransitionChainFixture(t)
+		reservation := applyTestReservation(t, fixture)
+		current, err := fixture.store.DecisionFrontierSourceSnapshot(fixture.work.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fixture.workflowVerifier.err = errors.New("workflow root missing or lineage differs")
+		request := TransitionRequest{
+			IssueID: fixture.work.ID, Step: TransitionStepAttachedMaterialization, OperationID: "materialize-1",
+			PriorReceiptID: reservation.Receipt.ReceiptID, Evidence: fixture.evidence,
+			Patch: fixture.attachedMaterializationPatch(current),
+		}
+		if _, err := fixture.chain.Apply(request); !errors.Is(err, ErrTransitionChainEvidence) {
+			t.Fatalf("Apply with workflow mismatch = %v, want evidence refusal", err)
+		}
+		if len(fixture.workflowVerifier.calls) != 1 || len(fixture.store.patchRequests) != 1 || len(fixture.permits.requests) != 1 {
+			t.Fatalf("failed workflow proof calls=%d patches=%d permits=%d; want one proof and no attachment write/permit", len(fixture.workflowVerifier.calls), len(fixture.store.patchRequests), len(fixture.permits.requests))
+		}
+	})
+}
+
+func TestTransitionChainRequiresFreshSignedCompletionReceiptForClose(t *testing.T) {
+	_, wrongSigner, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name  string
+		value func(*testing.T, *transitionChainFixture) string
+	}{
+		{name: "fake string", value: func(_ *testing.T, _ *transitionChainFixture) string { return `{"version":1,"accepted":true}` }},
+		{name: "wrong work binding", value: func(t *testing.T, fixture *transitionChainFixture) string {
+			return fixture.completionReceiptValue(t, func(receipt *CompletionReceipt) { receipt.WorkItemID = "other-work" })
+		}},
+		{name: "wrong scope binding", value: func(t *testing.T, fixture *transitionChainFixture) string {
+			return fixture.completionReceiptValue(t, func(receipt *CompletionReceipt) { receipt.Scope = "other-scope" })
+		}},
+		{name: "wrong admission digest", value: func(t *testing.T, fixture *transitionChainFixture) string {
+			return fixture.completionReceiptValue(t, func(receipt *CompletionReceipt) { receipt.AdmissionDigest = strings.Repeat("1", 43) })
+		}},
+		{name: "missing artifact reference", value: func(t *testing.T, fixture *transitionChainFixture) string {
+			return fixture.completionReceiptValue(t, func(receipt *CompletionReceipt) { receipt.DeliverableRef = " " })
+		}},
+		{name: "untrusted signature", value: func(t *testing.T, fixture *transitionChainFixture) string {
+			receipt := CompletionReceipt{
+				Version: 1, WorkItemID: fixture.work.ID, Scope: fixture.policy.SourceScope,
+				AdmissionDigest: fixture.attachment.ReceiptDigest,
+				DeliverableRef:  "artifact://work-1/patch", VerificationRef: "checks://work-1/required",
+				AcceptedBy: "reviewer", AcceptedAt: fixture.now.Format(time.RFC3339Nano),
+			}
+			encoded, err := SignCompletionReceipt(receipt, wrongSigner)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return encoded
+		}},
+		{name: "stale acceptance", value: func(t *testing.T, fixture *transitionChainFixture) string {
+			return fixture.completionReceiptValue(t, func(receipt *CompletionReceipt) {
+				receipt.AcceptedAt = fixture.now.Add(-200 * time.Hour).Format(time.RFC3339Nano)
+			})
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newTransitionChainFixture(t)
+			parent := applyTestCompletionBudget(t, fixture, applyTestClaim(t, fixture, applyTestAttachment(t, fixture, applyTestReservation(t, fixture))))
+			beforeWrites := len(fixture.store.patchRequests)
+			beforePermits := len(fixture.permits.requests)
+			request := closeTestRequest(fixture, parent, tc.value(t, fixture))
+			if _, err := fixture.chain.Apply(request); !errors.Is(err, ErrTransitionChainEvidence) {
+				t.Fatalf("Apply with invalid completion receipt = %v, want evidence refusal", err)
+			}
+			if len(fixture.store.patchRequests) != beforeWrites || len(fixture.permits.requests) != beforePermits {
+				t.Fatalf("invalid close reached patch/permit: writes %d->%d permits %d->%d", beforeWrites, len(fixture.store.patchRequests), beforePermits, len(fixture.permits.requests))
+			}
+		})
 	}
 }
 
@@ -350,6 +601,66 @@ func cloneSourceWorkPatch(patch SourceWorkPatch) SourceWorkPatch {
 	return copy
 }
 
+func applyTestReservation(t *testing.T, fixture *transitionChainFixture) TransitionResult {
+	t.Helper()
+	result, err := fixture.chain.Apply(fixture.firstReservationRequest())
+	if err != nil {
+		t.Fatalf("apply reservation: %v", err)
+	}
+	return result
+}
+
+func applyTestAttachment(t *testing.T, fixture *transitionChainFixture, parent TransitionResult) TransitionResult {
+	t.Helper()
+	current, err := fixture.store.DecisionFrontierSourceSnapshot(fixture.work.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := fixture.chain.Apply(TransitionRequest{
+		IssueID: fixture.work.ID, Step: TransitionStepAttachedMaterialization, OperationID: "materialize-1",
+		PriorReceiptID: parent.Receipt.ReceiptID, Evidence: fixture.evidence,
+		Patch: fixture.attachedMaterializationPatch(current),
+	})
+	if err != nil {
+		t.Fatalf("apply attached materialization: %v", err)
+	}
+	return result
+}
+
+func applyTestClaim(t *testing.T, fixture *transitionChainFixture, parent TransitionResult) TransitionResult {
+	t.Helper()
+	result, err := fixture.chain.Apply(TransitionRequest{
+		IssueID: fixture.work.ID, Step: TransitionStepClaimIdentity, OperationID: "claim-1",
+		PriorReceiptID: parent.Receipt.ReceiptID, Evidence: fixture.evidence, Patch: claimIdentityTestPatch(),
+	})
+	if err != nil {
+		t.Fatalf("apply claim identity: %v", err)
+	}
+	return result
+}
+
+func applyTestCompletionBudget(t *testing.T, fixture *transitionChainFixture, parent TransitionResult) TransitionResult {
+	t.Helper()
+	result, err := fixture.chain.Apply(TransitionRequest{
+		IssueID: fixture.work.ID, Step: TransitionStepCompletionBudget, OperationID: "completion-budget-1",
+		PriorReceiptID: parent.Receipt.ReceiptID, Evidence: fixture.evidence,
+		Patch: metadataTransition(beads.Bead{}, beadmeta.LifecycleCompletionBudgetMetadataKey, `{"version":1,"reserved":true}`),
+	})
+	if err != nil {
+		t.Fatalf("apply completion budget: %v", err)
+	}
+	return result
+}
+
+func closeTestRequest(fixture *transitionChainFixture, parent TransitionResult, completion string) TransitionRequest {
+	patch := metadataTransition(beads.Bead{}, beadmeta.LifecycleCompletionReceiptMetadataKey, completion)
+	patch.Status = &StringTransition{Expected: "in_progress", Value: "closed"}
+	return TransitionRequest{
+		IssueID: fixture.work.ID, Step: TransitionStepClose, OperationID: "close-1",
+		PriorReceiptID: parent.Receipt.ReceiptID, Evidence: fixture.evidence, Patch: patch,
+	}
+}
+
 func (f *transitionChainFixture) firstReservationRequest() TransitionRequest {
 	return TransitionRequest{
 		IssueID: f.work.ID, Step: TransitionStepReservation, OperationID: "reserve-1", PriorReceiptID: f.attachment.ReceiptID,
@@ -383,15 +694,38 @@ func (f *transitionChainFixture) materializationValue(state, workflowID string) 
 	return string(encoded)
 }
 
+func (f *transitionChainFixture) completionReceiptValue(t *testing.T, mutate func(*CompletionReceipt)) string {
+	t.Helper()
+	receipt := CompletionReceipt{
+		Version: 1, WorkItemID: f.work.ID, Scope: f.policy.SourceScope,
+		AdmissionDigest: f.attachment.ReceiptDigest,
+		DeliverableRef:  "artifact://work-1/patch",
+		VerificationRef: "checks://work-1/required",
+		AcceptedBy:      "reviewer", AcceptedAt: f.now.Format(time.RFC3339Nano),
+	}
+	if mutate != nil {
+		mutate(&receipt)
+	}
+	encoded, err := SignCompletionReceipt(receipt, f.acceptancePrivate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
+}
+
 type transitionChainFixture struct {
-	store      *transitionChainTestStore
-	permits    *transitionChainPermitIssuer
-	chain      *TransitionChain
-	work       beads.Bead
-	policy     AdmissionPolicyProjectionV2
-	cfg        config.LifecycleConfig
-	attachment AdmissionAttachmentProof
-	evidence   TransitionEvidence
+	store             *transitionChainTestStore
+	permits           *transitionChainPermitIssuer
+	policyResolver    *transitionChainPolicyResolver
+	workflowVerifier  *transitionChainWorkflowVerifier
+	chain             *TransitionChain
+	work              beads.Bead
+	policy            AdmissionPolicyProjectionV2
+	cfg               config.LifecycleConfig
+	attachment        AdmissionAttachmentProof
+	evidence          TransitionEvidence
+	acceptancePrivate ed25519.PrivateKey
+	now               time.Time
 }
 
 func newTransitionChainFixture(t *testing.T) *transitionChainFixture {
@@ -402,7 +736,7 @@ func newTransitionChainFixture(t *testing.T) *transitionChainFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	acceptancePublic, _, err := ed25519.GenerateKey(rand.Reader)
+	acceptancePublic, acceptancePrivate, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -411,6 +745,8 @@ func newTransitionChainFixture(t *testing.T) *transitionChainFixture {
 		AdmissionV2PrimaryAuthority: "triage",
 		AdmissionV2Authorities:      map[string]string{"triage": base64.StdEncoding.EncodeToString(admissionPublic)},
 		AcceptanceAuthorities:       map[string]string{"reviewer": base64.StdEncoding.EncodeToString(acceptancePublic)},
+		CompletionReceiptMaxAge:     "168h",
+		CompletionClockSkew:         "2m",
 	}
 	policyDigest, err := DigestAdmissionPolicyV2(policy)
 	if err != nil {
@@ -438,8 +774,11 @@ func newTransitionChainFixture(t *testing.T) *transitionChainFixture {
 	}
 	fixture := &transitionChainFixture{
 		store: store, permits: &transitionChainPermitIssuer{token: "permit-token"}, work: work,
-		policy: policy, cfg: cfg, attachment: attachment,
-		evidence: TransitionEvidence{Attachment: attachment, Policy: policy},
+		policy: policy, cfg: cfg, attachment: attachment, acceptancePrivate: acceptancePrivate,
+		now:              time.Date(2026, time.September, 30, 12, 0, 0, 0, time.UTC),
+		evidence:         TransitionEvidence{Attachment: attachment},
+		policyResolver:   &transitionChainPolicyResolver{policy: policy},
+		workflowVerifier: &transitionChainWorkflowVerifier{},
 	}
 	fixture.chain, err = NewTransitionChain(fixture.chainConfig())
 	if err != nil {
@@ -453,7 +792,47 @@ func (f *transitionChainFixture) chainConfig() TransitionChainConfig {
 		Scope: f.policy.SourceScope, Actor: "controller", AdmissionConfig: f.cfg,
 		PatchWriter: f.store, PatchReceiptReader: f.store, SourceReader: f.store,
 		AttachmentReceiptReader: f.store, PermitIssuer: f.permits,
+		PolicyResolver: f.policyResolver, WorkflowEvidenceVerifier: f.workflowVerifier,
+		Now: func() time.Time { return f.now },
 	}
+}
+
+type transitionChainPolicyResolver struct {
+	policy AdmissionPolicyProjectionV2
+	err    error
+	calls  int
+}
+
+func (r *transitionChainPolicyResolver) CurrentAdmissionPolicy(source beads.Bead, admission AdmissionReceiptV2) (AdmissionPolicyProjectionV2, error) {
+	r.calls++
+	if r.err != nil {
+		return AdmissionPolicyProjectionV2{}, r.err
+	}
+	if source.ID != admission.WorkItemID {
+		return AdmissionPolicyProjectionV2{}, errors.New("policy resolver received mismatched source and admission")
+	}
+	return r.policy, nil
+}
+
+type transitionChainWorkflowVerifier struct {
+	calls    []AttachedWorkflowEvidence
+	err      error
+	verified bool
+}
+
+func (v *transitionChainWorkflowVerifier) VerifyAttachedWorkflow(source beads.Bead, admission AdmissionReceiptV2, policy AdmissionPolicyProjectionV2, evidence AttachedWorkflowEvidence) error {
+	v.calls = append(v.calls, evidence)
+	if v.err != nil {
+		return v.err
+	}
+	if source.ID != evidence.SourceID || admission.WorkItemID != evidence.SourceID ||
+		policy.Target.Identity != evidence.Route || policy.Workflow != evidence.Workflow ||
+		policy.MergeStrategy != evidence.MergeStrategy || evidence.WorkflowID == "" ||
+		evidence.SourceStoreRef == "" || evidence.WorkflowStoreRef == "" || evidence.Token == "" {
+		return errors.New("workflow lineage evidence does not match the current admission")
+	}
+	v.verified = true
+	return nil
 }
 
 type transitionChainPermitCall struct {
