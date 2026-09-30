@@ -478,35 +478,39 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 		agentForQuery,
 	)
 	routeTargets := hookClaimRouteTargets(hookClaimPrimaryRouteTarget(&a), resolvedAgentName, strings.TrimSpace(overrides["GC_TEMPLATE"]))
+	resolveLifecycleStore := func(ref string) (beads.Store, error) { return lifecycleStoreForRef(cityPath, cfg, ref) }
+	verifyLifecycleTransitionHead := newLifecycleClaimTransitionHeadVerifier(cityPath, cfg, resolveLifecycleStore)
 	if opts.Claim {
 		claimOpts := hookClaimOptions{
-			Assignee:              assignee,
-			SessionID:             sessionID,
-			IdentityCandidates:    identityCandidates,
-			RouteTargets:          routeTargets,
-			Env:                   queryEnv,
-			DrainAck:              opts.DrainAck,
-			JSON:                  opts.JSON,
-			Lifecycle:             cfg.Lifecycle,
-			LifecycleCity:         cfg,
-			ResolveLifecycleStore: func(ref string) (beads.Store, error) { return lifecycleStoreForRef(cityPath, cfg, ref) },
-			TrustedLifecycleScope: cfg.Lifecycle.AdmissionEnabled && a.WorkQuery == "",
-			CheckFormulaAction:    formulaActionCheck,
-			RuntimeActor:          strings.TrimSpace(os.Getenv("BEADS_ACTOR")),
+			Assignee:                      assignee,
+			SessionID:                     sessionID,
+			IdentityCandidates:            identityCandidates,
+			RouteTargets:                  routeTargets,
+			Env:                           queryEnv,
+			DrainAck:                      opts.DrainAck,
+			JSON:                          opts.JSON,
+			Lifecycle:                     cfg.Lifecycle,
+			LifecycleCity:                 cfg,
+			ResolveLifecycleStore:         resolveLifecycleStore,
+			TrustedLifecycleScope:         cfg.Lifecycle.AdmissionEnabled && a.WorkQuery == "",
+			VerifyLifecycleTransitionHead: verifyLifecycleTransitionHead,
+			CheckFormulaAction:            formulaActionCheck,
+			RuntimeActor:                  strings.TrimSpace(os.Getenv("BEADS_ACTOR")),
 		}
 		return claimHookWork(cityPath, workQuery, workDir, queryEnv, stores, claimOpts, emitQueryFailure, stdout, stderr)
 	}
 	// The discovery door is fenced too: a draining seat must not be handed its
 	// preassigned continuation sibling by the packs' post-close `gc hook`.
 	return doHookDiscovery(workQuery, workDir, false, hookClaimOptions{
-		Env:                   queryEnv,
-		DrainAck:              opts.DrainAck,
-		JSON:                  opts.JSON,
-		Lifecycle:             cfg.Lifecycle,
-		LifecycleCity:         cfg,
-		ResolveLifecycleStore: func(ref string) (beads.Store, error) { return lifecycleStoreForRef(cityPath, cfg, ref) },
-		TrustedLifecycleScope: cfg.Lifecycle.AdmissionEnabled && a.WorkQuery == "",
-		CheckFormulaAction:    discoveryFormulaActionCheck,
+		Env:                           queryEnv,
+		DrainAck:                      opts.DrainAck,
+		JSON:                          opts.JSON,
+		Lifecycle:                     cfg.Lifecycle,
+		LifecycleCity:                 cfg,
+		ResolveLifecycleStore:         resolveLifecycleStore,
+		TrustedLifecycleScope:         cfg.Lifecycle.AdmissionEnabled && a.WorkQuery == "",
+		VerifyLifecycleTransitionHead: verifyLifecycleTransitionHead,
+		CheckFormulaAction:            discoveryFormulaActionCheck,
 	}, hookClaimOps{}, runner, stdout, stderr, hookVisibility{
 		Identities:                         identityCandidates,
 		RouteTargets:                       routeTargets,

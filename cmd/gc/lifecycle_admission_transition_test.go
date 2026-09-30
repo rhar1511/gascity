@@ -317,6 +317,40 @@ func TestLifecycleAdmissionV1ClaimFilterHoldsReservationAndAllowsExactAttachedSt
 		t.Fatalf("exact attached formula-v1 step was not claimable: got=%+v stderr=%s", got, filterErr.String())
 	}
 
+	attachedSource, err := setup.store.Get(setup.source.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validHead := attachedSource.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey]
+	setup.store.mu.Lock()
+	attachedReceipt, found := setup.store.patchReceipts[validHead]
+	setup.store.mu.Unlock()
+	if !found || validHead == "" {
+		t.Fatalf("attached source has no exact Q54 head receipt %q", validHead)
+	}
+	setup.store.mu.Lock()
+	forgedSource := attachedSource
+	forgedSource.Metadata = cloneLifecycleAdmissionMetadata(attachedSource.Metadata)
+	forgedSource.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey] = "forged-q54-head"
+	setup.store.rows[setup.source.ID] = forgedSource
+	setup.store.mu.Unlock()
+	filterErr.Reset()
+	if got := filterHookLifecycleCandidates([]beads.Bead{step}, opts, &filterErr); len(got) != 0 {
+		t.Fatalf("attached v1 descendant remained claimable with a forged Q54 head: %+v", got)
+	}
+
+	setup.store.mu.Lock()
+	setup.store.rows[setup.source.ID] = attachedSource
+	delete(setup.store.patchReceipts, validHead)
+	setup.store.mu.Unlock()
+	filterErr.Reset()
+	if got := filterHookLifecycleCandidates([]beads.Bead{step}, opts, &filterErr); len(got) != 0 {
+		t.Fatalf("attached v1 descendant remained claimable with a missing attached Q54 receipt: %+v", got)
+	}
+	setup.store.mu.Lock()
+	setup.store.patchReceipts[validHead] = attachedReceipt
+	setup.store.mu.Unlock()
+
 	tamperedStep := step
 	tamperedStep.Metadata = cloneLifecycleAdmissionMetadata(step.Metadata)
 	tamperedStep.Metadata[beadmeta.MergeStrategyMetadataKey] = "forged"
@@ -388,15 +422,21 @@ func lifecycleAdmissionV1StepCandidate(t *testing.T, setup lifecycleAdmissionTra
 }
 
 func lifecycleAdmissionV1ClaimOptions(setup lifecycleAdmissionTransitionSetup) hookClaimOptions {
+	resolveStore := func(ref string) (beads.Store, error) {
+		switch ref {
+		case "city:pilot":
+			return setup.cityStore, nil
+		case "rig:pilot":
+			return setup.store, nil
+		default:
+			return nil, fmt.Errorf("unexpected lifecycle store %q", ref)
+		}
+	}
 	return hookClaimOptions{
 		Lifecycle: setup.fixture.cfg.Lifecycle, LifecycleCity: setup.fixture.cfg,
 		TrustedLifecycleScope: true, RouteTargets: []string{setup.receipt.Route},
-		ResolveLifecycleStore: func(ref string) (beads.Store, error) {
-			if ref != "rig:pilot" {
-				return nil, fmt.Errorf("unexpected lifecycle store %q", ref)
-			}
-			return setup.store, nil
-		},
+		ResolveLifecycleStore:         resolveStore,
+		VerifyLifecycleTransitionHead: newLifecycleClaimTransitionHeadVerifier(setup.fixture.cityPath, setup.fixture.cfg, resolveStore),
 	}
 }
 

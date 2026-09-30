@@ -176,6 +176,24 @@ func NewTransitionChain(config TransitionChainConfig) (*TransitionChain, error) 
 	}, nil
 }
 
+// NewTransitionChainVerifier creates a read-only chain verifier. It exposes
+// CurrentHead while leaving the patch writer and protected permit issuer nil,
+// so Apply continues to fail closed. Claim filtering uses this constructor to
+// verify the exact Q43/Q54 source history without acquiring mutation authority.
+func NewTransitionChainVerifier(config TransitionChainConfig) (*TransitionChain, error) {
+	if strings.TrimSpace(config.Scope) == "" || strings.TrimSpace(config.Scope) != config.Scope ||
+		config.PatchReceiptReader == nil || config.SourceReader == nil || config.AttachmentReceiptReader == nil ||
+		config.PolicyResolver == nil || config.WorkflowEvidenceVerifier == nil || config.Now == nil {
+		return nil, ErrTransitionChainUnavailable
+	}
+	return &TransitionChain{
+		scope: config.Scope, admissionConfig: config.AdmissionConfig,
+		patchReceiptReader: config.PatchReceiptReader, sourceReader: config.SourceReader,
+		attachmentReceiptReader: config.AttachmentReceiptReader, policyResolver: config.PolicyResolver,
+		workflowEvidenceVerifier: config.WorkflowEvidenceVerifier, now: config.Now,
+	}, nil
+}
+
 // TransitionEvidence identifies the exact Q43 admission attachment. Current
 // route/formula policy is always recomputed through the injected resolver.
 type TransitionEvidence struct {

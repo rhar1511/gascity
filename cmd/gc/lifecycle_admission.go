@@ -10,6 +10,7 @@ import (
 	"io"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/agentutil"
@@ -521,6 +522,127 @@ func newLifecycleAdmissionTransitionChain(
 		PermitIssuer: permitIssuer, PolicyResolver: policyResolver,
 		WorkflowEvidenceVerifier: workflowVerifier, Now: time.Now,
 	})
+}
+
+type lifecycleClaimTransitionHeadVerifier func(
+	source beads.Bead,
+	sourceStore beads.Store,
+	sourceStoreRef string,
+	attachment worklifecycle.AdmissionAttachmentProof,
+) (worklifecycle.TransitionHead, worklifecycle.AdmissionPolicyProjectionV2, error)
+
+func newLifecycleClaimTransitionHeadVerifier(
+	cityPath string,
+	cfg *config.City,
+	resolveStore func(string) (beads.Store, error),
+) lifecycleClaimTransitionHeadVerifier {
+	var storesOnce sync.Once
+	var cityStore beads.Store
+	var rigStores map[string]beads.Store
+	var legs []classStoreCandidate
+	var storesErr error
+	return func(
+		source beads.Bead,
+		sourceStore beads.Store,
+		sourceStoreRef string,
+		attachment worklifecycle.AdmissionAttachmentProof,
+	) (worklifecycle.TransitionHead, worklifecycle.AdmissionPolicyProjectionV2, error) {
+		if cfg == nil || resolveStore == nil || sourceStore == nil || source.ID == "" || attachment.WorkItemID != source.ID {
+			return worklifecycle.TransitionHead{}, worklifecycle.AdmissionPolicyProjectionV2{}, worklifecycle.ErrTransitionChainUnavailable
+		}
+		storesOnce.Do(func() {
+			cityName := censusCityName(cfg)
+			cityStore, storesErr = resolveStore("city:" + cityName)
+			if storesErr != nil {
+				storesErr = fmt.Errorf("resolve exact lifecycle city store: %w", storesErr)
+				return
+			}
+			if cityStore == nil {
+				storesErr = fmt.Errorf("exact lifecycle city store is unavailable")
+				return
+			}
+			rigStores = make(map[string]beads.Store, len(cfg.Rigs))
+			for _, rig := range cfg.Rigs {
+				ref := "rig:" + strings.TrimSpace(rig.Name)
+				store, err := resolveStore(ref)
+				if err != nil {
+					storesErr = fmt.Errorf("resolve exact lifecycle rig store %s: %w", ref, err)
+					return
+				}
+				if store == nil {
+					storesErr = fmt.Errorf("exact lifecycle rig store %s is unavailable", ref)
+					return
+				}
+				rigStores[strings.TrimSpace(rig.Name)] = store
+			}
+			legs, storesErr = routedWorkStoreCandidates(cityPath, cfg, cityStore, rigStores, nil)
+		})
+		if storesErr != nil {
+			return worklifecycle.TransitionHead{}, worklifecycle.AdmissionPolicyProjectionV2{}, storesErr
+		}
+		var selected classStoreCandidate
+		for _, leg := range legs {
+			if leg.ref == sourceStoreRef {
+				selected = leg
+				break
+			}
+		}
+		if selected.store == nil || sourceStoreRef == "" || attachment.Scope == "" {
+			return worklifecycle.TransitionHead{}, worklifecycle.AdmissionPolicyProjectionV2{}, fmt.Errorf("exact lifecycle source store %q is not in the authoritative routed-work plan", sourceStoreRef)
+		}
+		cityName := censusCityName(cfg)
+		buildCurrentPolicy := func(candidate beads.Bead, admission worklifecycle.AdmissionReceiptV2) (lifecycleAdmissionPolicy, error) {
+			if candidate.ID != source.ID || candidate.Metadata[beadmeta.RootStoreRefMetadataKey] != source.Metadata[beadmeta.RootStoreRefMetadataKey] {
+				return lifecycleAdmissionPolicy{}, fmt.Errorf("source identity changed while resolving current claim policy")
+			}
+			return buildLifecycleAdmissionPolicy(
+				candidate, admission, attachment.Scope, cityName, cityPath, cfg, cityStore, rigStores,
+				selected, legs, sling.SlingRunner(shellSlingRunner), nil,
+			)
+		}
+		receipt, err := worklifecycle.VerifyAdmissionReceiptV2(source, cfg.Lifecycle, attachment.Scope)
+		if err != nil {
+			return worklifecycle.TransitionHead{}, worklifecycle.AdmissionPolicyProjectionV2{}, err
+		}
+		currentPolicy, err := buildCurrentPolicy(source, receipt)
+		if err != nil {
+			return worklifecycle.TransitionHead{}, worklifecycle.AdmissionPolicyProjectionV2{}, err
+		}
+		policyResolver := worklifecycle.CurrentAdmissionPolicyResolverFunc(func(candidate beads.Bead, admission worklifecycle.AdmissionReceiptV2) (worklifecycle.AdmissionPolicyProjectionV2, error) {
+			resolved, resolveErr := buildCurrentPolicy(candidate, admission)
+			if resolveErr != nil {
+				return worklifecycle.AdmissionPolicyProjectionV2{}, resolveErr
+			}
+			return resolved.projection, nil
+		})
+		workflowVerifier := worklifecycle.AttachedWorkflowEvidenceVerifierFunc(func(candidate beads.Bead, admission worklifecycle.AdmissionReceiptV2, projection worklifecycle.AdmissionPolicyProjectionV2, evidence worklifecycle.AttachedWorkflowEvidence) error {
+			resolved, resolveErr := buildCurrentPolicy(candidate, admission)
+			if resolveErr != nil {
+				return resolveErr
+			}
+			return verifyLifecycleAttachedWorkflow(selected.store, resolved.deps.GraphStore, candidate, admission, projection, evidence)
+		})
+		patchReceiptReader, patchOK := beads.RevisionTransitionPatchReceiptReaderFor(selected.store)
+		sourceReader, sourceOK := beads.DecisionFrontierSourceReaderFor(selected.store)
+		attachmentReceiptReader, attachmentOK := beads.ControllerMetadataTransitionReceiptReaderFor(selected.store)
+		if !patchOK || !sourceOK || !attachmentOK || patchReceiptReader == nil || sourceReader == nil || attachmentReceiptReader == nil {
+			return worklifecycle.TransitionHead{}, worklifecycle.AdmissionPolicyProjectionV2{}, worklifecycle.ErrTransitionChainUnavailable
+		}
+		chain, err := worklifecycle.NewTransitionChainVerifier(worklifecycle.TransitionChainConfig{
+			Scope: attachment.Scope, AdmissionConfig: cfg.Lifecycle,
+			PatchReceiptReader: patchReceiptReader, SourceReader: sourceReader,
+			AttachmentReceiptReader: attachmentReceiptReader, PolicyResolver: policyResolver,
+			WorkflowEvidenceVerifier: workflowVerifier, Now: time.Now,
+		})
+		if err != nil {
+			return worklifecycle.TransitionHead{}, worklifecycle.AdmissionPolicyProjectionV2{}, err
+		}
+		head, err := chain.CurrentHead(source.ID, worklifecycle.TransitionEvidence{Attachment: attachment})
+		if err != nil {
+			return worklifecycle.TransitionHead{}, worklifecycle.AdmissionPolicyProjectionV2{}, err
+		}
+		return head, currentPolicy.projection, nil
+	}
 }
 
 func findLifecycleMaterializedWorkflow(store beads.Store, materializationID, pendingLineage, formulaName string) (string, bool, error) {
@@ -1336,9 +1458,19 @@ func lifecycleLineageCurrent(candidate beads.Bead, lineage lifecycleMaterializat
 	source.SourceStoreRef = lineage.SourceStoreRef
 	receipt, err := worklifecycle.VerifyAdmissionReceiptV2(source, opts.Lifecycle, lineage.Scope)
 	digest, digestErr := worklifecycle.AdmissionDigestV2(receipt)
+	if opts.VerifyLifecycleTransitionHead == nil {
+		return false
+	}
+	head, projection, headErr := opts.VerifyLifecycleTransitionHead(source, sourceStore, lineage.SourceStoreRef, attachmentProof)
+	if headErr != nil || head.FromAttachment || head.ToVersion != source.Revision ||
+		head.ReceiptID == "" || head.ReceiptID != source.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey] {
+		return false
+	}
+	transitionDecision := worklifecycle.EvaluateAdmissionWithTransitionProof(source, opts.Lifecycle, lineage.Scope,
+		worklifecycle.AdmissionProofInputsV2{Attachment: &attachmentProof, PolicyProjection: &projection}, head)
 	sourceStatus := strings.ToLower(strings.TrimSpace(source.Status))
 	sourceOwner := strings.TrimSpace(source.Assignee)
-	if err != nil || digestErr != nil || digest != lineage.Contract || receipt.Route != lineage.Route ||
+	if err != nil || digestErr != nil || !transitionDecision.Admitted || digest != lineage.Contract || receipt.Route != lineage.Route ||
 		receipt.Workflow != lineage.Workflow || receipt.MergeStrategy != lineage.MergeStrategy ||
 		!lifecycleAttachedSourceRouteCurrent(opts.LifecycleCity, source, receipt, lineage.Scope) ||
 		(sourceStatus != "open" && sourceStatus != "in_progress") ||

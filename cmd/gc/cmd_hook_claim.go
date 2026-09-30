@@ -174,6 +174,10 @@ type hookClaimOptions struct {
 	// generated default work query. A custom worker-authored query cannot
 	// supply lifecycle store identity.
 	TrustedLifecycleScope bool
+	// VerifyLifecycleTransitionHead builds a read-only verifier from controller
+	// config and exact stores, then validates the source's durable Q43/Q54 head
+	// before a lifecycle descendant is claimable.
+	VerifyLifecycleTransitionHead lifecycleClaimTransitionHeadVerifier
 	// AutoReclaimStaleClaims opts into a scoped stale-lease reclaim attempt
 	// (ga-7rj87d) when a route-matched candidate's only claim blocker is an
 	// existing assignee. Off by default; wired from config.Agent.
