@@ -186,9 +186,36 @@ func reconcileLifecycleAdmissionWithPermitResolver(
 				fmt.Fprintf(stderr, "lifecycle admission: holding %s: v2 admission requires verified attachment and current route-policy proof: %v\n", current.ID, err) //nolint:errcheck
 				continue
 			}
-			admission := worklifecycle.EvaluateAdmissionWithProof(current, cfg.Lifecycle, scope, worklifecycle.AdmissionProofInputsV2{
-				Attachment: &attachmentProof, PolicyProjection: &policy.projection,
+			deps, graphStoreRef := policy.deps, policy.graphStoreRef
+			previous := strings.TrimSpace(current.Metadata[beadmeta.LifecycleMaterializationMetadataKey])
+			policyResolver := worklifecycle.CurrentAdmissionPolicyResolverFunc(func(source beads.Bead, admission worklifecycle.AdmissionReceiptV2) (worklifecycle.AdmissionPolicyProjectionV2, error) {
+				if source.ID != current.ID || source.Metadata[beadmeta.RootStoreRefMetadataKey] != current.Metadata[beadmeta.RootStoreRefMetadataKey] {
+					return worklifecycle.AdmissionPolicyProjectionV2{}, fmt.Errorf("source identity changed while resolving admission policy")
+				}
+				resolved, resolveErr := buildLifecycleAdmissionPolicy(source, admission, scope, cityName, cityPath, cfg, store, rigStores, leg, legs, runner, authority)
+				if resolveErr != nil {
+					return worklifecycle.AdmissionPolicyProjectionV2{}, resolveErr
+				}
+				return resolved.projection, nil
 			})
+			workflowVerifier := worklifecycle.AttachedWorkflowEvidenceVerifierFunc(func(source beads.Bead, admission worklifecycle.AdmissionReceiptV2, currentPolicy worklifecycle.AdmissionPolicyProjectionV2, evidence worklifecycle.AttachedWorkflowEvidence) error {
+				return verifyLifecycleAttachedWorkflow(leg.store, deps.GraphStore, source, admission, currentPolicy, evidence)
+			})
+			chain, err := newLifecycleAdmissionTransitionChain(leg.store, cfg.Lifecycle, scope, permitPolicy.Actor, permitIssuer, policyResolver, workflowVerifier)
+			if err != nil {
+				fmt.Fprintf(stderr, "lifecycle admission: %s transition chain unavailable: %v; workflow materialization held\n", current.ID, err) //nolint:errcheck
+				continue
+			}
+			evidence := worklifecycle.TransitionEvidence{Attachment: attachmentProof}
+			head, err := chain.CurrentHead(current.ID, evidence)
+			if err != nil || previous == "" && (!head.FromAttachment || head.ReceiptID != attachmentProof.ReceiptID || head.ToVersion != current.Revision) ||
+				previous != "" && head.FromAttachment {
+				fmt.Fprintf(stderr, "lifecycle admission: %s current transition head is invalid: %v; workflow materialization held\n", current.ID, err) //nolint:errcheck
+				continue
+			}
+			admission := worklifecycle.EvaluateAdmissionWithTransitionProof(current, cfg.Lifecycle, scope, worklifecycle.AdmissionProofInputsV2{
+				Attachment: &attachmentProof, PolicyProjection: &policy.projection,
+			}, head)
 			if !admission.Admitted {
 				fmt.Fprintf(stderr, "lifecycle admission: holding %s: %s\n", current.ID, admission.Reason) //nolint:errcheck
 				continue
@@ -196,7 +223,6 @@ func reconcileLifecycleAdmissionWithPermitResolver(
 			receipt = admission.Receipt
 			route = receipt.Route
 			agentCfg := &policy.target
-			deps, graphStoreRef := policy.deps, policy.graphStoreRef
 			if agentCfg.Suspended || !agentCfg.SupportsGenericEphemeralSessions() || isCustomSlingQuery(*agentCfg) {
 				fmt.Fprintf(stderr, "lifecycle admission: %s exact route %q is no longer eligible in current config\n", current.ID, route) //nolint:errcheck
 				continue
@@ -225,7 +251,6 @@ func reconcileLifecycleAdmissionWithPermitResolver(
 				fmt.Fprintf(stderr, "lifecycle admission: encoding materialization reservation for %s: %v\n", current.ID, err) //nolint:errcheck
 				continue
 			}
-			previous := strings.TrimSpace(current.Metadata[beadmeta.LifecycleMaterializationMetadataKey])
 			attachedReplayValue := ""
 			if alreadyAttached {
 				attachedReplayValue, err = encodeLifecycleMaterialization(lifecycleMaterialization{
@@ -246,31 +271,6 @@ func reconcileLifecycleAdmissionWithPermitResolver(
 				}
 			} else if previous != "" && previous != reservationValue {
 				fmt.Fprintf(stderr, "lifecycle admission: %s has a nonmatching prior materialization reservation; holding for review\n", current.ID) //nolint:errcheck
-				continue
-			}
-			policyResolver := worklifecycle.CurrentAdmissionPolicyResolverFunc(func(source beads.Bead, admission worklifecycle.AdmissionReceiptV2) (worklifecycle.AdmissionPolicyProjectionV2, error) {
-				if source.ID != current.ID || source.Metadata[beadmeta.RootStoreRefMetadataKey] != current.Metadata[beadmeta.RootStoreRefMetadataKey] {
-					return worklifecycle.AdmissionPolicyProjectionV2{}, fmt.Errorf("source identity changed while resolving admission policy")
-				}
-				resolved, resolveErr := buildLifecycleAdmissionPolicy(source, admission, scope, cityName, cityPath, cfg, store, rigStores, leg, legs, runner, authority)
-				if resolveErr != nil {
-					return worklifecycle.AdmissionPolicyProjectionV2{}, resolveErr
-				}
-				return resolved.projection, nil
-			})
-			workflowVerifier := worklifecycle.AttachedWorkflowEvidenceVerifierFunc(func(source beads.Bead, admission worklifecycle.AdmissionReceiptV2, currentPolicy worklifecycle.AdmissionPolicyProjectionV2, evidence worklifecycle.AttachedWorkflowEvidence) error {
-				return verifyLifecycleAttachedWorkflow(leg.store, deps.GraphStore, source, admission, currentPolicy, evidence)
-			})
-			chain, err := newLifecycleAdmissionTransitionChain(leg.store, cfg.Lifecycle, scope, permitPolicy.Actor, permitIssuer, policyResolver, workflowVerifier)
-			if err != nil {
-				fmt.Fprintf(stderr, "lifecycle admission: %s transition chain unavailable: %v; workflow materialization held\n", current.ID, err) //nolint:errcheck
-				continue
-			}
-			evidence := worklifecycle.TransitionEvidence{Attachment: attachmentProof}
-			head, err := chain.CurrentHead(current.ID, evidence)
-			if err != nil || previous == "" && (!head.FromAttachment || head.ReceiptID != attachmentProof.ReceiptID || head.ToVersion != attachmentProof.ToRevision) ||
-				previous != "" && head.FromAttachment {
-				fmt.Fprintf(stderr, "lifecycle admission: %s current transition head is invalid: %v; workflow materialization held\n", current.ID, err) //nolint:errcheck
 				continue
 			}
 			reservationResult, err := chain.Apply(worklifecycle.TransitionRequest{
@@ -1131,33 +1131,45 @@ func lifecycleLineageAdmissionMatches(cfg *config.City, bead beads.Bead, marker 
 		strings.TrimSpace(marker.WorkflowStoreRef) == "" ||
 		(marker.State == "attached" && strings.TrimSpace(marker.WorkflowID) == "") ||
 		(marker.State == "lineage_pending" && strings.TrimSpace(marker.WorkflowID) != "") ||
-		strings.TrimSpace(marker.AdmissionReceipt) == "" ||
-		strings.TrimSpace(bead.Metadata[beadmeta.RootStoreRefMetadataKey]) != marker.SourceStoreRef {
+		strings.TrimSpace(marker.AdmissionReceipt) == "" {
+		return false
+	}
+	if rootStoreRef := strings.TrimSpace(bead.Metadata[beadmeta.RootStoreRefMetadataKey]); rootStoreRef != "" && rootStoreRef != marker.SourceStoreRef {
 		return false
 	}
 	workflowID := strings.TrimSpace(marker.WorkflowID)
-	if workflowID == "" && sourceworkflow.IsWorkflowRoot(bead) {
+	rootCandidate := sourceworkflow.IsWorkflowRoot(bead) || lifecycleFormulaV1Root(bead, marker.Workflow)
+	if sourceworkflow.IsWorkflowRoot(bead) && strings.EqualFold(strings.TrimSpace(bead.Metadata[beadmeta.FormulaContractMetadataKey]), beadmeta.FormulaContractGraphV2) {
+		return false
+	}
+	if workflowID == "" && rootCandidate {
 		workflowID = bead.ID
 	} else if workflowID == "" {
 		workflowID = strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
 	}
-	if workflowID == "" {
+	if workflowID == "" && (strings.TrimSpace(bead.ParentID) == "" || marker.State != "lineage_pending") {
 		return false
 	}
-	if bead.ID == workflowID {
-		if !sourceworkflow.IsWorkflowRoot(bead) || strings.TrimSpace(bead.Metadata[beadmeta.FormulaNameMetadataKey]) != marker.Workflow {
+	if rootCandidate || bead.ID == workflowID {
+		if !rootCandidate || strings.TrimSpace(bead.Metadata[beadmeta.FormulaNameMetadataKey]) != marker.Workflow {
 			return false
 		}
-		if !lifecycleRoutesMatch(cfg, bead, marker.Route) {
+		if routes := lifecycleRouteCandidates(bead); len(routes) != 0 && !lifecycleRoutesMatch(cfg, bead, marker.Route) {
 			return false
 		}
-	} else if rootID := strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey]); rootID != marker.WorkflowID {
-		return false
+	} else {
+		rootID := strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
+		if rootID != "" && workflowID != "" && rootID != workflowID {
+			return false
+		}
+		if rootID == "" && strings.TrimSpace(bead.ParentID) == "" {
+			return false
+		}
 	}
 	if strings.TrimSpace(bead.Metadata[beadmeta.MergeStrategyMetadataKey]) != marker.MergeStrategy {
 		return false
 	}
-	if !lifecycleRoutesMatch(cfg, bead, marker.Route) {
+	if bead.ID != workflowID && !lifecycleRoutesMatch(cfg, bead, marker.Route) {
 		return false
 	}
 	receiptBead := beads.Bead{
@@ -1167,11 +1179,18 @@ func lifecycleLineageAdmissionMatches(cfg *config.City, bead beads.Bead, marker 
 			beadmeta.LifecycleAdmissionReceiptV2MetadataKey: marker.AdmissionReceipt,
 		},
 	}
-	decision := worklifecycle.EvaluateAdmission(receiptBead, cfg.Lifecycle, marker.Scope)
-	digest, err := worklifecycle.AdmissionDigestV2(decision.Receipt)
-	return err == nil && decision.Admitted && digest == marker.Contract &&
-		decision.Receipt.Route == marker.Route && decision.Receipt.Workflow == marker.Workflow &&
-		decision.Receipt.MergeStrategy == marker.MergeStrategy
+	receipt, err := worklifecycle.VerifyAdmissionReceiptV2(receiptBead, cfg.Lifecycle, marker.Scope)
+	digest, digestErr := worklifecycle.AdmissionDigestV2(receipt)
+	return err == nil && digestErr == nil && digest == marker.Contract &&
+		receipt.Route == marker.Route && receipt.Workflow == marker.Workflow &&
+		receipt.MergeStrategy == marker.MergeStrategy
+}
+
+func lifecycleFormulaV1Root(bead beads.Bead, formulaName string) bool {
+	return strings.EqualFold(strings.TrimSpace(bead.Type), "molecule") &&
+		!strings.EqualFold(strings.TrimSpace(bead.Metadata[beadmeta.FormulaContractMetadataKey]), beadmeta.FormulaContractGraphV2) &&
+		strings.TrimSpace(bead.Metadata[beadmeta.FormulaNameMetadataKey]) == formulaName &&
+		strings.TrimSpace(bead.ParentID) == ""
 }
 
 func lifecycleAdmissionRequested(bead beads.Bead, cfg *config.City) bool {
@@ -1291,52 +1310,8 @@ func lifecycleLineageCurrent(candidate beads.Bead, lineage lifecycleMaterializat
 		(lineage.State != "attached" && lineage.State != "lineage_pending") {
 		return false
 	}
-	workflowID := strings.TrimSpace(lineage.WorkflowID)
-	if lineage.State == "lineage_pending" {
-		if workflowID != "" {
-			return false
-		}
-		if sourceworkflow.IsWorkflowRoot(candidate) {
-			workflowID = candidate.ID
-		} else {
-			workflowID = strings.TrimSpace(candidate.Metadata[beadmeta.RootBeadIDMetadataKey])
-		}
-	}
-	if workflowID == "" {
-		return false
-	}
 	workflowStore, err := opts.ResolveLifecycleStore(lineage.WorkflowStoreRef)
 	if err != nil || workflowStore == nil {
-		return false
-	}
-	root, err := workflowStore.Get(workflowID)
-	if err != nil || root.ID != workflowID || !sourceworkflow.IsWorkflowRoot(root) ||
-		strings.TrimSpace(root.Metadata[beadmeta.FormulaContractMetadataKey]) != beadmeta.FormulaContractGraphV2 ||
-		strings.TrimSpace(root.Metadata[beadmeta.FormulaNameMetadataKey]) != lineage.Workflow ||
-		strings.TrimSpace(root.Metadata[beadmeta.RootStoreRefMetadataKey]) != lineage.SourceStoreRef ||
-		strings.EqualFold(strings.TrimSpace(root.Status), "closed") {
-		return false
-	}
-	rootLineage, ok := lifecycleMaterializationFor(root)
-	if !ok || !sameLifecycleLineage(rootLineage, lineage) || rootLineage.State != lineage.State ||
-		root.Metadata[beadmeta.IdempotencyKeyMetadataKey] != lifecycleMaterializationID(lineage.SourceID, lineage.Scope, lineage.Contract) {
-		return false
-	}
-	if candidate.ID != workflowID && strings.TrimSpace(candidate.Metadata[beadmeta.RootBeadIDMetadataKey]) != workflowID {
-		return false
-	}
-	candidateStore, err := opts.ResolveLifecycleStore(candidate.SourceStoreRef)
-	if err != nil || candidateStore == nil {
-		return false
-	}
-	currentCandidate, err := candidateStore.Get(candidate.ID)
-	if err != nil || currentCandidate.ID != candidate.ID {
-		return false
-	}
-	currentLineage, ok := lifecycleMaterializationFor(currentCandidate)
-	if !ok || currentLineage.State != lineage.State || !sameLifecycleLineage(currentLineage, lineage) ||
-		currentCandidate.Metadata[beadmeta.RootStoreRefMetadataKey] != lineage.SourceStoreRef ||
-		lifecycleRowHeld(currentCandidate) || beads.IsDeferred(currentCandidate, time.Now()) {
 		return false
 	}
 	sourceStore, err := opts.ResolveLifecycleStore(lineage.SourceStoreRef)
@@ -1347,32 +1322,138 @@ func lifecycleLineageCurrent(candidate beads.Bead, lineage lifecycleMaterializat
 	if err != nil {
 		return false
 	}
+	attachmentAdapter, err := worklifecycle.NewAdmissionAttachmentAdapter(sourceStore)
+	if err != nil {
+		return false
+	}
+	verifiedSource, attachmentProof, err := attachmentAdapter.VerifyForTransition(lineage.SourceID, opts.Lifecycle, lineage.Scope)
+	if err != nil || verifiedSource.ID != source.ID || verifiedSource.Revision != source.Revision ||
+		verifiedSource.Metadata[beadmeta.LifecycleAdmissionReceiptV2MetadataKey] != source.Metadata[beadmeta.LifecycleAdmissionReceiptV2MetadataKey] ||
+		attachmentProof.Scope != lineage.Scope || attachmentProof.WorkItemID != lineage.SourceID {
+		return false
+	}
 	source.LifecycleScope = lineage.Scope
 	source.SourceStoreRef = lineage.SourceStoreRef
-	decision := worklifecycle.EvaluateAdmission(source, opts.Lifecycle, lineage.Scope)
-	digest, err := worklifecycle.AdmissionDigestV2(decision.Receipt)
+	receipt, err := worklifecycle.VerifyAdmissionReceiptV2(source, opts.Lifecycle, lineage.Scope)
+	digest, digestErr := worklifecycle.AdmissionDigestV2(receipt)
 	sourceStatus := strings.ToLower(strings.TrimSpace(source.Status))
 	sourceOwner := strings.TrimSpace(source.Assignee)
-	if err != nil || !decision.Admitted || digest != lineage.Contract ||
-		!lifecycleAdmissionRouteMatches(opts.LifecycleCity, source, lineage.Scope) ||
+	if err != nil || digestErr != nil || digest != lineage.Contract || receipt.Route != lineage.Route ||
+		receipt.Workflow != lineage.Workflow || receipt.MergeStrategy != lineage.MergeStrategy ||
+		!lifecycleAttachedSourceRouteCurrent(opts.LifecycleCity, source, receipt, lineage.Scope) ||
 		(sourceStatus != "open" && sourceStatus != "in_progress") ||
 		(sourceOwner != "" && !hookClaimHasIdentity(sourceOwner, opts.IdentityCandidates)) ||
 		beads.IsDeferred(source, time.Now()) || lifecycleRowHeld(source) {
 		return false
 	}
 	attached, ok := lifecycleMaterializationFor(source)
-	if !ok || attached.State != "attached" || !sameLifecycleLineage(attached, lineage) || attached.WorkflowID != workflowID {
+	if !ok || attached.State != "attached" || !sameLifecycleLineage(attached, lineage) || attached.WorkflowID == "" ||
+		source.Metadata[beadmeta.RoutedToMetadataKey] != lineage.Route ||
+		source.Metadata[beadmeta.MoleculeIDMetadataKey] != attached.WorkflowID ||
+		source.Metadata[beadmeta.MergeStrategyMetadataKey] != lineage.MergeStrategy ||
+		source.Metadata[beadmeta.WorkflowIDMetadataKey] != "" || source.Metadata[beadmeta.LegacyWorkflowIDMetadataKey] != "" {
 		return false
 	}
-	inputConvoyID := strings.TrimSpace(root.Metadata[beadmeta.InputConvoyIDMetadataKey])
-	if inputConvoyID == "" {
+	workflowID := attached.WorkflowID
+	if lineage.State == "attached" && lineage.WorkflowID != workflowID || lineage.State == "lineage_pending" && lineage.WorkflowID != "" {
 		return false
 	}
-	members, err := convoycore.Members(sourceStore, inputConvoyID, false)
-	if err != nil || !slices.ContainsFunc(members, func(member beads.Bead) bool { return member.ID == lineage.SourceID }) {
+	expectedLineageValue := lifecycleLineageValueForWorkflow(lineage, attached, workflowID)
+	if expectedLineageValue == "" {
+		return false
+	}
+	root, err := workflowStore.Get(workflowID)
+	if err != nil || root.ID != workflowID || !lifecycleFormulaV1Root(root, lineage.Workflow) ||
+		strings.EqualFold(strings.TrimSpace(root.Metadata[beadmeta.FormulaContractMetadataKey]), beadmeta.FormulaContractGraphV2) ||
+		strings.TrimSpace(root.Metadata[beadmeta.FormulaNameMetadataKey]) != lineage.Workflow ||
+		strings.TrimSpace(root.Metadata[beadmeta.MergeStrategyMetadataKey]) != lineage.MergeStrategy ||
+		root.Metadata[beadmeta.IdempotencyKeyMetadataKey] != lifecycleMaterializationID(lineage.SourceID, lineage.Scope, lineage.Contract) ||
+		root.Metadata[beadmeta.LifecycleMaterializationMetadataKey] != expectedLineageValue ||
+		strings.EqualFold(strings.TrimSpace(root.Status), "closed") || root.Metadata[beadmeta.FailureReasonMetadataKey] != "" ||
+		root.Metadata["molecule_failed"] != "" {
+		return false
+	}
+	if rootStoreRef := strings.TrimSpace(root.Metadata[beadmeta.RootStoreRefMetadataKey]); rootStoreRef != "" && rootStoreRef != lineage.SourceStoreRef {
+		return false
+	}
+	formulaHash := strings.TrimSpace(root.Metadata[beadmeta.FormulaHashMetadataKey])
+	decodedHash, decodeErr := hex.DecodeString(formulaHash)
+	if decodeErr != nil || len(decodedHash) != sha256.Size {
+		return false
+	}
+	currentCandidate, err := workflowStore.Get(candidate.ID)
+	if err != nil || currentCandidate.ID != candidate.ID ||
+		currentCandidate.Metadata[beadmeta.LifecycleMaterializationMetadataKey] != expectedLineageValue ||
+		strings.TrimSpace(currentCandidate.Metadata[beadmeta.MergeStrategyMetadataKey]) != lineage.MergeStrategy ||
+		lifecycleRowHeld(currentCandidate) || beads.IsDeferred(currentCandidate, time.Now()) {
+		return false
+	}
+	if rootStoreRef := strings.TrimSpace(currentCandidate.Metadata[beadmeta.RootStoreRefMetadataKey]); rootStoreRef != "" && rootStoreRef != lineage.SourceStoreRef {
+		return false
+	}
+	if candidate.ID != workflowID {
+		if rootID := strings.TrimSpace(currentCandidate.Metadata[beadmeta.RootBeadIDMetadataKey]); rootID != "" {
+			return rootID == workflowID
+		}
+		parentID := strings.TrimSpace(currentCandidate.ParentID)
+		seen := map[string]struct{}{currentCandidate.ID: {}}
+		for hops := 0; parentID != "" && hops < 256; hops++ {
+			if parentID == workflowID {
+				return true
+			}
+			if _, duplicate := seen[parentID]; duplicate {
+				return false
+			}
+			seen[parentID] = struct{}{}
+			parent, getErr := workflowStore.Get(parentID)
+			if getErr != nil || parent.Metadata[beadmeta.LifecycleMaterializationMetadataKey] != expectedLineageValue {
+				return false
+			}
+			parentID = strings.TrimSpace(parent.ParentID)
+		}
 		return false
 	}
 	return true
+}
+
+func lifecycleAttachedSourceRouteCurrent(cfg *config.City, source beads.Bead, receipt worklifecycle.AdmissionReceiptV2, scope string) bool {
+	if cfg == nil || !cfg.Lifecycle.AdmissionEnabled || receipt.Scope != scope || receipt.WorkItemID != source.ID {
+		return false
+	}
+	marker, ok := lifecycleMaterializationFor(source)
+	if !ok || marker.State != "attached" || marker.Scope != scope || marker.Route != receipt.Route ||
+		marker.Workflow != receipt.Workflow || marker.MergeStrategy != receipt.MergeStrategy || marker.WorkflowID == "" {
+		return false
+	}
+	digest, err := worklifecycle.AdmissionDigestV2(receipt)
+	if err != nil || digest != marker.Contract || source.Metadata[beadmeta.RoutedToMetadataKey] != receipt.Route ||
+		source.Metadata[beadmeta.MoleculeIDMetadataKey] != marker.WorkflowID ||
+		source.Metadata[beadmeta.WorkflowIDMetadataKey] != "" || source.Metadata[beadmeta.LegacyWorkflowIDMetadataKey] != "" ||
+		source.Metadata[beadmeta.MergeStrategyMetadataKey] != receipt.MergeStrategy {
+		return false
+	}
+	permitted := agentutil.NormalizePoolRouteTarget(cfg, receipt.Route)
+	agentCfg := findAgentByTemplate(cfg, permitted)
+	return agentCfg != nil && !agentCfg.Suspended && agentCfg.SupportsGenericEphemeralSessions() &&
+		!isCustomSlingQuery(*agentCfg) && strings.TrimSpace(agentCfg.EffectiveDefaultSlingFormula()) == receipt.Workflow &&
+		lifecycleRoutesMatch(cfg, source, permitted)
+}
+
+func lifecycleLineageValueForWorkflow(lineage, attached lifecycleMaterialization, workflowID string) string {
+	marker := lifecycleMaterialization{
+		Version: 1, State: lineage.State, Scope: attached.Scope, Contract: attached.Contract,
+		Route: attached.Route, Workflow: attached.Workflow, MergeStrategy: attached.MergeStrategy,
+		Token: attached.Token, SourceID: attached.SourceID, SourceStoreRef: attached.SourceStoreRef,
+		WorkflowStoreRef: attached.WorkflowStoreRef, AdmissionReceipt: attached.AdmissionReceipt,
+	}
+	if lineage.State == "attached" {
+		marker.WorkflowID = workflowID
+	}
+	encoded, err := encodeLifecycleMaterialization(marker)
+	if err != nil {
+		return ""
+	}
+	return encoded
 }
 
 func sameLifecycleLineage(a, b lifecycleMaterialization) bool {

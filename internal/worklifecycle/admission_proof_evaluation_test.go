@@ -1,6 +1,7 @@
 package worklifecycle
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -93,6 +94,97 @@ func TestEvaluateAdmissionWithProofRequiresCurrentAttachmentAndPolicy(t *testing
 		got := EvaluateAdmission(bead, cfg, inputs.PolicyProjection.SourceScope)
 		if !got.Requested || got.Admitted || !strings.Contains(got.Reason, "attachment and current route-policy proof") {
 			t.Fatalf("EvaluateAdmission() = %+v, want default fail-closed hold", got)
+		}
+	})
+}
+
+func TestEvaluateAdmissionWithTransitionProofRequiresVerifiedQ54Head(t *testing.T) {
+	bead, cfg, inputs := proofAwareAdmissionFixture(t)
+	bead.Revision++
+	receipt, err := VerifyAdmissionReceiptV2(bead, cfg, inputs.PolicyProjection.SourceScope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, err := AdmissionDigestV2(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded := bead.Metadata[beadmeta.LifecycleAdmissionReceiptV2MetadataKey]
+	marker := transitionMaterialization{
+		Version: 1, State: "reserved", Scope: receipt.Scope, Contract: digest, Route: receipt.Route,
+		Workflow: receipt.Workflow, MergeStrategy: receipt.MergeStrategy, Token: "reservation-token",
+		SourceID: bead.ID, SourceStoreRef: "rig:pilot", WorkflowStoreRef: "rig:pilot", AdmissionReceipt: encoded,
+	}
+	markerBytes, err := json.Marshal(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bead.Metadata[beadmeta.LifecycleMaterializationMetadataKey] = string(markerBytes)
+	verifiedHead := TransitionHead{ReceiptID: "q54-reservation", ToVersion: bead.Revision, Step: TransitionStepReservation, verified: true}
+
+	t.Run("verified reservation head accepts historical Q43", func(t *testing.T) {
+		got := EvaluateAdmissionWithTransitionProof(bead, cfg, receipt.Scope, inputs, verifiedHead)
+		if !got.Requested || !got.Admitted {
+			t.Fatalf("transition-aware decision = %+v, want exact verified reservation admitted", got)
+		}
+	})
+
+	t.Run("ordinary proof gate still rejects historical Q43", func(t *testing.T) {
+		got := EvaluateAdmissionWithProof(bead, cfg, receipt.Scope, inputs)
+		if !got.Requested || got.Admitted {
+			t.Fatalf("ordinary proof gate decision = %+v, want fail-closed hold", got)
+		}
+	})
+
+	for _, tc := range []struct {
+		name string
+		head TransitionHead
+	}{
+		{name: "unverified head", head: TransitionHead{ReceiptID: verifiedHead.ReceiptID, ToVersion: bead.Revision, Step: verifiedHead.Step}},
+		{name: "wrong step", head: TransitionHead{ReceiptID: verifiedHead.ReceiptID, ToVersion: bead.Revision, Step: TransitionStepClaimIdentity, verified: true}},
+		{name: "stale revision", head: TransitionHead{ReceiptID: verifiedHead.ReceiptID, ToVersion: bead.Revision - 1, Step: verifiedHead.Step, verified: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := EvaluateAdmissionWithTransitionProof(bead, cfg, receipt.Scope, inputs, tc.head)
+			if !got.Requested || got.Admitted {
+				t.Fatalf("transition-aware decision = %+v, want fail-closed hold", got)
+			}
+		})
+	}
+
+	t.Run("verified post-attachment Q54 head retains admission", func(t *testing.T) {
+		attached := bead
+		attached.Metadata = cloneStringMap(bead.Metadata)
+		marker.State = "attached"
+		marker.WorkflowID = "workflow-1"
+		encodedMarker, err := json.Marshal(marker)
+		if err != nil {
+			t.Fatal(err)
+		}
+		attached.Metadata[beadmeta.LifecycleMaterializationMetadataKey] = string(encodedMarker)
+		attached.Metadata[beadmeta.RoutedToMetadataKey] = receipt.Route
+		attached.Metadata[beadmeta.MoleculeIDMetadataKey] = marker.WorkflowID
+		attached.Metadata[beadmeta.MergeStrategyMetadataKey] = receipt.MergeStrategy
+		laterHead := TransitionHead{ReceiptID: "q54-claim", ToVersion: attached.Revision, Step: TransitionStepClaimIdentity, verified: true}
+		got := EvaluateAdmissionWithTransitionProof(attached, cfg, receipt.Scope, inputs, laterHead)
+		if !got.Requested || !got.Admitted {
+			t.Fatalf("transition-aware decision = %+v, want attached source with a later verified Q54 head admitted", got)
+		}
+	})
+
+	t.Run("reservation marker must match the verified step", func(t *testing.T) {
+		changed := bead
+		changed.Metadata = cloneStringMap(bead.Metadata)
+		marker.State = "attached"
+		marker.WorkflowID = "workflow-1"
+		changedMarker, err := json.Marshal(marker)
+		if err != nil {
+			t.Fatal(err)
+		}
+		changed.Metadata[beadmeta.LifecycleMaterializationMetadataKey] = string(changedMarker)
+		got := EvaluateAdmissionWithTransitionProof(changed, cfg, receipt.Scope, inputs, verifiedHead)
+		if !got.Requested || got.Admitted {
+			t.Fatalf("mismatched marker/head decision = %+v, want fail-closed hold", got)
 		}
 	})
 }

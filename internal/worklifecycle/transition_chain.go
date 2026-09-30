@@ -277,6 +277,12 @@ type TransitionHead struct {
 	ToVersion int64
 	// FromAttachment marks the Q43 receipt as the initial head before reservation.
 	FromAttachment bool
+	// Step is empty for the Q43 attachment and identifies the exact Q54 step
+	// that currently heads the verified receipt chain otherwise.
+	Step TransitionStep
+	// verified is set only by CurrentHead after it validates the complete Q43/Q54
+	// receipt chain and source revision. Callers cannot construct this proof.
+	verified bool
 }
 
 // Apply validates the current admission and policy proof, resolves the exact
@@ -467,7 +473,7 @@ func (c *TransitionChain) CurrentHead(issueID string, evidence TransitionEvidenc
 		if source.Revision != verified.Attachment.ToRevision {
 			return TransitionHead{}, fmt.Errorf("source advanced after attachment without a transition head: %w", ErrTransitionChainStale)
 		}
-		return TransitionHead{ReceiptID: verified.Attachment.ReceiptID, ToVersion: verified.Attachment.ToRevision, FromAttachment: true}, nil
+		return TransitionHead{ReceiptID: verified.Attachment.ReceiptID, ToVersion: verified.Attachment.ToRevision, FromAttachment: true, verified: true}, nil
 	}
 	if !validTransitionText(encoded, 200) || strings.TrimSpace(encoded) != encoded {
 		return TransitionHead{}, fmt.Errorf("source transition head is malformed: %w", ErrTransitionChainReceipt)
@@ -479,7 +485,7 @@ func (c *TransitionChain) CurrentHead(issueID string, evidence TransitionEvidenc
 	if parent.Attachment || parent.ToVersion != source.Revision {
 		return TransitionHead{}, fmt.Errorf("source transition head does not identify its current patch revision: %w", ErrTransitionChainStale)
 	}
-	return TransitionHead{ReceiptID: parent.ReceiptID, ToVersion: parent.ToVersion}, nil
+	return TransitionHead{ReceiptID: parent.ReceiptID, ToVersion: parent.ToVersion, Step: parent.Step, verified: true}, nil
 }
 
 type transitionParent struct {

@@ -202,6 +202,204 @@ func TestLifecycleAdmissionTransitionRecoversLostAttachResponse(t *testing.T) {
 	}
 }
 
+func TestLifecycleAdmissionTransitionRestartAfterReservationUsesVerifiedHistoricalQ43(t *testing.T) {
+	setup := newLifecycleAdmissionTransitionSetup(t)
+	leaveLifecycleAdmissionReservation(t, setup)
+
+	var stderr strings.Builder
+	reconcileLifecycleAdmissionWithPermitResolver("pilot", setup.fixture.cityPath, setup.fixture.cfg, setup.cityStore, setup.rigStores, nil, &stderr, setup.permitResolver)
+	attached, err := setup.store.Get(setup.source.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker, ok := lifecycleMaterializationFor(attached)
+	if !ok || marker.State != "attached" || marker.WorkflowID == "" || len(setup.store.patchReceipts) != 2 {
+		t.Fatalf("restart after reservation = marker %+v receipts %d stderr=%s; want exact graph materialized and attached", marker, len(setup.store.patchReceipts), stderr.String())
+	}
+	if setup.store.sourceGenericWrites != 0 {
+		t.Fatalf("reservation restart used %d generic source writes", setup.store.sourceGenericWrites)
+	}
+}
+
+func TestLifecycleAdmissionTransitionRejectsInvalidOrStaleReservationHead(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*lifecycleAdmissionTransitionTestStore)
+	}{
+		{
+			name: "forged head",
+			mutate: func(store *lifecycleAdmissionTransitionTestStore) {
+				current := store.rows[store.sourceID]
+				current.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey] = "forged-transition-head"
+				store.rows[store.sourceID] = current
+			},
+		},
+		{
+			name: "missing head receipt",
+			mutate: func(store *lifecycleAdmissionTransitionTestStore) {
+				current := store.rows[store.sourceID]
+				head := current.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey]
+				delete(store.patchReceipts, head)
+				store.rows[store.sourceID] = current
+			},
+		},
+		{
+			name: "head source revision is stale",
+			mutate: func(store *lifecycleAdmissionTransitionTestStore) {
+				current := store.rows[store.sourceID]
+				current.Revision++
+				store.rows[store.sourceID] = current
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setup := newLifecycleAdmissionTransitionSetup(t)
+			leaveLifecycleAdmissionReservation(t, setup)
+			setup.store.mu.Lock()
+			tc.mutate(setup.store)
+			beforeRequests := len(setup.store.patchRequests)
+			setup.store.mu.Unlock()
+
+			var stderr strings.Builder
+			reconcileLifecycleAdmissionWithPermitResolver("pilot", setup.fixture.cityPath, setup.fixture.cfg, setup.cityStore, setup.rigStores, nil, &stderr, setup.permitResolver)
+			current, err := setup.store.Get(setup.source.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			marker, ok := lifecycleMaterializationFor(current)
+			if !ok || marker.State != "reserved" || len(setup.store.patchRequests) != beforeRequests {
+				t.Fatalf("bad transition head progressed admission: marker=%+v patch requests=%d (before %d) stderr=%s", marker, len(setup.store.patchRequests), beforeRequests, stderr.String())
+			}
+			if stderr.Len() == 0 || setup.store.sourceGenericWrites != 0 {
+				t.Fatalf("invalid/stale head was not held cleanly: stderr=%s generic writes=%d", stderr.String(), setup.store.sourceGenericWrites)
+			}
+		})
+	}
+}
+
+func TestLifecycleAdmissionV1ClaimFilterHoldsReservationAndAllowsExactAttachedSteps(t *testing.T) {
+	setup := newLifecycleAdmissionTransitionSetup(t)
+	setup.store.rejectNextPatchKind = "lifecycle_source_materialization_v1"
+	var attachErr strings.Builder
+	reconcileLifecycleAdmissionWithPermitResolver("pilot", setup.fixture.cityPath, setup.fixture.cfg, setup.cityStore, setup.rigStores, nil, &attachErr, setup.permitResolver)
+	reserved, err := setup.store.Get(setup.source.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reservation, ok := lifecycleMaterializationFor(reserved)
+	if !ok || reservation.State != "reserved" {
+		t.Fatalf("rejected attachment did not preserve the reservation: marker=%+v stderr=%s", reservation, attachErr.String())
+	}
+	step := lifecycleAdmissionV1StepCandidate(t, setup, reservation)
+	opts := lifecycleAdmissionV1ClaimOptions(setup)
+	var filterErr strings.Builder
+	if got := filterHookLifecycleCandidates([]beads.Bead{step}, opts, &filterErr); len(got) != 0 {
+		t.Fatalf("reserved formula-v1 step remained claimable: %+v", got)
+	}
+	if filterErr.Len() == 0 {
+		t.Fatal("reserved formula-v1 step was filtered without a hold reason")
+	}
+
+	setup.store.rejectNextPatchKind = ""
+	var attachSuccess strings.Builder
+	reconcileLifecycleAdmissionWithPermitResolver("pilot", setup.fixture.cityPath, setup.fixture.cfg, setup.cityStore, setup.rigStores, nil, &attachSuccess, setup.permitResolver)
+	attached, err := setup.store.Get(setup.source.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attachedMarker, ok := lifecycleMaterializationFor(attached)
+	if !ok || attachedMarker.State != "attached" || attachedMarker.WorkflowID == "" {
+		t.Fatalf("formula-v1 source did not attach after retry: marker=%+v stderr=%s", attachedMarker, attachSuccess.String())
+	}
+	filterErr.Reset()
+	got := filterHookLifecycleCandidates([]beads.Bead{step}, opts, &filterErr)
+	if len(got) != 1 || got[0].ID != step.ID {
+		t.Fatalf("exact attached formula-v1 step was not claimable: got=%+v stderr=%s", got, filterErr.String())
+	}
+
+	tamperedStep := step
+	tamperedStep.Metadata = cloneLifecycleAdmissionMetadata(step.Metadata)
+	tamperedStep.Metadata[beadmeta.MergeStrategyMetadataKey] = "forged"
+	setup.store.mu.Lock()
+	setup.store.workflowReadOverrides[step.ID] = tamperedStep
+	setup.store.mu.Unlock()
+	filterErr.Reset()
+	if got := filterHookLifecycleCandidates([]beads.Bead{step}, opts, &filterErr); len(got) != 0 {
+		t.Fatalf("tampered exact formula-v1 descendant remained claimable: %+v", got)
+	}
+
+	root, err := setup.store.Get(attachedMarker.WorkflowID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root.SourceStoreRef = attachedMarker.WorkflowStoreRef
+	root.LifecycleScope = attachedMarker.Scope
+	tamperedRoot := root
+	tamperedRoot.Metadata = cloneLifecycleAdmissionMetadata(root.Metadata)
+	tamperedRoot.Metadata[beadmeta.FormulaContractMetadataKey] = beadmeta.FormulaContractGraphV2
+	setup.store.mu.Lock()
+	setup.store.workflowReadOverrides[root.ID] = tamperedRoot
+	delete(setup.store.workflowReadOverrides, step.ID)
+	setup.store.mu.Unlock()
+	filterErr.Reset()
+	if got := filterHookLifecycleCandidates([]beads.Bead{root}, opts, &filterErr); len(got) != 0 {
+		t.Fatalf("exact graph.v2 root without proven invocation inputs remained claimable: %+v", got)
+	}
+}
+
+func leaveLifecycleAdmissionReservation(t *testing.T, setup lifecycleAdmissionTransitionSetup) {
+	t.Helper()
+	setup.store.mu.Lock()
+	setup.store.afterNextPatch = func(kind string) {
+		if kind == "lifecycle_source_reservation_v1" {
+			setup.fixture.cfg.Agents[0].Name = "replacement-worker"
+		}
+	}
+	setup.store.mu.Unlock()
+	var stderr strings.Builder
+	reconcileLifecycleAdmissionWithPermitResolver("pilot", setup.fixture.cityPath, setup.fixture.cfg, setup.cityStore, setup.rigStores, nil, &stderr, setup.permitResolver)
+	current, err := setup.store.Get(setup.source.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker, ok := lifecycleMaterializationFor(current)
+	if !ok || marker.State != "reserved" || len(setup.store.patchReceipts) != 1 {
+		t.Fatalf("expected restart fixture to stop after reservation: marker=%+v receipts=%d stderr=%s", marker, len(setup.store.patchReceipts), stderr.String())
+	}
+	setup.fixture.cfg.Agents[0].Name = "worker"
+}
+
+func lifecycleAdmissionV1StepCandidate(t *testing.T, setup lifecycleAdmissionTransitionSetup, marker lifecycleMaterialization) beads.Bead {
+	t.Helper()
+	rows, err := setup.store.MemStore.List(beads.ListQuery{Status: "open", Live: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range rows {
+		lineage, ok := lifecycleMaterializationFor(row)
+		if ok && row.ID != setup.source.ID && lineage.State == "lineage_pending" && lineage.SourceID == setup.source.ID {
+			row.SourceStoreRef = marker.WorkflowStoreRef
+			row.LifecycleScope = marker.Scope
+			return row
+		}
+	}
+	t.Fatalf("materialized formula-v1 workflow has no pending step row: %+v", rows)
+	return beads.Bead{}
+}
+
+func lifecycleAdmissionV1ClaimOptions(setup lifecycleAdmissionTransitionSetup) hookClaimOptions {
+	return hookClaimOptions{
+		Lifecycle: setup.fixture.cfg.Lifecycle, LifecycleCity: setup.fixture.cfg,
+		TrustedLifecycleScope: true, RouteTargets: []string{setup.receipt.Route},
+		ResolveLifecycleStore: func(ref string) (beads.Store, error) {
+			if ref != "rig:pilot" {
+				return nil, fmt.Errorf("unexpected lifecycle store %q", ref)
+			}
+			return setup.store, nil
+		},
+	}
+}
+
 func encodeAdmissionTestKey(key ed25519.PublicKey) string {
 	return base64.StdEncoding.EncodeToString(key)
 }
@@ -252,8 +450,10 @@ func newLifecycleAdmissionTransitionSetup(t *testing.T) lifecycleAdmissionTransi
 	}
 	store := &lifecycleAdmissionTransitionTestStore{
 		MemStore: base, sourceID: source.ID,
-		q43Receipts:   map[string]beads.ControllerMetadataTransitionReceipt{},
-		patchReceipts: map[string]beads.RevisionTransitionPatchReceipt{}, rows: map[string]beads.Bead{},
+		q43Receipts:           map[string]beads.ControllerMetadataTransitionReceipt{},
+		patchReceipts:         map[string]beads.RevisionTransitionPatchReceipt{},
+		rows:                  map[string]beads.Bead{},
+		workflowReadOverrides: map[string]beads.Bead{},
 	}
 	cityStore := beads.NewMemStore()
 	rigStores := map[string]beads.Store{"pilot": store}
@@ -318,14 +518,17 @@ func newLifecycleAdmissionTransitionSetup(t *testing.T) lifecycleAdmissionTransi
 
 type lifecycleAdmissionTransitionTestStore struct {
 	*beads.MemStore
-	mu                  sync.Mutex
-	sourceID            string
-	rows                map[string]beads.Bead
-	q43Receipts         map[string]beads.ControllerMetadataTransitionReceipt
-	patchReceipts       map[string]beads.RevisionTransitionPatchReceipt
-	patchRequests       []beads.RevisionTransitionPatchRequest
-	sourceGenericWrites int
-	loseNextPatchKind   string
+	mu                    sync.Mutex
+	sourceID              string
+	rows                  map[string]beads.Bead
+	workflowReadOverrides map[string]beads.Bead
+	q43Receipts           map[string]beads.ControllerMetadataTransitionReceipt
+	patchReceipts         map[string]beads.RevisionTransitionPatchReceipt
+	patchRequests         []beads.RevisionTransitionPatchRequest
+	sourceGenericWrites   int
+	loseNextPatchKind     string
+	rejectNextPatchKind   string
+	afterNextPatch        func(kind string)
 }
 
 var _ beads.ControllerMetadataTransitionWriterHandleProvider = (*lifecycleAdmissionTransitionTestStore)(nil)
@@ -338,6 +541,11 @@ func (s *lifecycleAdmissionTransitionTestStore) Get(id string) (beads.Bead, erro
 	s.mu.Lock()
 	row, ok := s.rows[id]
 	if ok {
+		row.Metadata = cloneLifecycleAdmissionMetadata(row.Metadata)
+		s.mu.Unlock()
+		return row, nil
+	}
+	if row, ok := s.workflowReadOverrides[id]; ok {
 		row.Metadata = cloneLifecycleAdmissionMetadata(row.Metadata)
 		s.mu.Unlock()
 		return row, nil
@@ -457,6 +665,10 @@ func (s *lifecycleAdmissionTransitionTestStore) TransitionPatch(issueID string, 
 	if err != nil || issueID != s.sourceID || current.Revision != request.ExpectedVersion || request.ProtectedPermit == "" {
 		return beads.RevisionTransitionPatchResult{}, beads.ErrRevisionTransitionPatchPrecondition
 	}
+	if request.Kind == s.rejectNextPatchKind {
+		s.rejectNextPatchKind = ""
+		return beads.RevisionTransitionPatchResult{}, errors.New("simulated protected patch rejection")
+	}
 	for _, change := range request.Patch.Metadata {
 		got, present := current.Metadata[change.Key]
 		if change.Expected == nil {
@@ -487,6 +699,11 @@ func (s *lifecycleAdmissionTransitionTestStore) TransitionPatch(issueID string, 
 		PriorReceiptID: request.PriorReceiptID, PriorReceiptDigest: request.PriorReceiptDigest, Patch: request.Patch,
 	}
 	s.patchReceipts[receipt.ReceiptID] = receipt
+	afterPatch := s.afterNextPatch
+	s.afterNextPatch = nil
+	if afterPatch != nil {
+		afterPatch(request.Kind)
+	}
 	if request.Kind == s.loseNextPatchKind {
 		s.loseNextPatchKind = ""
 		return beads.RevisionTransitionPatchResult{}, errors.New("simulated lost protected patch response")
