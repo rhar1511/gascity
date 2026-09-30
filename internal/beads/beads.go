@@ -288,7 +288,8 @@ func IsLifecycleRoutingMetadataKey(key string) bool {
 		beadmeta.WorkflowExpandedMetadataKey,
 		beadmeta.MoleculeIDMetadataKey,
 		beadmeta.MergeStrategyMetadataKey,
-		beadmeta.LifecycleMaterializationMetadataKey:
+		beadmeta.LifecycleMaterializationMetadataKey,
+		beadmeta.LifecycleCompletionBudgetMetadataKey:
 		return true
 	default:
 		return false
@@ -313,6 +314,7 @@ func LifecycleMutationNeedsValidation(opts UpdateOpts) bool {
 		case beadmeta.LifecycleAdmissionReceiptMetadataKey,
 			beadmeta.LifecycleAdmissionReceiptV2MetadataKey,
 			beadmeta.LifecycleCompletionReceiptMetadataKey,
+			beadmeta.LifecycleCompletionBudgetMetadataKey,
 			beadmeta.LifecycleMaterializationMetadataKey,
 			beadmeta.LifecycleRecoveryStateMetadataKey:
 			return true
@@ -330,6 +332,7 @@ func HasLifecycleEvidence(b Bead) bool {
 	for _, key := range []string{
 		beadmeta.LifecycleMaterializationMetadataKey,
 		beadmeta.LifecycleCompletionReceiptMetadataKey,
+		beadmeta.LifecycleCompletionBudgetMetadataKey,
 		beadmeta.LifecycleRecoveryStateMetadataKey,
 	} {
 		if strings.TrimSpace(b.Metadata[key]) != "" {
@@ -431,6 +434,7 @@ func ValidateLifecycleMutation(current Bead, opts UpdateOpts) error {
 	for _, key := range []string{
 		beadmeta.LifecycleAdmissionReceiptMetadataKey,
 		beadmeta.LifecycleAdmissionReceiptV2MetadataKey,
+		beadmeta.LifecycleCompletionBudgetMetadataKey,
 		beadmeta.LifecycleMaterializationMetadataKey,
 		beadmeta.LifecycleCompletionReceiptMetadataKey,
 		beadmeta.LifecycleRecoveryStateMetadataKey,

@@ -1,0 +1,974 @@
+package worklifecycle
+
+import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+	"unicode"
+	"unicode/utf8"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
+)
+
+const (
+	transitionReceiptDomain = "gascity.lifecycle.source_transition.v1\n"
+	transitionReceiptPrefix = "gc-lifecycle-patch-v1-"
+	maxTransitionParentHops = 32
+)
+
+// transitionMaterialization is the existing lifecycle materialization marker
+// written by cmd/gc. Reservation and attachment both CAS this same key.
+type transitionMaterialization struct {
+	Version          int    `json:"version"`
+	State            string `json:"state"`
+	Scope            string `json:"scope"`
+	Contract         string `json:"contract"`
+	Route            string `json:"route"`
+	Workflow         string `json:"workflow"`
+	MergeStrategy    string `json:"merge_strategy"`
+	Token            string `json:"token"`
+	WorkflowID       string `json:"workflow_id,omitempty"`
+	SourceID         string `json:"source_id,omitempty"`
+	SourceStoreRef   string `json:"source_store_ref,omitempty"`
+	WorkflowStoreRef string `json:"workflow_store_ref,omitempty"`
+	AdmissionReceipt string `json:"admission_receipt,omitempty"`
+}
+
+var (
+	ErrTransitionChainUnavailable = errors.New("durable source-work transition chain is unavailable")
+	ErrTransitionChainInvalid     = errors.New("durable source-work transition request is invalid")
+	ErrTransitionChainEvidence    = errors.New("durable source-work transition evidence is invalid")
+	ErrTransitionChainReceipt     = errors.New("durable source-work transition receipt is invalid")
+	ErrTransitionChainStale       = errors.New("durable source-work transition source revision is stale")
+	ErrTransitionChainPermit      = errors.New("durable source-work transition permit was refused")
+)
+
+// TransitionStep names one supported source-work lifecycle mutation. The
+// corresponding Beads receipt kind is fixed by this package.
+type TransitionStep string
+
+const (
+	TransitionStepReservation             TransitionStep = "reservation"
+	TransitionStepAttachedMaterialization TransitionStep = "attached_materialization"
+	TransitionStepClaimIdentity           TransitionStep = "claim_identity"
+	TransitionStepRecoveryBudget          TransitionStep = "recovery_budget"
+	TransitionStepCompletionBudget        TransitionStep = "completion_budget"
+	TransitionStepClose                   TransitionStep = "close"
+)
+
+const (
+	transitionKindReservation             = "lifecycle_source_reservation_v1"
+	transitionKindAttachedMaterialization = "lifecycle_source_materialization_v1"
+	transitionKindClaimIdentity           = "lifecycle_source_claim_identity_v1"
+	transitionKindRecoveryBudget          = "lifecycle_source_recovery_budget_v1"
+	transitionKindCompletionBudget        = "lifecycle_source_completion_budget_v1"
+	transitionKindClose                   = "lifecycle_source_close_v1"
+)
+
+// TransitionChainConfig contains the already-resolved policy and the explicit
+// Beads capabilities used by the service. The permit issuer must already be
+// authorized for protected source patches; the chain does not load or sign
+// keys.
+type TransitionChainConfig struct {
+	Scope                   string
+	Actor                   string
+	AdmissionConfig         config.LifecycleConfig
+	PatchWriter             beads.RevisionTransitionPatchWriter
+	PatchReceiptReader      beads.RevisionTransitionPatchReceiptReader
+	SourceReader            beads.DecisionFrontierSourceReader
+	AttachmentReceiptReader beads.ControllerMetadataTransitionReceiptReader
+	PermitIssuer            beads.ControllerProtectedMutationPermitIssuer
+}
+
+// TransitionChain advances an admitted source bead through immutable Beads
+// patch receipts. Route and formula resolution remain caller-owned: each
+// request supplies the exact current projection whose digest is checked here.
+type TransitionChain struct {
+	scope                   string
+	actor                   string
+	admissionConfig         config.LifecycleConfig
+	patchWriter             beads.RevisionTransitionPatchWriter
+	patchReceiptReader      beads.RevisionTransitionPatchReceiptReader
+	sourceReader            beads.DecisionFrontierSourceReader
+	attachmentReceiptReader beads.ControllerMetadataTransitionReceiptReader
+	permitIssuer            beads.ControllerProtectedMutationPermitIssuer
+}
+
+// NewTransitionChain requires every durable proof and authorization
+// capability. It never unwraps a store to discover a missing capability.
+func NewTransitionChain(config TransitionChainConfig) (*TransitionChain, error) {
+	if strings.TrimSpace(config.Scope) == "" || strings.TrimSpace(config.Scope) != config.Scope ||
+		strings.TrimSpace(config.Actor) == "" || strings.TrimSpace(config.Actor) != config.Actor ||
+		config.PatchWriter == nil || config.PatchReceiptReader == nil || config.SourceReader == nil ||
+		config.AttachmentReceiptReader == nil || config.PermitIssuer == nil {
+		return nil, ErrTransitionChainUnavailable
+	}
+	return &TransitionChain{
+		scope: config.Scope, actor: config.Actor, admissionConfig: config.AdmissionConfig,
+		patchWriter: config.PatchWriter, patchReceiptReader: config.PatchReceiptReader,
+		sourceReader: config.SourceReader, attachmentReceiptReader: config.AttachmentReceiptReader,
+		permitIssuer: config.PermitIssuer,
+	}, nil
+}
+
+// TransitionEvidence is assembled at the composition edge from the exact
+// Q43 admission attachment and the freshly resolved route/formula policy.
+// Policy carries inputs, not policy decisions; the chain only validates and
+// hashes the complete projection against the signed v2 admission receipt.
+type TransitionEvidence struct {
+	Attachment AdmissionAttachmentProof
+	Policy     AdmissionPolicyProjectionV2
+}
+
+// MetadataStringPatch changes one metadata string. A nil Expected means the
+// key was absent; Value is always written as a canonical JSON string by the
+// chain before it reaches Beads.
+type MetadataStringPatch struct {
+	Expected *string
+	Value    string
+}
+
+// StringTransition compares and replaces one source string field.
+type StringTransition struct {
+	Expected string
+	Value    string
+}
+
+// SourceWorkPatch is the lifecycle-facing patch shape. Metadata is expressed
+// as strings so callers cannot accidentally write JSON numbers, objects, or
+// noncanonical raw JSON into Beads metadata.
+type SourceWorkPatch struct {
+	Metadata map[string]MetadataStringPatch
+	Status   *StringTransition
+	Assignee *StringTransition
+}
+
+// TransitionRequest names one idempotent lifecycle step and its direct parent
+// receipt. OperationID must remain stable across retries of the same step.
+type TransitionRequest struct {
+	IssueID        string
+	Step           TransitionStep
+	OperationID    string
+	PriorReceiptID string
+	Evidence       TransitionEvidence
+	Patch          SourceWorkPatch
+}
+
+// TransitionResult returns the immutable committed receipt and its canonical
+// digest. Replayed identifies a receipt found before a write; Recovered marks
+// a lost writer response re-established from that exact durable receipt.
+type TransitionResult struct {
+	Receipt       beads.RevisionTransitionPatchReceipt
+	ReceiptDigest string
+	Replayed      bool
+	Recovered     bool
+}
+
+// Apply validates the current admission and policy proof, resolves the exact
+// parent receipt, then submits one atomic typed Beads patch. Ambiguous writer
+// results are accepted only when the deterministic receipt ID reads back with
+// every request field matching exactly.
+func (c *TransitionChain) Apply(request TransitionRequest) (TransitionResult, error) {
+	if c == nil || c.patchWriter == nil || c.patchReceiptReader == nil || c.sourceReader == nil ||
+		c.attachmentReceiptReader == nil || c.permitIssuer == nil {
+		return TransitionResult{}, ErrTransitionChainUnavailable
+	}
+	if !validTransitionStep(request.Step) || !validTransitionText(request.IssueID, 200) ||
+		!validTransitionText(request.OperationID, 256) || strings.TrimSpace(request.OperationID) != request.OperationID ||
+		!validTransitionText(request.PriorReceiptID, 200) {
+		return TransitionResult{}, ErrTransitionChainInvalid
+	}
+	kind := transitionStepKind(request.Step)
+	receiptID, err := transitionReceiptID(request.IssueID, c.scope, request.Step, request.OperationID)
+	if err != nil {
+		return TransitionResult{}, fmt.Errorf("derive deterministic lifecycle receipt ID: %w", err)
+	}
+
+	source, err := c.sourceReader.DecisionFrontierSourceSnapshot(request.IssueID)
+	if err != nil {
+		return TransitionResult{}, fmt.Errorf("read lifecycle source snapshot: %w", err)
+	}
+	if source.ID != request.IssueID || source.Revision == 0 {
+		return TransitionResult{}, fmt.Errorf("source snapshot has no exact identity or revision: %w", ErrTransitionChainEvidence)
+	}
+	admission, attachmentReceipt, err := c.verifyTransitionEvidence(source, request.Evidence)
+	if err != nil {
+		return TransitionResult{}, err
+	}
+	parent, err := c.verifyParentChain(request.IssueID, request.PriorReceiptID, attachmentReceipt, request.Evidence, source.Metadata[beadmeta.LifecycleAdmissionReceiptV2MetadataKey])
+	if err != nil {
+		return TransitionResult{}, err
+	}
+	patch, err := transitionPatch(request.Patch)
+	if err != nil {
+		return TransitionResult{}, fmt.Errorf("build canonical lifecycle patch: %w", err)
+	}
+	if err := validateTransitionStepPatch(request.Step, request.Patch); err != nil {
+		return TransitionResult{}, err
+	}
+	if err := validateTransitionStepPatchEvidence(request.Step, request.Patch, source, request.Evidence); err != nil {
+		return TransitionResult{}, err
+	}
+	patchRequest := beads.RevisionTransitionPatchRequest{
+		ReceiptID: receiptID, Scope: c.scope, Kind: kind, Actor: c.actor,
+		ExpectedVersion: parent.ToVersion, PriorReceiptID: parent.ReceiptID,
+		PriorReceiptDigest: parent.Digest, Patch: patch,
+	}
+	permitDigest, err := beads.RevisionTransitionPatchProtectedMutationDigest(request.IssueID, patchRequest)
+	if err != nil {
+		return TransitionResult{}, fmt.Errorf("validate canonical lifecycle patch: %w", errors.Join(ErrTransitionChainInvalid, err))
+	}
+
+	if actual, found, readErr := c.patchReceiptReader.ReadRevisionTransitionPatchReceipt(receiptID); readErr != nil {
+		return TransitionResult{}, fmt.Errorf("read prior lifecycle patch receipt: %w", readErr)
+	} else if found {
+		verified, digest, verifyErr := verifyTransitionPatchReceipt(actual, request.IssueID, patchRequest)
+		if verifyErr != nil {
+			return TransitionResult{}, verifyErr
+		}
+		return TransitionResult{Receipt: verified, ReceiptDigest: digest, Replayed: true}, nil
+	}
+
+	if source.Revision != parent.ToVersion {
+		return TransitionResult{}, fmt.Errorf("source revision %d does not match parent ToVersion %d: %w", source.Revision, parent.ToVersion, ErrTransitionChainStale)
+	}
+	if err := verifyTransitionPatchExpected(source, patch); err != nil {
+		return TransitionResult{}, fmt.Errorf("source does not match lifecycle patch preconditions: %w", errors.Join(ErrTransitionChainStale, err))
+	}
+
+	permitRequest := beads.ControllerProtectedMutationRequest{
+		Operation:   beads.RevisionTransitionPatchProtectedMutationOperation,
+		ResourceIDs: []string{request.IssueID}, RequestDigest: permitDigest,
+	}
+	permit, err := c.permitIssuer.IssueProtectedMutation(permitRequest, receiptID)
+	if err != nil || !validTransitionPermit(permit) {
+		return TransitionResult{}, fmt.Errorf("issue exact lifecycle patch permit: %w", errors.Join(ErrTransitionChainPermit, err))
+	}
+	patchRequest.ProtectedPermit = permit
+
+	result, writeErr := c.patchWriter.TransitionPatch(request.IssueID, patchRequest)
+	actual, found, readErr := c.patchReceiptReader.ReadRevisionTransitionPatchReceipt(receiptID)
+	if readErr != nil {
+		return TransitionResult{}, errors.Join(writeErr, fmt.Errorf("read lifecycle patch receipt after write: %w", readErr))
+	}
+	if !found {
+		if errors.Is(writeErr, beads.ErrRevisionTransitionPatchPrecondition) {
+			return TransitionResult{}, errors.Join(ErrTransitionChainStale, writeErr)
+		}
+		if writeErr != nil {
+			return TransitionResult{}, fmt.Errorf("apply lifecycle source patch: %w", writeErr)
+		}
+		return TransitionResult{}, fmt.Errorf("Beads returned no exact durable patch receipt: %w", ErrTransitionChainReceipt)
+	}
+	verified, digest, verifyErr := verifyTransitionPatchReceipt(actual, request.IssueID, patchRequest)
+	if verifyErr != nil {
+		return TransitionResult{}, errors.Join(writeErr, verifyErr)
+	}
+	if writeErr == nil {
+		if !result.Applied || result.Receipt == nil {
+			return TransitionResult{}, fmt.Errorf("Beads returned a non-applied result with a durable patch receipt: %w", ErrTransitionChainReceipt)
+		}
+		if _, _, resultErr := verifyTransitionPatchReceipt(*result.Receipt, request.IssueID, patchRequest); resultErr != nil {
+			return TransitionResult{}, errors.Join(ErrTransitionChainReceipt, resultErr)
+		}
+	}
+	if admission.WorkItemID != request.IssueID {
+		return TransitionResult{}, ErrTransitionChainEvidence
+	}
+	return TransitionResult{
+		Receipt: verified, ReceiptDigest: digest,
+		Replayed:  writeErr == nil && result.Replayed,
+		Recovered: writeErr != nil,
+	}, nil
+}
+
+type transitionParent struct {
+	ReceiptID string
+	Digest    string
+	ToVersion int64
+}
+
+func (c *TransitionChain) verifyTransitionEvidence(source beads.Bead, evidence TransitionEvidence) (AdmissionReceiptV2, beads.ControllerMetadataTransitionReceipt, error) {
+	encoded := source.Metadata[beadmeta.LifecycleAdmissionReceiptV2MetadataKey]
+	admission, err := VerifyAdmissionReceiptV2(source, c.admissionConfig, c.scope)
+	if err != nil {
+		return AdmissionReceiptV2{}, beads.ControllerMetadataTransitionReceipt{}, fmt.Errorf("verify exact v2 source admission: %w", errors.Join(ErrTransitionChainEvidence, err))
+	}
+	if source.Metadata[beadmeta.LifecycleAdmissionReceiptMetadataKey] != "" {
+		return AdmissionReceiptV2{}, beads.ControllerMetadataTransitionReceipt{}, fmt.Errorf("historical v1 evidence conflicts with v2 admission: %w", ErrTransitionChainEvidence)
+	}
+	digest, err := AdmissionDigestV2(admission)
+	if err != nil || evidence.Attachment.SchemaVersion != 1 || evidence.Attachment.WorkItemID != source.ID ||
+		evidence.Attachment.Scope != c.scope || evidence.Attachment.ReceiptDigest != digest ||
+		evidence.Attachment.FromRevision != admission.ExpectedWorkRevision || evidence.Attachment.ToRevision == 0 ||
+		evidence.Attachment.ToRevision == evidence.Attachment.FromRevision {
+		return AdmissionReceiptV2{}, beads.ControllerMetadataTransitionReceipt{}, fmt.Errorf("Q43 attachment does not bind the exact signed v2 admission: %w", ErrTransitionChainEvidence)
+	}
+	policyDigest, err := DigestAdmissionPolicyV2(evidence.Policy)
+	if err != nil || policyDigest != admission.RoutingPolicyDigest || evidence.Policy.SourceScope != c.scope ||
+		evidence.Policy.Target.Identity != admission.Route || evidence.Policy.Workflow != admission.Workflow ||
+		evidence.Policy.MergeStrategy != admission.MergeStrategy {
+		return AdmissionReceiptV2{}, beads.ControllerMetadataTransitionReceipt{}, fmt.Errorf("current route/formula policy proof differs from signed admission: %w", ErrTransitionChainEvidence)
+	}
+	request, err := admissionAttachmentRequest(admission, encoded, digest)
+	if err != nil {
+		return AdmissionReceiptV2{}, beads.ControllerMetadataTransitionReceipt{}, fmt.Errorf("rebuild exact Q43 attachment request: %w", errors.Join(ErrTransitionChainEvidence, err))
+	}
+	actual, found, err := c.attachmentReceiptReader.ControllerMetadataTransitionReceipt(source.ID, evidence.Attachment.ReceiptID)
+	if err != nil || !found {
+		if err != nil {
+			return AdmissionReceiptV2{}, beads.ControllerMetadataTransitionReceipt{}, fmt.Errorf("read exact Q43 attachment receipt: %w", err)
+		}
+		return AdmissionReceiptV2{}, beads.ControllerMetadataTransitionReceipt{}, fmt.Errorf("exact Q43 attachment receipt is absent: %w", ErrTransitionChainEvidence)
+	}
+	proof, err := verifyAdmissionAttachmentReceipt(actual, source.ID, request, digest)
+	if err != nil || proof != evidence.Attachment {
+		return AdmissionReceiptV2{}, beads.ControllerMetadataTransitionReceipt{}, fmt.Errorf("Q43 attachment receipt does not match supplied proof: %w", errors.Join(ErrTransitionChainReceipt, err))
+	}
+	return admission, actual, nil
+}
+
+func (c *TransitionChain) verifyParentChain(issueID, receiptID string, attachmentReceipt beads.ControllerMetadataTransitionReceipt, evidence TransitionEvidence, admissionReceipt string) (transitionParent, error) {
+	attachment := evidence.Attachment
+	seen := map[string]struct{}{}
+	var verify func(string, int) (transitionParent, error)
+	verify = func(id string, hops int) (transitionParent, error) {
+		if hops > maxTransitionParentHops {
+			return transitionParent{}, fmt.Errorf("lifecycle parent chain exceeds %d receipts: %w", maxTransitionParentHops, ErrTransitionChainReceipt)
+		}
+		if _, duplicate := seen[id]; duplicate {
+			return transitionParent{}, fmt.Errorf("lifecycle parent chain contains a cycle: %w", ErrTransitionChainReceipt)
+		}
+		seen[id] = struct{}{}
+		if id == attachment.ReceiptID {
+			if attachmentReceipt.ReceiptID != attachment.ReceiptID || attachmentReceipt.IssueID != issueID ||
+				attachmentReceipt.Scope != c.scope || attachmentReceipt.ExpectedVersion != attachment.FromRevision ||
+				attachmentReceipt.ToVersion != attachment.ToRevision {
+				return transitionParent{}, fmt.Errorf("Q43 attachment parent identity or ToVersion changed: %w", ErrTransitionChainReceipt)
+			}
+			digest, err := controllerMetadataTransitionReceiptDigest(attachmentReceipt)
+			if err != nil {
+				return transitionParent{}, fmt.Errorf("digest Q43 attachment parent receipt: %w", errors.Join(ErrTransitionChainReceipt, err))
+			}
+			return transitionParent{ReceiptID: attachmentReceipt.ReceiptID, Digest: digest, ToVersion: attachmentReceipt.ToVersion}, nil
+		}
+		parentReceipt, found, err := c.patchReceiptReader.ReadRevisionTransitionPatchReceipt(id)
+		if err != nil || !found {
+			if err != nil {
+				return transitionParent{}, fmt.Errorf("read parent patch receipt %q: %w", id, err)
+			}
+			return transitionParent{}, fmt.Errorf("parent patch receipt %q is absent: %w", id, ErrTransitionChainReceipt)
+		}
+		if parentReceipt.ReceiptID != id {
+			return transitionParent{}, fmt.Errorf("parent patch reader returned receipt %q for requested ID %q: %w", parentReceipt.ReceiptID, id, ErrTransitionChainReceipt)
+		}
+		parentInfo, err := validateStoredTransitionPatchReceipt(parentReceipt, issueID, c.scope, evidence, admissionReceipt)
+		if err != nil {
+			return transitionParent{}, err
+		}
+		upstream, err := verify(parentReceipt.PriorReceiptID, hops+1)
+		if err != nil {
+			return transitionParent{}, err
+		}
+		if upstream.ToVersion != parentReceipt.ExpectedVersion || upstream.Digest != parentReceipt.PriorReceiptDigest {
+			return transitionParent{}, fmt.Errorf("parent patch does not bind its parent's digest and ToVersion: %w", ErrTransitionChainReceipt)
+		}
+		return parentInfo, nil
+	}
+
+	return verify(receiptID, 0)
+}
+
+func transitionPatch(patch SourceWorkPatch) (beads.RevisionTransitionIssuePatch, error) {
+	if len(patch.Metadata) == 0 && patch.Status == nil && patch.Assignee == nil {
+		return beads.RevisionTransitionIssuePatch{}, ErrTransitionChainInvalid
+	}
+	keys := make([]string, 0, len(patch.Metadata))
+	for key := range patch.Metadata {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	converted := beads.RevisionTransitionIssuePatch{Metadata: make([]beads.RevisionTransitionMetadataPatch, 0, len(keys))}
+	for _, key := range keys {
+		if !beadmeta.ValidKey(key) || !validTransitionText(key, 255) {
+			return beads.RevisionTransitionIssuePatch{}, fmt.Errorf("metadata key %q is invalid: %w", key, ErrTransitionChainInvalid)
+		}
+		change := patch.Metadata[key]
+		valueBytes, err := json.Marshal(change.Value)
+		if err != nil {
+			return beads.RevisionTransitionIssuePatch{}, fmt.Errorf("encode metadata string %q: %w", key, err)
+		}
+		value := json.RawMessage(valueBytes)
+		var expected *json.RawMessage
+		if change.Expected != nil {
+			expectedBytes, err := json.Marshal(*change.Expected)
+			if err != nil {
+				return beads.RevisionTransitionIssuePatch{}, fmt.Errorf("encode expected metadata string %q: %w", key, err)
+			}
+			raw := json.RawMessage(expectedBytes)
+			expected = &raw
+		}
+		converted.Metadata = append(converted.Metadata, beads.RevisionTransitionMetadataPatch{Key: key, Expected: expected, Value: &value})
+	}
+	if patch.Status != nil {
+		value := beads.RevisionTransitionStringPatch{Expected: patch.Status.Expected, Value: patch.Status.Value}
+		converted.Status = &value
+	}
+	if patch.Assignee != nil {
+		value := beads.RevisionTransitionStringPatch{Expected: patch.Assignee.Expected, Value: patch.Assignee.Value}
+		converted.Assignee = &value
+	}
+	return converted, nil
+}
+
+func validateTransitionStepPatch(step TransitionStep, patch SourceWorkPatch) error {
+	allowed := map[TransitionStep]map[string]struct{}{
+		TransitionStepReservation:             {beadmeta.LifecycleMaterializationMetadataKey: {}},
+		TransitionStepAttachedMaterialization: {beadmeta.LifecycleMaterializationMetadataKey: {}},
+		TransitionStepRecoveryBudget:          {beadmeta.LifecycleRecoveryStateMetadataKey: {}},
+		TransitionStepCompletionBudget:        {beadmeta.LifecycleCompletionBudgetMetadataKey: {}},
+		TransitionStepClose:                   {beadmeta.LifecycleCompletionReceiptMetadataKey: {}},
+		TransitionStepClaimIdentity: {
+			beadmeta.ClaimGenerationMetadataKey: {}, beadmeta.ClaimedAtMetadataKey: {}, beadmeta.SessionIDMetadataKey: {},
+			beadmeta.SessionNameMetadataKey: {}, beadmeta.WorkDirMetadataKey: {}, beadmeta.WorkBranchMetadataKey: {},
+		},
+	}
+	allowedKeys, ok := allowed[step]
+	if !ok {
+		return ErrTransitionChainInvalid
+	}
+	if step == TransitionStepAttachedMaterialization {
+		allowedKeys = map[string]struct{}{
+			beadmeta.LifecycleMaterializationMetadataKey: {},
+			beadmeta.ExecutionRoutedToMetadataKey:        {},
+			beadmeta.RoutedToMetadataKey:                 {},
+			beadmeta.MoleculeIDMetadataKey:               {},
+			beadmeta.WorkflowIDMetadataKey:               {},
+			beadmeta.LegacyWorkflowIDMetadataKey:         {},
+			beadmeta.MergeStrategyMetadataKey:            {},
+		}
+	}
+	if step == TransitionStepRecoveryBudget || step == TransitionStepCompletionBudget || step == TransitionStepClose {
+		if len(patch.Metadata) != 1 {
+			return fmt.Errorf("step %q must set exactly one metadata key: %w", step, ErrTransitionChainInvalid)
+		}
+	}
+	for key := range patch.Metadata {
+		if _, ok := allowedKeys[key]; !ok {
+			return fmt.Errorf("step %q cannot mutate metadata key %q: %w", step, key, ErrTransitionChainInvalid)
+		}
+	}
+	if len(patch.Metadata) > len(allowedKeys) {
+		return fmt.Errorf("step %q has an incomplete metadata patch: %w", step, ErrTransitionChainInvalid)
+	}
+	switch step {
+	case TransitionStepReservation:
+		change, ok := patch.Metadata[beadmeta.LifecycleMaterializationMetadataKey]
+		marker, err := parseTransitionMaterialization(change.Value)
+		if !ok || err != nil || change.Expected != nil || marker.State != "reserved" || marker.WorkflowID != "" {
+			return fmt.Errorf("reservation step must create the canonical reserved materialization marker: %w", ErrTransitionChainInvalid)
+		}
+	case TransitionStepAttachedMaterialization:
+		if err := validateAttachedMaterializationShape(patch); err != nil {
+			return err
+		}
+	case TransitionStepClaimIdentity:
+		for _, key := range []string{beadmeta.ClaimGenerationMetadataKey, beadmeta.ClaimedAtMetadataKey, beadmeta.SessionIDMetadataKey} {
+			if _, present := patch.Metadata[key]; !present {
+				return fmt.Errorf("claim identity step omits required metadata key %q: %w", key, ErrTransitionChainInvalid)
+			}
+		}
+		if patch.Status == nil || patch.Status.Expected != "open" || patch.Status.Value != "in_progress" ||
+			patch.Assignee == nil || patch.Assignee.Expected != "" || strings.TrimSpace(patch.Assignee.Value) == "" {
+			return fmt.Errorf("claim identity step must atomically set in_progress, assignee, claim generation, claimed_at, and session ID: %w", ErrTransitionChainInvalid)
+		}
+	case TransitionStepClose:
+		if patch.Status == nil || patch.Status.Expected != "in_progress" || patch.Status.Value != "closed" {
+			return fmt.Errorf("close step must atomically close in_progress source work: %w", ErrTransitionChainInvalid)
+		}
+	default:
+		if patch.Status != nil || patch.Assignee != nil {
+			return fmt.Errorf("step %q cannot change status or assignee: %w", step, ErrTransitionChainInvalid)
+		}
+	}
+	for key, change := range patch.Metadata {
+		if change.Value == "" {
+			return fmt.Errorf("step %q metadata value %q is empty: %w", step, key, ErrTransitionChainInvalid)
+		}
+	}
+	if step == TransitionStepClaimIdentity {
+		generation, err := strconv.ParseInt(patch.Metadata[beadmeta.ClaimGenerationMetadataKey].Value, 10, 64)
+		if err != nil || generation <= 0 || strconv.FormatInt(generation, 10) != patch.Metadata[beadmeta.ClaimGenerationMetadataKey].Value {
+			return fmt.Errorf("claim identity generation is not a canonical positive integer: %w", ErrTransitionChainInvalid)
+		}
+		claimedAt := patch.Metadata[beadmeta.ClaimedAtMetadataKey].Value
+		instant, err := time.Parse(time.RFC3339, claimedAt)
+		if err != nil || instant.UTC().Format(time.RFC3339) != claimedAt {
+			return fmt.Errorf("claim identity claimed_at is not canonical UTC RFC3339: %w", ErrTransitionChainInvalid)
+		}
+	}
+	return nil
+}
+
+func validateAttachedMaterializationShape(patch SourceWorkPatch) error {
+	if len(patch.Metadata) != 4 {
+		return fmt.Errorf("attached materialization must atomically set the marker, one route, one workflow ID, and merge strategy: %w", ErrTransitionChainInvalid)
+	}
+	routeKey, routeCount := exactlyOneTransitionKey(patch.Metadata, beadmeta.ExecutionRoutedToMetadataKey, beadmeta.RoutedToMetadataKey)
+	workflowKey, workflowCount := exactlyOneTransitionKey(patch.Metadata, beadmeta.MoleculeIDMetadataKey, beadmeta.WorkflowIDMetadataKey, beadmeta.LegacyWorkflowIDMetadataKey)
+	if routeCount != 1 || workflowCount != 1 {
+		return fmt.Errorf("attached materialization must choose exactly one canonical route key and one workflow ID key (route=%d workflow=%d): %w", routeCount, workflowCount, ErrTransitionChainInvalid)
+	}
+	markerChange, markerOK := patch.Metadata[beadmeta.LifecycleMaterializationMetadataKey]
+	mergeChange, mergeOK := patch.Metadata[beadmeta.MergeStrategyMetadataKey]
+	marker, err := parseTransitionMaterialization(markerChange.Value)
+	if !markerOK || !mergeOK || err != nil || marker.State != "attached" || marker.WorkflowID == "" ||
+		patch.Metadata[routeKey].Value != marker.Route || patch.Metadata[workflowKey].Value != marker.WorkflowID ||
+		mergeChange.Value != marker.MergeStrategy {
+		return fmt.Errorf("attached materialization fields differ from its attached marker: %w", ErrTransitionChainInvalid)
+	}
+	if markerChange.Expected == nil {
+		return fmt.Errorf("attached materialization must compare-and-set the existing reserved marker: %w", ErrTransitionChainInvalid)
+	}
+	prior, err := parseTransitionMaterialization(*markerChange.Expected)
+	if err != nil || prior.State != "reserved" || !sameTransitionMaterializationContract(prior, marker) {
+		return fmt.Errorf("attached materialization does not continue the exact reserved marker: %w", ErrTransitionChainInvalid)
+	}
+	return nil
+}
+
+func exactlyOneTransitionKey(values map[string]MetadataStringPatch, keys ...string) (string, int) {
+	selected := ""
+	count := 0
+	for _, key := range keys {
+		if _, ok := values[key]; ok {
+			selected = key
+			count++
+		}
+	}
+	return selected, count
+}
+
+func parseTransitionMaterialization(encoded string) (transitionMaterialization, error) {
+	var marker transitionMaterialization
+	if encoded == "" || json.Unmarshal([]byte(encoded), &marker) != nil {
+		return transitionMaterialization{}, errors.New("materialization marker is not valid JSON")
+	}
+	canonical, err := json.Marshal(marker)
+	if err != nil || string(canonical) != encoded || marker.Version != 1 || marker.Scope == "" || marker.Contract == "" ||
+		marker.Route == "" || marker.Workflow == "" || marker.MergeStrategy == "" || marker.Token == "" ||
+		marker.SourceID == "" || marker.SourceStoreRef == "" || marker.WorkflowStoreRef == "" || marker.AdmissionReceipt == "" {
+		return transitionMaterialization{}, errors.New("materialization marker is incomplete or noncanonical")
+	}
+	if marker.State != "reserved" && marker.State != "attached" {
+		return transitionMaterialization{}, errors.New("materialization marker state is unsupported")
+	}
+	if marker.State == "reserved" && marker.WorkflowID != "" || marker.State == "attached" && marker.WorkflowID == "" {
+		return transitionMaterialization{}, errors.New("materialization workflow ID does not match marker state")
+	}
+	return marker, nil
+}
+
+func sameTransitionMaterializationContract(left, right transitionMaterialization) bool {
+	return left.Version == right.Version && left.Scope == right.Scope && left.Contract == right.Contract &&
+		left.Route == right.Route && left.Workflow == right.Workflow && left.MergeStrategy == right.MergeStrategy &&
+		left.Token == right.Token && left.SourceID == right.SourceID && left.SourceStoreRef == right.SourceStoreRef &&
+		left.WorkflowStoreRef == right.WorkflowStoreRef && left.AdmissionReceipt == right.AdmissionReceipt
+}
+
+func validateTransitionStepPatchEvidence(step TransitionStep, patch SourceWorkPatch, source beads.Bead, evidence TransitionEvidence) error {
+	switch step {
+	case TransitionStepReservation:
+		marker, err := parseTransitionMaterialization(patch.Metadata[beadmeta.LifecycleMaterializationMetadataKey].Value)
+		if err != nil || !transitionMaterializationMatchesEvidence(marker, source, evidence) {
+			return fmt.Errorf("reserved materialization marker does not bind source admission and policy: %w", errors.Join(ErrTransitionChainEvidence, err))
+		}
+	case TransitionStepAttachedMaterialization:
+		marker, err := parseTransitionMaterialization(patch.Metadata[beadmeta.LifecycleMaterializationMetadataKey].Value)
+		priorEncoded := *patch.Metadata[beadmeta.LifecycleMaterializationMetadataKey].Expected
+		prior, priorErr := parseTransitionMaterialization(priorEncoded)
+		if err != nil || priorErr != nil || !transitionMaterializationMatchesEvidence(marker, source, evidence) ||
+			!transitionMaterializationMatchesEvidence(prior, source, evidence) || !sameTransitionMaterializationContract(prior, marker) {
+			return fmt.Errorf("attached materialization marker does not continue the exact admitted reservation: %w", errors.Join(ErrTransitionChainEvidence, err, priorErr))
+		}
+		routeKey, _ := exactlyOneTransitionKey(patch.Metadata, beadmeta.ExecutionRoutedToMetadataKey, beadmeta.RoutedToMetadataKey)
+		workflowKey, _ := exactlyOneTransitionKey(patch.Metadata, beadmeta.MoleculeIDMetadataKey, beadmeta.WorkflowIDMetadataKey, beadmeta.LegacyWorkflowIDMetadataKey)
+		if patch.Metadata[routeKey].Value != evidence.Policy.Target.Identity || patch.Metadata[workflowKey].Value != marker.WorkflowID ||
+			patch.Metadata[beadmeta.MergeStrategyMetadataKey].Value != evidence.Policy.MergeStrategy {
+			return fmt.Errorf("attached source route, workflow, or merge value differs from exact admission: %w", ErrTransitionChainEvidence)
+		}
+		for _, key := range []string{beadmeta.ExecutionRoutedToMetadataKey, beadmeta.RoutedToMetadataKey} {
+			current := source.Metadata[key]
+			if key == routeKey {
+				current = patch.Metadata[key].Value
+			}
+			if strings.TrimSpace(current) != "" && key != routeKey {
+				return fmt.Errorf("attached source has a second route key %q: %w", key, ErrTransitionChainEvidence)
+			}
+		}
+		workflowKeys := []string{beadmeta.MoleculeIDMetadataKey, beadmeta.WorkflowIDMetadataKey, beadmeta.LegacyWorkflowIDMetadataKey}
+		for _, key := range workflowKeys {
+			current := source.Metadata[key]
+			if key == workflowKey {
+				current = patch.Metadata[key].Value
+			}
+			if strings.TrimSpace(current) != "" && key != workflowKey {
+				return fmt.Errorf("attached source has a second workflow ID key %q: %w", key, ErrTransitionChainEvidence)
+			}
+		}
+	}
+	return nil
+}
+
+func transitionMaterializationMatchesEvidence(marker transitionMaterialization, source beads.Bead, evidence TransitionEvidence) bool {
+	return marker.Scope == evidence.Policy.SourceScope && marker.Scope == evidence.Attachment.Scope &&
+		marker.Contract == evidence.Attachment.ReceiptDigest && marker.Route == evidence.Policy.Target.Identity && marker.Workflow == evidence.Policy.Workflow &&
+		marker.MergeStrategy == evidence.Policy.MergeStrategy && marker.SourceID == source.ID &&
+		marker.AdmissionReceipt == source.Metadata[beadmeta.LifecycleAdmissionReceiptV2MetadataKey]
+}
+
+func verifyTransitionPatchExpected(source beads.Bead, patch beads.RevisionTransitionIssuePatch) error {
+	for _, change := range patch.Metadata {
+		current, present := source.Metadata[change.Key]
+		if change.Expected == nil {
+			if present {
+				return fmt.Errorf("metadata key %q is present", change.Key)
+			}
+			continue
+		}
+		var expected string
+		if err := json.Unmarshal(*change.Expected, &expected); err != nil || !present || current != expected {
+			return fmt.Errorf("metadata key %q differs from its expected string", change.Key)
+		}
+	}
+	if patch.Status != nil && source.Status != patch.Status.Expected {
+		return errors.New("status differs from its expected value")
+	}
+	if patch.Assignee != nil && source.Assignee != patch.Assignee.Expected {
+		return errors.New("assignee differs from its expected value")
+	}
+	return nil
+}
+
+func verifyTransitionPatchReceipt(receipt beads.RevisionTransitionPatchReceipt, issueID string, request beads.RevisionTransitionPatchRequest) (beads.RevisionTransitionPatchReceipt, string, error) {
+	if receipt.ReceiptID != request.ReceiptID || receipt.IssueID != issueID || receipt.Scope != request.Scope ||
+		receipt.Kind != request.Kind || receipt.Actor != request.Actor || receipt.ExpectedVersion != request.ExpectedVersion ||
+		receipt.PriorReceiptID != request.PriorReceiptID || receipt.PriorReceiptDigest != request.PriorReceiptDigest ||
+		receipt.ToVersion == 0 || receipt.ToVersion == receipt.ExpectedVersion {
+		return beads.RevisionTransitionPatchReceipt{}, "", fmt.Errorf("durable receipt identity, parent, or ToVersion differs from request: %w", ErrTransitionChainReceipt)
+	}
+	wantPatch, err := canonicalPatch(request.Patch)
+	if err != nil {
+		return beads.RevisionTransitionPatchReceipt{}, "", fmt.Errorf("request patch is not canonical: %w", errors.Join(ErrTransitionChainReceipt, err))
+	}
+	gotPatch, err := canonicalPatch(receipt.Patch)
+	if err != nil {
+		return beads.RevisionTransitionPatchReceipt{}, "", fmt.Errorf("receipt patch is not canonical: %w", errors.Join(ErrTransitionChainReceipt, err))
+	}
+	actualPatchBytes, _ := json.Marshal(receipt.Patch)
+	canonicalPatchBytes, _ := json.Marshal(gotPatch)
+	if !bytes.Equal(actualPatchBytes, canonicalPatchBytes) {
+		return beads.RevisionTransitionPatchReceipt{}, "", fmt.Errorf("receipt patch is not canonically ordered: %w", ErrTransitionChainReceipt)
+	}
+	wantBytes, _ := json.Marshal(wantPatch)
+	gotBytes, _ := json.Marshal(gotPatch)
+	if !bytes.Equal(wantBytes, gotBytes) {
+		return beads.RevisionTransitionPatchReceipt{}, "", fmt.Errorf("durable receipt patch differs from request: %w", ErrTransitionChainReceipt)
+	}
+	canonical := receipt
+	canonical.Patch = gotPatch
+	digest, err := revisionTransitionPatchReceiptDigest(canonical)
+	if err != nil {
+		return beads.RevisionTransitionPatchReceipt{}, "", fmt.Errorf("digest durable patch receipt: %w", errors.Join(ErrTransitionChainReceipt, err))
+	}
+	return canonical, digest, nil
+}
+
+func validateStoredTransitionPatchReceipt(receipt beads.RevisionTransitionPatchReceipt, issueID, scope string, evidence TransitionEvidence, admissionReceipt string) (transitionParent, error) {
+	if receipt.IssueID != issueID || receipt.Scope != scope || receipt.ToVersion == 0 || receipt.ToVersion == receipt.ExpectedVersion {
+		return transitionParent{}, fmt.Errorf("stored parent patch receipt has wrong identity or version: %w", ErrTransitionChainReceipt)
+	}
+	request := beads.RevisionTransitionPatchRequest{
+		ReceiptID: receipt.ReceiptID, Scope: receipt.Scope, Kind: receipt.Kind, Actor: receipt.Actor,
+		ExpectedVersion: receipt.ExpectedVersion, PriorReceiptID: receipt.PriorReceiptID,
+		PriorReceiptDigest: receipt.PriorReceiptDigest, Patch: receipt.Patch,
+	}
+	if _, err := beads.RevisionTransitionPatchProtectedMutationDigest(issueID, request); err != nil {
+		return transitionParent{}, fmt.Errorf("stored parent patch receipt request is invalid: %w", errors.Join(ErrTransitionChainReceipt, err))
+	}
+	canonicalPatch, err := canonicalPatch(receipt.Patch)
+	if err != nil {
+		return transitionParent{}, fmt.Errorf("stored parent patch is not canonical: %w", errors.Join(ErrTransitionChainReceipt, err))
+	}
+	actualBytes, _ := json.Marshal(receipt.Patch)
+	canonicalBytes, _ := json.Marshal(canonicalPatch)
+	if !bytes.Equal(actualBytes, canonicalBytes) {
+		return transitionParent{}, fmt.Errorf("stored parent patch is not canonical: %w", ErrTransitionChainReceipt)
+	}
+	step, ok := transitionStepForKind(receipt.Kind)
+	if !ok {
+		return transitionParent{}, fmt.Errorf("stored parent patch has an unsupported lifecycle kind: %w", ErrTransitionChainReceipt)
+	}
+	sourcePatch, err := sourcePatchFromCanonical(canonicalPatch)
+	if err != nil || validateTransitionStepPatch(step, sourcePatch) != nil {
+		return transitionParent{}, fmt.Errorf("stored parent patch does not match its lifecycle kind: %w", errors.Join(ErrTransitionChainReceipt, err))
+	}
+	// Historical receipts are checked against the same v2 contract and current
+	// policy proof. Their source may since have advanced, so only fields carried
+	// by each immutable patch receipt are checked here.
+	if step == TransitionStepReservation || step == TransitionStepAttachedMaterialization {
+		if !transitionPatchEvidenceMatchesMarker(step, sourcePatch, issueID, admissionReceipt, evidence) {
+			return transitionParent{}, fmt.Errorf("stored parent patch differs from current admission proof: %w", ErrTransitionChainReceipt)
+		}
+	}
+	receipt.Patch = canonicalPatch
+	digest, err := revisionTransitionPatchReceiptDigest(receipt)
+	if err != nil {
+		return transitionParent{}, fmt.Errorf("digest stored parent patch receipt: %w", errors.Join(ErrTransitionChainReceipt, err))
+	}
+	return transitionParent{ReceiptID: receipt.ReceiptID, Digest: digest, ToVersion: receipt.ToVersion}, nil
+}
+
+func transitionPatchEvidenceMatchesMarker(step TransitionStep, patch SourceWorkPatch, issueID, admissionReceipt string, evidence TransitionEvidence) bool {
+	change, ok := patch.Metadata[beadmeta.LifecycleMaterializationMetadataKey]
+	if !ok {
+		return false
+	}
+	marker, err := parseTransitionMaterialization(change.Value)
+	if err != nil || marker.Scope != evidence.Policy.SourceScope || marker.Scope != evidence.Attachment.Scope ||
+		marker.Contract != evidence.Attachment.ReceiptDigest || marker.Route != evidence.Policy.Target.Identity ||
+		marker.Workflow != evidence.Policy.Workflow || marker.MergeStrategy != evidence.Policy.MergeStrategy ||
+		marker.SourceID != issueID || marker.AdmissionReceipt != admissionReceipt {
+		return false
+	}
+	if step == TransitionStepReservation {
+		return marker.State == "reserved" && marker.WorkflowID == ""
+	}
+	if step != TransitionStepAttachedMaterialization || marker.State != "attached" || marker.WorkflowID == "" {
+		return false
+	}
+	routeKey, _ := exactlyOneTransitionKey(patch.Metadata, beadmeta.ExecutionRoutedToMetadataKey, beadmeta.RoutedToMetadataKey)
+	workflowKey, _ := exactlyOneTransitionKey(patch.Metadata, beadmeta.MoleculeIDMetadataKey, beadmeta.WorkflowIDMetadataKey, beadmeta.LegacyWorkflowIDMetadataKey)
+	return patch.Metadata[routeKey].Value == evidence.Policy.Target.Identity &&
+		patch.Metadata[workflowKey].Value == marker.WorkflowID &&
+		patch.Metadata[beadmeta.MergeStrategyMetadataKey].Value == evidence.Policy.MergeStrategy
+}
+
+func canonicalPatch(patch beads.RevisionTransitionIssuePatch) (beads.RevisionTransitionIssuePatch, error) {
+	if patch.Labels != nil {
+		return beads.RevisionTransitionIssuePatch{}, errors.New("source lifecycle chain does not patch labels")
+	}
+	canonical := beads.RevisionTransitionIssuePatch{Metadata: append([]beads.RevisionTransitionMetadataPatch(nil), patch.Metadata...)}
+	sort.Slice(canonical.Metadata, func(i, j int) bool { return canonical.Metadata[i].Key < canonical.Metadata[j].Key })
+	for index := range canonical.Metadata {
+		entry := &canonical.Metadata[index]
+		if !beadmeta.ValidKey(entry.Key) || (index > 0 && canonical.Metadata[index-1].Key == entry.Key) {
+			return beads.RevisionTransitionIssuePatch{}, errors.New("metadata patch keys are invalid or duplicated")
+		}
+		var err error
+		entry.Expected, err = canonicalMetadataString(entry.Expected)
+		if err != nil {
+			return beads.RevisionTransitionIssuePatch{}, fmt.Errorf("metadata key %q expected value is not a canonical string", entry.Key)
+		}
+		entry.Value, err = canonicalMetadataString(entry.Value)
+		if err != nil || entry.Value == nil {
+			return beads.RevisionTransitionIssuePatch{}, fmt.Errorf("metadata key %q next value is not a canonical string", entry.Key)
+		}
+	}
+	if patch.Status != nil {
+		value := *patch.Status
+		canonical.Status = &value
+	}
+	if patch.Assignee != nil {
+		value := *patch.Assignee
+		canonical.Assignee = &value
+	}
+	return canonical, nil
+}
+
+func canonicalMetadataString(raw *json.RawMessage) (*json.RawMessage, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	var value string
+	if err := json.Unmarshal(*raw, &value); err != nil {
+		return nil, err
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil || !bytes.Equal(encoded, *raw) {
+		return nil, errors.New("metadata string JSON is not canonical")
+	}
+	canonical := json.RawMessage(encoded)
+	return &canonical, nil
+}
+
+func revisionTransitionPatchReceiptDigest(receipt beads.RevisionTransitionPatchReceipt) (string, error) {
+	type canonicalReceipt struct {
+		ReceiptID          string                             `json:"receipt_id"`
+		IssueID            string                             `json:"issue_id"`
+		Scope              string                             `json:"scope"`
+		Kind               string                             `json:"kind"`
+		Actor              string                             `json:"actor"`
+		ExpectedVersion    string                             `json:"expected_version"`
+		ToVersion          string                             `json:"to_version"`
+		PriorReceiptID     string                             `json:"prior_receipt_id"`
+		PriorReceiptDigest string                             `json:"prior_receipt_digest"`
+		Patch              beads.RevisionTransitionIssuePatch `json:"patch"`
+	}
+	encoded, err := json.Marshal(canonicalReceipt{
+		ReceiptID: receipt.ReceiptID, IssueID: receipt.IssueID, Scope: receipt.Scope,
+		Kind: receipt.Kind, Actor: receipt.Actor,
+		ExpectedVersion: strconv.FormatInt(receipt.ExpectedVersion, 10), ToVersion: strconv.FormatInt(receipt.ToVersion, 10),
+		PriorReceiptID: receipt.PriorReceiptID, PriorReceiptDigest: receipt.PriorReceiptDigest,
+		Patch: receipt.Patch,
+	})
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(encoded)
+	return hex.EncodeToString(digest[:]), nil
+}
+
+func controllerMetadataTransitionReceiptDigest(receipt beads.ControllerMetadataTransitionReceipt) (string, error) {
+	type canonicalReceipt struct {
+		ReceiptID       string          `json:"receipt_id"`
+		IssueID         string          `json:"issue_id"`
+		Scope           string          `json:"scope"`
+		Kind            string          `json:"kind"`
+		Actor           string          `json:"actor"`
+		ExpectedVersion string          `json:"expected_version"`
+		ToVersion       string          `json:"to_version"`
+		Key             string          `json:"key"`
+		Expected        json.RawMessage `json:"expected,omitempty"`
+		Value           json.RawMessage `json:"value,omitempty"`
+		Payload         json.RawMessage `json:"payload"`
+	}
+	canonical := canonicalReceipt{
+		ReceiptID: receipt.ReceiptID, IssueID: receipt.IssueID, Scope: receipt.Scope,
+		Kind: receipt.Kind, Actor: receipt.Actor,
+		ExpectedVersion: strconv.FormatInt(receipt.ExpectedVersion, 10), ToVersion: strconv.FormatInt(receipt.ToVersion, 10),
+		Key: receipt.Key, Payload: append(json.RawMessage(nil), receipt.Payload...),
+	}
+	if len(receipt.Expected) > 0 {
+		canonical.Expected = append(json.RawMessage(nil), receipt.Expected...)
+	}
+	if len(receipt.Value) > 0 {
+		canonical.Value = append(json.RawMessage(nil), receipt.Value...)
+	}
+	encoded, err := json.Marshal(canonical)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(encoded)
+	return hex.EncodeToString(digest[:]), nil
+}
+
+func transitionReceiptID(issueID, scope string, step TransitionStep, operationID string) (string, error) {
+	identity, err := json.Marshal(struct {
+		IssueID     string         `json:"issue_id"`
+		Scope       string         `json:"scope"`
+		Step        TransitionStep `json:"step"`
+		OperationID string         `json:"operation_id"`
+	}{IssueID: issueID, Scope: scope, Step: step, OperationID: operationID})
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(append([]byte(transitionReceiptDomain), identity...))
+	return transitionReceiptPrefix + hex.EncodeToString(digest[:]), nil
+}
+
+func validTransitionStep(step TransitionStep) bool {
+	return transitionStepKind(step) != ""
+}
+
+func transitionStepKind(step TransitionStep) string {
+	switch step {
+	case TransitionStepReservation:
+		return transitionKindReservation
+	case TransitionStepAttachedMaterialization:
+		return transitionKindAttachedMaterialization
+	case TransitionStepClaimIdentity:
+		return transitionKindClaimIdentity
+	case TransitionStepRecoveryBudget:
+		return transitionKindRecoveryBudget
+	case TransitionStepCompletionBudget:
+		return transitionKindCompletionBudget
+	case TransitionStepClose:
+		return transitionKindClose
+	default:
+		return ""
+	}
+}
+
+func transitionStepForKind(kind string) (TransitionStep, bool) {
+	for _, step := range []TransitionStep{
+		TransitionStepReservation, TransitionStepAttachedMaterialization, TransitionStepClaimIdentity,
+		TransitionStepRecoveryBudget, TransitionStepCompletionBudget, TransitionStepClose,
+	} {
+		if transitionStepKind(step) == kind {
+			return step, true
+		}
+	}
+	return "", false
+}
+
+func sourcePatchFromCanonical(patch beads.RevisionTransitionIssuePatch) (SourceWorkPatch, error) {
+	converted := SourceWorkPatch{Metadata: make(map[string]MetadataStringPatch, len(patch.Metadata))}
+	for _, entry := range patch.Metadata {
+		var value string
+		if entry.Value == nil || json.Unmarshal(*entry.Value, &value) != nil {
+			return SourceWorkPatch{}, ErrTransitionChainReceipt
+		}
+		change := MetadataStringPatch{Value: value}
+		if entry.Expected != nil {
+			var expected string
+			if json.Unmarshal(*entry.Expected, &expected) != nil {
+				return SourceWorkPatch{}, ErrTransitionChainReceipt
+			}
+			change.Expected = &expected
+		}
+		converted.Metadata[entry.Key] = change
+	}
+	if patch.Status != nil {
+		value := *patch.Status
+		converted.Status = &StringTransition{Expected: value.Expected, Value: value.Value}
+	}
+	if patch.Assignee != nil {
+		value := *patch.Assignee
+		converted.Assignee = &StringTransition{Expected: value.Expected, Value: value.Value}
+	}
+	return converted, nil
+}
+
+func validTransitionText(value string, max int) bool {
+	if value == "" || !utf8.ValidString(value) || strings.ContainsRune(value, '\x00') || utf8.RuneCountInString(value) > max {
+		return false
+	}
+	for _, r := range value {
+		if unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
+}
+
+func validTransitionPermit(value string) bool {
+	if value == "" || strings.TrimSpace(value) != value || len(value) > 65536 || !utf8.ValidString(value) {
+		return false
+	}
+	for _, r := range value {
+		if unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
+}

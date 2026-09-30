@@ -115,6 +115,7 @@ func TestLifecycleEnrollmentBlocksRouteMetadataChanges(t *testing.T) {
 		beadmeta.MoleculeIDMetadataKey,
 		beadmeta.MergeStrategyMetadataKey,
 		beadmeta.LifecycleMaterializationMetadataKey,
+		beadmeta.LifecycleCompletionBudgetMetadataKey,
 		beadmeta.WorkflowExpandedMetadataKey,
 		"gc.lifecycle.admission_receipt.v2",
 	}
