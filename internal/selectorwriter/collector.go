@@ -292,7 +292,7 @@ func (c Collector) Collect(ctx context.Context, request Request) ([]byte, error)
 	}
 
 	ledger := selectorinventory.ExternalLedgerEvidence{
-		SchemaVersion:            selectorinventory.ExternalLedgerSchemaVersion,
+		SchemaVersion:            ledgerSchemaVersionForSequences(orders.Sequences),
 		ObservationID:            request.ObservationID,
 		ControllerSnapshotSHA256: request.Controller.SnapshotSHA256,
 		GraphConfigGeneration:    request.Controller.Generation,
@@ -476,15 +476,20 @@ func validOrderSnapshot(snapshot OrderLedgerSnapshot, window selectorinventory.C
 	if !validScopeCoverage(snapshot.Coverage, ScopeOrders, window) || !validCapture(snapshot.Retention) ||
 		snapshot.Retention.Start.Location() != time.UTC || snapshot.Retention.End.Location() != time.UTC ||
 		snapshot.Retention.Start.After(window.Start) || snapshot.Retention.End.Before(window.End) || snapshot.Retention.End.After(now) ||
-		!validDigest(snapshot.EvidenceSHA256) ||
-		snapshot.Sequences == nil || len(snapshot.Sequences) == 0 || len(snapshot.Sequences) > maxLedgerEntries ||
-		snapshot.SequenceStart == 0 || snapshot.SequenceEnd < snapshot.SequenceStart ||
-		uint64(len(snapshot.Sequences)) != snapshot.SequenceEnd-snapshot.SequenceStart+1 {
+		!validDigest(snapshot.EvidenceSHA256) {
+		return false
+	}
+	return validOrderSequences(snapshot.SequenceStart, snapshot.SequenceEnd, snapshot.Sequences, window)
+}
+
+func validOrderSequences(sequenceStart, sequenceEnd uint64, sequences []selectorinventory.LedgerSequence, window selectorinventory.CaptureWindow) bool {
+	if sequences == nil || len(sequences) == 0 || len(sequences) > maxLedgerEntries ||
+		sequenceStart == 0 || sequenceEnd < sequenceStart || uint64(len(sequences)) != sequenceEnd-sequenceStart+1 {
 		return false
 	}
 	checkpointCount := 0
-	for index, sequence := range snapshot.Sequences {
-		if sequence.Sequence != snapshot.SequenceStart+uint64(index) || sequence.SourceScope != ScopeOrders || !validDigest(sequence.EntrySHA256) {
+	for index, sequence := range sequences {
+		if sequence.Sequence != sequenceStart+uint64(index) || sequence.SourceScope != ScopeOrders || !validDigest(sequence.EntrySHA256) {
 			return false
 		}
 		switch sequence.EntryKind {
@@ -505,11 +510,11 @@ func validOrderSnapshot(snapshot OrderLedgerSnapshot, window selectorinventory.C
 		}
 	}
 	if checkpointCount > 0 {
-		if checkpointCount != len(snapshot.Sequences) {
+		if checkpointCount != len(sequences) {
 			return false
 		}
 		coveredThrough := window.Start
-		for _, sequence := range snapshot.Sequences {
+		for _, sequence := range sequences {
 			if !sequence.CoverageWindow.Start.Equal(coveredThrough) {
 				return false
 			}
@@ -520,6 +525,15 @@ func validOrderSnapshot(snapshot OrderLedgerSnapshot, window selectorinventory.C
 	return true
 }
 
+func ledgerSchemaVersionForSequences(sequences []selectorinventory.LedgerSequence) int {
+	for _, sequence := range sequences {
+		if sequence.EntryKind == selectorinventory.LedgerSequenceKindCoverageCheckpoint {
+			return selectorinventory.ExternalLedgerSchemaVersionV2
+		}
+	}
+	return selectorinventory.ExternalLedgerSchemaVersionV1
+}
+
 func validScopeCoverage(coverage selectorinventory.ExternalSourceCoverage, scope string, window selectorinventory.CaptureWindow) bool {
 	return coverage.ScopeID == scope && coverage.Status == selectorinventory.StatusAvailable && coverage.Complete &&
 		validCapture(coverage.Capture) && coverage.Capture.Start.Location() == time.UTC && coverage.Capture.End.Location() == time.UTC &&
@@ -527,7 +541,9 @@ func validScopeCoverage(coverage selectorinventory.ExternalSourceCoverage, scope
 }
 
 func validCanonicalLedger(ledger selectorinventory.ExternalLedgerEvidence, raw []byte, request Request) bool {
-	if len(raw) == 0 || len(raw) > maxLedgerBytes || ledger.ObservationID != request.ObservationID ||
+	if len(raw) == 0 || len(raw) > maxLedgerBytes ||
+		!validOrderSequences(ledger.SequenceStart, ledger.SequenceEnd, ledger.Sequences, request.Capture) ||
+		ledger.SchemaVersion != ledgerSchemaVersionForSequences(ledger.Sequences) || ledger.ObservationID != request.ObservationID ||
 		ledger.ControllerSnapshotSHA256 != request.Controller.SnapshotSHA256 || ledger.GraphConfigGeneration != request.Controller.Generation ||
 		ledger.ControllerBuild != request.Controller.Build || ledger.ExecutionGeneration != request.ExecutionGeneration ||
 		!ledger.Capture.Start.Equal(request.Capture.Start) || !ledger.Capture.End.Equal(request.Capture.End) ||

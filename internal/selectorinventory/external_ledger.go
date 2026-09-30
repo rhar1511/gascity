@@ -19,8 +19,14 @@ import (
 )
 
 const (
-	// ExternalLedgerSchemaVersion identifies canonical external ledger records.
-	ExternalLedgerSchemaVersion = 1
+	// ExternalLedgerSchemaVersionV1 identifies the original event-only ledger
+	// byte contract.
+	ExternalLedgerSchemaVersionV1 = 1
+	// ExternalLedgerSchemaVersionV2 identifies ledgers that can carry sequenced
+	// quiet-window coverage checkpoints.
+	ExternalLedgerSchemaVersionV2 = 2
+	// ExternalLedgerSchemaVersion remains the v1 version for existing callers.
+	ExternalLedgerSchemaVersion = ExternalLedgerSchemaVersionV1
 
 	// LedgerSequenceKindCoverageCheckpoint marks an order-scope sequence entry
 	// that proves an exact interval contained no order attempts.
@@ -350,7 +356,7 @@ func validateExternalLedgerExpectation(expected ExternalLedgerExpectation) strin
 }
 
 func validateExternalLedgerShape(evidence ExternalLedgerEvidence) string {
-	if evidence.SchemaVersion != ExternalLedgerSchemaVersion || evidence.ObservationID == "" ||
+	if (evidence.SchemaVersion != ExternalLedgerSchemaVersionV1 && evidence.SchemaVersion != ExternalLedgerSchemaVersionV2) || evidence.ObservationID == "" ||
 		evidence.ControllerSnapshotSHA256 == "" || evidence.ControllerBuild == "" || evidence.ExecutionGeneration == "" ||
 		evidence.GraphConfigGeneration == 0 || evidence.SequenceStart == 0 || evidence.SequenceEnd < evidence.SequenceStart ||
 		len(evidence.Sequences) == 0 || len(evidence.Sequences) > maxExternalLedgerEntries ||
@@ -449,11 +455,11 @@ func validateExternalSequence(evidence ExternalLedgerEvidence) string {
 		}
 		switch entry.EntryKind {
 		case "":
-			if entry.CoverageWindow != nil {
+			if evidence.SchemaVersion != ExternalLedgerSchemaVersionV1 || entry.CoverageWindow != nil {
 				return "ledger_sequence_gap_or_ambiguity"
 			}
 		case LedgerSequenceKindCoverageCheckpoint:
-			if entry.SourceScope != "orders" || entry.CoverageWindow == nil || !validCaptureWindow(*entry.CoverageWindow) ||
+			if evidence.SchemaVersion != ExternalLedgerSchemaVersionV2 || entry.SourceScope != "orders" || entry.CoverageWindow == nil || !validCaptureWindow(*entry.CoverageWindow) ||
 				!canonicalUTC(entry.CoverageWindow.Start) || !canonicalUTC(entry.CoverageWindow.End) ||
 				entry.CoverageWindow.Start.Before(evidence.Capture.Start) || entry.CoverageWindow.End.After(evidence.Capture.End) ||
 				entry.EntrySHA256 != LedgerSequenceCoverageCheckpointDigest(entry.Sequence, *entry.CoverageWindow) {
@@ -463,6 +469,9 @@ func validateExternalSequence(evidence ExternalLedgerEvidence) string {
 		default:
 			return "ledger_sequence_gap_or_ambiguity"
 		}
+	}
+	if evidence.SchemaVersion == ExternalLedgerSchemaVersionV2 && checkpointCount == 0 {
+		return "ledger_sequence_gap_or_ambiguity"
 	}
 	if checkpointCount > 0 {
 		if checkpointCount != len(evidence.Sequences) {

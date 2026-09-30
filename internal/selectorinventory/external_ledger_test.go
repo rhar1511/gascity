@@ -249,6 +249,36 @@ func TestJoinExternalLedgerAcceptsExactCanonicalEvidence(t *testing.T) {
 	}
 }
 
+func TestExternalLedgerV1EventOnlyRowsPreserveLegacyBytes(t *testing.T) {
+	fixture := newExternalLedgerTestFixture(t)
+	if fixture.ledger.SchemaVersion != ExternalLedgerSchemaVersionV1 {
+		t.Fatalf("event-only fixture schema = %d, want v1", fixture.ledger.SchemaVersion)
+	}
+	type legacyLedgerSequence struct {
+		Sequence    uint64 `json:"sequence"`
+		SourceScope string `json:"source_scope"`
+		EntrySHA256 string `json:"entry_sha256"`
+	}
+	legacy := make([]legacyLedgerSequence, len(fixture.ledger.Sequences))
+	for index, sequence := range fixture.ledger.Sequences {
+		legacy[index] = legacyLedgerSequence{Sequence: sequence.Sequence, SourceScope: sequence.SourceScope, EntrySHA256: sequence.EntrySHA256}
+	}
+	legacyBytes, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentBytes, err := json.Marshal(fixture.ledger.Sequences)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(currentBytes, legacyBytes) {
+		t.Fatalf("v1 event-only sequence bytes changed: got %s, want legacy %s", currentBytes, legacyBytes)
+	}
+	if bytes.Contains(fixture.raw, []byte(`"entry_kind"`)) || bytes.Contains(fixture.raw, []byte(`"coverage_window"`)) {
+		t.Fatalf("v1 event-only ledger serialized v2 fields: %s", fixture.raw)
+	}
+}
+
 func TestJoinExternalLedgerAcceptsSequencedEmptyWindowCheckpoints(t *testing.T) {
 	fixture := newQuietExternalLedgerTestFixture(t)
 	result := JoinExternalLedger(fixture.raw, fixture.expected, fixture.registry)
@@ -301,9 +331,27 @@ func TestJoinExternalLedgerRejectsMalformedEmptyWindowCheckpoints(t *testing.T) 
 	}
 }
 
+func TestJoinExternalLedgerEnforcesCheckpointSchemaVersion(t *testing.T) {
+	t.Run("v1 rejects checkpoint fields", func(t *testing.T) {
+		fixture := newQuietExternalLedgerTestFixture(t)
+		fixture.ledger.SchemaVersion = ExternalLedgerSchemaVersionV1
+		fixture.refresh(t)
+		result := JoinExternalLedger(fixture.raw, fixture.expected, fixture.registry)
+		assertExternalJoinUnavailable(t, result, "ledger_sequence_gap_or_ambiguity")
+	})
+	t.Run("v2 requires checkpoint rows", func(t *testing.T) {
+		fixture := newExternalLedgerTestFixture(t)
+		fixture.ledger.SchemaVersion = ExternalLedgerSchemaVersionV2
+		fixture.refresh(t)
+		result := JoinExternalLedger(fixture.raw, fixture.expected, fixture.registry)
+		assertExternalJoinUnavailable(t, result, "ledger_sequence_gap_or_ambiguity")
+	})
+}
+
 func newQuietExternalLedgerTestFixture(t *testing.T) *externalLedgerTestFixture {
 	t.Helper()
 	fixture := newExternalLedgerTestFixture(t)
+	fixture.ledger.SchemaVersion = ExternalLedgerSchemaVersionV2
 	fixture.ledger.ExternalScope = []string{"audit.secondary", "orders"}
 	fixture.expected.ExternalScope = append([]string(nil), fixture.ledger.ExternalScope...)
 	fixture.ledger.SourceCoverage = []ExternalSourceCoverage{

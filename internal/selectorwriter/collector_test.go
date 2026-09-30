@@ -333,6 +333,10 @@ func TestCollectorSignsCanonicalExternalLedgerWithMandatoryScopes(t *testing.T) 
 	if err := json.Unmarshal(ledger, &ledgerEvidence); err != nil {
 		t.Fatalf("decode signed canonical ledger: %v", err)
 	}
+	if ledgerEvidence.SchemaVersion != selectorinventory.ExternalLedgerSchemaVersionV1 ||
+		strings.Contains(string(ledger), `"entry_kind"`) || strings.Contains(string(ledger), `"coverage_window"`) {
+		t.Fatalf("ordinary event-only ledger did not preserve v1 bytes: version=%d ledger=%s", ledgerEvidence.SchemaVersion, ledger)
+	}
 	for _, scope := range MandatoryScopes() {
 		if !bytes.Contains(ledger, []byte(`"scope_id":"`+scope+`"`)) {
 			t.Errorf("canonical ledger does not carry mandatory scope %q", scope)
@@ -360,6 +364,9 @@ func TestCollectorSignsExactQuietOrderWindowCheckpoint(t *testing.T) {
 	var ledger selectorinventory.ExternalLedgerEvidence
 	if err := json.Unmarshal(verified.ExternalLedgerJSON(), &ledger); err != nil {
 		t.Fatalf("decode quiet-window ledger: %v", err)
+	}
+	if ledger.SchemaVersion != selectorinventory.ExternalLedgerSchemaVersionV2 {
+		t.Fatalf("quiet-window schema = %d, want v2", ledger.SchemaVersion)
 	}
 	if ledger.SequenceStart != 42 || ledger.SequenceEnd != 43 || len(ledger.Sequences) != 2 {
 		t.Fatalf("quiet-window sequence bounds/rows = %d..%d/%d, want checkpoint sequences 42..43", ledger.SequenceStart, ledger.SequenceEnd, len(ledger.Sequences))
