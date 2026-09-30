@@ -27,6 +27,62 @@ import (
 	"github.com/gastownhall/gascity/internal/storeref/storereftest"
 )
 
+func TestBdByIDGenericMutationsRefuseLifecycleEnrolledWork(t *testing.T) {
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title:    "Protected",
+		Status:   "in_progress",
+		Assignee: "worker-1",
+		Metadata: map[string]string{beadmeta.LifecycleAdmissionReceiptMetadataKey: "persisted"},
+	})
+	if err != nil {
+		t.Fatalf("Create(): %v", err)
+	}
+	graph, err := storebinding.NewBeadsGraphStore(store)
+	if err != nil {
+		t.Fatalf("NewBeadsGraphStore(): %v", err)
+	}
+	title := "Changed"
+	cases := []struct {
+		name string
+		run  func(*bytes.Buffer, *bytes.Buffer) int
+	}{
+		{name: "update", run: func(out, stderr *bytes.Buffer) int {
+			return doBdByIDUpdate(graph, bdByIDOp{ID: bead.ID, Update: beads.UpdateOpts{Title: &title}}, "binding", out, stderr)
+		}},
+		{name: "close", run: func(out, stderr *bytes.Buffer) int {
+			return doBdByIDClose(graph, bdByIDOp{ID: bead.ID}, "binding", out, stderr)
+		}},
+		{name: "reopen", run: func(out, stderr *bytes.Buffer) int {
+			return doBdByIDReopen(graph, bdByIDOp{ID: bead.ID}, "binding", out, stderr)
+		}},
+		{name: "claim", run: func(out, stderr *bytes.Buffer) int {
+			return doBdByIDClaim(graph, bead.ID, "worker-2", true, "binding", out, stderr)
+		}},
+		{name: "release", run: func(out, stderr *bytes.Buffer) int {
+			return doBdByIDReleaseIfCurrent(graph, bead.ID, "worker-1", out, stderr)
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if code := tc.run(&stdout, &stderr); code == 0 {
+				t.Fatalf("mutation exited 0; stdout=%q stderr=%q", stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "generic mutation lacks current session, claim, and row-revision proof") {
+				t.Fatalf("stderr = %q, want enrolled-work fence reason", stderr.String())
+			}
+			current, err := store.Get(bead.ID)
+			if err != nil {
+				t.Fatalf("Get(): %v", err)
+			}
+			if current.Title != "Protected" || current.Status != bead.Status || current.Assignee != "worker-1" {
+				t.Fatalf("refused mutation changed enrolled row: %+v", current)
+			}
+		})
+	}
+}
+
 // configRefEngineProviderID is the foreign provider the fixtures below serve
 // their infrastructure classes from. It is not the built-in engine, so
 // resolveInfraBindingTarget refuses it and the whole migration apparatus is out
@@ -1610,8 +1666,8 @@ func TestBdByIDCloseAndUpdateRefuseLifecycleSourceWithoutCompletion(t *testing.T
 		if code == 0 {
 			t.Fatalf("%v succeeded without verified completion: %s", args, stdout.String())
 		}
-		if !strings.Contains(stderr.String(), "verified completion") {
-			t.Fatalf("%v refusal = %q, want verified-completion explanation", args, stderr.String())
+		if !strings.Contains(stderr.String(), "verified completion") && !strings.Contains(stderr.String(), "generic mutation lacks current session, claim, and row-revision proof") {
+			t.Fatalf("%v refusal = %q, want lifecycle mutation refusal", args, stderr.String())
 		}
 		after, err := classStore.Get(relic.ID)
 		if err != nil {

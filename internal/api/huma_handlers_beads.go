@@ -827,6 +827,9 @@ func (s *Server) humaHandleBeadClose(ctx context.Context, input *BeadCloseInput)
 	if err := rejectPRActionLedgerMutation(current); err != nil {
 		return nil, err
 	}
+	if err := worklifecycle.ValidateGenericMutation(current); err != nil {
+		return nil, apierr.ConflictWrongState.Msg(err.Error())
+	}
 	if err := beads.ValidateLifecycleClose(current); err != nil {
 		return nil, apierr.ConflictWrongState.Msg(err.Error())
 	}
@@ -864,8 +867,8 @@ func (s *Server) humaHandleBeadReopen(_ context.Context, input *BeadReopenInput)
 	if b.Status != "closed" {
 		return nil, apierr.ConflictWrongState.Msg("conflict: bead " + id + " is not closed (status: " + b.Status + ")")
 	}
-	if worklifecycle.HasDurableEnrollment(b) {
-		return nil, apierr.ConflictWrongState.Msg(worklifecycle.ErrEnrolledWorkMutationBlocked.Error())
+	if err := worklifecycle.ValidateGenericMutation(b); err != nil {
+		return nil, apierr.ConflictWrongState.Msg(err.Error())
 	}
 	if err := store.Reopen(id); err != nil {
 		return nil, apierr.Internal.Msg(err.Error())
@@ -891,6 +894,9 @@ func (s *Server) humaHandleBeadAssign(ctx context.Context, input *BeadAssignInpu
 	assignee, err := s.normalizeRawBeadAssignee(ctx, input.Body.Assignee)
 	if err != nil {
 		return nil, apierr.InvalidRequest.Msg(err.Error())
+	}
+	if err := worklifecycle.ValidateEnrolledMutation(current, beads.UpdateOpts{Assignee: &assignee}); err != nil {
+		return nil, apierr.ConflictWrongState.Msg(err.Error())
 	}
 	// Once Get succeeded in the resolved store, treat Update-ErrNotFound as a
 	// concurrent-delete race rather than resolving again — the bead was just
@@ -1025,10 +1031,11 @@ func validateSessionAuthorityMetadata(metadata, current map[string]string) error
 // exposed through the API.
 //
 // The work-record validation gate deliberately does not apply here. Delete
-// says "this bead should not exist", not "this work completed", so demanding a
-// work record would make an unwanted bead undeletable under enforcement. A
-// persisted Workbench execution is still captured before this soft-delete so
-// its private attempt evidence survives owner removal.
+// says "this bead should not exist", not "this work completed". However,
+// durable lifecycle enrollment still requires a current-owner mutation proof;
+// this generic API request carries none. A persisted Workbench execution is
+// still captured before ordinary soft-delete so its private attempt evidence
+// survives owner removal.
 //
 // The same exclusion covers bulk teardown: the paths that close a whole
 // workflow root or scope at once through beads.Store.CloseAll rather than
@@ -1050,6 +1057,9 @@ func (s *Server) humaHandleBeadDelete(ctx context.Context, input *BeadDeleteInpu
 	}
 	if err := rejectPRActionLedgerMutation(current); err != nil {
 		return nil, err
+	}
+	if err := worklifecycle.ValidateGenericMutation(current); err != nil {
+		return nil, apierr.ConflictWrongState.Msg(err.Error())
 	}
 	if err := rejectAttemptEvidenceArchive(current); err != nil {
 		return nil, err

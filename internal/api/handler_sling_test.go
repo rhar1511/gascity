@@ -283,6 +283,36 @@ func (w *apiRouteBarrierWriter) UpdateIfMatch(id string, revision int64, opts be
 	return w.ConditionalWriter.UpdateIfMatch(id, revision, opts)
 }
 
+func TestSlingRefusesLifecycleEnrolledWork(t *testing.T) {
+	h, state := newSlingTestServer(t)
+	store := state.stores["myrig"]
+	bead, err := store.Create(beads.Bead{
+		Title:    "Protected task",
+		Type:     "task",
+		Metadata: map[string]string{beadmeta.LifecycleAdmissionReceiptMetadataKey: "persisted admission evidence"},
+	})
+	if err != nil {
+		t.Fatalf("Create(): %v", err)
+	}
+
+	body := `{"target":"myrig/worker","bead":"` + bead.ID + `"}`
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/sling"), strings.NewReader(body)))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "generic mutation lacks current session, claim, and row-revision proof") {
+		t.Fatalf("response = %s, want enrolled-work fence reason", rec.Body.String())
+	}
+	current, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get(%q): %v", bead.ID, err)
+	}
+	if current.Metadata[beadmeta.RoutedToMetadataKey] != "" {
+		t.Fatalf("refused sling changed routed_to: %q", current.Metadata[beadmeta.RoutedToMetadataKey])
+	}
+}
+
 func TestSlingRefusesCityStoreBeadToRigTarget(t *testing.T) {
 	h, state := newSlingTestServer(t)
 	state.cfg.Workspace.Prefix = "gc"

@@ -936,6 +936,32 @@ func (w *routeBarrierWriter) UpdateIfMatch(id string, revision int64, opts beads
 	return w.ConditionalWriter.UpdateIfMatch(id, revision, opts)
 }
 
+func TestCliBeadRouterRefusesLifecycleEnrolledWork(t *testing.T) {
+	cityPath := t.TempDir()
+	store := newSlingTestStore()
+	bead, err := store.Create(beads.Bead{
+		ID:       "RIG-ENROLLED",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{beadmeta.LifecycleAdmissionReceiptMetadataKey: "persisted admission evidence"},
+	})
+	if err != nil {
+		t.Fatalf("seed enrolled work: %v", err)
+	}
+	router := cliBeadRouter{deps: &slingDeps{CityPath: cityPath, Store: store}}
+	err = router.Route(context.Background(), sling.RouteRequest{BeadID: bead.ID, Target: "alpha/polecat"})
+	if err == nil || !strings.Contains(err.Error(), "generic mutation lacks current session, claim, and row-revision proof") {
+		t.Fatalf("Route() error = %v, want enrolled-work fence", err)
+	}
+	current, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("store.Get(): %v", err)
+	}
+	if current.Metadata[beadmeta.RoutedToMetadataKey] != "" {
+		t.Fatalf("refused route changed gc.routed_to to %q", current.Metadata[beadmeta.RoutedToMetadataKey])
+	}
+}
+
 func TestCliBeadRouterAllowsCityTargetFromCityStore(t *testing.T) {
 	cityPath := t.TempDir()
 	cfg := &config.City{

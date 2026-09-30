@@ -1414,6 +1414,15 @@ func doBdByIDClaim(graph storebinding.GraphStore, id, assignee string, jsonOut b
 		fmt.Fprintf(stderr, "gc bd: claiming %s requires BEADS_ACTOR to name the claimant\n", id) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	current, err := graph.Get(id)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc bd: claiming %s: %v\n", id, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if err := worklifecycle.ValidateGenericMutation(current); err != nil {
+		fmt.Fprintf(stderr, "gc bd: claiming %s: %v\n", id, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	claimed, ok, err := graph.Claim(id, assignee)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: claiming %s: %v\n", id, err) //nolint:errcheck // best-effort stderr
@@ -1439,6 +1448,15 @@ func doBdByIDClaim(graph storebinding.GraphStore, id, assignee string, jsonOut b
 // the orphan-recovery scripts that read it keep working when the bead lives in
 // a class binding.
 func doBdByIDReleaseIfCurrent(graph storebinding.GraphStore, id, expectedAssignee string, stdout, stderr io.Writer) int {
+	current, err := graph.Get(id)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc bd release-if-current: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if err := worklifecycle.ValidateGenericMutation(current); err != nil {
+		fmt.Fprintf(stderr, "gc bd release-if-current: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	released, err := graph.ReleaseIfCurrent(id, expectedAssignee)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd release-if-current: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -1786,7 +1804,10 @@ func doBdByIDLifecycleWrite(graph storebinding.GraphStore, op bdByIDOp, verb str
 		}
 		var validationErr error
 		if verb == "close" {
-			validationErr = beads.ValidateLifecycleClose(current)
+			validationErr = worklifecycle.ValidateGenericMutation(current)
+			if validationErr == nil {
+				validationErr = beads.ValidateLifecycleClose(current)
+			}
 		} else {
 			open := "open"
 			validationErr = worklifecycle.ValidateEnrolledMutation(current, beads.UpdateOpts{Status: &open})

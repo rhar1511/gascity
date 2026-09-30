@@ -222,6 +222,9 @@ func runBdStoreBridge(op string, args []string, dir, host, port, user string, st
 		if len(args) < 1 {
 			return fmt.Errorf("usage: close <id>")
 		}
+		if err := validateBridgeGenericMutation(store, args[0]); err != nil {
+			return err
+		}
 		return store.Close(args[0])
 	case "reopen":
 		if len(args) < 1 {
@@ -310,6 +313,9 @@ func runBdStoreBridge(op string, args []string, dir, host, port, user string, st
 				return fmt.Errorf("refusing controller-owned session authority metadata %q on a protected session; use the signed session permission-mode API", args[1])
 			}
 		}
+		if err := validateBridgeGenericMutation(store, args[0]); err != nil {
+			return err
+		}
 		value, err := io.ReadAll(stdin)
 		if err != nil {
 			return fmt.Errorf("read stdin: %w", err)
@@ -319,15 +325,25 @@ func runBdStoreBridge(op string, args []string, dir, host, port, user string, st
 		if len(args) < 1 {
 			return fmt.Errorf("usage: delete <id>")
 		}
-		return store.Delete(args[len(args)-1])
+		id := args[len(args)-1]
+		if err := validateBridgeGenericMutation(store, id); err != nil {
+			return err
+		}
+		return store.Delete(id)
 	case "dep-add":
 		if len(args) < 3 {
 			return fmt.Errorf("usage: dep-add <issue-id> <depends-on-id> <type>")
+		}
+		if err := validateBridgeGenericMutation(store, args[0]); err != nil {
+			return err
 		}
 		return store.DepAdd(args[0], args[1], args[2])
 	case "dep-remove":
 		if len(args) < 2 {
 			return fmt.Errorf("usage: dep-remove <issue-id> <depends-on-id>")
+		}
+		if err := validateBridgeGenericMutation(store, args[0]); err != nil {
+			return err
 		}
 		return store.DepRemove(args[0], args[1])
 	case "dep-list":
@@ -358,6 +374,14 @@ func validateBdStoreBridgeAuthorityMetadata(metadata, current map[string]string)
 		}
 	}
 	return nil
+}
+
+func validateBridgeGenericMutation(store beads.Store, id string) error {
+	current, err := store.Get(id)
+	if err != nil {
+		return err
+	}
+	return worklifecycle.ValidateGenericMutation(current)
 }
 
 func bdStoreBridgeEnv(dir, host, port, user, password string) map[string]string {

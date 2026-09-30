@@ -1965,6 +1965,68 @@ func TestBeadAssign(t *testing.T) {
 	}
 }
 
+func TestGenericBeadMutationsRefuseLifecycleEnrolledWork(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		method string
+		path   func(string) string
+		body   string
+	}{
+		{
+			name:   "assign",
+			method: http.MethodPost,
+			path:   func(id string) string { return "/bead/" + id + "/assign" },
+			body:   `{"assignee":"worker-new"}`,
+		},
+		{
+			name:   "update",
+			method: http.MethodPost,
+			path:   func(id string) string { return "/bead/" + id + "/update" },
+			body:   `{"title":"Changed","description":"changed","assignee":"worker-new"}`,
+		},
+		{
+			name:   "delete",
+			method: http.MethodDelete,
+			path:   func(id string) string { return "/bead/" + id },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := newFakeState(t)
+			store := state.stores["myrig"]
+			original, err := store.Create(beads.Bead{
+				Title:    "Protected",
+				Status:   "open",
+				Assignee: "worker-old",
+				Metadata: map[string]string{beadmeta.LifecycleAdmissionReceiptMetadataKey: "persisted admission evidence"},
+			})
+			if err != nil {
+				t.Fatalf("Create(): %v", err)
+			}
+			h := newTestCityHandler(t, state)
+			var req *http.Request
+			if tc.method == http.MethodDelete {
+				req = httptest.NewRequest(tc.method, cityURL(state, tc.path(original.ID)), nil)
+				req.Header.Set("X-GC-Request", "true")
+			} else {
+				req = newPostRequest(cityURL(state, tc.path(original.ID)), bytes.NewBufferString(tc.body))
+			}
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusConflict {
+				t.Fatalf("%s status = %d, want %d; body: %s", tc.name, rec.Code, http.StatusConflict, rec.Body.String())
+			}
+			got, err := store.Get(original.ID)
+			if err != nil {
+				t.Fatalf("Get(): %v", err)
+			}
+			if got.Status != "open" || got.Title != "Protected" || got.Assignee != "worker-old" || got.Description != "" {
+				t.Fatalf("refused %s changed enrolled row: %+v", tc.name, got)
+			}
+		})
+	}
+}
+
 func TestPhase2BeadAssignNormalizesCurrentSessionAlias(t *testing.T) {
 	state := newFakeState(t)
 	state.cityBeadStore = beads.NewMemStore()

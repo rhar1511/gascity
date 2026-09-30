@@ -2071,6 +2071,13 @@ set -eu
 // managed Dolt server and falls back to opening the on-disk store. doBd
 // should treat this as a hard failure regardless of bd's exit code.
 const silentFallbackFakeBdScript = `#!/bin/sh
+if [ "${1:-}" = "--dolt-auto-commit" ]; then
+  shift 2
+fi
+if [ "${1:-}" = "show" ]; then
+  printf '%s\n' '[{"id":"demo-abc","status":"in_progress","assignee":"worker-1"}]'
+  exit 0
+fi
 echo "auto-importing 220929 bytes from .beads/issues.jsonl into empty database... auto-imported 123 issues" >&2
 echo "$@"
 exit 0
@@ -2079,7 +2086,7 @@ exit 0
 // silentFallbackTestSetup writes a fake bd binary that emits the silent-
 // fallback marker, prepends it to PATH, and configures a minimal city as a
 // bd-backed scope (via GC_CITY_PATH) so doBd will dispatch through it.
-func silentFallbackTestSetup(t *testing.T, fakeBdScript string) {
+func silentFallbackTestSetup(t *testing.T, fakeBdScript string) (cityDir, binDir string) {
 	t.Helper()
 
 	origCityFlag := cityFlag
@@ -2091,7 +2098,7 @@ func silentFallbackTestSetup(t *testing.T, fakeBdScript string) {
 	cityFlag = ""
 	rigFlag = ""
 
-	cityDir := t.TempDir()
+	cityDir = t.TempDir()
 	port := strconv.Itoa(writeReachableManagedDoltState(t, cityDir))
 
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
@@ -2114,7 +2121,7 @@ name = "demo"
 		t.Fatal(err)
 	}
 
-	binDir := t.TempDir()
+	binDir = t.TempDir()
 	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(fakeBdScript), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -2122,6 +2129,7 @@ name = "demo"
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+origPath)
 	t.Setenv("GC_CITY_PATH", cityDir)
 	t.Setenv("GC_DOLT_PORT", port)
+	return cityDir, binDir
 }
 
 // managedDoltTestSetup is silentFallbackTestSetup for a Dolt endpoint gc
@@ -2212,6 +2220,36 @@ func TestGcBdSurfacesSilentFallbackAsLoudError_ClosePath(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "auto-importing") {
 		t.Fatalf("original bd stderr not passed through; stderr=%q", stderr.String())
+	}
+}
+
+func TestGcBdRefusesGenericMutationOfEnrolledWork(t *testing.T) {
+	argsFile := filepath.Join(t.TempDir(), "bd.args")
+	fakeBD := "#!/bin/sh\n" +
+		"if [ \"${1:-}\" = \"--dolt-auto-commit\" ]; then shift 2; fi\n" +
+		"printf '%s\\n' \"$*\" >> " + strconv.Quote(argsFile) + "\n" +
+		"case \"$*\" in\n" +
+		"  *\"show --json demo-abc\"*)\n" +
+		"    printf '%s\\n' '[{\"id\":\"demo-abc\",\"title\":\"Protected\",\"status\":\"open\",\"metadata\":{\"gc.lifecycle.admission_receipt.v1\":\"persisted\"}}]'\n" +
+		"    exit 0\n" +
+		"    ;;\n" +
+		"esac\n" +
+		"exit 0\n"
+	silentFallbackTestSetup(t, fakeBD)
+
+	var stdout, stderr bytes.Buffer
+	if got := doBd([]string{"update", "demo-abc", "--title", "Changed"}, &stdout, &stderr); got == 0 {
+		t.Fatalf("doBd(update enrolled work) = 0, want refusal; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "generic mutation lacks current session, claim, and row-revision proof") {
+		t.Fatalf("stderr = %q, want enrolled-work fence reason", stderr.String())
+	}
+	args, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("ReadFile(bd args): %v", err)
+	}
+	if got := strings.TrimSpace(string(args)); got != "show --json demo-abc" {
+		t.Fatalf("bd invocations = %q, want only the enrollment preflight read", got)
 	}
 }
 
@@ -2925,6 +2963,11 @@ prefix = "fe"
 	// conditional-release flags and rejects them the way its flag parser does,
 	// which is what latches the store onto the raw-SQL path this test pins.
 	fakeBD := "#!/bin/sh\n" +
+		"if [ \"${1:-}\" = \"--dolt-auto-commit\" ]; then shift 2; fi\n" +
+		"if [ \"$1\" = \"show\" ]; then\n" +
+		"  printf '%s\\n' '[{\"id\":\"fe-abc\",\"status\":\"in_progress\",\"assignee\":\"worker-1\"}]'\n" +
+		"  exit 0\n" +
+		"fi\n" +
 		"if [ \"$1\" = \"update\" ]; then\n" +
 		"  printf 'unknown flag: --if-assignee\\n' >&2\n" +
 		"  exit 1\n" +
@@ -3014,6 +3057,11 @@ prefix = "fe"
 	// reported the way bd reports it — exit 13, nothing written.
 	fakeBD := "#!/bin/sh\n" +
 		"printf ' %s' \"$@\" >> " + strconv.Quote(argvLog) + "\n" +
+		"if [ \"${1:-}\" = \"--dolt-auto-commit\" ]; then shift 2; fi\n" +
+		"if [ \"$1\" = \"show\" ]; then\n" +
+		"  printf '%s\\n' '[{\"id\":\"fe-abc\",\"status\":\"in_progress\",\"assignee\":\"worker-1\"}]'\n" +
+		"  exit 0\n" +
+		"fi\n" +
 		"if [ \"$1\" = \"update\" ]; then\n" +
 		"  printf 'assignee mismatch\\n' >&2\n" +
 		"  exit 13\n" +

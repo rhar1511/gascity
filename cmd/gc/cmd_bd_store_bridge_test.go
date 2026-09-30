@@ -452,6 +452,57 @@ func TestBdStoreBridgeUpdateCommandPassesType(t *testing.T) {
 	}
 }
 
+func TestBdStoreBridgeRefusesGenericMutationsOfEnrolledWork(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		op    string
+		args  []string
+		stdin string
+	}{
+		{name: "update", op: "update", args: []string{"BD-1"}, stdin: `{"title":"Changed"}`},
+		{name: "close", op: "close", args: []string{"BD-1"}},
+		{name: "set-metadata", op: "set-metadata", args: []string{"BD-1", "gc.session_id"}, stdin: "replacement"},
+		{name: "delete", op: "delete", args: []string{"BD-1"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scopeDir := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(scopeDir, ".beads"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			binDir := t.TempDir()
+			argsFile := filepath.Join(t.TempDir(), "bridge.args")
+			script := `#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> '` + argsFile + `'
+case "$*" in
+  *"show --json BD-1"*)
+    cat <<'JSON'
+[{"id":"BD-1","title":"Protected","status":"open","issue_type":"task","metadata":{"gc.lifecycle.admission_receipt.v1":"persisted"}}]
+JSON
+    ;;
+esac
+exit 0
+`
+			if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			var stdout bytes.Buffer
+			err := runBdStoreBridge(tc.op, tc.args, scopeDir, "db.example.internal", "3317", "root", strings.NewReader(tc.stdin), &stdout)
+			if err == nil || !strings.Contains(err.Error(), "generic mutation lacks current session, claim, and row-revision proof") {
+				t.Fatalf("runBdStoreBridge() error = %v, want fail-closed enrolled-work error", err)
+			}
+			argsText, readErr := os.ReadFile(argsFile)
+			if readErr != nil {
+				t.Fatalf("ReadFile(args): %v", readErr)
+			}
+			if got := strings.TrimSpace(string(argsText)); got != "show --json BD-1" {
+				t.Fatalf("bd calls = %q, want only the preflight read", got)
+			}
+		})
+	}
+}
+
 func TestBdStoreBridgeListCommandForwardsFilters(t *testing.T) {
 	scopeDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(scopeDir, ".beads"), 0o755); err != nil {

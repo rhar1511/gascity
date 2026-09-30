@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +14,52 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 )
+
+func TestValidateEnrolledMutationBlocksGenericWrites(t *testing.T) {
+	current := beads.Bead{
+		ID: "work-1",
+		Metadata: map[string]string{
+			beadmeta.LifecycleAdmissionReceiptMetadataKey: "persisted admission evidence",
+		},
+	}
+	title := "changed by a generic caller"
+	assignee := "replacement-worker"
+	status := "closed"
+	metadata := map[string]string{"gc.session_id": "replacement-session"}
+
+	for name, opts := range map[string]beads.UpdateOpts{
+		"ordinary field": {Title: &title},
+		"assignment":     {Assignee: &assignee},
+		"status":         {Status: &status},
+		"owner metadata": {Metadata: metadata},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := ValidateEnrolledMutation(current, opts); !errors.Is(err, ErrEnrolledWorkMutationBlocked) {
+				t.Fatalf("ValidateEnrolledMutation() error = %v, want %v", err, ErrEnrolledWorkMutationBlocked)
+			}
+		})
+	}
+}
+
+func TestValidateEnrolledMutationLeavesLegacyWorkWritable(t *testing.T) {
+	current := beads.Bead{ID: "legacy-work"}
+	title := "updated"
+	if err := ValidateEnrolledMutation(current, beads.UpdateOpts{Title: &title}); err != nil {
+		t.Fatalf("ValidateEnrolledMutation() error = %v, want nil", err)
+	}
+}
+
+func TestValidateGenericMutationBlocksLifecycleRecoveryIntent(t *testing.T) {
+	current := beads.Bead{
+		ID: "work-1",
+		Metadata: map[string]string{
+			beadmeta.LifecycleRecoveryIntentMetadataKey: "pending request",
+		},
+	}
+	if err := ValidateGenericMutation(current); !errors.Is(err, ErrEnrolledWorkMutationBlocked) {
+		t.Fatalf("ValidateGenericMutation() error = %v, want %v", err, ErrEnrolledWorkMutationBlocked)
+	}
+}
 
 func lifecycleKeys(t *testing.T) (ed25519.PrivateKey, ed25519.PrivateKey, ed25519.PrivateKey, config.LifecycleConfig) {
 	t.Helper()

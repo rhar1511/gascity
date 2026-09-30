@@ -430,12 +430,25 @@ func HasDurableEnrollment(bead beads.Bead) bool {
 	return beads.HasLifecycleEvidence(bead)
 }
 
-// ValidateEnrolledMutation prevents generic close/reopen/status and metadata
-// writes from bypassing completion or erasing the lifecycle record before the
-// next controller reconciliation. A changed signed contract must use a
-// separately authorized fresh attempt; blank values cannot silently opt
-// existing work back into legacy behavior.
+// ValidateGenericMutation refuses generic writes to lifecycle-enrolled work.
+// The generic HTTP, CLI, and store-bridge transports do not carry an
+// authenticated session incarnation, reciprocal work claim, and observed row
+// revision. They therefore cannot prove that their caller is still the owner.
+// Narrow controller operations use their dedicated lifecycle capabilities
+// instead of this generic path.
+func ValidateGenericMutation(current beads.Bead) error {
+	if HasDurableEnrollment(current) || beads.HasLifecycleRecoveryIntent(current) {
+		return fmt.Errorf("%w: generic mutation lacks current session, claim, and row-revision proof", ErrEnrolledWorkMutationBlocked)
+	}
+	return nil
+}
+
+// ValidateEnrolledMutation applies the shared generic-write policy and then
+// the existing lifecycle transition rules for unenrolled work.
 func ValidateEnrolledMutation(current beads.Bead, opts beads.UpdateOpts) error {
+	if err := ValidateGenericMutation(current); err != nil {
+		return err
+	}
 	return beads.ValidateLifecycleMutation(current, opts)
 }
 

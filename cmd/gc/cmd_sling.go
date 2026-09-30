@@ -30,6 +30,7 @@ import (
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	"github.com/gastownhall/gascity/internal/worker"
+	"github.com/gastownhall/gascity/internal/worklifecycle"
 	"github.com/spf13/cobra"
 )
 
@@ -759,10 +760,14 @@ func (r cliBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 		return fmt.Errorf("sling routing requires a store to check lifecycle enrollment")
 	}
 	current, err := r.deps.Store.Get(req.BeadID)
-	if err != nil && !errors.Is(err, beads.ErrNotFound) {
-		return fmt.Errorf("checking lifecycle routing for %s: %w", req.BeadID, err)
-	}
-	if err == nil {
+	if err != nil {
+		if !errors.Is(err, beads.ErrNotFound) {
+			return fmt.Errorf("checking lifecycle routing for %s: %w", req.BeadID, err)
+		}
+	} else {
+		if err := worklifecycle.ValidateGenericMutation(current); err != nil {
+			return err
+		}
 		if err := beads.ValidateLifecycleRouting(current); err != nil {
 			return fmt.Errorf("routing bead %s: %w", req.BeadID, err)
 		}

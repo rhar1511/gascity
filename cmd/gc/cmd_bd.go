@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/sessionauthority"
+	"github.com/gastownhall/gascity/internal/worklifecycle"
 	"github.com/spf13/cobra"
 )
 
@@ -734,13 +735,11 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// value-consuming flag), the command is rejected rather than forwarded
 	// unguarded.
 	//
-	// Tradeoff: only a genuine ErrIDCollision (bd returned a *different* bead
-	// than requested) blocks the write. ErrNotFound and store-unavailable are
-	// non-fatal — the write falls through to bd, which will produce its own
-	// error if the bead truly does not exist. This preserves correctness for
-	// legitimate flows (native heartbeat lease refresh, silent-fallback paths,
-	// ephemeral/wisp rows, projection-lag writes) that proceed even when the
-	// bead isn't yet visible through the read seam.
+	// Lifecycle-enrolled writes also fail closed here because the raw bd
+	// subprocess has no authenticated session/claim proof or observed revision.
+	// A genuinely absent bead may still be forwarded to bd so its own not-found
+	// behavior remains intact; an unavailable read seam cannot establish that
+	// the target is unenrolled, so it is refused.
 	//
 	// Note: gc bd show (read passthrough) does NOT have this guard and still
 	// substring-resolves. That is intentional — reads are non-destructive.
@@ -761,25 +760,32 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		}
 		if len(writeIDs) > 0 {
 			store, storeErr := openStoreAtForCityWithConfig(target.ScopeRoot, cityPath, cfg)
-			// Store-unavailable: we cannot verify, but we must not block
-			// legitimate writes. Fall through; bd will error on actual problems.
-			if storeErr == nil {
-				guardStore = store
-				guardBeads = make(map[string]beads.Bead, len(writeIDs))
-				for _, id := range writeIDs {
-					bead, getErr := store.Get(id)
-					if errors.Is(getErr, beads.ErrIDCollision) {
-						// bd resolved a different bead — block the write to prevent
-						// mutating the wrong bead via substring resolution.
-						fmt.Fprintf(stderr, "gc bd: bead %q resolved to a different bead ID (substring collision); aborting to prevent mutating the wrong bead\n", id) //nolint:errcheck // best-effort stderr
-						return 1
-					}
-					if getErr == nil {
-						guardBeads[id] = bead
-					}
-					// ErrNotFound or any other error: bead may be absent, ephemeral,
-					// or the read seam differs from the write seam — fall through.
+			if storeErr != nil {
+				fmt.Fprintf(stderr, "gc bd: cannot verify lifecycle enrollment for write target: %v; refusing mutation\n", storeErr) //nolint:errcheck // best-effort stderr
+				return 1
+			}
+			guardStore = store
+			guardBeads = make(map[string]beads.Bead, len(writeIDs))
+			for _, id := range writeIDs {
+				bead, getErr := store.Get(id)
+				if errors.Is(getErr, beads.ErrIDCollision) {
+					// bd resolved a different bead — block the write to prevent
+					// mutating the wrong bead via substring resolution.
+					fmt.Fprintf(stderr, "gc bd: bead %q resolved to a different bead ID (substring collision); aborting to prevent mutating the wrong bead\n", id) //nolint:errcheck // best-effort stderr
+					return 1
 				}
+				if errors.Is(getErr, beads.ErrNotFound) {
+					continue
+				}
+				if getErr != nil {
+					fmt.Fprintf(stderr, "gc bd: cannot verify lifecycle enrollment for %q: %v; refusing mutation\n", id, getErr) //nolint:errcheck // best-effort stderr
+					return 1
+				}
+				if err := worklifecycle.ValidateGenericMutation(bead); err != nil {
+					fmt.Fprintf(stderr, "gc bd: %s: %v\n", id, err) //nolint:errcheck // best-effort stderr
+					return 1
+				}
+				guardBeads[id] = bead
 			}
 		}
 	}
@@ -1069,6 +1075,15 @@ func doBdReleaseIfCurrent(cityPath string, cfg *config.City, target execStoreTar
 	store, err := openStoreAtForCityWithConfig(target.ScopeRoot, cityPath, cfg)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd release-if-current: opening store: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	current, err := store.Get(id)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc bd release-if-current: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if err := worklifecycle.ValidateGenericMutation(current); err != nil {
+		fmt.Fprintf(stderr, "gc bd release-if-current: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	releaser, ok := store.(beads.ConditionalAssignmentReleaser)
