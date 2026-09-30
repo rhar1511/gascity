@@ -49,6 +49,8 @@ var (
 	_ DecisionFrontierRecordWriterHandleProvider              = (*ProxiedStore)(nil)
 	_ RevisionTransitionReceiptReaderHandleProvider           = (*ProxiedStore)(nil)
 	_ RevisionTransitionWriterHandleProvider                  = (*ProxiedStore)(nil)
+	_ RevisionTransitionPatchWriterHandleProvider             = (*ProxiedStore)(nil)
+	_ RevisionTransitionPatchReceiptReaderHandleProvider      = (*ProxiedStore)(nil)
 	_ ParentProjectionWaiter                                  = (*ProxiedStore)(nil)
 	_ RowWitness                                              = (*ProxiedStore)(nil)
 	_ StorageCreateStore                                      = (*ProxiedStore)(nil)
@@ -427,6 +429,63 @@ func (s *ProxiedStore) ControllerMetadataTransitionWriterHandle() (ControllerMet
 		return nil, false
 	}
 	return proxiedControllerMetadataTransitionWriter{store: s, writer: writer}, true
+}
+
+type proxiedRevisionTransitionPatchWriter struct {
+	store  *ProxiedStore
+	writer RevisionTransitionPatchWriter
+}
+
+func (w proxiedRevisionTransitionPatchWriter) TransitionPatch(issueID string, request RevisionTransitionPatchRequest) (RevisionTransitionPatchResult, error) {
+	var result RevisionTransitionPatchResult
+	err := w.store.withMutation("revision-transition-patch "+issueID, func(Store) error {
+		var writeErr error
+		result, writeErr = w.writer.TransitionPatch(issueID, request)
+		return writeErr
+	})
+	return result, err
+}
+
+// RevisionTransitionPatchWriterHandle brackets the patch and any exact-receipt
+// recovery under one proxy generation so a restart cannot split the operation.
+func (s *ProxiedStore) RevisionTransitionPatchWriterHandle() (RevisionTransitionPatchWriter, bool) {
+	if s == nil {
+		return nil, false
+	}
+	writer, ok := RevisionTransitionPatchWriterFor(s.writeLeaf())
+	if !ok || writer == nil {
+		return nil, false
+	}
+	return proxiedRevisionTransitionPatchWriter{store: s, writer: writer}, true
+}
+
+type proxiedRevisionTransitionPatchReceiptReader struct {
+	store  *ProxiedStore
+	reader RevisionTransitionPatchReceiptReader
+}
+
+func (r proxiedRevisionTransitionPatchReceiptReader) ReadRevisionTransitionPatchReceipt(receiptID string) (RevisionTransitionPatchReceipt, bool, error) {
+	var receipt RevisionTransitionPatchReceipt
+	var found bool
+	err := r.store.withMutation("revision-transition-patch-receipt "+receiptID, func(Store) error {
+		var readErr error
+		receipt, found, readErr = r.reader.ReadRevisionTransitionPatchReceipt(receiptID)
+		return readErr
+	})
+	return receipt, found, r.store.classifyReadError(err)
+}
+
+// RevisionTransitionPatchReceiptReaderHandle reads exact receipts from the
+// authoritative write leaf inside the same proxy generation bracket.
+func (s *ProxiedStore) RevisionTransitionPatchReceiptReaderHandle() (RevisionTransitionPatchReceiptReader, bool) {
+	if s == nil {
+		return nil, false
+	}
+	reader, ok := RevisionTransitionPatchReceiptReaderFor(s.writeLeaf())
+	if !ok || reader == nil {
+		return nil, false
+	}
+	return proxiedRevisionTransitionPatchReceiptReader{store: s, reader: reader}, true
 }
 
 type proxiedDecisionFrontierSourceReader struct {

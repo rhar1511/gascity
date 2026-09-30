@@ -79,6 +79,9 @@ type PrivateEvidenceHTTPConfig struct {
 	ScopeRef            string
 	TokenFile           string
 	RevisionTransitions bool
+	// RevisionTransitionPatches opts this scope into the additive typed atomic
+	// issue-patch endpoint. It is independent from the legacy one-key transition.
+	RevisionTransitionPatches bool
 }
 
 // PrivateEvidenceMetadataCASWriter is deliberately separate from
@@ -132,23 +135,29 @@ type PrivateEvidenceArchiveReaderHandleProvider interface {
 }
 
 var (
-	_ PrivateEvidenceMetadataCASWriter                 = (*BdStore)(nil)
-	_ PrivateEvidenceMetadataCASWriterHandleProvider   = (*BdStore)(nil)
-	_ PrivateEvidencePayloadTransportReady             = (*BdStore)(nil)
-	_ PrivateEvidenceArchiveReader                     = (*BdStore)(nil)
-	_ PrivateEvidenceArchiveReaderHandleProvider       = (*BdStore)(nil)
-	_ ControllerMetadataTransitionWriter               = (*BdStore)(nil)
-	_ ControllerMetadataTransitionWriterHandleProvider = (*BdStore)(nil)
+	_ PrivateEvidenceMetadataCASWriter                   = (*BdStore)(nil)
+	_ PrivateEvidenceMetadataCASWriterHandleProvider     = (*BdStore)(nil)
+	_ PrivateEvidencePayloadTransportReady               = (*BdStore)(nil)
+	_ PrivateEvidenceArchiveReader                       = (*BdStore)(nil)
+	_ PrivateEvidenceArchiveReaderHandleProvider         = (*BdStore)(nil)
+	_ ControllerMetadataTransitionWriter                 = (*BdStore)(nil)
+	_ ControllerMetadataTransitionWriterHandleProvider   = (*BdStore)(nil)
+	_ RevisionTransitionPatchWriter                      = (*BdStore)(nil)
+	_ RevisionTransitionPatchWriterHandleProvider        = (*BdStore)(nil)
+	_ RevisionTransitionPatchReceiptReader               = (*BdStore)(nil)
+	_ RevisionTransitionPatchReceiptReaderHandleProvider = (*BdStore)(nil)
+	_ RevisionTransitionPatchTransportReady              = (*BdStore)(nil)
 )
 
 type privateEvidenceHTTPClient struct {
-	endpoint            string
-	projectID           string
-	database            string
-	scopeRef            string
-	token               string
-	revisionTransitions bool
-	client              *http.Client
+	endpoint                  string
+	projectID                 string
+	database                  string
+	scopeRef                  string
+	token                     string
+	revisionTransitions       bool
+	revisionTransitionPatches bool
+	client                    *http.Client
 }
 
 // WithBdStorePrivateEvidenceHTTP installs the explicitly configured private
@@ -443,13 +452,14 @@ func newPrivateEvidenceHTTPClient(config PrivateEvidenceHTTPConfig) (*privateEvi
 		},
 	}
 	return &privateEvidenceHTTPClient{
-		endpoint:            strings.TrimRight(endpoint, "/"),
-		projectID:           projectID,
-		database:            database,
-		scopeRef:            scopeRef,
-		token:               token,
-		revisionTransitions: config.RevisionTransitions,
-		client:              client,
+		endpoint:                  strings.TrimRight(endpoint, "/"),
+		projectID:                 projectID,
+		database:                  database,
+		scopeRef:                  scopeRef,
+		token:                     token,
+		revisionTransitions:       config.RevisionTransitions,
+		revisionTransitionPatches: config.RevisionTransitionPatches,
+		client:                    client,
 	}, nil
 }
 

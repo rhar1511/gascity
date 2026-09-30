@@ -21,6 +21,36 @@ type revisionTransitionWrapperTestStore struct {
 	transitionFn func(string)
 }
 
+type revisionTransitionPatchWrapperTestStore struct {
+	Store
+	getCalls     int
+	patchCalls   int
+	receiptCalls int
+	patchFn      func(string, RevisionTransitionPatchRequest) (RevisionTransitionPatchResult, error)
+	receiptFn    func(string) (RevisionTransitionPatchReceipt, bool, error)
+}
+
+func (s *revisionTransitionPatchWrapperTestStore) Get(id string) (Bead, error) {
+	s.getCalls++
+	return s.Store.Get(id)
+}
+
+func (s *revisionTransitionPatchWrapperTestStore) TransitionPatch(issueID string, request RevisionTransitionPatchRequest) (RevisionTransitionPatchResult, error) {
+	s.patchCalls++
+	if s.patchFn != nil {
+		return s.patchFn(issueID, request)
+	}
+	return RevisionTransitionPatchResult{Applied: true}, nil
+}
+
+func (s *revisionTransitionPatchWrapperTestStore) ReadRevisionTransitionPatchReceipt(receiptID string) (RevisionTransitionPatchReceipt, bool, error) {
+	s.receiptCalls++
+	if s.receiptFn != nil {
+		return s.receiptFn(receiptID)
+	}
+	return RevisionTransitionPatchReceipt{}, false, nil
+}
+
 func (s *revisionTransitionWrapperTestStore) RevisionTransitionWriterHandle() (RevisionTransitionWriter, bool) {
 	return s, s != nil
 }
@@ -206,6 +236,115 @@ func TestProxiedRevisionTransitionUsesOneGenerationBracket(t *testing.T) {
 	}
 }
 
+func TestCachingRevisionTransitionPatchEvictsAndForwardsReceiptRead(t *testing.T) {
+	mem := NewMemStore()
+	owner, err := mem.Create(Bead{Title: "patch transition owner", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	backing := &revisionTransitionPatchWrapperTestStore{Store: mem}
+	backing.patchFn = func(id string, request RevisionTransitionPatchRequest) (RevisionTransitionPatchResult, error) {
+		if id != owner.ID || request.ReceiptID != "patch/receipt-1" {
+			t.Errorf("patch request forwarding = %q / %q", id, request.ReceiptID)
+		}
+		if err := backing.SetMetadata(id, "gc.patch_test", "updated"); err != nil {
+			return RevisionTransitionPatchResult{}, err
+		}
+		return RevisionTransitionPatchResult{Applied: true}, nil
+	}
+	backing.receiptFn = func(id string) (RevisionTransitionPatchReceipt, bool, error) {
+		if id != "patch/receipt-1" {
+			t.Errorf("receipt ID forwarded = %q", id)
+		}
+		return RevisionTransitionPatchReceipt{ReceiptID: id, IssueID: owner.ID}, true, nil
+	}
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+	if _, err := cache.Get(owner.ID); err != nil {
+		t.Fatalf("initial cached Get: %v", err)
+	}
+	getsBefore := backing.getCalls
+	writer, ok := RevisionTransitionPatchWriterFor(cache)
+	if !ok {
+		t.Fatal("CachingStore hid the patch writer")
+	}
+	if _, err := writer.TransitionPatch(owner.ID, RevisionTransitionPatchRequest{ReceiptID: "patch/receipt-1"}); err != nil {
+		t.Fatalf("cached patch: %v", err)
+	}
+	got, err := cache.Get(owner.ID)
+	if err != nil || got.Metadata["gc.patch_test"] != "updated" {
+		t.Fatalf("owner after patch = %+v, %v", got, err)
+	}
+	if backing.getCalls <= getsBefore {
+		t.Fatalf("backing Get calls = %d before and %d after; patch did not evict the issue cache", getsBefore, backing.getCalls)
+	}
+	reader, ok := RevisionTransitionPatchReceiptReaderFor(cache)
+	if !ok {
+		t.Fatal("CachingStore hid the exact receipt reader")
+	}
+	if receipt, found, err := reader.ReadRevisionTransitionPatchReceipt("patch/receipt-1"); err != nil || !found || receipt.IssueID != owner.ID {
+		t.Fatalf("receipt read = (%+v, %t, %v)", receipt, found, err)
+	}
+	if backing.receiptCalls != 1 {
+		t.Fatalf("receipt reads = %d, want a direct backing read", backing.receiptCalls)
+	}
+}
+
+func TestProxiedRevisionTransitionPatchUsesGenerationBracket(t *testing.T) {
+	root := t.TempDir()
+	writeProxyRecordForControllerTransitionTest(t, root, 4101, 46123, "generation-one")
+	writeStore := &revisionTransitionPatchWrapperTestStore{Store: NewMemStore()}
+	writeStore.patchFn = func(string, RevisionTransitionPatchRequest) (RevisionTransitionPatchResult, error) {
+		writeProxyRecordForControllerTransitionTest(t, root, 4102, 46987, "generation-two")
+		return RevisionTransitionPatchResult{Applied: true}, nil
+	}
+	native := newNativeDoltStoreForTest(newNativeDoltMemStorage(), WithProxiedReadOnly())
+	store, err := NewProxiedStore(native, writeStore, PinForTest("/scope", root, "beads"))
+	if err != nil {
+		t.Fatalf("NewProxiedStore: %v", err)
+	}
+	writer, ok := RevisionTransitionPatchWriterFor(store)
+	if !ok {
+		t.Fatal("ProxiedStore hid the patch writer")
+	}
+	if _, err := writer.TransitionPatch("issue-1", RevisionTransitionPatchRequest{}); err != nil {
+		t.Fatalf("proxied patch: %v", err)
+	}
+	if !store.Demoted() {
+		t.Fatal("proxy generation change during patch did not stand down the native read leaf")
+	}
+	if verdict := store.Verdict(); verdict == nil || verdict.Verdict != ProxiedVerdictProxyGone {
+		t.Fatalf("proxied patch verdict = %v, want proxy_gone", verdict)
+	}
+}
+
+func TestProxiedRevisionTransitionPatchReceiptReadUsesGenerationBracket(t *testing.T) {
+	root := t.TempDir()
+	writeProxyRecordForControllerTransitionTest(t, root, 4201, 47123, "generation-one")
+	writeStore := &revisionTransitionPatchWrapperTestStore{Store: NewMemStore()}
+	writeStore.receiptFn = func(receiptID string) (RevisionTransitionPatchReceipt, bool, error) {
+		writeProxyRecordForControllerTransitionTest(t, root, 4202, 47987, "generation-two")
+		return RevisionTransitionPatchReceipt{ReceiptID: receiptID}, true, nil
+	}
+	native := newNativeDoltStoreForTest(newNativeDoltMemStorage(), WithProxiedReadOnly())
+	store, err := NewProxiedStore(native, writeStore, PinForTest("/scope", root, "beads"))
+	if err != nil {
+		t.Fatalf("NewProxiedStore: %v", err)
+	}
+	reader, ok := RevisionTransitionPatchReceiptReaderFor(store)
+	if !ok {
+		t.Fatal("ProxiedStore hid the exact receipt reader")
+	}
+	if _, found, err := reader.ReadRevisionTransitionPatchReceipt("patch/receipt-1"); err != nil || !found {
+		t.Fatalf("proxied receipt read: found=%t err=%v", found, err)
+	}
+	if !store.Demoted() {
+		t.Fatal("proxy generation change during receipt read did not stand down the native read leaf")
+	}
+}
+
 func writeProxyRecordForControllerTransitionTest(t *testing.T, root string, pid, port int, generation string) {
 	t.Helper()
 	rootID, err := proxyendpoint.RootID(root)
@@ -230,3 +369,5 @@ func writeProxyRecordForControllerTransitionTest(t *testing.T, root string, pid,
 
 var _ ControllerMetadataTransitionWriter = (*controllerTransitionWrapperTestStore)(nil)
 var _ RevisionTransitionWriterHandleProvider = (*revisionTransitionWrapperTestStore)(nil)
+var _ RevisionTransitionPatchWriter = (*revisionTransitionPatchWrapperTestStore)(nil)
+var _ RevisionTransitionPatchReceiptReader = (*revisionTransitionPatchWrapperTestStore)(nil)

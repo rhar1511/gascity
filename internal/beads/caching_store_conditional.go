@@ -38,6 +38,8 @@ var (
 	_ RevisionTransitionReceiptReaderHandleProvider           = (*CachingStore)(nil)
 	_ ControllerMetadataTransitionReceiptReaderHandleProvider = (*CachingStore)(nil)
 	_ RevisionTransitionWriterHandleProvider                  = (*CachingStore)(nil)
+	_ RevisionTransitionPatchWriterHandleProvider             = (*CachingStore)(nil)
+	_ RevisionTransitionPatchReceiptReaderHandleProvider      = (*CachingStore)(nil)
 )
 
 // DecisionFrontierSourceReaderHandle delegates the source snapshot directly to
@@ -124,6 +126,43 @@ func (c *CachingStore) ControllerMetadataTransitionReceiptReaderHandle() (Contro
 		return nil, false
 	}
 	return ControllerMetadataTransitionReceiptReaderFor(c.backing)
+}
+
+// RevisionTransitionPatchReceiptReaderHandle delegates exact private receipt
+// reads directly to the backing store; receipts never enter the issue cache.
+func (c *CachingStore) RevisionTransitionPatchReceiptReaderHandle() (RevisionTransitionPatchReceiptReader, bool) {
+	if c == nil {
+		return nil, false
+	}
+	return RevisionTransitionPatchReceiptReaderFor(c.backing)
+}
+
+type cachingRevisionTransitionPatchWriter struct {
+	cache  *CachingStore
+	writer RevisionTransitionPatchWriter
+}
+
+func (w cachingRevisionTransitionPatchWriter) TransitionPatch(issueID string, request RevisionTransitionPatchRequest) (RevisionTransitionPatchResult, error) {
+	result, err := w.writer.TransitionPatch(issueID, request)
+	if err != nil {
+		w.cache.applyConditionalWriteFailure(issueID, err)
+		return result, err
+	}
+	w.cache.evictForConditionalWrite(issueID)
+	return result, nil
+}
+
+// RevisionTransitionPatchWriterHandle preserves ordinary cache invalidation
+// while forwarding the exact request to its configured atomic backend.
+func (c *CachingStore) RevisionTransitionPatchWriterHandle() (RevisionTransitionPatchWriter, bool) {
+	if c == nil {
+		return nil, false
+	}
+	writer, ok := RevisionTransitionPatchWriterFor(c.backing)
+	if !ok {
+		return nil, false
+	}
+	return cachingRevisionTransitionPatchWriter{cache: c, writer: writer}, true
 }
 
 type cachingRevisionTransitionWriter struct {
