@@ -111,6 +111,7 @@ func TestLifecycleEnrollmentBlocksRouteMetadataChanges(t *testing.T) {
 		beadmeta.DeferredExecutionRoutedToMetadataKey,
 		beadmeta.RunTargetMetadataKey,
 		beadmeta.WorkflowIDMetadataKey,
+		beadmeta.LegacyWorkflowIDMetadataKey,
 		beadmeta.MoleculeIDMetadataKey,
 		beadmeta.MergeStrategyMetadataKey,
 		beadmeta.LifecycleMaterializationMetadataKey,

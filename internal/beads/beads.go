@@ -284,6 +284,7 @@ func IsLifecycleRoutingMetadataKey(key string) bool {
 		beadmeta.DeferredExecutionRoutedToMetadataKey,
 		beadmeta.RunTargetMetadataKey,
 		beadmeta.WorkflowIDMetadataKey,
+		beadmeta.LegacyWorkflowIDMetadataKey,
 		beadmeta.WorkflowExpandedMetadataKey,
 		beadmeta.MoleculeIDMetadataKey,
 		beadmeta.MergeStrategyMetadataKey,

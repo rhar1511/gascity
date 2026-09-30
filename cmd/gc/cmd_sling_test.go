@@ -946,20 +946,26 @@ func TestCliBeadRouterAllowsCityTargetFromCityStore(t *testing.T) {
 		}},
 	}
 	store := newSlingTestStore()
-	if _, err := store.Create(beads.Bead{ID: "HQ-2", Type: "task", Status: "open"}); err != nil {
+	created, err := store.Create(beads.Bead{ID: "HQ-2", Type: "task", Status: "open"})
+	if err != nil {
 		t.Fatalf("seed HQ-2: %v", err)
 	}
+	writer, ok := beads.ConditionalWriterFor(store.Store)
+	if !ok {
+		t.Fatal("test store lacks conditional writer")
+	}
+	routeStore := &routeBarrierStore{Store: store, writer: writer}
 	deps := &slingDeps{
 		CityName: "test-city",
 		CityPath: cityPath,
 		Cfg:      cfg,
-		Store:    store,
+		Store:    routeStore,
 		StoreRef: "city:test-city",
 	}
 	router := cliBeadRouter{deps: deps}
 
 	if err := router.Route(context.Background(), sling.RouteRequest{
-		BeadID: "HQ-2",
+		BeadID: created.ID,
 		Target: "mayor",
 	}); err != nil {
 		t.Fatalf("HQ->HQ route should succeed, got: %v", err)

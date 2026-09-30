@@ -1007,7 +1007,7 @@ func doStartGraphWorkflow(rootID, sourceBeadID string, a config.Agent, method st
 		}
 		// Graph workflow launches repoint the source bead at the active root so
 		// witness/source lookups resume from the workflow currently in control.
-		if err := deps.Store.SetMetadata(sourceBeadID, "workflow_id", rootID); err != nil {
+		if err := deps.Store.SetMetadata(sourceBeadID, beadmeta.LegacyWorkflowIDMetadataKey, rootID); err != nil {
 			return result, fmt.Errorf("setting workflow_id on %s: %w", sourceBeadID, err)
 		}
 		restampWorkBeadRouting(deps, sourceBeadID, a, &result)
@@ -1434,7 +1434,7 @@ func rollbackSourceWorkflowReplacement(launch pendingSourceWorkflowLaunch, store
 		}
 	}
 	if sourceBeadID != "" {
-		if err := store.SetMetadata(sourceBeadID, "workflow_id", previousWorkflowID); err != nil && !errors.Is(err, beads.ErrNotFound) {
+		if err := store.SetMetadata(sourceBeadID, beadmeta.LegacyWorkflowIDMetadataKey, previousWorkflowID); err != nil && !errors.Is(err, beads.ErrNotFound) {
 			rollbackErr = errors.Join(rollbackErr, fmt.Errorf("restore source workflow_id on %s: %w", sourceBeadID, err))
 		}
 	}
@@ -1461,7 +1461,7 @@ func withSourceWorkflowLaunchLock(ctx context.Context, deps SlingDeps, sourceBea
 			return fmt.Errorf("get source bead %s: %w", sourceBeadID, err)
 		}
 		if err == nil {
-			previousWorkflowID = strings.TrimSpace(sourceBead.Metadata["workflow_id"])
+			previousWorkflowID = strings.TrimSpace(sourceBead.Metadata[beadmeta.LegacyWorkflowIDMetadataKey])
 		}
 		roots, err := listSourceWorkflowRoots(deps, sourceBeadID)
 		if err != nil {

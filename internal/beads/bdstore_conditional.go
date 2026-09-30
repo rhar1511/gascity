@@ -403,6 +403,20 @@ func (s *BdStore) UpdateIfMatch(id string, expectedRevision int64, opts UpdateOp
 			return fmt.Errorf("conditional update lifecycle bead %q: %w", id, err)
 		}
 	}
+	return s.updateIfMatchAtRevision(id, expectedRevision, opts)
+}
+
+// updateIfMatchAtRevision is the single bd update CAS path. Callers that have
+// just read and validated a lifecycle-sensitive snapshot pass its exact
+// positive revision here; an unsupported capability or stale revision never
+// falls back to an unconditional update.
+func (s *BdStore) updateIfMatchAtRevision(id string, expectedRevision int64, opts UpdateOpts) error {
+	if expectedRevision <= 0 {
+		return ErrConditionalWriteUnsupported
+	}
+	if err := validateConditionalUpdateOpts(opts); err != nil {
+		return fmt.Errorf("conditional update %s: %w", id, err)
+	}
 	if capable, _ := s.conditionalWritesCapable(); !capable {
 		return ErrConditionalWriteUnsupported
 	}
@@ -574,6 +588,9 @@ func (s *BdStore) CompareAndSetMetadataKey(id, key, expected, next string) (bool
 		}
 		if err := ValidateLifecycleMutation(b, UpdateOpts{Metadata: map[string]string{key: next}}); err != nil {
 			return false, err
+		}
+		if b.Revision <= 0 {
+			return false, ErrConditionalWriteUnsupported
 		}
 		// Build the fenced set through bdUpdateArgs so the metadata write carries
 		// the same --json envelope (and future flag handling) as the *IfMatch

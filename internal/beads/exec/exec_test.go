@@ -1106,7 +1106,7 @@ esac
 `)
 	s := NewStore(script)
 
-	if err := s.SetMetadata("EX-1", "merge_strategy", "mr"); err != nil {
+	if err := s.SetMetadata("EX-1", "ordinary_key", "mr"); err != nil {
 		t.Fatalf("SetMetadata: %v", err)
 	}
 
@@ -1153,6 +1153,49 @@ esac
 	}
 	if _, err := os.Stat(writeMarker); !os.IsNotExist(err) {
 		t.Fatalf("delegate mutation ran; marker stat error = %v", err)
+	}
+}
+
+func TestLifecycleSensitiveExecWritesRefuseWithoutConditionalCapability(t *testing.T) {
+	dir := t.TempDir()
+	writeMarker := filepath.Join(dir, "write-called")
+	script := writeScript(t, dir, `
+case "$1" in
+  get)
+    echo '{"id":"EX-1","title":"open","status":"open","type":"task","created_at":"2026-01-01T00:00:00Z"}'
+    ;;
+  update|set-metadata)
+    touch "`+writeMarker+`"
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	store := NewStore(script)
+	status := "in_progress"
+	for _, mutation := range []struct {
+		name string
+		fn   func() error
+	}{
+		{"Update status", func() error { return store.Update("EX-1", beads.UpdateOpts{Status: &status}) }},
+		{"Update legacy workflow id", func() error {
+			return store.Update("EX-1", beads.UpdateOpts{Metadata: map[string]string{beadmeta.LegacyWorkflowIDMetadataKey: "wf-1"}})
+		}},
+		{"SetMetadata", func() error { return store.SetMetadata("EX-1", beadmeta.WorkflowIDMetadataKey, "wf-1") }},
+		{"SetMetadataBatch", func() error {
+			return store.SetMetadataBatch("EX-1", map[string]string{
+				"ordinary":                   "value",
+				beadmeta.RoutedToMetadataKey: "pool/worker",
+			})
+		}},
+	} {
+		t.Run(mutation.name, func(t *testing.T) {
+			if err := mutation.fn(); !errors.Is(err, beads.ErrConditionalWriteUnsupported) {
+				t.Fatalf("mutation error = %v, want ErrConditionalWriteUnsupported", err)
+			}
+		})
+	}
+	if _, err := os.Stat(writeMarker); !os.IsNotExist(err) {
+		t.Fatalf("unguarded exec write reached script; marker stat error = %v", err)
 	}
 }
 

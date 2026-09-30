@@ -641,6 +641,18 @@ func TestUpdateIfMatchSuccessAppliesFence(t *testing.T) {
 	}
 }
 
+func TestBdStoreGenericLifecycleMetadataRefusesWhenCASIsUnsupported(t *testing.T) {
+	w := &scriptedBd{id: "ga-1", revision: 1, status: "open", probeIncapable: true}
+	s := NewBdStore("/city", w.runner)
+	err := s.SetMetadata("ga-1", beadmeta.WorkflowIDMetadataKey, "wf-1")
+	if !errors.Is(err, ErrConditionalWriteUnsupported) {
+		t.Fatalf("SetMetadata error = %v, want ErrConditionalWriteUnsupported", err)
+	}
+	if w.writeCalls != 0 {
+		t.Fatalf("mutation writes = %d, want 0", w.writeCalls)
+	}
+}
+
 func TestBdStoreUpdateIfMatchCannotResetRecoveryState(t *testing.T) {
 	const initial = `{"version":1,"work_item_id":"ga-1","scope":"city:pilot/city:pilot","attempts":[{"id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","reserved_at":"2026-09-27T12:00:00Z","request_id":"request-1","request_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","expected_revision":1}]}`
 	const reset = `{"version":1,"work_item_id":"ga-1","scope":"city:pilot/city:pilot","attempts":[]}`
@@ -909,6 +921,18 @@ func TestCompareAndSetMetadataKeyWin(t *testing.T) {
 	}
 	if !argvContains(w.writeArgv, "update", "--set-metadata", "k=first", conditionalWriteFlag, "1") {
 		t.Fatalf("CAS fenced update argv missing expected flags: %v", w.writeArgv)
+	}
+}
+
+func TestCompareAndSetMetadataKeyRejectsZeroRevision(t *testing.T) {
+	w := &scriptedBd{id: "ga-1", revision: 0, status: "open"}
+	s := NewBdStore("/city", w.runner)
+	ok, err := s.CompareAndSetMetadataKey("ga-1", "k", "", "next")
+	if ok || !errors.Is(err, ErrConditionalWriteUnsupported) {
+		t.Fatalf("CompareAndSetMetadataKey = (%v, %v), want zero-revision fail-closed", ok, err)
+	}
+	if w.writeCalls != 0 {
+		t.Fatalf("conditional writes = %d, want 0", w.writeCalls)
 	}
 }
 

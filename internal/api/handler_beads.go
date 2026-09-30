@@ -29,7 +29,7 @@ func appendMetadataAttachedChildren(store beads.Store, parent beads.Bead, childr
 	// NOTE: "workflow_id" is the bare (non-prefixed) metadata key, distinct
 	// from beadmeta.WorkflowIDMetadataKey ("gc.workflow_id") — do NOT substitute
 	// the prefixed constant here or this would surface a different key.
-	for _, key := range []string{beadmeta.MoleculeIDMetadataKey, "workflow_id"} {
+	for _, key := range []string{beadmeta.MoleculeIDMetadataKey, beadmeta.LegacyWorkflowIDMetadataKey} {
 		attachedID := strings.TrimSpace(parent.Metadata[key])
 		if attachedID == "" {
 			continue

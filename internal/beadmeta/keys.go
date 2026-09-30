@@ -350,6 +350,11 @@ const (
 // unrelated metadata declarations.
 const LifecycleAdmissionReceiptV2MetadataKey = "gc.lifecycle.admission_receipt.v2"
 
+// LegacyWorkflowIDMetadataKey is the engine's historical bare graph workflow
+// pointer. It remains part of the run-chain and therefore must be treated as
+// lifecycle routing identity wherever the namespaced workflow key is guarded.
+const LegacyWorkflowIDMetadataKey = "workflow_id"
+
 // Work-record metadata keys (ADR-0009). These bind a work bead to its claim
 // and its outcome so observability/eval can answer "what work was done, by
 // whom, with what artifact, to what end":

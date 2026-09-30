@@ -415,7 +415,9 @@ func lifecycleSlingResultMatches(bead beads.Bead, workStore, graphStore beads.St
 		if err != nil || !slices.ContainsFunc(members, func(member beads.Bead) bool { return member.ID == bead.ID }) {
 			return false
 		}
-	} else if strings.TrimSpace(bead.Metadata[beadmeta.MoleculeIDMetadataKey]) != workflowID && strings.TrimSpace(bead.Metadata[beadmeta.WorkflowIDMetadataKey]) != workflowID {
+	} else if strings.TrimSpace(bead.Metadata[beadmeta.MoleculeIDMetadataKey]) != workflowID &&
+		strings.TrimSpace(bead.Metadata[beadmeta.WorkflowIDMetadataKey]) != workflowID &&
+		strings.TrimSpace(bead.Metadata[beadmeta.LegacyWorkflowIDMetadataKey]) != workflowID {
 		return false
 	}
 	return true
@@ -686,7 +688,11 @@ func lifecycleAdmissionRouteMatches(cfg *config.City, bead beads.Bead, scope str
 	// Formula-v1 attachments write one of these identifiers onto the source.
 	// If present, it must agree with the root that the controller verified. A
 	// graph.v2 attachment is convoy-first and can legitimately have neither.
-	for _, sourceWorkflowID := range []string{bead.Metadata[beadmeta.MoleculeIDMetadataKey], bead.Metadata[beadmeta.WorkflowIDMetadataKey]} {
+	for _, sourceWorkflowID := range []string{
+		bead.Metadata[beadmeta.MoleculeIDMetadataKey],
+		bead.Metadata[beadmeta.WorkflowIDMetadataKey],
+		bead.Metadata[beadmeta.LegacyWorkflowIDMetadataKey],
+	} {
 		if sourceWorkflowID = strings.TrimSpace(sourceWorkflowID); sourceWorkflowID != "" && sourceWorkflowID != marker.WorkflowID {
 			return false
 		}

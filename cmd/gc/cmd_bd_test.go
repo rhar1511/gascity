@@ -142,6 +142,103 @@ func TestExtractBdScopeFlags(t *testing.T) {
 	}
 }
 
+func TestLifecycleAdmissionRawBdReadOnlyClassifier(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{"show", []string{"show", "gc-1"}, true},
+		{"list with global flag", []string{"--json", "list"}, true},
+		{"global value flag before read", []string{"--actor", "mayor", "show", "gc-1"}, true},
+		{"root version", []string{"--version"}, true},
+		{"help", []string{"help"}, true},
+		{"update", []string{"update", "gc-1", "--title", "new"}, false},
+		{"global flag before update", []string{"--actor", "mayor", "update", "gc-1"}, false},
+		{"claim alias", []string{"claim", "gc-1"}, false},
+		{"assignment", []string{"assign", "gc-1", "worker"}, false},
+		{"status alias", []string{"set-state", "gc-1", "closed"}, false},
+		{"label mutation", []string{"label", "add", "gc-1", "urgent"}, false},
+		{"close", []string{"close", "gc-1"}, false},
+		{"reopen", []string{"reopen", "gc-1"}, false},
+		{"delete", []string{"delete", "gc-1"}, false},
+		{"create alias", []string{"new", "task"}, false},
+		{"raw sql", []string{"sql", "UPDATE issues SET status='closed'"}, false},
+		{"custom metadata", []string{"update", "gc-1", "--set-metadata", "workflow_id=wf-1"}, false},
+		{"custom release command", []string{"release-if-current", "gc-1", "worker"}, false},
+		{"unknown command", []string{"future-mutator", "gc-1"}, false},
+		{"unknown global flag", []string{"--mystery", "value", "list"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := lifecycleAdmissionBdCommandReadOnly(tc.args); got != tc.want {
+				t.Fatalf("lifecycleAdmissionBdCommandReadOnly(%v) = %v, want %v", tc.args, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestGcBdAdmissionEnabledRefusesRawMutationsBeforeInvokingBd(t *testing.T) {
+	disableManagedDoltRecoveryForTest(t)
+	clearInheritedBeadsEnv(t)
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const publicKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+	cityConfig := `[workspace]
+name = "demo"
+
+[lifecycle]
+admission_enabled = true
+
+[lifecycle.admission_authorities]
+ricky = "` + publicKey + `"
+
+[lifecycle.acceptance_authorities]
+ricky = "` + publicKey + `"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityConfig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte("issue_prefix: gc\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	setCwd(t, cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
+	marker := filepath.Join(cityDir, "bd-invoked")
+	binDir := t.TempDir()
+	bdPath := filepath.Join(binDir, "bd")
+	if err := os.WriteFile(bdPath, []byte("#!/bin/sh\ntouch \"$BD_INVOKED_MARKER\"\nprintf '[]\\n'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("BD_INVOKED_MARKER", marker)
+
+	for _, args := range [][]string{
+		{"update", "gc-1", "--title", "x"},
+		{"--actor", "mayor", "update", "gc-1", "--set-metadata", "workflow_id=wf-1"},
+		{"assign", "gc-1", "worker"},
+		{"update", "gc-1", "--claim"},
+		{"set-state", "gc-1", "closed"},
+		{"label", "add", "gc-1", "urgent"},
+		{"close", "gc-1"},
+		{"reopen", "gc-1"},
+		{"delete", "gc-1"},
+		{"sql", "UPDATE issues SET status='closed'"},
+		{"release-if-current", "gc-1", "worker"},
+		{"future-mutator", "gc-1"},
+	} {
+		var stdout, stderr bytes.Buffer
+		code := doBd(args, &stdout, &stderr)
+		if code == 0 || !strings.Contains(stderr.String(), "lifecycle admission is enabled") {
+			t.Fatalf("doBd(%v) = %d, stderr=%q; want admission refusal", args, code, stderr.String())
+		}
+		if _, err := os.Stat(marker); !os.IsNotExist(err) {
+			t.Fatalf("bd invoked for refused command %v; marker stat error=%v", args, err)
+		}
+	}
+}
+
 func TestExtractBdDirectoryFlag(t *testing.T) {
 	tests := []struct {
 		name string

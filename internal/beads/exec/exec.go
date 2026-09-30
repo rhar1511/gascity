@@ -287,6 +287,7 @@ func (s *Store) Update(id string, opts beads.UpdateOpts) error {
 		if err := beads.ValidateLifecycleMutation(current, opts); err != nil {
 			return fmt.Errorf("updating lifecycle bead %q: %w", id, err)
 		}
+		return fmt.Errorf("updating lifecycle bead %q: %w", id, beads.ErrConditionalWriteUnsupported)
 	}
 	data, err := marshalUpdate(opts)
 	if err != nil {
@@ -515,13 +516,15 @@ func (s *Store) ListByMetadata(filters map[string]string, limit int, opts ...bea
 // SetMetadata sets a key-value metadata pair: script set-metadata <id> <key> (stdin: value)
 func (s *Store) SetMetadata(id, key, value string) error {
 	if lifecycleMutationMayReopenOrClear(beads.UpdateOpts{Metadata: map[string]string{key: value}}) {
+		opts := beads.UpdateOpts{Metadata: map[string]string{key: value}}
 		current, err := s.Get(id)
 		if err != nil {
 			return err
 		}
-		if err := beads.ValidateLifecycleMutation(current, beads.UpdateOpts{Metadata: map[string]string{key: value}}); err != nil {
+		if err := beads.ValidateLifecycleMutation(current, opts); err != nil {
 			return fmt.Errorf("setting lifecycle metadata on %q: %w", id, err)
 		}
+		return fmt.Errorf("setting lifecycle metadata on %q: %w", id, beads.ErrConditionalWriteUnsupported)
 	}
 	_, err := s.run([]byte(value), "set-metadata", id, key)
 	if err != nil {
@@ -533,6 +536,17 @@ func (s *Store) SetMetadata(id, key, value string) error {
 // SetMetadataBatch sets multiple key-value metadata pairs on a bead.
 // Delegates to sequential SetMetadata calls.
 func (s *Store) SetMetadataBatch(id string, kvs map[string]string) error {
+	if lifecycleMutationMayReopenOrClear(beads.UpdateOpts{Metadata: kvs}) {
+		current, err := s.Get(id)
+		if err != nil {
+			return err
+		}
+		opts := beads.UpdateOpts{Metadata: kvs}
+		if err := beads.ValidateLifecycleMutation(current, opts); err != nil {
+			return fmt.Errorf("setting lifecycle metadata batch on %q: %w", id, err)
+		}
+		return fmt.Errorf("setting lifecycle metadata batch on %q: %w", id, beads.ErrConditionalWriteUnsupported)
+	}
 	for k, v := range kvs {
 		if err := s.SetMetadata(id, k, v); err != nil {
 			return err

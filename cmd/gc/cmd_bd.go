@@ -459,6 +459,10 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc bd: loading config: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	if cfg.Lifecycle.AdmissionEnabled && !lifecycleAdmissionBdCommandReadOnly(bdArgs) {
+		fmt.Fprintf(stderr, "gc bd: lifecycle admission is enabled; refusing raw bd command %q because it has no lifecycle proof-aware write guard\n", bdArgs) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	if msg, refused := bdRigQualifiedMetadataRefusal(cfg, bdArgs); refused {
 		fmt.Fprint(stderr, msg) //nolint:errcheck // best-effort stderr
 		return 1
@@ -708,6 +712,63 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	}
 
 	return 0
+}
+
+// lifecycleAdmissionBdCommandReadOnly allows a narrow set of raw bd reads
+// while lifecycle admission is enabled. The raw passthrough has no proof-aware
+// write guard, so every unknown command and every mutation alias must fail
+// closed. Parse persistent flags strictly so an unknown leading flag cannot
+// make its value look like an allowlisted read verb.
+func lifecycleAdmissionBdCommandReadOnly(args []string) bool {
+	globalValueFlags := bdflags.GlobalValueFlags()
+	globalBoolFlags := bdflags.GlobalBoolFlags()
+	verb := ""
+	rootHelpOrVersion := false
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			return false
+		}
+		if !strings.HasPrefix(arg, "-") {
+			verb = arg
+			break
+		}
+		name := arg
+		inline := false
+		if at := strings.IndexByte(arg, '='); at >= 0 {
+			name, inline = arg[:at], true
+		}
+		if globalValueFlags[name] {
+			if !inline {
+				if i+1 >= len(args) {
+					return false
+				}
+				i++
+			}
+			continue
+		}
+		if globalBoolFlags[name] {
+			if name == "--help" || name == "-h" || name == "--version" || name == "-V" {
+				rootHelpOrVersion = true
+			}
+			continue
+		}
+		return false
+	}
+	if verb == "" {
+		return rootHelpOrVersion
+	}
+	switch verb {
+	case "show", "list", "search", "query", "count", "ready", "blocked",
+		"children", "status", "statuses", "types", "history", "diff", "stale",
+		"graph", "stats", "info", "where", "context", "version", "help":
+		return true
+	default:
+		// This includes nested command families, aliases, raw SQL, the internal
+		// release-if-current verb, and commands added by a future bd version.
+		// A future read verb can be added here with a direct bounded read contract.
+		return false
+	}
 }
 
 func parseBdReleaseIfCurrentArgs(args []string) (id, expectedAssignee string, ok bool, err error) {

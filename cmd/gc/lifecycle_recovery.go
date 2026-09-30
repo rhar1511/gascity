@@ -287,7 +287,9 @@ func lifecycleRecoveryAttachedWorkflowMatches(work beads.Bead, sourceRef string,
 		}
 		return true
 	}
-	return strings.TrimSpace(work.Metadata[beadmeta.MoleculeIDMetadataKey]) == marker.WorkflowID || strings.TrimSpace(work.Metadata[beadmeta.WorkflowIDMetadataKey]) == marker.WorkflowID
+	return strings.TrimSpace(work.Metadata[beadmeta.MoleculeIDMetadataKey]) == marker.WorkflowID ||
+		strings.TrimSpace(work.Metadata[beadmeta.WorkflowIDMetadataKey]) == marker.WorkflowID ||
+		strings.TrimSpace(work.Metadata[beadmeta.LegacyWorkflowIDMetadataKey]) == marker.WorkflowID
 }
 
 func containsBeadID(beadsList []beads.Bead, id string) bool {

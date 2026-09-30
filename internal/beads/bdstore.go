@@ -1532,6 +1532,13 @@ func (s *BdStore) Update(id string, opts UpdateOpts) error {
 		if err := ValidateLifecycleMutation(current, opts); err != nil {
 			return fmt.Errorf("updating lifecycle bead %q: %w", id, err)
 		}
+		if current.Revision <= 0 {
+			return fmt.Errorf("updating lifecycle bead %q: %w", id, ErrConditionalWriteUnsupported)
+		}
+		if err := s.updateIfMatchAtRevision(id, current.Revision, opts); err != nil {
+			return fmt.Errorf("updating lifecycle bead %q: %w", id, err)
+		}
+		return nil
 	}
 	// Internal store callers supply canonical full IDs; the exact-ID collision
 	// guard lives at the CLI/API entry points (cmd_bd.go, huma_handlers_beads.go)
@@ -1932,6 +1939,9 @@ func (s *BdStore) UpdateAll(ids []string, opts UpdateOpts) (int, error) {
 				return 0, fmt.Errorf("batch updating lifecycle bead %q: %w", id, err)
 			}
 		}
+		// The public conditional API fences one row at a time. Do not send a
+		// lifecycle-sensitive multi-row update through bd's unfenced batch verb.
+		return 0, ErrConditionalWriteUnsupported
 	}
 	args := append([]string{"update", "--json"}, ids...)
 	baseLen := len(args)
@@ -2069,6 +2079,13 @@ func (s *BdStore) SetMetadata(id, key, value string) error {
 		if err := ValidateLifecycleMutation(current, UpdateOpts{Metadata: metadata}); err != nil {
 			return fmt.Errorf("setting lifecycle metadata on %q: %w", id, err)
 		}
+		if current.Revision <= 0 {
+			return fmt.Errorf("setting lifecycle metadata on %q: %w", id, ErrConditionalWriteUnsupported)
+		}
+		if err := s.updateIfMatchAtRevision(id, current.Revision, UpdateOpts{Metadata: metadata}); err != nil {
+			return fmt.Errorf("setting lifecycle metadata on %q: %w", id, err)
+		}
+		return nil
 	}
 	err := s.runBDTransientWrite("update", "--json", id,
 		"--set-metadata", key+"="+value)
@@ -2099,6 +2116,13 @@ func (s *BdStore) SetMetadataBatch(id string, kvs map[string]string) error {
 		if err := ValidateLifecycleMutation(current, UpdateOpts{Metadata: kvs}); err != nil {
 			return fmt.Errorf("setting lifecycle metadata batch on %q: %w", id, err)
 		}
+		if current.Revision <= 0 {
+			return fmt.Errorf("setting lifecycle metadata batch on %q: %w", id, ErrConditionalWriteUnsupported)
+		}
+		if err := s.updateIfMatchAtRevision(id, current.Revision, UpdateOpts{Metadata: kvs}); err != nil {
+			return fmt.Errorf("setting lifecycle metadata batch on %q: %w", id, err)
+		}
+		return nil
 	}
 	args := []string{"update", "--json", id}
 	keys := make([]string, 0, len(kvs))

@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -1051,13 +1052,123 @@ func TestBdStoreUpdatePassesPriority(t *testing.T) {
 	}
 }
 
+func TestBdStoreLifecycleSensitiveMetadataUsesExactRevisionCAS(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		write func(*beads.BdStore) error
+		want  string
+	}{
+		{
+			name: "update",
+			write: func(store *beads.BdStore) error {
+				return store.Update("EX-1", beads.UpdateOpts{Metadata: map[string]string{beadmeta.WorkflowIDMetadataKey: "wf-1"}})
+			},
+			want: "--set-metadata gc.workflow_id=wf-1",
+		},
+		{
+			name: "set metadata",
+			write: func(store *beads.BdStore) error {
+				return store.SetMetadata("EX-1", beadmeta.LegacyWorkflowIDMetadataKey, "wf-1")
+			},
+			want: "--set-metadata workflow_id=wf-1",
+		},
+		{
+			name: "set metadata batch",
+			write: func(store *beads.BdStore) error {
+				return store.SetMetadataBatch("EX-1", map[string]string{
+					beadmeta.RoutedToMetadataKey: "pool/worker",
+					"ordinary":                   "value",
+				})
+			},
+			want: "--set-metadata gc.routed_to=pool/worker",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var writeArgs []string
+			runner := func(_, name string, args ...string) ([]byte, error) {
+				joined := strings.Join(args, " ")
+				switch {
+				case joined == "show --json EX-1":
+					return []byte(`[{"id":"EX-1","status":"open","issue_type":"task","created_at":"2026-01-01T00:00:00Z","revision":12,"metadata":{}}]`), nil
+				case strings.HasSuffix(joined, " --help"):
+					return []byte("supports --if-revision"), nil
+				case len(args) >= 2 && args[0] == "update":
+					writeArgs = append([]string(nil), args...)
+					return nil, nil
+				default:
+					return nil, fmt.Errorf("unexpected command: %s %s", name, joined)
+				}
+			}
+			store := beads.NewBdStore("/city", runner)
+			if err := tc.write(store); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			joined := strings.Join(writeArgs, " ")
+			if !strings.Contains(joined, tc.want) {
+				t.Fatalf("write args = %q, want %q", joined, tc.want)
+			}
+			if !strings.HasSuffix(joined, "--if-revision 12") {
+				t.Fatalf("write args = %q, want exact observed revision CAS", joined)
+			}
+		})
+	}
+}
+
+func TestBdStoreLifecycleMetadataAttachmentRaceHasNoUnconditionalFallback(t *testing.T) {
+	var currentRevision int64 = 12
+	var commands []string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		joined := strings.Join(args, " ")
+		commands = append(commands, joined)
+		switch {
+		case joined == "show --json EX-1":
+			return []byte(fmt.Sprintf(`[{"id":"EX-1","status":"open","issue_type":"task","created_at":"2026-01-01T00:00:00Z","revision":%d,"metadata":{}}]`, currentRevision)), nil
+		case strings.HasSuffix(joined, " --help"):
+			// Model admission attaching after the source snapshot but before the
+			// conditional mutation reaches bd.
+			if strings.HasPrefix(joined, "update ") {
+				currentRevision = 13
+			}
+			return []byte("supports --if-revision"), nil
+		case strings.HasPrefix(joined, "update "):
+			if !strings.HasSuffix(joined, "--if-revision 12") {
+				return nil, fmt.Errorf("mutation did not use observed revision: %s", joined)
+			}
+			return []byte(`{"error":"revision mismatch","code":"precondition_failed","expected_revision":12,"current_revision":13}`), fmt.Errorf("exit status 1")
+		default:
+			return nil, fmt.Errorf("unexpected command: %s %s", name, joined)
+		}
+	}
+	store := beads.NewBdStore("/city", runner)
+	err := store.SetMetadata("EX-1", beadmeta.WorkflowIDMetadataKey, "wf-1")
+	if err == nil || !beads.IsPreconditionFailed(err) {
+		t.Fatalf("SetMetadata error = %v, want exact-revision precondition failure", err)
+	}
+	var mutationCount int
+	for _, command := range commands {
+		if strings.HasPrefix(command, "update ") && !strings.HasSuffix(command, " --help") {
+			mutationCount++
+			if !strings.Contains(command, "--if-revision 12") {
+				t.Fatalf("unconditional or wrong-revision update reached bd: %q", command)
+			}
+		}
+	}
+	if mutationCount != 1 {
+		t.Fatalf("mutation commands = %d, want exactly one fenced attempt; commands=%v", mutationCount, commands)
+	}
+}
+
 func TestBdStoreTxCombinesWritesForSameBead(t *testing.T) {
 	var commands []string
 	closed := false
 	description := "seed"
+	revision := int64(1)
 	metadata := map[string]string{"existing": "kept"}
 	runner := func(_, name string, args ...string) ([]byte, error) {
 		commands = append(commands, name+" "+strings.Join(args, " "))
+		if len(args) >= 2 && args[1] == "--help" {
+			return []byte("--if-revision"), nil
+		}
 		switch strings.Join(args, " ") {
 		case "show --json bd-42":
 			status := "open"
@@ -1065,30 +1176,34 @@ func TestBdStoreTxCombinesWritesForSameBead(t *testing.T) {
 				status = "closed"
 			}
 			payload := fmt.Sprintf(
-				`[{"id":"bd-42","title":"before","status":%q,"issue_type":"task","priority":2,"created_at":"2025-01-15T10:30:00Z","description":%q,"metadata":%s}]`,
+				`[{"id":"bd-42","title":"before","status":%q,"issue_type":"task","priority":2,"created_at":"2025-01-15T10:30:00Z","description":%q,"revision":%d,"metadata":%s}]`,
 				status,
 				description,
+				revision,
 				mustJSON(t, metadata),
 			)
 			return []byte(payload), nil
 		case "close --force --json --reason completed during transaction bd-42":
 			closed = true
+			revision++
 			description = ""
 			metadata = map[string]string{}
 			return []byte(`[{"id":"bd-42","title":"before","status":"closed","issue_type":"task","priority":2,"created_at":"2025-01-15T10:30:00Z","description":"","metadata":{}}]`), nil
 		case "update --json bd-42 --title before --type task --priority 2 --description after --set-metadata close_reason=completed during transaction --set-metadata existing=kept --set-metadata tx=applied":
+			revision++
 			description = "after"
 			metadata["close_reason"] = "completed during transaction"
 			metadata["existing"] = "kept"
 			metadata["tx"] = "applied"
 			return []byte(`[{"id":"bd-42","title":"before","status":"open","issue_type":"task","priority":2,"created_at":"2025-01-15T10:30:00Z","description":"after","metadata":{"close_reason":"completed during transaction","existing":"kept","tx":"applied"}}]`), nil
-		case "update --json bd-42 --title before --status closed --type task --priority 2 --description after --set-metadata close_reason=completed during transaction --set-metadata existing=kept --set-metadata tx=applied":
+		case "update --json bd-42 --title before --status closed --type task --priority 2 --description after --set-metadata close_reason=completed during transaction --set-metadata existing=kept --set-metadata tx=applied --if-revision 3":
+			revision++
 			closed = true
 			description = "after"
 			metadata["close_reason"] = "completed during transaction"
 			metadata["existing"] = "kept"
 			metadata["tx"] = "applied"
-			return []byte(`[{"id":"bd-42","title":"before","status":"closed","issue_type":"task","priority":2,"created_at":"2025-01-15T10:30:00Z","description":"after","metadata":{"close_reason":"completed during transaction","existing":"kept","tx":"applied"}}]`), nil
+			return []byte(`[{"id":"bd-42","title":"before","status":"closed","issue_type":"task","priority":2,"created_at":"2025-01-15T10:30:00Z","description":"after","revision":4,"metadata":{"close_reason":"completed during transaction","existing":"kept","tx":"applied"}}]`), nil
 		default:
 			return nil, fmt.Errorf("unexpected command: bd %s", strings.Join(args, " "))
 		}
@@ -1136,7 +1251,11 @@ func TestBdStoreTxCombinesWritesForSameBead(t *testing.T) {
 		"bd close --force --json --reason completed during transaction bd-42",
 		"bd show --json bd-42", // honesty re-read after close
 		"bd show --json bd-42", // status update lifecycle preflight
-		"bd update --json bd-42 --title before --status closed --type task --priority 2 --description after --set-metadata close_reason=completed during transaction --set-metadata existing=kept --set-metadata tx=applied",
+		"bd update --help",
+		"bd close --help",
+		"bd assign --help",
+		"bd delete --help",
+		"bd update --json bd-42 --title before --status closed --type task --priority 2 --description after --set-metadata close_reason=completed during transaction --set-metadata existing=kept --set-metadata tx=applied --if-revision 3",
 		"bd show --json bd-42", // update honesty re-read
 		"bd show --json bd-42", // final Get after Tx
 	}
@@ -1186,15 +1305,19 @@ func TestBdStoreTxCloseOnlyUsesCloseCommand(t *testing.T) {
 func TestBdStoreTxRetriesTransientUpdateApply(t *testing.T) {
 	updateCalls := 0
 	runner := func(_, _ string, args ...string) ([]byte, error) {
-		switch strings.Join(args, " ") {
+		joined := strings.Join(args, " ")
+		if len(args) >= 2 && args[1] == "--help" {
+			return []byte("--if-revision"), nil
+		}
+		switch joined {
 		case "show --json bd-42":
-			return []byte(`[{"id":"bd-42","title":"before","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
-		case "update --json bd-42 --title before --status open --type task --set-metadata tx=applied":
+			return []byte(`[{"id":"bd-42","title":"before","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","revision":1}]`), nil
+		case "update --json bd-42 --title before --status open --type task --set-metadata tx=applied --if-revision 1":
 			updateCalls++
 			if updateCalls == 1 {
 				return nil, fmt.Errorf("exit status 1: Error updating bd-42: dolt commit: Error 1213 (40001): serialization failure: this transaction conflicts with a committed transaction from another client, try restarting transaction")
 			}
-			return []byte(`[{"id":"bd-42","title":"before","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","metadata":{"tx":"applied"}}]`), nil
+			return []byte(`[{"id":"bd-42","title":"before","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","revision":2,"metadata":{"tx":"applied"}}]`), nil
 		default:
 			return nil, fmt.Errorf("unexpected command: bd %s", strings.Join(args, " "))
 		}
@@ -1212,34 +1335,33 @@ func TestBdStoreTxRetriesTransientUpdateApply(t *testing.T) {
 	}
 }
 
-func TestBdStoreTxPreservesAddsAndRemovesLabels(t *testing.T) {
+func TestBdStoreTxRefusesUnfenceableLifecycleLabelUpdate(t *testing.T) {
 	var commands []string
 	runner := func(_, name string, args ...string) ([]byte, error) {
 		commands = append(commands, name+" "+strings.Join(args, " "))
 		switch strings.Join(args, " ") {
 		case "show --json bd-42":
-			return []byte(`[{"id":"bd-42","title":"before","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","labels":["a","b"]}]`), nil
-		case "update --json bd-42 --title before --status open --type task --add-label b --add-label c --remove-label a":
-			return []byte(`[{"id":"bd-42","title":"before","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","labels":["b","c"]}]`), nil
+			return []byte(`[{"id":"bd-42","title":"before","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","revision":1,"labels":["a","b"]}]`), nil
 		default:
 			return nil, fmt.Errorf("unexpected command: bd %s", strings.Join(args, " "))
 		}
 	}
 	s := beads.NewBdStore("/city", runner)
 
-	if err := s.Tx("labels", func(tx beads.Tx) error {
+	err := s.Tx("labels", func(tx beads.Tx) error {
 		return tx.Update("bd-42", beads.UpdateOpts{
 			Labels:       []string{"c"},
 			RemoveLabels: []string{"a"},
 		})
-	}); err != nil {
-		t.Fatal(err)
+	})
+	var unsupported *beads.ConditionalUpdateFieldUnsupportedError
+	if !errors.As(err, &unsupported) || unsupported.Field != "labels" {
+		t.Fatalf("Tx label update error = %v, want labels conditional-write refusal", err)
 	}
 
 	want := []string{
 		"bd show --json bd-42", // Tx initial Get
 		"bd show --json bd-42", // lifecycle preflight before status update
-		"bd update --json bd-42 --title before --status open --type task --add-label b --add-label c --remove-label a",
 	}
 	if !reflect.DeepEqual(commands, want) {
 		t.Fatalf("commands = %#v, want %#v", commands, want)
@@ -1265,9 +1387,9 @@ func TestBdStoreUpdateAllBatchesIDsAndRetriesTransientWrite(t *testing.T) {
 		return nil, nil
 	}
 	s := beads.NewBdStore("/city", runner)
-	status := "closed"
+	title := "finished"
 	updated, err := s.UpdateAll([]string{"bd-1", "bd-2"}, beads.UpdateOpts{
-		Status: &status,
+		Title: &title,
 		Metadata: map[string]string{
 			"phase":      "abort",
 			"gc.outcome": "skipped",
@@ -1281,7 +1403,7 @@ func TestBdStoreUpdateAllBatchesIDsAndRetriesTransientWrite(t *testing.T) {
 	}
 	want := []string{
 		"update", "--json", "bd-1", "bd-2",
-		"--status", "closed",
+		"--title", "finished",
 		"--set-metadata", "gc.outcome=skipped",
 		"--set-metadata", "phase=abort",
 	}
@@ -3367,11 +3489,11 @@ func TestBdStoreSetMetadata(t *testing.T) {
 		return nil, nil
 	}
 	s := beads.NewBdStore("/city", runner)
-	err := s.SetMetadata("bd-42", "merge_strategy", "mr")
+	err := s.SetMetadata("bd-42", "ordinary_key", "mr")
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantArgs := "update --json bd-42 --set-metadata merge_strategy=mr"
+	wantArgs := "update --json bd-42 --set-metadata ordinary_key=mr"
 	if strings.Join(gotArgs, " ") != wantArgs {
 		t.Errorf("args = %q, want %q", strings.Join(gotArgs, " "), wantArgs)
 	}
@@ -3394,10 +3516,10 @@ func TestBdStoreSetMetadataDisablesAutoCommitForDoltlite(t *testing.T) {
 		return nil, nil
 	}
 	s := beads.NewBdStore(dir, runner)
-	if err := s.SetMetadata("bd-42", "merge_strategy", "mr"); err != nil {
+	if err := s.SetMetadata("bd-42", "ordinary_key", "mr"); err != nil {
 		t.Fatal(err)
 	}
-	wantArgs := "--dolt-auto-commit off update --json bd-42 --set-metadata merge_strategy=mr"
+	wantArgs := "--dolt-auto-commit off update --json bd-42 --set-metadata ordinary_key=mr"
 	if strings.Join(gotArgs, " ") != wantArgs {
 		t.Errorf("args = %q, want %q", strings.Join(gotArgs, " "), wantArgs)
 	}

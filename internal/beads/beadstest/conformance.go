@@ -536,6 +536,19 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 			{"metadata", beads.UpdateOpts{Metadata: map[string]string{"note": "x"}}},
 		} {
 			if err := s.Update(b.ID, u.opts); err != nil {
+				if u.name == "status" && errors.Is(err, beads.ErrConditionalWriteUnsupported) {
+					if _, ok := beads.ConditionalWriterFor(s); ok {
+						t.Fatalf("Update(status) = %v despite exposing ConditionalWriter", err)
+					}
+					current, getErr := s.Get(b.ID)
+					if getErr != nil {
+						t.Fatalf("Get after refused Update(status): %v", getErr)
+					}
+					if current.Status != "open" {
+						t.Fatalf("status after refused Update(status) = %q, want unchanged open", current.Status)
+					}
+					t.Skip("store has no conditional-write capability for lifecycle-sensitive status updates")
+				}
 				t.Fatalf("Update(%s): %v", u.name, err)
 			}
 		}
