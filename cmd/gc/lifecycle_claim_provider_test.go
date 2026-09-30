@@ -10,6 +10,7 @@ import (
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/worklifecycle"
@@ -91,29 +92,126 @@ func TestLifecycleClaimProviderRechecksCanonicalReadiness(t *testing.T) {
 }
 
 func TestLifecycleClaimProviderClaimsReadyWorkAndReplaysExactClaim(t *testing.T) {
-	setup, state, request := newLifecycleClaimProviderFixture(t)
-	beforeRequests := len(setup.store.patchRequests)
-	claimed, err := state.ClaimLifecycleWork(context.Background(), request)
-	if err != nil {
-		t.Fatalf("claim currently ready admitted work: %v", err)
-	}
-	if claimed.ClaimGeneration != "1" || claimed.ReceiptID == "" || claimed.Replayed || claimed.Recovered {
-		t.Fatalf("claim result = %+v, want a fresh generation-1 transition", claimed)
-	}
-	current, err := setup.store.Get(request.Work.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if current.Status != "in_progress" || current.Assignee != request.Actor || len(setup.store.patchRequests) != beforeRequests+1 {
-		t.Fatalf("source after claim = %q/%q with %d transition writes, want claimed once", current.Status, current.Assignee, len(setup.store.patchRequests)-beforeRequests)
-	}
+	for _, tc := range []struct {
+		name      string
+		template  string
+		agentName string
+		poolSlot  string
+	}{
+		{name: "configured base", template: "pilot/worker", agentName: "pilot/worker"},
+		{name: "canonical pool slot", template: "pilot/worker-2", agentName: "pilot/worker-2", poolSlot: "2"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setup, state, request := newLifecycleClaimProviderFixture(t)
+			request.Session.Template = tc.template
+			request.Session.AgentName = tc.agentName
+			request.Session.PoolSlot = tc.poolSlot
+			beforeRequests := len(setup.store.patchRequests)
+			claimed, err := state.ClaimLifecycleWork(context.Background(), request)
+			if err != nil {
+				t.Fatalf("claim currently ready admitted work: %v", err)
+			}
+			if claimed.ClaimGeneration != "1" || claimed.ReceiptID == "" || claimed.Replayed || claimed.Recovered {
+				t.Fatalf("claim result = %+v, want a fresh generation-1 transition", claimed)
+			}
+			current, err := setup.store.Get(request.Work.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if current.Status != "in_progress" || current.Assignee != request.Actor || len(setup.store.patchRequests) != beforeRequests+1 {
+				t.Fatalf("source after claim = %q/%q with %d transition writes, want claimed once", current.Status, current.Assignee, len(setup.store.patchRequests)-beforeRequests)
+			}
 
-	replayed, err := state.ClaimLifecycleWork(context.Background(), request)
-	if err != nil {
-		t.Fatalf("replay exact claim after a lost response: %v", err)
+			replayed, err := state.ClaimLifecycleWork(context.Background(), request)
+			if err != nil {
+				t.Fatalf("replay exact claim after a lost response: %v", err)
+			}
+			if !replayed.Replayed || replayed.ReceiptID != claimed.ReceiptID || replayed.ClaimGeneration != claimed.ClaimGeneration || len(setup.store.patchRequests) != beforeRequests+1 {
+				t.Fatalf("claim replay = %+v with %d transition writes, want the original receipt without another write", replayed, len(setup.store.patchRequests)-beforeRequests)
+			}
+		})
 	}
-	if !replayed.Replayed || replayed.ReceiptID != claimed.ReceiptID || replayed.ClaimGeneration != claimed.ClaimGeneration || len(setup.store.patchRequests) != beforeRequests+1 {
-		t.Fatalf("claim replay = %+v with %d transition writes, want the original receipt without another write", replayed, len(setup.store.patchRequests)-beforeRequests)
+}
+
+func TestLifecycleClaimProviderRejectsSessionOnDifferentConfiguredRouteBeforeWrites(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		prepare func(*lifecycleAdmissionTransitionSetup, *api.LifecycleClaimTransitionRequest)
+	}{
+		{
+			name: "wrong configured route",
+			prepare: func(setup *lifecycleAdmissionTransitionSetup, request *api.LifecycleClaimTransitionRequest) {
+				setup.fixture.cfg.Agents = append(setup.fixture.cfg.Agents, config.Agent{Name: "other-worker", Dir: "pilot"})
+				request.Session.Template = "pilot/other-worker"
+				request.Session.AgentName = "pilot/other-worker"
+			},
+		},
+		{
+			name: "missing configured route",
+			prepare: func(_ *lifecycleAdmissionTransitionSetup, request *api.LifecycleClaimTransitionRequest) {
+				request.Session.Template = ""
+				request.Session.AgentName = ""
+				request.Session.CommonName = ""
+				request.Session.Labels = nil
+			},
+		},
+		{
+			name: "ambiguous pool slot identity",
+			prepare: func(setup *lifecycleAdmissionTransitionSetup, request *api.LifecycleClaimTransitionRequest) {
+				setup.fixture.cfg.Agents = append(setup.fixture.cfg.Agents, config.Agent{Name: "worker", Dir: "other"})
+				request.Session.Template = "worker-2"
+				request.Session.AgentName = "worker-2"
+				request.Session.PoolSlot = "2"
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setup, state, request := newLifecycleClaimProviderFixture(t)
+			tc.prepare(&setup, &request)
+			beforeRequests := len(setup.store.patchRequests)
+			beforeReceipts := len(setup.store.patchReceipts)
+			beforeGenericWrites := setup.store.sourceGenericWrites
+			if _, err := state.ClaimLifecycleWork(context.Background(), request); err == nil {
+				t.Fatal("provider accepted a session that does not resolve to the signed admission route")
+			} else if !errors.Is(err, worklifecycle.ErrTransitionChainEvidence) {
+				t.Fatalf("claim error = %v, want a route-evidence refusal", err)
+			}
+			if len(setup.store.patchRequests) != beforeRequests || len(setup.store.patchReceipts) != beforeReceipts || setup.store.sourceGenericWrites != beforeGenericWrites {
+				t.Fatalf("route refusal wrote source state: patches=%d/%d receipts=%d/%d generic=%d/%d",
+					len(setup.store.patchRequests), beforeRequests, len(setup.store.patchReceipts), beforeReceipts,
+					setup.store.sourceGenericWrites, beforeGenericWrites)
+			}
+			current, err := setup.store.Get(request.Work.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if current.Status != "open" || current.Assignee != "" {
+				t.Fatalf("route refusal changed source owner/status to %q/%q", current.Status, current.Assignee)
+			}
+		})
+	}
+}
+
+func TestLifecycleClaimProviderRejectsWrongRouteBeforeExactReplay(t *testing.T) {
+	setup, state, request := newLifecycleClaimProviderFixture(t)
+	if _, err := state.ClaimLifecycleWork(context.Background(), request); err != nil {
+		t.Fatalf("initial claim on the signed route: %v", err)
+	}
+	setup.fixture.cfg.Agents = append(setup.fixture.cfg.Agents, config.Agent{Name: "other-worker", Dir: "pilot"})
+	request.Session.Template = "pilot/other-worker"
+	request.Session.AgentName = "pilot/other-worker"
+	beforeRequests := len(setup.store.patchRequests)
+	beforeReceipts := len(setup.store.patchReceipts)
+	beforeGenericWrites := setup.store.sourceGenericWrites
+	if _, err := state.ClaimLifecycleWork(context.Background(), request); err == nil {
+		t.Fatal("provider replayed an exact claim through a session on another configured route")
+	} else if !errors.Is(err, worklifecycle.ErrTransitionChainEvidence) {
+		t.Fatalf("claim replay error = %v, want a route-evidence refusal", err)
+	}
+	if len(setup.store.patchRequests) != beforeRequests || len(setup.store.patchReceipts) != beforeReceipts || setup.store.sourceGenericWrites != beforeGenericWrites {
+		t.Fatalf("route refusal added writes: patches=%d/%d receipts=%d/%d generic=%d/%d",
+			len(setup.store.patchRequests), beforeRequests, len(setup.store.patchReceipts), beforeReceipts,
+			setup.store.sourceGenericWrites, beforeGenericWrites)
 	}
 }
 
@@ -162,7 +260,7 @@ func newLifecycleClaimProviderFixture(t *testing.T) (lifecycleAdmissionTransitio
 		cityBeadStore: setup.cityStore, beadStores: setup.rigStores,
 		beadsPermitResolver: setup.permitResolver, graphStoreGeneration: 1,
 	}
-	info := session.Info{ID: "claim-session", Generation: "1", InstanceToken: "instance-token"}
+	info := session.Info{ID: "claim-session", Generation: "1", InstanceToken: "instance-token", Template: "pilot/worker", AgentName: "pilot/worker"}
 	actor := session.AssigneeIdentifier(info)
 	request := api.LifecycleClaimTransitionRequest{
 		Work: current, WorkStore: setup.store, WorkStoreRef: storeref.RigRef("pilot"),

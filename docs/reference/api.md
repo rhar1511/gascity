@@ -126,8 +126,12 @@ transition for an admitted work item and its authenticated managed session.
 lifecycle descendants in a relocated graph store remain held until a separate
 descendant transition proof is available. Before a fresh claim, the controller
 re-reads the source and requires it to remain open, unassigned, outside dispatch
-and time-based holds, and in the live ready set so dependency changes are
-included. Exact claim retries remain idempotent.
+and time-based holds, and in the live ready set. The managed session's
+configured agent must resolve to the same canonical route named by the signed
+admission receipt; pool slots resolve to their base pool route. Dependency
+readiness reflects the state visible to the final live ready-set read. That read
+does not atomically fence independent changes to dependency rows. Exact claim
+retries remain idempotent.
 
 ### Pull-request action trust
 

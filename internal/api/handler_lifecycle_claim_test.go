@@ -32,7 +32,9 @@ func TestLifecycleClaimSubmitAuthenticatesSessionAndStampsReciprocalClaim(t *tes
 		if request.Work.ID != work.ID || request.WorkStore != store || request.WorkStoreRef != storeref.WorkRef ||
 			request.Scope != worklifecycle.ScopeForStore("test-city", "city:test-city") ||
 			request.ExpectedRevision != work.Revision || request.ExpectedTransitionHead != "head-1" ||
-			request.Session.ID != info.ID || request.Actor != session.AssigneeIdentifier(info) {
+			request.Session.ID != info.ID || request.Session.Template != info.Template ||
+			request.Session.AgentName != info.AgentName || request.Session.CommonName != info.CommonName ||
+			request.Actor != session.AssigneeIdentifier(info) {
 			t.Fatalf("provider request = %+v; want exact work/session snapshot", request)
 		}
 		return LifecycleClaimTransitionResult{ClaimGeneration: "1", ReceiptID: "claim-receipt-1"}, nil

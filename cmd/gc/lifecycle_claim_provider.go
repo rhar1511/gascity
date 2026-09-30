@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -118,7 +119,7 @@ func (cs *controllerState) ClaimLifecycleWork(ctx context.Context, request api.L
 		current.Metadata[beadmeta.LifecycleAdmissionReceiptMetadataKey] != "" || current.Metadata[beadmeta.LifecycleAdmissionReceiptV2MetadataKey] == "" {
 		return api.LifecycleClaimTransitionResult{}, worklifecycle.ErrTransitionChainEvidence
 	}
-	_, err = worklifecycle.VerifyAdmissionReceiptV2(current, cfg.Lifecycle, scope)
+	admissionReceipt, err := worklifecycle.VerifyAdmissionReceiptV2(current, cfg.Lifecycle, scope)
 	if err != nil {
 		return api.LifecycleClaimTransitionResult{}, fmt.Errorf("verify current v2 lifecycle admission: %w", errorsJoinTransitionEvidence(err))
 	}
@@ -161,6 +162,9 @@ func (cs *controllerState) ClaimLifecycleWork(ctx context.Context, request api.L
 	if head.ToVersion != current.Revision {
 		return api.LifecycleClaimTransitionResult{}, worklifecycle.ErrTransitionChainStale
 	}
+	if err := verifyLifecycleClaimSessionRoute(cfg, request.Session, resolvedPolicy, admissionReceipt.Route); err != nil {
+		return api.LifecycleClaimTransitionResult{}, err
+	}
 	if current.Status == "open" && current.Assignee == "" &&
 		(request.ExpectedRevision != head.ToVersion || request.ExpectedTransitionHead != head.ReceiptID) {
 		return api.LifecycleClaimTransitionResult{}, worklifecycle.ErrTransitionChainStale
@@ -189,11 +193,29 @@ func (cs *controllerState) ClaimLifecycleWork(ctx context.Context, request api.L
 	}, nil
 }
 
+// verifyLifecycleClaimSessionRoute binds the authenticated managed session to
+// the exact route in the current signed admission policy. Session template
+// resolution uses the canonical Info helper so concrete pool slots collapse to
+// their configured base agent before route comparison.
+func verifyLifecycleClaimSessionRoute(cfg *config.City, info session.Info, policy lifecycleAdmissionPolicy, receiptRoute string) error {
+	sessionAgent := sessionAgentConfigInfo(cfg, info)
+	if sessionAgent == nil {
+		return fmt.Errorf("managed claim session has no unambiguous configured agent route: %w", worklifecycle.ErrTransitionChainEvidence)
+	}
+	sessionRoute := agentutil.RoutedToIdentity(sessionAgent)
+	policyRoute := agentutil.RoutedToIdentity(&policy.target)
+	if receiptRoute == "" || policyRoute == "" || policyRoute != receiptRoute || sessionRoute != policyRoute {
+		return fmt.Errorf("managed claim session route %q does not match signed admission route %q: %w", sessionRoute, receiptRoute, worklifecycle.ErrTransitionChainEvidence)
+	}
+	return nil
+}
+
 // verifyLifecycleClaimReadiness re-reads the exact source after its transition
 // head is verified and immediately before ClaimIdentity. The hook's projection
 // is only a candidate locator: a fresh claim requires the current source to be
 // open, unassigned, outside all deferrals and dispatch holds, and present in the
-// authoritative live ready set, which owns dependency readiness.
+// authoritative live ready set. Dependency readiness is whatever that final
+// live read observes; it is not an atomic fence on independent dependency rows.
 func verifyLifecycleClaimReadiness(store beads.Store, workID string, expectedRevision int64, expectedHead string) error {
 	if store == nil || strings.TrimSpace(workID) == "" || expectedRevision <= 0 || strings.TrimSpace(expectedHead) == "" {
 		return worklifecycle.ErrTransitionChainUnavailable
