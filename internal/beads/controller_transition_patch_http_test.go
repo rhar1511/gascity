@@ -69,6 +69,23 @@ func controllerTransitionPatchTestStoreWithOptIn(t *testing.T, transport *contro
 	return store
 }
 
+func controllerTransitionPatchTestStoreWithLifecycleScope(t *testing.T, transport *controllerTransitionPatchTestTransport, scope string) *BdStore {
+	t.Helper()
+	tokenPath := filepath.Join(t.TempDir(), "controller-token")
+	if err := os.WriteFile(tokenPath, []byte("controller-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := NewBdStoreWithPrefix(t.TempDir(), func(_, _ string, _ ...string) ([]byte, error) {
+		t.Fatal("transition-patch HTTP path invoked bd command runner")
+		return nil, nil
+	}, "gc", WithBdStorePrivateEvidenceHTTP(PrivateEvidenceHTTPConfig{
+		Endpoint: "http://127.0.0.1:1", ProjectID: "project-a", Database: "gc_fixture",
+		ScopeRef: "rig:fixture", LifecycleScope: scope, TokenFile: tokenPath, RevisionTransitions: true,
+	}))
+	store.privateEvidenceHTTP.client.Transport = transport
+	return store
+}
+
 func controllerTransitionPatchTestRequest() RevisionTransitionPatchRequest {
 	metadataExpected := json.RawMessage(`{"z":0,"a":1}`)
 	metadataNext := json.RawMessage(`"worker"`)
@@ -205,6 +222,61 @@ func TestControllerTransitionPatchHTTPPostsCanonicalRequestAndReceipt(t *testing
 	if len(patch.Metadata) != 2 || patch.Metadata[0].Key != "gc.route" || patch.Metadata[1].Key != "gc.step" ||
 		strings.Join(patch.Labels.Expected, ",") != "a,z" || strings.Join(patch.Labels.Value, ",") != "ready,worker" {
 		t.Fatalf("wire patch is not canonical: %s", wire["patch"])
+	}
+}
+
+func TestControllerTransitionPatchLifecycleScopeMatchesQ43ScopeAndRecovers(t *testing.T) {
+	request := controllerTransitionPatchTestRequest()
+	request.Scope = "city:alpha/rig:fixture"
+	request.Kind = "lifecycle_source_reservation_v1"
+	request.PriorReceiptID = "q43-attachment-receipt"
+	receipt := controllerTransitionPatchTestReceipt(t, request, request.Actor)
+	transport := &controllerTransitionPatchTestTransport{
+		handler:       controllerTransitionPatchTestHandler(receipt, http.StatusOK),
+		dropFirstPost: true,
+	}
+	store := controllerTransitionPatchTestStoreWithLifecycleScope(t, transport, request.Scope)
+	writer, ok := RevisionTransitionPatchWriterFor(store)
+	if !ok {
+		t.Fatal("Q54 patch capability was not enabled by the trusted lifecycle scope")
+	}
+	result, err := writer.TransitionPatch("gc-1", request)
+	if err != nil {
+		t.Fatalf("same-scope Q54 reservation failed after lost response: %v", err)
+	}
+	if !result.Applied || !result.Replayed || result.Receipt == nil || result.Receipt.Scope != request.Scope {
+		t.Fatalf("recovered Q54 result = %+v, want exact same-scope receipt", result)
+	}
+	if transport.postCount != 1 || transport.receiptGetCount != 1 {
+		t.Fatalf("requests: post=%d receipt-get=%d, want one lost POST and exact readback", transport.postCount, transport.receiptGetCount)
+	}
+	var wire revisionTransitionPatchWireRequest
+	if err := json.Unmarshal(transport.postBodies[0], &wire); err != nil {
+		t.Fatalf("decode Q54 request: %v", err)
+	}
+	if wire.Scope != "city:alpha/rig:fixture" || wire.PriorReceiptID != "q43-attachment-receipt" {
+		t.Fatalf("Q54 request scope/parent = %q/%q, want same Q43 lifecycle scope and parent", wire.Scope, wire.PriorReceiptID)
+	}
+
+	for _, scope := range []string{"city:beta/rig:fixture", "city:alpha/rig:other"} {
+		bad := request
+		bad.Scope = scope
+		if _, err := writer.TransitionPatch("gc-1", bad); err == nil {
+			t.Errorf("cross-city or arbitrary patch scope %q was accepted", scope)
+		}
+	}
+	badKind := request
+	badKind.Kind = "unrelated_patch"
+	if _, err := writer.TransitionPatch("gc-1", badKind); err == nil {
+		t.Error("unrelated patch kind was accepted at the lifecycle scope")
+	}
+	wrongScope := request
+	wrongScope.Scope = "rig:fixture"
+	if _, err := writer.TransitionPatch("gc-1", wrongScope); err == nil {
+		t.Error("Q54 lifecycle patch was accepted at the store-identity scope")
+	}
+	if transport.postCount != 1 {
+		t.Fatalf("rejected patch requests reached HTTP transport: POST count = %d", transport.postCount)
 	}
 }
 

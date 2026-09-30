@@ -94,7 +94,8 @@ func (c *privateEvidenceHTTPClient) controllerMetadataTransitionReceipt(ctx cont
 		return ControllerMetadataTransitionReceipt{}, false, fmt.Errorf("%w: receipt lookup returned HTTP %d", ErrDecisionFrontierReceiptReadProtocol, status)
 	}
 	remote, err := decodeControllerMetadataTransitionReceipt(body)
-	if err != nil || remote.ReceiptID != receiptID || remote.IssueID != issueID || remote.Scope != c.scopeRef {
+	if err != nil || remote.ReceiptID != receiptID || remote.IssueID != issueID ||
+		!c.metadataTransitionScopeAllowed(remote.Scope, remote.Kind) {
 		return ControllerMetadataTransitionReceipt{}, false, fmt.Errorf("%w: receipt identity does not match the query", ErrDecisionFrontierTransitionReceiptCorrupt)
 	}
 	if _, err := decodeDecisionFrontierControllerReceipt(remote); err != nil {

@@ -3800,6 +3800,18 @@ func (cr *CityRuntime) buildDesiredState(sessionBeads *sessionBeadSnapshot, trac
 	// single city store into the class accessors so a future per-class backend
 	// routes each role independently; both collapse to the same store today.
 	sessionsStore := cr.sessionsBeadStore()
+	var permitResolver *hostBeadsPermitResolver
+	if cr.cs != nil {
+		permitResolver = cr.cs.beadsPermitResolver
+	}
+	// Admission reservation and materialization run at the controller edge,
+	// where the exact host-authorized permit issuer is available. The desired
+	// state builder remains a projection and cannot issue protected mutations.
+	reconcileLifecycleAdmissionWithPermitResolver(
+		cr.cityName, cr.cityPath, cr.cfg, cr.cityWorkStore().Store,
+		unwrapWorkStores(cr.workBeadStores()), buildSuspendedRigPathsForCity(cr.cfg, cr.cityPath),
+		cr.stderr, permitResolver, cr.compatibilityAuthority,
+	)
 	var result DesiredStateResult
 	if cr.buildFnWithSessionBeads != nil {
 		result = cr.buildFnWithSessionBeads(cr.cfg, cr.sp, sessionsStore.Store, unwrapWorkStores(cr.workBeadStores()), sessionBeads, trace)

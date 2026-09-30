@@ -571,7 +571,7 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 			}
 			if err := CheckNoMoleculeChildrenAllowLiveWorkflow(querier, beadID, deps.Store, &result); err != nil {
 				var molErr *MoleculeAttachedError
-				if fallbackToPlainOnMoleculeConflict && errors.As(err, &molErr) {
+				if fallbackToPlainOnMoleculeConflict && !opts.GraphOnlyMaterialization && errors.As(err, &molErr) {
 					// Mirrors the legacy branch's fallback below: the caller
 					// never asked for this formula attach -- it was only
 					// implied by the target's default_sling_formula config --
@@ -612,6 +612,7 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 			mResult, err := InstantiateSlingFormula(context.Background(), formulaName, searchPaths, molecule.Options{
 				Title:            opts.Title,
 				Vars:             formulaVars,
+				IdempotencyKey:   opts.MaterializationID,
 				PriorityOverride: BeadPriorityOverride(deps.Store, graphInv.InputConvoy),
 			}, "", opts.ScopeKind, opts.ScopeRef, a, deps, opts.Force)
 			if err != nil {
@@ -633,8 +634,10 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 			// sourceBeadID (the source is tracked through the input convoy,
 			// not gc.source_bead_id), so doStartGraphWorkflow's own restamp
 			// never covers it. Stamp the work bead here instead.
-			restampWorkBeadRouting(deps, beadID, a, &wfResult)
-			if opts.Merge != "" && deps.Store != nil {
+			if !opts.GraphOnlyMaterialization {
+				restampWorkBeadRouting(deps, beadID, a, &wfResult)
+			}
+			if !opts.GraphOnlyMaterialization && opts.Merge != "" && deps.Store != nil {
 				if err := deps.Store.SetMetadata(beadID, beadmeta.MergeStrategyMetadataKey, opts.Merge); err != nil {
 					wfResult.MetadataErrors = append(wfResult.MetadataErrors,
 						fmt.Sprintf("setting merge strategy: %v", err))
@@ -666,7 +669,7 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 	// with CheckNoMoleculeChildren on this path.
 	if err := CheckNoMoleculeChildren(querier, beadID, deps.Store, &result); err != nil {
 		var molErr *MoleculeAttachedError
-		if fallbackToPlainOnMoleculeConflict && errors.As(err, &molErr) {
+		if fallbackToPlainOnMoleculeConflict && !opts.GraphOnlyMaterialization && errors.As(err, &molErr) {
 			// The caller never asked for this formula attach -- it was only
 			// implied by the target's default_sling_formula config -- so an
 			// unrelated live molecule/wisp is not a reason to block the
@@ -693,19 +696,35 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 				return result, fmt.Errorf("formula attach preflight: %w", err)
 			}
 		}
+		sourceID := beadID
+		if opts.GraphOnlyMaterialization {
+			sourceID = ""
+		}
 		mResult, err := InstantiateSlingFormula(context.Background(), formulaName, SlingFormulaSearchPaths(deps, a), molecule.Options{
 			Title:            opts.Title,
 			Vars:             formulaVars,
+			IdempotencyKey:   opts.MaterializationID,
 			PriorityOverride: BeadPriorityOverride(querier, beadID),
-		}, beadID, opts.ScopeKind, opts.ScopeRef, a, deps)
+		}, sourceID, opts.ScopeKind, opts.ScopeRef, a, deps)
 		if err != nil {
 			return result, fmt.Errorf("instantiating %s %q on %s: %w", errLabel, formulaName, beadID, err)
 		}
 		wispRootID := mResult.RootID
 		if mResult.GraphWorkflow || IsGraphWorkflowAttachment(deps.Store, wispRootID) {
-			wfResult, wfErr := doStartGraphWorkflow(mResult.RootID, beadID, a, method, deps)
+			workflowSourceID := beadID
+			if opts.GraphOnlyMaterialization {
+				workflowSourceID = ""
+			}
+			wfResult, wfErr := doStartGraphWorkflow(mResult.RootID, workflowSourceID, a, method, deps)
 			wfResult.FormulaName = formulaName
 			return wfResult, wfErr
+		}
+		if opts.GraphOnlyMaterialization {
+			result.WispRootID = wispRootID
+			result.FormulaName = formulaName
+			result.Target = a.QualifiedName()
+			result.Method = method
+			return result, nil
 		}
 		if err := deps.Store.SetMetadata(beadID, beadmeta.MoleculeIDMetadataKey, wispRootID); err != nil {
 			result.MetadataErrors = append(result.MetadataErrors,

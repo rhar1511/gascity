@@ -77,6 +77,106 @@ func TestAdmissionAttachmentRecoversLostTransitionResponseFromExactReceipt(t *te
 	}
 }
 
+func TestAdmissionAttachmentTransitionVerifierAllowsOnlyExactQ54AdvancedSource(t *testing.T) {
+	for _, state := range []string{"reserved", "attached"} {
+		t.Run(state, func(t *testing.T) {
+			store, _, cfg, source, encoded := admissionAttachmentFixture(t)
+			adapter, err := NewAdmissionAttachmentAdapter(store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, proof, err := adapter.Attach(encoded, cfg, "rig:pilot")
+			if err != nil {
+				t.Fatal(err)
+			}
+			marker := transitionMaterialization{
+				Version: 1, State: state, Scope: proof.Scope, Contract: proof.ReceiptDigest,
+				Route: "pilot/worker", Workflow: "review", MergeStrategy: "mr", Token: "stable-token",
+				SourceID: source.ID, SourceStoreRef: "rig:pilot", WorkflowStoreRef: "rig:pilot",
+				AdmissionReceipt: encoded,
+			}
+			metadata := map[string]string{beadmeta.LifecycleMaterializationMetadataKey: encodeAttachmentTestValue(t, marker)}
+			if state == "attached" {
+				marker.WorkflowID = "workflow-root"
+				metadata[beadmeta.LifecycleMaterializationMetadataKey] = encodeAttachmentTestValue(t, marker)
+				metadata[beadmeta.RoutedToMetadataKey] = marker.Route
+				metadata[beadmeta.MoleculeIDMetadataKey] = marker.WorkflowID
+				metadata[beadmeta.MergeStrategyMetadataKey] = marker.MergeStrategy
+			}
+			setAdmissionAttachmentSnapshotOverride(t, store, source.ID, metadata)
+			if _, _, err := adapter.VerifyCurrent(source.ID, cfg, proof.Scope); err == nil {
+				t.Fatal("strict VerifyCurrent accepted a source revision advanced by Q54")
+			}
+			current, got, err := adapter.VerifyForTransition(source.ID, cfg, proof.Scope)
+			if err != nil || got != proof || current.Revision <= proof.ToRevision {
+				t.Fatalf("VerifyForTransition() = row revision %d proof %+v err %v, want exact historical Q43 proof", current.Revision, got, err)
+			}
+		})
+	}
+
+	t.Run("advanced source without matching marker", func(t *testing.T) {
+		store, _, cfg, source, encoded := admissionAttachmentFixture(t)
+		adapter, err := NewAdmissionAttachmentAdapter(store)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _, err = adapter.Attach(encoded, cfg, "rig:pilot")
+		if err != nil {
+			t.Fatal(err)
+		}
+		setAdmissionAttachmentSnapshotOverride(t, store, source.ID, nil)
+		if _, _, err := adapter.VerifyForTransition(source.ID, cfg, "rig:pilot"); err == nil {
+			t.Fatal("advanced source without Q54 marker verified")
+		}
+	})
+
+	t.Run("advanced source with mismatched marker", func(t *testing.T) {
+		store, _, cfg, source, encoded := admissionAttachmentFixture(t)
+		adapter, err := NewAdmissionAttachmentAdapter(store)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, proof, err := adapter.Attach(encoded, cfg, "rig:pilot")
+		if err != nil {
+			t.Fatal(err)
+		}
+		marker := transitionMaterialization{
+			Version: 1, State: "reserved", Scope: proof.Scope, Contract: "wrong-digest",
+			Route: "pilot/worker", Workflow: "review", MergeStrategy: "mr", Token: "stable-token",
+			SourceID: source.ID, SourceStoreRef: "rig:pilot", WorkflowStoreRef: "rig:pilot", AdmissionReceipt: encoded,
+		}
+		setAdmissionAttachmentSnapshotOverride(t, store, source.ID, map[string]string{
+			beadmeta.LifecycleMaterializationMetadataKey: encodeAttachmentTestValue(t, marker),
+		})
+		if _, _, err := adapter.VerifyForTransition(source.ID, cfg, proof.Scope); err == nil {
+			t.Fatal("advanced source with a mismatched Q54 marker verified")
+		}
+	})
+}
+
+func encodeAttachmentTestValue(t *testing.T, value any) string {
+	t.Helper()
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(encoded)
+}
+
+func setAdmissionAttachmentSnapshotOverride(t *testing.T, store *admissionAttachmentTestStore, sourceID string, metadata map[string]string) {
+	t.Helper()
+	current, err := store.MemStore.Get(sourceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current.Revision++
+	current.Metadata = cloneStringMap(current.Metadata)
+	for key, value := range metadata {
+		current.Metadata[key] = value
+	}
+	store.sourceOverride = &current
+}
+
 func TestAdmissionAttachmentRejectsStaleUnsupportedAndCorruptProofs(t *testing.T) {
 	t.Run("stale source revision", func(t *testing.T) {
 		store, _, cfg, source, encoded := admissionAttachmentFixture(t)
@@ -225,6 +325,7 @@ func admissionAttachmentFixture(t *testing.T) (*admissionAttachmentTestStore, ed
 
 type admissionAttachmentTestStore struct {
 	*beads.MemStore
+	sourceOverride                 *beads.Bead
 	receipts                       map[string]beads.ControllerMetadataTransitionReceipt
 	lastRequest                    beads.ControllerMetadataTransitionRequest
 	transitionCalls                int
@@ -241,6 +342,11 @@ func (s *admissionAttachmentTestStore) DecisionFrontierSourceReaderHandle() (bea
 }
 
 func (s *admissionAttachmentTestStore) DecisionFrontierSourceSnapshot(id string) (beads.Bead, error) {
+	if s.sourceOverride != nil && s.sourceOverride.ID == id {
+		current := *s.sourceOverride
+		current.Metadata = cloneStringMap(current.Metadata)
+		return current, nil
+	}
 	return s.MemStore.Get(id)
 }
 

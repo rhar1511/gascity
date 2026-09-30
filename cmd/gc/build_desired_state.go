@@ -481,10 +481,7 @@ func buildDesiredStateWithSessionBeadsAt(
 	stderr io.Writer,
 	authorities ...qualification.CompatibilityAuthority,
 ) DesiredStateResult {
-	var compatibilityAuthority qualification.CompatibilityAuthority
-	if len(authorities) > 0 {
-		compatibilityAuthority = authorities[0]
-	}
+	_ = authorities // compatibility authority is used by runtime-owned lifecycle admission, not this projection.
 	citySt, _ := loadSuspensionState(fsys.OSFS{}, cityPath)
 	if effectiveCitySuspended(cfg, citySt) {
 		return DesiredStateResult{}
@@ -497,12 +494,6 @@ func buildDesiredStateWithSessionBeadsAt(
 
 	// Pre-compute suspended rig paths (config + runtime state).
 	suspendedRigPaths := buildSuspendedRigPathsForCity(cfg, cityPath)
-	// Lifecycle admission is the only route for explicitly enrolled, signed
-	// roots. It uses the existing sling engine so default worktree/workflow and
-	// merge behavior stays attached before this tick measures routed demand.
-	// The gate is disabled by default; a partial or unreadable admission simply
-	// leaves that one item untouched for a later reconciliation.
-	reconcileLifecycleAdmission(cityName, cityPath, cfg, store, rigStores, suspendedRigPaths, stderr, compatibilityAuthority)
 	reconcileLifecycleCompletions(cityName, cityPath, cfg, store, rigStores, suspendedRigPaths, stderr)
 	bp.sessionCensusRigStores = cloneSessionCensusRigStores(rigStores)
 	bp.sessionCensusSuspendedRigPaths = cloneSessionCensusSuspendedRigPaths(suspendedRigPaths)

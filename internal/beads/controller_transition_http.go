@@ -47,8 +47,8 @@ func (c *privateEvidenceHTTPClient) transitionMetadata(ctx context.Context, issu
 	if err != nil {
 		return ControllerMetadataTransitionResult{}, err
 	}
-	if plan.request.Scope != c.scopeRef {
-		return ControllerMetadataTransitionResult{}, controllerTransitionProtocolError("transition scope does not match the configured store")
+	if !c.metadataTransitionScopeAllowed(plan.request.Scope, plan.request.Kind) {
+		return ControllerMetadataTransitionResult{}, controllerTransitionProtocolError("transition scope and kind do not match the configured store")
 	}
 	body, err := encodeControllerMetadataTransition(plan)
 	if err != nil {

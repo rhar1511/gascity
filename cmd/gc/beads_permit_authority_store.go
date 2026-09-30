@@ -10,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/worklifecycle"
 )
 
 const decisionFrontierRecordMetadataTransitionKind = "decision-frontier-record-metadata"
@@ -48,6 +49,11 @@ func hostProtectedDecisionFrontierWriterForStore(
 	if store == nil {
 		return nil, true, errors.New("configured host Beads authority has no BdStore leaf")
 	}
+	// The lifecycle receipt scope is a host-derived request namespace, distinct
+	// from ScopeRef (the trusted store identity used by the ordinary
+	// decision-frontier routes). Bind it only after exact host authority lookup.
+	lifecycleScope := worklifecycle.ScopeForStore(cityName, storeRef)
+	beads.WithBdStorePrivateEvidenceLifecycleScope(lifecycleScope)(store)
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
 	if err := store.ValidateControllerDecisionFrontierTransport(ctx); err != nil {

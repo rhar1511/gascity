@@ -143,6 +143,13 @@ func buildLifecycleAdmissionPolicy(
 	if strings.EqualFold(strings.TrimSpace(recipe.Steps[0].Metadata[beadmeta.FormulaContractMetadataKey]), beadmeta.FormulaContractGraphV2) {
 		return lifecycleAdmissionPolicy{}, fmt.Errorf("graph.v2 workflow invocation requires a generated input convoy and is not supported by current admission evidence")
 	}
+	// The signed formula.v1 policy places the attached molecule in the source
+	// work store. Keep the graph-only materialization on that exact store too;
+	// the class graph store is recorded in the policy projection for routing
+	// proof but cannot silently become the workflow placement.
+	deps.GraphStore = leg.store
+	deps.GraphStoreRef = leg.ref
+	graphStoreRef = leg.ref
 	if len(recipe.FormulaSources) == 0 || len(recipe.FormulaSources) != len(provenance.FormulaSources) {
 		return lifecycleAdmissionPolicy{}, fmt.Errorf("workflow formula source closure is missing or inconsistent")
 	}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -1243,6 +1244,62 @@ func TestDoSlingFormulaToAgent(t *testing.T) {
 	}
 	if result.BeadID == "" {
 		t.Error("expected non-empty BeadID (wisp root)")
+	}
+}
+
+func TestDoSlingGraphOnlyMaterializationLeavesSourceUntouched(t *testing.T) {
+	formulaDir := t.TempDir()
+	workflow := "lifecycle-simple"
+	formulaText := "formula = \"lifecycle-simple\"\nversion = 1\nphase = \"vapor\"\n\n[[steps]]\nid = \"review\"\ntitle = \"Review\"\n"
+	if err := os.WriteFile(filepath.Join(formulaDir, workflow+".toml"), []byte(formulaText), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	agentCfg := config.Agent{Name: "worker", MaxActiveSessions: intPtr(1), DefaultSlingFormula: &workflow}
+	cfg := &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		FormulaLayers: config.FormulaLayers{City: []string{formulaDir}},
+		Agents:        []config.Agent{agentCfg},
+	}
+	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	source, err := deps.Store.Create(beads.Bead{Title: "admitted work", Type: "task", Status: "open", Metadata: map[string]string{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := deps.Store.Get(source.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineage := `{"version":1,"state":"lineage_pending","scope":"city:test-city/city:test-city","contract":"digest","route":"worker","workflow":"lifecycle-simple","merge_strategy":"mr","token":"stable","source_id":"` + source.ID + `","source_store_ref":"city:test-city","workflow_store_ref":"city:test-city","admission_receipt":"receipt"}`
+	deps.LifecycleRecipeMetadata = map[string]string{
+		beadmeta.LifecycleMaterializationMetadataKey: lineage,
+		beadmeta.MergeStrategyMetadataKey:            "mr",
+		beadmeta.IdempotencyKeyMetadataKey:           "lifecycle-materialization-stable",
+	}
+	result, err := DoSling(SlingOpts{
+		Target: agentCfg, BeadOrFormula: source.ID, RequireFormulaAttach: true,
+		GraphOnlyMaterialization: true, MaterializationID: "lifecycle-materialization-stable",
+		Merge: "mr",
+	}, deps, deps.Store)
+	if err != nil {
+		t.Fatalf("graph-only DoSling: %v", err)
+	}
+	if result.WispRootID == "" {
+		t.Fatalf("graph-only DoSling returned no workflow root: %+v", result)
+	}
+	after, err := deps.Store.Get(source.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(before, after) {
+		t.Fatalf("graph-only materialization mutated source:\nbefore=%+v\nafter=%+v", before, after)
+	}
+	root, err := deps.Store.Get(result.WispRootID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if root.Metadata[beadmeta.LifecycleMaterializationMetadataKey] != lineage ||
+		root.Metadata[beadmeta.IdempotencyKeyMetadataKey] != "lifecycle-materialization-stable" {
+		t.Fatalf("workflow root lost lifecycle lineage/idempotency metadata: %+v", root.Metadata)
 	}
 }
 

@@ -140,8 +140,8 @@ func (c *privateEvidenceHTTPClient) transitionPatch(ctx context.Context, issueID
 	if err != nil {
 		return RevisionTransitionPatchResult{}, fmt.Errorf("%w: invalid patch request", ErrRevisionTransitionPatchProtocol)
 	}
-	if plan.Scope != c.scopeRef {
-		return RevisionTransitionPatchResult{}, fmt.Errorf("%w: patch scope does not match the configured store", ErrRevisionTransitionPatchProtocol)
+	if !c.patchTransitionScopeAllowed(plan.Scope, plan.Kind) {
+		return RevisionTransitionPatchResult{}, fmt.Errorf("%w: patch scope and kind do not match the configured store", ErrRevisionTransitionPatchProtocol)
 	}
 	wire := revisionTransitionPatchWireRequest{
 		ReceiptID: plan.ReceiptID, Scope: plan.Scope, Kind: plan.Kind, Actor: plan.Actor,
@@ -249,7 +249,7 @@ func (c *privateEvidenceHTTPClient) readTransitionPatchReceipt(ctx context.Conte
 		return RevisionTransitionPatchReceipt{}, false, revisionTransitionPatchStatusError(status, body)
 	}
 	receipt, err := decodeRevisionTransitionPatchReceipt(body)
-	if err != nil || receipt.ReceiptID != receiptID || receipt.Scope != c.scopeRef {
+	if err != nil || receipt.ReceiptID != receiptID || !c.patchTransitionScopeAllowed(receipt.Scope, receipt.Kind) {
 		return RevisionTransitionPatchReceipt{}, false, fmt.Errorf("%w: receipt response is malformed or outside the configured scope", ErrRevisionTransitionPatchProtocol)
 	}
 	return receipt, true, nil

@@ -64,6 +64,23 @@ func controllerTransitionTestStore(t *testing.T, transport *controllerTransition
 	return store
 }
 
+func controllerTransitionTestStoreWithLifecycleScope(t *testing.T, transport *controllerTransitionTestTransport, scope string) *BdStore {
+	t.Helper()
+	tokenPath := filepath.Join(t.TempDir(), "controller-token")
+	if err := os.WriteFile(tokenPath, []byte("controller-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := NewBdStoreWithPrefix(t.TempDir(), func(_, _ string, _ ...string) ([]byte, error) {
+		t.Fatal("controller transition HTTP path invoked bd command runner")
+		return nil, nil
+	}, "gc", WithBdStorePrivateEvidenceHTTP(PrivateEvidenceHTTPConfig{
+		Endpoint: "http://127.0.0.1:1", ProjectID: "project-a", Database: "gc_fixture",
+		ScopeRef: "rig:fixture", LifecycleScope: scope, TokenFile: tokenPath, RevisionTransitions: true,
+	}))
+	store.privateEvidenceHTTP.client.Transport = transport
+	return store
+}
+
 func controllerTransitionTestStoreWithEnabled(t *testing.T, transport *controllerTransitionTestTransport, enabled bool) *BdStore {
 	t.Helper()
 	store := controllerTransitionTestStore(t, transport)
@@ -178,6 +195,47 @@ func TestControllerMetadataTransitionHTTPPostsCanonicalWireAndExactReceipt(t *te
 	wantBody := `{"receipt_id":"receipt/1","scope":"rig:fixture","kind":"lease","actor":"controller","expected_version":"7","key":"gc.lease","expected":{"a":1,"z":0},"value":{"next":true},"payload":{"ticket":"private-marker"}}`
 	if string(transport.postBodies[0]) != wantBody {
 		t.Fatalf("POST body = %s, want %s", transport.postBodies[0], wantBody)
+	}
+}
+
+func TestControllerMetadataTransitionLifecycleScopeUsesExactAttachmentKind(t *testing.T) {
+	request := controllerTransitionTestRequest()
+	request.Scope = "city:alpha/rig:fixture"
+	request.Kind = privateEvidenceLifecycleAdmissionAttachmentKind
+	receipt := controllerTransitionTestReceipt(t, request, request.Actor)
+	transport := &controllerTransitionTestTransport{handler: controllerTransitionTestHandler(&receipt, false)}
+	store := controllerTransitionTestStoreWithLifecycleScope(t, transport, request.Scope)
+
+	writer, ok := ControllerMetadataTransitionWriterFor(store)
+	if !ok {
+		t.Fatal("configured lifecycle transition capability is unavailable")
+	}
+	if _, err := writer.TransitionMetadata("gc/one", request); err != nil {
+		t.Fatalf("same-scope Q43 lifecycle attachment failed: %v", err)
+	}
+	if transport.postCount != 1 {
+		t.Fatalf("POST count = %d, want 1", transport.postCount)
+	}
+
+	for _, scope := range []string{"city:beta/rig:fixture", "city:alpha/rig:other"} {
+		bad := request
+		bad.Scope = scope
+		if _, err := writer.TransitionMetadata("gc/one", bad); err == nil {
+			t.Errorf("cross-city or arbitrary scope %q was accepted", scope)
+		}
+	}
+	badKind := request
+	badKind.Kind = "decision-frontier-source-transition"
+	if _, err := writer.TransitionMetadata("gc/one", badKind); err == nil {
+		t.Error("non-attachment metadata transition was accepted at the lifecycle scope")
+	}
+	wrongScope := request
+	wrongScope.Scope = "rig:fixture"
+	if _, err := writer.TransitionMetadata("gc/one", wrongScope); err == nil {
+		t.Error("Q43 lifecycle attachment was accepted at the store-identity scope")
+	}
+	if transport.postCount != 1 {
+		t.Fatalf("rejected requests reached HTTP transport: POST count = %d", transport.postCount)
 	}
 }
 

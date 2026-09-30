@@ -60,6 +60,17 @@ var (
 
 const redactedPrivateEvidenceDiagnostic = "[private attempt-evidence output redacted]"
 
+const privateEvidenceLifecycleAdmissionAttachmentKind = "lifecycle_admission_v2_attach"
+
+var privateEvidenceLifecyclePatchKinds = map[string]struct{}{
+	"lifecycle_source_reservation_v1":       {},
+	"lifecycle_source_materialization_v1":   {},
+	"lifecycle_source_claim_identity_v1":    {},
+	"lifecycle_source_recovery_budget_v1":   {},
+	"lifecycle_source_completion_budget_v1": {},
+	"lifecycle_source_close_v1":             {},
+}
+
 func redactPrivateEvidenceDiagnostic(value string) string {
 	if strings.Contains(value, beadmeta.AttemptEvidenceArchivePayloadMetadataKey) ||
 		strings.Contains(value, beadmeta.AttemptEvidenceIndexPrefix) {
@@ -73,10 +84,15 @@ func redactPrivateEvidenceDiagnostic(value string) string {
 // TokenFile contains only a filesystem path; the token itself is loaded into
 // this process and is never passed through a bd argument or child environment.
 type PrivateEvidenceHTTPConfig struct {
-	Endpoint            string
-	ProjectID           string
-	Database            string
-	ScopeRef            string
+	Endpoint  string
+	ProjectID string
+	Database  string
+	ScopeRef  string
+	// LifecycleScope is a trusted controller-only receipt scope that may
+	// accompany the exact lifecycle attachment and source-patch kinds. It must
+	// be derived from the host-authorized city/store pair with
+	// worklifecycle.ScopeForStore; city configuration must never supply it.
+	LifecycleScope      string
 	TokenFile           string
 	RevisionTransitions bool
 	// RevisionTransitionPatches opts this scope into the additive typed atomic
@@ -154,10 +170,33 @@ type privateEvidenceHTTPClient struct {
 	projectID                 string
 	database                  string
 	scopeRef                  string
+	lifecycleScope            string
 	token                     string
 	revisionTransitions       bool
 	revisionTransitionPatches bool
 	client                    *http.Client
+}
+
+// WithBdStorePrivateEvidenceLifecycleScope binds the additional lifecycle
+// receipt scope after controller composition has resolved the exact host
+// authority for this store. It deliberately leaves ScopeRef unchanged for all
+// existing private-evidence and decision-frontier routes.
+func WithBdStorePrivateEvidenceLifecycleScope(scope string) BdStoreOption {
+	return func(store *BdStore) {
+		if store == nil || store.privateEvidenceHTTP == nil || store.privateEvidenceHTTPInitErr != nil {
+			return
+		}
+		if !validPrivateEvidenceLifecycleScope(scope, store.privateEvidenceHTTP.scopeRef) {
+			store.privateEvidenceHTTPInitErr = fmt.Errorf("%w: trusted lifecycle receipt scope is invalid", ErrPrivateEvidenceHTTPUnavailable)
+			return
+		}
+		client := *store.privateEvidenceHTTP
+		client.lifecycleScope = scope
+		// Q54 atomic patches share Q43's host-authorized opt-in. There is no
+		// separate city-pack switch that could grant protected-patch authority.
+		client.revisionTransitionPatches = client.revisionTransitions
+		store.privateEvidenceHTTP = &client
+	}
 }
 
 // WithBdStorePrivateEvidenceHTTP installs the explicitly configured private
@@ -410,8 +449,10 @@ func newPrivateEvidenceHTTPClient(config PrivateEvidenceHTTPConfig) (*privateEvi
 	projectID := strings.TrimSpace(config.ProjectID)
 	database := strings.TrimSpace(config.Database)
 	scopeRef := strings.TrimSpace(config.ScopeRef)
+	lifecycleScope := config.LifecycleScope
 	tokenFile := strings.TrimSpace(config.TokenFile)
-	if endpoint == "" || projectID == "" || database == "" || tokenFile == "" || !validPrivateEvidenceScopeRef(scopeRef) {
+	if endpoint == "" || projectID == "" || database == "" || tokenFile == "" || !validPrivateEvidenceScopeRef(scopeRef) ||
+		lifecycleScope != "" && (!config.RevisionTransitions || !validPrivateEvidenceLifecycleScope(lifecycleScope, scopeRef)) {
 		return nil, fmt.Errorf("%w: endpoint, project, database, scope, and token file are required", ErrPrivateEvidenceHTTPUnavailable)
 	}
 	parsed, err := url.Parse(endpoint)
@@ -456,11 +497,49 @@ func newPrivateEvidenceHTTPClient(config PrivateEvidenceHTTPConfig) (*privateEvi
 		projectID:                 projectID,
 		database:                  database,
 		scopeRef:                  scopeRef,
+		lifecycleScope:            lifecycleScope,
 		token:                     token,
 		revisionTransitions:       config.RevisionTransitions,
-		revisionTransitionPatches: config.RevisionTransitionPatches,
+		revisionTransitionPatches: config.RevisionTransitionPatches || lifecycleScope != "",
 		client:                    client,
 	}, nil
+}
+
+func validPrivateEvidenceLifecycleScope(scope, scopeRef string) bool {
+	if scope == "" || strings.TrimSpace(scope) != scope || strings.ContainsAny(scope, "\r\n\t") || scopeRef == "" {
+		return false
+	}
+	city, storeRef, found := strings.Cut(strings.TrimPrefix(scope, "city:"), "/")
+	return strings.HasPrefix(scope, "city:") && found && city != "" &&
+		strings.TrimSpace(city) == city && !strings.Contains(city, "/") &&
+		storeRef == scopeRef && validPrivateEvidenceScopeRef(scopeRef)
+}
+
+func (c *privateEvidenceHTTPClient) metadataTransitionScopeAllowed(scope, kind string) bool {
+	if c == nil {
+		return false
+	}
+	if kind == privateEvidenceLifecycleAdmissionAttachmentKind {
+		return c.lifecycleScope != "" && scope == c.lifecycleScope
+	}
+	if scope == c.scopeRef {
+		return true
+	}
+	return false
+}
+
+func (c *privateEvidenceHTTPClient) patchTransitionScopeAllowed(scope, kind string) bool {
+	if c == nil {
+		return false
+	}
+	_, lifecycleKind := privateEvidenceLifecyclePatchKinds[kind]
+	if lifecycleKind {
+		return c.lifecycleScope != "" && scope == c.lifecycleScope
+	}
+	if scope == c.scopeRef {
+		return true
+	}
+	return false
 }
 
 func validPrivateEvidenceScopeRef(scope string) bool {

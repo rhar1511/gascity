@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -166,6 +167,21 @@ func (a *AdmissionAttachmentAdapter) Attach(encoded string, cfg config.Lifecycle
 // Callers must combine it with the current policy projection and a proof for
 // any later controller transition before reservation or materialization.
 func (a *AdmissionAttachmentAdapter) VerifyCurrent(id string, cfg config.LifecycleConfig, scope string) (beads.Bead, AdmissionAttachmentProof, error) {
+	return a.verify(id, cfg, scope, false)
+}
+
+// VerifyForTransition verifies the exact immutable Q43 attachment receipt for
+// the current signed admission. Q54 source patches advance the Beads revision,
+// so a restart after reservation or attachment cannot require the source to
+// remain at Q43's ToVersion. An advanced revision is accepted only when the
+// source carries the canonical Q54 reservation/attachment marker for this
+// exact admission; TransitionChain then verifies the durable Q54 receipt chain
+// and source revision head before replay or mutation.
+func (a *AdmissionAttachmentAdapter) VerifyForTransition(id string, cfg config.LifecycleConfig, scope string) (beads.Bead, AdmissionAttachmentProof, error) {
+	return a.verify(id, cfg, scope, true)
+}
+
+func (a *AdmissionAttachmentAdapter) verify(id string, cfg config.LifecycleConfig, scope string, allowAdvancedTransition bool) (beads.Bead, AdmissionAttachmentProof, error) {
 	if a == nil || a.sourceReader == nil || a.receiptReader == nil {
 		return beads.Bead{}, AdmissionAttachmentProof{}, ErrAdmissionAttachmentUnavailable
 	}
@@ -204,10 +220,50 @@ func (a *AdmissionAttachmentAdapter) VerifyCurrent(id string, cfg config.Lifecyc
 	if err != nil {
 		return beads.Bead{}, AdmissionAttachmentProof{}, err
 	}
-	if err := verifyAdmissionAttachmentCurrent(current, encoded, proof); err != nil {
-		return beads.Bead{}, AdmissionAttachmentProof{}, err
+	if current.Revision == proof.ToRevision {
+		if err := verifyAdmissionAttachmentCurrent(current, encoded, proof); err != nil {
+			return beads.Bead{}, AdmissionAttachmentProof{}, err
+		}
+	} else if !allowAdvancedTransition || !verifyAdvancedAdmissionTransition(current, encoded, receipt, digest, proof) {
+		return beads.Bead{}, AdmissionAttachmentProof{}, fmt.Errorf("%w: source revision advanced beyond Q43 without an exact Q54 transition marker", ErrAdmissionAttachmentInvalid)
 	}
 	return current, proof, nil
+}
+
+func verifyAdvancedAdmissionTransition(current beads.Bead, encoded string, admission AdmissionReceiptV2, digest string, proof AdmissionAttachmentProof) bool {
+	if current.ID != proof.WorkItemID || current.Revision <= proof.ToRevision ||
+		current.Metadata[beadmeta.LifecycleAdmissionReceiptV2MetadataKey] != encoded ||
+		current.Metadata[beadmeta.LifecycleAdmissionReceiptMetadataKey] != "" {
+		return false
+	}
+	marker, err := parseTransitionMaterialization(current.Metadata[beadmeta.LifecycleMaterializationMetadataKey])
+	if err != nil || (marker.State != "reserved" && marker.State != "attached") ||
+		marker.Scope != proof.Scope || marker.Contract != digest || marker.SourceID != current.ID ||
+		marker.AdmissionReceipt != encoded || marker.Route != admission.Route || marker.Workflow != admission.Workflow ||
+		marker.MergeStrategy != admission.MergeStrategy || marker.Token == "" || marker.SourceStoreRef == "" || marker.WorkflowStoreRef == "" {
+		return false
+	}
+	if marker.State == "reserved" {
+		_, hasMerge := current.Metadata[beadmeta.MergeStrategyMetadataKey]
+		return marker.WorkflowID == "" && len(controllerDemandRoutesForLifecycle(current)) == 0 &&
+			current.Metadata[beadmeta.MoleculeIDMetadataKey] == "" && current.Metadata[beadmeta.WorkflowIDMetadataKey] == "" &&
+			current.Metadata[beadmeta.LegacyWorkflowIDMetadataKey] == "" && !hasMerge
+	}
+	return marker.WorkflowID != "" && current.Metadata[beadmeta.RoutedToMetadataKey] == marker.Route &&
+		current.Metadata[beadmeta.MoleculeIDMetadataKey] == marker.WorkflowID &&
+		current.Metadata[beadmeta.WorkflowIDMetadataKey] == "" && current.Metadata[beadmeta.LegacyWorkflowIDMetadataKey] == "" &&
+		current.Metadata[beadmeta.MergeStrategyMetadataKey] == marker.MergeStrategy &&
+		current.Metadata[beadmeta.ExecutionRoutedToMetadataKey] == ""
+}
+
+func controllerDemandRoutesForLifecycle(source beads.Bead) []string {
+	routes := make([]string, 0, 2)
+	for _, key := range []string{beadmeta.RoutedToMetadataKey, beadmeta.ExecutionRoutedToMetadataKey} {
+		if value := strings.TrimSpace(source.Metadata[key]); value != "" {
+			routes = append(routes, value)
+		}
+	}
+	return routes
 }
 
 func admissionAttachmentRequest(receipt AdmissionReceiptV2, encoded, digest string) (beads.ControllerMetadataTransitionRequest, error) {

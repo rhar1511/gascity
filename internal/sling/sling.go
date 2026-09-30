@@ -62,6 +62,13 @@ type SlingOpts struct {
 	// conflicts. Controller-owned lifecycle admission uses it to preserve the
 	// signed workflow contract rather than silently routing around it.
 	RequireFormulaAttach bool
+	// GraphOnlyMaterialization creates the formula graph without linking or
+	// routing the source bead. A separately authorized lifecycle transition
+	// attaches all source pointers atomically after exact graph verification.
+	GraphOnlyMaterialization bool
+	// MaterializationID is a deterministic idempotency marker for controller
+	// graph-only materialization recovery.
+	MaterializationID string
 	// BeforeFormulaAttach runs immediately before formula materialization, under
 	// the source-workflow lock for graph.v2 formulas. Controller admission uses
 	// it to re-read the signed contract and current eligibility at the effect
@@ -1377,8 +1384,7 @@ func InstantiateCompiledSlingFormula(ctx context.Context, recipe *formula.Recipe
 	}
 	graphWorkflow := graphroute.IsCompiledGraphWorkflow(recipe)
 	rootKey := ""
-	if graphWorkflow {
-		stampGraphV2RootMetadata(recipe, formulaName, opts.Vars, scopeKind, scopeRef)
+	if deps.LifecycleRecipeMetadata != nil {
 		for i := range recipe.Steps {
 			if recipe.Steps[i].Metadata == nil {
 				recipe.Steps[i].Metadata = make(map[string]string, len(deps.LifecycleRecipeMetadata))
@@ -1387,6 +1393,9 @@ func InstantiateCompiledSlingFormula(ctx context.Context, recipe *formula.Recipe
 				recipe.Steps[i].Metadata[key] = value
 			}
 		}
+	}
+	if graphWorkflow {
+		stampGraphV2RootMetadata(recipe, formulaName, opts.Vars, scopeKind, scopeRef)
 		sourceBeadID = ""
 		rootKey = strings.TrimSpace(recipe.Steps[0].Metadata[beadmeta.Graphv2RootKeyMetadataKey])
 	}
