@@ -62,6 +62,7 @@ func TestPinnedValues(t *testing.T) {
 		ExecutionRoutedToMetadataKey:           "gc.execution_routed_to",
 		LifecycleAdmissionReceiptV2MetadataKey: "gc.lifecycle.admission_receipt.v2",
 		LifecycleCompletionBudgetMetadataKey:   "gc.lifecycle.completion_budget.v1",
+		LifecycleTransitionHeadMetadataKey:     "gc.lifecycle.transition_head.v1",
 		InstantiatingMetadataKey:               "gc.instantiating",
 		FormulaVarPrefix:                       "gc.var.",
 		Namespace:                              "gc.",

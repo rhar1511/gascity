@@ -3,6 +3,7 @@ package worklifecycle
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -22,6 +23,7 @@ import (
 const (
 	transitionReceiptDomain = "gascity.lifecycle.source_transition.v1\n"
 	transitionReceiptPrefix = "gc-lifecycle-patch-v1-"
+	completionReceiptDomain = "gascity.lifecycle.completion-receipt.v1\n"
 	maxTransitionParentHops = 32
 )
 
@@ -74,10 +76,9 @@ const (
 	transitionKindClose                   = "lifecycle_source_close_v1"
 )
 
-// TransitionChainConfig contains the already-resolved policy and the explicit
-// Beads capabilities used by the service. The permit issuer must already be
-// authorized for protected source patches; the chain does not load or sign
-// keys.
+// TransitionChainConfig contains the explicit proof and Beads capabilities
+// used by the service. The permit issuer must already be authorized for
+// protected source patches; the chain does not load or sign keys.
 type TransitionChainConfig struct {
 	Scope                    string
 	Actor                    string
@@ -217,7 +218,40 @@ type TransitionRequest struct {
 	OperationID    string
 	PriorReceiptID string
 	Evidence       TransitionEvidence
-	Patch          SourceWorkPatch
+	// RecoveryRequest carries the separately signed proof for a recovery
+	// budget transition. Its request ID, digest, and expected revision must
+	// match the appended recovery attempt and this transition's parent.
+	RecoveryRequest *RecoveryRequest
+	Patch           SourceWorkPatch
+}
+
+type completionBudgetMetadata struct {
+	Version                 int    `json:"version"`
+	WorkItemID              string `json:"work_item_id"`
+	Scope                   string `json:"scope"`
+	AdmissionDigest         string `json:"admission_digest"`
+	CompletionReceiptDigest string `json:"completion_receipt_digest"`
+	Consumed                bool   `json:"consumed"`
+}
+
+// BuildCompletionBudgetMetadata returns the canonical single-use budget value
+// for the exact completion receipt that a later close transition will attach.
+// The close transition still verifies the completion receipt's signature and
+// freshness before it can write.
+func BuildCompletionBudgetMetadata(workItemID, scope, admissionDigest, completionReceipt string) (string, error) {
+	if !validTransitionText(workItemID, 200) || !validTransitionText(scope, 500) ||
+		!validAdmissionDigest(admissionDigest) || completionReceipt == "" {
+		return "", ErrTransitionChainInvalid
+	}
+	metadata := completionBudgetMetadata{
+		Version: 1, WorkItemID: workItemID, Scope: scope, AdmissionDigest: admissionDigest,
+		CompletionReceiptDigest: completionReceiptMetadataDigest(completionReceipt), Consumed: true,
+	}
+	encoded, err := json.Marshal(metadata)
+	if err != nil {
+		return "", err
+	}
+	return string(encoded), nil
 }
 
 // TransitionResult returns the immutable committed receipt and its canonical
@@ -228,6 +262,18 @@ type TransitionResult struct {
 	ReceiptDigest string
 	Replayed      bool
 	Recovered     bool
+}
+
+// TransitionHead is the current source row's validated lifecycle parent. The
+// Q43 attachment is the head until the first typed patch writes a transition
+// head key onto the source row.
+type TransitionHead struct {
+	// ReceiptID is the exact Q43 or typed patch receipt ID callers should use.
+	ReceiptID string
+	// ToVersion is the opaque source revision written by that receipt.
+	ToVersion int64
+	// FromAttachment marks the Q43 receipt as the initial head before reservation.
+	FromAttachment bool
 }
 
 // Apply validates the current admission and policy proof, resolves the exact
@@ -269,15 +315,24 @@ func (c *TransitionChain) Apply(request TransitionRequest) (TransitionResult, er
 	if err := validateTransitionPredecessor(request.Step, parent); err != nil {
 		return TransitionResult{}, err
 	}
-	patch, err := transitionPatch(request.Patch)
-	if err != nil {
-		return TransitionResult{}, fmt.Errorf("build canonical lifecycle patch: %w", err)
-	}
 	if err := validateTransitionStepPatch(request.Step, request.Patch); err != nil {
 		return TransitionResult{}, err
 	}
-	if err := validateTransitionStepPatchEvidence(request.Step, request.Patch, source, evidence); err != nil {
+	if err := c.validateTransitionStepPatchEvidence(request, source, evidence, parent); err != nil {
 		return TransitionResult{}, err
+	}
+	if request.Step == TransitionStepClose {
+		if err := verifyCompletionBudgetBinding(parent, request.Patch, request.IssueID, c.scope, evidence.Attachment.ReceiptDigest); err != nil {
+			return TransitionResult{}, err
+		}
+	}
+	effectivePatch, err := transitionPatchWithHead(request.Patch, request.Step, parent.ReceiptID, receiptID)
+	if err != nil {
+		return TransitionResult{}, err
+	}
+	patch, err := transitionPatch(effectivePatch)
+	if err != nil {
+		return TransitionResult{}, fmt.Errorf("build canonical lifecycle patch: %w", err)
 	}
 	patchRequest := beads.RevisionTransitionPatchRequest{
 		ReceiptID: receiptID, Scope: c.scope, Kind: kind, Actor: c.actor,
@@ -303,14 +358,25 @@ func (c *TransitionChain) Apply(request TransitionRequest) (TransitionResult, er
 			return TransitionResult{}, err
 		}
 	}
+	if request.Step == TransitionStepRecoveryBudget {
+		if _, err := VerifyRecoveryRequest(*request.RecoveryRequest, c.admissionConfig, c.now()); err != nil {
+			return TransitionResult{}, fmt.Errorf("verify current recovery request authorization: %w", errors.Join(ErrTransitionChainEvidence, err))
+		}
+		if err := validateRecoveryTargetRowFromBead(source, *request.RecoveryRequest); err != nil {
+			return TransitionResult{}, fmt.Errorf("recovery request target differs from the current source: %w", errors.Join(ErrTransitionChainStale, err))
+		}
+	}
 	if request.Step == TransitionStepClose {
-		if err := c.verifyCloseReceipt(source, evidence, request.Patch); err != nil {
+		if err := c.verifyCloseReceipt(source, evidence, parent, request.Patch); err != nil {
 			return TransitionResult{}, err
 		}
 	}
 
 	if source.Revision != parent.ToVersion {
 		return TransitionResult{}, fmt.Errorf("source revision %d does not match parent ToVersion %d: %w", source.Revision, parent.ToVersion, ErrTransitionChainStale)
+	}
+	if err := verifyCurrentTransitionHead(source, request.Step, parent.ReceiptID); err != nil {
+		return TransitionResult{}, err
 	}
 	if err := verifyTransitionPatchExpected(source, patch); err != nil {
 		return TransitionResult{}, fmt.Errorf("source does not match lifecycle patch preconditions: %w", errors.Join(ErrTransitionChainStale, err))
@@ -362,12 +428,56 @@ func (c *TransitionChain) Apply(request TransitionRequest) (TransitionResult, er
 	}, nil
 }
 
+// CurrentHead reads and validates the exact current lifecycle parent from the
+// source row. Before reservation it returns the Q43 attachment receipt; after
+// reservation it requires the protected source head to identify a committed
+// patch receipt whose ToVersion equals the live source revision.
+func (c *TransitionChain) CurrentHead(issueID string, evidence TransitionEvidence) (TransitionHead, error) {
+	if c == nil || c.sourceReader == nil || c.patchReceiptReader == nil || c.attachmentReceiptReader == nil ||
+		c.policyResolver == nil || c.workflowEvidenceVerifier == nil || c.now == nil {
+		return TransitionHead{}, ErrTransitionChainUnavailable
+	}
+	if !validTransitionText(issueID, 200) {
+		return TransitionHead{}, ErrTransitionChainInvalid
+	}
+	source, err := c.sourceReader.DecisionFrontierSourceSnapshot(issueID)
+	if err != nil {
+		return TransitionHead{}, fmt.Errorf("read lifecycle source snapshot: %w", err)
+	}
+	if source.ID != issueID || source.Revision == 0 {
+		return TransitionHead{}, fmt.Errorf("source snapshot has no exact identity or revision: %w", ErrTransitionChainEvidence)
+	}
+	verified, attachmentReceipt, err := c.verifyTransitionEvidence(source, evidence)
+	if err != nil {
+		return TransitionHead{}, err
+	}
+	encoded, present := source.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey]
+	if !present {
+		if source.Revision != verified.Attachment.ToRevision {
+			return TransitionHead{}, fmt.Errorf("source advanced after attachment without a transition head: %w", ErrTransitionChainStale)
+		}
+		return TransitionHead{ReceiptID: verified.Attachment.ReceiptID, ToVersion: verified.Attachment.ToRevision, FromAttachment: true}, nil
+	}
+	if !validTransitionText(encoded, 200) || strings.TrimSpace(encoded) != encoded {
+		return TransitionHead{}, fmt.Errorf("source transition head is malformed: %w", ErrTransitionChainReceipt)
+	}
+	parent, err := c.verifyParentChain(issueID, encoded, attachmentReceipt, verified)
+	if err != nil {
+		return TransitionHead{}, err
+	}
+	if parent.Attachment || parent.ToVersion != source.Revision {
+		return TransitionHead{}, fmt.Errorf("source transition head does not identify its current patch revision: %w", ErrTransitionChainStale)
+	}
+	return TransitionHead{ReceiptID: parent.ReceiptID, ToVersion: parent.ToVersion}, nil
+}
+
 type transitionParent struct {
 	ReceiptID  string
 	Digest     string
 	ToVersion  int64
 	Step       TransitionStep
 	Attachment bool
+	Patch      SourceWorkPatch
 }
 
 func (c *TransitionChain) verifyTransitionEvidence(source beads.Bead, evidence TransitionEvidence) (verifiedTransitionEvidence, beads.ControllerMetadataTransitionReceipt, error) {
@@ -464,6 +574,12 @@ func (c *TransitionChain) verifyParentChain(issueID, receiptID string, attachmen
 		if err := validateTransitionPredecessor(parentInfo.Step, upstream); err != nil {
 			return transitionParent{}, fmt.Errorf("stored lifecycle receipt has an invalid predecessor: %w", errors.Join(ErrTransitionChainReceipt, err))
 		}
+		if parentInfo.Step == TransitionStepRecoveryBudget {
+			if _, err := validateRecoveryBudgetAppend(parentInfo.Patch, upstream.Patch, upstream.Step, issueID, c.scope,
+				parentReceipt.ExpectedVersion); err != nil {
+				return transitionParent{}, fmt.Errorf("stored recovery budget is not an append-only request reservation: %w", errors.Join(ErrTransitionChainReceipt, err))
+			}
+		}
 		return parentInfo, nil
 	}
 
@@ -509,7 +625,32 @@ func (c *TransitionChain) verifyAttachedWorkflow(source beads.Bead, evidence ver
 	return nil
 }
 
-func (c *TransitionChain) verifyCloseReceipt(source beads.Bead, evidence verifiedTransitionEvidence, patch SourceWorkPatch) error {
+func (c *TransitionChain) verifyRecoveryBudgetTransition(source beads.Bead, request TransitionRequest, parent transitionParent) error {
+	recoveryRequest := request.RecoveryRequest
+	if recoveryRequest == nil {
+		return fmt.Errorf("recovery budget requires its signed request proof: %w", ErrTransitionChainEvidence)
+	}
+	digest, err := VerifyRecoveryRequestProof(*recoveryRequest, c.admissionConfig)
+	if err != nil {
+		return fmt.Errorf("verify recovery request proof: %w", errors.Join(ErrTransitionChainEvidence, err))
+	}
+	if request.OperationID != recoveryRequest.RequestID || recoveryRequest.WorkItemID != source.ID ||
+		recoveryRequest.Scope != c.scope || recoveryRequest.ExpectedRevision != parent.ToVersion {
+		return fmt.Errorf("recovery request identity or parent revision differs from transition: %w", ErrTransitionChainEvidence)
+	}
+	next, err := validateRecoveryBudgetAppend(request.Patch, parent.Patch, parent.Step, source.ID, c.scope, parent.ToVersion)
+	if err != nil {
+		return err
+	}
+	last := next.Attempts[len(next.Attempts)-1]
+	if last.RequestID != recoveryRequest.RequestID || last.RequestDigest != digest ||
+		last.ExpectedRevision != recoveryRequest.ExpectedRevision {
+		return fmt.Errorf("appended recovery attempt does not bind the exact signed request: %w", ErrTransitionChainEvidence)
+	}
+	return nil
+}
+
+func (c *TransitionChain) verifyCloseReceipt(source beads.Bead, evidence verifiedTransitionEvidence, parent transitionParent, patch SourceWorkPatch) error {
 	change, ok := patch.Metadata[beadmeta.LifecycleCompletionReceiptMetadataKey]
 	if !ok {
 		return fmt.Errorf("close patch has no completion receipt: %w", ErrTransitionChainEvidence)
@@ -523,6 +664,248 @@ func (c *TransitionChain) verifyCloseReceipt(source beads.Bead, evidence verifie
 	decision := evaluateCompletionReceiptAt(candidate, c.admissionConfig, c.scope, evidence.Admission, c.now())
 	if !decision.Accepted {
 		return fmt.Errorf("close completion receipt is not currently valid: %s: %w", decision.Reason, ErrTransitionChainEvidence)
+	}
+	budget, err := parseCompletionBudgetMetadata(
+		parent.Patch.Metadata[beadmeta.LifecycleCompletionBudgetMetadataKey].Value,
+		source.ID, c.scope, evidence.Attachment.ReceiptDigest,
+	)
+	if err != nil || budget.CompletionReceiptDigest != completionReceiptMetadataDigest(change.Value) {
+		return fmt.Errorf("close completion receipt differs from consumed completion budget: %w", errors.Join(ErrTransitionChainEvidence, err))
+	}
+	return nil
+}
+
+func validateRecoveryBudgetAppend(patch, parentPatch SourceWorkPatch, parentStep TransitionStep, workID, scope string, expectedRevision int64) (RecoveryState, error) {
+	change, ok := patch.Metadata[beadmeta.LifecycleRecoveryStateMetadataKey]
+	if !ok {
+		return RecoveryState{}, fmt.Errorf("recovery budget omits its state: %w", ErrTransitionChainInvalid)
+	}
+	var prior RecoveryState
+	switch parentStep {
+	case TransitionStepClaimIdentity:
+		if change.Expected != nil {
+			return RecoveryState{}, fmt.Errorf("first recovery budget must compare the absent state: %w", ErrTransitionChainInvalid)
+		}
+		prior = RecoveryState{Version: recoveryStateVersion, WorkItemID: workID, Scope: scope, Attempts: []RecoveryAttempt{}}
+	case TransitionStepRecoveryBudget:
+		parentChange, parentOK := parentPatch.Metadata[beadmeta.LifecycleRecoveryStateMetadataKey]
+		if !parentOK || change.Expected == nil || *change.Expected != parentChange.Value {
+			return RecoveryState{}, fmt.Errorf("recovery budget does not compare the exact parent state: %w", ErrTransitionChainInvalid)
+		}
+		decoded, err := decodeCanonicalRecoveryState(parentChange.Value, workID, scope)
+		if err != nil {
+			return RecoveryState{}, fmt.Errorf("decode parent recovery state: %w", errors.Join(ErrTransitionChainInvalid, err))
+		}
+		prior = decoded
+	default:
+		return RecoveryState{}, fmt.Errorf("recovery budget parent is not a claim or recovery receipt: %w", ErrTransitionChainInvalid)
+	}
+	if change.Expected != nil {
+		decoded, err := decodeCanonicalRecoveryState(*change.Expected, workID, scope)
+		if err != nil {
+			return RecoveryState{}, fmt.Errorf("decode expected recovery state: %w", errors.Join(ErrTransitionChainInvalid, err))
+		}
+		if !sameRecoveryState(decoded, prior) {
+			return RecoveryState{}, fmt.Errorf("expected recovery state differs from the lifecycle parent: %w", ErrTransitionChainInvalid)
+		}
+	}
+	next, err := decodeCanonicalRecoveryState(change.Value, workID, scope)
+	if err != nil {
+		return RecoveryState{}, fmt.Errorf("decode next recovery state: %w", errors.Join(ErrTransitionChainInvalid, err))
+	}
+	if len(prior.Attempts) >= MaxRecoveryAttempts || len(next.Attempts) != len(prior.Attempts)+1 ||
+		!sameRecoveryEscalation(prior.Escalation, next.Escalation) {
+		return RecoveryState{}, fmt.Errorf("recovery state must append exactly one attempt without changing escalation or exceeding the budget: %w", ErrTransitionChainInvalid)
+	}
+	for index, attempt := range prior.Attempts {
+		if next.Attempts[index] != attempt {
+			return RecoveryState{}, fmt.Errorf("recovery state changed prior attempt %d: %w", index, ErrTransitionChainInvalid)
+		}
+	}
+	last := next.Attempts[len(next.Attempts)-1]
+	reservedAt, err := time.Parse(time.RFC3339Nano, last.ReservedAt)
+	if !validSessionRequestID(last.RequestID) || !validLowercaseDigest(last.RequestDigest) ||
+		last.ExpectedRevision != expectedRevision || expectedRevision == 0 || err != nil ||
+		reservedAt.UTC().Format(time.RFC3339Nano) != last.ReservedAt {
+		return RecoveryState{}, fmt.Errorf("new recovery attempt is not bound to a canonical request and parent revision: %w", ErrTransitionChainInvalid)
+	}
+	return next, nil
+}
+
+func decodeCanonicalRecoveryState(raw, workID, scope string) (RecoveryState, error) {
+	state, err := decodeRecoveryState(raw, workID, scope)
+	if err != nil {
+		return RecoveryState{}, err
+	}
+	canonical, err := json.Marshal(state)
+	if err != nil || !bytes.Equal(canonical, []byte(raw)) {
+		return RecoveryState{}, fmt.Errorf("recovery state is not canonical JSON: %w", ErrRecoveryStateInvalid)
+	}
+	return state, nil
+}
+
+func sameRecoveryState(left, right RecoveryState) bool {
+	if left.Version != right.Version || left.WorkItemID != right.WorkItemID || left.Scope != right.Scope ||
+		len(left.Attempts) != len(right.Attempts) || !sameRecoveryEscalation(left.Escalation, right.Escalation) {
+		return false
+	}
+	for index := range left.Attempts {
+		if left.Attempts[index] != right.Attempts[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func sameRecoveryEscalation(left, right *RecoveryEscalation) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
+}
+
+func validateStoredRecoveryBudget(patch SourceWorkPatch, receiptID, workID, scope string, expectedVersion int64) error {
+	change, ok := patch.Metadata[beadmeta.LifecycleRecoveryStateMetadataKey]
+	if !ok {
+		return fmt.Errorf("stored recovery receipt omits state: %w", ErrTransitionChainReceipt)
+	}
+	state, err := decodeCanonicalRecoveryState(change.Value, workID, scope)
+	if err != nil || len(state.Attempts) == 0 {
+		return fmt.Errorf("decode stored recovery state: %w", errors.Join(ErrTransitionChainReceipt, err))
+	}
+	last := state.Attempts[len(state.Attempts)-1]
+	wantReceiptID, err := transitionReceiptID(workID, scope, TransitionStepRecoveryBudget, last.RequestID)
+	if err != nil || wantReceiptID != receiptID || last.ExpectedRevision != expectedVersion ||
+		!validSessionRequestID(last.RequestID) || !validLowercaseDigest(last.RequestDigest) {
+		return fmt.Errorf("stored recovery receipt is not bound to its request and expected revision: %w", errors.Join(ErrTransitionChainReceipt, err))
+	}
+	return nil
+}
+
+func validateCompletionBudgetPatch(patch SourceWorkPatch, workID, scope, admissionDigest string) error {
+	change, ok := patch.Metadata[beadmeta.LifecycleCompletionBudgetMetadataKey]
+	if !ok || change.Expected != nil {
+		return fmt.Errorf("completion budget must consume one absent budget record: %w", ErrTransitionChainInvalid)
+	}
+	if _, err := parseCompletionBudgetMetadata(change.Value, workID, scope, admissionDigest); err != nil {
+		return fmt.Errorf("completion budget metadata is invalid: %w", errors.Join(ErrTransitionChainInvalid, err))
+	}
+	return nil
+}
+
+func verifyCompletionBudgetBinding(parent transitionParent, closePatch SourceWorkPatch, workID, scope, admissionDigest string) error {
+	if parent.Step != TransitionStepCompletionBudget {
+		return fmt.Errorf("close parent is not a completion budget: %w", ErrTransitionChainInvalid)
+	}
+	change, ok := closePatch.Metadata[beadmeta.LifecycleCompletionReceiptMetadataKey]
+	if !ok {
+		return fmt.Errorf("close patch omits its completion receipt: %w", ErrTransitionChainInvalid)
+	}
+	budgetChange, ok := parent.Patch.Metadata[beadmeta.LifecycleCompletionBudgetMetadataKey]
+	if !ok || budgetChange.Expected != nil {
+		return fmt.Errorf("completion budget parent has no canonical consumed state: %w", ErrTransitionChainReceipt)
+	}
+	budget, err := parseCompletionBudgetMetadata(budgetChange.Value, workID, scope, admissionDigest)
+	if err != nil || budget.CompletionReceiptDigest != completionReceiptMetadataDigest(change.Value) {
+		return fmt.Errorf("close completion receipt differs from its consumed budget: %w", errors.Join(ErrTransitionChainEvidence, err))
+	}
+	return nil
+}
+
+func parseCompletionBudgetMetadata(raw, workID, scope, admissionDigest string) (completionBudgetMetadata, error) {
+	var metadata completionBudgetMetadata
+	if err := json.Unmarshal([]byte(raw), &metadata); err != nil {
+		return completionBudgetMetadata{}, err
+	}
+	canonical, err := json.Marshal(metadata)
+	if err != nil || !bytes.Equal(canonical, []byte(raw)) || metadata.Version != 1 ||
+		metadata.WorkItemID != workID || metadata.Scope != scope || metadata.AdmissionDigest != admissionDigest ||
+		!validAdmissionDigest(metadata.AdmissionDigest) || !validLowercaseDigest(metadata.CompletionReceiptDigest) || !metadata.Consumed {
+		return completionBudgetMetadata{}, errors.New("completion budget identity, digests, version, consumed flag, or encoding is invalid")
+	}
+	return metadata, nil
+}
+
+func completionReceiptMetadataDigest(encoded string) string {
+	digest := sha256.Sum256([]byte(completionReceiptDomain + encoded))
+	return hex.EncodeToString(digest[:])
+}
+
+func validLowercaseDigest(digest string) bool {
+	if !validDigest(digest) {
+		return false
+	}
+	decoded, _ := hex.DecodeString(digest)
+	return hex.EncodeToString(decoded) == digest
+}
+
+func validAdmissionDigest(digest string) bool {
+	decoded, err := base64.RawURLEncoding.DecodeString(digest)
+	return err == nil && len(decoded) == sha256.Size && base64.RawURLEncoding.EncodeToString(decoded) == digest
+}
+
+func transitionPatchWithHead(patch SourceWorkPatch, step TransitionStep, parentReceiptID, receiptID string) (SourceWorkPatch, error) {
+	if _, supplied := patch.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey]; supplied {
+		return SourceWorkPatch{}, fmt.Errorf("transition head is service-owned: %w", ErrTransitionChainInvalid)
+	}
+	metadata := make(map[string]MetadataStringPatch, len(patch.Metadata)+1)
+	for key, change := range patch.Metadata {
+		if change.Expected != nil {
+			expected := *change.Expected
+			change.Expected = &expected
+		}
+		metadata[key] = change
+	}
+	head := MetadataStringPatch{Value: receiptID}
+	if step != TransitionStepReservation {
+		parent := parentReceiptID
+		head.Expected = &parent
+	}
+	metadata[beadmeta.LifecycleTransitionHeadMetadataKey] = head
+	patch.Metadata = metadata
+	return patch, nil
+}
+
+func verifyCurrentTransitionHead(source beads.Bead, step TransitionStep, parentReceiptID string) error {
+	current, present := source.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey]
+	if step == TransitionStepReservation {
+		if present {
+			return fmt.Errorf("source already has a lifecycle transition head %q before reservation: %w", current, ErrTransitionChainStale)
+		}
+		return nil
+	}
+	if !present || current != parentReceiptID {
+		return fmt.Errorf("source transition head %q does not match requested parent %q: %w", current, parentReceiptID, ErrTransitionChainStale)
+	}
+	return nil
+}
+
+func stripTransitionHeadPatch(patch SourceWorkPatch) (SourceWorkPatch, error) {
+	if _, ok := patch.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey]; !ok {
+		return SourceWorkPatch{}, fmt.Errorf("stored lifecycle patch omits its transition head: %w", ErrTransitionChainReceipt)
+	}
+	metadata := make(map[string]MetadataStringPatch, len(patch.Metadata)-1)
+	for key, change := range patch.Metadata {
+		if key == beadmeta.LifecycleTransitionHeadMetadataKey {
+			continue
+		}
+		metadata[key] = change
+	}
+	patch.Metadata = metadata
+	return patch, nil
+}
+
+func validateStoredTransitionHead(receipt beads.RevisionTransitionPatchReceipt, step TransitionStep, patch SourceWorkPatch) error {
+	change, ok := patch.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey]
+	if !ok || change.Value != receipt.ReceiptID {
+		return fmt.Errorf("stored lifecycle patch does not point its head at its own receipt: %w", ErrTransitionChainReceipt)
+	}
+	if step == TransitionStepReservation {
+		if change.Expected != nil {
+			return fmt.Errorf("reservation head must compare the absent source head: %w", ErrTransitionChainReceipt)
+		}
+	} else if change.Expected == nil || *change.Expected != receipt.PriorReceiptID {
+		return fmt.Errorf("stored lifecycle patch head does not compare its exact parent: %w", ErrTransitionChainReceipt)
 	}
 	return nil
 }
@@ -724,31 +1107,31 @@ func sameTransitionMaterializationContract(left, right transitionMaterialization
 		left.WorkflowStoreRef == right.WorkflowStoreRef && left.AdmissionReceipt == right.AdmissionReceipt
 }
 
-func validateTransitionStepPatchEvidence(step TransitionStep, patch SourceWorkPatch, source beads.Bead, evidence verifiedTransitionEvidence) error {
-	switch step {
+func (c *TransitionChain) validateTransitionStepPatchEvidence(request TransitionRequest, source beads.Bead, evidence verifiedTransitionEvidence, parent transitionParent) error {
+	switch request.Step {
 	case TransitionStepReservation:
-		marker, err := parseTransitionMaterialization(patch.Metadata[beadmeta.LifecycleMaterializationMetadataKey].Value)
+		marker, err := parseTransitionMaterialization(request.Patch.Metadata[beadmeta.LifecycleMaterializationMetadataKey].Value)
 		if err != nil || !transitionMaterializationMatchesEvidence(marker, source, evidence) {
 			return fmt.Errorf("reserved materialization marker does not bind source admission and policy: %w", errors.Join(ErrTransitionChainEvidence, err))
 		}
 	case TransitionStepAttachedMaterialization:
-		marker, err := parseTransitionMaterialization(patch.Metadata[beadmeta.LifecycleMaterializationMetadataKey].Value)
-		priorEncoded := *patch.Metadata[beadmeta.LifecycleMaterializationMetadataKey].Expected
+		marker, err := parseTransitionMaterialization(request.Patch.Metadata[beadmeta.LifecycleMaterializationMetadataKey].Value)
+		priorEncoded := *request.Patch.Metadata[beadmeta.LifecycleMaterializationMetadataKey].Expected
 		prior, priorErr := parseTransitionMaterialization(priorEncoded)
 		if err != nil || priorErr != nil || !transitionMaterializationMatchesEvidence(marker, source, evidence) ||
 			!transitionMaterializationMatchesEvidence(prior, source, evidence) || !sameTransitionMaterializationContract(prior, marker) {
 			return fmt.Errorf("attached materialization marker does not continue the exact admitted reservation: %w", errors.Join(ErrTransitionChainEvidence, err, priorErr))
 		}
-		routeKey, _ := exactlyOneTransitionKey(patch.Metadata, beadmeta.ExecutionRoutedToMetadataKey, beadmeta.RoutedToMetadataKey)
-		workflowKey, _ := exactlyOneTransitionKey(patch.Metadata, beadmeta.MoleculeIDMetadataKey, beadmeta.WorkflowIDMetadataKey, beadmeta.LegacyWorkflowIDMetadataKey)
-		if patch.Metadata[routeKey].Value != evidence.Policy.Target.Identity || patch.Metadata[workflowKey].Value != marker.WorkflowID ||
-			patch.Metadata[beadmeta.MergeStrategyMetadataKey].Value != evidence.Policy.MergeStrategy {
+		routeKey, _ := exactlyOneTransitionKey(request.Patch.Metadata, beadmeta.ExecutionRoutedToMetadataKey, beadmeta.RoutedToMetadataKey)
+		workflowKey, _ := exactlyOneTransitionKey(request.Patch.Metadata, beadmeta.MoleculeIDMetadataKey, beadmeta.WorkflowIDMetadataKey, beadmeta.LegacyWorkflowIDMetadataKey)
+		if request.Patch.Metadata[routeKey].Value != evidence.Policy.Target.Identity || request.Patch.Metadata[workflowKey].Value != marker.WorkflowID ||
+			request.Patch.Metadata[beadmeta.MergeStrategyMetadataKey].Value != evidence.Policy.MergeStrategy {
 			return fmt.Errorf("attached source route, workflow, or merge value differs from exact admission: %w", ErrTransitionChainEvidence)
 		}
 		for _, key := range []string{beadmeta.ExecutionRoutedToMetadataKey, beadmeta.RoutedToMetadataKey} {
 			current := source.Metadata[key]
 			if key == routeKey {
-				current = patch.Metadata[key].Value
+				current = request.Patch.Metadata[key].Value
 			}
 			if strings.TrimSpace(current) != "" && key != routeKey {
 				return fmt.Errorf("attached source has a second route key %q: %w", key, ErrTransitionChainEvidence)
@@ -758,11 +1141,19 @@ func validateTransitionStepPatchEvidence(step TransitionStep, patch SourceWorkPa
 		for _, key := range workflowKeys {
 			current := source.Metadata[key]
 			if key == workflowKey {
-				current = patch.Metadata[key].Value
+				current = request.Patch.Metadata[key].Value
 			}
 			if strings.TrimSpace(current) != "" && key != workflowKey {
 				return fmt.Errorf("attached source has a second workflow ID key %q: %w", key, ErrTransitionChainEvidence)
 			}
+		}
+	case TransitionStepRecoveryBudget:
+		if err := c.verifyRecoveryBudgetTransition(source, request, parent); err != nil {
+			return err
+		}
+	case TransitionStepCompletionBudget:
+		if err := validateCompletionBudgetPatch(request.Patch, source.ID, c.scope, evidence.Attachment.ReceiptDigest); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -858,7 +1249,11 @@ func validateStoredTransitionPatchReceipt(receipt beads.RevisionTransitionPatchR
 		return transitionParent{}, fmt.Errorf("stored parent patch has an unsupported lifecycle kind: %w", ErrTransitionChainReceipt)
 	}
 	sourcePatch, err := sourcePatchFromCanonical(canonicalPatch)
-	if err != nil || validateTransitionStepPatch(step, sourcePatch) != nil {
+	if err != nil {
+		return transitionParent{}, fmt.Errorf("stored parent patch cannot be read: %w", errors.Join(ErrTransitionChainReceipt, err))
+	}
+	callerPatch, err := stripTransitionHeadPatch(sourcePatch)
+	if err != nil || validateStoredTransitionHead(receipt, step, sourcePatch) != nil || validateTransitionStepPatch(step, callerPatch) != nil {
 		return transitionParent{}, fmt.Errorf("stored parent patch does not match its lifecycle kind: %w", errors.Join(ErrTransitionChainReceipt, err))
 	}
 	// Historical receipts are checked against the same v2 contract and current
@@ -868,13 +1263,22 @@ func validateStoredTransitionPatchReceipt(receipt beads.RevisionTransitionPatchR
 		if !transitionPatchEvidenceMatchesMarker(step, sourcePatch, issueID, evidence) {
 			return transitionParent{}, fmt.Errorf("stored parent patch differs from current admission proof: %w", ErrTransitionChainReceipt)
 		}
+	} else if step == TransitionStepRecoveryBudget {
+		if err := validateStoredRecoveryBudget(sourcePatch, receipt.ReceiptID, issueID, scope, receipt.ExpectedVersion); err != nil {
+			return transitionParent{}, err
+		}
+	} else if step == TransitionStepCompletionBudget {
+		change := sourcePatch.Metadata[beadmeta.LifecycleCompletionBudgetMetadataKey]
+		if _, err := parseCompletionBudgetMetadata(change.Value, issueID, scope, evidence.Attachment.ReceiptDigest); err != nil || change.Expected != nil {
+			return transitionParent{}, fmt.Errorf("stored completion budget differs from current admission proof: %w", errors.Join(ErrTransitionChainReceipt, err))
+		}
 	}
 	receipt.Patch = canonicalPatch
 	digest, err := revisionTransitionPatchReceiptDigest(receipt)
 	if err != nil {
 		return transitionParent{}, fmt.Errorf("digest stored parent patch receipt: %w", errors.Join(ErrTransitionChainReceipt, err))
 	}
-	return transitionParent{ReceiptID: receipt.ReceiptID, Digest: digest, ToVersion: receipt.ToVersion, Step: step}, nil
+	return transitionParent{ReceiptID: receipt.ReceiptID, Digest: digest, ToVersion: receipt.ToVersion, Step: step, Patch: sourcePatch}, nil
 }
 
 func transitionPatchEvidenceMatchesMarker(step TransitionStep, patch SourceWorkPatch, issueID string, evidence verifiedTransitionEvidence) bool {

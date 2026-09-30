@@ -116,6 +116,7 @@ func TestLifecycleEnrollmentBlocksRouteMetadataChanges(t *testing.T) {
 		beadmeta.MergeStrategyMetadataKey,
 		beadmeta.LifecycleMaterializationMetadataKey,
 		beadmeta.LifecycleCompletionBudgetMetadataKey,
+		beadmeta.LifecycleTransitionHeadMetadataKey,
 		beadmeta.WorkflowExpandedMetadataKey,
 		"gc.lifecycle.admission_receipt.v2",
 	}
@@ -130,6 +131,29 @@ func TestLifecycleEnrollmentBlocksRouteMetadataChanges(t *testing.T) {
 				t.Fatalf("ValidateLifecycleMutation(%q) = %v, want ErrLifecycleMutationBlocked", key, err)
 			}
 		})
+	}
+}
+
+func TestLifecycleTransitionHeadProtectsLegacyMutationAndDeletePaths(t *testing.T) {
+	store := NewMemStore()
+	created, err := store.Create(Bead{
+		ID: "transition-head-fence", Type: "task", Status: "open",
+		Metadata: map[string]string{
+			beadmeta.LifecycleAdmissionReceiptV2MetadataKey: "durable admission evidence",
+			beadmeta.LifecycleTransitionHeadMetadataKey:     "gc-lifecycle-patch-v1-current",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateLifecycleMutation(created, UpdateOpts{Metadata: map[string]string{beadmeta.LifecycleTransitionHeadMetadataKey: "forged"}}); !errors.Is(err, ErrLifecycleMutationBlocked) {
+		t.Fatalf("changing lifecycle transition head error = %v, want blocked", err)
+	}
+	if err := ValidateLifecycleDelete(created); !errors.Is(err, ErrLifecycleMutationBlocked) {
+		t.Fatalf("deleting lifecycle transition head row error = %v, want blocked", err)
+	}
+	if err := UpdateLifecycleRecoveryStateIfMatch(store, created.ID, created.Revision, "", `{"version":1}`); !errors.Is(err, ErrLifecycleMutationBlocked) {
+		t.Fatalf("legacy recovery write after transition head error = %v, want blocked", err)
 	}
 }
 

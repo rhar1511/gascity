@@ -37,10 +37,10 @@ func TestTransitionChainAppliesEveryLifecycleStepWithExactPermitBinding(t *testi
 			return claimIdentityTestPatch()
 		}},
 		{step: TransitionStepRecoveryBudget, operation: "recovery-1", patch: func(bead beads.Bead) SourceWorkPatch {
-			return metadataTransition(bead, beadmeta.LifecycleRecoveryStateMetadataKey, `{"version":1,"attempts":[{"id":"00000000000000000000000000000001"}]}`)
+			return SourceWorkPatch{}
 		}},
 		{step: TransitionStepCompletionBudget, operation: "completion-1", patch: func(bead beads.Bead) SourceWorkPatch {
-			return metadataTransition(bead, beadmeta.LifecycleCompletionBudgetMetadataKey, `{"version":1,"reserved":true}`)
+			return SourceWorkPatch{}
 		}},
 		{step: TransitionStepClose, operation: "close-1", patch: func(bead beads.Bead) SourceWorkPatch {
 			patch := metadataTransition(bead, beadmeta.LifecycleCompletionReceiptMetadataKey, fixture.completionReceiptValue(t, nil))
@@ -60,12 +60,23 @@ func TestTransitionChainAppliesEveryLifecycleStepWithExactPermitBinding(t *testi
 			IssueID: fixture.work.ID, Step: tc.step, OperationID: tc.operation, PriorReceiptID: parentID,
 			Evidence: fixture.evidence, Patch: tc.patch(current),
 		}
+		if tc.step == TransitionStepRecoveryBudget {
+			request = fixture.recoveryBudgetRequest(t, previous, tc.operation)
+		} else if tc.step == TransitionStepCompletionBudget {
+			request = fixture.completionBudgetRequest(t, previous, fixture.completionReceiptValue(t, nil))
+		}
 		got, err := fixture.chain.Apply(request)
 		if err != nil {
 			t.Fatalf("Apply(%s): %v", tc.step, err)
 		}
 		if got.Receipt.ReceiptID == "" || got.Receipt.Kind != transitionStepKind(tc.step) || got.Receipt.ExpectedVersion == got.Receipt.ToVersion || got.Receipt.ToVersion == 0 {
 			t.Fatalf("Apply(%s) receipt = %+v, want deterministic kind and backend ToVersion", tc.step, got.Receipt)
+		}
+		assertTransitionHeadPatch(t, got.Receipt, tc.step, previous.ReceiptID)
+		head, err := fixture.chain.CurrentHead(fixture.work.ID, fixture.evidence)
+		currentHeadRow, readErr := fixture.store.DecisionFrontierSourceSnapshot(fixture.work.ID)
+		if err != nil || readErr != nil || head.ReceiptID != got.Receipt.ReceiptID || head.ToVersion != currentHeadRow.Revision || currentHeadRow.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey] != got.Receipt.ReceiptID {
+			t.Fatalf("current head after %s = %+v row=%+v err=%v readErr=%v", tc.step, head, currentHeadRow, err, readErr)
 		}
 		if got.Replayed || got.Recovered {
 			t.Fatalf("Apply(%s) flags = replayed %t recovered %t, want fresh transition", tc.step, got.Replayed, got.Recovered)
@@ -91,8 +102,8 @@ func TestTransitionChainAppliesEveryLifecycleStepWithExactPermitBinding(t *testi
 	if len(fixture.store.patchRequests) != len(steps) {
 		t.Fatalf("patch calls = %d, want %d", len(fixture.store.patchRequests), len(steps))
 	}
-	if fixture.policyResolver.calls != len(steps) || len(fixture.workflowVerifier.calls) != 1 {
-		t.Fatalf("proof calls: policy=%d workflow=%d, want policy for every step and one workflow verification", fixture.policyResolver.calls, len(fixture.workflowVerifier.calls))
+	if fixture.policyResolver.calls != len(steps)*2 || len(fixture.workflowVerifier.calls) != 1 {
+		t.Fatalf("proof calls: policy=%d workflow=%d, want policy for every apply/head read and one workflow verification", fixture.policyResolver.calls, len(fixture.workflowVerifier.calls))
 	}
 	if previous.Kind != transitionStepKind(TransitionStepClose) || previous.PriorReceiptID != fixture.store.patchRequests[len(steps)-2].ReceiptID {
 		t.Fatalf("close receipt = %+v, want direct parent from completion budget", previous)
@@ -100,6 +111,109 @@ func TestTransitionChainAppliesEveryLifecycleStepWithExactPermitBinding(t *testi
 	closed, err := fixture.store.DecisionFrontierSourceSnapshot(fixture.work.ID)
 	if err != nil || closed.Status != "closed" {
 		t.Fatalf("closed source = %+v err %v, want closed", closed, err)
+	}
+	beforeReplayWrites := len(fixture.store.patchRequests)
+	replay, err := fixture.chain.Apply(fixture.firstReservationRequest())
+	if err != nil || !replay.Replayed || len(fixture.store.patchRequests) != beforeReplayWrites ||
+		closed.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey] != previous.ReceiptID {
+		t.Fatalf("historical reservation replay after later steps = %+v err %v writes=%d->%d", replay, err, beforeReplayWrites, len(fixture.store.patchRequests))
+	}
+}
+
+func assertTransitionHeadPatch(t *testing.T, receipt beads.RevisionTransitionPatchReceipt, step TransitionStep, parentID string) {
+	t.Helper()
+	for _, change := range receipt.Patch.Metadata {
+		if change.Key != beadmeta.LifecycleTransitionHeadMetadataKey {
+			continue
+		}
+		var value string
+		if change.Value == nil || json.Unmarshal(*change.Value, &value) != nil || value != receipt.ReceiptID {
+			t.Fatalf("%s head value = %s, want its receipt ID %q", step, change.Value, receipt.ReceiptID)
+		}
+		if step == TransitionStepReservation {
+			if change.Expected != nil {
+				t.Fatalf("reservation head expected = %s, want absent", change.Expected)
+			}
+		} else {
+			var expected string
+			if change.Expected == nil || json.Unmarshal(*change.Expected, &expected) != nil || expected != parentID {
+				t.Fatalf("%s head expected = %v, want parent %q", step, change.Expected, parentID)
+			}
+		}
+		return
+	}
+	t.Fatalf("%s receipt omits service-owned transition head", step)
+}
+
+func TestTransitionChainCurrentHeadAndMutationCAS(t *testing.T) {
+	t.Run("attachment is the initial head and restart discovers latest patch", func(t *testing.T) {
+		fixture := newTransitionChainFixture(t)
+		initial, err := fixture.chain.CurrentHead(fixture.work.ID, fixture.evidence)
+		if err != nil || !initial.FromAttachment || initial.ReceiptID != fixture.attachment.ReceiptID || initial.ToVersion != fixture.attachment.ToRevision {
+			t.Fatalf("initial head = %+v err %v, want Q43 attachment", initial, err)
+		}
+		reservation := applyTestReservation(t, fixture)
+		claim := applyTestClaim(t, fixture, applyTestAttachment(t, fixture, reservation))
+		restarted, err := NewTransitionChain(fixture.chainConfig())
+		if err != nil {
+			t.Fatal(err)
+		}
+		head, err := restarted.CurrentHead(fixture.work.ID, fixture.evidence)
+		if err != nil || head.FromAttachment || head.ReceiptID != claim.Receipt.ReceiptID || head.ToVersion != claim.Receipt.ToVersion {
+			t.Fatalf("restarted current head = %+v err %v, want latest claim receipt", head, err)
+		}
+	})
+
+	t.Run("caller cannot choose service-owned head", func(t *testing.T) {
+		fixture := newTransitionChainFixture(t)
+		request := fixture.firstReservationRequest()
+		request.Patch.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey] = MetadataStringPatch{Value: "forged"}
+		if _, err := fixture.chain.Apply(request); !errors.Is(err, ErrTransitionChainInvalid) {
+			t.Fatalf("caller-supplied transition head error = %v, want invalid request", err)
+		}
+	})
+
+	for _, tc := range []struct {
+		name string
+		set  func(beads.Bead) string
+	}{
+		{name: "missing", set: func(source beads.Bead) string {
+			delete(source.Metadata, beadmeta.LifecycleTransitionHeadMetadataKey)
+			return ""
+		}},
+		{name: "forged", set: func(source beads.Bead) string {
+			source.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey] = "forged-receipt"
+			return "forged-receipt"
+		}},
+		{name: "old receipt", set: func(source beads.Bead) string {
+			source.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey] = ""
+			return ""
+		}},
+	} {
+		t.Run("reject "+tc.name+" head", func(t *testing.T) {
+			fixture := newTransitionChainFixture(t)
+			reservation := applyTestReservation(t, fixture)
+			attached := applyTestAttachment(t, fixture, reservation)
+			claim := applyTestClaim(t, fixture, attached)
+			fixture.store.mu.Lock()
+			if tc.name == "old receipt" {
+				fixture.store.source.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey] = attached.Receipt.ReceiptID
+			} else {
+				_ = tc.set(fixture.store.source)
+			}
+			fixture.store.mu.Unlock()
+			if _, err := fixture.chain.CurrentHead(fixture.work.ID, fixture.evidence); !errors.Is(err, ErrTransitionChainStale) && !errors.Is(err, ErrTransitionChainReceipt) {
+				t.Fatalf("CurrentHead with %s source head = %v, want stale/receipt refusal", tc.name, err)
+			}
+			request := fixture.recoveryBudgetRequest(t, claim.Receipt, "recovery-request-1")
+			beforeWrites, beforePermits := len(fixture.store.patchRequests), len(fixture.permits.requests)
+			if _, err := fixture.chain.Apply(request); !errors.Is(err, ErrTransitionChainStale) {
+				t.Fatalf("Apply with %s source head = %v, want stale refusal", tc.name, err)
+			}
+			if len(fixture.store.patchRequests) != beforeWrites || len(fixture.permits.requests) != beforePermits {
+				t.Fatalf("bad source head reached write/permit: %d->%d, %d->%d", beforeWrites, len(fixture.store.patchRequests), beforePermits, len(fixture.permits.requests))
+			}
+		})
 	}
 }
 
@@ -234,47 +348,25 @@ func TestTransitionChainAllowsRepeatedRecoveryAndExactCompletionReplayOnly(t *te
 
 	fixture := newTransitionChainFixture(t)
 	claim := applyTestClaim(t, fixture, applyTestAttachment(t, fixture, applyTestReservation(t, fixture)))
-	current, err := fixture.store.DecisionFrontierSourceSnapshot(fixture.work.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	recoveryOne := TransitionRequest{
-		IssueID: fixture.work.ID, Step: TransitionStepRecoveryBudget, OperationID: "recovery-1",
-		PriorReceiptID: claim.Receipt.ReceiptID, Evidence: fixture.evidence,
-		Patch: metadataTransition(current, beadmeta.LifecycleRecoveryStateMetadataKey, `{"version":1,"attempts":[]}`),
-	}
+	recoveryOne := fixture.recoveryBudgetRequest(t, claim.Receipt, "recovery-request-1")
 	recoveryResult, err := fixture.chain.Apply(recoveryOne)
 	if err != nil {
 		t.Fatalf("first recovery budget: %v", err)
 	}
-	current, err = fixture.store.DecisionFrontierSourceSnapshot(fixture.work.ID)
+	recoveryTwo := fixture.recoveryBudgetRequest(t, recoveryResult.Receipt, "recovery-request-2")
+	recoveryTwoResult, err := fixture.chain.Apply(recoveryTwo)
 	if err != nil {
-		t.Fatal(err)
-	}
-	priorRecovery := current.Metadata[beadmeta.LifecycleRecoveryStateMetadataKey]
-	recoveryTwo := TransitionRequest{
-		IssueID: fixture.work.ID, Step: TransitionStepRecoveryBudget, OperationID: "recovery-2",
-		PriorReceiptID: recoveryResult.Receipt.ReceiptID, Evidence: fixture.evidence,
-		Patch: SourceWorkPatch{Metadata: map[string]MetadataStringPatch{
-			beadmeta.LifecycleRecoveryStateMetadataKey: {Expected: &priorRecovery, Value: `{"version":1,"attempts":["next"]}`},
-		}},
-	}
-	if _, err := fixture.chain.Apply(recoveryTwo); err != nil {
 		t.Fatalf("repeated recovery budget: %v", err)
 	}
 
 	completion := TransitionRequest{
 		IssueID: fixture.work.ID, Step: TransitionStepCompletionBudget, OperationID: "completion-1",
 		PriorReceiptID: recoveryResult.Receipt.ReceiptID, Evidence: fixture.evidence,
-		Patch: metadataTransition(beads.Bead{}, beadmeta.LifecycleCompletionBudgetMetadataKey, `{"version":1,"reserved":true}`),
 	}
 	// Completion may branch from the latest recovery receipt, so use the second
 	// recovery receipt as its direct parent.
 	completion.PriorReceiptID = recoveryTwo.PriorReceiptID
-	completion.PriorReceiptID, err = transitionReceiptID(fixture.work.ID, fixture.policy.SourceScope, TransitionStepRecoveryBudget, "recovery-2")
-	if err != nil {
-		t.Fatal(err)
-	}
+	completion = fixture.completionBudgetRequest(t, recoveryTwoResult.Receipt, fixture.completionReceiptValue(t, nil))
 	completionResult, err := fixture.chain.Apply(completion)
 	if err != nil {
 		t.Fatalf("completion budget after recovery: %v", err)
@@ -286,7 +378,7 @@ func TestTransitionChainAllowsRepeatedRecoveryAndExactCompletionReplayOnly(t *te
 	if err != nil || !replay.Replayed || replay.Receipt.ReceiptID != completionResult.Receipt.ReceiptID {
 		t.Fatalf("exact completion replay = %+v err %v, want same receipt replay", replay, err)
 	}
-	current, err = fixture.store.DecisionFrontierSourceSnapshot(fixture.work.ID)
+	current, err := fixture.store.DecisionFrontierSourceSnapshot(fixture.work.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -300,6 +392,206 @@ func TestTransitionChainAllowsRepeatedRecoveryAndExactCompletionReplayOnly(t *te
 	if _, err := fixture.chain.Apply(completionRetry); !errors.Is(err, ErrTransitionChainInvalid) {
 		t.Fatalf("new completion budget step after completion = %v, want predecessor refusal", err)
 	}
+}
+
+func TestTransitionChainRecoveryBudgetIsRequestBoundAndAppendOnly(t *testing.T) {
+	t.Run("valid first and second append replay exactly", func(t *testing.T) {
+		fixture := newTransitionChainFixture(t)
+		claim := applyTestClaim(t, fixture, applyTestAttachment(t, fixture, applyTestReservation(t, fixture)))
+		firstRequest := fixture.recoveryBudgetRequest(t, claim.Receipt, "recovery-request-1")
+		first, err := fixture.chain.Apply(firstRequest)
+		if err != nil {
+			t.Fatalf("first recovery append: %v", err)
+		}
+		replay, err := fixture.chain.Apply(firstRequest)
+		if err != nil || !replay.Replayed || replay.Receipt.ReceiptID != first.Receipt.ReceiptID {
+			t.Fatalf("first recovery replay = %+v, err %v", replay, err)
+		}
+		secondRequest := fixture.recoveryBudgetRequest(t, first.Receipt, "recovery-request-2")
+		second, err := fixture.chain.Apply(secondRequest)
+		if err != nil {
+			t.Fatalf("second recovery append: %v", err)
+		}
+		state, err := decodeRecoveryState(
+			fixture.store.source.Metadata[beadmeta.LifecycleRecoveryStateMetadataKey], fixture.work.ID, fixture.policy.SourceScope,
+		)
+		if err != nil || len(state.Attempts) != MaxRecoveryAttempts || second.Receipt.PriorReceiptID != first.Receipt.ReceiptID {
+			t.Fatalf("final recovery state = %+v err %v; receipt %+v", state, err, second.Receipt)
+		}
+	})
+
+	cases := []struct {
+		name   string
+		mutate func(*testing.T, *transitionChainFixture, *TransitionRequest)
+	}{
+		{name: "reset", mutate: func(t *testing.T, _ *transitionChainFixture, request *TransitionRequest) {
+			rewriteRecoveryRequestState(t, request, func(state *RecoveryState) { state.Attempts = []RecoveryAttempt{} })
+		}},
+		{name: "malformed state", mutate: func(_ *testing.T, _ *transitionChainFixture, request *TransitionRequest) {
+			change := request.Patch.Metadata[beadmeta.LifecycleRecoveryStateMetadataKey]
+			change.Value = `{"version":1,"attempts":[`
+			request.Patch.Metadata[beadmeta.LifecycleRecoveryStateMetadataKey] = change
+		}},
+		{name: "more than two attempts", mutate: func(t *testing.T, fixture *transitionChainFixture, request *TransitionRequest) {
+			rewriteRecoveryRequestState(t, request, func(state *RecoveryState) {
+				state.Attempts = append(state.Attempts, RecoveryAttempt{
+					ID: "00000000000000000000000000000003", ReservedAt: fixture.now.Format(time.RFC3339Nano),
+					RequestID: "recovery-request-3", RequestDigest: strings.Repeat("3", 64), ExpectedRevision: request.RecoveryRequest.ExpectedRevision,
+				})
+			})
+		}},
+		{name: "changed prior attempt", mutate: func(t *testing.T, _ *transitionChainFixture, request *TransitionRequest) {
+			rewriteRecoveryRequestState(t, request, func(state *RecoveryState) {
+				state.Attempts[0].ID = "ffffffffffffffffffffffffffffffff"
+			})
+		}},
+		{name: "duplicate request", mutate: func(t *testing.T, _ *transitionChainFixture, request *TransitionRequest) {
+			rewriteRecoveryRequestState(t, request, func(state *RecoveryState) {
+				state.Attempts[1].RequestID = state.Attempts[0].RequestID
+				state.Attempts[1].RequestDigest = state.Attempts[0].RequestDigest
+			})
+		}},
+		{name: "unbound new attempt", mutate: func(t *testing.T, _ *transitionChainFixture, request *TransitionRequest) {
+			rewriteRecoveryRequestState(t, request, func(state *RecoveryState) {
+				last := &state.Attempts[len(state.Attempts)-1]
+				last.RequestID, last.RequestDigest, last.ExpectedRevision = "", "", 0
+			})
+		}},
+		{name: "request digest mismatch", mutate: func(t *testing.T, _ *transitionChainFixture, request *TransitionRequest) {
+			rewriteRecoveryRequestState(t, request, func(state *RecoveryState) {
+				state.Attempts[len(state.Attempts)-1].RequestDigest = strings.Repeat("9", 64)
+			})
+		}},
+		{name: "request ID differs from operation", mutate: func(_ *testing.T, _ *transitionChainFixture, request *TransitionRequest) {
+			request.OperationID = "different-operation"
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newTransitionChainFixture(t)
+			claim := applyTestClaim(t, fixture, applyTestAttachment(t, fixture, applyTestReservation(t, fixture)))
+			firstRequest := fixture.recoveryBudgetRequest(t, claim.Receipt, "recovery-request-1")
+			first, err := fixture.chain.Apply(firstRequest)
+			if err != nil {
+				t.Fatalf("prepare first recovery: %v", err)
+			}
+			request := fixture.recoveryBudgetRequest(t, first.Receipt, "recovery-request-2")
+			tc.mutate(t, fixture, &request)
+			beforeWrites, beforePermits := len(fixture.store.patchRequests), len(fixture.permits.requests)
+			if _, err := fixture.chain.Apply(request); !errors.Is(err, ErrTransitionChainInvalid) && !errors.Is(err, ErrTransitionChainEvidence) {
+				t.Fatalf("invalid recovery append error = %v, want invalid or evidence refusal", err)
+			}
+			if len(fixture.store.patchRequests) != beforeWrites || len(fixture.permits.requests) != beforePermits {
+				t.Fatalf("invalid recovery append reached write/permit: %d->%d, %d->%d", beforeWrites, len(fixture.store.patchRequests), beforePermits, len(fixture.permits.requests))
+			}
+		})
+	}
+}
+
+func rewriteRecoveryRequestState(t *testing.T, request *TransitionRequest, mutate func(*RecoveryState)) {
+	t.Helper()
+	change := request.Patch.Metadata[beadmeta.LifecycleRecoveryStateMetadataKey]
+	var state RecoveryState
+	if err := json.Unmarshal([]byte(change.Value), &state); err != nil {
+		t.Fatal(err)
+	}
+	mutate(&state)
+	encoded, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	change.Value = string(encoded)
+	request.Patch.Metadata[beadmeta.LifecycleRecoveryStateMetadataKey] = change
+}
+
+func TestTransitionChainRequiresCanonicalBoundCompletionBudget(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(*testing.T, *TransitionRequest)
+	}{
+		{name: "arbitrary JSON", mutate: func(_ *testing.T, request *TransitionRequest) {
+			change := request.Patch.Metadata[beadmeta.LifecycleCompletionBudgetMetadataKey]
+			change.Value = `{"version":1,"reserved":true}`
+			request.Patch.Metadata[beadmeta.LifecycleCompletionBudgetMetadataKey] = change
+		}},
+		{name: "wrong work item", mutate: func(t *testing.T, request *TransitionRequest) {
+			rewriteCompletionBudgetRequest(t, request, func(metadata *completionBudgetMetadata) { metadata.WorkItemID = "other-work" })
+		}},
+		{name: "wrong scope", mutate: func(t *testing.T, request *TransitionRequest) {
+			rewriteCompletionBudgetRequest(t, request, func(metadata *completionBudgetMetadata) { metadata.Scope = "other-scope" })
+		}},
+		{name: "wrong admission digest", mutate: func(t *testing.T, request *TransitionRequest) {
+			rewriteCompletionBudgetRequest(t, request, func(metadata *completionBudgetMetadata) {
+				metadata.AdmissionDigest = base64.RawURLEncoding.EncodeToString(make([]byte, 32))
+			})
+		}},
+		{name: "malformed completion digest", mutate: func(t *testing.T, request *TransitionRequest) {
+			rewriteCompletionBudgetRequest(t, request, func(metadata *completionBudgetMetadata) { metadata.CompletionReceiptDigest = "invalid" })
+		}},
+		{name: "not consumed", mutate: func(t *testing.T, request *TransitionRequest) {
+			rewriteCompletionBudgetRequest(t, request, func(metadata *completionBudgetMetadata) { metadata.Consumed = false })
+		}},
+		{name: "extra field", mutate: func(_ *testing.T, request *TransitionRequest) {
+			change := request.Patch.Metadata[beadmeta.LifecycleCompletionBudgetMetadataKey]
+			change.Value = strings.TrimSuffix(change.Value, "}") + `,"extra":true}`
+			request.Patch.Metadata[beadmeta.LifecycleCompletionBudgetMetadataKey] = change
+		}},
+		{name: "expected value is caller supplied", mutate: func(_ *testing.T, request *TransitionRequest) {
+			expected := "forged-prior-budget"
+			change := request.Patch.Metadata[beadmeta.LifecycleCompletionBudgetMetadataKey]
+			change.Expected = &expected
+			request.Patch.Metadata[beadmeta.LifecycleCompletionBudgetMetadataKey] = change
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newTransitionChainFixture(t)
+			claim := applyTestClaim(t, fixture, applyTestAttachment(t, fixture, applyTestReservation(t, fixture)))
+			request := fixture.completionBudgetRequest(t, claim.Receipt, fixture.completionReceiptValue(t, nil))
+			tc.mutate(t, &request)
+			beforeWrites, beforePermits := len(fixture.store.patchRequests), len(fixture.permits.requests)
+			if _, err := fixture.chain.Apply(request); !errors.Is(err, ErrTransitionChainInvalid) {
+				t.Fatalf("malformed completion budget error = %v, want invalid transition", err)
+			}
+			if len(fixture.store.patchRequests) != beforeWrites || len(fixture.permits.requests) != beforePermits {
+				t.Fatalf("invalid completion budget reached write/permit: %d->%d, %d->%d", beforeWrites, len(fixture.store.patchRequests), beforePermits, len(fixture.permits.requests))
+			}
+		})
+	}
+
+	t.Run("close receipt must match consumed digest", func(t *testing.T) {
+		fixture := newTransitionChainFixture(t)
+		claim := applyTestClaim(t, fixture, applyTestAttachment(t, fixture, applyTestReservation(t, fixture)))
+		budgetReceipt := fixture.completionReceiptValue(t, nil)
+		budget, err := fixture.chain.Apply(fixture.completionBudgetRequest(t, claim.Receipt, budgetReceipt))
+		if err != nil {
+			t.Fatal(err)
+		}
+		closeReceipt := fixture.completionReceiptValue(t, func(receipt *CompletionReceipt) { receipt.DeliverableRef = "artifact://different" })
+		beforeWrites, beforePermits := len(fixture.store.patchRequests), len(fixture.permits.requests)
+		if _, err := fixture.chain.Apply(closeTestRequest(fixture, budget, closeReceipt)); !errors.Is(err, ErrTransitionChainEvidence) {
+			t.Fatalf("close with a different completion digest = %v, want evidence refusal", err)
+		}
+		if len(fixture.store.patchRequests) != beforeWrites || len(fixture.permits.requests) != beforePermits {
+			t.Fatalf("mismatched completion receipt reached write/permit: %d->%d, %d->%d", beforeWrites, len(fixture.store.patchRequests), beforePermits, len(fixture.permits.requests))
+		}
+	})
+}
+
+func rewriteCompletionBudgetRequest(t *testing.T, request *TransitionRequest, mutate func(*completionBudgetMetadata)) {
+	t.Helper()
+	change := request.Patch.Metadata[beadmeta.LifecycleCompletionBudgetMetadataKey]
+	var metadata completionBudgetMetadata
+	if err := json.Unmarshal([]byte(change.Value), &metadata); err != nil {
+		t.Fatal(err)
+	}
+	mutate(&metadata)
+	encoded, err := json.Marshal(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	change.Value = string(encoded)
+	request.Patch.Metadata[beadmeta.LifecycleCompletionBudgetMetadataKey] = change
 }
 
 func TestTransitionChainRecoversLostResponseAndReplaysAfterRestart(t *testing.T) {
@@ -548,10 +840,15 @@ func TestTransitionChainRequiresFreshSignedCompletionReceiptForClose(t *testing.
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			fixture := newTransitionChainFixture(t)
-			parent := applyTestCompletionBudget(t, fixture, applyTestClaim(t, fixture, applyTestAttachment(t, fixture, applyTestReservation(t, fixture))))
+			claim := applyTestClaim(t, fixture, applyTestAttachment(t, fixture, applyTestReservation(t, fixture)))
+			completion := tc.value(t, fixture)
+			budget, err := fixture.chain.Apply(fixture.completionBudgetRequest(t, claim.Receipt, completion))
+			if err != nil {
+				t.Fatalf("Apply completion budget for candidate receipt: %v", err)
+			}
 			beforeWrites := len(fixture.store.patchRequests)
 			beforePermits := len(fixture.permits.requests)
-			request := closeTestRequest(fixture, parent, tc.value(t, fixture))
+			request := closeTestRequest(fixture, budget, completion)
 			if _, err := fixture.chain.Apply(request); !errors.Is(err, ErrTransitionChainEvidence) {
 				t.Fatalf("Apply with invalid completion receipt = %v, want evidence refusal", err)
 			}
@@ -641,15 +938,76 @@ func applyTestClaim(t *testing.T, fixture *transitionChainFixture, parent Transi
 
 func applyTestCompletionBudget(t *testing.T, fixture *transitionChainFixture, parent TransitionResult) TransitionResult {
 	t.Helper()
-	result, err := fixture.chain.Apply(TransitionRequest{
-		IssueID: fixture.work.ID, Step: TransitionStepCompletionBudget, OperationID: "completion-budget-1",
-		PriorReceiptID: parent.Receipt.ReceiptID, Evidence: fixture.evidence,
-		Patch: metadataTransition(beads.Bead{}, beadmeta.LifecycleCompletionBudgetMetadataKey, `{"version":1,"reserved":true}`),
-	})
+	request := fixture.completionBudgetRequest(t, parent.Receipt, fixture.completionReceiptValue(t, nil))
+	result, err := fixture.chain.Apply(request)
 	if err != nil {
 		t.Fatalf("apply completion budget: %v", err)
 	}
 	return result
+}
+
+func (f *transitionChainFixture) recoveryBudgetRequest(t *testing.T, parent beads.RevisionTransitionPatchReceipt, requestID string) TransitionRequest {
+	t.Helper()
+	current, err := f.store.DecisionFrontierSourceSnapshot(f.work.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recoveryRequest, err := SignRecoveryRequest(RecoveryRequest{
+		Version: 1, RequestID: requestID, Action: "nudge", Scope: f.policy.SourceScope, WorkItemID: f.work.ID,
+		ExpectedRevision: parent.ToVersion, Owner: current.Assignee,
+		ClaimGeneration: current.Metadata[beadmeta.ClaimGenerationMetadataKey],
+		SessionID:       current.Metadata[beadmeta.SessionIDMetadataKey], SessionGeneration: "session-generation-1",
+		Message: "authorized lifecycle recovery", IssuedAt: f.now.Add(-time.Minute).Format(time.RFC3339Nano),
+		ExpiresAt: f.now.Add(time.Hour).Format(time.RFC3339Nano), AuthorizedBy: "recovery",
+	}, f.recoveryPrivate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, err := RecoveryRequestDigest(recoveryRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var previous RecoveryState
+	previousRaw := current.Metadata[beadmeta.LifecycleRecoveryStateMetadataKey]
+	if previousRaw == "" {
+		previous = RecoveryState{Version: recoveryStateVersion, WorkItemID: f.work.ID, Scope: f.policy.SourceScope, Attempts: []RecoveryAttempt{}}
+	} else {
+		previous, err = decodeCanonicalRecoveryState(previousRaw, f.work.ID, f.policy.SourceScope)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	next := cloneRecoveryState(previous)
+	next.Attempts = append(next.Attempts, RecoveryAttempt{
+		ID: fmt.Sprintf("%032x", len(previous.Attempts)+1), ReservedAt: f.now.UTC().Format(time.RFC3339Nano),
+		RequestID: recoveryRequest.RequestID, RequestDigest: digest, ExpectedRevision: recoveryRequest.ExpectedRevision,
+	})
+	encoded, err := json.Marshal(next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	change := MetadataStringPatch{Value: string(encoded)}
+	if previousRaw != "" {
+		change.Expected = &previousRaw
+	}
+	return TransitionRequest{
+		IssueID: f.work.ID, Step: TransitionStepRecoveryBudget, OperationID: recoveryRequest.RequestID,
+		PriorReceiptID: parent.ReceiptID, Evidence: f.evidence, RecoveryRequest: &recoveryRequest,
+		Patch: SourceWorkPatch{Metadata: map[string]MetadataStringPatch{beadmeta.LifecycleRecoveryStateMetadataKey: change}},
+	}
+}
+
+func (f *transitionChainFixture) completionBudgetRequest(t *testing.T, parent beads.RevisionTransitionPatchReceipt, completionReceipt string) TransitionRequest {
+	t.Helper()
+	value, err := BuildCompletionBudgetMetadata(f.work.ID, f.policy.SourceScope, f.attachment.ReceiptDigest, completionReceipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return TransitionRequest{
+		IssueID: f.work.ID, Step: TransitionStepCompletionBudget, OperationID: "completion-budget-1",
+		PriorReceiptID: parent.ReceiptID, Evidence: f.evidence,
+		Patch: metadataTransition(beads.Bead{}, beadmeta.LifecycleCompletionBudgetMetadataKey, value),
+	}
 }
 
 func closeTestRequest(fixture *transitionChainFixture, parent TransitionResult, completion string) TransitionRequest {
@@ -725,6 +1083,7 @@ type transitionChainFixture struct {
 	attachment        AdmissionAttachmentProof
 	evidence          TransitionEvidence
 	acceptancePrivate ed25519.PrivateKey
+	recoveryPrivate   ed25519.PrivateKey
 	now               time.Time
 }
 
@@ -740,13 +1099,22 @@ func newTransitionChainFixture(t *testing.T) *transitionChainFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
+	recoveryPublic, recoveryPrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
 	cfg := config.LifecycleConfig{
 		AdmissionEnabled:            true,
+		RecoveryEnabled:             true,
 		AdmissionV2PrimaryAuthority: "triage",
 		AdmissionV2Authorities:      map[string]string{"triage": base64.StdEncoding.EncodeToString(admissionPublic)},
 		AcceptanceAuthorities:       map[string]string{"reviewer": base64.StdEncoding.EncodeToString(acceptancePublic)},
-		CompletionReceiptMaxAge:     "168h",
-		CompletionClockSkew:         "2m",
+		RecoveryAuthorities: map[string]config.LifecycleRecoveryAuthority{"recovery": {
+			PublicKey: base64.StdEncoding.EncodeToString(recoveryPublic), Actions: []string{"nudge"}, Scopes: []string{scope},
+		}},
+		EscalationTarget:        "human",
+		CompletionReceiptMaxAge: "168h",
+		CompletionClockSkew:     "2m",
 	}
 	policyDigest, err := DigestAdmissionPolicyV2(policy)
 	if err != nil {
@@ -774,7 +1142,7 @@ func newTransitionChainFixture(t *testing.T) *transitionChainFixture {
 	}
 	fixture := &transitionChainFixture{
 		store: store, permits: &transitionChainPermitIssuer{token: "permit-token"}, work: work,
-		policy: policy, cfg: cfg, attachment: attachment, acceptancePrivate: acceptancePrivate,
+		policy: policy, cfg: cfg, attachment: attachment, acceptancePrivate: acceptancePrivate, recoveryPrivate: recoveryPrivate,
 		now:              time.Date(2026, time.September, 30, 12, 0, 0, 0, time.UTC),
 		evidence:         TransitionEvidence{Attachment: attachment},
 		policyResolver:   &transitionChainPolicyResolver{policy: policy},

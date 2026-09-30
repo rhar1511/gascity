@@ -351,6 +351,9 @@ const (
 // unrelated metadata declarations.
 const LifecycleAdmissionReceiptV2MetadataKey = "gc.lifecycle.admission_receipt.v2"
 
+// LifecycleTransitionHeadMetadataKey points to the latest typed lifecycle transition receipt.
+const LifecycleTransitionHeadMetadataKey = "gc.lifecycle.transition_head.v1"
+
 // LegacyWorkflowIDMetadataKey is the engine's historical bare graph workflow
 // pointer. It remains part of the run-chain and therefore must be treated as
 // lifecycle routing identity wherever the namespaced workflow key is guarded.
@@ -624,6 +627,7 @@ var KnownMetadataKeys = []string{
 	LifecycleRecoveryIntentScopeKey,
 	LifecycleRecoveryIntentRequestIDKey,
 	LifecycleRecoveryStateMetadataKey,
+	LifecycleTransitionHeadMetadataKey,
 	LifecycleMaterializationMetadataKey,
 	LastFailureClassMetadataKey,
 	LastFinalizeErrorMetadataKey,

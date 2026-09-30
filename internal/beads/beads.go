@@ -289,7 +289,8 @@ func IsLifecycleRoutingMetadataKey(key string) bool {
 		beadmeta.MoleculeIDMetadataKey,
 		beadmeta.MergeStrategyMetadataKey,
 		beadmeta.LifecycleMaterializationMetadataKey,
-		beadmeta.LifecycleCompletionBudgetMetadataKey:
+		beadmeta.LifecycleCompletionBudgetMetadataKey,
+		beadmeta.LifecycleTransitionHeadMetadataKey:
 		return true
 	default:
 		return false
@@ -315,6 +316,7 @@ func LifecycleMutationNeedsValidation(opts UpdateOpts) bool {
 			beadmeta.LifecycleAdmissionReceiptV2MetadataKey,
 			beadmeta.LifecycleCompletionReceiptMetadataKey,
 			beadmeta.LifecycleCompletionBudgetMetadataKey,
+			beadmeta.LifecycleTransitionHeadMetadataKey,
 			beadmeta.LifecycleMaterializationMetadataKey,
 			beadmeta.LifecycleRecoveryStateMetadataKey:
 			return true
@@ -327,6 +329,9 @@ func LifecycleMutationNeedsValidation(opts UpdateOpts) bool {
 // the bead. It excludes the removable intent label by design.
 func HasLifecycleEvidence(b Bead) bool {
 	if HasLifecycleAdmissionReceipt(b) {
+		return true
+	}
+	if b.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey] != "" {
 		return true
 	}
 	for _, key := range []string{
@@ -435,6 +440,7 @@ func ValidateLifecycleMutation(current Bead, opts UpdateOpts) error {
 		beadmeta.LifecycleAdmissionReceiptMetadataKey,
 		beadmeta.LifecycleAdmissionReceiptV2MetadataKey,
 		beadmeta.LifecycleCompletionBudgetMetadataKey,
+		beadmeta.LifecycleTransitionHeadMetadataKey,
 		beadmeta.LifecycleMaterializationMetadataKey,
 		beadmeta.LifecycleCompletionReceiptMetadataKey,
 		beadmeta.LifecycleRecoveryStateMetadataKey,
@@ -471,6 +477,9 @@ func UpdateLifecycleRecoveryStateIfMatch(store Store, id string, expectedRevisio
 	if current.ID != id || current.Revision != expectedRevision || current.Metadata[beadmeta.LifecycleRecoveryStateMetadataKey] != expectedState {
 		return &PreconditionFailedError{ID: id, Expected: expectedRevision, Current: current.Revision}
 	}
+	if current.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey] != "" {
+		return ErrLifecycleMutationBlocked
+	}
 	return writer.UpdateIfMatch(id, expectedRevision, UpdateOpts{
 		Metadata:                    map[string]string{beadmeta.LifecycleRecoveryStateMetadataKey: nextState},
 		lifecycleRecoveryStateWrite: true,
@@ -500,7 +509,7 @@ func ValidateLifecycleDelete(current Bead) error {
 	if HasLifecycleRecoveryIntent(current) {
 		return ErrLifecycleIntentImmutable
 	}
-	if HasLifecycleRecoveryState(current) {
+	if HasLifecycleRecoveryState(current) || current.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey] != "" {
 		return ErrLifecycleMutationBlocked
 	}
 	return nil
