@@ -518,6 +518,11 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 			fmt.Fprintf(stderr, "gc hook --claim: refusing candidate set without authoritative source reads: %v\n", err) //nolint:errcheck
 			return hookClaimResult{terminal: true, code: 1}
 		}
+		candidates, err = filterCanonicalHookClaimCandidates(candidates, *opts, now())
+		if err != nil {
+			fmt.Fprintf(stderr, "gc hook --claim: refusing candidate set without authoritative readiness checks: %v\n", err) //nolint:errcheck
+			return hookClaimResult{terminal: true, code: 1}
+		}
 	}
 	for _, skip := range skipped {
 		fmt.Fprintf(stderr, "gc hook --claim: skipping undecodable bead %s: %v\n", skip.ID, skip.Err) //nolint:errcheck
@@ -541,9 +546,15 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 	}
 	if opts.RequireAuthoritativeClaimRead {
 		// Formula compatibility results have been re-read from the exact source
-		// store by checkHookFormulaAction. Re-run lifecycle classification because
-		// that authoritative read may expose enrollment omitted by the projection.
+		// store by checkHookFormulaAction. Re-run lifecycle and general readiness
+		// checks because that authoritative read may expose enrollment, holds,
+		// deferrals, or dependency state omitted by the projection.
 		candidates = filterHookLifecycleCandidates(candidates, *opts, stderr)
+		candidates, err = filterCanonicalHookClaimCandidates(candidates, *opts, now())
+		if err != nil {
+			fmt.Fprintf(stderr, "gc hook --claim: refusing formula candidates without authoritative readiness checks: %v\n", err) //nolint:errcheck
+			return hookClaimResult{terminal: true, code: 1}
+		}
 	}
 	if len(candidates) == 0 {
 		return hookClaimResult{}
@@ -569,6 +580,11 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 			if !current || !strings.EqualFold(strings.TrimSpace(canonical.Status), "in_progress") ||
 				!hookClaimHasIdentity(canonical.Assignee, opts.IdentityCandidates) {
 				fmt.Fprintf(stderr, "gc hook --claim: holding lifecycle assignment %s: current owner, status, admission, or lineage could not be verified\n", bead.ID) //nolint:errcheck
+				return hookClaimResult{}
+			}
+			ready, err := authoritativeHookClaimCandidateReady(canonical, *opts, now())
+			if err != nil || !ready {
+				fmt.Fprintf(stderr, "gc hook --claim: holding lifecycle assignment %s because canonical readiness changed or could not be checked: %v\n", bead.ID, err) //nolint:errcheck
 				return hookClaimResult{}
 			}
 			bead = canonical
@@ -664,6 +680,161 @@ func rereadHookClaimCandidates(candidates []beads.Bead, opts hookClaimOptions) (
 	return currentCandidates, nil
 }
 
+// filterCanonicalHookClaimCandidates reapplies the hook's general readiness
+// gates after a lossy query/formula projection has been replaced with rows from
+// the exact source stores. Open rows are checked against Store.Ready, which
+// supplies authoritative dependency readiness even when Get omits is_blocked.
+// In-progress rows need their own dependency walk because Ready intentionally
+// excludes them; this uses the same blocked_by projection as gc ready.
+func filterCanonicalHookClaimCandidates(candidates []beads.Bead, opts hookClaimOptions, now time.Time) ([]beads.Bead, error) {
+	if !opts.RequireAuthoritativeClaimRead || len(candidates) == 0 {
+		return candidates, nil
+	}
+	type sourceGroup struct {
+		store      beads.Store
+		open       []beads.Bead
+		inProgress []beads.Bead
+	}
+	type candidateKey struct {
+		storeRef string
+		id       string
+	}
+	groups := make(map[string]*sourceGroup)
+	eligible := make(map[candidateKey]bool, len(candidates))
+	for _, candidate := range candidates {
+		if hookClaimCandidateIsMessage(candidate) {
+			eligible[candidateKey{id: candidate.ID}] = true
+			continue
+		}
+		status := strings.ToLower(strings.TrimSpace(candidate.Status))
+		if status == "closed" || status == "blocked" || beads.IsDeferred(candidate, now) ||
+			(candidate.IsBlocked != nil && *candidate.IsBlocked) || lifecycleRowHeld(candidate) ||
+			hookCandidateBudgetDeferred(candidate, now) {
+			continue
+		}
+		if status != "open" && status != "in_progress" {
+			continue
+		}
+		storeRef := strings.TrimSpace(candidate.SourceStoreRef)
+		if storeRef == "" || storeRef != candidate.SourceStoreRef {
+			return nil, fmt.Errorf("candidate %s has no exact source-store reference for readiness checks", candidate.ID)
+		}
+		group := groups[storeRef]
+		if group == nil {
+			if opts.ResolveLifecycleStore == nil {
+				return nil, errors.New("authoritative readiness store resolver is unavailable")
+			}
+			store, err := opts.ResolveLifecycleStore(storeRef)
+			if err != nil {
+				return nil, fmt.Errorf("resolve source store %s for readiness checks: %w", storeRef, err)
+			}
+			if store == nil {
+				return nil, fmt.Errorf("resolve source store %s for readiness checks: resolver returned nil", storeRef)
+			}
+			group = &sourceGroup{store: store}
+			groups[storeRef] = group
+		}
+		if status == "open" {
+			group.open = append(group.open, candidate)
+		} else {
+			group.inProgress = append(group.inProgress, candidate)
+		}
+	}
+	for storeRef, group := range groups {
+		if len(group.open) > 0 {
+			ready, err := group.store.Ready(beads.ReadyQuery{TierMode: beads.TierBoth})
+			if err != nil {
+				return nil, fmt.Errorf("read ready candidates from source store %s: %w", storeRef, err)
+			}
+			readyIDs := make(map[string]struct{}, len(ready))
+			for _, bead := range ready {
+				readyIDs[bead.ID] = struct{}{}
+			}
+			for _, candidate := range group.open {
+				_, eligible[candidateKey{storeRef: storeRef, id: candidate.ID}] = readyIDs[candidate.ID]
+			}
+		}
+		if len(group.inProgress) > 0 {
+			owners := make(map[string]readyLeg, len(group.inProgress))
+			for _, candidate := range group.inProgress {
+				owners[candidate.ID] = readyLeg{label: "claim source", store: group.store}
+			}
+			blockedBy, err := readyBlockedByForRows(group.inProgress, owners)
+			if err != nil {
+				return nil, fmt.Errorf("check in-progress dependencies in source store %s: %w", storeRef, err)
+			}
+			for _, candidate := range group.inProgress {
+				blocked := false
+				for _, blocker := range blockedBy[candidate.ID] {
+					if status := strings.TrimSpace(blocker.Status); status != "" && !strings.EqualFold(status, "closed") {
+						blocked = true
+						break
+					}
+				}
+				eligible[candidateKey{storeRef: storeRef, id: candidate.ID}] = !blocked
+			}
+		}
+	}
+	filtered := make([]beads.Bead, 0, len(candidates))
+	for _, candidate := range candidates {
+		key := candidateKey{storeRef: strings.TrimSpace(candidate.SourceStoreRef), id: candidate.ID}
+		if hookClaimCandidateIsMessage(candidate) {
+			key.storeRef = ""
+		}
+		if eligible[key] {
+			filtered = append(filtered, candidate)
+		}
+	}
+	return filtered, nil
+}
+
+func authoritativeHookClaimCandidateReady(candidate beads.Bead, opts hookClaimOptions, now time.Time) (bool, error) {
+	if !opts.RequireAuthoritativeClaimRead || hookClaimCandidateIsMessage(candidate) {
+		return true, nil
+	}
+	filtered, err := filterCanonicalHookClaimCandidates([]beads.Bead{candidate}, opts, now)
+	if err != nil {
+		return false, err
+	}
+	return len(filtered) == 1, nil
+}
+
+func canonicalHookClaimCandidateReady(store beads.Store, candidate beads.Bead, now time.Time) (bool, error) {
+	if store == nil || strings.TrimSpace(candidate.ID) == "" ||
+		beads.IsDeferred(candidate, now) || hookCandidateBudgetDeferred(candidate, now) ||
+		(candidate.IsBlocked != nil && *candidate.IsBlocked) || lifecycleRowHeld(candidate) {
+		return false, nil
+	}
+	status := strings.ToLower(strings.TrimSpace(candidate.Status))
+	switch status {
+	case "open":
+		ready, err := store.Ready(beads.ReadyQuery{TierMode: beads.TierBoth})
+		if err != nil {
+			return false, err
+		}
+		for _, bead := range ready {
+			if bead.ID == candidate.ID {
+				return true, nil
+			}
+		}
+		return false, nil
+	case "in_progress":
+		owners := map[string]readyLeg{candidate.ID: {label: "claim source", store: store}}
+		blockedBy, err := readyBlockedByForRows([]beads.Bead{candidate}, owners)
+		if err != nil {
+			return false, err
+		}
+		for _, blocker := range blockedBy[candidate.ID] {
+			if status := strings.TrimSpace(blocker.Status); status != "" && !strings.EqualFold(status, "closed") {
+				return false, nil
+			}
+		}
+		return true, nil
+	default:
+		return false, nil
+	}
+}
+
 func assignTrustedHookClaimProvenance(candidates []beads.Bead, opts hookClaimOptions) ([]beads.Bead, error) {
 	storeRef := strings.TrimSpace(opts.ClaimSourceStoreRef)
 	if storeRef == "" {
@@ -704,6 +875,42 @@ func checkHookFormulaAction(ctx context.Context, opts hookClaimOptions, candidat
 	if err != nil {
 		return formulaActionCandidate{}, err
 	}
+	state, err = normalizeHookFormulaActionState(state, candidate)
+	if err != nil {
+		return formulaActionCandidate{}, err
+	}
+	if !opts.RequireAuthoritativeClaimRead {
+		return state, nil
+	}
+	canonical, err := rereadHookClaimCandidates([]beads.Bead{state.Bead}, opts)
+	if err != nil {
+		return formulaActionCandidate{}, err
+	}
+	if len(canonical) != 1 {
+		return formulaActionCandidate{}, fmt.Errorf("formula compatibility lookup lost candidate %s", candidate.ID)
+	}
+	// Formula checkers may return a projection of their own. Re-run the formula
+	// decision against the canonical source row so omitted compatibility keys
+	// cannot leave Required=false and select the generic claim path.
+	verified, err := opts.CheckFormulaAction(ctx, canonical[0])
+	if err != nil {
+		return formulaActionCandidate{}, err
+	}
+	verified, err = normalizeHookFormulaActionState(verified, canonical[0])
+	if err != nil {
+		return formulaActionCandidate{}, err
+	}
+	if verified.Bead.Revision != 0 && canonical[0].Revision != 0 && verified.Bead.Revision != canonical[0].Revision {
+		return formulaActionCandidate{}, fmt.Errorf("formula compatibility lookup changed canonical revision for %s", candidate.ID)
+	}
+	// Use the exact row whose compatibility state was just checked. The
+	// checker’s formula result controls Required and Store; its row projection
+	// never replaces canonical claim data.
+	verified.Bead = canonical[0]
+	return verified, nil
+}
+
+func normalizeHookFormulaActionState(state formulaActionCandidate, candidate beads.Bead) (formulaActionCandidate, error) {
 	if state.Bead.ID == "" {
 		state.Bead = candidate
 	}
@@ -722,16 +929,6 @@ func checkHookFormulaAction(ctx context.Context, opts hookClaimOptions, candidat
 	if state.Bead.LifecycleScope == "" {
 		state.Bead.LifecycleScope = candidate.LifecycleScope
 	}
-	if opts.RequireAuthoritativeClaimRead {
-		canonical, err := rereadHookClaimCandidates([]beads.Bead{state.Bead}, opts)
-		if err != nil {
-			return formulaActionCandidate{}, err
-		}
-		if len(canonical) != 1 {
-			return formulaActionCandidate{}, fmt.Errorf("formula compatibility lookup lost candidate %s", candidate.ID)
-		}
-		state.Bead = canonical[0]
-	}
 	return state, nil
 }
 
@@ -746,6 +943,15 @@ func conditionalFormulaActionClaim(ctx context.Context, state formulaActionCandi
 	}
 	if !strings.EqualFold(strings.TrimSpace(current.Status), "open") {
 		return beads.Bead{}, false, nil
+	}
+	if opts.RequireAuthoritativeClaimRead {
+		ready, err := canonicalHookClaimCandidateReady(state.Store, current, time.Now().UTC())
+		if err != nil {
+			return beads.Bead{}, false, fmt.Errorf("checking formula action readiness: %w", err)
+		}
+		if !ready {
+			return beads.Bead{}, false, nil
+		}
 	}
 	owner := strings.TrimSpace(current.Assignee)
 	if readyAssignment {
@@ -992,6 +1198,12 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 			}
 			candidate = actionState.Bead
 		}
+		if ready, err := authoritativeHookClaimCandidateReady(candidate, opts, now); err != nil {
+			fmt.Fprintf(stderr, "gc hook --claim: authoritative readiness check failed for %s: %v\n", candidate.ID, err) //nolint:errcheck
+			return hookClaimResult{terminal: true, code: 1}
+		} else if !ready {
+			continue
+		}
 		// Use the bead's current own-identity assignee as the claim actor.
 		// BEADS_ACTOR may be represented by the runtime name, session bead id,
 		// or alias; bd's idempotent --claim path requires the actor to match the
@@ -1153,6 +1365,12 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 					continue
 				}
 			}
+			if ready, err := authoritativeHookClaimCandidateReady(candidate, opts, now); err != nil {
+				fmt.Fprintf(stderr, "gc hook --claim: authoritative readiness check failed before stale-claim reclaim of %s: %v\n", candidate.ID, err) //nolint:errcheck
+				return hookClaimResult{terminal: true, code: 1}
+			} else if !ready {
+				continue
+			}
 			if ops.claimWindowSpent() {
 				return refuseExpiredHookClaimWindow(candidate.ID, ops, stderr)
 			}
@@ -1190,6 +1408,12 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 				return hookClaimResult{terminal: true, code: 1}
 			}
 			candidate = actionState.Bead
+		}
+		if ready, err := authoritativeHookClaimCandidateReady(candidate, opts, now); err != nil {
+			fmt.Fprintf(stderr, "gc hook --claim: authoritative readiness check failed for %s: %v\n", candidate.ID, err) //nolint:errcheck
+			return hookClaimResult{terminal: true, code: 1}
+		} else if !ready {
+			continue
 		}
 		var claimed beads.Bead
 		var ok bool
@@ -1402,6 +1626,23 @@ func certifyHookAdoption(bead beads.Bead, opts hookClaimOptions, ops hookClaimOp
 	if err != nil {
 		fmt.Fprintf(stderr, "gc hook --claim: adopting %s without a canonical ownership readback: %v\n", beadID, err) //nolint:errcheck
 		return hookAdoptionUnverified, ""
+	}
+	if opts.RequireAuthoritativeClaimRead {
+		current, err := rereadHookClaimCandidates([]beads.Bead{bead}, opts)
+		if err != nil || len(current) != 1 {
+			fmt.Fprintf(stderr, "gc hook --claim: holding assignment %s because its exact source row could not be re-read: %v\n", beadID, err) //nolint:errcheck
+			return hookAdoptionRefused, ""
+		}
+		ready, err := authoritativeHookClaimCandidateReady(current[0], opts, ops.nowOrWallClock())
+		if err != nil || !ready {
+			fmt.Fprintf(stderr, "gc hook --claim: holding assignment %s because its canonical readiness changed or could not be checked: %v\n", beadID, err) //nolint:errcheck
+			return hookAdoptionRefused, ""
+		}
+		canonical = current[0]
+	}
+	if !strings.EqualFold(strings.TrimSpace(canonical.Status), "in_progress") {
+		fmt.Fprintf(stderr, "gc hook --claim: refusing to re-serve %s: the canonical store records status=%q, not in_progress\n", beadID, strings.TrimSpace(canonical.Status)) //nolint:errcheck
+		return hookAdoptionRefused, ""
 	}
 	if !hookClaimHasIdentity(canonical.Assignee, opts.IdentityCandidates) {
 		_, _ = fmt.Fprintf(stderr,
@@ -1892,18 +2133,43 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 			!hookClaimMatchesRoute(sibling, opts.RouteTargets) {
 			continue
 		}
+		if opts.RequireAuthoritativeClaimRead {
+			canonical, err := rereadHookClaimCandidates([]beads.Bead{sibling}, opts)
+			if err != nil {
+				return assigned, fmt.Errorf("reading canonical continuation %s: %w", sibling.ID, err)
+			}
+			if len(canonical) != 1 {
+				return assigned, fmt.Errorf("canonical continuation lookup lost %s", sibling.ID)
+			}
+			sibling = canonical[0]
+			ready, err := authoritativeHookClaimCandidateReady(sibling, opts, ops.nowOrWallClock())
+			if err != nil {
+				return assigned, fmt.Errorf("checking canonical continuation readiness %s: %w", sibling.ID, err)
+			}
+			if !ready {
+				continue
+			}
+		}
+		actionState := formulaActionCandidate{Bead: sibling}
 		if opts.CheckFormulaAction != nil {
-			state, err := checkHookFormulaAction(ctx, opts, sibling)
+			var err error
+			actionState, err = checkHookFormulaAction(ctx, opts, sibling)
 			if err != nil {
 				return assigned, fmt.Errorf("validating continuation formula %s: %w", sibling.ID, err)
 			}
-			if state.Required {
-				if err := conditionalFormulaActionAssign(ctx, state, pinAssignee, opts); err != nil {
-					return assigned, fmt.Errorf("conditionally assigning formula continuation %s: %w", sibling.ID, err)
-				}
-				assigned = append(assigned, sibling.ID)
-				continue
+			sibling = actionState.Bead
+		}
+		if ready, err := authoritativeHookClaimCandidateReady(sibling, opts, ops.nowOrWallClock()); err != nil {
+			return assigned, fmt.Errorf("checking canonical continuation readiness %s: %w", sibling.ID, err)
+		} else if !ready {
+			continue
+		}
+		if actionState.Required {
+			if err := conditionalFormulaActionAssign(ctx, actionState, pinAssignee, opts); err != nil {
+				return assigned, fmt.Errorf("conditionally assigning formula continuation %s: %w", sibling.ID, err)
 			}
+			assigned = append(assigned, sibling.ID)
+			continue
 		}
 		if err := ops.AssignContinuation(ctx, dir, opts.Env, sibling.ID, pinAssignee); err != nil {
 			return assigned, fmt.Errorf("assigning %s: %w", sibling.ID, err)
@@ -1919,6 +2185,15 @@ func conditionalFormulaActionAssign(ctx context.Context, state formulaActionCand
 	}
 	if !strings.EqualFold(strings.TrimSpace(state.Bead.Status), "open") {
 		return nil
+	}
+	if opts.RequireAuthoritativeClaimRead {
+		ready, err := canonicalHookClaimCandidateReady(state.Store, state.Bead, time.Now().UTC())
+		if err != nil {
+			return fmt.Errorf("checking formula continuation readiness: %w", err)
+		}
+		if !ready {
+			return errors.New("formula continuation is no longer ready")
+		}
 	}
 	writer, ok := beads.ConditionalWriterFor(state.Store)
 	if !ok || !beads.InspectConditionalWrites(state.Store).Capable {

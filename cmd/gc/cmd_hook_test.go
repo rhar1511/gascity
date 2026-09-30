@@ -1805,6 +1805,9 @@ case "$*" in
   *"show --json root-1"*)
     printf '[{"id":"root-1","status":"open","metadata":{}}]'
     ;;
+  *"ready --json --include-ephemeral --limit 0"*)
+    printf '[{"id":"hw-next","status":"open","metadata":{"gc.routed_to":"worker"}}]'
+    ;;
   *"list --json --status=open"*"gc.continuation_group=body"*"gc.root_bead_id=root-1"*)
     printf '[{"id":"hw-claim","status":"open","metadata":{"gc.routed_to":"worker","gc.root_bead_id":"root-1","gc.continuation_group":"body"}},{"id":"hw-next","status":"open","metadata":{"gc.routed_to":"worker","gc.root_bead_id":"root-1","gc.continuation_group":"body"}},{"id":"hw-other","status":"open","metadata":{"gc.routed_to":"other","gc.root_bead_id":"root-1","gc.continuation_group":"body"}}]'
     ;;

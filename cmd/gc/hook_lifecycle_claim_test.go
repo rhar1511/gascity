@@ -7,6 +7,7 @@ import (
 	"io"
 	"maps"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -199,6 +200,170 @@ func TestHookFormulaActionProjectionCannotEraseDurableLifecycleMarkers(t *testin
 	if state.Bead.SourceStoreRef != candidate.SourceStoreRef || state.Bead.LifecycleScope != candidate.LifecycleScope {
 		t.Fatalf("canonical formula candidate provenance = (%q, %q), want (%q, %q)",
 			state.Bead.SourceStoreRef, state.Bead.LifecycleScope, candidate.SourceStoreRef, candidate.LifecycleScope)
+	}
+}
+
+func TestHookClaimRechecksFormulaRequirementAfterCanonicalReread(t *testing.T) {
+	baseStore := beads.NewMemStore()
+	baseStore.HonorExplicitIDs = true
+	canonical, err := baseStore.Create(beads.Bead{
+		ID: "work-formula-projection", Type: "task", Status: "open",
+		Metadata: map[string]string{
+			beadmeta.RoutedToMetadataKey:                   "worker",
+			beadmeta.CompatibilityRequestMetadataKey:       "request-v1",
+			beadmeta.CompatibilityAuthorizationMetadataKey: "authorization-v1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create canonical formula action: %v", err)
+	}
+	candidate := beads.Bead{
+		ID: canonical.ID, Type: canonical.Type, Status: canonical.Status,
+		SourceStoreRef: "city:pilot", LifecycleScope: worklifecycle.ScopeForStore("pilot", "city:pilot"),
+		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker"},
+	}
+
+	formulaChecks := 0
+	check := func(_ context.Context, current beads.Bead) (formulaActionCandidate, error) {
+		formulaChecks++
+		if current.Metadata[beadmeta.CompatibilityRequestMetadataKey] == "request-v1" &&
+			current.Metadata[beadmeta.CompatibilityAuthorizationMetadataKey] == "authorization-v1" {
+			return formulaActionCandidate{Store: baseStore, Bead: current, Required: true}, nil
+		}
+		// Model a formula checker that returns a lossy projection. Its initial
+		// Required=false must not survive the authoritative reread below.
+		return formulaActionCandidate{Bead: beads.Bead{
+			ID: current.ID, Type: current.Type, Status: current.Status,
+			Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker"},
+		}}, nil
+	}
+	var writes lifecycleClaimWriteCounters
+	ops := lifecycleProjectionClaimOps("", baseStore, &writes)
+	ops.EmitExecutionStepStarted = func(beads.Bead, string, []string, string) {}
+	ops.PublishRunMap = func(string, string, ...string) error { return nil }
+	ops.ResolveWorkBranch = func(hookClaimWorkTree) string { return "" }
+	ops.ResolveSessionWorkDir = func(string) string { return "" }
+	var stdout, stderr bytes.Buffer
+	result := claimFirstEligibleHookCandidate([]beads.Bead{candidate}, hookClaimOptions{
+		Assignee: "worker", IdentityCandidates: []string{"worker"}, RouteTargets: []string{"worker"},
+		TrustedLifecycleScope: true, RequireAuthoritativeClaimRead: true,
+		ResolveLifecycleStore: func(ref string) (beads.Store, error) {
+			if ref != candidate.SourceStoreRef {
+				return nil, beads.ErrNotFound
+			}
+			return baseStore, nil
+		},
+		CheckFormulaAction: check,
+	}, ops, "/city", &stdout, &stderr)
+
+	if !result.terminal || result.code != 0 {
+		t.Fatalf("claim result = %+v; stderr=%q", result, stderr.String())
+	}
+	if formulaChecks < 2 {
+		t.Fatalf("formula checks = %d, want a second check against canonical metadata", formulaChecks)
+	}
+	if writes.claim != 0 {
+		t.Fatalf("generic claim writes = %d, want zero after canonical formula compatibility became required", writes.claim)
+	}
+	stored, err := baseStore.Get(canonical.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != "in_progress" || stored.Assignee != "worker" {
+		t.Fatalf("stored work = status %q, assignee %q; want a conditional formula claim", stored.Status, stored.Assignee)
+	}
+}
+
+func TestHookClaimCanonicalRereadReappliesReadinessChecks(t *testing.T) {
+	future := time.Now().UTC().Add(time.Hour)
+	for _, tc := range []struct {
+		name       string
+		status     string
+		assignee   string
+		labels     []string
+		deferUntil *time.Time
+		blocked    bool
+		dependency bool
+	}{
+		{name: "hold label", status: "open", labels: []string{beadmeta.HoldMayorLabel}},
+		{name: "future defer", status: "open", deferUntil: &future},
+		{name: "blocked projection", status: "open", blocked: true},
+		{name: "in-progress dependency block", status: "in_progress", assignee: "worker", dependency: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			baseStore := beads.NewMemStore()
+			baseStore.HonorExplicitIDs = true
+			if tc.dependency {
+				if _, err := baseStore.Create(beads.Bead{ID: "blocker", Type: "task", Status: "open"}); err != nil {
+					t.Fatalf("create blocker: %v", err)
+				}
+			}
+			blocked := tc.blocked
+			canonical, err := baseStore.Create(beads.Bead{
+				ID: "work-readiness-projection", Type: "task", Status: tc.status, Assignee: tc.assignee,
+				Labels: tc.labels, DeferUntil: tc.deferUntil,
+				IsBlocked: func() *bool {
+					if !tc.blocked {
+						return nil
+					}
+					return &blocked
+				}(),
+				Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker"},
+			})
+			if err != nil {
+				t.Fatalf("create canonical candidate: %v", err)
+			}
+			if tc.dependency {
+				if err := baseStore.DepAdd(canonical.ID, "blocker", "blocks"); err != nil {
+					t.Fatalf("add blocking dependency: %v", err)
+				}
+			}
+			projection, err := json.Marshal([]struct {
+				ID             string            `json:"id"`
+				Type           string            `json:"type"`
+				Status         string            `json:"status"`
+				Assignee       string            `json:"assignee,omitempty"`
+				Metadata       map[string]string `json:"metadata"`
+				SourceStoreRef string            `json:"source_store_ref"`
+			}{{
+				ID: canonical.ID, Type: canonical.Type, Status: tc.status, Assignee: tc.assignee,
+				Metadata:       map[string]string{beadmeta.RoutedToMetadataKey: "worker"},
+				SourceStoreRef: "city:pilot",
+			}})
+			if err != nil {
+				t.Fatalf("encode lossy query projection: %v", err)
+			}
+
+			var writes lifecycleClaimWriteCounters
+			ops := lifecycleProjectionClaimOps(string(projection), baseStore, &writes)
+			var stdout, stderr bytes.Buffer
+			opts := hookClaimOptions{
+				Assignee: "worker", IdentityCandidates: []string{"worker"}, RouteTargets: []string{"worker"}, JSON: true,
+				TrustedLifecycleScope: true, RequireAuthoritativeClaimRead: true,
+				LifecycleCity: &config.City{},
+				ResolveLifecycleStore: func(ref string) (beads.Store, error) {
+					if ref != "city:pilot" {
+						return nil, beads.ErrNotFound
+					}
+					return baseStore, nil
+				},
+				CheckFormulaAction: func(_ context.Context, candidate beads.Bead) (formulaActionCandidate, error) {
+					// Formula evaluation returns a row projection too. Readiness must
+					// be checked on the canonical source row after that projection.
+					return formulaActionCandidate{Bead: beads.Bead{
+						ID: candidate.ID, Type: candidate.Type, Status: candidate.Status, Assignee: candidate.Assignee,
+						Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker"},
+					}}, nil
+				},
+			}
+			result := tryHookClaim("gc ready --json", "/city", &opts, &ops, &stdout, &stderr)
+			if result.terminal {
+				t.Fatalf("unexpected terminal claim result = %+v; stderr=%q stdout=%q", result, stderr.String(), stdout.String())
+			}
+			if writes.claim != 0 || writes.lifecycleClaim != 0 || writes.workIdentity != 0 || writes.sessionClaim != 0 || writes.continuationAssign != 0 {
+				t.Fatalf("lossy readiness projection reached mutation operations: %+v", writes)
+			}
+		})
 	}
 }
 
