@@ -124,7 +124,10 @@ transition for an admitted work item and its authenticated managed session.
 `source_store_ref` accepts `city:<city_name>` or `rig:<rig_name>`. Relocated
 `class:<classes>` references are not supported by this endpoint. Graph-v2
 lifecycle descendants in a relocated graph store remain held until a separate
-descendant transition proof is available.
+descendant transition proof is available. Before a fresh claim, the controller
+re-reads the source and requires it to remain open, unassigned, outside dispatch
+and time-based holds, and in the live ready set so dependency changes are
+included. Exact claim retries remain idempotent.
 
 ### Pull-request action trust
 

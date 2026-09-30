@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -164,6 +165,11 @@ func (cs *controllerState) ClaimLifecycleWork(ctx context.Context, request api.L
 		(request.ExpectedRevision != head.ToVersion || request.ExpectedTransitionHead != head.ReceiptID) {
 		return api.LifecycleClaimTransitionResult{}, worklifecycle.ErrTransitionChainStale
 	}
+	if current.Status == "open" && current.Assignee == "" {
+		if err := verifyLifecycleClaimReadiness(selected.store, current.ID, head.ToVersion, head.ReceiptID); err != nil {
+			return api.LifecycleClaimTransitionResult{}, err
+		}
+	}
 	if err := ctx.Err(); err != nil {
 		return api.LifecycleClaimTransitionResult{}, err
 	}
@@ -181,6 +187,42 @@ func (cs *controllerState) ClaimLifecycleWork(ctx context.Context, request api.L
 		ClaimGeneration: claimed.ClaimGeneration, ReceiptID: claimed.Receipt.ReceiptID,
 		Replayed: claimed.Replayed, Recovered: claimed.Recovered,
 	}, nil
+}
+
+// verifyLifecycleClaimReadiness re-reads the exact source after its transition
+// head is verified and immediately before ClaimIdentity. The hook's projection
+// is only a candidate locator: a fresh claim requires the current source to be
+// open, unassigned, outside all deferrals and dispatch holds, and present in the
+// authoritative live ready set, which owns dependency readiness.
+func verifyLifecycleClaimReadiness(store beads.Store, workID string, expectedRevision int64, expectedHead string) error {
+	if store == nil || strings.TrimSpace(workID) == "" || expectedRevision <= 0 || strings.TrimSpace(expectedHead) == "" {
+		return worklifecycle.ErrTransitionChainUnavailable
+	}
+	live := beads.HandlesFor(store).Live
+	current, err := live.Get(workID)
+	if err != nil {
+		return fmt.Errorf("read current lifecycle claim source: %w", errorsJoinTransitionEvidence(err))
+	}
+	if current.ID != workID || current.Revision != expectedRevision ||
+		current.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey] != expectedHead ||
+		current.Status != "open" || current.Assignee != "" {
+		return worklifecycle.ErrTransitionChainStale
+	}
+	now := time.Now()
+	if (current.IsBlocked != nil && *current.IsBlocked) || lifecycleRowHeld(current) ||
+		beads.IsDeferred(current, now) || hookCandidateBudgetDeferred(current, now) {
+		return worklifecycle.ErrTransitionChainStale
+	}
+	ready, err := live.Ready(beads.ReadyQuery{TierMode: beads.FederatedReadTier})
+	if err != nil {
+		return fmt.Errorf("read current lifecycle claim ready set: %w", errorsJoinTransitionEvidence(err))
+	}
+	for _, row := range ready {
+		if row.ID == workID {
+			return nil
+		}
+	}
+	return worklifecycle.ErrTransitionChainStale
 }
 
 func lifecycleClaimSourceStoreRef(cityName string, apiRef storeref.StoreRef) (string, error) {

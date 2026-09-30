@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -252,7 +253,6 @@ func TestLifecycleGraphV2ClassStoreDescendantIsHeldBeforeClaim(t *testing.T) {
 	root, err := store.Create(beads.Bead{
 		ID: rootID, Type: "molecule", Status: "open",
 		Metadata: map[string]string{
-			beadmeta.KindMetadataKey:                     beadmeta.KindWorkflow,
 			beadmeta.FormulaContractMetadataKey:          beadmeta.FormulaContractGraphV2,
 			beadmeta.FormulaNameMetadataKey:              "review",
 			beadmeta.LifecycleMaterializationMetadataKey: lineage,
@@ -323,6 +323,84 @@ func TestLifecycleGraphV2ClassStoreDescendantIsHeldBeforeClaim(t *testing.T) {
 	if !strings.Contains(stderr.String(), "graph.v2 lifecycle descendant has no verified own Q43/Q54 transition head") {
 		t.Fatalf("stderr = %q, want the graph.v2 descendant hold despite an unverified head", stderr.String())
 	}
+}
+
+func TestLifecycleGraphV2ClassDescendantFailsClosedWithoutRootEvidence(t *testing.T) {
+	const (
+		classRef = "class:graph"
+		rootID   = "gcg-root"
+		childID  = "gcg-step"
+	)
+	store := beads.NewMemStore()
+	store.HonorExplicitIDs = true
+	if _, err := store.Create(beads.Bead{
+		ID: rootID, Type: "molecule", Status: "open",
+		Metadata: map[string]string{
+			beadmeta.FormulaContractMetadataKey:          beadmeta.FormulaContractGraphV2,
+			beadmeta.LifecycleMaterializationMetadataKey: "controller-lineage",
+		},
+	}); err != nil {
+		t.Fatalf("create graph-only lifecycle root: %v", err)
+	}
+	child, err := store.Create(beads.Bead{
+		ID: childID, Type: "task", Status: "open", ParentID: rootID,
+		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: rootID},
+	})
+	if err != nil {
+		t.Fatalf("create graph descendant: %v", err)
+	}
+	child.SourceStoreRef = classRef
+
+	rootReadErrorStore := lifecycleRootReadErrorStore{Store: store, rootID: rootID}
+	for _, tc := range []struct {
+		name    string
+		resolve func() func(string) (beads.Store, error)
+	}{
+		{
+			name:    "missing resolver",
+			resolve: func() func(string) (beads.Store, error) { return nil },
+		},
+		{
+			name: "unavailable store",
+			resolve: func() func(string) (beads.Store, error) {
+				return func(string) (beads.Store, error) { return nil, errors.New("store unavailable") }
+			},
+		},
+		{
+			name: "root read failure",
+			resolve: func() func(string) (beads.Store, error) {
+				return func(string) (beads.Store, error) { return rootReadErrorStore, nil }
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resolve := tc.resolve()
+			opts := hookClaimOptions{
+				Lifecycle:             config.LifecycleConfig{AdmissionEnabled: true},
+				TrustedLifecycleScope: true,
+				ResolveLifecycleStore: resolve,
+			}
+			var filterErr strings.Builder
+			if got := filterHookLifecycleCandidates([]beads.Bead{child}, opts, &filterErr); len(got) != 0 {
+				t.Fatalf("descendant passed lifecycle hold with unavailable root evidence: %+v", got)
+			}
+			if !strings.Contains(filterErr.String(), "workflow root evidence is unavailable") {
+				t.Fatalf("hold reason = %q, want explicit unavailable-root evidence", filterErr.String())
+			}
+		})
+	}
+}
+
+type lifecycleRootReadErrorStore struct {
+	beads.Store
+	rootID string
+}
+
+func (s lifecycleRootReadErrorStore) Get(id string) (beads.Bead, error) {
+	if id == s.rootID {
+		return beads.Bead{}, errors.New("root read failed")
+	}
+	return s.Store.Get(id)
 }
 
 type lifecycleHoldDuringClaimStore struct {

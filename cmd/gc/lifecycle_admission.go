@@ -1329,16 +1329,21 @@ func lifecycleGraphV2ClassDescendantHoldReason(candidate beads.Bead, opts hookCl
 		return ""
 	}
 	rootID := strings.TrimSpace(candidate.Metadata[beadmeta.RootBeadIDMetadataKey])
-	if rootID == "" || rootID == candidate.ID || opts.ResolveLifecycleStore == nil {
+	if rootID == candidate.ID {
 		return ""
+	}
+	if rootID == "" || opts.ResolveLifecycleStore == nil {
+		return "graph.v2 lifecycle descendant workflow root evidence is unavailable; descendant claims remain held pending verified root evidence"
 	}
 	store, err := opts.ResolveLifecycleStore(storeRef)
 	if err != nil || store == nil {
-		return ""
+		return "graph.v2 lifecycle descendant workflow root evidence is unavailable; descendant claims remain held pending verified root evidence"
 	}
 	root, err := store.Get(rootID)
-	if err != nil || root.ID != rootID || root.Metadata[beadmeta.KindMetadataKey] != beadmeta.KindWorkflow ||
-		!strings.EqualFold(strings.TrimSpace(root.Metadata[beadmeta.FormulaContractMetadataKey]), beadmeta.FormulaContractGraphV2) {
+	if err != nil || root.ID != rootID {
+		return "graph.v2 lifecycle descendant workflow root evidence is unavailable; descendant claims remain held pending verified root evidence"
+	}
+	if !sourceworkflow.IsWorkflowRoot(root) {
 		return ""
 	}
 	if strings.TrimSpace(root.Metadata[beadmeta.LifecycleMaterializationMetadataKey]) == "" {
