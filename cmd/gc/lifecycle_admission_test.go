@@ -5,7 +5,6 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
-	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
@@ -18,14 +17,13 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/featureflags"
 	"github.com/gastownhall/gascity/internal/rollout"
-	"github.com/gastownhall/gascity/internal/sourceworkflow"
 	"github.com/gastownhall/gascity/internal/worklifecycle"
 )
 
 func TestLifecycleAdmissionHoldsSignedV2UntilAttachmentAndPolicyProof(t *testing.T) {
 	store, cfg, cityPath := lifecycleAdmissionFixture(t)
 	var stderr bytes.Buffer
-	reconcileLifecycleAdmission("pilot", cityPath, cfg, store, nil, nil, &stderr)
+	reconcileLifecycleAdmission("pilot", cityPath, cfg, store, &stderr)
 	work, err := store.Get("work-1")
 	if err != nil {
 		t.Fatal(err)
@@ -49,7 +47,7 @@ func TestLifecycleAdmissionConcurrentPassesDoNotMaterializeWithoutProof(t *testi
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			reconcileLifecycleAdmission("pilot", cityPath, cfg, store, nil, nil, io.Discard)
+			reconcileLifecycleAdmission("pilot", cityPath, cfg, store, io.Discard)
 		}()
 	}
 	wg.Wait()
@@ -83,7 +81,7 @@ func TestLifecycleAdmissionDoesNotResumeReservationWithoutV2Proof(t *testing.T) 
 		t.Fatal(err)
 	}
 	var stderr bytes.Buffer
-	reconcileLifecycleAdmission("pilot", cityPath, cfg, store, nil, nil, &stderr)
+	reconcileLifecycleAdmission("pilot", cityPath, cfg, store, &stderr)
 	current, err := store.Get(row.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -115,7 +113,7 @@ func TestLifecycleProtectionSurvivesDisabledAdmissionWithoutChangingLegacyRows(t
 func TestLifecycleGraphV2AdmissionWaitsForAttachmentAndPolicyProof(t *testing.T) {
 	store, cfg, cityPath := lifecycleAdmissionFixture(t)
 	var stderr bytes.Buffer
-	reconcileLifecycleAdmission("pilot", cityPath, cfg, store, nil, nil, &stderr)
+	reconcileLifecycleAdmission("pilot", cityPath, cfg, store, &stderr)
 	source, err := store.Get("work-1")
 	if err != nil {
 		t.Fatal(err)
@@ -176,7 +174,7 @@ func TestLifecycleGraphDescendantAssignmentProtectsLiveSessionFromLegacyRestart(
 	}
 	cityPath := t.TempDir()
 	var stderr bytes.Buffer
-	reconcileLifecycleAdmission("test-city", cityPath, env.cfg, env.store, nil, nil, &stderr)
+	reconcileLifecycleAdmission("test-city", cityPath, env.cfg, env.store, &stderr)
 	source, err = env.store.Get(source.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -276,75 +274,12 @@ func TestLifecycleGraphWorkflowLookupDoesNotFallBackAcrossDuplicateIDs(t *testin
 	}
 }
 
-func materializeLifecycleGraphV2(t *testing.T, store beads.Store, cfg *config.City, cityPath, sourceID string) (beads.Bead, beads.Bead) {
-	t.Helper()
-	if len(cfg.FormulaLayers.City) == 0 {
-		cfg.FormulaLayers.City = []string{t.TempDir()}
-	}
-	formulaDir := cfg.FormulaLayers.City[0]
-	if err := os.MkdirAll(formulaDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	formula := "formula = \"review\"\nversion = 2\ncontract = \"graph.v2\"\n\n[[steps]]\nid = \"work\"\ntitle = \"Review work\"\ntype = \"task\"\n"
-	if err := os.WriteFile(filepath.Join(formulaDir, "review.toml"), []byte(formula), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	workflow := "review"
-	cfg.Agents[0].DefaultSlingFormula = &workflow
-	cfg.Daemon.FormulaV2 = boolPtr(true)
-	withLifecycleFormulaV2ForTest(t, cfg)
-	addTestControlDispatcherAgents(cfg, "")
-	var stderr bytes.Buffer
-	reconcileLifecycleAdmission(censusCityName(cfg), cityPath, cfg, store, nil, nil, &stderr)
-	source, err := store.Get(sourceID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	lineage, ok := lifecycleMaterializationFor(source)
-	if !ok || lineage.State != "attached" || lineage.WorkflowID == "" {
-		rows, _ := store.List(beads.ListQuery{AllowScan: true, TierMode: beads.TierBoth})
-		t.Fatalf("graph formula did not attach lifecycle lineage to source: %+v; stderr=%s; source=%+v; rows=%+v", lineage, stderr.String(), source, rows)
-	}
-	root, err := store.Get(lineage.WorkflowID)
-	if err != nil {
-		t.Fatalf("read graph root %s: %v", lineage.WorkflowID, err)
-	}
-	if !sourceworkflow.IsWorkflowRoot(root) || root.Metadata[beadmeta.FormulaContractMetadataKey] != beadmeta.FormulaContractGraphV2 {
-		t.Fatalf("attached workflow is not a graph.v2 root: %+v", root)
-	}
-	children, err := store.ListByMetadata(map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID}, 0, beads.WithBothTiers)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, child := range children {
-		if child.ID != root.ID && child.Metadata[beadmeta.RoutedToMetadataKey] == "pilot/worker" && lifecycleMaterializationEvidence(child) {
-			return root, child
-		}
-	}
-	t.Fatalf("graph root %s has no routed descendant carrying attached lifecycle lineage: %+v", root.ID, children)
-	return beads.Bead{}, beads.Bead{}
-}
-
 func withLifecycleFormulaV2ForTest(t *testing.T, cfg *config.City) {
 	t.Helper()
 	previous := featureflags.Snapshot()
 	formulaV2 := rollout.ForTest(rollout.WithFormulaV2(cfg != nil && cfg.Daemon.FormulaV2Enabled())).FormulaV2()
 	featureflags.Apply(featureflags.Flags{FormulaV2: formulaV2, GraphApply: formulaV2})
 	t.Cleanup(func() { featureflags.Apply(previous) })
-}
-
-func lifecycleReadyWireJSON(t *testing.T, candidate beads.Bead, storeRef, scope string) string {
-	t.Helper()
-	wire := struct {
-		beads.Bead
-		SourceStoreRef string `json:"source_store_ref"`
-		LifecycleScope string `json:"lifecycle_scope"`
-	}{Bead: candidate, SourceStoreRef: storeRef, LifecycleScope: scope}
-	encoded, err := json.Marshal([]any{wire})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return string(encoded)
 }
 
 func lifecycleAdmissionFixture(t *testing.T) (beads.Store, *config.City, string) {

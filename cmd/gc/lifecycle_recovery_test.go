@@ -6,7 +6,6 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -373,7 +372,7 @@ func newLifecycleRecoveryFixture(t *testing.T) *lifecycleRecoveryFixture {
 		t.Fatal(err)
 	}
 	cityPath := t.TempDir()
-	reconcileLifecycleAdmission(city, cityPath, cfg, store, nil, nil, &bytes.Buffer{})
+	reconcileLifecycleAdmission(city, cityPath, cfg, store, &bytes.Buffer{})
 	work, err = store.Get(work.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -454,15 +453,6 @@ func lifecycleRecoveryBindingForTest(t *testing.T, fixture *lifecycleRecoveryFix
 	}
 }
 
-func recoveryStateFromWork(t *testing.T, work beads.Bead) worklifecycle.RecoveryState {
-	t.Helper()
-	var state worklifecycle.RecoveryState
-	if err := json.Unmarshal([]byte(work.Metadata[beadmeta.LifecycleRecoveryStateMetadataKey]), &state); err != nil {
-		t.Fatal(err)
-	}
-	return state
-}
-
 type lifecycleRecoveryAmbiguousStore struct {
 	beads.Store
 	beads.ConditionalWriter
@@ -473,22 +463,4 @@ func (s *lifecycleRecoveryAmbiguousStore) UpdateIfMatch(id string, revision int6
 		return err
 	}
 	return errors.New("simulated lost conditional-write response")
-}
-
-type lifecycleRecoveryHoldAfterCASStore struct {
-	beads.Store
-	beads.ConditionalWriter
-	target string
-}
-
-func (s *lifecycleRecoveryHoldAfterCASStore) UpdateIfMatch(id string, revision int64, opts beads.UpdateOpts) error {
-	if err := s.ConditionalWriter.UpdateIfMatch(id, revision, opts); err != nil {
-		return err
-	}
-	if id == s.target {
-		if err := s.Update(id, beads.UpdateOpts{Labels: []string{"hold:external"}}); err != nil {
-			return err
-		}
-	}
-	return nil
 }

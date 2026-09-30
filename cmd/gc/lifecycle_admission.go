@@ -36,12 +36,9 @@ func reconcileLifecycleAdmission(
 	cityPath string,
 	cfg *config.City,
 	store beads.Store,
-	rigStores map[string]beads.Store,
-	suspendedRigPaths map[string]bool,
 	stderr io.Writer,
-	authorities ...qualification.CompatibilityAuthority,
 ) {
-	reconcileLifecycleAdmissionWithPermitResolver(cityName, cityPath, cfg, store, rigStores, suspendedRigPaths, stderr, nil, authorities...)
+	reconcileLifecycleAdmissionWithPermitResolver(cityName, cityPath, cfg, store, nil, nil, stderr, nil)
 }
 
 func reconcileLifecycleAdmissionWithPermitResolver(
@@ -673,7 +670,7 @@ func findLifecycleMaterializedWorkflow(store beads.Store, materializationID, pen
 		marker, markerOK := lifecycleMaterializationFor(root)
 		if strings.TrimSpace(root.Metadata[beadmeta.FormulaNameMetadataKey]) != formulaName || !markerOK ||
 			!sameLifecycleMaterializationContract(pending, marker) ||
-			marker.State != "lineage_pending" && !(marker.State == "attached" && marker.WorkflowID == root.ID) {
+			marker.State != "lineage_pending" && (marker.State != "attached" || marker.WorkflowID != root.ID) {
 			return "", false, fmt.Errorf("deterministic materialization identity points to a workflow with mismatched formula or lineage")
 		}
 		if strings.EqualFold(strings.TrimSpace(root.Status), "closed") || root.Metadata[beadmeta.FailureReasonMetadataKey] != "" ||
@@ -1133,33 +1130,6 @@ func lifecycleStoreForRef(cityPath string, cfg *config.City, ref string) (beads.
 		}
 	}
 	return nil, fmt.Errorf("configured topology has no store named %q", ref)
-}
-
-func lifecycleWorkflowRowDescendsFrom(root beads.Bead, row beads.Bead, rows []beads.Bead) bool {
-	byID := make(map[string]beads.Bead, len(rows))
-	for _, candidate := range rows {
-		byID[candidate.ID] = candidate
-	}
-	if strings.TrimSpace(row.Metadata[beadmeta.RootBeadIDMetadataKey]) == root.ID {
-		return true
-	}
-	parentID := strings.TrimSpace(row.ParentID)
-	seen := map[string]struct{}{}
-	for parentID != "" {
-		if parentID == root.ID {
-			return true
-		}
-		if _, duplicate := seen[parentID]; duplicate {
-			return false
-		}
-		seen[parentID] = struct{}{}
-		parent, ok := byID[parentID]
-		if !ok {
-			return false
-		}
-		parentID = strings.TrimSpace(parent.ParentID)
-	}
-	return false
 }
 
 // lifecycleAdmissionRouteMatches reports whether a work item whose lifecycle
