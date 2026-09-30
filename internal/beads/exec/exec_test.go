@@ -1192,6 +1192,98 @@ esac
 	}
 }
 
+func TestProtectedMetadataNamespacesAreCheckedBeforeExecWrites(t *testing.T) {
+	for _, mutation := range []struct {
+		name string
+		fn   func(*Store, string) error
+	}{
+		{"Update", func(store *Store, key string) error {
+			return store.Update("EX-1", beads.UpdateOpts{Metadata: map[string]string{key: "forged"}})
+		}},
+		{"SetMetadata", func(store *Store, key string) error {
+			return store.SetMetadata("EX-1", key, "forged")
+		}},
+		{"SetMetadataBatch", func(store *Store, key string) error {
+			return store.SetMetadataBatch("EX-1", map[string]string{key: "forged"})
+		}},
+	} {
+		t.Run(mutation.name, func(t *testing.T) {
+			for _, protected := range []struct {
+				name string
+				key  string
+				want error
+			}{
+				{name: "decision frontier namespace", key: beadmeta.DecisionFrontierMetadataPrefix + "caller_forged", want: beads.ErrDecisionFrontierMutationBlocked},
+				{name: "lifecycle transition head", key: beadmeta.LifecycleTransitionHeadMetadataKey, want: beads.ErrLifecycleMutationBlocked},
+			} {
+				t.Run(protected.name, func(t *testing.T) {
+					dir := t.TempDir()
+					writeMarker := filepath.Join(dir, "write-called")
+					script := writeScript(t, dir, `
+case "$1" in
+  get)
+    echo '{"id":"EX-1","title":"ordinary","status":"open","type":"task","created_at":"2026-01-01T00:00:00Z"}'
+    ;;
+  update|set-metadata)
+    touch "`+writeMarker+`"
+    cat > /dev/null
+    ;;
+  *) exit 2 ;;
+esac
+`)
+					if err := mutation.fn(NewStore(script), protected.key); !errors.Is(err, protected.want) {
+						t.Fatalf("protected metadata write = %v, want %v", err, protected.want)
+					}
+					if _, err := os.Stat(writeMarker); !errors.Is(err, os.ErrNotExist) {
+						t.Fatalf("protected metadata write reached exec script: %v", err)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestOrdinaryMetadataWritesRemainCompatibleAcrossExecPaths(t *testing.T) {
+	dir := t.TempDir()
+	operations := filepath.Join(dir, "operations")
+	script := writeScript(t, dir, `
+op="$1"
+shift
+printf '%s\n' "$op" >> "`+operations+`"
+case "$op" in
+  get)
+    echo '{"id":"EX-1","title":"ordinary","status":"open","type":"task","created_at":"2026-01-01T00:00:00Z"}'
+    ;;
+  update|set-metadata)
+    cat > /dev/null
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	store := NewStore(script)
+	if err := store.Update("EX-1", beads.UpdateOpts{Metadata: map[string]string{"ordinary_update": "value"}}); err != nil {
+		t.Fatalf("Update ordinary metadata: %v", err)
+	}
+	if err := store.SetMetadata("EX-1", "ordinary_single", "value"); err != nil {
+		t.Fatalf("SetMetadata ordinary metadata: %v", err)
+	}
+	if err := store.SetMetadataBatch("EX-1", map[string]string{
+		"ordinary_batch_a": "value-a",
+		"ordinary_batch_b": "value-b",
+	}); err != nil {
+		t.Fatalf("SetMetadataBatch ordinary metadata: %v", err)
+	}
+
+	data, err := os.ReadFile(operations)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Fields(string(data))
+	if len(lines) != 4 || lines[0] != "update" || lines[1] != "set-metadata" || lines[2] != "set-metadata" || lines[3] != "set-metadata" {
+		t.Fatalf("exec operations = %v, want update followed by three metadata writes without a preflight read", lines)
+	}
+}
+
 func TestLifecycleSensitiveExecWritesRefuseWithoutConditionalCapability(t *testing.T) {
 	dir := t.TempDir()
 	writeMarker := filepath.Join(dir, "write-called")

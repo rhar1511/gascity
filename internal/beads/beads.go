@@ -308,7 +308,7 @@ func LifecycleMutationNeedsValidation(opts UpdateOpts) bool {
 		return true
 	}
 	for key := range opts.Metadata {
-		if IsLifecycleRoutingMetadataKey(key) {
+		if IsLifecycleRoutingMetadataKey(key) || beadmeta.IsDecisionFrontierMetadataKey(key) {
 			return true
 		}
 		switch key {
