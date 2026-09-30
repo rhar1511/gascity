@@ -215,6 +215,10 @@ const (
 	RSIPromoteMetadataKey               = "gc.rsi_promote"
 	RSIReasonMetadataKey                = "gc.rsi_reason"
 	RSIManualApprovalMetadataKey        = "gc.rsi_manual_approval_required"
+	RSIStoryRequiredMetadataKey         = "gc.rsi_story_benchmark_required"
+	RSISuitePathMetadataKey             = "gc.rsi_suite_path"
+	RSISuiteHashMetadataKey             = "gc.rsi_eval_suite"
+	RSIParentBundleMetadataKey          = "gc.rsi_parent_bundle"
 	ReasoningMetadataKey                = "gc.reasoning"
 	RequiredArtifactMetadataKey         = "gc.required_artifact"
 	RequiredArtifactsMetadataKey        = "gc.required_artifacts"
@@ -633,6 +637,10 @@ var KnownMetadataKeys = []string{
 	RSIPromoteMetadataKey,
 	RSIReasonMetadataKey,
 	RSIManualApprovalMetadataKey,
+	RSIStoryRequiredMetadataKey,
+	RSISuitePathMetadataKey,
+	RSISuiteHashMetadataKey,
+	RSIParentBundleMetadataKey,
 	ReasoningMetadataKey,
 	RequiredArtifactMetadataKey,
 	RequiredArtifactsMetadataKey,

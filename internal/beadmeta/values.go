@@ -46,9 +46,10 @@ const (
 
 // Values of RSIRoleMetadataKey identify the producer of durable RSI evidence.
 const (
-	RSIRoleImprover = "improver"
-	RSIRoleJudge    = "judge"
-	RSIRoleGate     = "gate"
+	RSIRoleImprover  = "improver"
+	RSIRoleJudge     = "judge"
+	RSIRoleBenchmark = "benchmark"
+	RSIRoleGate      = "gate"
 )
 
 // Values of OutcomeMetadataKey ("gc.outcome").

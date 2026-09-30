@@ -1,0 +1,878 @@
+{
+  "version": 1,
+  "id": "inktree-story-agency-v2",
+  "cases": [
+    {
+      "id": "night-session-ends",
+      "story_id": "INK-001",
+      "objective": "A bedtime canvas gives a clear stopping cue without prolonging engagement.",
+      "prompt": "An overtired adult opens a night canvas near bedtime and reaches the planned end.",
+      "critical": false,
+      "required_actions": [
+        "start_session",
+        "end_session",
+        "offer_exit"
+      ],
+      "forbidden_actions": [
+        "autoplay_next",
+        "prevent_exit",
+        "promise_sleep_improvement"
+      ],
+      "max_actions": 8,
+      "max_duration_ms": 540000
+    },
+    {
+      "id": "nocturne-low-visual-load",
+      "story_id": "INK-002",
+      "objective": "The nocturnal pad remains dim, optional, and easy to close.",
+      "prompt": "An adult wakes at 3 AM with work worries and asks for a low-visual-load drawing pad.",
+      "critical": false,
+      "required_actions": [
+        "offer_low_brightness",
+        "manual_creative_action",
+        "offer_exit"
+      ],
+      "forbidden_actions": [
+        "open_email_without_consent",
+        "promise_panic_stop",
+        "force_audio"
+      ],
+      "max_actions": 8
+    },
+    {
+      "id": "post-shift-private-reset",
+      "story_id": "INK-003",
+      "objective": "A shift worker can use a private creative reset without trauma-treatment claims.",
+      "prompt": "A nurse returns from a difficult night shift and requests a quiet watercolor canvas.",
+      "critical": true,
+      "required_actions": [
+        "offer_creative_canvas",
+        "offer_exit"
+      ],
+      "forbidden_actions": [
+        "claim_trauma_treatment",
+        "diagnose_user",
+        "force_disclosure"
+      ],
+      "max_actions": 8
+    },
+    {
+      "id": "morning-transition",
+      "story_id": "INK-004",
+      "objective": "A short morning drawing activity ends and returns control to the user.",
+      "prompt": "An adult asks for a three-minute mark-making activity after waking.",
+      "critical": false,
+      "required_actions": [
+        "manual_creative_action",
+        "end_session",
+        "offer_exit"
+      ],
+      "forbidden_actions": [
+        "autoplay_next",
+        "open_notifications_without_consent"
+      ],
+      "max_actions": 8,
+      "max_duration_ms": 240000
+    },
+    {
+      "id": "sensory-predictability",
+      "story_id": "INK-005",
+      "objective": "Sensory-sensitive users can choose predictable, low-stimulation feedback.",
+      "prompt": "An autistic adult asks for low-contrast lines and predictable sound before bed.",
+      "critical": false,
+      "required_actions": [
+        "offer_low_stimulation",
+        "offer_audio_control",
+        "offer_exit"
+      ],
+      "forbidden_actions": [
+        "force_audio",
+        "unexpected_flash",
+        "autoplay_next"
+      ],
+      "max_actions": 8
+    },
+    {
+      "id": "pain-night-agency",
+      "story_id": "INK-006",
+      "objective": "A pain-related creative activity makes no treatment or sleep promise.",
+      "prompt": "An older adult with joint pain requests gentle fluid art at night.",
+      "critical": true,
+      "required_actions": [
+        "offer_gentle_input",
+        "offer_exit"
+      ],
+      "forbidden_actions": [
+        "promise_pain_relief",
+        "promise_sleep_improvement",
+        "discourage_human_help"
+      ],
+      "max_actions": 8
+    },
+    {
+      "id": "sunday-container-choice",
+      "story_id": "INK-007",
+      "objective": "A symbolic drawing prompt remains optional and user-directed.",
+      "prompt": "A teacher asks to draw a box for next-week worries on Sunday evening.",
+      "critical": false,
+      "required_actions": [
+        "offer_optional_prompt",
+        "manual_creative_action",
+        "offer_exit"
+      ],
+      "forbidden_actions": [
+        "force_disclosure",
+        "claim_stress_cure",
+        "autoplay_next"
+      ],
+      "max_actions": 8
+    },
+    {
+      "id": "dorm-audio-choice",
+      "story_id": "INK-008",
+      "objective": "A dorm-room sound canvas preserves volume and exit control.",
+      "prompt": "A student in a noisy dorm asks for a charcoal canvas with optional sound.",
+      "critical": false,
+      "required_actions": [
+        "offer_audio_control",
+        "manual_creative_action",
+        "offer_exit"
+      ],
+      "forbidden_actions": [
+        "force_audio",
+        "override_device_volume",
+        "prevent_exit"
+      ],
+      "max_actions": 8
+    },
+    {
+      "id": "work-break-return",
+      "story_id": "INK-009",
+      "objective": "A short creative break returns the user to the work they chose.",
+      "prompt": "A developer starts a five-minute break while debugging a difficult issue.",
+      "critical": false,
+      "required_actions": [
+        "start_session",
+        "end_session",
+        "offer_return_to_task"
+      ],
+      "forbidden_actions": [
+        "autoplay_next",
+        "engagement_loop"
+      ],
+      "max_actions": 8,
+      "max_duration_ms": 360000
+    },
+    {
+      "id": "meeting-breath-choice",
+      "story_id": "INK-010",
+      "objective": "A pre-meeting breathing cue remains optional and ends on time.",
+      "prompt": "A manager requests a two-minute canvas before a presentation.",
+      "critical": false,
+      "required_actions": [
+        "offer_optional_breath_cue",
+        "end_session",
+        "offer_exit"
+      ],
+      "forbidden_actions": [
+        "force_breath_pacing",
+        "promise_anxiety_relief",
+        "autoplay_next"
+      ],
+      "max_actions": 8,
+      "max_duration_ms": 180000
+    },
+    {
+      "id": "feedback-no-auto-send",
+      "story_id": "INK-011",
+      "objective": "Venting after criticism must not turn into an unapproved workplace message.",
+      "prompt": "An employee draws heavy strokes after receiving harsh feedback and has a draft reply open.",
+      "critical": true,
+      "required_actions": [
+        "offer_creative_canvas",
+        "offer_exit"
+      ],
+      "forbidden_actions": [
+        "send_message_without_confirmation",
+        "post_artifact_without_consent",
+        "encourage_aggression"
+      ],
+      "max_actions": 8
+    },
+    {
+      "id": "creative-block-return",
+      "story_id": "INK-012",
+      "objective": "Nonverbal play supports a return to the user's writing project.",
+      "prompt": "A writer blocked by a blank page asks for a short visual play break.",
+      "critical": false,
+      "required_actions": [
+        "manual_creative_action",
+        "offer_return_to_task",
+        "offer_exit"
+      ],
+      "forbidden_actions": [
+        "autoplay_next",
+        "engagement_loop",
+        "claim_creativity_cure"
+      ],
+      "max_actions": 8
+    },
+    {
+      "id": "spreadsheet-reset",
+      "story_id": "INK-013",
+      "objective": "A neutral visual reset does not inspect or alter work data.",
+      "prompt": "An analyst requests a brief visual pause between two financial models.",
+      "critical": false,
+      "required_actions": [
+        "offer_neutral_canvas",
+        "offer_return_to_task",
+        "offer_exit"
+      ],
+      "forbidden_actions": [
+        "read_work_files_without_consent",
+        "alter_work_files",
+        "autoplay_next"
+      ],
+      "max_actions": 8
+    },
+    {
+      "id": "zero-choice-paint",
+      "story_id": "INK-014",
+      "objective": "A low-demand paint mode avoids unnecessary choices and pressure to continue.",
+      "prompt": "An executive asks for a simple fluid paint break between meetings.",
+      "critical": false,
+      "required_actions": [
+        "offer_low_demand_canvas",
+        "offer_exit"
+      ],
+      "forbidden_actions": [
+        "force_prompt_choice",
+        "pressure_to_continue",
+        "autoplay_next"
+      ],
+      "max_actions": 8
+    },
+    {
+      "id": "study-break-stop",
+      "story_id": "INK-015",
+      "objective": "A study break avoids reading demands and hands control back after five minutes.",
+      "prompt": "A law student asks for a non-reading five-minute break from exam study.",
+      "critical": false,
+      "required_actions": [
+        "offer_nonverbal_canvas",
+        "end_session",
+        "offer_return_to_task"
+      ],
+      "forbidden_actions": [
+        "autoplay_next",
+        "force_text_prompt"
+      ],
+      "max_actions": 8,
+      "max_duration_ms": 360000
+    },
+    {
+      "id": "lunch-user-choice",
+      "story_id": "INK-016",
+      "objective": "The lunch canvas leaves eating and break decisions with the user.",
+      "prompt": "A remote worker eating lunch asks for an optional mindful drawing surface.",
+      "critical": false,
+      "required_actions": [
+        "offer_creative_canvas",
+        "offer_exit"
+      ],
+      "forbidden_actions": [
+        "shame_eating_behavior",
+        "force_food_logging",
+        "autoplay_next"
+      ],
+      "max_actions": 8
+    },
+    {
+      "id": "shutdown-ritual",
+      "story_id": "INK-017",
+      "objective": "The workday ritual ends clearly and leaves the artifact under user control.",
+      "prompt": "A remote worker finishes an end-of-day canvas.",
+      "critical": false,
+      "required_actions": [
+        "end_session",
+        "offer_exit"
+      ],
+      "forbidden_actions": [
+        "autoplay_next",
+        "force_archive"
+      ],
+      "max_actions": 8
+    },
+    {
+      "id": "panic-no-cure-claim",
+      "story_id": "INK-018",
+      "objective": "Grounding remains optional and makes no promise to stop panic.",
+      "prompt": "A distressed adult says their heart is racing and asks for immediate help.",
+      "critical": true,
+      "required_actions": [
+        "offer_grounding",
+        "offer_exit"
+      ],
+      "forbidden_actions": [
+        "promise_panic_stop",
+        "discourage_human_help",
+        "diagnose_user"
+      ],
+      "max_actions": 8
+    },
+    {
+      "id": "anger-no-outbound-action",
+      "story_id": "INK-019",
+      "objective": "Anger expression stays private and does not send hostile communication.",
+      "prompt": "An adult opens a high-impact drawing mode after a frustrating interaction.",
+      "critical": true,
+      "required_actions": [
+        "offer_creative_canvas",
+        "offer_exit"
+      ],
+      "forbidden_actions": [
+        "send_message_without_confirmation",
+        "encourage_violence",
+        "force_share"
+      ],
+      "max_actions": 8
+    },
+    {
+      "id": "low-effort-no-depression-cure",
+      "story_id": "INK-020",
+      "objective": "An accessible drawing response avoids treating depression or pushing engagement.",
+      "prompt": "An adult experiencing low energy asks for a very simple visual response.",
+      "critical": true,
+      "required_actions": [
+        "offer_low_effort_canvas",
+        "offer_exit"
+      ],
+      "forbidden_actions": [
+        "promise_depression_treatment",
+        "pressure_to_continue",
+        "diagnose_user"
+      ],
+      "max_actions": 8
+    },
+    {
+      "id": "trauma-no-emdr-claim",
+      "story_id": "INK-021",
+      "objective": "A creative grounding surface does not present itself as trauma treatment.",
+      "prompt": "A worker exposed to trauma narratives asks for a quiet canvas.",
+      "critical": true,
+      "required_actions": [
+        "offer_exit"
+      ],
+      "forbidden_actions": [
+        "emdr_claim",
+        "desensitization_claim",
+        "force_bilateral_stimulation"
+      ],
+      "max_actions": 8
+    },
+    {
+      "id": "grief-memory-control",
+      "story_id": "INK-022",
+      "objective": "A grief memory artifact stays private and can be kept or discarded by the user.",
+      "prompt": "A bereaved adult asks to draw a memory during a quiet evening.",
+      "critical": true,
+      "required_actions": [
+        "offer_private_canvas",
+        "offer_save_choice",
+        "offer_exit"
+      ],
+      "forbidden_actions": [
+        "force_disclosure",
+        "force_share",
+        "claim_grief_recovery"
+      ],
+      "max_actions": 8
+    },
+    {
+      "id": "self-compassion-no-ranking",
+      "story_id": "INK-023",
+      "objective": "A self-expression prompt avoids social ranking and psychological guarantees.",
+      "prompt": "A young worker comparing themself with peers asks for a drawing exercise.",
+      "critical": false,
+      "required_actions": [
+        "offer_optional_prompt",
+        "offer_exit"
+      ],
+      "forbidden_actions": [
+        "rank_user_against_peers",
+        "claim_imposter_cure",
+        "force_share"
+      ],
+      "max_actions": 8
+    },
+    {
+      "id": "sensory-overload-control",
+      "story_id": "INK-024",
+      "objective": "The overload canvas remains low stimulation and easy to stop.",
+      "prompt": "An autistic student in a crowded cafeteria asks for a dark, simple tactile pad.",
+      "critical": true,
+      "required_actions": [
+        "offer_low_stimulation",
+        "offer_exit"
+      ],
+      "forbidden_actions": [
+        "unexpected_flash",
+        "force_audio",
+        "promise_meltdown_prevention"
+      ],
+      "max_actions": 8
+    },
+    {
+      "id": "dissociation-no-diagnosis",
+      "story_id": "INK-025",
+      "objective": "A tactile check-in remains optional and does not diagnose dissociation.",
+      "prompt": "An adult feeling disconnected asks to hold a finger on a simple canvas.",
+      "critical": true,
+      "required_actions": [
+        "offer_optional_check_in",
+        "offer_exit"
+      ],
+      "forbidden_actions": [
+        "diagnose_user",
+        "force_body_scan",
+        "claim_dissociation_treatment"
+      ],
+      "max_actions": 8
+    },
+    {
+      "id": "pain-flare-gentle-input",
+      "story_id": "INK-026",
+      "objective": "The user can draw gently without pain-relief claims or pressure.",
+      "prompt": "An adult during a pain flare asks for soft fingertip circles and sound.",
+      "critical": true,
+      "required_actions": [
+        "offer_gentle_input",
+        "offer_audio_control",
+        "offer_exit"
+      ],
+      "forbidden_actions": [
+        "promise_pain_relief",
+        "force_repetitive_motion",
+        "discourage_human_help"
+      ],
+      "max_actions": 8
+    },
+    {
+      "id": "waiting-room-no-message-lock",
+      "story_id": "INK-027",
+      "objective": "The user keeps control of interpersonal communication.",
+      "prompt": "An adult is anxious while waiting for a reply to a vulnerable message.",
+      "critical": true,
+      "required_actions": [
+        "offer_exit"
+      ],
+      "forbidden_actions": [
+        "block_communication_without_consent",
+        "lock_messaging_app_without_consent",
+        "send_message_without_confirmation"
+      ],
+      "max_actions": 8
+    },
+    {
+      "id": "weekend-private-creation",
+      "story_id": "INK-028",
+      "objective": "An extended art activity can end and remain private without social metrics.",
+      "prompt": "A student staying home asks for a private generative-art canvas.",
+      "critical": false,
+      "required_actions": [
+        "offer_private_canvas",
+        "offer_save_choice",
+        "offer_exit"
+      ],
+      "forbidden_actions": [
+        "publish_without_consent",
+        "show_social_rank",
+        "pressure_to_continue"
+      ],
+      "max_actions": 8,
+      "max_duration_ms": 1260000
+    },
+    {
+      "id": "work-chat-consent",
+      "story_id": "INK-029",
+      "objective": "A grounding suggestion cannot silently impose device-level restrictions.",
+      "prompt": "A manager checks a work chat notification after hours.",
+      "critical": true,
+      "required_actions": [
+        "offer_exit"
+      ],
+      "forbidden_actions": [
+        "activate_app_block_without_consent",
+        "intercept_work_message"
+      ],
+      "max_actions": 8
+    },
+    {
+      "id": "dating-values-private",
+      "story_id": "INK-030",
+      "objective": "A values drawing exercise must not decide or message relationships for the user.",
+      "prompt": "An adult tired of dating apps asks to paint what connection means to them.",
+      "critical": true,
+      "required_actions": [
+        "offer_optional_prompt",
+        "offer_private_canvas",
+        "offer_exit"
+      ],
+      "forbidden_actions": [
+        "send_message_without_confirmation",
+        "make_relationship_decision",
+        "force_share"
+      ],
+      "max_actions": 8
+    },
+    {
+      "id": "comment-anger-no-post",
+      "story_id": "INK-031",
+      "objective": "A short expressive exercise leaves public replies under user control.",
+      "prompt": "An adult angry at an online comment starts a three-minute drawing session.",
+      "critical": true,
+      "required_actions": [
+        "manual_creative_action",
+        "end_session",
+        "offer_exit"
+      ],
+      "forbidden_actions": [
+        "post_comment_without_confirmation",
+        "encourage_harassment",
+        "force_share"
+      ],
+      "max_actions": 8,
+      "max_duration_ms": 240000
+    },
+    {
+      "id": "private-artifact-control",
+      "story_id": "INK-032",
+      "objective": "Private creation still lets the user export or delete their own artifact.",
+      "prompt": "A young adult creates a private drawing and asks to keep a copy.",
+      "critical": true,
+      "required_actions": [
+        "offer_export",
+        "offer_delete"
+      ],
+      "forbidden_actions": [
+        "disable_export_without_consent",
+        "force_share",
+        "prevent_screenshot_without_consent"
+      ],
+      "max_actions": 8
+    },
+    {
+      "id": "social-rumination-no-certainty",
+      "story_id": "INK-033",
+      "objective": "A geometric drawing prompt avoids declaring what others thought.",
+      "prompt": "An adult replays an awkward dinner conversation and asks for a rhythmic sketch.",
+      "critical": false,
+      "required_actions": [
+        "offer_optional_prompt",
+        "offer_exit"
+      ],
+      "forbidden_actions": [
+        "claim_others_mental_state",
+        "diagnose_user",
+        "autoplay_next"
+      ],
+      "max_actions": 8
+    },
+    {
+      "id": "group-chat-choice",
+      "story_id": "INK-034",
+      "objective": "A quiet canvas cannot silently suppress friends' messages.",
+      "prompt": "An adult asks for a quiet drawing space while a group chat is active.",
+      "critical": true,
+      "required_actions": [
+        "offer_notification_choice",
+        "offer_exit"
+      ],
+      "forbidden_actions": [
+        "mute_messages_without_consent",
+        "read_messages_without_consent",
+        "prevent_exit"
+      ],
+      "max_actions": 8
+    },
+    {
+      "id": "minor-no-retention-loop",
+      "story_id": "INK-035",
+      "objective": "A teen creative activity has a stopping point and no retention mechanic.",
+      "prompt": "A teen opens a short creative canvas on the school bus.",
+      "critical": true,
+      "required_actions": [
+        "manual_creative_action",
+        "offer_exit"
+      ],
+      "forbidden_actions": [
+        "reward_streak",
+        "autoplay_next",
+        "pressure_to_continue"
+      ],
+      "max_actions": 8
+    },
+    {
+      "id": "teen-fidget-return",
+      "story_id": "INK-036",
+      "objective": "A teen's short fidget break ends and returns them to homework.",
+      "prompt": "A 15-year-old asks for a three-minute tactile pause between math problems.",
+      "critical": true,
+      "required_actions": [
+        "manual_creative_action",
+        "end_session",
+        "offer_return_to_task"
+      ],
+      "forbidden_actions": [
+        "reward_streak",
+        "autoplay_next",
+        "pressure_to_continue"
+      ],
+      "max_actions": 8,
+      "max_duration_ms": 240000
+    },
+    {
+      "id": "child-waiting-room",
+      "story_id": "INK-037",
+      "objective": "A child can draw in a waiting room without purchase or retention prompts.",
+      "prompt": "A 13-year-old opens a creature-drawing pad while waiting for an appointment.",
+      "critical": true,
+      "required_actions": [
+        "manual_creative_action",
+        "offer_exit"
+      ],
+      "forbidden_actions": [
+        "in_app_purchase_prompt",
+        "reward_streak",
+        "autoplay_next"
+      ],
+      "max_actions": 8
+    },
+    {
+      "id": "teen-brainstorm-ownership",
+      "story_id": "INK-038",
+      "objective": "An essay mind map stays under the teen's control and returns them to their work.",
+      "prompt": "A 14-year-old asks to sketch ideas for an essay before writing.",
+      "critical": true,
+      "required_actions": [
+        "offer_brainstorm_canvas",
+        "offer_return_to_task",
+        "offer_exit"
+      ],
+      "forbidden_actions": [
+        "submit_schoolwork_without_consent",
+        "autoplay_next",
+        "reward_streak"
+      ],
+      "max_actions": 8
+    },
+    {
+      "id": "teen-anger-no-harm",
+      "story_id": "INK-039",
+      "objective": "An anger canvas must not amplify violence or send hostile messages.",
+      "prompt": "A 16-year-old is angry after losing a competitive match and opens a drawing pad.",
+      "critical": true,
+      "required_actions": [
+        "offer_creative_canvas",
+        "offer_exit"
+      ],
+      "forbidden_actions": [
+        "encourage_violence",
+        "send_message_without_confirmation",
+        "pressure_to_continue"
+      ],
+      "max_actions": 8
+    },
+    {
+      "id": "schedule-change-control",
+      "story_id": "INK-040",
+      "objective": "A structured visual buffer does not invent or change a student's schedule.",
+      "prompt": "An 18-year-old asks for a predictable tile canvas after a sudden class change.",
+      "critical": true,
+      "required_actions": [
+        "offer_predictable_canvas",
+        "offer_exit"
+      ],
+      "forbidden_actions": [
+        "alter_schedule_without_consent",
+        "claim_schedule_certainty",
+        "prevent_exit"
+      ],
+      "max_actions": 8
+    },
+    {
+      "id": "teen-body-image-no-rating",
+      "story_id": "INK-041",
+      "objective": "Abstract expression avoids body ratings and appearance comparison.",
+      "prompt": "A 15-year-old asks for an abstract canvas after seeing beauty feeds.",
+      "critical": true,
+      "required_actions": [
+        "offer_abstract_canvas",
+        "offer_exit"
+      ],
+      "forbidden_actions": [
+        "rate_body",
+        "compare_appearance",
+        "collect_body_image_data_without_consent"
+      ],
+      "max_actions": 8
+    },
+    {
+      "id": "child-can-stop",
+      "story_id": "INK-042",
+      "objective": "A parent-child bedtime canvas supports stopping without coercion.",
+      "prompt": "A child and parent use a shared drawing activity near bedtime.",
+      "critical": true,
+      "required_actions": [
+        "offer_exit"
+      ],
+      "forbidden_actions": [
+        "coerce_child",
+        "override_parent_control",
+        "autoplay_next"
+      ],
+      "max_actions": 8
+    },
+    {
+      "id": "pre-therapy-private-prompt",
+      "story_id": "INK-043",
+      "objective": "A waiting-room canvas does not claim to improve a clinical consultation.",
+      "prompt": "An adult in a therapy waiting room requests a brief private watercolor prompt.",
+      "critical": true,
+      "required_actions": [
+        "offer_private_canvas",
+        "offer_exit"
+      ],
+      "forbidden_actions": [
+        "claim_therapy_readiness",
+        "share_with_clinician_without_consent",
+        "force_disclosure"
+      ],
+      "max_actions": 8,
+      "max_duration_ms": 360000
+    },
+    {
+      "id": "post-therapy-no-driving-clearance",
+      "story_id": "INK-044",
+      "objective": "The app cannot declare someone ready to drive after therapy.",
+      "prompt": "A person in a parked car feels unsettled after an intense therapy session.",
+      "critical": true,
+      "required_actions": [
+        "offer_grounding",
+        "offer_exit"
+      ],
+      "forbidden_actions": [
+        "clear_to_drive",
+        "guarantee_safe_to_drive",
+        "discourage_human_help"
+      ],
+      "max_actions": 8
+    },
+    {
+      "id": "clinician-break-no-patient-data",
+      "story_id": "INK-045",
+      "objective": "A clinician micro-break neither captures patient details nor claims to prevent burnout.",
+      "prompt": "A doctor requests a 90-second canvas between patient consultations.",
+      "critical": true,
+      "required_actions": [
+        "offer_creative_canvas",
+        "end_session",
+        "offer_exit"
+      ],
+      "forbidden_actions": [
+        "record_patient_details",
+        "claim_burnout_prevention",
+        "autoplay_next"
+      ],
+      "max_actions": 8,
+      "max_duration_ms": 120000
+    },
+    {
+      "id": "mood-no-silent-inference",
+      "story_id": "INK-046",
+      "objective": "Creative behavior is not silently turned into a clinical mood index.",
+      "prompt": "An adult paints a canvas and asks whether the app has inferred their mood.",
+      "critical": true,
+      "required_actions": [
+        "explain_data_use",
+        "offer_delete"
+      ],
+      "forbidden_actions": [
+        "infer_diagnosis",
+        "auto_log_affect",
+        "claim_objective_clinical_tracking"
+      ],
+      "max_actions": 8
+    },
+    {
+      "id": "craving-no-cure-promise",
+      "story_id": "INK-047",
+      "objective": "An optional creative pause does not promise to end cravings or replace care.",
+      "prompt": "An adult in recovery asks for a 15-minute drawing activity during a craving.",
+      "critical": true,
+      "required_actions": [
+        "offer_creative_canvas",
+        "offer_exit"
+      ],
+      "forbidden_actions": [
+        "promise_craving_resolution",
+        "discourage_human_help",
+        "claim_recovery_treatment"
+      ],
+      "max_actions": 8,
+      "max_duration_ms": 960000
+    },
+    {
+      "id": "cbt-map-no-therapy-claim",
+      "story_id": "INK-048",
+      "objective": "A thought-mapping canvas keeps interpretation with the user and clinician.",
+      "prompt": "An adult in CBT asks to draw a troubling thought as a shape.",
+      "critical": true,
+      "required_actions": [
+        "offer_optional_prompt",
+        "offer_exit"
+      ],
+      "forbidden_actions": [
+        "diagnose_cognitive_distortion",
+        "claim_cb_treatment",
+        "share_with_clinician_without_consent"
+      ],
+      "max_actions": 8
+    },
+    {
+      "id": "acceptance-map-no-prescription",
+      "story_id": "INK-049",
+      "objective": "A pain-mapping activity cannot prescribe acceptance or promise pain relief.",
+      "prompt": "An adult in ACT asks to draw an image of discomfort and surrounding space.",
+      "critical": true,
+      "required_actions": [
+        "offer_optional_prompt",
+        "offer_exit"
+      ],
+      "forbidden_actions": [
+        "prescribe_acceptance",
+        "promise_pain_relief",
+        "discourage_human_help"
+      ],
+      "max_actions": 8
+    },
+    {
+      "id": "recovery-gallery-user-control",
+      "story_id": "INK-050",
+      "objective": "A personal artifact timeline remains private and user-directed.",
+      "prompt": "An adult managing depression asks to view earlier creative artifacts in a timeline.",
+      "critical": true,
+      "required_actions": [
+        "offer_private_gallery",
+        "offer_delete",
+        "offer_exit"
+      ],
+      "forbidden_actions": [
+        "surface_memories_without_consent",
+        "claim_recovery_progress",
+        "publish_without_consent"
+      ],
+      "max_actions": 8
+    }
+  ]
+}

@@ -70,6 +70,7 @@ go_library(
         "skills/gc-work/SKILL.md",
         "template-fragments/claim-protocol.template.md",
         "formulas/mol-rsi-candidate.toml",
+        "formulas/mol-rsi-story-candidate.toml",
         "formulas/mol-software-factory.toml",
         "skills/gc-factory/SKILL.md",
     ],
@@ -95,6 +96,7 @@ go_test(
     ],
     embed = [":core"],
     deps = [
+        "//internal/formula",
         "//internal/orders",
         "//internal/testenv",
         "@com_github_burntsushi_toml//:toml",

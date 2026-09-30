@@ -1,0 +1,27 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library")
+
+go_library(
+    name = "rsistorybench_lib",
+    srcs = ["main.go"],
+    importpath = "github.com/gastownhall/gascity/cmd/rsistorybench",
+    visibility = ["//visibility:private"],
+    deps = ["//internal/storybench"],
+)
+
+go_binary(
+    name = "rsistorybench",
+    embed = [":rsistorybench_lib"],
+    visibility = ["//visibility:public"],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

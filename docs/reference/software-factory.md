@@ -49,3 +49,13 @@ remain separate decisions.
 
 This formula does not install connectors or create scheduler jobs. Configure
 those capabilities in the host and retain secrets there.
+
+For user-story-linked RSI, use the `mol-rsi-story-candidate` formula. It extends
+`mol-rsi-candidate` with an independent, read-only benchmark step and makes its
+result mandatory at the promotion gate. Supply the frozen suite path and its
+raw-file SHA-256 as `eval_suite_hash`. The project-owned pilot suite is at
+`benchmarks/inktree-story-agency-v1/suite.json`; the operator guide is at
+`engdocs/benchmarks/inktree-story-agency-v1.md` in the repository.
+The separate `benchmarks/inktree-story-agency-v1/suiteV2.json` covers all 50
+source stories but requires a new, independently captured baseline and human
+approval before use as a promotion gate.

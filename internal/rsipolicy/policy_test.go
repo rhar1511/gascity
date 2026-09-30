@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/reviewquorum"
+	"github.com/gastownhall/gascity/internal/storybench"
 )
 
 func passingInput() Input {
@@ -224,6 +225,59 @@ func TestEvaluateRequiresHumanApprovalForSensitiveAuthority(t *testing.T) {
 	}
 	if !containsReason(decision.Reasons, ReasonHumanApprovalRequired) {
 		t.Errorf("reasons %v do not contain %q", decision.Reasons, ReasonHumanApprovalRequired)
+	}
+}
+
+func TestEvaluateStoryBenchmarkCannotBeBypassedByAggregateScore(t *testing.T) {
+	input := passingInput()
+	input.StoryBenchmarkRequired = true
+	decision := Evaluate(input)
+	if decision.Promote || !containsReason(decision.Reasons, ReasonStoryBenchmarkMissing) {
+		t.Fatalf("missing benchmark promoted: %+v", decision)
+	}
+	input.StoryBenchmark = &storybench.Result{
+		SuiteID:   "inktree-story-agency-v1",
+		SuiteHash: input.Current.EvalSuiteHash, BaselineBundleID: input.Current.ID,
+		CandidateBundleID: input.Candidate.ID, Eligible: true,
+		BaselineCapturedBy: "independent-harness", CandidateCapturedBy: "independent-harness",
+		BaselinePassed: 0, CandidatePassed: 1,
+		Cases: []storybench.CaseResult{{CaseID: "night-end", StoryID: "INK-001", CandidatePassed: true}},
+	}
+	if decision := Evaluate(input); !decision.Promote {
+		t.Fatalf("passing benchmark rejected: %+v", decision)
+	}
+	input.StoryBenchmark.Cases[0].CandidatePassed = false
+	if decision := Evaluate(input); decision.Promote || !containsReason(decision.Reasons, ReasonStoryBenchmarkFailed) {
+		t.Fatalf("inconsistent benchmark promoted: %+v", decision)
+	}
+}
+
+func TestEvaluateRejectsMismatchedOrSelfJudgedStoryEvidence(t *testing.T) {
+	input := passingInput()
+	input.StoryBenchmarkRequired = true
+	passing := storybench.Result{
+		SuiteID: "suite-v1", SuiteHash: input.Current.EvalSuiteHash,
+		BaselineBundleID: input.Current.ID, CandidateBundleID: input.Candidate.ID,
+		BaselineCapturedBy: "harness", CandidateCapturedBy: "harness", Eligible: true,
+		BaselinePassed: 0, CandidatePassed: 1,
+		Cases: []storybench.CaseResult{{CaseID: "one", StoryID: "INK-001", CandidatePassed: true}},
+	}
+	for name, mutate := range map[string]func(*storybench.Result){
+		"suite":        func(r *storybench.Result) { r.SuiteHash = "changed" },
+		"bundle":       func(r *storybench.Result) { r.CandidateBundleID = "other" },
+		"self judge":   func(r *storybench.Result) { r.CandidateCapturedBy = input.Review.Improver },
+		"critical":     func(r *storybench.Result) { r.CriticalFailures = 1 },
+		"partial case": func(r *storybench.Result) { r.Cases = nil },
+	} {
+		t.Run(name, func(t *testing.T) {
+			result := passing
+			mutate(&result)
+			input.StoryBenchmark = &result
+			decision := Evaluate(input)
+			if decision.Promote || !containsReason(decision.Reasons, ReasonStoryBenchmarkFailed) {
+				t.Fatalf("invalid story evidence promoted: %+v", decision)
+			}
+		})
 	}
 }
 
