@@ -21,10 +21,12 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -249,6 +251,13 @@ type preparedStart struct {
 	// re-derivation from the template (S19 re-eligibility).
 	promptDelivered bool
 	promptHash      string
+	// capacityTicket is the endpoint capacity admission for this attempt,
+	// nil when the endpoint is unguarded. Every path that holds one resolves
+	// it exactly once (resolveStartCapacity / abandonCapacityTicket).
+	capacityTicket *capacityTicket
+	// preWakeUndo is what a capacity refusal needs to undo this attempt's
+	// PreWake (restorePreWakeState). Zero when the start had no persisted row.
+	preWakeUndo preWakeUndo
 }
 
 type startResult struct {
@@ -259,6 +268,16 @@ type startResult struct {
 	finished        time.Time
 	rollbackPending bool
 	rateLimitScreen bool
+	// providerStartCalled reports that the attempt reached provider Start (a
+	// warm reuse does not). Only such a start can prove endpoint capacity.
+	providerStartCalled bool
+	// capacityRefused selects the capacity commit arm: the endpoint refused
+	// the start (runtime.ErrProviderCapacity), a guard admitted it, and the
+	// poison valve did not trip. Set only by resolveStartCapacity.
+	capacityRefused bool
+	// capacityValve reports that the poison valve returned this refused
+	// session to normal failure accounting.
+	capacityValve bool
 	// diedDuringStartup is true when the session started and then died
 	// before it was confirmed alive, detected either of two ways: (1) the
 	// provider/resume layer returns runtime.ErrSessionDiedDuringStartup
@@ -370,6 +389,9 @@ type startExecutionOptions struct {
 	// the reconciler where the cached rig stores are in scope and consumed in
 	// startPreparedStartCandidate's warm-reuse branch. Nil disables the nudge.
 	warmClaimProbe warmClaimTriggerProbe
+	// capacityGuard gates starts per serving endpoint. Nil leaves every
+	// endpoint unguarded (legacy failure accounting).
+	capacityGuard *endpointCapacityGuard
 }
 
 type startExecutionOption func(*startExecutionOptions)
@@ -454,6 +476,14 @@ func resolveStartStabilityWaiter(waiter startStabilityWaiter) startStabilityWait
 func withWarmClaimProbe(probe warmClaimTriggerProbe) startExecutionOption {
 	return func(opts *startExecutionOptions) {
 		opts.warmClaimProbe = probe
+	}
+}
+
+// withEndpointCapacityGuard installs the per-endpoint capacity breaker for
+// this reconcile pass. Nil (or the option omitted) leaves endpoints unguarded.
+func withEndpointCapacityGuard(guard *endpointCapacityGuard) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.capacityGuard = guard
 	}
 }
 
@@ -912,6 +942,7 @@ func prepareStartCandidateForCity(
 	stderr io.Writer,
 	workDirResolver taskWorkDirResolver,
 ) (*preparedStart, error) {
+	var undo preWakeUndo
 	if id := strings.TrimSpace(candidate.info.ID); id != "" && store != nil {
 		if err := sessionpkg.WithSessionMutationLock(id, func() error {
 			sessFront := sessionFrontDoor(store)
@@ -924,7 +955,7 @@ func prepareStartCandidateForCity(
 			// a bead that is no longer a session (IsSessionBeadOrRepairable), the
 			// documented front-door-Get delta from the former raw store.Get. This is
 			// the SANCTIONED cross-goroutine freshness re-read, not a per-patch re-Get.
-			current, _, err := sessFront.GetPersistedResponse(id)
+			current, persisted, err := sessFront.GetPersistedResponse(id)
 			if err != nil {
 				return err
 			}
@@ -937,6 +968,7 @@ func prepareStartCandidateForCity(
 			if err != nil {
 				return err
 			}
+			undo = newPreWakeUndo(current, persisted.Metadata, fold)
 			candidate.info = current.ApplyPatch(fold)
 			return nil
 		}); err != nil {
@@ -956,6 +988,10 @@ func prepareStartCandidateForCity(
 	// partial-Info second return is only load-bearing for recoverRunningPendingCreate's
 	// abort residue; here the prepared already carries it, so it is discarded.
 	prepared, _, err := buildPreparedStartWithWorkDirResolver(candidate, cityPath, cfg, store, workDirResolver)
+	if prepared != nil && undo.written != nil {
+		undo.token = prepared.candidate.info.InstanceToken
+		prepared.preWakeUndo = undo
+	}
 	return prepared, err
 }
 
@@ -1723,18 +1759,22 @@ func runPreparedStartCandidate(
 	}
 	finished := time.Now()
 	livenessUnavailable := errors.Is(err, runtime.ErrRuntimeUnavailable)
+	capacityRefused := !livenessUnavailable && runtime.IsProviderCapacity(err)
 	rollbackPending := err != nil && !livenessUnavailable && shouldRollbackPendingCreateInfo(item.candidate.info)
-	rateLimitScreen := err != nil && !livenessUnavailable && startupRateLimitScreenDetected(item, cityPath, sp, store, cfg)
+	// A capacity refusal never peeks for a rate-limit screen: the launcher
+	// exited before the provider drew one, and the peek is a provider call.
+	rateLimitScreen := err != nil && !livenessUnavailable && !capacityRefused && startupRateLimitScreenDetected(item, cityPath, sp, store, cfg)
 	if err != nil && rollbackPending && !rateLimitScreen && runningSessionMatchesPendingCreateInfo(item.candidate.info, item.candidate.name(), sp) {
 		return startResult{
-			prepared:          item,
-			err:               nil,
-			outcome:           TraceOutcomeStartErrorConverged,
-			started:           started,
-			finished:          finished,
-			rollbackPending:   false,
-			diedDuringStartup: diedDuringStartup,
-			phases:            phases,
+			prepared:            item,
+			err:                 nil,
+			outcome:             TraceOutcomeStartErrorConverged,
+			started:             started,
+			finished:            finished,
+			rollbackPending:     false,
+			providerStartCalled: startedFresh,
+			diedDuringStartup:   diedDuringStartup,
+			phases:              phases,
 		}
 	}
 	var outcome TraceOutcomeCode
@@ -1745,6 +1785,8 @@ func runPreparedStartCandidate(
 	case livenessUnavailable:
 		outcome = TraceOutcomeDeferred
 		err = nil
+	case capacityRefused:
+		outcome = TraceOutcomeCapacityRefused
 	case startCtxErr == context.DeadlineExceeded:
 		outcome = TraceOutcomeDeadlineExceeded
 		if err == nil {
@@ -1778,16 +1820,17 @@ func runPreparedStartCandidate(
 		rateLimitScreen = false
 	}
 	return startResult{
-		prepared:          item,
-		err:               err,
-		outcome:           outcome,
-		started:           started,
-		finished:          finished,
-		rollbackPending:   rollbackPending,
-		rateLimitScreen:   rateLimitScreen,
-		diedDuringStartup: diedDuringStartup,
-		provider:          sp,
-		phases:            phases,
+		prepared:            item,
+		err:                 err,
+		outcome:             outcome,
+		started:             started,
+		finished:            finished,
+		rollbackPending:     rollbackPending,
+		rateLimitScreen:     rateLimitScreen,
+		providerStartCalled: startedFresh,
+		diedDuringStartup:   diedDuringStartup,
+		provider:            sp,
+		phases:              phases,
 	}
 }
 
@@ -1884,6 +1927,9 @@ func enqueuePreparedStartWaveForCity(
 				defer release()
 			}
 			result := runPreparedStartCandidate(ctx, item, cityPath, sp, store, cfg, startupTimeout, stabilityWaiter, sessionStaleKeyDetectionWaiter, warmClaim)
+			// Resolve before the commit so a stale, refused, or panicking
+			// commit cannot lose the endpoint verdict.
+			result = resolveStartCapacity(result, rec, stderr)
 			commitAsyncStartResultWithContext(ctx, result, sp, store, clk, rec, wave, stdout, stderr, trace)
 			if asyncFollowUp != nil {
 				asyncFollowUp()
@@ -1935,26 +1981,19 @@ func commitAsyncStartResultWithContext(
 	}()
 
 	refreshBegin := time.Now()
-	refreshed, ok, cleanupRuntime, releaseInFlight := refreshAsyncStartResult(result, store, stderr)
+	refreshed, refresh := refreshAsyncStartResult(result, store, stderr)
 	commitRefreshElapsed := time.Since(refreshBegin)
 	// Carry the per-phase timings forward: refresh's elapsed time is
 	// commit-side, distinct from the start phases captured in
 	// runPreparedStartCandidate. Both flow into the lifecycle log.
 	refreshed.phases.CommitRefresh = commitRefreshElapsed
-	if !ok {
-		// refreshAsyncStartResult returns result unchanged on every !ok
-		// branch (store.Get error, stale prepared command, stale runtime
-		// session), so refreshed.phases already carries the original
+	if !refresh.commit {
+		// refreshAsyncStartResult returns result unchanged on every
+		// non-commit branch (store.Get error, stale prepared command, stale
+		// runtime session), so refreshed.phases already carries the original
 		// start_call / post_start_observe; only commit_refresh was
 		// stamped above. No restore needed.
-		if cleanupRuntime && !startOutcomeDefersCommit(result.outcome) {
-			stopStaleAsyncStartRuntime(result, sp, stderr)
-		}
-		outcome := "stale_async_start"
-		if releaseInFlight {
-			clearPendingStartInFlightLease(result.prepared.candidate.info.ID, sessFront, stderr)
-			outcome = "async_start_refresh_failed"
-		}
+		outcome := settleUncommittedAsyncStart(result, refresh, sp, sessFront, clk, stderr)
 		logLifecycleOutcome(stderr, "start", wave, name, template, outcome, result.started, time.Now(), nil, refreshed.phases)
 		return false
 	}
@@ -1996,6 +2035,48 @@ func commitAsyncStartResultWithContext(
 	return verdict == startCommitSucceeded
 }
 
+// settleUncommittedAsyncStart carries out a non-commit refresh verdict and
+// returns the lifecycle outcome to log.
+//
+// A deferred or still-initializing outcome means the runtime is there but this
+// tick could not decide about it, which is no state to stop it from, or to
+// close a bead and free an alias from. It keeps the lease handling below and
+// retries next tick.
+func settleUncommittedAsyncStart(result startResult, refresh asyncStartRefreshVerdict, sp runtime.Provider, sessFront *sessionpkg.Store, clk clock.Clock, stderr io.Writer) string {
+	// A capacity refusal holds its row like a deferral: the endpoint, not
+	// this session, failed.
+	deferred := startOutcomeDefersCommit(result.outcome) || result.capacityRefused
+	switch {
+	case refresh.rollbackPendingCreate && !deferred:
+		// The rollback frees the alias, so it waits until the runtime this
+		// start spawned is confirmed gone. When it survives or cannot be
+		// observed, the row keeps the discard below and retries.
+		if pendingCreateRuntimeClearedForRollback(result, sp, stderr) {
+			switch rollbackPendingCreateConfirmed(result.prepared.candidate.info, refresh.current, sessFront, clk.Now().UTC(), stderr) {
+			case pendingCreateRolledBack:
+				// The rollback cleared last_woke_at in its own terminal write.
+				return "async_start_drift_rolled_back"
+			case pendingCreateRollbackSuperseded:
+				// The row moved on; the in-flight lease is no longer ours.
+				return "stale_async_start"
+			}
+		}
+	case refresh.cleanupRuntime && !deferred:
+		stopStaleAsyncStartRuntime(result, sp, stderr)
+	}
+	if refresh.releaseInFlight {
+		if result.capacityRefused {
+			// The launch never happened; undo its PreWake rather than only
+			// dropping the lease.
+			restorePreWakeState(result.prepared, sessFront, stderr)
+			return string(TraceOutcomeCapacityRefused)
+		}
+		clearPendingStartInFlightLease(result.prepared.candidate.info.ID, sessFront, stderr)
+		return "async_start_refresh_failed"
+	}
+	return "stale_async_start"
+}
+
 // refreshAsyncStartResult re-reads the session bead just before commit so the async
 // commit protocol decides against the CURRENT persisted state, not the tick
 // snapshot the start goroutine was enqueued with (which can be stale by the time
@@ -2016,26 +2097,44 @@ func commitAsyncStartResultWithContext(
 // TestRefreshAsyncStartRejectsNonSessionBead. candidate.info is refreshed to the
 // re-read Info; the prepared side (result.prepared.candidate.info) is the enqueue-time
 // twin the gates compare against.
-func refreshAsyncStartResult(result startResult, store beads.Store, stderr io.Writer) (startResult, bool, bool, bool) {
+func refreshAsyncStartResult(result startResult, store beads.Store, stderr io.Writer) (startResult, asyncStartRefreshVerdict) {
 	preparedInfo := result.prepared.candidate.info
 	if store == nil || strings.TrimSpace(preparedInfo.ID) == "" {
-		return result, true, false, false
+		return result, asyncStartRefreshVerdict{commit: true}
 	}
 	currentInfo, _, err := sessionFrontDoor(store).GetPersistedResponse(preparedInfo.ID)
 	if err != nil {
 		fmt.Fprintf(stderr, "session reconciler: refreshing async start %s: %v\n", result.prepared.candidate.name(), err) //nolint:errcheck
-		return result, false, false, true
+		return result, asyncStartRefreshVerdict{releaseInFlight: true}
 	}
 	if asyncStartPreparedCommandStaleInfo(result.prepared, currentInfo) {
+		// last_woke_at is the in-flight lease of whichever incarnation owns
+		// the row now, so only the attempt that owns it may release it: the
+		// same rule the still-current gate below applies. A late attempt must
+		// not clear the lease of a newer incarnation that is mid-spawn.
+		identityMatches := asyncStartIdentityMatchesInfo(preparedInfo, currentInfo)
+		verdict := asyncStartRefreshVerdict{
+			cleanupRuntime:  true,
+			releaseInFlight: identityMatches,
+			current:         currentInfo,
+		}
+		if asyncStartDriftRollbackEligibleInfo(preparedInfo, currentInfo) {
+			fmt.Fprintf(stderr, "session reconciler: rolling back pending create for %s: its command drifted before the create committed and a retry cannot converge\n", result.prepared.candidate.name()) //nolint:errcheck
+			verdict.rollbackPendingCreate = true
+			return result, verdict
+		}
 		fmt.Fprintf(stderr, "session reconciler: ignoring stale async start result for %s: desired command changed during startup\n", result.prepared.candidate.name()) //nolint:errcheck
-		return result, false, true, true
+		return result, verdict
 	}
 	if !asyncStartSessionStillCurrentInfo(preparedInfo, currentInfo) {
 		fmt.Fprintf(stderr, "session reconciler: ignoring stale async start result for %s\n", result.prepared.candidate.name()) //nolint:errcheck
-		return result, false, asyncStartStaleRuntimeCleanupAllowedInfo(preparedInfo, currentInfo), false
+		return result, asyncStartRefreshVerdict{
+			cleanupRuntime: asyncStartStaleRuntimeCleanupAllowedInfo(preparedInfo, currentInfo),
+			current:        currentInfo,
+		}
 	}
 	result.prepared.candidate.info = currentInfo
-	return result, true, false, false
+	return result, asyncStartRefreshVerdict{commit: true, current: currentInfo}
 }
 
 // asyncStartPreparedCommandStaleInfo is the async-start command-drift gate: it
@@ -2051,8 +2150,8 @@ func asyncStartPreparedCommandStaleInfo(prepared preparedStart, current sessionp
 // clearPendingStartInFlightLease clears last_woke_at for the session handle so a
 // stale in-flight start lease does not survive a rollback or abandoned start.
 // Fire-and-forget: setMeta logs on failure and the next reconciler tick
-// re-attempts. The transactional rollback siblings now clear last_woke_at inside
-// their own store.Tx (rollbackPendingCreateClears), so this helper no longer
+// re-attempts. The rollback siblings now clear last_woke_at in their own
+// terminal write (rollbackPendingCreateClears), so this helper no longer
 // returns a fold batch.
 func clearPendingStartInFlightLease(handle string, sessFront *sessionpkg.Store, stderr io.Writer) {
 	if strings.TrimSpace(handle) == "" || sessFront == nil {
@@ -2084,9 +2183,13 @@ func stopStaleAsyncStartRuntime(result startResult, sp runtime.Provider, stderr 
 			return
 		}
 	}
+	agentName := result.prepared.candidate.tp.DisplayName()
 	if err := sp.Stop(name); err != nil && !runtime.IsSessionGone(err) {
 		fmt.Fprintf(stderr, "session reconciler: stopping stale async start runtime %s: %v\n", name, err) //nolint:errcheck
+		telemetry.RecordAgentStop(context.Background(), name, agentName, "stale-async-start", err)
+		return
 	}
+	telemetry.RecordAgentStop(context.Background(), name, agentName, "stale-async-start", nil)
 }
 
 // asyncStartSessionStillCurrentInfo decides whether an async start result should
@@ -2172,6 +2275,16 @@ func startPreparedStartCandidate(
 			// create back just recreates the bead next tick against the same
 			// zombie — so recycle it: stop the stale session and fall
 			// through to a fresh start.
+			//
+			// This is the same "pane up, process dead" condition the
+			// steady-state reconciler classifies as a crash (session_reconciler.go's
+			// zombie-capture block), just detected here at start-retry time instead
+			// of on a normal reconcile tick — so it is recorded the same way
+			// (gc.agent.crashes.total), not as a stop: nothing here was
+			// deliberately shut down, gc is discovering and clearing wreckage
+			// left by the agent process's own exit. Like that detector, a
+			// provider rate-limit screen in the pane is not counted as a crash.
+			crashOutput, peekErr := sp.Peek(name, rateLimitPeekLines)
 			recycleBegin := time.Now()
 			stopErr := sp.Stop(name)
 			if phases != nil {
@@ -2180,6 +2293,30 @@ func startPreparedStartCandidate(
 			if stopErr != nil && !runtime.IsSessionGone(stopErr) {
 				return false, fmt.Errorf("recycling session %q with dead agent process: %w", name, stopErr)
 			}
+			// Recording after a successful Stop bounds this to one datapoint
+			// per recycle even when a failed Stop sends the start back for retry.
+			if peekErr == nil && !runtime.ContainsProviderRateLimitScreen(crashOutput) {
+				telemetry.RecordAgentCrash(context.Background(), item.candidate.tp.DisplayName(), crashOutput)
+			}
+		}
+	}
+	if rigName := strings.TrimSpace(item.candidate.tp.RigName); rigName != "" {
+		st, err := loadSuspensionState(fsys.OSFS{}, cityPath)
+		if err != nil {
+			return false, fmt.Errorf("loading suspension state before starting session %q: %w", name, err)
+		}
+		suspendedOnStart := false
+		if cfg != nil {
+			for i := range cfg.Rigs {
+				rig := &cfg.Rigs[i]
+				if rig.Name == rigName {
+					suspendedOnStart = rig.EffectiveSuspendedOnStart()
+					break
+				}
+			}
+		}
+		if suspensionstate.EffectiveRigSuspended(st, rigName, suspendedOnStart) {
+			return false, fmt.Errorf("rig %q is suspended", rigName)
 		}
 	}
 	if store == nil || strings.TrimSpace(item.candidate.info.ID) == "" {
@@ -2341,9 +2478,6 @@ func clearStaleResumeKeyMetadata(handle string, sessFront *sessionpkg.Store) map
 	}
 	if sessFront != nil && strings.TrimSpace(handle) != "" {
 		_ = sessFront.ApplyPatch(handle, patch)
-		// S19 Stage 3 shadow: record the legacy priming-marker clears (no-op
-		// unless the shadow harness is enabled).
-		recordLegacyCompareWrites(handle, "clearStaleResumeKeyMetadata", patch)
 	}
 	return patch
 }
@@ -2380,6 +2514,26 @@ func confirmPendingStart(currentState string) bool {
 	return sessionpkg.StateConfirmsPendingStart(sessionpkg.State(strings.TrimSpace(currentState)))
 }
 
+// confirmStartCommitState reports whether a start commit (the async/sync commit
+// in commitStartResultTraced and the recovery commit in
+// recoverRunningPendingCreate) should stamp state=active +
+// state_reason=creation_complete. It is confirmPendingStart plus "awake": the
+// reconciler's heal pass projects "awake" for any live runtime, so it can land
+// on a bead between the runtime spawn and this commit. Treating that healed
+// "awake" as already-confirmed left state_reason unset, which silently dropped
+// the post-create demand floor (poolSessionWithinPostCreateProtection) for a
+// fresh pool worker — the first-run "orphaned" drain of a worker that had just
+// claimed its step. Both commit paths share this one predicate so they cannot
+// drift apart again.
+//
+// It deliberately does NOT drive StartsAwakeInterval: re-confirming an
+// already-awake runtime must not reset its in-flight awake interval, so that
+// epoch stays keyed on confirmPendingStart alone.
+func confirmStartCommitState(currentState string) bool {
+	return confirmPendingStart(currentState) ||
+		sessionpkg.State(strings.TrimSpace(currentState)) == sessionpkg.StateAwake
+}
+
 func commitStartResultTraced(
 	result startResult,
 	sessFront *sessionpkg.Store,
@@ -2396,6 +2550,18 @@ func commitStartResultTraced(
 	info := result.prepared.candidate.info
 	name := result.prepared.candidate.name()
 	tp := result.prepared.candidate.tp
+	// A capacity refusal is checked first, ahead of every failure arm
+	// including the terminal-error classifier: the endpoint refused, so
+	// nothing about this session is terminal or crash-looping.
+	// Gated on err: an async commit can still convert a refused start into
+	// a converged success once a matching runtime is found.
+	if result.err != nil && (result.capacityRefused || result.capacityValve) {
+		recordCapacityRefusedTrace(result, trace)
+	}
+	if result.err != nil && result.capacityRefused {
+		commitCapacityRefusal(result, sessFront, wave, stderr)
+		return startCommitFailed
+	}
 	// Session startup is not yet safe to decide — back off silently without
 	// recording failure. The reconciler will retry on the next patrol tick.
 	if startOutcomeDefersCommit(result.outcome) {
@@ -2429,16 +2595,21 @@ func commitStartResultTraced(
 		promptHash = result.prepared.promptHash
 	}
 	metadata := sessionpkg.CommitStartedPatch(sessionpkg.CommitStartedPatchInput{
-		CoreHash:                result.prepared.coreHash,
-		LiveHash:                result.prepared.liveHash,
-		ProvisionHash:           result.prepared.provisionHash,
-		LaunchHash:              result.prepared.launchHash,
-		CoreBreakdown:           coreBreakdown,
-		ConfirmState:            confirmPendingStart(info.MetadataState),
+		CoreHash:      result.prepared.coreHash,
+		LiveHash:      result.prepared.liveHash,
+		ProvisionHash: result.prepared.provisionHash,
+		LaunchHash:    result.prepared.launchHash,
+		CoreBreakdown: coreBreakdown,
+		// The heal pass may already have projected "awake" onto this bead
+		// before the commit landed; confirm from there too so the commit still
+		// stamps state_reason=creation_complete (confirmStartCommitState).
+		ConfirmState:            confirmStartCommitState(info.MetadataState),
 		ClearSleepReason:        info.SleepReason != "",
 		ClearPendingCreateClaim: shouldRollbackPendingCreateInfo(info),
 		// A confirmed transition out of a dormant/creating state opens a new
-		// awake interval — stamp a fresh compute-usage epoch for it.
+		// awake interval — stamp a fresh compute-usage epoch for it. Keyed on
+		// confirmPendingStart, not confirmStartCommitState: an already-awake
+		// bead keeps its in-flight interval (mirrors recoverRunningPendingCreate).
 		StartsAwakeInterval: confirmPendingStart(info.MetadataState),
 		Now:                 clk.Now(),
 		PrimedAt:            primedAt,
@@ -2546,6 +2717,130 @@ func commitStartResultTraced(
 	return startCommitSucceeded
 }
 
+// commitCapacityRefusal commits a start the serving endpoint refused. The
+// launch never happened, so it undoes PreWake (restorePreWakeState): no
+// rollback, no startup-health episode, no wake-failure accrual, and no
+// conversation reset. A pending-create row stays open and keeps its place in
+// the wake order.
+func commitCapacityRefusal(result startResult, sessFront *sessionpkg.Store, wave int, stderr io.Writer) {
+	name := result.prepared.candidate.name()
+	tp := result.prepared.candidate.tp
+	fmt.Fprintf(stderr, "session reconciler: starting %s: endpoint refused (capacity): %s\n", name, formatLifecycleError(result.err)) //nolint:errcheck
+	telemetry.RecordAgentStart(context.Background(), name, tp.DisplayName(), result.err)
+	restorePreWakeState(result.prepared, sessFront, stderr)
+	logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, string(TraceOutcomeCapacityRefused), result.started, result.finished, result.err, result.phases)
+}
+
+// preWakeRestoredKeys are the lifecycle keys PreWake overwrites that a
+// capacity refusal restores. continuation_epoch is among them so a refused
+// attempt does not invalidate queued nudges. The incarnation identity
+// (instance_token, generation) stays bumped: the token fences the restore.
+var preWakeRestoredKeys = []string{
+	"state", "sleep_reason", "sleep_intent", "detached_at", "continuation_reset_pending",
+	"continuation_epoch", "wake_request", "wake_requested_at",
+}
+
+// preWakeRestoreAttempts bounds the restore's re-read when another writer
+// lands between its read and its fenced write.
+const preWakeRestoreAttempts = 3
+
+// preWakeUndo records what one attempt's PreWake wrote and what each key held
+// before, so a capacity refusal can put the row back.
+type preWakeUndo struct {
+	// token is the attempt's instance_token; the restore applies only to the
+	// incarnation that made it.
+	token string
+	// written is PreWake's value for each restorable key, restore the value
+	// before it.
+	written, restore sessionpkg.MetadataPatch
+}
+
+// newPreWakeUndo captures, from the row PreWake read and the batch it wrote,
+// how to undo it. The in-flight lease (last_woke_at) goes back to empty. A
+// claimless row's pending_create_started_at is restored too: PreWake stamps it
+// fresh, while a claimed row keeps its episode marker.
+func newPreWakeUndo(current sessionpkg.Info, persisted map[string]string, written sessionpkg.MetadataPatch) preWakeUndo {
+	keys := append([]string{"last_woke_at"}, preWakeRestoredKeys...)
+	if !current.PendingCreateClaim {
+		keys = append(keys, "pending_create_started_at")
+	}
+	undo := preWakeUndo{
+		written: make(sessionpkg.MetadataPatch, len(keys)),
+		restore: make(sessionpkg.MetadataPatch, len(keys)),
+	}
+	for _, key := range keys {
+		value, ok := written[key]
+		if !ok {
+			continue
+		}
+		undo.written[key] = value
+		undo.restore[key] = persisted[key]
+	}
+	undo.restore["last_woke_at"] = ""
+	return undo
+}
+
+// restorePreWakeState undoes a refused start's PreWake, so the reconciler does
+// not later heal a never-launched "creating" row into a conversation reset,
+// reap it as stale, or lose an explicit wake. Under the session mutation lock
+// it re-reads the row and restores each key only while it still holds the
+// value PreWake wrote: anything written since (a suspend, a wait hold, a new
+// wake request, a newer attempt's lease) wins. Nothing is written to a closed
+// row or to another incarnation's row. The restore is one Update fenced on the
+// re-read revision (Store.UpdateMetadataFenced), so an out-of-process writer
+// landing after the re-read is not overwritten; on stores without conditional
+// writes only that read-to-write window stays unfenced.
+func restorePreWakeState(prepared preparedStart, sessFront *sessionpkg.Store, stderr io.Writer) {
+	id := strings.TrimSpace(prepared.candidate.info.ID)
+	undo := prepared.preWakeUndo
+	if id == "" || sessFront == nil || undo.written == nil {
+		return
+	}
+	err := sessionpkg.WithSessionMutationLock(id, func() error {
+		_, err := sessFront.UpdateMetadataFenced(id, preWakeRestoreAttempts, func(current sessionpkg.Info, persisted sessionpkg.PersistedResponse) sessionpkg.MetadataPatch {
+			if persisted.Status == "closed" || current.InstanceToken != undo.token {
+				return nil
+			}
+			patch := make(sessionpkg.MetadataPatch, len(undo.restore))
+			for key, value := range undo.restore {
+				if written := undo.written[key]; persisted.Metadata[key] == written && value != written {
+					patch[key] = value
+				}
+			}
+			return patch
+		})
+		return err
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "session reconciler: restoring pre-wake state for %s: %v\n", prepared.candidate.name(), err) //nolint:errcheck
+	}
+}
+
+// recordCapacityRefusedTrace records one refused start with the endpoint's
+// breaker state after the refusal. It is a baseline record so refusals stay
+// visible without a template trace arm.
+func recordCapacityRefusedTrace(result startResult, trace *sessionReconcilerTraceCycle) {
+	ticket := result.prepared.capacityTicket
+	if trace == nil || ticket == nil {
+		return
+	}
+	fields := traceRecordPayload{
+		"template":            result.prepared.candidate.tp.TemplateName,
+		"session_name":        result.prepared.candidate.name(),
+		"endpoint":            string(ticket.key),
+		"probe":               ticket.probe,
+		"breaker_state_after": ticket.stateAfter.String(),
+		"capacity_valve":      result.capacityValve,
+		"error":               formatLifecycleError(result.err),
+	}
+	var capErr *runtime.CapacityError
+	if errors.As(result.err, &capErr) {
+		fields["exit_code"] = capErr.ExitCode
+		fields["source"] = capErr.Source
+	}
+	trace.RecordControllerOperation(TraceSiteLifecycleStartCapacityRefused, TraceReasonStart, TraceOutcomeCapacityRefused, "capacity_refused", result.finished.Sub(result.started), fields)
+}
+
 // commitStartFailure performs the failure-path side effects for a start that
 // returned an error: startup rate-limit quarantine, pending-create rollback, or
 // wake-failure accounting, plus the matching trace and log records. It is split
@@ -2556,6 +2851,12 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 	name := result.prepared.candidate.name()
 	tp := result.prepared.candidate.tp
 	fmt.Fprintf(stderr, "session reconciler: starting %s: %s\n", name, formatLifecycleError(result.err)) //nolint:errcheck
+	// Every exit from this function is a failed start attempt, so record it
+	// here once rather than at each arm below — mirrors the single call site
+	// on the success path (commitStartResultTraced) and closes the gap where
+	// a start failure (e.g. a folder-trust-dialog abort on the rollback-pending
+	// arm below) never reached gc.agent.starts.total at all.
+	telemetry.RecordAgentStart(context.Background(), name, tp.DisplayName(), result.err)
 	if reason := runtime.ProviderTerminalErrorReason(result.err.Error()); reason != "" {
 		if result.rollbackPending && !releaseBeadScopedPoolRuntime(info, result.provider, stderr) {
 			// The runtime teardown could not be confirmed, so the row must stay
@@ -2765,8 +3066,7 @@ func recoverRunningPendingCreate(
 		// confirmPendingStart / StateAwake / sleep_reason checks are byte-identical
 		// to the former raw session.Metadata reads) — the two transitional W6
 		// lockstep mirrors that kept this raw read coherent are gone.
-		ConfirmState: confirmPendingStart(info.MetadataState) ||
-			sessionpkg.State(strings.TrimSpace(info.MetadataState)) == sessionpkg.StateAwake,
+		ConfirmState:     confirmStartCommitState(info.MetadataState),
 		ClearSleepReason: info.SleepReason != "",
 		// recoverRunningPendingCreate's caller (session_reconciler.go)
 		// already gates entry on shouldRollbackPendingCreateInfo(info), so
@@ -2899,18 +3199,32 @@ func runningSessionMatchesPendingCreateInfo(info sessionpkg.Info, sessionName st
 	return expectedToken != "" && liveToken == expectedToken
 }
 
-// rollbackPendingCreateClears folds the failed-create terminal close and the
-// pre/post-close metadata clears (last_woke_at, plus session_name when the
-// session name was explicit) into one store.Tx: one logical rollback transition,
-// not N independent writes (ga-igcny0.1.1). It is the shared transaction body for
-// both pending-create rollback siblings so they can never diverge on the
-// transaction boundary; each wraps it and decides which mirrored batch to fold
-// onto the typed snapshot.
+// rollbackPendingCreateClears is the pending-create rollback: the failed-create
+// terminal close plus the pre/post-close metadata clears (last_woke_at, plus
+// session_name when the session name was explicit), as one logical rollback
+// transition, not N independent writes (ga-igcny0.1.1). It is the shared body
+// for every pending-create rollback sibling so they can never diverge on the
+// write boundary; each wraps it and decides which mirrored batch to fold onto
+// the typed snapshot. Both arms below run under the per-session mutation lock
+// and only while PendingCreateLease.CanRollback approves the fresh read.
 //
-// On an atomic backing (the production Dolt/DoltLite store) every write commits
-// or rolls back together, so write order is invisible. The order below is what
-// keeps each invariant correct on a store whose Tx executes callbacks
-// sequentially WITHOUT rollback:
+// On a store with the atomic terminal close (native Dolt, SQLite, FileStore,
+// or a cache over one), session.Store.RollbackPendingCreateAtomically commits
+// the pre-close clears, the failed-create patch and the closed status as ONE
+// write fenced on the revision the rollback fence approved. A writer that lands
+// after that read wins the fence, and the rollback re-reads and closes only if
+// the row still passes CanRollback. So the row can never come to rest closed
+// with live-looking metadata (a wake's state=awake landing between a split
+// Tx's metadata write and its Close), and a new incarnation, a completed start
+// or a `gc session kill` fence (#6749) that lands in the window is never closed
+// over. The session_name clear is a separate write after the close, made only
+// while the row still reads closed.
+//
+// Every other store (BdStore, exec, plain MemStore, a legacy sqlite layout, or
+// a store that refuses the atomic close at call time) keeps one store.Tx. On
+// an atomic Tx every write commits or rolls back together, so write order is
+// invisible. The order below is what keeps each invariant correct on a store
+// whose Tx executes callbacks sequentially WITHOUT rollback:
 //
 //   - last_woke_at (the in-flight-lease marker) clears BEFORE the close, so it
 //     lands even if the close then fails and the next reconciler tick can retry
@@ -2921,11 +3235,11 @@ func runningSessionMatchesPendingCreateInfo(info sessionpkg.Info, sessionName st
 //   - session_name (the runtime identity) clears only AFTER the close has
 //     succeeded, so a failed close never strands an OPEN bead with its runtime
 //     name cleared; a closed bead's stale name is inert (closed beads are
-//     skipped for name reuse).
+//     skipped for name reuse). The atomic arm keeps the same ordering.
 //
-// When a non-atomic Tx persists the close but then fails the post-close write,
-// the txErr branch re-reads the bead and runs retired-session cleanup if it is
-// already closed, so a partial close cannot strand the session's waits/extmsg
+// When the close lands but the post-close write fails (either arm), the txErr
+// branch re-reads the bead and runs retired-session cleanup if it is already
+// closed, so a partial close cannot strand the session's waits/extmsg
 // bindings — the next reconciler tick would otherwise short-circuit on the
 // already-closed guard above and return before that cleanup ran.
 //
@@ -2936,7 +3250,9 @@ func runningSessionMatchesPendingCreateInfo(info sessionpkg.Info, sessionName st
 // refuse the rollback (ga-z8yi2j).
 //
 // It returns the applied clears and true on success, or (nil, false) when the
-// snapshot was superseded, the bead was already closed, or a store operation failed.
+// snapshot was superseded, the bead was already closed, or a store operation
+// failed. The session_name clear is left out of the returned clears when the
+// row was reopened before it could land.
 func rollbackPendingCreateClears(info sessionpkg.Info, sessFront *sessionpkg.Store, now time.Time, commitMsg string, preClose map[string]string, stderr io.Writer) (map[string]string, bool) {
 	store := sessFront.Store()
 	preCloseClears := map[string]string{"last_woke_at": ""}
@@ -2947,22 +3263,46 @@ func rollbackPendingCreateClears(info sessionpkg.Info, sessFront *sessionpkg.Sto
 	if strings.TrimSpace(info.SessionNameExplicit) == "true" {
 		postCloseClears = map[string]string{"session_name": ""}
 	}
-	// Tx has no read operation. Hold the same per-session lock used by start
-	// completion and preWakeCommit across the fresh read AND the transaction.
-	applied, txErr := sessFront.WithPendingCreateRollback(info, func() error {
-		return store.Tx(commitMsg, func(tx beads.Tx) error {
-			if err := tx.SetMetadataBatch(info.ID, preCloseClears); err != nil {
-				return err
-			}
-			if err := closeFailedCreateBeadInTx(tx, info.ID, now); err != nil {
-				return err
-			}
-			if len(postCloseClears) == 0 {
-				return nil
-			}
-			return tx.SetMetadataBatch(info.ID, postCloseClears)
+	// On a store with the atomic terminal close (native Dolt, SQLite,
+	// FileStore, or a cache over one) the pre-close clears and the
+	// failed-create patch commit with the closed status as ONE write, fenced on
+	// the revision of the row the rollback fence approved. A writer that lands
+	// after that read, such as a wake stamping state=awake, can then never leave
+	// the row closed with live-looking metadata, which FileStore's split Tx
+	// allowed. The failed-create keys overlay the pre-close ones, the same
+	// result as the Tx's write order. The session_name clear stays a separate
+	// write strictly after the close, and lands only while the row still reads
+	// closed.
+	closePatch := sessionpkg.MetadataPatch{}
+	for k, v := range preCloseClears {
+		closePatch[k] = v
+	}
+	for k, v := range failedCreateClosePatch(now) {
+		closePatch[k] = v
+	}
+	applied, postClosed, txErr := sessFront.RollbackPendingCreateAtomically(info, closePatch, postCloseClears)
+	if !applied && beads.IsConditionalWriteUnsupported(txErr) {
+		// No atomic close on this store (BdStore, exec, plain MemStore, a legacy
+		// sqlite layout), or it refused at call time and wrote nothing: keep the
+		// historical Tx. Tx has no read operation, so hold the same per-session
+		// lock used by start completion and preWakeCommit across the fresh read
+		// AND the transaction.
+		applied, txErr = sessFront.WithPendingCreateRollback(info, func() error {
+			return store.Tx(commitMsg, func(tx beads.Tx) error {
+				if err := tx.SetMetadataBatch(info.ID, preCloseClears); err != nil {
+					return err
+				}
+				if err := closeFailedCreateBeadInTx(tx, info.ID, now); err != nil {
+					return err
+				}
+				if len(postCloseClears) == 0 {
+					return nil
+				}
+				return tx.SetMetadataBatch(info.ID, postCloseClears)
+			})
 		})
-	})
+		postClosed = applied && txErr == nil
+	}
 	if txErr != nil {
 		fmt.Fprintf(stderr, "session beads: %s: %v\n", commitMsg, txErr) //nolint:errcheck
 		// On a non-atomic Store.Tx backend (FileStore, or BdStore whose apply()
@@ -2984,10 +3324,13 @@ func rollbackPendingCreateClears(info sessionpkg.Info, sessFront *sessionpkg.Sto
 		return nil, false
 	}
 	cancelStateAssignedToRetiredSessionBead(store.Store, info.ID, now, stderr)
-	// Mirror the union of both clears onto the typed snapshot.
+	// Mirror the union of both clears onto the typed snapshot. The post-close
+	// clear is left out when it did not land (the row was reopened before it).
 	batch := map[string]string{"last_woke_at": ""}
-	for k, v := range postCloseClears {
-		batch[k] = v
+	if postClosed {
+		for k, v := range postCloseClears {
+			batch[k] = v
+		}
 	}
 	return batch, true
 }
@@ -3153,10 +3496,10 @@ func rollbackPendingCreateMarkingTerminal(info sessionpkg.Info, sessFront *sessi
 // failed-create ClosePatch metadata + claim clears mirrored onto the raw bead
 // when the store-only close succeeds. Returns the full mirrored batch (again with
 // NO Closed change — closeFailedCreateBead is store-only, so *session.Status stays
-// open) for the snapshot fold. It shares rollbackPendingCreateClears' single Tx,
-// so the pre-close clears and the failed-create close roll back together on
-// failure (ga-igcny0.1.1) instead of leaving an open creating bead with its
-// runtime name already cleared.
+// open) for the snapshot fold. It shares rollbackPendingCreateClears' write
+// boundary (one fenced atomic close, or one Tx), so the pre-close clears and
+// the failed-create close land or fail together (ga-igcny0.1.1) instead of
+// leaving an open creating bead with its runtime name already cleared.
 func rollbackPendingCreateClearingClaim(info sessionpkg.Info, sessFront *sessionpkg.Store, now time.Time, stderr io.Writer) map[string]string {
 	if strings.TrimSpace(info.ID) == "" || sessFront == nil {
 		return nil
@@ -3249,6 +3592,16 @@ func executePlannedStartsTraced(
 			maxWave = wave
 		}
 	}
+	capacityGuard := startOpts.capacityGuard
+	// admitted holds capacity tickets not yet handed to a start. Every
+	// early return (context cancellation, panic) resolves them so an
+	// abandoned admission cannot wedge its endpoint's probe.
+	var admitted []*capacityTicket
+	defer func() {
+		for _, ticket := range admitted {
+			abandonCapacityTicket(ticket, rec, stderr)
+		}
+	}()
 	wakeCount := 0
 	for wave := 0; wave <= maxWave; wave++ {
 		if ctx != nil && ctx.Err() != nil {
@@ -3288,6 +3641,10 @@ func executePlannedStartsTraced(
 		// every tick. Sorting within the dependency wave is safe: every
 		// candidate here already has its dependencies satisfied.
 		sortCandidatesByWakeFairness(ready)
+		// Probe rotation: among sessions on a refusing endpoint, the ones
+		// refused least this episode go first, so a poisoned oldest session
+		// cannot monopolize the half-open probe.
+		sortCandidatesByProbeRotation(ready, capacityGuard)
 		for offset := 0; offset < len(ready); {
 			if wakeCount >= maxWakes {
 				for _, candidate := range ready[offset:] {
@@ -3326,11 +3683,37 @@ func executePlannedStartsTraced(
 						continue
 					}
 				}
+				// Endpoint capacity admission comes before the identity
+				// breaker's restart accounting and before PreWake, so a
+				// deferred start writes nothing and spends no wake budget.
+				endpoint := resolvedEndpointKey(candidate.tp, candidate.info)
+				ticket, admit := capacityGuard.Admit(endpoint, candidate.info.ID, candidate.logicalTemplate(cfg))
+				if !admit {
+					if release != nil {
+						release()
+					}
+					if done != nil {
+						done()
+					}
+					logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), string(TraceOutcomeDeferredByEndpointCapacity), time.Time{}, time.Time{}, nil)
+					if trace != nil {
+						_, st := capacityGuard.Eligible(endpoint)
+						trace.RecordDecision(TraceSiteLifecycleStartRun, TraceReasonEndpointCapacityOpen, TraceOutcomeDeferredByEndpointCapacity, candidate.tp.TemplateName, candidate.name(), traceRecordPayload{
+							"endpoint": string(endpoint),
+							"state":    st.State.String(),
+						})
+					}
+					continue
+				}
+				if ticket != nil {
+					admitted = append(admitted, ticket)
+				}
 				if cbEnabled {
 					identity := namedSessionIdentityInfo(candidate.info)
 					if identity != "" {
 						cbNow := clk.Now().UTC()
 						if cb.IsOpen(identity, cbNow) {
+							abandonCapacityTicket(ticket, rec, stderr)
 							if release != nil {
 								release()
 							}
@@ -3350,6 +3733,7 @@ func executePlannedStartsTraced(
 						}
 						state, err := recordSessionCircuitBreakerRestart(sessFront, candidate.info.ID, cb, identity, cbNow)
 						if err != nil {
+							abandonCapacityTicket(ticket, rec, stderr)
 							if release != nil {
 								release()
 							}
@@ -3361,6 +3745,7 @@ func executePlannedStartsTraced(
 							continue
 						}
 						if state == circuitOpen {
+							abandonCapacityTicket(ticket, rec, stderr)
 							if release != nil {
 								release()
 							}
@@ -3379,6 +3764,7 @@ func executePlannedStartsTraced(
 				}
 				item, err := prepareStartCandidateForCity(candidate, cityPath, cityName, cfg, sp, store, clk, stderr, startOpts.workDirResolver)
 				if err != nil {
+					abandonCapacityTicket(ticket, rec, stderr)
 					clearPendingStartInFlightLease(candidate.info.ID, sessFront, stderr)
 					if release != nil {
 						release()
@@ -3390,6 +3776,7 @@ func executePlannedStartsTraced(
 					logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), "failed", time.Time{}, time.Time{}, err)
 					continue
 				}
+				item.capacityTicket = ticket
 				if startOpts.async {
 					asyncPrepared = append(asyncPrepared, asyncPreparedStart{item: *item, release: release, done: done})
 				} else {
@@ -3403,6 +3790,8 @@ func executePlannedStartsTraced(
 			}
 			if startOpts.async {
 				results = enqueuePreparedStartWaveForCity(ctx, asyncPrepared, cityPath, sp, store, cfg, clk, rec, startupTimeout, wave, stdout, stderr, trace, startOpts.asyncFollowUp, stabilityWaiter, sessionStaleKeyDetectionWaiter, startOpts.warmClaimProbe)
+				// The start goroutines own these tickets now.
+				admitted = admitted[:0]
 				if len(results) > 0 && asyncStartBatchNeedsFollowUp(batchCandidates, cfg) {
 					asyncFollowUpRequired = true
 				}
@@ -3422,6 +3811,9 @@ func executePlannedStartsTraced(
 				)
 			}
 			for _, result := range results {
+				if !startOpts.async {
+					result = resolveStartCapacity(result, rec, stderr)
+				}
 				if trace != nil {
 					trace.RecordOperation(TraceSiteLifecycleStartRun, TraceReasonStart, result.outcome, "", result.prepared.candidate.tp.TemplateName, result.prepared.candidate.name(), result.finished.Sub(result.started), traceRecordPayload{
 						"rollback_pending": result.rollbackPending,

@@ -36,6 +36,40 @@ var ErrInteractionUnsupported = errors.New("session interaction is unsupported")
 // process, but it exited before startup completed successfully.
 var ErrSessionDiedDuringStartup = errors.New("session died during startup")
 
+// ExitCodeTempFail is sysexits.h EX_TEMPFAIL. A launched agent command that
+// exits with it before startup completes declares a retryable, endpoint-wide
+// refusal rather than a session-specific crash. It is the same convention gate
+// commands use to report an infrastructure outcome (convergence.GateInfraExitCode).
+const ExitCodeTempFail = 75
+
+// CapacitySourceExitStatus is the [CapacityError.Source] of a refusal observed
+// as the launched command's exit status.
+const CapacitySourceExitStatus = "exit_status"
+
+// ErrProviderCapacity reports that a start was refused because a shared
+// serving endpoint is at capacity or temporarily unavailable. It is retryable
+// and not specific to the session that attempted the start.
+var ErrProviderCapacity = errors.New("provider endpoint at capacity")
+
+// CapacityError is returned by providers that observed a capacity refusal at a
+// process boundary. It matches both [ErrProviderCapacity] and its cause under
+// errors.Is, and its message is exactly the cause's, so logs, pane excerpts,
+// and existing string consumers are unchanged.
+type CapacityError struct {
+	ExitCode int    // the observed exit status
+	Source   string // how the refusal was observed, e.g. CapacitySourceExitStatus
+	Err      error  // the provider's own error, e.g. one wrapping ErrSessionDiedDuringStartup
+}
+
+// Error returns the cause's message unchanged.
+func (e *CapacityError) Error() string { return e.Err.Error() }
+
+// Unwrap exposes both the capacity sentinel and the provider's cause.
+func (e *CapacityError) Unwrap() []error { return []error{ErrProviderCapacity, e.Err} }
+
+// IsProviderCapacity reports whether err carries a typed capacity refusal.
+func IsProviderCapacity(err error) bool { return errors.Is(err, ErrProviderCapacity) }
+
 // ErrSessionNotFound reports that an operation targeted a session the
 // runtime does not know about. Benign for Stop() — the session was
 // already gone — but fatal for Attach/Send. Providers wrap their own
@@ -341,6 +375,40 @@ type SessionRosterProvider interface {
 type SessionRosterEntry struct {
 	Attached     bool
 	LastActivity time.Time
+}
+
+// InventoryProvider is an optional extension that reads per-session
+// runtime attributes for the whole fleet in one call, for callers that would
+// otherwise probe every listed session separately.
+//
+// Like [SessionRosterProvider], it is an attributes source, not a listing:
+// the entry names are a subset of the same instant's ListRunning("") result,
+// and a name absent from the inventory is not thereby proven absent.
+type InventoryProvider interface {
+	RuntimeInventory(ctx context.Context) (map[string]InventoryEntry, error)
+}
+
+// InventoryEntry holds the batch-readable attributes of one session,
+// as returned by [InventoryProvider.RuntimeInventory]. A false Known
+// flag means the attribute could not be read; its value is then meaningless.
+type InventoryEntry struct {
+	// Incarnation identifies this runtime instance of the session. A new
+	// runtime under the same name, or a respawn of the session's first pane,
+	// gets a different value. Empty when the provider cannot report one.
+	//
+	// On tmux it can also change without a restart: swap-pane,
+	// split-window -b, rotate-window, or killing pane 0.0 moves a different
+	// process into the first slot. That is harmless; a changed id only costs
+	// one attribution re-read.
+	Incarnation string
+	// DeadKnown and AllPanesDead report whether every process slot of the
+	// session has exited (a corpse kept visible, for example by tmux
+	// remain-on-exit).
+	DeadKnown, AllPanesDead bool
+	// AttachedKnown and Attached report whether any client is attached. On
+	// tmux the count includes gc's own hidden attach client, so a session gc
+	// is briefly attached to reads attached.
+	AttachedKnown, Attached bool
 }
 
 // EnvironmentBatchProvider is an optional extension exposing a single-exec

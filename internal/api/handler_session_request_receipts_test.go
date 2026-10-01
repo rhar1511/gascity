@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -276,14 +277,8 @@ func TestSessionRequestSubmitHTTPReturnsAcceptanceBeforeResolutionAndReplayRecov
 	if second.Code != http.StatusAccepted || second.Body.String() != first.Body.String() {
 		t.Fatalf("same-key replay = %d %s, want exact %s", second.Code, second.Body.String(), first.Body.String())
 	}
-	deadline := time.Now().Add(testEventTimeout)
-	for time.Now().Before(deadline) {
-		receipt, err = session.NewStore(state.SessionsBeadStore()).GetRequest(info.ID, "resolution-http-1")
-		if err == nil && receipt.Delivery == session.RequestDeliveryAccepted {
-			break
-		}
-		time.Sleep(time.Millisecond)
-	}
+	waitForTrackedRequestEvents(t, state.eventProv, "resolution-http-1", events.RequestResultSessionSubmit, 1)
+	receipt, err = session.NewStore(state.SessionsBeadStore()).GetRequest(info.ID, "resolution-http-1")
 	if err != nil || receipt.Delivery != session.RequestDeliveryAccepted || state.sp.CountCalls("Nudge", info.SessionName) != 1 {
 		t.Fatalf("recovered receipt=%+v error=%v", receipt, err)
 	}
@@ -324,14 +319,8 @@ func TestSessionRequestSameKeyReplayResumesAfterPreReservationFailure(t *testing
 	if second.Code != http.StatusAccepted || second.Body.String() != first.Body.String() {
 		t.Fatalf("same-key replay = %d %s, want exact %s", second.Code, second.Body.String(), first.Body.String())
 	}
-	deadline := time.Now().Add(testEventTimeout)
-	for time.Now().Before(deadline) {
-		receipt, err = session.NewStore(state.SessionsBeadStore()).GetRequest(info.ID, "retry-http-1")
-		if err == nil && receipt.Delivery == session.RequestDeliveryAccepted {
-			break
-		}
-		time.Sleep(time.Millisecond)
-	}
+	waitForTrackedRequestEvents(t, state.eventProv, "retry-http-1", events.RequestResultSessionSubmit, 1)
+	receipt, err = session.NewStore(state.SessionsBeadStore()).GetRequest(info.ID, "retry-http-1")
 	if err != nil || receipt.Delivery != session.RequestDeliveryAccepted || state.sp.CountCalls("Nudge", info.SessionName) != 1 {
 		t.Fatalf("resumed receipt=%+v error=%v", receipt, err)
 	}
@@ -368,31 +357,42 @@ func TestSessionRequestSameKeyReplayDoesNotResendUnknownDelivery(t *testing.T) {
 	if second.Code != http.StatusAccepted || second.Body.String() != first.Body.String() {
 		t.Fatalf("same-key replay = %d %s, want exact %s", second.Code, second.Body.String(), first.Body.String())
 	}
-	waitForSessionRequestFailures(t, state, "unknown-http-1", 2)
+	waitForTrackedRequestEvents(t, state.eventProv, "unknown-http-1", events.RequestFailed, 2)
 	receipt, err := session.NewStore(state.SessionsBeadStore()).GetRequest(info.ID, "unknown-http-1")
 	if err != nil || receipt.Delivery != session.RequestDeliveryUnknown || state.sp.CountCalls("Nudge", info.SessionName) != 1 {
 		t.Fatalf("uncertain replay receipt=%+v error=%v", receipt, err)
 	}
 }
 
-func waitForSessionRequestFailures(t *testing.T, state *fakeState, requestID string, want int) {
+func waitForTrackedRequestEvents(t *testing.T, prov events.Provider, requestID, eventType string, want int) {
 	t.Helper()
-	deadline := time.Now().Add(testEventTimeout)
-	for time.Now().Before(deadline) {
-		rows, _ := state.eventProv.List(events.Filter{Type: events.RequestFailed})
-		count := 0
-		for _, row := range rows {
-			var payload RequestFailedPayload
-			if json.Unmarshal(row.Payload, &payload) == nil && payload.Operation == RequestOperationSessionSubmit && requestIDMatches(payload.RequestID, requestID) {
+	ctx, cancel := context.WithTimeout(context.Background(), testEventTimeout)
+	defer cancel()
+	watcher, err := prov.Watch(ctx, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer watcher.Close() //nolint:errcheck // test watcher cleanup
+	for count := 0; count < want; {
+		row, err := watcher.Next()
+		if err != nil {
+			t.Fatalf("waiting for %d %s events for %s: %v", want, eventType, requestID, err)
+		}
+		if row.Type != eventType {
+			continue
+		}
+		if eventType == events.RequestFailed {
+			var p RequestFailedPayload
+			if json.Unmarshal(row.Payload, &p) == nil && p.Operation == RequestOperationSessionSubmit && p.RequestID == requestID {
+				count++
+			}
+		} else {
+			var p SessionSubmitSucceededPayload
+			if json.Unmarshal(row.Payload, &p) == nil && p.RequestID == requestID {
 				count++
 			}
 		}
-		if count >= want {
-			return
-		}
-		time.Sleep(time.Millisecond)
 	}
-	t.Fatalf("timed out waiting for %d request failures", want)
 }
 
 func TestSessionRequestReceiptMetadataRejectsGenericMutation(t *testing.T) {

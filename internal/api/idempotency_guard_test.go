@@ -26,6 +26,9 @@ var requireIdempotency = map[string]bool{
 	"emit-event":              true,
 	"post-v0-city":            true,
 	"post-v0-city-by-city-name-session-by-id-requests": true,
+	"submit-session":       true,
+	"send-session-message": true,
+	"respond-session":      true,
 }
 
 // pendingIdempotency lists known create operations that are deliberately NOT
@@ -33,10 +36,7 @@ var requireIdempotency = map[string]bool{
 // TODO list, not an exemption: when a slice wires one of these, MOVE it to
 // requireIdempotency — the test enforces the move so the lists stay honest.
 var pendingIdempotency = map[string]bool{
-	"create-session":       true, // 202; raw+Huma split, deferred (S4)
-	"send-session-message": true, // 202; deferred (S4)
-	"respond-session":      true, // 202; deferred (S4)
-	"submit-session":       true, // 202; deferred (S4)
+	"create-session": true, // 202; raw+Huma split, deferred (S4)
 }
 
 // exemptFromIdempotency lists POST operations that are NOT resource creates and
@@ -92,6 +92,7 @@ var exemptFromIdempotency = map[string]bool{
 	"post-v0-city-by-city-name-unregister":                               true,
 	"rotate-events":                                                      true,
 	"trigger-maintenance-dolt-gc":                                        true,
+	"post-v0-city-by-city-name-session-by-id-reset":                      true,
 }
 
 type idemSpecDoc struct {

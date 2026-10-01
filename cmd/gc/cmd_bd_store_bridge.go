@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -351,6 +352,77 @@ func updateBdStoreBridgeAtRevision(store beads.Store, current beads.Bead, opts b
 		return beads.ErrConditionalWriteUnsupported
 	}
 	return writer.UpdateIfMatch(current.ID, current.Revision, opts)
+}
+
+// parseFencedBatchClose recognizes only the batch-close options the typed
+// mutation can preserve. Other forms retain the fail-closed passthrough guard.
+func parseFencedBatchClose(args []string) (ids []string, reason string, jsonOutput, ok bool) {
+	if len(args) == 0 || args[0] != "close" {
+		return nil, "", false, false
+	}
+	for i := 1; i < len(args); i++ {
+		switch {
+		case args[i] == "--json":
+			jsonOutput = true
+		case args[i] == "--reason" || args[i] == "-r":
+			i++
+			if i == len(args) {
+				return nil, "", false, false
+			}
+			reason = args[i]
+		case strings.HasPrefix(args[i], "--reason="):
+			reason = strings.TrimPrefix(args[i], "--reason=")
+		case strings.HasPrefix(args[i], "-"):
+			return nil, "", false, false
+		default:
+			ids = append(ids, args[i])
+		}
+	}
+	return ids, reason, jsonOutput, len(ids) > 1
+}
+
+// closeBdBatchAtRevisions retains the batched exact-ID read while fencing each
+// close. All rows are checked before the first mutation; a race after that
+// point stops the remaining writes and reports the successfully closed prefix.
+func closeBdBatchAtRevisions(store beads.Store, observed map[string]beads.Bead, ids []string, reason string) ([]beads.Bead, error) {
+	if store == nil {
+		return nil, beads.ErrConditionalWriteUnsupported
+	}
+	closed := "closed"
+	opts := beads.UpdateOpts{Status: &closed}
+	if reason != "" {
+		opts.Metadata = map[string]string{"close_reason": reason}
+	}
+	writer, ok := beads.ConditionalWriterFor(store)
+	if !ok || !beads.InspectConditionalWrites(store).Capable {
+		return nil, beads.ErrConditionalWriteUnsupported
+	}
+	for _, id := range ids {
+		b, found := observed[id]
+		if !found || b.ID != id || b.Revision == 0 {
+			return nil, fmt.Errorf("%s: %w", id, beads.ErrConditionalWriteUnsupported)
+		}
+		if err := session.GuardGenericMutation(b, opts); err != nil {
+			return nil, fmt.Errorf("%s: %w", id, err)
+		}
+	}
+	var written []beads.Bead
+	for _, id := range ids {
+		b := observed[id]
+		if err := writer.UpdateIfMatch(id, b.Revision, opts); err != nil {
+			return written, fmt.Errorf("%s after %d close(s): %w", id, len(written), err)
+		}
+		b.Status = closed
+		if reason != "" {
+			b.Metadata = maps.Clone(b.Metadata)
+			if b.Metadata == nil {
+				b.Metadata = make(map[string]string)
+			}
+			b.Metadata["close_reason"] = reason
+		}
+		written = append(written, b)
+	}
+	return written, nil
 }
 
 func deleteBdStoreBridge(store beads.Store, args []string) error {

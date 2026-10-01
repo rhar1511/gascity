@@ -1,0 +1,165 @@
+{
+  "schema_version": 1,
+  "status": "source_checks_passed_uncommitted_pending_review",
+  "scope": "source_only",
+  "worktree": "/home/ricky/gascity-worktrees/gascity/upstream-pilot-baseline",
+  "branch": "implement/upstream-pilot-baseline-20260930",
+  "refs": {
+    "fork_parent": "90a0a050188c43b3884530c6cf5aee2cae5f8cff",
+    "upstream_merge_parent": "b5df315a82b38fd2379eb4255e311ab4fa7f588d",
+    "merge_base": "6f770bf87f92df771ffa2aa9e7a8eb369d0b4df8",
+    "qualification_reference_only": "eb720ec5f037f8649d62da2971a41b633ec6476d",
+    "release_integration_reference_only": "56dd2908846d94514a28f62ba3279b1d985f760b",
+    "code_and_generated_index_tree_before_handoff_files": "f1a1e82f2aef489180c585e8b721b649797489da",
+    "review_corrected_index_tree_before_handoff_update": "2d728b4dd87864b04565ffb3d54b0025138848c2",
+    "beads_go_module": "github.com/steveyegge/beads@v1.3.1-rc.2"
+  },
+  "integration": {
+    "method": "git merge --no-commit --no-ff b5df315a82b38fd2379eb4255e311ab4fa7f588d",
+    "unmerged_paths": 0,
+    "commit_created": false,
+    "published": false,
+    "deployed": false,
+    "reference_history_replayed": false,
+    "subagent_tool_available": false
+  },
+  "required_core_deltas": [
+    {
+      "id": "fork_31_herdr_binding_attribution",
+      "source": "27ca65453c5d25d767604b1d702844d0f2dea160",
+      "paths": ["internal/runtime/herdr/panebinding.go", "internal/runtime/herdr/events.go", "internal/runtime/herdr/provider.go", "internal/runtime/herdr/*test.go"],
+      "disposition": "retain_pinned_core",
+      "reason": "Upstream composite streams do not replace persisted pane ownership, binding generation, or ambiguous-owner refusal.",
+      "proof": "internal/runtime/herdr package PASS"
+    },
+    {
+      "id": "fork_32_acknowledged_reconcile",
+      "source": "4e4f982998befea82943005f0744b430af8b9c27",
+      "paths": ["cmd/gc/cmd_controller_reconcile*", "schemas/controller/reconcile/*"],
+      "disposition": "retain_pinned_core",
+      "reason": "Controller request acknowledgement remains distinct from session acknowledgement and verified effect.",
+      "proof": "six fast cmd/gc shards PASS"
+    },
+    {
+      "id": "fork_33_durable_receipts_and_protection",
+      "source": "8d3110af27495403dad9a6846e911654450b3ad3",
+      "paths": ["internal/session/request_*", "internal/session/store.go", "internal/api/*session_request*", "internal/beadmeta/*", "internal/beads/event_payload.go", "cmd/gc/cmd_bd*", "cmd/gc/bead_policy_store.go", "cmd/gc/wisp_gc*", "schemas/session/request/*"],
+      "disposition": "retain_pinned_core_backend",
+      "reason": "Durable reservation-before-I/O, uncertain-delivery replay refusal, credential redaction, receipt retention, and revision/purge fences require controller/backend enforcement.",
+      "proof": "session, api, beads, beadmeta packages and cmd/gc shards PASS"
+    },
+    {
+      "id": "fork_34_trusted_rsi",
+      "source": "ae572374330af0d0742cc24584bf386ed4797234",
+      "paths": ["internal/rsipolicy/*", "internal/dispatch/rsi*", "internal/config/rsi*", "cmd/gc/cmd_hook_claim_rsi_binding_test.go"],
+      "disposition": "retain_pinned_core",
+      "reason": "Candidate-owned evidence cannot establish judge identity, baseline authority, bounds, or promotion permission.",
+      "proof": "rsipolicy, dispatch, config packages and cmd/gc shards PASS"
+    },
+    {
+      "id": "fork_pool_runtime_name_demand",
+      "source": "10f5694f023efe7dfd08ff80d87bf67dc0a0c2a5",
+      "paths": ["cmd/gc/pool_desired_state.go", "cmd/gc/pool_session_name.go", "cmd/gc/pool_desired_state_test.go", "cmd/gc/doctor_pool_idle_routed_work_check.go"],
+      "disposition": "retain_narrow_fork_fix",
+      "reason": "Keep the exact pool-runtime-name discriminator; arbitrary unknown identities and closed session-bead IDs remain excluded. This is not signed dead-owner replacement authority.",
+      "proof": "pool demand/discriminator tests in fast cmd/gc shards PASS"
+    },
+    {
+      "id": "integration_exact_tmux_followups",
+      "paths": ["internal/runtime/tmux/tmux.go", "internal/runtime/tmux/adapter.go", "internal/runtime/tmux/exact_target_test.go", "internal/runtime/tmux/session_roster_test.go", "scripts/runtime-tmux-tests.manifest", "scripts/runtime_tmux_manifest_test.go"],
+      "disposition": "necessary_generic_core_fix",
+      "reason": "Extend exact targeting to activity, attach, selection, messages, setup/options, client switches, and hooks; preserve pane IDs and qualified targets.",
+      "proof": "TestAuxiliaryOpsNeverTargetPrefixSibling RED then GREEN; full tmux unit package PASS; inventory PASS"
+    },
+    {
+      "id": "integration_reload_watch_root",
+      "paths": ["cmd/gc/controller.go", "cmd/gc/city_runtime_config_publication_test.go"],
+      "disposition": "necessary_generic_core_fix",
+      "reason": "Runtime exclusions apply inside watched roots, not to their hosting ancestors; recursively register source directories under .gc-hosted worktrees.",
+      "proof": "new relative-root test RED then GREEN; existing watcher/reload tests PASS"
+    },
+    {
+      "id": "integration_fenced_batch_close",
+      "paths": ["cmd/gc/cmd_bd.go", "cmd/gc/cmd_bd_store_bridge.go", "cmd/gc/cmd_bd_batch_guard_test.go"],
+      "disposition": "necessary_core_backend_seam",
+      "reason": "Keep upstream batched exact-ID verification while fencing each close, preserving reason and redacted output, prechecking all purge fences, and reporting a successfully closed prefix on CAS conflict. No unfenced fallback.",
+      "proof": "batch verification/refusal, stale revision, purge preflight tests PASS"
+    },
+    {
+      "id": "review_explicit_file_store_config_errors",
+      "paths": ["cmd/gc/main.go", "cmd/gc/provider_store_resolution_test.go", "cmd/gc/cmd_graph_test.go"],
+      "disposition": "necessary_generic_core_fix",
+      "reason": "Explicit city config failures propagate before file-store opening or ID minting. Bare standalone scopes retain gc IDs through the direct opener and store factory. An invalid legacy graph config fixture is migrated to supported site bindings without changing shared-file-store assertions.",
+      "proof": "Invalid-config regression reproduced gc-1 for malformed/unreadable/missing config before the fix; focused public Store.Create and related prefix/graph tests PASS after the fix."
+    },
+    {
+      "id": "retained_workbench_compiled_seams",
+      "paths": ["internal/workbench/*", "internal/api/*attempt*", "internal/api/*convoy*", "cmd/gc/cmd_convoy_dispatch*", "cmd/gc/supervisor_dashboard*", "internal/api/dashboardspa/web/frontend/src/*"],
+      "disposition": "retain_existing_core_feature_pending_extraction",
+      "reason": "Preserve existing fork Workbench/PR-policy contracts. The pinned pack interface has no general compiled HTTP-route or dashboard-module plugin; these are not honestly pack-only today.",
+      "proof": "API/Workbench/CLI packages PASS; dashboard 103 files and 982 tests PASS"
+    }
+  ],
+  "pack_candidates": [
+    {"paths": ["contrib/inktree-hq-mirror/**"], "reason": "Opt-in roles, orders, prompts, scripts and service declarations; no activation performed."},
+    {"paths": ["internal/bootstrap/packs/core/formulas/mol-rsi-candidate.toml", "internal/bootstrap/packs/core/formulas/mol-software-factory.toml", "internal/bootstrap/packs/core/skills/gc-factory/**"], "reason": "Workflow/skill assets can move to a private pack; trusted promotion enforcement remains core-owned."},
+    {"paths": ["docs/reference/software-factory.md", "docs/reference/rsi-trusted-evaluation.md", "docs/reference/session-request-receipts.md", "engdocs/**workbench**", "docs/guides/workbench.md"], "reason": "Fork capability documentation follows its owning core seam or private-pack asset."},
+    {"paths": ["scripts/*gc-bundle*.sh", "scripts/*workbench-bundle*.sh", "scripts/testdata/fake-workbench*", "scripts/testdata/fake-export-gc.sh"], "reason": "Private distribution/host packaging candidates; retain checksummed bundles and tests."}
+  ],
+  "upstream_behavioral_proofs": {
+    "exact_targeting": "existing exact-target suite plus new auxiliary sibling executor regression",
+    "live_claim_drain_veto": "TestReconcileSessionBeads_IdleRespawnNeverDrainsClaimHolder and IdleRespawnRechecksClaimBeforeStop",
+    "occupant_identity": "TestHookClaimAssigneeIdentityPrecedence and CmdHookClaimUnaliasedPoolWorkerClaimsUnderItsSessionBeadID",
+    "nudge_uncertainty": "TestSendStartupNudgeWithRetry_DeliveredButUnobservedNeverRetried; fork SessionRequestUncertainProviderOutcomeIsNeverRetried; same-key HTTP unknown-delivery replay",
+    "reload_publication": "CityRuntimeReloadRejectsRevisionSupersededDuringPreparation; ReloadSupersededByAPIMutationConvergesOnRetry; provider census supersession tests",
+    "capacity": "endpoint_capacity_test.go executable fake-clock/provider suite",
+    "qualification": "Source seams only; real provider/listing death attestation and live-trial approval remain separate. No live user tmux probe."
+  },
+  "integration_metadata": {
+    "resource_union": "Retained #33 adds two HTTP-server sites/one file; #32 adds one Unix-listener site/one file. Code-owned and TOML ceilings reflect that exact union. Three receipt polling sleeps were removed; no sleep ceiling raised. Existing owner and upstream expiry retained; main-agent policy review required.",
+    "env_union": ["GC_BD_STORE_BRIDGE_PRIVATE", "GC_RUNTIME_EPOCH"],
+    "regenerated": ["OpenAPI JSON/TXT and event schemas", "Go API client", "city/pack schemas and CLI/config docs", "TypeScript API client", "embedded dashboard dist", "command census artifacts", "TESTING.md resource ledger"],
+    "legacy_script_preservation": "Operator's original no-script-removal boundary preserves six legacy sources, not six runtime requirements. They have no current private-contract dependency and are not qualification evidence for the rewritten upstream reaper. Embedded core scripts are exact upstream defaults; Dolt runtime.sh differs only by removal of an empty EOF line. The #33 private store bridge is the required behavioral shell delta.",
+    "formatting_only": ["engdocs/bazel-quickstart.md", "examples/bd/dolt/assets/scripts/runtime.sh", "release-gates/ga-oyyeq5-systemd-unit-dir-gate.md"],
+    "legacy_script_dispositions": [
+      {"path": "test/reaper_expired_rig_nudge_test.sh", "disposition": "operator_preserved_legacy_reference", "reason": "Historical direct-SQL Step 4 rig/nudge-close regression source. Its extracted-block interface was superseded upstream; no runtime/order/CI caller found. Retained solely under the initial no-removal instruction, not to reinstate old reaper behavior.", "private_contract_required": false},
+      {"path": "test/reaper_prune_backup_guard_test.sh", "disposition": "operator_preserved_legacy_reference", "reason": "Historical direct-SQL Step 6 backup-age prerequisite tests. Current upstream reaper uses the rewritten scope-aware path; retention preserves source evidence but does not override current backup behavior or certify the old test against new source.", "private_contract_required": false},
+      {"path": "test/reaper_prune_type_scope_guard_test.sh", "disposition": "operator_preserved_legacy_reference", "reason": "Historical direct-SQL Step 6 issue-type scope tests. Fork #33's current protection lives in revision-fenced controller/backend guards, not in this retired shell block. No current caller found; source retention only.", "private_contract_required": false},
+      {"path": "test/reaper_rig_name_for_db_test.sh", "disposition": "operator_preserved_legacy_reference", "reason": "Historical DB-to-rig map function tests; upstream's reaper no longer exposes that function. No current caller found. Kept as source evidence under no-removal instruction, not as an executable baseline gate.", "private_contract_required": false},
+      {"path": "test/reaper_session_pattern_test.sh", "disposition": "operator_preserved_legacy_reference", "reason": "Historical Step 6 pattern/SQL-versus-prune switch tests. The legacy block was superseded upstream and is not a required fork contract. No current caller found; kept only as reference source.", "private_contract_required": false},
+      {"path": "contrib/upstream-baseline-reference/scripts/dolt-target.sh", "original_path": "internal/bootstrap/packs/core/assets/scripts/dolt-target.sh", "disposition": "operator_preserved_nonembedded_reference", "reason": "Upstream explicitly retires the old Dog maintenance helper; TestCoreMaintenanceExecAssets requires its absence from the embedded core pack. Original executable source is preserved outside every pack/import/order to honor no-removal without resurrecting default runtime behavior. No current private-contract dependency.", "private_contract_required": false}
+    ],
+    "active_shell_exception": {"path": "examples/bd/assets/scripts/gc-beads-bd.sh", "disposition": "required_fork_33_private_backend_seam", "reason": "Internal get/list/ready/children/label reads select private bridge verbs with GC_BD_STORE_BRIDGE_PRIVATE=1 so authoritative lifecycle code retains credentials while public projections stay redacted. All other upstream script behavior is retained."}
+  },
+  "residual_path_classification": {
+    "scope": "All tracked paths in the source index tree, compared with the exact upstream merge parent.",
+    "rules_in_order": [
+      {"match": "blob and mode equal upstream", "disposition": "upstream_baseline"},
+      {"match": "integration_metadata.formatting_only paths", "disposition": "upstream_content_whitespace_normalized"},
+      {"match": "absent generated SPA chunk replaced by regenerated source build", "disposition": "obsolete_generated_output"},
+      {"match": "pack_candidates paths", "disposition": "pack_candidate"},
+      {"match": "contrib/upstream-baseline-reference/** or test/reaper_*_test.sh", "disposition": "retained_legacy_source_reference"},
+      {"match": "generated schemas, clients, dist, command tables and BUILD metadata", "disposition": "derived_artifact_of_owning_core_or_pack_delta"},
+      {"match": "remaining differing Go, UI, docs, policy, CI, dependency or build paths", "disposition": "retained_pinned_fork_core_or_qualification_support"}
+    ],
+    "necessity_limit": "Retention is not proof every existing Workbench/factory delta is permanently required in core. Extraction/necessity review remains explicit; no unsupported pack-plugin claim or blanket replay of reference integration history."
+  },
+  "validation": {
+    "record": "upstream-baseline-validation.md",
+    "vet": "PASS",
+    "build": "PASS at pre-review checkpoint; output removed. Not repeated after final review corrections under requested focused-tests/vet/lint/diff-only scope; focused tests compile the affected packages and vet passes.",
+    "cmd_gc_fast_shards": "PASS 1..6, with focused reruns after test-placement/metadata changes",
+    "internal_packages": "PASS per-package union; testenv and workertest failures resolved by golden union and inherited buildvcs=false",
+    "dashboard": "PASS build, source/test/e2e typechecks, 103 files/982 tests, isolated preview HTTP 200",
+    "scripts": "All tests except new tmux inventory metadata passed with make available; inventory-only rerun PASS after count update",
+    "examples_bd_dolt": "PASS: 347.605s; 483 pass events, zero fail/skip. Focused two formerly named fixtures PASS together in 4.378s.",
+    "timeout_disposition": "Original -timeout=5m validation invocation was under-budget for serialized GOMAXPROCS=2 execution. Owned-process capture showed fixture-local fake dolt under timeout, not an operator process or lock wait. Timestamped package run completed all cases; max completed case 10.99s, aggregate test time 633.95s. Corrected invocation uses repo-standard 20m package budget. No production timeout, test wait, assertion or concurrency limit changed.",
+    "staged_prerequisites": {"inspection_start_tree": "2b45c285bb895aecff83ab1f0cb0b2b2f1a88651", "initial_unstaged_paths": 0, "initial_untracked_paths": 0, "check_hooks": "PASS: .githooks active", "staged_lint": "PASS: 0 issues", "staged_format": "PASS", "check_docs": "PASS: 5.843s", "vet": "PASS", "codegen": "PASS: OpenAPI/schema/census/Go-client regenerated or checked; no artifact drift"},
+    "final_review_corrections": {"file_store_prefix": "PASS: focused cmd/gc tests 0.651s; malformed/unreadable/missing explicit configs refuse opening, configured HQ/rig prefixes remain correct, standalone Create remains gc-1", "memory_limit_contract": "PASS: 1.743s; real Make and recording lint executable verify seven targets with default/override caps; literal Makefile-body heuristic removed from TestLintTargetsApplyMemoryLimit", "vet": "PASS via go-bounded.sh vet ./...", "staged_lint": "PASS: 0 issues", "staged_format": "PASS", "diff_check_vs_fork": "PASS for index and worktree against 90a0a050188c43b3884530c6cf5aee2cae5f8cff", "test_scope": "Focused affected tests only; no broad suite repeated"},
+    "broad_fast_runner": "NOT COMPLETE; wrapper call exceeded tool's 20-minute timeout during unit-core",
+    "remaining_blockers": [
+      "Bazel unavailable; merged BUILD metadata reviewed but Bazel build/test not executed.",
+      "Full pre-commit invocation (including Beads hook chain) and independent commit review remain with the main agent; source prerequisites above pass. No commit attempted."
+    ]
+  }
+}

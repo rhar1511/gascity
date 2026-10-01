@@ -531,7 +531,7 @@ func (s *Server) handleSessionRename(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid", decErr.Error())
 		return
 	}
-	if body.Title == "" {
+	if strings.TrimSpace(body.Title) == "" {
 		writeError(w, http.StatusBadRequest, "invalid", "title is required")
 		return
 	}
@@ -753,7 +753,7 @@ func (s *Server) handleSessionPatch(w http.ResponseWriter, r *http.Request) {
 	var titlePtr *string
 	if rawTitle, ok := body["title"]; ok {
 		title, isString := rawTitle.(string)
-		if !isString || title == "" {
+		if !isString || strings.TrimSpace(title) == "" {
 			writeError(w, http.StatusBadRequest, "invalid", "title must be a non-empty string")
 			return
 		}
