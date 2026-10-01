@@ -185,9 +185,20 @@ func ResolveReadAuthVerifier(configKey string, configRequired bool) (*citywritea
 			return nil, fmt.Errorf("GC_CITY_READ_EPOCH_FLOOR: %w", err)
 		}
 	}
+	// Read and write grants address the same controller tenancy. A hosted
+	// launcher that supplies the write identity must not accidentally leave the
+	// read plane city-name-only. Explicitly conflicting identities fail at boot.
+	readCID := strings.TrimSpace(os.Getenv("GC_CITY_READ_CID"))
+	writeCID := strings.TrimSpace(os.Getenv("GC_CITY_WRITE_CID"))
+	if readCID != "" && writeCID != "" && readCID != writeCID {
+		return nil, errors.New("city read/write tenancy identities conflict")
+	}
+	if readCID == "" {
+		readCID = writeCID
+	}
 	return citywriteauth.New(citywriteauth.Options{
 		Aud:        readAuthAudience,
-		CID:        strings.TrimSpace(os.Getenv("GC_CITY_READ_CID")),
+		CID:        readCID,
 		Keys:       keys,
 		EpochFloor: epochFloor,
 		MaxTTL:     readAuthMaxTTL,

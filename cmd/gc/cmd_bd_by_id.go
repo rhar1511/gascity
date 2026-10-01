@@ -1509,7 +1509,7 @@ func doBdByIDDepList(graph storebinding.GraphStore, op bdByIDOp, stdout, stderr 
 		bead, err := graph.Get(related)
 		switch {
 		case err == nil:
-			rows = append(rows, bdByIDDepRow{Bead: bead, DepType: dep.Type})
+			rows = append(rows, bdByIDDepRow{Bead: beads.PublicBead(bead), DepType: dep.Type})
 		case errors.Is(err, beads.ErrNotFound):
 			rows = append(rows, bdByIDDepRow{Bead: beads.Bead{ID: related}, DepType: dep.Type, External: true})
 		default:
@@ -1576,7 +1576,7 @@ func doBdByIDDepTree(graph storebinding.GraphStore, root beads.Bead, op bdByIDOp
 	// Recursion depth is bounded by op.MaxDepth, which the parser floors at 1.
 	var walk func(bead beads.Bead, depth int, parentID, edge string) error
 	walk = func(bead beads.Bead, depth int, parentID, edge string) error {
-		row := bdByIDTreeRow{Bead: bead, Depth: depth, TreeParentID: parentID, EdgeFromParent: edge}
+		row := bdByIDTreeRow{Bead: beads.PublicBead(bead), Depth: depth, TreeParentID: parentID, EdgeFromParent: edge}
 		visited[bead.ID] = true
 		deps, err := graph.DepList(bead.ID, op.Direction)
 		if err != nil {
@@ -1672,6 +1672,7 @@ const bdByIDDepTreeLooseEdge = "relates-to"
 // the record came from, so a human who expected bd's own layout can see why it
 // differs rather than assume the bead is thin.
 func printBdByIDBead(b beads.Bead, jsonOut bool, binding string, stdout, stderr io.Writer) int {
+	b = beads.PublicBead(b)
 	if jsonOut {
 		out, err := json.MarshalIndent([]beads.Bead{b}, "", "  ")
 		if err != nil {

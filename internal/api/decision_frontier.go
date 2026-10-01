@@ -58,6 +58,7 @@ type DecisionFrontierAnswerInput struct {
 }
 
 func (sm *SupervisorMux) registerCityDecisionFrontierRoutes() {
+	sm.registerCitySourceCompositionRoutes()
 	cityGet(sm, "/bead/{id}/decision-frontier", (*Server).humaHandleDecisionFrontierRead,
 		func(op *huma.Operation) {
 			op.OperationID = "get-decision-frontier"
@@ -137,6 +138,19 @@ func (s *Server) humaHandleDecisionFrontierAnswer(ctx context.Context, input *De
 		return nil, err
 	}
 	service := s.decisionFrontierService()
+	current, err := service.Read(ctx, store, scope, input.ID, input.Body.WorkRevision)
+	if err != nil {
+		return nil, decisionFrontierAPIError(err)
+	}
+	if current.DeliveryContract == decisionfrontier.IndependentQuestionsContract {
+		// The reviewed answer URL remains usable, but protected maps use the
+		// authenticated canonical submission/readback and round-delivery path.
+		result, err := s.humaHandleHumanSourceAnswer(ctx, input)
+		if err != nil {
+			return nil, err
+		}
+		return &IndexOutput[decisionfrontier.Frontier]{Index: result.Index, Body: result.Body.Frontier}, nil
+	}
 	body := struct {
 		CityRef  string                            `json:"city_ref"`
 		StoreRef string                            `json:"store_ref"`

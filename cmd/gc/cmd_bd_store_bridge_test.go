@@ -54,14 +54,14 @@ func TestBdStoreBridgeBeadRedactsAttemptEvidenceMetadata(t *testing.T) {
 		t.Fatalf("bridge JSON exposed private attempt evidence: %s", encoded)
 	}
 	for key := range metadata {
-		if isBridgePrivateAttemptEvidenceMetadataKey(key) {
+		if beads.IsPrivatePresentationMetadataKey(key) {
 			if _, present := projected.Metadata[key]; present {
 				t.Errorf("bridge metadata retained private key %q", key)
 			}
 		}
 	}
-	if projected.Metadata["gc.attempt"] != "3" {
-		t.Fatalf("ordinary metadata = %v, want gc.attempt preserved", projected.Metadata)
+	if len(projected.Metadata) != 0 || projected.Title != "[private record]" {
+		t.Fatalf("private archive must be an identity-only stub: %+v", projected)
 	}
 	if metadata[beadmeta.AttemptEvidenceArchivePayloadMetadataKey] != privateValue {
 		t.Fatal("bridge projection mutated the store-owned metadata map")

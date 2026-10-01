@@ -341,6 +341,25 @@ export type Authorization = {
     status: string;
 };
 
+export type AuthorizedAnswer = {
+    answer_id: string;
+    issuer: string;
+    key_id: string;
+    resolution: string;
+    subject: string;
+    ticket_id: string;
+};
+
+export type AuthorizedFrontier = {
+    answers: Array<AuthorizedAnswer> | null;
+    frontier: Frontier;
+    physical_revision: string;
+    release?: RevisionTransitionReceipt;
+    reservation: RevisionTransitionReceipt;
+    rounds: Array<SessionEvidence> | null;
+    session: SessionEvidence;
+};
+
 export type BackendCredentialResolvedPayload = {
     backend: string;
     host: string;
@@ -1543,6 +1562,7 @@ export type FormulaVarDefResponse = {
 
 export type Frontier = {
     city_ref: string;
+    delivery_contract?: string;
     map_id: string;
     open_questions: Array<QuestionView> | null;
     prompt: PromptView;
@@ -1626,6 +1646,27 @@ export type HookClaimReclaimedStalePayload = {
     bead_id: string;
     new_assignee: string;
     previous_owner: string;
+};
+
+export type HumanSourceEnsureRequest = {
+    preparation_token: string;
+};
+
+export type HumanSourcePreparation = {
+    binding: PromptBinding;
+    city_ref: string;
+    delivery_contract: string;
+    expires_at: string;
+    preparation_token: string;
+    store_ref: string;
+    target_name: string;
+    work_id: string;
+    work_revision: string;
+};
+
+export type HumanSourceResumeRequest = {
+    frontier_revision: string;
+    physical_revision: string;
 };
 
 export type Identity = {
@@ -2761,6 +2802,12 @@ export type ProjectIdentityStampedPayload = {
     source: string;
 };
 
+export type PromptBinding = {
+    execution_generation: number;
+    request_id: string;
+    session_id: string;
+};
+
 export type PromptView = {
     id: string;
     reason?: string;
@@ -3147,6 +3194,13 @@ export type RecoveryRequest = {
     work_item_id: string;
 };
 
+export type Request = {
+    gate: string;
+    manifest_json: string;
+    request_sha256: string;
+    retained_base64: string;
+};
+
 export type RequestAttemptAttribution = {
     reason?: string;
     reference?: RequestAttemptReference;
@@ -3250,6 +3304,25 @@ export type RequestTranscriptReference = {
     tool_id?: string;
     transcript_generation_id: string;
     transcript_stream_id: string;
+};
+
+export type ResumeEligibility = {
+    eligible: boolean;
+    frontier_revision: string;
+    map_id: string;
+    physical_revision: string;
+    reason?: string;
+};
+
+export type RevisionTransitionReceipt = {
+    city_ref: string;
+    from_revision: number;
+    id: string;
+    map_id: string;
+    operation: string;
+    store_ref: string;
+    to_revision: number;
+    work_id: string;
 };
 
 export type RigActionBody = {
@@ -3780,6 +3853,13 @@ export type SessionDrainAckedWithAssignedWorkPayload = {
      * Pool template name when known at the emission site.
      */
     template?: string;
+};
+
+export type SessionEvidence = {
+    binding: PromptBinding;
+    effect: string;
+    receipt?: RequestReceipt;
+    status: string;
 };
 
 export type SessionInfo = {
@@ -10193,6 +10273,13 @@ export type UsageTotals = {
     wall_seconds: number;
 };
 
+export type Verdict = {
+    assurance: string;
+    reason: string;
+    request_sha256: string;
+    status: string;
+};
+
 export type WaitListBody = {
     /**
      * True when the lookup hit the per-scope cap and the list is partial.
@@ -12314,6 +12401,383 @@ export type AnswerDecisionFrontierResponses = {
 };
 
 export type AnswerDecisionFrontierResponse = AnswerDecisionFrontierResponses[keyof AnswerDecisionFrontierResponses];
+
+export type ReadAuthorizedHumanSourceFrontierData = {
+    body?: never;
+    headers: {
+        /**
+         * Fresh request-bound grant verified by the configured city authority. Network position and caller success fields are insufficient.
+         */
+        'X-GC-City-Read': string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Source work bead ID.
+         */
+        id: string;
+    };
+    query: {
+        /**
+         * Exact source work revision token.
+         */
+        work_revision: string;
+    };
+    url: '/v0/city/{cityName}/bead/{id}/decision-frontier/authorized';
+};
+
+export type ReadAuthorizedHumanSourceFrontierErrors = {
+    /**
+     * Bad Request
+     */
+    400: ErrorModel;
+    /**
+     * Unauthorized
+     */
+    401: ErrorModel;
+    /**
+     * Forbidden
+     */
+    403: ErrorModel;
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Request Entity Too Large
+     */
+    413: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type ReadAuthorizedHumanSourceFrontierError = ReadAuthorizedHumanSourceFrontierErrors[keyof ReadAuthorizedHumanSourceFrontierErrors];
+
+export type ReadAuthorizedHumanSourceFrontierResponses = {
+    /**
+     * OK
+     */
+    200: AuthorizedFrontier;
+};
+
+export type ReadAuthorizedHumanSourceFrontierResponse = ReadAuthorizedHumanSourceFrontierResponses[keyof ReadAuthorizedHumanSourceFrontierResponses];
+
+export type SubmitHumanSourceAnswerData = {
+    body: AnswerSubmission;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+        /**
+         * Fresh request-bound grant verified by the configured city authority. Network position and caller success fields are insufficient.
+         */
+        'X-GC-City-Write': string;
+        /**
+         * Stable key for retries of this exact answer.
+         */
+        'Idempotency-Key': string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Source work bead ID.
+         */
+        id: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/bead/{id}/decision-frontier/authorized/answers';
+};
+
+export type SubmitHumanSourceAnswerErrors = {
+    /**
+     * Bad Request
+     */
+    400: ErrorModel;
+    /**
+     * Unauthorized
+     */
+    401: ErrorModel;
+    /**
+     * Forbidden
+     */
+    403: ErrorModel;
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Request Entity Too Large
+     */
+    413: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type SubmitHumanSourceAnswerError = SubmitHumanSourceAnswerErrors[keyof SubmitHumanSourceAnswerErrors];
+
+export type SubmitHumanSourceAnswerResponses = {
+    /**
+     * OK
+     */
+    200: AuthorizedFrontier;
+};
+
+export type SubmitHumanSourceAnswerResponse = SubmitHumanSourceAnswerResponses[keyof SubmitHumanSourceAnswerResponses];
+
+export type CheckHumanSourceResumeData = {
+    body: HumanSourceResumeRequest;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+        /**
+         * Fresh request-bound grant verified by the configured city authority. Network position and caller success fields are insufficient.
+         */
+        'X-GC-City-Write': string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        id: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/bead/{id}/decision-frontier/check-resume';
+};
+
+export type CheckHumanSourceResumeErrors = {
+    /**
+     * Bad Request
+     */
+    400: ErrorModel;
+    /**
+     * Unauthorized
+     */
+    401: ErrorModel;
+    /**
+     * Forbidden
+     */
+    403: ErrorModel;
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Request Entity Too Large
+     */
+    413: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type CheckHumanSourceResumeError = CheckHumanSourceResumeErrors[keyof CheckHumanSourceResumeErrors];
+
+export type CheckHumanSourceResumeResponses = {
+    /**
+     * OK
+     */
+    200: ResumeEligibility;
+};
+
+export type CheckHumanSourceResumeResponse = CheckHumanSourceResumeResponses[keyof CheckHumanSourceResumeResponses];
+
+export type PrepareHumanSourceProposalData = {
+    body: DecisionFrontierEnsureRequest;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+        /**
+         * Fresh request-bound grant verified by the configured city authority. Network position and caller success fields are insufficient.
+         */
+        'X-GC-City-Write': string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        id: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/bead/{id}/decision-frontier/prepare';
+};
+
+export type PrepareHumanSourceProposalErrors = {
+    /**
+     * Bad Request
+     */
+    400: ErrorModel;
+    /**
+     * Unauthorized
+     */
+    401: ErrorModel;
+    /**
+     * Forbidden
+     */
+    403: ErrorModel;
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Request Entity Too Large
+     */
+    413: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type PrepareHumanSourceProposalError = PrepareHumanSourceProposalErrors[keyof PrepareHumanSourceProposalErrors];
+
+export type PrepareHumanSourceProposalResponses = {
+    /**
+     * OK
+     */
+    200: HumanSourcePreparation;
+};
+
+export type PrepareHumanSourceProposalResponse = PrepareHumanSourceProposalResponses[keyof PrepareHumanSourceProposalResponses];
+
+export type EnsurePreparedHumanSourceProposalData = {
+    body: HumanSourceEnsureRequest;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+        /**
+         * Fresh request-bound grant verified by the configured city authority. Network position and caller success fields are insufficient.
+         */
+        'X-GC-City-Write': string;
+        'Idempotency-Key': string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        id: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/bead/{id}/decision-frontier/prepared';
+};
+
+export type EnsurePreparedHumanSourceProposalErrors = {
+    /**
+     * Bad Request
+     */
+    400: ErrorModel;
+    /**
+     * Unauthorized
+     */
+    401: ErrorModel;
+    /**
+     * Forbidden
+     */
+    403: ErrorModel;
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Request Entity Too Large
+     */
+    413: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type EnsurePreparedHumanSourceProposalError = EnsurePreparedHumanSourceProposalErrors[keyof EnsurePreparedHumanSourceProposalErrors];
+
+export type EnsurePreparedHumanSourceProposalResponses = {
+    /**
+     * OK
+     */
+    200: Frontier;
+};
+
+export type EnsurePreparedHumanSourceProposalResponse = EnsurePreparedHumanSourceProposalResponses[keyof EnsurePreparedHumanSourceProposalResponses];
 
 export type GetV0CityByCityNameBeadByIdDepsData = {
     body?: never;
@@ -17864,6 +18328,74 @@ export type GetV0CityByCityNameReadinessResponses = {
 };
 
 export type GetV0CityByCityNameReadinessResponse = GetV0CityByCityNameReadinessResponses[keyof GetV0CityByCityNameReadinessResponses];
+
+export type VerifyRetirementReleaseSourceData = {
+    body: Request;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+        /**
+         * Fresh request-bound grant verified by the configured city authority. Network position and caller success fields are insufficient.
+         */
+        'X-GC-City-Write': string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/retirement-release/verify';
+};
+
+export type VerifyRetirementReleaseSourceErrors = {
+    /**
+     * Bad Request
+     */
+    400: ErrorModel;
+    /**
+     * Unauthorized
+     */
+    401: ErrorModel;
+    /**
+     * Forbidden
+     */
+    403: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Request Entity Too Large
+     */
+    413: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type VerifyRetirementReleaseSourceError = VerifyRetirementReleaseSourceErrors[keyof VerifyRetirementReleaseSourceErrors];
+
+export type VerifyRetirementReleaseSourceResponses = {
+    /**
+     * OK
+     */
+    200: Verdict;
+};
+
+export type VerifyRetirementReleaseSourceResponse = VerifyRetirementReleaseSourceResponses[keyof VerifyRetirementReleaseSourceResponses];
 
 export type DeleteV0CityByCityNameRigByNameData = {
     body?: never;

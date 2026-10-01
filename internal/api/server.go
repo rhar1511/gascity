@@ -82,6 +82,11 @@ type Server struct {
 	// idem caches responses for Idempotency-Key replay on create endpoints.
 	idem *idempotencyCache
 
+	// Human proposal preparation is ephemeral transport state, never authority.
+	// Every use revalidates the durable backend and current target composition.
+	humanPreparationsMu sync.Mutex
+	humanPreparations   map[string]humanPreparation
+
 	// rigIdem is the in-process live index + request_id state machine backing
 	// async server-side rig-create (POST /v0/city/{n}/rigs with a git_url). It
 	// starts empty at boot and is authoritative for admission (G13). One index

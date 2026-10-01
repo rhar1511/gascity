@@ -89,6 +89,12 @@ func (WireTaggedEvent) Schema(r huma.Registry) *huma.Schema {
 // event contract because `gc event emit` accepts them, so they pass through
 // under the schema's custom-event branch.
 func toWireEvent(e events.Event) (WireEvent, bool) {
+	var projectionErr error
+	e.Payload, e.Message, projectionErr = beads.PublicBeadEvent(e.Type, e.Payload, e.Message)
+	if projectionErr != nil {
+		log.Printf("api: events projection seq=%d: %v", e.Seq, projectionErr)
+		return WireEvent{}, false
+	}
 	decoded, registered, err := events.DecodePayload(e.Type, e.Payload)
 	if err != nil {
 		log.Printf("api: events wire: decode payload for %q seq=%d: %v", e.Type, e.Seq, err)
@@ -223,6 +229,11 @@ func (EventPayloadUnion) Schema(r huma.Registry) *huma.Schema {
 // wireEventFrom decodes the bus's opaque Payload into the registered typed
 // variant when one exists and otherwise emits a custom-event envelope.
 func wireEventFrom(e events.Event, workflow *workflowEventProjection) (eventStreamEnvelope, error) {
+	var projectionErr error
+	e.Payload, e.Message, projectionErr = beads.PublicBeadEvent(e.Type, e.Payload, e.Message)
+	if projectionErr != nil {
+		return eventStreamEnvelope{}, projectionErr
+	}
 	decoded, registered, err := events.DecodePayload(e.Type, e.Payload)
 	if err != nil {
 		return eventStreamEnvelope{}, fmt.Errorf("decode %s payload: %w", e.Type, err)
@@ -252,6 +263,11 @@ func wireEventFrom(e events.Event, workflow *workflowEventProjection) (eventStre
 
 // wireTaggedEventFrom is the supervisor-scope analog of wireEventFrom.
 func wireTaggedEventFrom(te events.TaggedEvent, workflow *workflowEventProjection) (taggedEventStreamEnvelope, error) {
+	var projectionErr error
+	te.Payload, te.Message, projectionErr = beads.PublicBeadEvent(te.Type, te.Payload, te.Message)
+	if projectionErr != nil {
+		return taggedEventStreamEnvelope{}, projectionErr
+	}
 	decoded, registered, err := events.DecodePayload(te.Type, te.Payload)
 	if err != nil {
 		return taggedEventStreamEnvelope{}, fmt.Errorf("decode %s payload: %w", te.Type, err)

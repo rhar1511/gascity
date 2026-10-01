@@ -56,7 +56,7 @@ const (
 	// maxWriteBodyBytes caps the request body the middleware buffers to compute
 	// the request digest, so an unauthenticated caller cannot exhaust memory by
 	// streaming a huge body before verification.
-	maxWriteBodyBytes = 1 << 20 // 1 MiB
+	maxWriteBodyBytes = citywriteauth.MaxHTTPBodyBytes
 
 	// writeAuthMaxTTL and writeAuthSkew bound grant lifetime and clock drift.
 	// The minter and verifier share a pod, so drift is small.

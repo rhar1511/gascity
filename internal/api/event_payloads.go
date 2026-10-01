@@ -278,7 +278,7 @@ func (p *BeadEventPayload) UnmarshalJSON(data []byte) error {
 	if !ok {
 		return fmt.Errorf("decode bead event payload: not a bead snapshot with an id: %s", data)
 	}
-	p.Bead = bead
+	p.Bead = beads.PublicBead(bead)
 	return nil
 }
 

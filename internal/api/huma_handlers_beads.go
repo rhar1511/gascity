@@ -651,7 +651,7 @@ func (s *Server) humaHandleBeadGraph(_ context.Context, input *BeadGraphInput) (
 	if err != nil {
 		return nil, apierr.Internal.Msg(err.Error())
 	}
-	if beads.IsProtectedAttemptEvidenceRecord(root) {
+	if isPrivateGenericBead(root) {
 		return nil, apierr.BeadNotFound.Msg("bead " + rootID + " not found")
 	}
 	visibleGraph := make([]beads.Bead, 0, len(graphBeads))
@@ -697,7 +697,7 @@ func (s *Server) humaHandleBeadGet(_ context.Context, input *BeadGetInput) (*Ind
 	if err != nil {
 		return nil, err
 	}
-	if beads.IsProtectedAttemptEvidenceRecord(b) {
+	if isPrivateGenericBead(b) {
 		return nil, apierr.BeadNotFound.Msg("bead " + id + " not found")
 	}
 	b, _ = publicAttemptEvidenceBead(b)
@@ -715,7 +715,7 @@ func (s *Server) humaHandleBeadDeps(_ context.Context, input *BeadDepsInput) (*I
 	if err != nil {
 		return nil, err
 	}
-	if beads.IsProtectedAttemptEvidenceRecord(parent) {
+	if isPrivateGenericBead(parent) {
 		return nil, apierr.BeadNotFound.Msg("bead " + id + " not found")
 	}
 	children, err := store.List(beads.ListQuery{

@@ -115,6 +115,15 @@ export const zAuthorization = z.object({
     status: z.string()
 });
 
+export const zAuthorizedAnswer = z.object({
+    answer_id: z.string(),
+    issuer: z.string(),
+    key_id: z.string(),
+    resolution: z.string(),
+    subject: z.string(),
+    ticket_id: z.string()
+});
+
 export const zBackendCredentialResolvedPayload = z.object({
     backend: z.string(),
     host: z.string(),
@@ -806,6 +815,15 @@ export const zHookClaimReclaimedStalePayload = z.object({
     previous_owner: z.string()
 });
 
+export const zHumanSourceEnsureRequest = z.object({
+    preparation_token: z.string().min(1)
+});
+
+export const zHumanSourceResumeRequest = z.object({
+    frontier_revision: z.string().min(1),
+    physical_revision: z.string().min(1)
+});
+
 export const zIdentity = z.object({
     claim_generation: z.string().optional(),
     execution_bead_id: z.string(),
@@ -1469,6 +1487,24 @@ export const zProjectIdentityStampedPayload = z.object({
     source: z.string()
 });
 
+export const zPromptBinding = z.object({
+    execution_generation: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    request_id: z.string(),
+    session_id: z.string()
+});
+
+export const zHumanSourcePreparation = z.object({
+    binding: zPromptBinding,
+    city_ref: z.string(),
+    delivery_contract: z.string(),
+    expires_at: z.iso.datetime(),
+    preparation_token: z.string(),
+    store_ref: z.string(),
+    target_name: z.string(),
+    work_id: z.string(),
+    work_revision: z.string()
+});
+
 export const zPromptView = z.object({
     id: z.string(),
     reason: z.string().optional(),
@@ -1705,6 +1741,13 @@ export const zRecoveryRequest = z.object({
     work_item_id: z.string()
 });
 
+export const zRequest = z.object({
+    gate: z.string(),
+    manifest_json: z.string(),
+    request_sha256: z.string(),
+    retained_base64: z.string()
+});
+
 export const zRequestAttemptBinding = z.object({
     attempt_id: z.string(),
     identity: zIdentity,
@@ -1842,6 +1885,25 @@ export const zRequestLedgerProjection = z.object({
     session_id: z.string(),
     status: z.string(),
     unavailable_reason: z.string().optional()
+});
+
+export const zResumeEligibility = z.object({
+    eligible: z.boolean(),
+    frontier_revision: z.string(),
+    map_id: z.string(),
+    physical_revision: z.string(),
+    reason: z.string().optional()
+});
+
+export const zRevisionTransitionReceipt = z.object({
+    city_ref: z.string(),
+    from_revision: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    id: z.string(),
+    map_id: z.string(),
+    operation: z.string(),
+    store_ref: z.string(),
+    to_revision: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    work_id: z.string()
 });
 
 export const zRigActionBody = z.object({
@@ -2120,6 +2182,13 @@ export const zSessionDrainAckedWithAssignedWorkPayload = z.object({
     reason: z.string().optional(),
     session_id: z.string(),
     template: z.string().optional()
+});
+
+export const zSessionEvidence = z.object({
+    binding: zPromptBinding,
+    effect: z.string(),
+    receipt: zRequestReceipt.optional(),
+    status: z.string()
 });
 
 export const zSessionInfo = z.object({
@@ -3361,6 +3430,7 @@ export const zQuestionView = z.object({
 
 export const zFrontier = z.object({
     city_ref: z.string(),
+    delivery_contract: z.string().optional(),
     map_id: z.string(),
     open_questions: z.array(zQuestionView).nullable(),
     prompt: zPromptView,
@@ -3372,6 +3442,16 @@ export const zFrontier = z.object({
     work_digest: z.string(),
     work_id: z.string(),
     work_revision: z.string()
+});
+
+export const zAuthorizedFrontier = z.object({
+    answers: z.array(zAuthorizedAnswer).nullable(),
+    frontier: zFrontier,
+    physical_revision: z.string(),
+    release: zRevisionTransitionReceipt.optional(),
+    reservation: zRevisionTransitionReceipt,
+    rounds: z.array(zSessionEvidence).nullable(),
+    session: zSessionEvidence
 });
 
 export const zStatus = z.object({
@@ -3794,6 +3874,13 @@ export const zUsageBody = z.object({
     source: z.enum(['local_estimate', 'unavailable']),
     today: zUsageTotals,
     updated_at: z.string()
+});
+
+export const zVerdict = z.object({
+    assurance: z.string(),
+    reason: z.string(),
+    request_sha256: z.string(),
+    status: z.string()
 });
 
 export const zWaitView = z.object({
@@ -8465,6 +8552,94 @@ export const zAnswerDecisionFrontierPath = z.object({
  */
 export const zAnswerDecisionFrontierResponse = zFrontier;
 
+export const zReadAuthorizedHumanSourceFrontierHeaders = z.object({
+    'X-GC-City-Read': z.string()
+});
+
+export const zReadAuthorizedHumanSourceFrontierPath = z.object({
+    cityName: z.string().min(1).regex(/\S/),
+    id: z.string()
+});
+
+export const zReadAuthorizedHumanSourceFrontierQuery = z.object({
+    work_revision: z.string()
+});
+
+/**
+ * OK
+ */
+export const zReadAuthorizedHumanSourceFrontierResponse = zAuthorizedFrontier;
+
+export const zSubmitHumanSourceAnswerBody = zAnswerSubmission;
+
+export const zSubmitHumanSourceAnswerHeaders = z.object({
+    'X-GC-Request': z.string().min(1),
+    'X-GC-City-Write': z.string(),
+    'Idempotency-Key': z.string()
+});
+
+export const zSubmitHumanSourceAnswerPath = z.object({
+    cityName: z.string().min(1).regex(/\S/),
+    id: z.string()
+});
+
+/**
+ * OK
+ */
+export const zSubmitHumanSourceAnswerResponse = zAuthorizedFrontier;
+
+export const zCheckHumanSourceResumeBody = zHumanSourceResumeRequest;
+
+export const zCheckHumanSourceResumeHeaders = z.object({
+    'X-GC-Request': z.string().min(1),
+    'X-GC-City-Write': z.string()
+});
+
+export const zCheckHumanSourceResumePath = z.object({
+    cityName: z.string().min(1).regex(/\S/),
+    id: z.string()
+});
+
+/**
+ * OK
+ */
+export const zCheckHumanSourceResumeResponse = zResumeEligibility;
+
+export const zPrepareHumanSourceProposalBody = zDecisionFrontierEnsureRequest;
+
+export const zPrepareHumanSourceProposalHeaders = z.object({
+    'X-GC-Request': z.string().min(1),
+    'X-GC-City-Write': z.string()
+});
+
+export const zPrepareHumanSourceProposalPath = z.object({
+    cityName: z.string().min(1).regex(/\S/),
+    id: z.string()
+});
+
+/**
+ * OK
+ */
+export const zPrepareHumanSourceProposalResponse = zHumanSourcePreparation;
+
+export const zEnsurePreparedHumanSourceProposalBody = zHumanSourceEnsureRequest;
+
+export const zEnsurePreparedHumanSourceProposalHeaders = z.object({
+    'X-GC-Request': z.string().min(1),
+    'X-GC-City-Write': z.string(),
+    'Idempotency-Key': z.string()
+});
+
+export const zEnsurePreparedHumanSourceProposalPath = z.object({
+    cityName: z.string().min(1).regex(/\S/),
+    id: z.string()
+});
+
+/**
+ * OK
+ */
+export const zEnsurePreparedHumanSourceProposalResponse = zFrontier;
+
 export const zGetV0CityByCityNameBeadByIdDepsPath = z.object({
     cityName: z.string().min(1).regex(/\S/),
     id: z.string()
@@ -9855,6 +10030,22 @@ export const zGetV0CityByCityNameReadinessQuery = z.object({
  * OK
  */
 export const zGetV0CityByCityNameReadinessResponse = zReadinessResponse;
+
+export const zVerifyRetirementReleaseSourceBody = zRequest;
+
+export const zVerifyRetirementReleaseSourceHeaders = z.object({
+    'X-GC-Request': z.string().min(1),
+    'X-GC-City-Write': z.string()
+});
+
+export const zVerifyRetirementReleaseSourcePath = z.object({
+    cityName: z.string().min(1).regex(/\S/)
+});
+
+/**
+ * OK
+ */
+export const zVerifyRetirementReleaseSourceResponse = zVerdict;
 
 export const zDeleteV0CityByCityNameRigByNameHeaders = z.object({
     'X-GC-Request': z.string().min(1)

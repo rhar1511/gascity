@@ -858,8 +858,8 @@ set -eu
 	if !samePath(got["pwd"], rigDir) {
 		t.Fatalf("pwd = %q, want %q", got["pwd"], rigDir)
 	}
-	if got["args"] != "show repo-abc" {
-		t.Fatalf("args = %q, want %q", got["args"], "show repo-abc")
+	if got["args"] != "show repo-abc --json" {
+		t.Fatalf("args = %q, want %q", got["args"], "show repo-abc --json")
 	}
 	if !samePath(got["GC_STORE_ROOT"], rigDir) {
 		t.Fatalf("GC_STORE_ROOT = %q, want %q", got["GC_STORE_ROOT"], rigDir)
@@ -1095,8 +1095,8 @@ set -eu
 	if !samePath(got["pwd"], cityDir) {
 		t.Fatalf("pwd = %q, want %q", got["pwd"], cityDir)
 	}
-	if got["args"] != "list --label repo-open" {
-		t.Fatalf("args = %q, want %q", got["args"], "list --label repo-open")
+	if got["args"] != "list --label repo-open --json" {
+		t.Fatalf("args = %q, want %q", got["args"], "list --label repo-open --json")
 	}
 	if !samePath(got["GC_STORE_ROOT"], cityDir) {
 		t.Fatalf("GC_STORE_ROOT = %q, want %q", got["GC_STORE_ROOT"], cityDir)
@@ -1314,8 +1314,8 @@ set -eu
 	if !samePath(got["pwd"], rigDir) {
 		t.Fatalf("pwd = %q, want %q", got["pwd"], rigDir)
 	}
-	if got["args"] != "list" {
-		t.Fatalf("args = %q, want %q", got["args"], "list")
+	if got["args"] != "list --json" {
+		t.Fatalf("args = %q, want %q", got["args"], "list --json")
 	}
 	if !samePath(got["BEADS_DIR"], filepath.Join(rigDir, ".beads")) {
 		t.Fatalf("BEADS_DIR = %q, want %q", got["BEADS_DIR"], filepath.Join(rigDir, ".beads"))
@@ -1755,7 +1755,21 @@ prefix = "sa"
 	binDir := t.TempDir()
 	capture := filepath.Join(t.TempDir(), "bd-ran")
 	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(`#!/bin/sh
-printf '%s' "$*" > "$BD_CAPTURE"
+set -eu
+if [ "${1:-}" = "--dolt-auto-commit" ]; then shift 2; fi
+case "$*" in
+  "show --json scratch-1")
+    printf '%s\n' '[{"id":"scratch-1","title":"Normal work","issue_type":"task","status":"open","revision":7,"metadata":{}}]'
+    ;;
+  "show --json --metadata=not-json")
+    printf '%s\n' '[{"id":"--metadata=not-json","title":"Normal work","issue_type":"task","status":"open","revision":7,"metadata":{}}]'
+    ;;
+  "update scratch-1 "*)
+    printf '%s\n' "$@" > "$BD_CAPTURE"
+    printf '%s\n' '[{"id":"scratch-1","title":"Normal work","issue_type":"task","status":"open","revision":8,"metadata":{}}]'
+    ;;
+  *) exit 64 ;;
+esac
 `), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -1784,8 +1798,13 @@ printf '%s' "$*" > "$BD_CAPTURE"
 			if got := doBd(args, &stdout, &stderr); got != 0 {
 				t.Fatalf("doBd() = %d, want success; stdout=%q stderr=%q", got, stdout.String(), stderr.String())
 			}
-			if _, err := os.Stat(capture); err != nil {
+			data, err := os.ReadFile(capture)
+			if err != nil {
 				t.Fatalf("bd was not invoked for compatible actor: %v", err)
+			}
+			wantArgs := append(append([]string(nil), tc.args...), "--json")
+			if got, want := string(data), strings.Join(wantArgs, "\n")+"\n"; got != want {
+				t.Fatalf("mutation args = %q, want %q", got, want)
 			}
 		})
 	}
@@ -1869,7 +1888,9 @@ set -eu
 	t.Setenv("GC_CITY_PATH", "")
 
 	var stdout, stderr bytes.Buffer
-	if got := doBd([]string{"--city", cityDir, "context", "--json"}, &stdout, &stderr); got != 0 {
+	// Use a non-payload command to isolate city routing. Context dumps are
+	// deliberately refused unless they provide a private-safe projection.
+	if got := doBd([]string{"--city", cityDir, "version", "--json"}, &stdout, &stderr); got != 0 {
 		t.Fatalf("doBd() = %d, want 0; stderr=%q", got, stderr.String())
 	}
 	data, err := os.ReadFile(capture)
@@ -1886,8 +1907,8 @@ set -eu
 	if !samePath(got["pwd"], cityDir) {
 		t.Fatalf("pwd = %q, want %q", got["pwd"], cityDir)
 	}
-	if got["args"] != "context --json" {
-		t.Fatalf("args = %q, want %q", got["args"], "context --json")
+	if got["args"] != "version --json" {
+		t.Fatalf("args = %q, want %q", got["args"], "version --json")
 	}
 	if !samePath(got["GC_STORE_ROOT"], cityDir) {
 		t.Fatalf("GC_STORE_ROOT = %q, want %q", got["GC_STORE_ROOT"], cityDir)
@@ -2086,7 +2107,7 @@ exit 0
 // silentFallbackTestSetup writes a fake bd binary that emits the silent-
 // fallback marker, prepends it to PATH, and configures a minimal city as a
 // bd-backed scope (via GC_CITY_PATH) so doBd will dispatch through it.
-func silentFallbackTestSetup(t *testing.T, fakeBdScript string) (cityDir, binDir string) {
+func silentFallbackTestSetup(t *testing.T, fakeBdScript string) {
 	t.Helper()
 
 	origCityFlag := cityFlag
@@ -2098,7 +2119,7 @@ func silentFallbackTestSetup(t *testing.T, fakeBdScript string) (cityDir, binDir
 	cityFlag = ""
 	rigFlag = ""
 
-	cityDir = t.TempDir()
+	cityDir := t.TempDir()
 	port := strconv.Itoa(writeReachableManagedDoltState(t, cityDir))
 
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
@@ -2121,7 +2142,7 @@ name = "demo"
 		t.Fatal(err)
 	}
 
-	binDir = t.TempDir()
+	binDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(fakeBdScript), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -2129,7 +2150,6 @@ name = "demo"
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+origPath)
 	t.Setenv("GC_CITY_PATH", cityDir)
 	t.Setenv("GC_DOLT_PORT", port)
-	return cityDir, binDir
 }
 
 // managedDoltTestSetup is silentFallbackTestSetup for a Dolt endpoint gc
@@ -2280,7 +2300,7 @@ func TestGcBdSurfacesSilentFallbackAsLoudError_ReleaseIfCurrentPath(t *testing.T
 func TestGcBdHappyPathExitsZeroWithoutFallbackMarker(t *testing.T) {
 	// Fake bd that exits 0 with normal output and an unrelated stderr line.
 	const happyPathFakeBdScript = `#!/bin/sh
-echo "some normal bd output"
+echo '[]'
 echo "some unrelated stderr line" >&2
 exit 0
 `
@@ -2519,8 +2539,23 @@ func TestHeadLimitedWriter(t *testing.T) {
 func TestGcBdHeartbeatForwardsNativeLeaseRefresh(t *testing.T) {
 	// The fake bd captures its forwarded args so the assertion can inspect them.
 	capture := filepath.Join(t.TempDir(), "gc-bd-args.txt")
-	silentFallbackTestSetup(t, "#!/bin/sh\nprintf '%s' \"$*\" > \"${CAPTURE_PATH}\"\n")
+	silentFallbackTestSetup(t, `#!/bin/sh
+set -eu
+if [ "${1:-}" = "--dolt-auto-commit" ]; then shift 2; fi
+case "$*" in
+  "show --json demo-abc")
+    if [ "${BD_TEST_ENROLLED:-0}" = "1" ]; then
+      printf '%s\n' '[{"id":"demo-abc","title":"Normal work","issue_type":"task","status":"in_progress","revision":7,"metadata":{"gc.lifecycle.admission_receipt.v1":"persisted"}}]'
+    else
+      printf '%s\n' '[{"id":"demo-abc","title":"Normal work","issue_type":"task","status":"in_progress","revision":7,"metadata":{}}]'
+    fi
+    ;;
+  "heartbeat demo-abc") printf '%s' "$*" > "$CAPTURE_PATH" ;;
+  *) exit 64 ;;
+esac
+`)
 	t.Setenv("CAPTURE_PATH", capture)
+	t.Setenv("BD_TEST_ENROLLED", "0")
 
 	var stdout, stderr bytes.Buffer
 	if got := doBd([]string{"heartbeat", "demo-abc"}, &stdout, &stderr); got != 0 {
@@ -2534,6 +2569,22 @@ func TestGcBdHeartbeatForwardsNativeLeaseRefresh(t *testing.T) {
 	if gotArgs := string(data); gotArgs != "heartbeat demo-abc" {
 		t.Fatalf("forwarded args = %q, want native %q", gotArgs, "heartbeat demo-abc")
 	}
+	t.Run("enrolled work refuses native lease refresh", func(t *testing.T) {
+		t.Setenv("BD_TEST_ENROLLED", "1")
+		if err := os.Remove(capture); err != nil {
+			t.Fatal(err)
+		}
+		var stdout, stderr bytes.Buffer
+		if got := doBd([]string{"heartbeat", "demo-abc"}, &stdout, &stderr); got == 0 {
+			t.Fatal("doBd(heartbeat enrolled work) succeeded, want refusal")
+		}
+		if !strings.Contains(stderr.String(), "generic mutation lacks current session, claim, and row-revision proof") {
+			t.Fatalf("stderr = %q, want enrolled-work fence reason", stderr.String())
+		}
+		if _, err := os.Stat(capture); !os.IsNotExist(err) {
+			t.Fatalf("heartbeat mutation was invoked or capture unavailable: %v", err)
+		}
+	})
 }
 
 // TestRewriteBdHeartbeatArgs covers the arg-rewrite edge cases without the
@@ -3196,7 +3247,7 @@ func TestGcBdPassthroughResolvesBdBinary(t *testing.T) {
 		if got := doBd([]string{"show", "gc-1"}, &stdout, &stderr); got != 0 {
 			t.Fatalf("doBd() = %d, want 0; stdout=%q stderr=%q", got, stdout.String(), stderr.String())
 		}
-		if got := strings.TrimSpace(stdout.String()); got != "pinned-bd" {
+		if got := strings.TrimSpace(stdout.String()); !strings.Contains(got, "pinned-bd") {
 			t.Fatalf("executed bd = %q, want workspace-pinned %q", got, "pinned-bd")
 		}
 	})
@@ -3220,7 +3271,7 @@ func TestGcBdPassthroughResolvesBdBinary(t *testing.T) {
 		if got := doBd([]string{"show", "gc-1"}, &stdout, &stderr); got != 0 {
 			t.Fatalf("doBd() = %d, want 0; stdout=%q stderr=%q", got, stdout.String(), stderr.String())
 		}
-		if got := strings.TrimSpace(stdout.String()); got != "pinned-bd" {
+		if got := strings.TrimSpace(stdout.String()); !strings.Contains(got, "pinned-bd") {
 			t.Fatalf("executed bd = %q, want workspace-pinned %q", got, "pinned-bd")
 		}
 	})
@@ -3235,7 +3286,7 @@ func TestGcBdPassthroughResolvesBdBinary(t *testing.T) {
 		if got := doBd([]string{"show", "gc-1"}, &stdout, &stderr); got != 0 {
 			t.Fatalf("doBd() = %d, want 0; stdout=%q stderr=%q", got, stdout.String(), stderr.String())
 		}
-		if got := strings.TrimSpace(stdout.String()); got != "ambient-bd" {
+		if got := strings.TrimSpace(stdout.String()); !strings.Contains(got, "ambient-bd") {
 			t.Fatalf("executed bd = %q, want ambient %q", got, "ambient-bd")
 		}
 	})
@@ -3381,7 +3432,7 @@ func TestGcBdPassthroughResolvesBdBinaryForRigScope(t *testing.T) {
 		if got := doBd([]string{"--rig", "frontend", "list"}, &stdout, &stderr); got != 0 {
 			t.Fatalf("doBd(--rig frontend) = %d, want 0; stdout=%q stderr=%q", got, stdout.String(), stderr.String())
 		}
-		if got := strings.TrimSpace(stdout.String()); got != "pinned-bd" {
+		if got := strings.TrimSpace(stdout.String()); !strings.Contains(got, "pinned-bd") {
 			t.Fatalf("executed bd = %q, want workspace-pinned %q", got, "pinned-bd")
 		}
 	})
@@ -3403,7 +3454,7 @@ func TestGcBdPassthroughResolvesBdBinaryForRigScope(t *testing.T) {
 		if got := doBd([]string{"--rig", "dl", "list"}, &stdout, &stderr); got != 0 {
 			t.Fatalf("doBd(--rig dl) = %d, want 0; a city-level binding fault must not take a doltlite rig offline; stdout=%q stderr=%q", got, stdout.String(), stderr.String())
 		}
-		if got := strings.TrimSpace(stdout.String()); got != "ambient-bd" {
+		if got := strings.TrimSpace(stdout.String()); !strings.Contains(got, "ambient-bd") {
 			t.Fatalf("executed bd = %q, want ambient %q", got, "ambient-bd")
 		}
 	})
@@ -3422,7 +3473,7 @@ func TestGcBdPassthroughResolvesBdBinaryForRigScope(t *testing.T) {
 		if got := doBd([]string{"--rig", "dl", "list"}, &stdout, &stderr); got != 0 {
 			t.Fatalf("doBd(--rig dl) = %d, want 0; stdout=%q stderr=%q", got, stdout.String(), stderr.String())
 		}
-		if got := strings.TrimSpace(stdout.String()); got != "ambient-bd" {
+		if got := strings.TrimSpace(stdout.String()); !strings.Contains(got, "ambient-bd") {
 			t.Fatalf("executed bd = %q, want ambient %q: a doltlite rig's runtime env carries no BD_BIN, so the passthrough must not exec the city's pin", got, "ambient-bd")
 		}
 	})
@@ -3514,7 +3565,11 @@ func newGcBdBinaryProbeCity(t *testing.T) string {
 // writeGcBdProbeScript writes a stand-in bd that announces which binary ran.
 func writeGcBdProbeScript(t *testing.T, path, identity string) {
 	t.Helper()
-	script := "#!/bin/sh\necho " + identity + "\n"
+	output, err := json.Marshal([]beads.Bead{{ID: "gc-1", Title: identity}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\nprintf '%s\\n' " + strconv.Quote(string(output)) + "\n"
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -3548,14 +3603,26 @@ func TestGcBdPassthroughIgnoresStaleAmbientBdBin(t *testing.T) {
 	writeBuiltinImportsFixture(t, cityDir, "core", "bd")
 
 	binDir := t.TempDir()
+	capture := filepath.Join(t.TempDir(), "bd-mutation-args.txt")
 	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(`#!/bin/sh
 set -eu
-printf '{"id":"gc-1","status":"in_progress"}\n'
+if [ "${1:-}" = "--dolt-auto-commit" ]; then shift 2; fi
+case "$*" in
+  "show --json gc-1")
+    printf '%s\n' '[{"id":"gc-1","title":"Normal work","issue_type":"task","status":"open","revision":7,"metadata":{}}]'
+    ;;
+  "update gc-1 --claim --json")
+    printf '%s' "$*" > "$BD_CAPTURE"
+    printf '%s\n' '[{"id":"gc-1","title":"Normal work","issue_type":"task","status":"in_progress","revision":8,"metadata":{}}]'
+    ;;
+  *) exit 64 ;;
+esac
 `), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("BD_CAPTURE", capture)
 	stale := "/nonexistent/beads/bd-rc2"
 	t.Setenv("BD_BIN", stale)
 
@@ -3565,6 +3632,13 @@ printf '{"id":"gc-1","status":"in_progress"}\n'
 	}
 	if !strings.Contains(stdout.String(), `"id":"gc-1"`) {
 		t.Fatalf("stdout = %q, want PATH bd output", stdout.String())
+	}
+	data, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(data), "update gc-1 --claim --json"; got != want {
+		t.Fatalf("mutation args = %q, want %q", got, want)
 	}
 	if msg := warnings.String(); strings.Count(msg, "\n") != 1 || !strings.Contains(msg, stale) {
 		t.Fatalf("warning = %q, want one line naming ignored BD_BIN %q", msg, stale)

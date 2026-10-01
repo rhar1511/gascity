@@ -124,7 +124,7 @@ func (s *Server) humaHandleConvoyList(ctx context.Context, input *ConvoyListInpu
 		Index:     index,
 		CacheAgeS: cacheAge,
 		Body: ListBody[beads.Bead]{
-			Items:         page,
+			Items:         beads.PublicBeads(page),
 			Total:         total,
 			NextCursor:    nextCursor,
 			Partial:       pa.partial(),
@@ -189,12 +189,13 @@ func (s *Server) humaHandleConvoyGet(_ context.Context, input *ConvoyGetInput) (
 			}
 		}
 
+		b = beads.PublicBead(b)
 		return &IndexOutput[convoyGetResponse]{
 			Index:     s.latestIndex(),
 			CacheAgeS: cacheAgeSeconds(cityStore),
 			Body: convoyGetResponse{
 				Convoy:   &b,
-				Children: children,
+				Children: beads.PublicBeads(children),
 				Progress: &convoyProgress{Total: total, Closed: closed},
 			},
 		}, nil

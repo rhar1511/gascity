@@ -589,6 +589,7 @@ func workflowStatus(bead beads.Bead) string {
 // clones the metadata map (preserving nil -> nil for the wire's "metadata":
 // null), so cloneStringMap is not called here.
 func workflowBeadResponseFromBead(bead beads.Bead) workflowBeadResponse {
+	bead = beads.PublicBead(bead)
 	wb := molecule.WorkflowBeadFromBead(bead)
 	var attempt *int
 	if wb.Attempt > 0 {

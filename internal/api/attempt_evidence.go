@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"maps"
 	"sort"
 	"strings"
 
@@ -285,28 +284,20 @@ func (s *Server) authorizeAttemptEvidence(ctx context.Context, authorizer Attemp
 }
 
 func publicAttemptEvidenceBead(b beads.Bead) (beads.Bead, bool) {
-	if beads.IsProtectedAttemptEvidenceRecord(b) {
+	if isPrivateGenericBead(b) {
 		return beads.Bead{}, false
 	}
-	for key := range b.Metadata {
-		if isPrivateGenericBeadMetadataKey(key) {
-			if b.Metadata == nil {
-				break
-			}
-			b.Metadata = maps.Clone(b.Metadata)
-			break
-		}
-	}
-	for key := range b.Metadata {
-		if isPrivateGenericBeadMetadataKey(key) {
-			delete(b.Metadata, key)
-		}
-	}
-	return b, true
+	return beads.PublicBead(b), true
+}
+
+// Signed answer envelopes are retained only for controller verification. The
+// dedicated frontier views expose verified principals, never their proofs.
+func isPrivateGenericBead(b beads.Bead) bool {
+	return beads.IsPrivatePresentationRecord(b)
 }
 
 func isPrivateGenericBeadMetadataKey(key string) bool {
-	return isAttemptEvidenceMetadataKey(key) || strings.HasPrefix(key, beadmeta.SessionRequestReceiptPrefix)
+	return beads.IsPrivatePresentationMetadataKey(key)
 }
 
 func isAttemptEvidenceMetadataKey(key string) bool {

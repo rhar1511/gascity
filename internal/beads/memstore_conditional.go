@@ -297,6 +297,15 @@ func (m *MemStore) CompareAndSetMetadataKeyWithReceipt(id, key, expected, next s
 	if current.Metadata[key] != expected {
 		return Bead{}, false, nil
 	}
+	if receipt.Operation == "release" {
+		ready, err := m.independentFrontierReadyLocked(receipt.MapID)
+		if err != nil {
+			return Bead{}, false, err
+		}
+		if !ready {
+			return Bead{}, false, ErrDecisionFrontierMutationBlocked
+		}
+	}
 	if current.Metadata == nil {
 		current.Metadata = make(StringMap)
 	}

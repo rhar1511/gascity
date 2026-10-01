@@ -706,6 +706,7 @@ func runStepAttempt(issues []runIssue, stepID string) RunLaneStepAttempt {
 // mapping: Type→issue_type, ParentID→parent (falling back to the legacy
 // gc.parent_bead_id marker), a zero UpdatedAt falling back to CreatedAt.
 func fromBead(b beads.Bead) runIssue {
+	b = beads.PublicBead(b)
 	parent := b.ParentID
 	if parent == "" {
 		parent = stringValue(b.Metadata[beadmeta.ParentBeadIDMetadataKey])

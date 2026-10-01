@@ -4,6 +4,7 @@ go_library(
     name = "decisionfrontier",
     srcs = [
         "frontier.go",
+        "human_domain.go",
         "session_delivery.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/decisionfrontier",
@@ -19,12 +20,14 @@ go_test(
     name = "decisionfrontier_test",
     srcs = [
         "frontier_test.go",
+        "human_domain_test.go",
         "session_delivery_test.go",
         "testenv_import_test.go",
         "transition_test.go",
     ],
     embed = [":decisionfrontier"],
     deps = [
+        "//internal/api",
         "//internal/beadmeta",
         "//internal/beads",
         "//internal/session",

@@ -14,20 +14,22 @@ import (
 // Idempotency-Key header. This set grows as each wiring slice (audit P0 #4)
 // lands; a regression that drops the header fails TestCreateEndpointsAreTriagedForIdempotency.
 var requireIdempotency = map[string]bool{
-	"create-bead":              true,
-	"send-mail":                true,
-	"create-agent":             true,
-	"create-provider":          true,
-	"create-rig":               true,
-	"create-convoy":            true,
-	"add-pack":                 true,
-	"reply-mail":               true,
-	"register-extmsg-adapter":  true,
-	"emit-event":               true,
-	"post-v0-city":             true,
-	"execute-pr-action":        true,
-	"ensure-decision-frontier": true,
-	"answer-decision-frontier": true,
+	"create-bead":                           true,
+	"send-mail":                             true,
+	"create-agent":                          true,
+	"create-provider":                       true,
+	"create-rig":                            true,
+	"create-convoy":                         true,
+	"add-pack":                              true,
+	"reply-mail":                            true,
+	"register-extmsg-adapter":               true,
+	"emit-event":                            true,
+	"post-v0-city":                          true,
+	"execute-pr-action":                     true,
+	"ensure-decision-frontier":              true,
+	"answer-decision-frontier":              true,
+	"ensure-prepared-human-source-proposal": true,
+	"submit-human-source-answer":            true,
 }
 
 // pendingIdempotency lists known create operations that are deliberately NOT
@@ -49,6 +51,12 @@ var pendingIdempotency = map[string]bool{
 // be classified, so a new create at ANY status (201, 202, …) that is neither
 // wired nor triaged fails the test.
 var exemptFromIdempotency = map[string]bool{
+	// Preparation creates only an expiring transport reference, never a durable
+	// decision or delivery. Resume and retirement verification are guarded reads;
+	// replay must revalidate current authority rather than cache a verdict.
+	"prepare-human-source-proposal":    true,
+	"check-human-source-resume":        true,
+	"verify-retirement-release-source": true,
 	// Enrolled claims derive a deterministic transition receipt from the
 	// authenticated runtime incarnation and resulting claim generation. The
 	// controller replays that exact receipt and repairs the reciprocal session

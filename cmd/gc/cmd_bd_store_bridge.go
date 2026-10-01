@@ -148,7 +148,14 @@ func runBdStoreBridge(op string, args []string, dir, host, port, user string, st
 	if err := pinBdGCEnvironment(env); err != nil {
 		return fmt.Errorf("resolve invoking gc executable: %w", err)
 	}
-	store := beads.NewBdStore(dir, beads.ExecCommandRunnerWithEnv(env))
+	runner := beads.ExecCommandRunnerWithEnv(env)
+	store := beads.NewBdStore(dir, func(dir, name string, args ...string) ([]byte, error) {
+		out, err := runner(dir, name, args...)
+		if err != nil {
+			return nil, bdBridgeProviderError{cause: err}
+		}
+		return out, nil
+	})
 	switch op {
 	case "create":
 		var req bdStoreBridgeCreateRequest
@@ -364,6 +371,15 @@ func runBdStoreBridge(op string, args []string, dir, host, port, user string, st
 	}
 }
 
+// bdBridgeProviderError retains error identity for store handling while keeping
+// provider stdout/stderr out of the bridge's generic diagnostic channel.
+type bdBridgeProviderError struct{ cause error }
+
+func (bdBridgeProviderError) Error() string {
+	return "bd provider command failed (private diagnostic withheld)"
+}
+func (e bdBridgeProviderError) Unwrap() error { return e.cause }
+
 func validateBdStoreBridgeAuthorityMetadata(metadata, current map[string]string) error {
 	for key := range metadata {
 		if strings.HasPrefix(strings.TrimSpace(key), beadmeta.SessionRequestReceiptPrefix) {
@@ -483,18 +499,8 @@ func bridgeBeads(items []beads.Bead) []bdStoreBridgeBead {
 }
 
 func bridgeBead(item beads.Bead) bdStoreBridgeBead {
+	item = beads.PublicBead(item)
 	metadata := item.Metadata
-	for key := range item.Metadata {
-		if isBridgePrivateAttemptEvidenceMetadataKey(key) {
-			metadata = make(map[string]string, len(item.Metadata))
-			for key, value := range item.Metadata {
-				if !isBridgePrivateAttemptEvidenceMetadataKey(key) {
-					metadata[key] = value
-				}
-			}
-			break
-		}
-	}
 	return bdStoreBridgeBead{
 		ID:          item.ID,
 		Title:       item.Title,
@@ -511,12 +517,4 @@ func bridgeBead(item beads.Bead) bdStoreBridgeBead {
 		Labels:      item.Labels,
 		Metadata:    metadata,
 	}
-}
-
-func isBridgePrivateAttemptEvidenceMetadataKey(key string) bool {
-	return key == beadmeta.AttemptEvidenceArchiveAttemptIDMetadataKey ||
-		key == beadmeta.AttemptEvidenceArchiveOwnerIDMetadataKey ||
-		key == beadmeta.AttemptEvidenceArchivePayloadMetadataKey ||
-		key == beadmeta.AttemptEvidenceArchiveDigestMetadataKey ||
-		strings.HasPrefix(key, beadmeta.AttemptEvidenceIndexPrefix)
 }

@@ -127,6 +127,7 @@ func toReadyBeads(items []beads.Bead, blockers map[string][]readyBeadBlocker, ow
 }
 
 func toReadyBead(b beads.Bead) readyBead {
+	b = beads.PublicBead(b)
 	return readyBead{
 		ID:             b.ID,
 		SourceStoreRef: b.SourceStoreRef,

@@ -329,6 +329,7 @@ filegroup(
         "//internal/reliability:bazel_repo_srcs",
         "//internal/remotesource:bazel_repo_srcs",
         "//internal/resilience:bazel_repo_srcs",
+        "//internal/retirementrelease:bazel_repo_srcs",
         "//internal/reviewquorum:bazel_repo_srcs",
         "//internal/rig:bazel_repo_srcs",
         "//internal/rollout:bazel_repo_srcs",

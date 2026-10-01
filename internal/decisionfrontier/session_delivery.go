@@ -182,7 +182,7 @@ func (d *SessionPromptDelivery) validateRequest(ctx context.Context, request Pro
 		return err
 	}
 	if request.ID == "" || strings.TrimSpace(request.ID) != request.ID ||
-		request.PresentationVersion != promptPresentationVersion || request.MessageDigest == "" ||
+		(request.PresentationVersion != promptPresentationVersion && request.PresentationVersion != 2) || request.MessageDigest == "" ||
 		request.MessageDigest != promptMessageDigest(request) {
 		return fmt.Errorf("%w: persisted decision prompt identity or digest is invalid", ErrConflict)
 	}
@@ -241,23 +241,23 @@ func promptReceiptResult(receipt sessiondomain.RequestReceipt, request PromptReq
 		if receipt.DeliveryAttemptedAt != nil || receipt.ProviderResultAt != nil {
 			return PromptResult{}, fmt.Errorf("%w: pending session request contains send evidence", ErrConflict)
 		}
-		return PromptResult{Status: "absent", DefinitivelyAbsent: true}, nil
+		return PromptResult{Status: "absent", DefinitivelyAbsent: true, Receipt: &receipt}, nil
 	case sessiondomain.RequestDeliveryAccepted, sessiondomain.RequestDeliveryQueued:
 		if receipt.ProviderResultAt == nil {
 			return PromptResult{}, fmt.Errorf("%w: accepted session request lacks provider result time", ErrConflict)
 		}
 		if receipt.AcknowledgedAt != nil {
-			return PromptResult{Status: "acknowledged"}, nil
+			return PromptResult{Status: "acknowledged", Receipt: &receipt}, nil
 		}
-		return PromptResult{Status: "accepted"}, nil
+		return PromptResult{Status: "accepted", Receipt: &receipt}, nil
 	case sessiondomain.RequestDeliveryUnknown:
 		if receipt.DeliveryAttemptedAt == nil && receipt.ProviderResultAt == nil {
 			return PromptResult{}, fmt.Errorf("%w: unknown session request lacks send evidence", ErrConflict)
 		}
 		if receipt.AcknowledgedAt != nil {
-			return PromptResult{Status: "acknowledged"}, nil
+			return PromptResult{Status: "acknowledged", Receipt: &receipt}, nil
 		}
-		return PromptResult{Status: "unknown"}, nil
+		return PromptResult{Status: "unknown", Receipt: &receipt}, nil
 	default:
 		return PromptResult{}, fmt.Errorf("%w: session request receipt has an unknown delivery stage", ErrConflict)
 	}

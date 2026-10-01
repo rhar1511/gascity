@@ -13,10 +13,44 @@ import (
 )
 
 const (
-	decisionFrontierMapKind      = "decision-frontier/map/v1"
-	decisionFrontierQuestionKind = "decision-frontier/question/v1"
-	decisionFrontierPromptKind   = "decision-frontier/prompt/v1"
+	// DecisionFrontierIndependentQuestionsContract is the protected numbered-round contract.
+	DecisionFrontierIndependentQuestionsContract = "gascity.decision-frontier.independent-questions.v1"
+	decisionFrontierMapKind                      = "decision-frontier/map/v1"
+	decisionFrontierQuestionKind                 = "decision-frontier/question/v1"
+	decisionFrontierPromptKind                   = "decision-frontier/prompt/v1"
 )
+
+// DecisionFrontierDeliveryContractFor reads an explicitly advertised contract
+// from the protected writer. Older remote Q43 writers do not automatically gain
+// the independent-round contract from basic record-CAS support.
+func DecisionFrontierDeliveryContractFor(writer DecisionFrontierRecordWriter) string {
+	if provider, ok := writer.(interface{ DecisionFrontierDeliveryContract() string }); ok {
+		return provider.DecisionFrontierDeliveryContract()
+	}
+	return ""
+}
+
+// DecisionFrontierDeliveryContract identifies the native memory record/link contract.
+func (*MemStore) DecisionFrontierDeliveryContract() string {
+	return DecisionFrontierIndependentQuestionsContract
+}
+
+// DecisionFrontierDeliveryContract forwards the cache's protected writer contract.
+func (w cachingDecisionFrontierRecordWriter) DecisionFrontierDeliveryContract() string {
+	return DecisionFrontierDeliveryContractFor(w.writer)
+}
+
+// DecisionFrontierDeliveryContract reads the current protected write-leaf contract.
+func (w proxiedDecisionFrontierRecordWriter) DecisionFrontierDeliveryContract() string {
+	if w.store == nil {
+		return ""
+	}
+	writer, ok := DecisionFrontierRecordWriterFor(w.store.writeLeaf())
+	if !ok {
+		return ""
+	}
+	return DecisionFrontierDeliveryContractFor(writer)
+}
 
 // DecisionFrontierMapRecordID returns the stable ID used for a map record.
 func DecisionFrontierMapRecordID(cityRef, storeRef, workID, workRevision string) string {
@@ -33,6 +67,12 @@ func DecisionFrontierQuestionRecordID(cityRef, storeRef, mapID, questionID strin
 // intent in one exact map.
 func DecisionFrontierPromptRecordID(cityRef, storeRef, mapID string) string {
 	return decisionFrontierStableID("prompt", cityRef, storeRef, mapID)
+}
+
+// DecisionFrontierRoundRecordID binds a receipt to an exact ordered set of
+// ticket/version slots. It shares the protected prompt namespace, not a ledger.
+func DecisionFrontierRoundRecordID(cityRef, storeRef, mapID string, versions []string) string {
+	return decisionFrontierStableID("round", append([]string{cityRef, storeRef, mapID}, versions...)...)
 }
 
 func decisionFrontierStableID(kind string, parts ...string) string {
@@ -55,6 +95,8 @@ type decisionFrontierLinkIdentity struct {
 }
 
 type decisionFrontierLinkQuestion struct {
+	Number          int      `json:"number,omitempty"`
+	Version         string   `json:"version,omitempty"`
 	ID              string   `json:"id"`
 	Title           string   `json:"title"`
 	Prompt          string   `json:"prompt"`
@@ -64,18 +106,28 @@ type decisionFrontierLinkQuestion struct {
 }
 
 type decisionFrontierLinkDocument struct {
-	SchemaVersion int                            `json:"schema_version"`
-	CityRef       string                         `json:"city_ref"`
-	StoreRef      string                         `json:"store_ref"`
-	WorkID        string                         `json:"work_id"`
-	WorkRevision  string                         `json:"work_revision"`
-	WorkDigest    string                         `json:"work_digest"`
-	MapID         string                         `json:"map_id"`
-	ID            string                         `json:"id"`
-	PromptID      string                         `json:"prompt_id"`
-	Question      decisionFrontierLinkQuestion   `json:"question"`
-	Questions     []decisionFrontierLinkQuestion `json:"questions"`
-	TicketIDs     []string                       `json:"ticket_ids"`
+	PromptTarget        string                         `json:"prompt_target,omitempty"`
+	PromptBinding       *decisionFrontierStoredBinding `json:"prompt_binding,omitempty"`
+	DeliveryContract    string                         `json:"delivery_contract,omitempty"`
+	PresentationVersion int                            `json:"presentation_version,omitempty"`
+	SchemaVersion       int                            `json:"schema_version"`
+	CityRef             string                         `json:"city_ref"`
+	StoreRef            string                         `json:"store_ref"`
+	WorkID              string                         `json:"work_id"`
+	WorkRevision        string                         `json:"work_revision"`
+	WorkDigest          string                         `json:"work_digest"`
+	MapID               string                         `json:"map_id"`
+	ID                  string                         `json:"id"`
+	PromptID            string                         `json:"prompt_id"`
+	Question            decisionFrontierLinkQuestion   `json:"question"`
+	Questions           []decisionFrontierLinkQuestion `json:"questions"`
+	TicketIDs           []string                       `json:"ticket_ids"`
+}
+
+type decisionFrontierStoredBinding struct {
+	SessionID           string `json:"session_id"`
+	ExecutionGeneration int64  `json:"execution_generation"`
+	RequestID           string `json:"request_id"`
 }
 
 func (doc decisionFrontierLinkDocument) identity() decisionFrontierLinkIdentity {
@@ -143,7 +195,12 @@ func decisionFrontierLinkRecord(bead Bead) (decisionFrontierLinkDocument, string
 			return doc, "", ErrDecisionFrontierLinkConflict
 		}
 	case decisionFrontierPromptKind:
-		if doc.ID != bead.ID || bead.ID != DecisionFrontierPromptRecordID(doc.CityRef, doc.StoreRef, doc.MapID) {
+		versions := make([]string, 0, len(doc.Questions))
+		for _, q := range doc.Questions {
+			versions = append(versions, DecisionFrontierQuestionRecordID(doc.CityRef, doc.StoreRef, doc.MapID, q.ID)+":"+q.Version)
+		}
+		isRound := doc.PresentationVersion == 2 && len(versions) > 0 && bead.ID == DecisionFrontierRoundRecordID(doc.CityRef, doc.StoreRef, doc.MapID, versions)
+		if doc.ID != bead.ID || (bead.ID != DecisionFrontierPromptRecordID(doc.CityRef, doc.StoreRef, doc.MapID) && !isRound) {
 			return doc, "", ErrDecisionFrontierLinkConflict
 		}
 	default:
@@ -202,6 +259,30 @@ func decisionFrontierQuestionInMap(question decisionFrontierLinkQuestion, mapDoc
 }
 
 func decisionFrontierPromptTicketsMatch(prompt decisionFrontierLinkDocument, mapDoc decisionFrontierLinkDocument) bool {
+	if mapDoc.DeliveryContract == DecisionFrontierIndependentQuestionsContract && prompt.PresentationVersion == 2 {
+		if len(prompt.TicketIDs) == 0 || len(prompt.TicketIDs) != len(prompt.Questions) {
+			return false
+		}
+		previous := -1
+		for i, q := range prompt.Questions {
+			index := slices.IndexFunc(mapDoc.Questions, func(candidate decisionFrontierLinkQuestion) bool { return decisionFrontierQuestionEqual(q, candidate) })
+			if index <= previous || prompt.TicketIDs[i] != DecisionFrontierQuestionRecordID(mapDoc.CityRef, mapDoc.StoreRef, mapDoc.MapID, q.ID) {
+				return false
+			}
+			canonical := mapDoc.Questions[index]
+			canonical.Number, canonical.Version = 0, ""
+			body, err := json.Marshal(canonical)
+			sum := sha256.Sum256(body)
+			if err != nil || q.Number != i+1 || q.Version != hex.EncodeToString(sum[:]) {
+				return false
+			}
+			if prompt.ID == mapDoc.PromptID && len(q.DependsOn) != 0 {
+				return false
+			}
+			previous = index
+		}
+		return true
+	}
 	if len(prompt.TicketIDs) != len(mapDoc.Questions) {
 		return false
 	}
@@ -244,7 +325,7 @@ func validateDecisionFrontierLink(source, target, mapBead Bead, depType string) 
 				return ErrDecisionFrontierLinkConflict
 			}
 		case decisionFrontierPromptKind:
-			if sourceDoc.ID != mapDoc.PromptID || !decisionFrontierPromptTicketsMatch(sourceDoc, mapDoc) {
+			if (sourceDoc.ID != mapDoc.PromptID && sourceDoc.PresentationVersion != 2) || !decisionFrontierPromptTicketsMatch(sourceDoc, mapDoc) {
 				return ErrDecisionFrontierLinkConflict
 			}
 		default:

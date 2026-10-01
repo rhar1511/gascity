@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -105,12 +106,19 @@ invocation the generated work query builds, not with all of "bd ready" —
 "gc ready --help" lists what it takes. A city that relocates no class is
 unaffected.
 
-All arguments after "gc bd" are forwarded to bd unchanged, with one
-exception: a "list" that filters on the wisps (ephemeral) tier —
+Generic bead output is projected before presentation: private signed-answer
+and attempt-evidence records appear as private stubs, and private metadata is
+removed from public owners. Read commands request complete JSON from bd; gc
+renders text unless --json is requested. Provider diagnostics are withheld on
+these paths. Raw SQL, exports, history, and output-field selection are refused
+because they cannot preserve the private-record boundary. Scoped private reads
+retain their separate authorization requirements.
+
+A "list" that filters on the wisps (ephemeral) tier —
 "--type=molecule", "--type=wisp", "--mol-type", "--wisp-type" — also gets
 "--include-infra". bd skips that tier on any list without the flag, so those
 filters would otherwise return [] and exit 0 on a ledger full of live
-molecules. Every other list is forwarded as written. "heartbeat
+molecules. Query filters retain their meaning. "heartbeat
 <issue-id>" forwards to bd's native heartbeat, which refreshes the claim's
 lease and fails loudly when the caller no longer owns it. gc adds one
 subcommand of its own: "release-if-current <issue-id> <assignee>", which
@@ -709,10 +717,8 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// names the store that actually serves the request: a class-owned `show`
 	// on a split city is answered in process from the class's own binding by
 	// maybeRouteBdByID, not from target, and disclosing target there would be
-	// wrong for that one read. This is stderr-only and additive — bd's own
-	// stdout (human or --json) is untouched, and it never changes the exit
-	// code, matching the disclosure style #5162/#5167 established for the
-	// sibling relocated-class invariant.
+	// wrong for that one read. The disclosure is stderr-only and additive; it
+	// never changes the exit code or the separate private-record projection.
 	if verb, _, ok := bdRelocatedClassVerb(bdArgs); ok && bdScopeDisclosureVerbs[verb] {
 		fmt.Fprintf(stderr, "gc bd: answering from the %s store\n", scopeLabel(target)) //nolint:errcheck // best-effort stderr
 	}
@@ -821,10 +827,24 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	cmd := exec.Command(bdPath, bdArgs...)
+	projectOutput, err := bdPresentationCommand(bdArgs)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	jsonOutput := bdPresentationJSONRequested(bdArgs)
+	providerArgs := append([]string(nil), bdArgs...)
+	if projectOutput && !jsonOutput {
+		providerArgs = append(providerArgs, "--json")
+	}
+	cmd := exec.Command(bdPath, providerArgs...)
 	cmd.Dir = target.ScopeRoot
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = stdout
+	var presentationOutput bytes.Buffer
+	if projectOutput {
+		cmd.Stdout = &presentationOutput
+	}
 	// Tee stderr through a bounded head buffer alongside the operator's
 	// pipe so we can scan it post-exec for bd's silent-fallback-to-on-disk
 	// marker. Only stderr is teed: bd writes its auto-import banner there,
@@ -832,6 +852,9 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// (close path) — both go through this handoff.
 	stderrScan := &headLimitedWriter{limit: bdStderrScanLimit}
 	cmd.Stderr = io.MultiWriter(stderr, stderrScan)
+	if projectOutput {
+		cmd.Stderr = stderrScan
+	}
 	env, err := bdCommandEnv(cityPath, cfg, target)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -843,6 +866,12 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	runErr := cmd.Run()
 	traceExit := 0
 	if runErr != nil {
+		if projectOutput {
+			fmt.Fprintln(stderr, "gc bd: provider command failed; private diagnostic withheld") //nolint:errcheck
+			if bdOutputSuggestsConflictingDoltStart(stderrScan.String()) {
+				fmt.Fprintln(stderr, "gc bd: provider suggested bd dolt start") //nolint:errcheck
+			}
+		}
 		var exitErr *exec.ExitError
 		if errors.As(runErr, &exitErr) {
 			traceExit = exitErr.ExitCode()
@@ -877,10 +906,16 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// mask it. (Root cause fixed upstream in beads post-#3691; this surfaces
 	// the symptom for deployments still on stable bd builds.)
 	if bdOutputIndicatesSilentFallback(stderrScan.String()) {
+		if projectOutput {
+			fmt.Fprintln(stderr, "gc bd: provider auto-importing fallback detected; private diagnostic withheld") //nolint:errcheck
+		}
 		fmt.Fprintln(stderr, bdSilentFallbackUserMessage) //nolint:errcheck // best-effort stderr
 		return bdSilentFallbackExitCode
 	}
 
+	if projectOutput {
+		return writeBdProviderPresentation(presentationOutput.Bytes(), jsonOutput, stdout, stderr)
+	}
 	return 0
 }
 
