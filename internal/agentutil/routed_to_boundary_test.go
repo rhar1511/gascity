@@ -1,7 +1,9 @@
 package agentutil
 
 import (
-	"bufio"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -31,8 +33,20 @@ func repoRoot() string {
 //     import cycle. This is a reviewed, permanent exception, not a pending
 //     migration.
 func TestRoutedToIdentityDerivationIsCentralized(t *testing.T) {
-	root := repoRoot()
+	violations, err := routedToIdentityViolations(repoRoot())
+	if err != nil {
+		t.Fatalf("walking repo: %v", err)
+	}
+	if len(violations) > 0 {
+		t.Errorf("inline PoolName collapse found outside RoutedToIdentity (%d violations):", len(violations))
+		for _, violation := range violations {
+			t.Errorf("  %s", violation)
+		}
+		t.Error("Call agentutil.RoutedToIdentity(agent) instead of reimplementing the PoolName-first collapse.")
+	}
+}
 
+func routedToIdentityViolations(root string) ([]string, error) {
 	allowedFiles := []string{
 		filepath.Join("internal", "agentutil", "resolve.go"),
 		filepath.Join("internal", "config", "workquery.go"),
@@ -76,40 +90,348 @@ func TestRoutedToIdentityDerivationIsCentralized(t *testing.T) {
 			}
 		}
 
-		f, err := os.Open(path)
+		positions := token.NewFileSet()
+		file, err := parser.ParseFile(positions, path, nil, 0)
 		if err != nil {
 			return err
 		}
-		defer func() { _ = f.Close() }()
-
-		scanner := bufio.NewScanner(f)
-		scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
-		lineNum := 0
-		for scanner.Scan() {
-			lineNum++
-			line := scanner.Text()
-			trimmed := strings.TrimSpace(line)
-			if strings.HasPrefix(trimmed, "//") {
-				continue
+		refusalChecks := make(map[*ast.BinaryExpr]bool)
+		ast.Inspect(file, func(node ast.Node) bool {
+			if branch, ok := node.(*ast.IfStmt); ok && isTerminalPoolRefusal(branch, file) {
+				markDirectRefusalChecks(branch.Cond, refusalChecks)
 			}
-			if strings.Contains(line, `PoolName != ""`) {
-				violations = append(violations, rel+":"+itoa(lineNum)+": "+trimmed)
+			if comparison, ok := node.(*ast.BinaryExpr); ok && comparesPoolNameToEmpty(comparison) && !refusalChecks[comparison] {
+				violations = append(violations, rel+":"+itoa(positions.Position(comparison.Pos()).Line))
 			}
-		}
-		return scanner.Err()
+			return true
+		})
+		return nil
 	})
 	if err != nil {
-		t.Fatalf("walking repo: %v", err)
+		return nil, err
 	}
+	sort.Strings(violations)
+	return violations, nil
+}
 
-	if len(violations) > 0 {
-		sort.Strings(violations)
-		t.Errorf("inline PoolName collapse found outside RoutedToIdentity (%d violations):", len(violations))
-		for _, v := range violations {
-			t.Errorf("  %s", v)
-		}
-		t.Error("Call agentutil.RoutedToIdentity(agent) instead of reimplementing the PoolName-first collapse.")
+func TestRoutingPolicyRejectsSideEffectingErrorConstructor(t *testing.T) {
+	root := t.TempDir()
+	source := `package fixture
+type Agent struct { PoolName string }
+type Result struct{}
+var route string
+var selectedAgent Agent
+func pretendRefusal(string) error {
+    route = selectedAgent.PoolName
+    return nil
+}
+func selectTarget(a Agent) (Result, error) {
+    if a.PoolName != "" {
+        return Result{}, pretendRefusal("blocked")
+    }
+    return Result{}, nil
+}`
+	if err := os.WriteFile(filepath.Join(root, "policy.go"), []byte(source), 0o600); err != nil {
+		t.Fatal(err)
 	}
+	violations, err := routedToIdentityViolations(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(violations) == 0 {
+		t.Fatal("routing gate accepted identity selection hidden in a supposed error constructor")
+	}
+}
+
+func TestRoutingPolicyClassifiesRefusalsWithoutExemptingIdentitySelection(t *testing.T) {
+	const prefix = `package fixture
+import "fmt"
+type Agent struct { PoolName string; Dir string }
+func (Agent) QualifiedName() string { return "rig/worker" }
+type Result struct{}
+var route string
+var selectedAgent Agent
+var _ = fmt.Errorf
+func RoutedToIdentity(*Agent) string { return "rig/worker" }
+type formatter string
+func (formatter) Errorf(string) error { route = selectedAgent.PoolName; return nil }
+`
+	const pureConstructor = `func refusal(reason string) error { return fmt.Errorf("refused: %s", reason) }
+`
+	for _, tc := range []struct {
+		name, body, constructor string
+		allowed                 bool
+	}{
+		{
+			name: "terminal membership refusal", allowed: true,
+			body: `if a.PoolName != "" { return Result{}, refusal("blocked") }; return Result{}, nil`,
+		},
+		{
+			name: "compound admission refusal", allowed: true,
+			body: `canonical := RoutedToIdentity(&a); if a.PoolName != "" || canonical != a.QualifiedName() || a.Dir == "" { return Result{}, refusal("blocked") }; return Result{}, nil`,
+		},
+		{
+			name: "central helper only", allowed: true,
+			body: `route = RoutedToIdentity(&a); return Result{}, nil`,
+		},
+		{
+			name: "inline assignment fallback",
+			body: "route = a.QualifiedName(); if a.PoolName != \"\" { route = a.PoolName }; return Result{}, nil",
+		},
+		{
+			name: "helper does not waive later fallback",
+			body: `route = RoutedToIdentity(&a); if a.PoolName != "" { route = a.PoolName }; return Result{}, nil`,
+		},
+		{
+			name: "assignment before error return",
+			body: `if a.PoolName != "" { route = a.PoolName; return Result{}, refusal("blocked") }; return Result{}, nil`,
+		},
+		{
+			name: "side effecting condition closure",
+			body: `if a.PoolName != "" && func() bool { route = a.PoolName; return true }() { return Result{}, refusal("blocked") }; return Result{}, nil`,
+		},
+		{
+			name: "nested comparison closure",
+			body: `if func() bool { if a.PoolName != "" { route = a.PoolName; return true }; return false }() { return Result{}, refusal("blocked") }; return Result{}, nil`,
+		},
+		{
+			name: "bare alias",
+			body: `PoolName := a.PoolName; if PoolName != "" { route = PoolName }; return Result{}, nil`,
+		},
+		{
+			name: "parenthesized raw empty comparison",
+			body: "if ((a.PoolName)) != (``) { route = a.PoolName }; return Result{}, nil",
+		},
+		{
+			name: "else branch cannot be exempted",
+			body: `if a.PoolName != "" { return Result{}, refusal("blocked") } else { route = a.QualifiedName() }; return Result{}, nil`,
+		},
+		{
+			name:        "constructor returning nil",
+			constructor: "func refusal(string) error { return nil }\n",
+			body:        `if a.PoolName != "" { return Result{}, refusal("blocked") }; return Result{}, nil`,
+		},
+		{
+			name:        "shadowed error formatter",
+			constructor: "func refusal(fmt formatter) error { return fmt.Errorf(\"blocked\") }\n",
+			body:        `if a.PoolName != "" { return Result{}, refusal("blocked") }; return Result{}, nil`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			constructor := tc.constructor
+			if constructor == "" {
+				constructor = pureConstructor
+			}
+			source := prefix + constructor + "func selectTarget(a Agent) (Result, error) { " + tc.body + " }\n"
+			if err := os.WriteFile(filepath.Join(root, "policy.go"), []byte(source), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			violations, err := routedToIdentityViolations(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (len(violations) == 0) != tc.allowed {
+				t.Fatalf("routing policy violations = %v, want allowed=%t", violations, tc.allowed)
+			}
+		})
+	}
+}
+
+func TestRoutingPolicyWalksWorktreeRootAndRejectsMalformedSource(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, ".git"), []byte("gitdir: /unused/test-owned-fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "policy.go")
+	if err := os.WriteFile(path, []byte(`package fixture; func route(a Agent) { if a.PoolName != "" { selected = a.PoolName } }`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	violations, err := routedToIdentityViolations(root)
+	if err != nil || len(violations) == 0 {
+		t.Fatalf("worktree root was not inspected: violations=%v err=%v", violations, err)
+	}
+	if err := os.WriteFile(path, []byte("package fixture; func malformed("), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := routedToIdentityViolations(root); err == nil {
+		t.Fatal("routing policy accepted a source parse failure")
+	}
+}
+
+// Only direct Boolean predicates belong to a terminal refusal. Keep walking
+// calls and function literals normally, so an inline routing derivation hidden
+// inside a condition is still rejected.
+func markDirectRefusalChecks(expr ast.Expr, checks map[*ast.BinaryExpr]bool) {
+	switch expr := expr.(type) {
+	case *ast.ParenExpr:
+		markDirectRefusalChecks(expr.X, checks)
+	case *ast.UnaryExpr:
+		if expr.Op == token.NOT {
+			markDirectRefusalChecks(expr.X, checks)
+		}
+	case *ast.BinaryExpr:
+		if comparesPoolNameToEmpty(expr) {
+			checks[expr] = true
+		} else if expr.Op == token.LAND || expr.Op == token.LOR {
+			markDirectRefusalChecks(expr.X, checks)
+			markDirectRefusalChecks(expr.Y, checks)
+		}
+	}
+}
+
+// A refusal does not derive an identity: it returns only a zero struct result
+// and a literal-argument, locally declared error constructor. Do not exempt the surrounding file/function or
+// a branch with an initializer, else, assignment, or identity-bearing return.
+func isTerminalPoolRefusal(branch *ast.IfStmt, file *ast.File) bool {
+	if branch.Init != nil || branch.Else != nil || len(branch.Body.List) != 1 {
+		return false
+	}
+	checks := make(map[*ast.BinaryExpr]bool)
+	markDirectRefusalChecks(branch.Cond, checks)
+	if len(checks) == 0 {
+		return false
+	}
+	safeCondition := true
+	ast.Inspect(branch.Cond, func(node ast.Node) bool {
+		switch node := node.(type) {
+		case *ast.FuncLit:
+			safeCondition = false
+			return false
+		case *ast.BinaryExpr:
+			if checks[node] {
+				// A call/closure as the selector's receiver can itself select an
+				// identity. Only a plain member or bare alias is a membership test.
+				for _, operand := range []ast.Expr{unparenRoutingExpr(node.X), unparenRoutingExpr(node.Y)} {
+					if member, ok := operand.(*ast.SelectorExpr); ok {
+						if _, ok := member.X.(*ast.Ident); !ok {
+							safeCondition = false
+						}
+					}
+				}
+				return false
+			}
+		case *ast.SelectorExpr:
+			if node.Sel.Name == "PoolName" {
+				safeCondition = false
+			}
+		case *ast.Ident:
+			if node.Name == "PoolName" {
+				safeCondition = false
+			}
+		}
+		return true
+	})
+	if !safeCondition {
+		return false
+	}
+	ret, ok := branch.Body.List[0].(*ast.ReturnStmt)
+	if !ok || len(ret.Results) != 2 {
+		return false
+	}
+	zero, ok := ret.Results[0].(*ast.CompositeLit)
+	if !ok || len(zero.Elts) != 0 {
+		return false
+	}
+	errCall, ok := ret.Results[1].(*ast.CallExpr)
+	if !ok || len(errCall.Args) == 0 {
+		return false
+	}
+	for _, arg := range errCall.Args {
+		literal, ok := arg.(*ast.BasicLit)
+		if !ok || literal.Kind != token.STRING {
+			return false
+		}
+	}
+	callee, ok := errCall.Fun.(*ast.Ident)
+	if !ok || callee.Obj == nil || callee.Obj.Kind != ast.Fun {
+		return false
+	}
+	constructor, ok := callee.Obj.Decl.(*ast.FuncDecl)
+	if !ok || constructor.Type.Results == nil || len(constructor.Type.Results.List) != 1 {
+		return false
+	}
+	errorType, ok := constructor.Type.Results.List[0].Type.(*ast.Ident)
+	if !ok || errorType.Name != "error" || errorType.Obj != nil || constructor.Body == nil || len(constructor.Body.List) != 1 {
+		return false
+	}
+	constructorReturn, ok := constructor.Body.List[0].(*ast.ReturnStmt)
+	if !ok || len(constructorReturn.Results) != 1 {
+		return false
+	}
+	formatError, ok := constructorReturn.Results[0].(*ast.CallExpr)
+	if !ok || len(formatError.Args) == 0 {
+		return false
+	}
+	method, ok := formatError.Fun.(*ast.SelectorExpr)
+	if !ok || method.Sel.Name != "Errorf" {
+		return false
+	}
+	pkg, ok := method.X.(*ast.Ident)
+	if !ok || pkg.Obj != nil {
+		return false
+	}
+	importedFmt := false
+	for _, imported := range file.Imports {
+		if imported.Path.Value != `"fmt"` {
+			continue
+		}
+		name := "fmt"
+		if imported.Name != nil {
+			name = imported.Name.Name
+		}
+		importedFmt = name == pkg.Name
+	}
+	if !importedFmt {
+		return false
+	}
+	// Literal/identifier arguments cannot perform writes or hide another call.
+	// In particular, a function that merely returns error may still select an
+	// identity or return nil; only this straight-line non-nil constructor is safe.
+	for _, arg := range formatError.Args {
+		switch arg := arg.(type) {
+		case *ast.BasicLit:
+		case *ast.Ident:
+			if arg.Name == "PoolName" {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func unparenRoutingExpr(expr ast.Expr) ast.Expr {
+	for {
+		paren, ok := expr.(*ast.ParenExpr)
+		if !ok {
+			return expr
+		}
+		expr = paren.X
+	}
+}
+
+func isRoutingPoolName(expr ast.Expr) bool {
+	switch expr := unparenRoutingExpr(expr).(type) {
+	case *ast.Ident:
+		return expr.Name == "PoolName"
+	case *ast.SelectorExpr:
+		return expr.Sel.Name == "PoolName"
+	default:
+		return false
+	}
+}
+
+func comparesPoolNameToEmpty(comparison *ast.BinaryExpr) bool {
+	if comparison.Op != token.NEQ && comparison.Op != token.EQL {
+		return false
+	}
+	isEmpty := func(expr ast.Expr) bool {
+		literal, ok := unparenRoutingExpr(expr).(*ast.BasicLit)
+		return ok && literal.Kind == token.STRING && (literal.Value == `""` || literal.Value == "``")
+	}
+	return (isRoutingPoolName(comparison.X) && isEmpty(comparison.Y)) || (isEmpty(comparison.X) && isRoutingPoolName(comparison.Y))
 }
 
 // itoa converts an int to a string without importing strconv.

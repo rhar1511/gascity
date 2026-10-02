@@ -159,6 +159,7 @@ go_test(
         "//internal/suspensionstate",
         "//internal/testenv",
         "//internal/testutil",
+        "//test/toolhome",
     ],
 )
 

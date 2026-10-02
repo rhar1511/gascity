@@ -524,6 +524,7 @@ func TestCustomTypesCheck_ServerBackedStoreIgnoresAmbientEndpoint(t *testing.T) 
 
 	targetDir := guardedTempDir(t)
 	decoyDir := guardedTempDir(t)
+	fixtureEnv := os.Environ() // Capture before Run/Fix deliberately poisons selectors.
 	var targetPort, decoyPort string
 	t.Cleanup(func() {
 		for _, store := range []struct {
@@ -533,10 +534,10 @@ func TestCustomTypesCheck_ServerBackedStoreIgnoresAmbientEndpoint(t *testing.T) 
 			{targetDir, targetPort},
 			{decoyDir, decoyPort},
 		} {
-			env := os.Environ()
-			if store.port != "" {
-				env = customTypesTestEnv(env, "127.0.0.1", store.port)
+			if store.port == "" {
+				continue // Initialization never established an owned server.
 			}
+			env := customTypesTestEnv(fixtureEnv, "127.0.0.1", store.port)
 			_, _ = runBD(store.dir, env, "dolt", "stop")
 		}
 	})
@@ -554,14 +555,14 @@ func TestCustomTypesCheck_ServerBackedStoreIgnoresAmbientEndpoint(t *testing.T) 
 	}); err != nil {
 		t.Fatal(err)
 	}
-	targetEnv := customTypesTestEnv(os.Environ(), "127.0.0.1", targetPort)
+	targetEnv := customTypesTestEnv(fixtureEnv, "127.0.0.1", targetPort)
 	mustRunBD(targetDir, targetEnv, "config", "set", "types.custom", "user-defined")
 
 	decoyInit := mustRunBD(decoyDir, nil,
 		"init", "--server", "--non-interactive",
 		"-p", "decoy", "--skip-hooks", "--skip-agents")
 	decoyPort = customTypesTestServerPort(t, decoyInit)
-	decoyEnv := customTypesTestEnv(os.Environ(), "127.0.0.1", decoyPort)
+	decoyEnv := customTypesTestEnv(fixtureEnv, "127.0.0.1", decoyPort)
 	mustRunBD(decoyDir, decoyEnv, "config", "set", "types.custom", "decoy-only")
 
 	setCustomTypesTestEndpoint(t, "127.0.0.1", decoyPort)

@@ -630,8 +630,12 @@ func TestDecisionFrontierSourceSnapshotHydratesAuthoritativeEdges(t *testing.T) 
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(ordinary.Dependencies) != 0 {
-				t.Fatalf("ordinary Get changed its dependency projection: %+v", ordinary.Dependencies)
+			if tc.name == "sqlite" {
+				if len(ordinary.Dependencies) != 1 || ordinary.Dependencies[0] != (Dep{IssueID: source.ID, DependsOnID: target.ID, Type: "blocks"}) {
+					t.Fatalf("SQLite Get dependencies = %+v, want persisted outgoing blocks edge", ordinary.Dependencies)
+				}
+			} else if len(ordinary.Dependencies) != 0 {
+				t.Fatalf("memory Get changed its dependency projection: %+v", ordinary.Dependencies)
 			}
 			reader, ok := DecisionFrontierSourceReaderFor(tc.store)
 			if !ok || reader == nil {

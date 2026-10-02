@@ -4,8 +4,11 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/test/toolhome"
 )
 
 const (
@@ -72,16 +75,26 @@ func guardedTempDirWith(t *testing.T, remove func(string) error) string {
 	return dir
 }
 
-// testOwnedHome pins HOME to a fresh guarded temp dir for the duration of the
-// test and returns it. bd's config precedence falls through, as a last
-// resort, to $HOME/.beads/config.yaml, so only a test-owned HOME keeps a
-// machine-level dolt.shared-server setting out of the bd subprocesses these
-// tests spawn (ga-zxpfic). bd then writes $HOME/.beads/ itself, which is why
-// that dir needs the same retrying removal as the working dir.
+// testOwnedHome isolates every bd user-config layer, not just HOME: XDG and
+// BD_* selectors can otherwise discover the operator's shared server. The
+// shared toolhome contract also disables shared-server startup and metrics.
+// Tests may deliberately inject an endpoint after this baseline is applied.
 func testOwnedHome(t *testing.T) string {
 	t.Helper()
 	home := guardedTempDir(t)
-	t.Setenv("HOME", home)
+	base := os.Environ()
+	for _, entry := range base {
+		key, _, _ := strings.Cut(entry, "=")
+		if toolhome.IsBeadsVar(key) {
+			unsetEnvForTest(t, key)
+		}
+	}
+	for _, entry := range toolhome.Environ(base, home) {
+		key, value, _ := strings.Cut(entry, "=")
+		if toolhome.IsHomeVar(key) || toolhome.IsBeadsVar(key) {
+			t.Setenv(key, value)
+		}
+	}
 	return home
 }
 

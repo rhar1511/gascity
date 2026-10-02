@@ -524,3 +524,74 @@ The selected PR-action interruption/stale-reader regressions passed (0.032s),
 log `/var/tmp/controller-upstream-fresh-state-fixture-regressions.log`.
 `/var/tmp/controller-upstream-merge-normal-hooks-v3.log` remains a failed hook
 record; full successful hooks, push-time tests and remote CI are still required.
+
+### Push-time fixture corrections and reconciled wire proofs
+
+The fourth normal merge-hook attempt passed with no bypass, producing
+`1a02c985f15189e35bcf3f4c04dc6bf962829526` with the two reviewed parents above.
+Its log is `/var/tmp/controller-upstream-merge-normal-hooks-v4.log`.
+The subsequent normal push did not publish a branch: it failed after its
+push-time baseline was stopped to investigate unsafe test-store discovery.
+`/var/tmp/controller-pr23-candidate-normal-push-v1.log` and the preserved
+per-job logs in `/var/tmp/controller-pr23-push-v1-audit.47KcXz8f/` retain that
+incomplete run. It is not a full baseline pass.
+
+The routing-policy gate's old substring match incorrectly classified a
+canonical-membership refusal as identity selection. Its AST check now accepts
+only a terminal, literal diagnostic produced by a locally resolved pure error
+constructor. It still visits nested expressions and rejects value flow,
+hidden side effects, nil-returning constructors and shadowed error helpers.
+The regression used the actual filesystem policy walker: the side-effect
+constructor first failed in
+`/var/tmp/controller-pr23-routing-error-constructor-red.log`, then passed in
+`/var/tmp/controller-pr23-routing-error-constructor-green.log`.
+The final 13-case gate matrix, root-worktree and malformed-source cases, and
+existing admission cases passed in
+`/var/tmp/controller-pr23-routing-policy-regression-matrix.log`.
+Both exact central-helper exceptions remain unchanged.
+
+Beads missing-row fakes now answer only the exact ephemeral-row query emitted
+by the real provider. Conditional missing deletion still forbids mutation;
+ordinary missing updates/deletes retain classified not-found results. The
+SQLite ordinary-read fixture now expects its authoritative outgoing edge,
+while memory's dependency projection and all checked revision assertions
+remain unchanged. Doctor Run/Fix fixtures use the shared guarded tool home and
+captured, unpoisoned environment for cleanup of their own resolved endpoints.
+Unknown endpoints are never stopped. The target-only repair, custom-type
+preservation and unchanged-decoy assertions remain in place.
+
+One-variable diagnosis established that an empty test `.beads` directory does
+not stop installed `bd` ancestor discovery. Scratch beneath the live city could
+therefore discover its ledger despite HOME/XDG isolation. The operational
+bounded launcher now creates disk-backed scratch beneath `/var/tmp`, outside
+that ancestor chain, while retaining its original city-wide lock and CPU,
+memory and disk admission limits. No production service, order, work claim or
+WIP setting was changed. The outside-city probe passed in
+`/var/tmp/controller-pr23-doctor-outside-city-probe.log`; the earlier inside-city
+failure remains in `/var/tmp/controller-pr23-fixtures-green-v2.log`.
+The control-surface check passed its ten Python cases and worker census, but
+exited 127 because the pre-existing
+`roles/host-hygiene/test-refresh-rig-roots.sh` is absent. Its log is
+`/var/tmp/controller-pr23-bounded-scratch-control-surface.log`; no complete
+control-surface pass is claimed.
+
+The affected full packages passed in
+`/var/tmp/controller-pr23-repaired-packages-full.log`: agent utilities
+(1.142s), work lifecycle (0.038s), Beads (83.218s), and doctor (47.833s).
+The later doctor cleanup correction passed its unchanged public Run/Fix
+regression (17.900s), in
+`/var/tmp/controller-pr23-doctor-cleanup-baseline-green.log`.
+
+The upstream-combined actual handler artifact passed all seven human-flow
+consumer cases in
+`/var/tmp/controller-pr23-upstream-human-wire-conformance.log` and all eight
+retirement consumer cases in
+`/var/tmp/controller-pr23-upstream-retirement-wire-conformance.log`.
+The native auxiliary CAS/reference-deletion proof also passed (8.465s) in
+`/var/tmp/controller-upstream-exact-native-auxiliary-qualification.log`.
+These isolated fixture proofs do not qualify the distinct joint production
+human-frontier atomic contract, process-durable recovery or measured live trial.
+Retirement fixture assurance remains fixture-only, with trial qualification
+and activation readiness false. Normal corrective hooks, a complete normal
+push-time baseline and exact-head remote CI remain required. WIP dispatch
+remains enabled.

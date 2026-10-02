@@ -495,6 +495,11 @@ func (w *scriptedBd) runner(_, _ string, args ...string) ([]byte, error) {
 	switch args[0] {
 	case "show":
 		return w.handleShow()
+	case "query":
+		if strings.Join(args, " ") == "query --json ephemeral=true AND id="+w.id+" --all --limit 1" {
+			return []byte(`[]`), nil
+		}
+		return nil, fmt.Errorf("scriptedBd: unexpected query %q", args)
 	case "update", "close", "delete":
 		return w.handleWrite(args[0], args)
 	default:
@@ -1192,6 +1197,9 @@ func TestDeleteIfMatchOnMissingSurfacesNotFound(t *testing.T) {
 	}
 	if IsPreconditionFailed(err) {
 		t.Fatalf("missing-bead delete misread as precondition: %v", err)
+	}
+	if w.writeCalls != 0 {
+		t.Fatalf("missing-bead preflight attempted %d writes, want none", w.writeCalls)
 	}
 }
 

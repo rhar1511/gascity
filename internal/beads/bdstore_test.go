@@ -657,6 +657,8 @@ func TestBdStoreMutationsPassThroughOnNotFound(t *testing.T) {
 		case strings.HasPrefix(cmd, "bd show "):
 			closeReadCalled = true
 			return nil, fmt.Errorf("bd: issue not found")
+		case cmd == "bd query --json ephemeral=true AND id=gcy-dv7 --all --limit 1":
+			return []byte(`[]`), nil
 		case strings.HasPrefix(cmd, "bd update "):
 			updateCalled = true
 			return nil, fmt.Errorf("bd: issue not found")
@@ -671,9 +673,15 @@ func TestBdStoreMutationsPassThroughOnNotFound(t *testing.T) {
 	}
 	s := beads.NewBdStore("/city", runner)
 	title := "x"
-	_ = s.Update("gcy-dv7", beads.UpdateOpts{Title: &title})
-	_ = s.Delete("gcy-dv7")
-	_ = s.Close("gcy-dv7")
+	if err := s.Update("gcy-dv7", beads.UpdateOpts{Title: &title}); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("Update error = %v, want provider's classified ErrNotFound", err)
+	}
+	if err := s.Delete("gcy-dv7"); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("Delete error = %v, want provider's classified ErrNotFound", err)
+	}
+	if err := s.Close("gcy-dv7"); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("Close error = %v, want preflight ErrNotFound", err)
+	}
 	if !updateCalled {
 		t.Error("Update did not reach bd when bead was not-found (should pass through)")
 	}
