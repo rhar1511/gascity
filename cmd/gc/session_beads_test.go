@@ -7142,7 +7142,7 @@ func TestReapStaleSessionBeads(t *testing.T) {
 			}
 
 			var stderr bytes.Buffer
-			got := reapStaleSessionBeads("", nil, store, nil, sp, dt, nil, clk, &stderr)
+			got := reapStaleSessionBeads("", nil, store, assignedWorkCapturePlanForTest(t, "", nil, store), sp, dt, nil, clk, &stderr)
 			if got != tt.wantReaped {
 				t.Errorf("reapStaleSessionBeads() = %d, want %d\nstderr: %s", got, tt.wantReaped, stderr.String())
 			}
@@ -7195,7 +7195,7 @@ func TestReapStaleSessionBeads_HonorsRecentWakeGrace(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	got := reapStaleSessionBeads("", nil, store, nil, sp, nil, nil, &clock.Fake{Time: now}, &stderr)
+	got := reapStaleSessionBeads("", nil, store, assignedWorkCapturePlanForTest(t, "", nil, store), sp, nil, nil, &clock.Fake{Time: now}, &stderr)
 	if got != 0 {
 		t.Fatalf("reapStaleSessionBeads() = %d, want 0\nstderr: %s", got, stderr.String())
 	}
@@ -7238,7 +7238,7 @@ func TestReapStaleSessionBeads_HonorsRecentWakeOnCreatingBead(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	got := reapStaleSessionBeads("", nil, store, nil, sp, nil, nil, &clock.Fake{Time: now}, &stderr)
+	got := reapStaleSessionBeads("", nil, store, assignedWorkCapturePlanForTest(t, "", nil, store), sp, nil, nil, &clock.Fake{Time: now}, &stderr)
 	if got != 0 {
 		t.Fatalf("reapStaleSessionBeads() = %d, want 0 (a recent wake must advance the reap boundary off the 10m-old CreatedAt)\nstderr: %s", got, stderr.String())
 	}
@@ -7272,7 +7272,7 @@ func TestReapStaleSessionBeads_NeverStartedPendingCreateNotReapedInPendingWindow
 	now := created.CreatedAt.Add(7 * time.Minute)
 
 	var stderr bytes.Buffer
-	if got := reapStaleSessionBeads("", nil, store, nil, sp, nil, nil, &clock.Fake{Time: now}, &stderr); got != 0 {
+	if got := reapStaleSessionBeads("", nil, store, assignedWorkCapturePlanForTest(t, "", nil, store), sp, nil, nil, &clock.Fake{Time: now}, &stderr); got != 0 {
 		t.Fatalf("reapStaleSessionBeads() = %d, want 0 (never-started bead within 10m lease must survive)\nstderr: %s", got, stderr.String())
 	}
 	open, err := loadSessionBeads(store)
@@ -7316,7 +7316,7 @@ func TestReapStaleSessionBeads_StartedPendingCreateReapedPastPendingGrace(t *tes
 	}
 
 	var stderr bytes.Buffer
-	if got := reapStaleSessionBeads("", nil, store, nil, sp, nil, nil, &clock.Fake{Time: now}, &stderr); got != 1 {
+	if got := reapStaleSessionBeads("", nil, store, assignedWorkCapturePlanForTest(t, "", nil, store), sp, nil, nil, &clock.Fake{Time: now}, &stderr); got != 1 {
 		t.Fatalf("reapStaleSessionBeads() = %d, want 1 (started bead past 5m pending grace must be reaped)\nstderr: %s", got, stderr.String())
 	}
 	open, err := loadSessionBeads(store)
@@ -7361,7 +7361,7 @@ func TestReapStaleSessionBeads_BeadScopedPoolRowHeldUntilTeardownConfirmed(t *te
 		now := created.CreatedAt.Add(staleCreatingStateTimeout + time.Minute)
 
 		var stderr bytes.Buffer
-		if got := reapStaleSessionBeads("", nil, store, nil, sp, nil, nil, &clock.Fake{Time: now}, &stderr); got != 0 {
+		if got := reapStaleSessionBeads("", nil, store, assignedWorkCapturePlanForTest(t, "", nil, store), sp, nil, nil, &clock.Fake{Time: now}, &stderr); got != 0 {
 			t.Fatalf("reapStaleSessionBeads() = %d, want 0 while the runtime teardown fails\nstderr: %s", got, stderr.String())
 		}
 		if got, _ := store.Get(created.ID); got.Status == "closed" {
@@ -7373,7 +7373,7 @@ func TestReapStaleSessionBeads_BeadScopedPoolRowHeldUntilTeardownConfirmed(t *te
 
 		delete(sp.StopErrors, name)
 		stderr.Reset()
-		if got := reapStaleSessionBeads("", nil, store, nil, sp, nil, nil, &clock.Fake{Time: now}, &stderr); got != 1 {
+		if got := reapStaleSessionBeads("", nil, store, assignedWorkCapturePlanForTest(t, "", nil, store), sp, nil, nil, &clock.Fake{Time: now}, &stderr); got != 1 {
 			t.Fatalf("reapStaleSessionBeads() after recovery = %d, want 1\nstderr: %s", got, stderr.String())
 		}
 		if got, _ := store.Get(created.ID); got.Status != "closed" {
@@ -7401,7 +7401,7 @@ func TestReapStaleSessionBeads_BeadScopedPoolRowHeldUntilTeardownConfirmed(t *te
 		now := created.CreatedAt.Add(staleCreatingStateTimeout + time.Minute)
 
 		var stderr bytes.Buffer
-		if got := reapStaleSessionBeads("", nil, store, nil, sp, nil, nil, &clock.Fake{Time: now}, &stderr); got != 1 {
+		if got := reapStaleSessionBeads("", nil, store, assignedWorkCapturePlanForTest(t, "", nil, store), sp, nil, nil, &clock.Fake{Time: now}, &stderr); got != 1 {
 			t.Fatalf("reapStaleSessionBeads() = %d, want 1 for a non-pool row\nstderr: %s", got, stderr.String())
 		}
 		if got, _ := store.Get(created.ID); got.Status != "closed" {
@@ -7434,7 +7434,7 @@ func TestReapStaleSessionBeads_HonorsRecentCreationCompleteProtection(t *testing
 	}
 
 	var stderr bytes.Buffer
-	got := reapStaleSessionBeads("", nil, store, nil, sp, nil, nil, &clock.Fake{Time: now}, &stderr)
+	got := reapStaleSessionBeads("", nil, store, assignedWorkCapturePlanForTest(t, "", nil, store), sp, nil, nil, &clock.Fake{Time: now}, &stderr)
 	if got != 0 {
 		t.Fatalf("reapStaleSessionBeads() = %d, want 0\nstderr: %s", got, stderr.String())
 	}
@@ -7451,13 +7451,13 @@ func TestReapStaleSessionBeads_NilStoreAndProvider(t *testing.T) {
 	clk := &clock.Fake{Time: time.Now()}
 	var stderr bytes.Buffer
 
-	if got := reapStaleSessionBeads("", nil, nil, nil, nil, nil, nil, clk, &stderr); got != 0 {
+	if got := reapStaleSessionBeads("", nil, nil, assignedWorkCapturePlanForTest(t, "", nil, nil), nil, nil, nil, clk, &stderr); got != 0 {
 		t.Errorf("nil store+provider: got %d, want 0", got)
 	}
-	if got := reapStaleSessionBeads("", nil, beads.NewMemStore(), nil, nil, nil, nil, clk, &stderr); got != 0 {
+	if got := reapStaleSessionBeads("", nil, beads.NewMemStore(), assignedWorkCapturePlanForTest(t, "", nil, nil), nil, nil, nil, clk, &stderr); got != 0 {
 		t.Errorf("nil provider: got %d, want 0", got)
 	}
-	if got := reapStaleSessionBeads("", nil, nil, nil, runtime.NewFake(), nil, nil, clk, &stderr); got != 0 {
+	if got := reapStaleSessionBeads("", nil, nil, assignedWorkCapturePlanForTest(t, "", nil, nil), runtime.NewFake(), nil, nil, clk, &stderr); got != 0 {
 		t.Errorf("nil store: got %d, want 0", got)
 	}
 }

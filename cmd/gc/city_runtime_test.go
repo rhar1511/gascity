@@ -7893,7 +7893,7 @@ func TestCityRuntimeReapStaleSessionBeads_HonorsEndpointHold(t *testing.T) {
 	ticket, _ := guard.Admit("upstream:broker", row.ID, "worker")
 	ticket.Resolve(verdictCapacity)
 
-	if n := cr.reapStaleSessionBeads(); n != 0 {
+	if n := cr.reapStaleSessionBeads(cr.rigBeadStores()); n != 0 {
 		t.Fatalf("reaped %d rows, want the row held while its endpoint refuses", n)
 	}
 }

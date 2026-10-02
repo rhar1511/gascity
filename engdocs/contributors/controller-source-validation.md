@@ -616,3 +616,73 @@ passed in `/var/tmp/controller-pr23-routing-format-method-final.log`.
 Independent standards and spec follow-ups found no remaining hard violations
 or P0-P2 findings in this final guard correction. These source reviews do not
 replace normal hooks, the full push-time baseline or exact-head remote CI.
+
+## Second normal-push baseline corrections — 2026-10-02
+
+The second normal push was stopped after deterministic guard/CLI failures; it
+did not publish the candidate and is not a complete baseline pass. Preserve
+`/var/tmp/controller-pr23-candidate-normal-push-v2.log` and the per-job logs in
+`/var/tmp/controller-pr23-push-v2-logs.ho4okYIk/`. The Darwin filesystem job and
+the push-lock/concurrency self-tests passed; unit-core and CLI shard one failed,
+and the remaining selected jobs were incomplete or unrun.
+
+The repaired environment vocabulary includes the existing protected-mutation
+and session-authority host selectors and scrubs both in canonical test setup.
+New packages use the canonical testenv import stub, registered in Bazel. Formula
+provenance records the compiler's captured V2 mode; admission compares that
+captured mode with the configured mode rather than consulting a separate legacy
+switch. Full testenv and formula packages passed in
+`/var/tmp/controller-pr23-push-guards-green.log` (58.771s and 0.807s).
+The residency source guards passed in
+`/var/tmp/controller-pr23-residency-guards-green.log` (13.020s). Standalone
+Gazelle and repository-source inventory synchronization passed in
+`/var/tmp/controller-pr23-push-guard-bazel-sync.log`; this is not Bazel execution.
+
+Startup/tick reaping uses the already resolved rig snapshot to capture assigned
+work from the positive owner plan before stopping or closing a session. The
+actual file-store relocation regression reproduced an unsafe stop when the
+city-work archive failed in
+`/var/tmp/controller-pr23-split-reaper-capture-red-v2.log`; successful capture
+and list-error refusal already passed on the earlier source. All capture,
+reaper and affected admission regressions then passed in
+`/var/tmp/controller-pr23-split-reaper-capture-green.log` (2.142s).
+
+The emitting class wrapper now preserves the dedicated private-payload backend
+and create capability without ordinary Create fallback or public journal events.
+The actual SQLite duplicate/reopen and unsupported-memory proof failed before
+the correction in `/var/tmp/controller-pr23-emitting-private-payload-red.log`.
+The fallback CLI fixture now advertises clean CAS help and a positive revision;
+this exposed a real classification gap on the fenced write path. That failure
+is retained in `/var/tmp/controller-pr23-fenced-silent-fallback-red.log`.
+The corrected typed error path returns the existing loud fallback exit code,
+without executing an unrevisioned mutation or accepting unsupported close flags.
+
+File-city and nudge fixtures now initialize their required explicit city config
+before opening the existing store boundary. The retention fixture enqueues and
+terminalizes through the same owned store, verifies durable terminal shadows,
+then checks that only the old queue entry is pruned. Missing-record retention
+remains unchanged. Private-payload fixtures seed fixed UTC timestamps so complete
+row equality survives SQLite serialization without comparing monotonic clocks.
+The combined class-capability, file-init, fallback, nudge-delivery and retention
+regressions passed in
+`/var/tmp/controller-pr23-cli-push-fixtures-green-v2.log` (1.965s).
+
+Final independent Standards and Spec reviews found no remaining hard-rule
+violations or concrete P0-P2 findings in this corrective delta. Final standalone
+Gazelle/inventory synchronization passed in
+`/var/tmp/controller-pr23-final-guard-fixture-bazel-sync.log` (234 packages),
+with the existing embed/expression warnings retained; Bazel execution is still
+not claimed.
+
+These corrections change source and isolated fixtures only. Exact-head CI,
+normal mandatory hooks and the complete push baseline are still required.
+No live work was reclaimed or restarted, no service was stopped, and WIP
+dispatch remains enabled. The joint production human-frontier atomic contract
+and operational retirement qualification remain distinct, unavailable gates.
+
+The first normal corrective commit attempt was rejected by whole-file lint;
+no commit was created. Its log is
+`/var/tmp/controller-pr23-guard-fixture-normal-commit.log`. The correction removes
+an overwritten graph-store-reference assignment while retaining the exact
+source-store placement, and documents the two exported provenance constant
+blocks. No lint suppression, hook bypass or amendment is used.

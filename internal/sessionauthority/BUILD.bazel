@@ -10,8 +10,12 @@ go_library(
 
 go_test(
     name = "sessionauthority_test",
-    srcs = ["authority_test.go"],
+    srcs = [
+        "authority_test.go",
+        "testenv_import_test.go",
+    ],
     embed = [":sessionauthority"],
+    deps = ["//internal/testenv"],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

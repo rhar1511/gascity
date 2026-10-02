@@ -186,9 +186,32 @@ func captureAssignedWorkbenchAttemptsForIdentifiers(ctx context.Context, cityPat
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	plan, err := assignedWorkSweepPlan(cityPath, cfg, store, rigStores, identifiers)
+	// Lifecycle callers may lead with the relocated session store. Keep it
+	// for identity reads, but plan capture over the registered CITY WORK leg.
+	plan, err := assignedWorkSweepPlan(cityPath, cfg, censusWorkLeg(cityPath, store), rigStores, identifiers)
 	if err != nil {
 		return fmt.Errorf("resolve assigned-work stores for session %s: %w", sessionID, err)
+	}
+	return captureAssignedWorkbenchAttemptsInPlan(ctx, cityPath, cfg, store, plan, sessionID, identifiers)
+}
+
+func captureSessionWorkBeforeCloseInPlan(ctx context.Context, cityPath string, cfg *config.City, sessionStore beads.Store, plan storeref.ResolvedPlan, sessionID string) error {
+	sessionBead, err := sessionStore.Get(sessionID)
+	if err != nil {
+		return fmt.Errorf("read session %s before close capture: %w", sessionID, err)
+	}
+	if sessionBead.Status == "closed" {
+		return nil
+	}
+	return captureAssignedWorkbenchAttemptsInPlan(ctx, cityPath, cfg, sessionStore, plan, sessionID, sessionAssignmentIdentifiersForConfig(sessionBead, cfg))
+}
+
+func captureAssignedWorkbenchAttemptsInPlan(ctx context.Context, cityPath string, cfg *config.City, sessionStore beads.Store, plan storeref.ResolvedPlan, sessionID string, identifiers []string) error {
+	if sessionStore == nil || strings.TrimSpace(sessionID) == "" || plan.Mode != storeref.ModeUnion || len(plan.Legs) == 0 {
+		return errors.New("complete assigned-work capture plan and session identity are required")
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	dirs := workRecordRepoDirs{
 		cityPath: cityPath,
@@ -218,7 +241,7 @@ func captureAssignedWorkbenchAttemptsForIdentifiers(ctx context.Context, cityPat
 						continue
 					}
 					seen[key] = struct{}{}
-					if captureErr := captureWorkbenchAttemptEvidenceFromStores(ctx, leg.Store, store, item, dirs, cityPath, cfg); captureErr != nil {
+					if captureErr := captureWorkbenchAttemptEvidenceFromStores(ctx, leg.Store, sessionStore, item, dirs, cityPath, cfg); captureErr != nil {
 						return false, fmt.Errorf("capture assigned execution %s before session %s retirement: %w", item.ID, sessionID, captureErr)
 					}
 				}

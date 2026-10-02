@@ -5,8 +5,6 @@ import (
 	"runtime"
 	"strings"
 	"testing"
-
-	_ "github.com/gastownhall/gascity/internal/testenv"
 )
 
 func TestShortTempDirRetainsUnixSocketHeadroomWithLongTMPDIR(t *testing.T) {

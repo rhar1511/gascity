@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1135,6 +1137,66 @@ func TestEmittingClassStoreRefusesAtomicCloseOverANonAtomicBacking(t *testing.T)
 	store := resolveGraphStore(splitClassRoutes(beads.NewMemStore()).withCLIEmission(cityPath), beads.NewMemStore(), nil, cityPath, nil)
 	if _, ok := beads.AtomicConditionalCloserFor(store); ok {
 		t.Fatal("the emitting wrapper advertised atomic close over a backing that cannot honor it")
+	}
+}
+
+func TestEmittingClassStoreKeepsPrivatePayloadTransport(t *testing.T) {
+	cityPath := t.TempDir()
+	dir := t.TempDir()
+	leaf, err := beads.OpenSQLiteStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = leaf.(*beads.SQLiteStore).CloseStore() })
+	store := resolveGraphStore(splitClassRoutes(leaf).withCLIEmission(cityPath), beads.NewMemStore(), nil, cityPath, nil)
+	content := []byte("private evidence must not enter the public journal")
+	digest := fmt.Sprintf("%x", sha256.Sum256(content))
+	createdAt := time.Date(2026, time.October, 2, 0, 0, 0, 0, time.UTC)
+	payload := beads.Bead{ID: beads.AttemptEvidencePayloadID(digest), Title: "private attempt payload", Type: "molecule", Status: "closed", CreatedAt: createdAt, UpdatedAt: createdAt, Metadata: map[string]string{
+		beadmeta.AttemptEvidencePayloadDigestMetadataKey: digest,
+		beadmeta.AttemptEvidencePayloadDataMetadataKey:   base64.StdEncoding.EncodeToString(content),
+	}}
+	backend, ok := beads.PrivatePayloadValueBackend(store)
+	if !ok || backend != leaf {
+		t.Fatalf("private payload backend = %T, %t; want exact SQLite backing", backend, ok)
+	}
+	creator, ok := store.(beads.PrivatePayloadValueCreator)
+	if !ok {
+		t.Fatal("emitting wrapper dropped the private create capability")
+	}
+	first, err := creator.CreatePrivatePayloadValue(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := creator.CreatePrivatePayloadValue(payload)
+	if err != nil || !reflect.DeepEqual(first, second) {
+		t.Fatalf("duplicate payload = %+v, %v; want unchanged exact row", second, err)
+	}
+	if err := leaf.(*beads.SQLiteStore).CloseStore(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := beads.OpenSQLiteStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.(*beads.SQLiteStore).CloseStore() })
+	stored, err := reopened.Get(first.ID)
+	if err != nil || !reflect.DeepEqual(first, stored) {
+		t.Fatalf("durable payload = %+v, %v; want exact row", stored, err)
+	}
+	if got := beadEvents(readCityJournal(t, cityPath)); len(got) != 0 {
+		t.Fatalf("private create emitted public events: %s", eventSummary(got))
+	}
+	unsupported := resolveGraphStore(splitClassRoutes(beads.NewMemStore()).withCLIEmission(cityPath), beads.NewMemStore(), nil, cityPath, nil)
+	if _, err := beads.CreatePrivatePayloadValue(unsupported, payload); !errors.Is(err, beads.ErrPrivatePayloadCreateUnsupported) {
+		t.Fatalf("unsupported backing create = %v", err)
+	}
+	unsupportedCreator, ok := unsupported.(beads.PrivatePayloadValueCreator)
+	if !ok {
+		t.Fatal("emitting wrapper has an inconsistent capability surface")
+	}
+	if _, err := unsupportedCreator.CreatePrivatePayloadValue(payload); !errors.Is(err, beads.ErrPrivatePayloadCreateUnsupported) {
+		t.Fatalf("direct unsupported backing create = %v", err)
 	}
 }
 

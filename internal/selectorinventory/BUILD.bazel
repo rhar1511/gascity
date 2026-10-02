@@ -28,10 +28,12 @@ go_test(
         "external_ledger_test.go",
         "linux_filesystem_test.go",
         "selectorinventory_test.go",
+        "testenv_import_test.go",
     ],
     embed = [":selectorinventory"],
     deps = [
         "//internal/selectorattestation",
+        "//internal/testenv",
     ] + select({
         "@rules_go//go/platform:android": [
             "@org_golang_x_sys//unix",

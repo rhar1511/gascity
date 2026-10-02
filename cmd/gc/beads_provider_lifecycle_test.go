@@ -3594,6 +3594,7 @@ func TestInitBeadsForDir_file(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
 	cityDir := t.TempDir()
+	writeMinimalCityToml(t, cityDir)
 	t.Setenv("GC_BEADS_SCOPE_ROOT", cityDir)
 	if err := initBeadsForDir(cityDir, cityDir, "test", "test"); err != nil {
 		t.Fatalf("expected nil, got %v", err)
@@ -3621,6 +3622,7 @@ func TestInitBeadsForDir_fileScopedRigCreatesStore(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
 	cityDir := t.TempDir()
+	writeMinimalCityToml(t, cityDir)
 	t.Setenv("GC_BEADS_SCOPE_ROOT", cityDir)
 	rigDir := filepath.Join(t.TempDir(), "rig1")
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {

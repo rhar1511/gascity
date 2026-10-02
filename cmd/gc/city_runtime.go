@@ -799,9 +799,10 @@ func (cr *CityRuntime) run(ctx context.Context) {
 			}
 		}()
 
+		rigStores := cr.rigBeadStores()
 		cleanupDeadRuntimeSessionCorpses(
 			cr.cityPath, cr.sessionsBeadStore().Store,
-			cr.rigBeadStores(),
+			rigStores,
 			cr.cfg, sessionBeads, cr.sessionDrains, cr.sp, clock.Real{}, cr.stderr,
 		)
 		// Reap live runtimes still bound to a closed bead (e.g. a named-session
@@ -813,7 +814,7 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		}
 		// Reap stale session beads from a previous run before building desired
 		// state, so desired state does not reference already-closed beads (#742).
-		if cr.reapStaleSessionBeads() > 0 {
+		if cr.reapStaleSessionBeads(rigStores) > 0 {
 			sessionBeads = cr.loadSessionBeadSnapshot()
 		}
 		result := cr.buildDesiredState(sessionBeads, startupTrace)
@@ -1388,9 +1389,10 @@ func (cr *CityRuntime) tick(
 	// Reap open session beads whose tmux session is dead before loading demand
 	// so stale names cannot block desired-state computation (#742).
 	phaseStart = time.Now()
+	rigStores := cr.rigBeadStores()
 	cleanupDeadRuntimeSessionCorpses(
 		cr.cityPath, cr.sessionsBeadStore().Store,
-		cr.rigBeadStores(),
+		rigStores,
 		cr.cfg, sessionBeads, cr.sessionDrains, cr.sp, clock.Real{}, cr.stderr,
 	)
 	recordPhase(TraceSiteControllerTickPhase, "cleanup_dead_runtime_session_corpses", phaseStart, nil)
@@ -1407,7 +1409,7 @@ func (cr *CityRuntime) tick(
 	}
 	recordPhase(TraceSiteControllerTickPhase, "sweep_process_table_orphans", phaseStart, map[string]any{"reaped": swept})
 	phaseStart = time.Now()
-	reaped := cr.reapStaleSessionBeads()
+	reaped := cr.reapStaleSessionBeads(rigStores)
 	recordPhase(TraceSiteControllerTickPhase, "reap_stale_session_beads", phaseStart, map[string]any{"reaped": reaped})
 	if reaped > 0 {
 		phaseStart = time.Now()
@@ -3383,8 +3385,15 @@ func (cr *CityRuntime) ensureAsyncStartLimiter() *asyncStartLimiter {
 
 // reapStaleSessionBeads reaps stale creating session beads, keeping rows the
 // endpoint capacity breaker holds.
-func (cr *CityRuntime) reapStaleSessionBeads() int {
-	return reapStaleSessionBeads(cr.cityPath, cr.cfg, cr.sessionsBeadStore().Store, cr.rigBeadStores(), cr.sp, cr.sessionDrains, endpointHoldForRows(cr.cfg, cr.ensureEndpointCapacityGuard()), clock.Real{}, cr.stderr)
+func (cr *CityRuntime) reapStaleSessionBeads(rigStores map[string]beads.Store) int {
+	// Capture is a WORK union, independent of the SESSION store used to read
+	// and retire rows. Do not drop a dark leg: incomplete capture holds cleanup.
+	plan, err := storeref.Plan(storeref.AssignedWork{}, cr.residencyTopology(rigStores))
+	if err != nil {
+		fmt.Fprintf(cr.stderr, "session reconciler: holding stale-session cleanup because assigned-work planning failed: %v\n", err) //nolint:errcheck
+		return 0
+	}
+	return reapStaleSessionBeads(cr.cityPath, cr.cfg, cr.sessionsBeadStore().Store, plan, cr.sp, cr.sessionDrains, endpointHoldForRows(cr.cfg, cr.ensureEndpointCapacityGuard()), clock.Real{}, cr.stderr)
 }
 
 // ensureEndpointCapacityGuard returns the city's endpoint capacity guard,

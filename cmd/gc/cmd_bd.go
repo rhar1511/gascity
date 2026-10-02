@@ -922,6 +922,10 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		}
 		if writeErr != nil {
 			fmt.Fprintf(stderr, "gc bd: %s %s: %v\n", op.Verb, op.ID, writeErr) //nolint:errcheck
+			if errors.Is(writeErr, beads.ErrBDSilentFallback) {
+				fmt.Fprintln(stderr, bdSilentFallbackUserMessage) //nolint:errcheck // best-effort diagnostic
+				return bdSilentFallbackExitCode
+			}
 			return 1
 		}
 		written, err := store.Get(op.ID)

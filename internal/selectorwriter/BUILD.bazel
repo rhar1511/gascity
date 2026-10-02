@@ -26,11 +26,13 @@ go_test(
     srcs = [
         "collector_test.go",
         "linux_identity_test.go",
+        "testenv_import_test.go",
     ],
     embed = [":selectorwriter"],
     deps = [
         "//internal/selectorattestation",
         "//internal/selectorinventory",
+        "//internal/testenv",
     ],
 )
 

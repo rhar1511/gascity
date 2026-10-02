@@ -2878,7 +2878,7 @@ func reapStaleSessionBeads(
 	cityPath string,
 	cfg *config.City,
 	store beads.Store,
-	rigStores map[string]beads.Store,
+	capturePlan storeref.ResolvedPlan,
 	sp runtime.Provider,
 	dt *drainTracker,
 	holdsPendingCreate func(session.Info) bool,
@@ -2988,7 +2988,7 @@ func reapStaleSessionBeads(
 		// claim the runtime is quiescent. The creating-state invariant says a
 		// worker has not claimed work before startup; if an execution record is
 		// nevertheless assigned, archive it before Stop can discard its source.
-		if err := captureSessionWorkBeforeClose(context.Background(), cityPath, cfg, store, rigStores, info.ID); err != nil {
+		if err := captureSessionWorkBeforeCloseInPlan(context.Background(), cityPath, cfg, store, capturePlan, info.ID); err != nil {
 			fmt.Fprintf(stderr, "session reconciler: leaving stale-creating session bead %s open because attempt evidence capture failed: %v\n", info.ID, err) //nolint:errcheck
 			continue
 		}

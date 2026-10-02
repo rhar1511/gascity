@@ -507,6 +507,21 @@ func (s *emittingClassStore) StableCreateIDResolveTarget() beads.Store {
 	return s.Store
 }
 
+// PrivatePayloadValueTransportTarget preserves the exact durable transport;
+// neither a structural method nor generic Create proves private-payload safety.
+func (s *emittingClassStore) PrivatePayloadValueTransportTarget() beads.Store {
+	if s == nil {
+		return nil
+	}
+	return s.Store
+}
+
+// CreatePrivatePayloadValue is event-dark: private evidence bytes never enter
+// the public bead journal. Unsupported backings retain their hard refusal.
+func (s *emittingClassStore) CreatePrivatePayloadValue(b beads.Bead) (beads.Bead, error) {
+	return beads.CreatePrivatePayloadValue(s.PrivatePayloadValueTransportTarget(), b)
+}
+
 // DecisionFrontierRecordWriterHandle preserves the backing store's trusted
 // record capability without emitting generic bead events. Decision records,
 // answers, and their links contain private controller state and are written

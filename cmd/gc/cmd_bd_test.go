@@ -2258,8 +2258,16 @@ const silentFallbackFakeBdScript = `#!/bin/sh
 if [ "${1:-}" = "--dolt-auto-commit" ]; then
   shift 2
 fi
+if [ "${2:-}" = "--help" ]; then
+  case "${1:-}" in
+    update|close|assign|delete)
+      printf 'Usage:\n  bd %s [flags]\n\nFlags:\n  --if-revision int  apply only at this revision\n' "$1"
+      exit 0
+      ;;
+  esac
+fi
 if [ "${1:-}" = "show" ]; then
-  printf '%s\n' '[{"id":"demo-abc","status":"in_progress","assignee":"worker-1"}]'
+  printf '%s\n' '[{"id":"demo-abc","status":"in_progress","assignee":"worker-1","revision":7}]'
   exit 0
 fi
 echo "auto-importing 220929 bytes from .beads/issues.jsonl into empty database... auto-imported 123 issues" >&2
@@ -2393,7 +2401,7 @@ func TestGcBdSurfacesSilentFallbackAsLoudError_ClosePath(t *testing.T) {
 	silentFallbackTestSetup(t, silentFallbackFakeBdScript)
 
 	var stdout, stderr bytes.Buffer
-	got := doBd([]string{"close", "demo-abc", "-r", "duplicate"}, &stdout, &stderr)
+	got := doBd([]string{"close", "demo-abc"}, &stdout, &stderr)
 	if got != bdSilentFallbackExitCode {
 		t.Fatalf("doBd(close) = %d, want %d (silent-fallback exit code); stderr=%q",
 			got, bdSilentFallbackExitCode, stderr.String())

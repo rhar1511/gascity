@@ -51,6 +51,7 @@ go_test(
         "graph_test.go",
         "graphv2_validation_test.go",
         "parser_test.go",
+        "provenance_rollout_test.go",
         "provenance_test.go",
         "ralph_iteration_test.go",
         "ralph_test.go",
@@ -77,6 +78,8 @@ go_test(
     embed = [":formula"],
     deps = [
         "//internal/beadmeta",
+        "//internal/featureflags",
+        "//internal/rollout",
         "//internal/testenv",
         "//internal/testfixtures/reviewworkflows",
         "//internal/testutil",

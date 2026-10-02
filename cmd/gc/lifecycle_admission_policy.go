@@ -45,9 +45,6 @@ func buildLifecycleAdmissionPolicy(
 	if cfg == nil {
 		return lifecycleAdmissionPolicy{}, fmt.Errorf("authoritative city configuration is unavailable")
 	}
-	if formula.IsFormulaV2Enabled() != cfg.Daemon.FormulaV2Enabled() {
-		return lifecycleAdmissionPolicy{}, fmt.Errorf("global FormulaV2 mode does not match the effective city configuration")
-	}
 
 	state, err := loadSuspensionState(fsys.OSFS{}, cityPath)
 	if err != nil {
@@ -98,7 +95,7 @@ func buildLifecycleAdmissionPolicy(
 		return lifecycleAdmissionPolicy{}, fmt.Errorf("exact signed route %q has no configured pool template", receipt.Route)
 	}
 
-	deps, graphStoreRef, err := lifecycleSlingDeps(cityName, cityPath, cfg, store, rigStores, strictSuspendedRigPaths, leg, legs, runner, authority)
+	deps, _, err := lifecycleSlingDeps(cityName, cityPath, cfg, store, rigStores, strictSuspendedRigPaths, leg, legs, runner, authority)
 	if err != nil {
 		return lifecycleAdmissionPolicy{}, fmt.Errorf("resolving current graph/workflow stores: %w", err)
 	}
@@ -131,6 +128,9 @@ func buildLifecycleAdmissionPolicy(
 	if provenance.Status != formula.CompileProvenanceAvailable {
 		return lifecycleAdmissionPolicy{}, fmt.Errorf("workflow compiler provenance is incomplete: %v", provenance.UnavailableReasons)
 	}
+	if provenance.FormulaV2Enabled != cfg.Daemon.FormulaV2Enabled() {
+		return lifecycleAdmissionPolicy{}, fmt.Errorf("global FormulaV2 mode captured by compiler provenance does not match the effective city configuration")
+	}
 	if len(provenance.ExternalAssets) != 0 {
 		return lifecycleAdmissionPolicy{}, fmt.Errorf("workflow description/external asset closure is not supported by admission evidence")
 	}
@@ -149,7 +149,7 @@ func buildLifecycleAdmissionPolicy(
 	// proof but cannot silently become the workflow placement.
 	deps.GraphStore = leg.store
 	deps.GraphStoreRef = leg.ref
-	graphStoreRef = leg.ref
+	graphStoreRef := leg.ref
 	if len(recipe.FormulaSources) == 0 || len(recipe.FormulaSources) != len(provenance.FormulaSources) {
 		return lifecycleAdmissionPolicy{}, fmt.Errorf("workflow formula source closure is missing or inconsistent")
 	}

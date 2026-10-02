@@ -41,6 +41,7 @@ type CompileProvenanceReason string
 // CompileTraceKind identifies a compiler transformation or inheritance edge.
 type CompileTraceKind string
 
+// Compiler provenance constants classify sources, reads and fail-closed gaps.
 const (
 	CompileSourceModeFilesystem                          CompileSourceMode       = "filesystem"
 	CompileSourceModeGitRef                              CompileSourceMode       = "git-ref"
@@ -64,6 +65,7 @@ const (
 	CompileSourceReadKindUnclassified                    CompileSourceReadKind   = "unclassified"
 )
 
+// Compile trace constants identify compiler transformations and inheritance.
 const (
 	CompileTraceInheritance      CompileTraceKind = "inheritance"
 	CompileTraceInlineExpansion  CompileTraceKind = "inline_expansion"
@@ -240,12 +242,12 @@ func (r *compileProvenanceRecorder) addUnavailableReason(reason CompileProvenanc
 	}
 }
 
-func (r *compileProvenanceRecorder) finish(recipe *Recipe, compileVars map[string]string, formulaV2Enabled bool) CompileProvenance {
+func (r *compileProvenanceRecorder) finish(recipe *Recipe, compileVars map[string]string, compilerV2Active bool) CompileProvenance {
 	provenance := CompileProvenance{
 		SchemaVersion:                 CompileProvenanceSchemaVersion,
 		CompilerImplementationVersion: FormulaCompilerImplementationVersion,
-		CompilerCapability:            activeFormulaCompilerCapability(formulaV2Enabled),
-		FormulaV2Enabled:              formulaV2Enabled,
+		CompilerCapability:            activeFormulaCompilerCapability(compilerV2Active),
+		FormulaV2Enabled:              compilerV2Active,
 		EffectiveCompileVariables:     cloneStringMap(compileVars),
 		Source:                        r.descriptor,
 		Trace:                         append([]CompileTraceEntry(nil), r.trace...),
@@ -324,7 +326,7 @@ func validSHA256(value string) bool {
 		return false
 	}
 	for _, char := range value {
-		if !(char >= '0' && char <= '9') && !(char >= 'a' && char <= 'f') {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
 			return false
 		}
 	}

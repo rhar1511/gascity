@@ -17,10 +17,12 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/storebinding"
+	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/testutil"
 )
 
@@ -530,6 +532,18 @@ type sessionReapEvidenceFixture struct {
 	baseSHA  string
 }
 
+func assignedWorkCapturePlanForTest(t *testing.T, cityPath string, cfg *config.City, work beads.Store) storeref.ResolvedPlan {
+	t.Helper()
+	if work == nil {
+		return storeref.ResolvedPlan{}
+	}
+	plan, err := assignedWorkSweepPlan(cityPath, cfg, work, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return plan
+}
+
 type evidenceInspectingStopRuntime struct {
 	*runtime.Fake
 	stopCalls int
@@ -684,7 +698,7 @@ func TestSessionReapPathsCaptureBeforeClosingAssignedWorkbenchAttempts(t *testin
 				case "stale-creating":
 					sp := runtime.NewFake()
 					now := fixture.session.CreatedAt.Add(staleCreatingStateTimeout + time.Second)
-					reaped = reapStaleSessionBeads(fixture.cityPath, fixture.cfg, fixture.store, nil, sp, nil, nil, &clock.Fake{Time: now}, &stderr)
+					reaped = reapStaleSessionBeads(fixture.cityPath, fixture.cfg, fixture.store, assignedWorkCapturePlanForTest(t, fixture.cityPath, fixture.cfg, fixture.store), sp, nil, nil, &clock.Fake{Time: now}, &stderr)
 				case "preboot":
 					boot := fixture.session.CreatedAt.Add(time.Hour)
 					withHostBootTime(t, boot, nil)
@@ -794,7 +808,7 @@ func TestStaleCreatingPoolReapCapturesBeforeRuntimeStop(t *testing.T) {
 			}
 			now := fixture.session.CreatedAt.Add(staleCreatingStateTimeout + time.Minute)
 			var stderr strings.Builder
-			got := reapStaleSessionBeads(fixture.cityPath, fixture.cfg, fixture.store, nil, sp, nil, nil, &clock.Fake{Time: now}, &stderr)
+			got := reapStaleSessionBeads(fixture.cityPath, fixture.cfg, fixture.store, assignedWorkCapturePlanForTest(t, fixture.cityPath, fixture.cfg, fixture.store), sp, nil, nil, &clock.Fake{Time: now}, &stderr)
 			if durable {
 				if got != 1 {
 					t.Fatalf("reaped = %d, want 1 after archive and teardown; stderr=%s", got, stderr.String())
@@ -827,6 +841,108 @@ func TestStaleCreatingPoolReapCapturesBeforeRuntimeStop(t *testing.T) {
 			}
 			if _, err := os.Stat(fixture.repo); err != nil {
 				t.Fatalf("fixture checkout was removed after failed capture: %v", err)
+			}
+		})
+	}
+}
+
+func TestControllerStaleReapCapturesEveryAssignedWorkStoreBeforeStop(t *testing.T) {
+	for _, mode := range []string{"success", "capture-failure", "list-failure"} {
+		t.Run(mode, func(t *testing.T) {
+			fixture := newSessionReapEvidenceFixture(t, mode != "capture-failure", "creating")
+			fixture.cfg.Workspace.Name = "test-city"
+			fixture.cfg.Rigs = []config.Rig{{Name: "blue", Path: fixture.repo}}
+			binding, err := beads.OpenFileStore(fsys.OSFS{}, filepath.Join(t.TempDir(), "binding.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			rig, err := beads.OpenFileStore(fsys.OSFS{}, filepath.Join(t.TempDir(), "rig.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			poolName := PoolSessionName("worker", fixture.session.ID)
+			sessionRow := fixture.session
+			sessionRow.ID = ""
+			sessionRow.Metadata = map[string]string{
+				"session_name": poolName, "template": "worker", "agent_name": "worker",
+				"transport": config.SessionTransportTmux, "state": "creating", "generation": "3",
+				poolManagedMetadataKey: "true", "pending_create_claim": "true",
+				"pending_create_started_at": time.Now().Add(-11 * time.Minute).UTC().Format(time.RFC3339),
+			}
+			sessionRow, err = binding.Create(sessionRow)
+			if err != nil || sessionRow.ID != fixture.session.ID {
+				t.Fatalf("relocated session identity = %q, want %q: %v", sessionRow.ID, fixture.session.ID, err)
+			}
+			type ownedExecution struct {
+				store   beads.Store
+				id, ref string
+			}
+			executions := []ownedExecution{{fixture.store, fixture.work.ID, "city:test-city"}}
+			for _, target := range []ownedExecution{
+				{rig, "", "rig:blue"},
+				{binding, "", string(storeref.ClassRef(coordclass.Classes()[1:]))},
+			} {
+				item := fixture.work
+				item.ID = ""
+				item.Metadata = map[string]string{
+					beadmeta.RootStoreRefMetadataKey:    target.ref,
+					beadmeta.SessionIDMetadataKey:       sessionRow.ID,
+					beadmeta.ClaimGenerationMetadataKey: "8",
+					beadmeta.WorkDirMetadataKey:         fixture.repo,
+					beadmeta.WorktreeBaseSHAMetadataKey: fixture.baseSHA,
+					beadmeta.WorkOutcomeMetadataKey:     beadmeta.OutcomeFail,
+				}
+				item, err = target.store.Create(item)
+				if err != nil {
+					t.Fatal(err)
+				}
+				target.id = item.ID
+				executions = append(executions, target)
+			}
+			sp := &evidenceInspectingStopRuntime{Fake: runtime.NewFake()}
+			sp.onStop = func(name string) error {
+				if name != poolName {
+					return fmt.Errorf("unexpected runtime Stop %q", name)
+				}
+				for _, execution := range executions {
+					attemptID, err := attemptevidence.AttemptID(attemptevidence.Identity{
+						Kind: attemptevidence.KindWorkbench, OwnerBeadID: execution.id, ExecutionBeadID: execution.id,
+						SessionID: sessionRow.ID, SessionGeneration: "3", ClaimGeneration: "8",
+					})
+					if err != nil {
+						return err
+					}
+					evidence, err := attemptevidence.Read(execution.store, execution.id, attemptID)
+					if err != nil || evidence.StoreRef != execution.ref {
+						return fmt.Errorf("execution %s in %s was not archived before Stop (ref=%s): %w", execution.id, execution.ref, evidence.StoreRef, err)
+					}
+				}
+				return os.RemoveAll(fixture.repo)
+			}
+			cr := &CityRuntime{
+				cityPath: fixture.cityPath, cfg: fixture.cfg, standaloneCityStore: fixture.store,
+				standaloneRigStores: map[string]beads.Store{"blue": rig}, storageRoutes: splitRoutes(binding), sp: sp,
+			}
+			var stderr strings.Builder
+			cr.stderr = &stderr
+			registerResidencyRoutes(fixture.cityPath, cr.storageRoutes, cr.cityBeadStore)
+			t.Cleanup(func() { unregisterResidencyRoutes(fixture.cityPath, cr.storageRoutes) })
+			if mode == "list-failure" {
+				cr.standaloneRigStores["blue"] = unavailableStore{err: errors.New("test-owned rig read failure")}
+			}
+			got := cr.reapStaleSessionBeads(cr.rigBeadStores())
+			if mode == "success" {
+				if got != 1 || sp.stopCalls != 1 {
+					t.Fatalf("reaped=%d Stop=%d, want 1/1 after all three archives: %s", got, sp.stopCalls, stderr.String())
+				}
+				return
+			}
+			row, err := binding.Get(sessionRow.ID)
+			if got != 0 || sp.stopCalls != 0 || err != nil || row.Status != "open" {
+				t.Fatalf("failed capture/read changed runtime or session: reaped=%d Stop=%d status=%q err=%v; %s", got, sp.stopCalls, row.Status, err, stderr.String())
+			}
+			if _, err := os.Stat(fixture.repo); err != nil {
+				t.Fatalf("failed capture/read removed checkout: %v", err)
 			}
 		})
 	}

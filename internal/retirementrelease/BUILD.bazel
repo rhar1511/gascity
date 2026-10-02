@@ -27,6 +27,7 @@ go_test(
         "http_envelope_test.go",
         "policy_test.go",
         "signed_test.go",
+        "testenv_import_test.go",
     ],
     embed = [":retirementrelease"],
     deps = [
@@ -35,6 +36,7 @@ go_test(
         "//internal/selectorattestation",
         "//internal/selectorinventory",
         "//internal/selectorwriter",
+        "//internal/testenv",
     ],
 )
 
