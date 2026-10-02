@@ -360,7 +360,12 @@ func TestResetPiInterruptedTurnIgnoresMirrorWriteFailureAfterNativeReset(t *test
 	log.SetOutput(&logs)
 	defer log.SetOutput(oldLogOutput)
 
-	if err := ResetPiInterruptedTurn(path, mirrorDir); err != nil {
+	transcript, err := OpenTranscript("pi", []string{filepath.Dir(path)}, path)
+	if err != nil {
+		t.Fatalf("OpenTranscript: %v", err)
+	}
+	defer transcript.Close() //nolint:errcheck
+	if err := ResetPiInterruptedTurn(transcript, mirrorDir); err != nil {
 		t.Fatalf("ResetPiInterruptedTurn: %v", err)
 	}
 	got, err := os.ReadFile(path)
@@ -372,6 +377,77 @@ func TestResetPiInterruptedTurnIgnoresMirrorWriteFailureAfterNativeReset(t *test
 	}
 	if !strings.Contains(logs.String(), "pi mirror reset") || !strings.Contains(logs.String(), mirrorDir) {
 		t.Fatalf("mirror failure log = %q, want path-bearing pi mirror reset diagnostic", logs.String())
+	}
+}
+
+func TestResetPiInterruptedTurnCannotEscapeRetainedRoot(t *testing.T) {
+	for _, swapRoot := range []bool{false, true} {
+		t.Run(fmt.Sprintf("swap_root_%t", swapRoot), func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "sessions")
+			parent := filepath.Join(root, "project")
+			if err := os.MkdirAll(parent, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(parent, "session.jsonl")
+			body := `{"type":"session","version":3,"id":"ses_pi","cwd":"/tmp/project"}
+{"type":"message","id":"u1","message":{"role":"user","content":"interrupted prompt"}}
+{"type":"message","id":"a1","parentId":"u1","message":{"role":"assistant","content":"partial response"}}
+`
+			if err := os.WriteFile(path, []byte(body), 0o640); err != nil {
+				t.Fatal(err)
+			}
+			transcript, err := OpenTranscript("pi", []string{root}, path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer transcript.Close() //nolint:errcheck
+
+			outside := t.TempDir()
+			swapPath, outsideParent := parent, outside
+			if swapRoot {
+				swapPath, outsideParent = root, filepath.Join(outside, "project")
+				if err := os.MkdirAll(outsideParent, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			outsideFile := filepath.Join(outsideParent, "session.jsonl")
+			const sentinel = "outside transcript must remain unchanged"
+			if err := os.WriteFile(outsideFile, []byte(sentinel), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(swapPath, swapPath+"-retained"); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(outside, swapPath); err != nil {
+				t.Skipf("symlink unavailable: %v", err)
+			}
+			err = ResetPiInterruptedTurn(transcript, "")
+			if swapRoot && err != nil {
+				t.Fatalf("reset through retained root: %v", err)
+			}
+			if !swapRoot && err == nil {
+				t.Fatal("reset accepted an escaping parent-directory replacement")
+			}
+			data, readErr := os.ReadFile(outsideFile)
+			if readErr != nil || string(data) != sentinel {
+				t.Fatalf("outside transcript changed: %q, %v", data, readErr)
+			}
+			retainedFile := filepath.Join(parent+"-retained", "session.jsonl")
+			if swapRoot {
+				retainedFile = filepath.Join(root+"-retained", "project", "session.jsonl")
+			}
+			data, readErr = os.ReadFile(retainedFile)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if swapRoot == strings.Contains(string(data), "interrupted prompt") {
+				t.Fatalf("unexpected retained transcript after reset: %q", data)
+			}
+			info, statErr := os.Stat(retainedFile)
+			if statErr != nil || info.Mode().Perm() != 0o640 {
+				t.Fatalf("retained transcript permissions changed: %v, %v", info, statErr)
+			}
+		})
 	}
 }
 

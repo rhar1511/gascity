@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/qualification"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
@@ -1166,5 +1167,26 @@ func (s *Server) humaHandleHealth(_ context.Context, _ *HealthInput) (*HealthOut
 	out.Body.Version = s.state.Version()
 	out.Body.City = s.state.CityName()
 	out.Body.UptimeSec = uptime
+	out.Body.Qualification = qualification.Snapshot{
+		SchemaVersion: qualification.SchemaVersion,
+		Status:        qualification.StatusUnavailable,
+		Reason:        "controller_qualification_provider_unavailable",
+		InputRoots:    []qualification.InputRoot{},
+	}
+	out.Body.ControllerBuild = qualification.BuildIdentity{
+		Status:         qualification.StatusUnavailable,
+		Reason:         "controller_qualification_provider_unavailable",
+		ArtifactStatus: qualification.StatusUnavailable,
+	}
+	out.Body.ReleaseAuthorization = qualification.Authorization{
+		Status: qualification.StatusUnavailable,
+		Reason: "controller_qualification_provider_unavailable",
+	}
+	if provider, ok := s.state.(QualificationProvider); ok {
+		report := provider.QualificationReport()
+		out.Body.Qualification = report.Qualification
+		out.Body.ControllerBuild = report.ControllerBuild
+		out.Body.ReleaseAuthorization = report.ReleaseAuthorization
+	}
 	return out, nil
 }

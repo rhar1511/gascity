@@ -9,14 +9,13 @@ import (
 	"time"
 )
 
-// Session environment reaches the box twice as process arguments: once as
-// `tmux new-session ... -e KEY=VALUE`, and once as the `export KEY=VALUE`
-// prelude embedded in the `sh -c ...` that carries PreStart / SessionSetup /
-// SessionLive. Both land in a world-readable /proc/<pid>/cmdline — on the box
-// AND in the local ssh client's own argv, since [sshArgs] folds the remote
-// command into one argument. The tmux server holding the session outlives the
-// session itself, so a credential passed that way is legible to every local
-// user for the shell's whole life.
+// Session environment reaches the box in two command-bearing forms: as
+// `tmux new-session ... -e KEY=VALUE` arguments and in the `export KEY=VALUE`
+// setup prelude sent over SSH stdin. The fixed remote command is only `sh`, so
+// these values are no longer part of the local ssh client's argv; tmux still
+// receives `-e` values in its argv on the box. The tmux server holding the
+// session outlives the session itself, so secrets should not be passed through
+// either command-line form.
 //
 // stagedEnv is the fix: values classified secret by
 // [runtime.SplitEnvByArgvSafety] are written to 0600 files inside a 0700

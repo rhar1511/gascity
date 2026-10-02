@@ -4,14 +4,19 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/api/apierr"
+	"github.com/gastownhall/gascity/internal/attemptevidence"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/testutil"
 	"github.com/gastownhall/gascity/internal/workrecord"
 )
 
@@ -211,6 +216,139 @@ func TestAPIBeadCloseEnforcesWorkRecord(t *testing.T) {
 			})
 		}
 	}
+}
+
+func TestAPIBeadRetirementCapturesWorkbenchAttemptBeforeClosing(t *testing.T) {
+	retirementSpellings := append(closeSpellings(), closeSpelling{
+		name: "DELETE /bead/{id}",
+		close: func(s *Server, ctx context.Context, id string) error {
+			_, err := s.humaHandleBeadDelete(ctx, &BeadDeleteInput{ID: id})
+			return err
+		},
+	})
+	for _, spelling := range retirementSpellings {
+		t.Run(spelling.name, func(t *testing.T) {
+			store, err := beads.OpenFileStore(fsys.OSFS{}, filepath.Join(t.TempDir(), "beads.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			repoDir, baseSHA := newWorkRecordGateRepo(t)
+			state := newFakeState(t)
+			state.cityBeadStore = store
+			state.stores = map[string]beads.Store{"myrig": store}
+			state.cfg.Rigs = []config.Rig{{Name: "myrig", Path: repoDir}}
+			sessionInfo, err := session.NewStore(beads.SessionStore{Store: store}).CreateSessionInfo(session.CreateSpec{
+				Title: "worker", AgentName: "worker", Metadata: map[string]string{"generation": "6"},
+			})
+			if err != nil {
+				t.Fatalf("create session: %v", err)
+			}
+			work, err := store.Create(beads.Bead{Title: "executed work", Type: "task", Metadata: map[string]string{
+				beadmeta.RootStoreRefMetadataKey:    "rig:myrig",
+				beadmeta.SessionIDMetadataKey:       sessionInfo.ID,
+				beadmeta.ClaimGenerationMetadataKey: "11",
+				beadmeta.WorkDirMetadataKey:         repoDir,
+				beadmeta.WorktreeBaseSHAMetadataKey: baseSHA,
+				beadmeta.WorkOutcomeMetadataKey:     beadmeta.WorkOutcomeNoOp,
+			}})
+			if err != nil {
+				t.Fatalf("create work bead: %v", err)
+			}
+			if err := spelling.close(New(state), context.Background(), work.ID); err != nil {
+				t.Fatalf("close: %v", err)
+			}
+			closed, err := store.Get(work.ID)
+			if err != nil || closed.Status != "closed" {
+				t.Fatalf("work bead close result: status=%q err=%v", closed.Status, err)
+			}
+			attemptID, err := attemptevidence.AttemptID(attemptevidence.Identity{
+				Kind: attemptevidence.KindWorkbench, OwnerBeadID: work.ID, ExecutionBeadID: work.ID,
+				SessionID: sessionInfo.ID, SessionGeneration: "6", ClaimGeneration: "11",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			evidence, err := attemptevidence.Read(store, work.ID, attemptID)
+			if err != nil {
+				t.Fatalf("read archived attempt after close: %v", err)
+			}
+			canonicalRepoDir, err := filepath.EvalSymlinks(repoDir)
+			if err != nil {
+				t.Fatalf("canonicalize fixture repository: %v", err)
+			}
+			if evidence.Identity.SessionGeneration != "6" || evidence.Permission.RepositoryRoot != filepath.Join(canonicalRepoDir, ".git") {
+				t.Fatalf("captured attempt identity/scope = %+v %+v", evidence.Identity, evidence.Permission)
+			}
+		})
+	}
+}
+
+func TestAttemptCaptureRefreshPreservesMutationFence(t *testing.T) {
+	for _, field := range []string{"private index only", "claim generation", "status", "public metadata"} {
+		t.Run(field, func(t *testing.T) {
+			store := beads.NewMemStore()
+			work, err := store.Create(beads.Bead{Title: "execution", Type: "task", Metadata: beads.StringMap{
+				beadmeta.SessionIDMetadataKey: "session", beadmeta.ClaimGenerationMetadataKey: "original",
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !attemptevidence.IsExecutionRecord(work) {
+				t.Fatal("fixture is not an execution record")
+			}
+			update := beads.UpdateOpts{Metadata: map[string]string{beadmeta.AttemptEvidenceIndexPrefix + "fixture": "retained-index"}}
+			switch field {
+			case "claim generation":
+				update.Metadata[beadmeta.ClaimGenerationMetadataKey] = "renewed"
+			case "status":
+				status := "in_progress"
+				update.Status = &status
+			case "public metadata":
+				update.Metadata["work_note"] = "concurrent edit"
+			}
+			if err := store.Update(work.ID, update); err != nil {
+				t.Fatal(err)
+			}
+			current, err := refreshAfterAttemptCapture(store, work)
+			if field != "private index only" {
+				if err == nil {
+					t.Fatal("capture refresh accepted a concurrent public/claim mutation")
+				}
+				return
+			}
+			if err != nil || current.Revision == work.Revision {
+				t.Fatalf("private index refresh = %+v, %v", current, err)
+			}
+			if err := store.SetMetadata(work.ID, "work_note", "later edit"); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.CloseIfMatch(work.ID, current.Revision); !beads.IsPreconditionFailed(err) {
+				t.Fatalf("refreshed close lost its revision fence: %v", err)
+			}
+			row, err := store.Get(work.ID)
+			if err != nil || row.Status == "closed" {
+				t.Fatalf("stale close retired execution: %+v, %v", row, err)
+			}
+		})
+	}
+}
+
+func newWorkRecordGateRepo(t *testing.T) (string, string) {
+	t.Helper()
+	repo := t.TempDir()
+	run := func(args ...string) string {
+		t.Helper()
+		return testutil.RunGit(t, repo, args...)
+	}
+	run("init", "-q")
+	run("config", "user.email", "work-record-test@example.invalid")
+	run("config", "user.name", "Work Record Test")
+	if err := os.WriteFile(filepath.Join(repo, "tracked.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "tracked.txt")
+	run("commit", "-q", "-m", "base")
+	return repo, run("rev-parse", "HEAD")
 }
 
 // TestAPIBeadCloseHandsTheOracleTheRequestContext pins this plane's half of the

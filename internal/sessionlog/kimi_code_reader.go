@@ -4,7 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
-	"os"
+	"io"
 	"strings"
 	"time"
 )
@@ -56,13 +56,8 @@ type kimiCodePart struct {
 	Think string `json:"think"`
 }
 
-func readKimiCodeWire(path string) (*Session, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close() //nolint:errcheck // read-only file
-	scanner := bufio.NewScanner(f)
+func readKimiCodeWireFrom(path string, source io.Reader) (*Session, error) {
+	scanner := bufio.NewScanner(source)
 	scanner.Buffer(make([]byte, 0, 256*1024), maxTailTokenBytes)
 	sess := &Session{ID: kimiSessionID(path)}
 	ids := newStableSyntheticEntryIDSequence("kimi-code")

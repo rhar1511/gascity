@@ -92,6 +92,14 @@ func TestHookClaimAssigneeIdentityPrecedence(t *testing.T) {
 // each subprocess ran under — the channel the claim's assignee travels on
 // (hookClaimEnvMap). It returns the bd log path.
 func unaliasedPoolWorkerHookCity(t *testing.T, beadID string) string {
+	return unaliasedPoolWorkerHookCityWithCanonicalRow(t, beadID, true)
+}
+
+func unaliasedPoolWorkerHookCityWithoutCanonicalRow(t *testing.T, beadID string) string {
+	return unaliasedPoolWorkerHookCityWithCanonicalRow(t, beadID, false)
+}
+
+func unaliasedPoolWorkerHookCityWithCanonicalRow(t *testing.T, beadID string, canonical bool) string {
 	t.Helper()
 	cityDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
@@ -113,6 +121,10 @@ work_query = "printf '[{\"id\":\"%s\",\"status\":\"open\",\"assignee\":\"\",\"me
 	stateDir := t.TempDir()
 	logPath := filepath.Join(stateDir, "bd.log")
 	ownerPath := filepath.Join(stateDir, "owner")
+	openShow := "printf '[]'"
+	if canonical {
+		openShow = fmt.Sprintf(`printf '[{"id":"%s","status":"open","assignee":"","metadata":{"gc.routed_to":"builder"}}]'`, beadID)
+	}
 	// `bd update <id> --claim --json` is the claim mutation (BdStore.Claim); it
 	// takes its actor implicitly from BEADS_ACTOR, so echoing that back as the
 	// claimed assignee is what a real bd does and what lets the claim be
@@ -123,16 +135,20 @@ printf '%%s\t%%s\n' "$BEADS_ACTOR" "$*" >> %q
 for arg in "$@"; do
   if [ "$arg" = "--claim" ]; then
     printf '%%s' "$BEADS_ACTOR" > %q
-    printf '{"id":"%s","status":"in_progress","assignee":"%%s"}' "$BEADS_ACTOR"
+    printf '{"id":"%s","status":"in_progress","assignee":"%%s","metadata":{"gc.routed_to":"builder"}}' "$BEADS_ACTOR"
     exit 0
   fi
 done
 if [ "$1" = "show" ] && [ -f %q ]; then
-  printf '[{"id":"%s","status":"in_progress","assignee":"%%s"}]' "$(cat %q)"
+  printf '[{"id":"%s","status":"in_progress","assignee":"%%s","metadata":{"gc.routed_to":"builder"}}]' "$(cat %q)"
+  exit 0
+fi
+if [ "$1" = "show" ]; then
+  %s
   exit 0
 fi
 printf '[]'
-`, logPath, ownerPath, beadID, ownerPath, beadID, ownerPath)
+`, logPath, ownerPath, beadID, ownerPath, beadID, ownerPath, openShow)
 	if err := os.WriteFile(filepath.Join(fakeBin, "bd"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -183,6 +199,44 @@ func TestCmdHookClaimUnaliasedPoolWorkerClaimsUnderItsSessionBeadID(t *testing.T
 		actor, args, _ := strings.Cut(line, "\t")
 		if actor == slotLabel {
 			t.Fatalf("bd ran under the slot label as BEADS_ACTOR (args: %s); the whole log:\n%s", args, logData)
+		}
+	}
+}
+
+func TestCmdHookClaimCustomQueryRefusesMissingCanonicalBead(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	const (
+		beadID    = "ga-unbacked1"
+		slotLabel = "test-city--builder-1-pool"
+		sessionID = "gcg-session-557fc1017792caa9a01355325b212416"
+	)
+	logPath := unaliasedPoolWorkerHookCityWithoutCanonicalRow(t, beadID)
+	t.Setenv("GC_TEMPLATE", "builder")
+	t.Setenv("GC_ALIAS", "")
+	t.Setenv("GC_AGENT", slotLabel)
+	t.Setenv("GC_SESSION_NAME", slotLabel)
+	t.Setenv("GC_SESSION_ID", sessionID)
+
+	var stdout, stderr bytes.Buffer
+	code := cmdHookWithOptions(nil, hookCommandOptions{Claim: true, JSON: true}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("cmdHookWithOptions(--claim) = %d, want canonical-read refusal; stdout=%q stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("canonical-read refusal wrote a claim result: %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "read canonical candidate "+beadID) {
+		t.Fatalf("stderr does not identify the missing canonical row: %s", stderr.String())
+	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%s): %v", logPath, err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(logData)), "\n") {
+		_, args, _ := strings.Cut(line, "\t")
+		if strings.Contains(args, "--claim") {
+			t.Fatalf("unbacked candidate reached a claim mutation (args: %s); log:\n%s", args, logData)
 		}
 	}
 }

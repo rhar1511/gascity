@@ -89,11 +89,13 @@ import (
 //     SetLocalString, which writes only the clone-local sidecar file, is
 //     deliberately outside; see its doc); every write capability this wrapper
 //     implements as a method (ReleaseIfCurrent, DeleteBatch,
-//     CreateWithForeignID, CreateWithStorage); and ONE
-//     capability handle, ConditionalWriterHandle — but only when it is reached
-//     by beads.ConditionalWriterFor on the *ProxiedStore itself, through which
-//     UpdateIfMatch, CloseIfMatch, DeleteIfMatch and CompareAndSetMetadataKey
-//     are bracketed.
+//     CreateWithForeignID, CreateWithStorage); and two capability handles.
+//     ConditionalWriterHandle is bracketed only when reached by
+//     beads.ConditionalWriterFor on the *ProxiedStore itself. The
+//     DecisionFrontierRecordWriterHandle also resolves on the write leaf and
+//     brackets each complete create, metadata-CAS, or link operation exactly
+//     once. Both prevent a mutation that restarts bd's proxy from leaving the
+//     native read leaf attached to the previous generation.
 //
 //     OUTSIDE it, deliberately: every conditional write reached through a
 //     resolver that follows ConditionalWritesResolveTarget first. That is

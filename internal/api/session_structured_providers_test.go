@@ -2,7 +2,7 @@ package api
 
 import (
 	"context"
-	"crypto/md5" //nolint:gosec // Kimi transcript fixtures use the provider's MD5 workdir layout.
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -2318,15 +2318,13 @@ func writeStructuredGeminiWriteContentPairFixture(t *testing.T, root, workDir, _
 
 func writeStructuredKimiReadFixture(t *testing.T, root, workDir, sessionKey string) {
 	t.Helper()
-	sum := md5.Sum([]byte(filepath.Clean(workDir)))
-	workHash := hex.EncodeToString(sum[:])
-	path := filepath.Join(root, workHash, sessionKey, "context.jsonl")
+	path := filepath.Join(root, "sessions", kimiCodeTestWorkDirKey(workDir), sessionKey, "agents", "main", "wire.jsonl")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatalf("mkdir kimi context dir: %v", err)
 	}
 	payload := strings.Join([]string{
-		`{"role":"assistant","content":[],"tool_calls":[{"type":"function","id":"call-kimi-read","function":{"name":"Read","arguments":"{\"path\":\"README.md\"}"}}]}`,
-		`{"role":"tool","content":[{"type":"text","text":"Kimi file data"}],"tool_call_id":"call-kimi-read"}`,
+		`{"type":"context.append_loop_event","event":{"type":"tool.call","uuid":"event-kimi-read-call","toolCallId":"call-kimi-read","name":"Read","args":{"path":"README.md"}}}`,
+		`{"type":"context.append_loop_event","event":{"type":"tool.result","uuid":"event-kimi-read-result","toolCallId":"call-kimi-read","result":{"output":{"filePath":"README.md","content":"Kimi file data"}}}}`,
 	}, "\n") + "\n"
 	if err := os.WriteFile(path, []byte(payload), 0o644); err != nil {
 		t.Fatalf("write kimi fixture: %v", err)
@@ -2335,19 +2333,33 @@ func writeStructuredKimiReadFixture(t *testing.T, root, workDir, sessionKey stri
 
 func writeStructuredKimiEditPatchFixture(t *testing.T, root, workDir, sessionKey string) {
 	t.Helper()
-	sum := md5.Sum([]byte(filepath.Clean(workDir)))
-	workHash := hex.EncodeToString(sum[:])
-	path := filepath.Join(root, workHash, sessionKey, "context.jsonl")
+	path := filepath.Join(root, "sessions", kimiCodeTestWorkDirKey(workDir), sessionKey, "agents", "main", "wire.jsonl")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatalf("mkdir kimi context dir: %v", err)
 	}
 	payload := strings.Join([]string{
-		`{"role":"assistant","content":[],"tool_calls":[{"type":"function","id":"call-kimi-edit","function":{"name":"Edit","arguments":"{\"filePath\":\"README.md\",\"oldString\":\"old\",\"newString\":\"new\"}"}}]}`,
-		`{"role":"tool","content":{"output":"Edited README.md","filePath":"README.md","patch":"--- README.md\n+++ README.md\n@@\n-old\n+new"},"tool_call_id":"call-kimi-edit"}`,
+		`{"type":"context.append_loop_event","event":{"type":"tool.call","uuid":"event-kimi-edit-call","toolCallId":"call-kimi-edit","name":"Edit","args":{"filePath":"README.md","oldString":"old","newString":"new"}}}`,
+		`{"type":"context.append_loop_event","event":{"type":"tool.result","uuid":"event-kimi-edit-result","toolCallId":"call-kimi-edit","result":{"output":{"output":"Edited README.md","filePath":"README.md","patch":"--- README.md\n+++ README.md\n@@\n-old\n+new"}}}}`,
 	}, "\n") + "\n"
 	if err := os.WriteFile(path, []byte(payload), 0o644); err != nil {
 		t.Fatalf("write kimi fixture: %v", err)
 	}
+}
+
+// kimiCodeTestWorkDirKey mirrors the Kimi Code directory key for temporary
+// fixture workdirs. The sessionlog package pins the derivation against a
+// provider-generated key; this helper only places API fixtures in that layout.
+func kimiCodeTestWorkDirKey(workDir string) string {
+	if resolved, err := filepath.EvalSymlinks(workDir); err == nil {
+		workDir = resolved
+	}
+	normalized := strings.TrimRight(strings.ReplaceAll(filepath.Clean(workDir), `\`, "/"), "/")
+	slug := strings.ToLower(filepath.Base(normalized))
+	if slug == "" || slug == "." || slug == ".." {
+		slug = "workspace"
+	}
+	sum := sha256.Sum256([]byte(normalized))
+	return "wd_" + slug + "_" + hex.EncodeToString(sum[:6])
 }
 
 func writeStructuredOpenCodeEditFixture(t *testing.T, root, workDir, _ string) {

@@ -7,6 +7,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/sessionauthority"
 )
 
 // allProjectedMetadataKeys is every metadata key InfoFromPersistedBead reads.
@@ -37,7 +38,8 @@ var allProjectedMetadataKeys = []string{
 	aliasHistoryMetadataKey, "continuity_eligible", "last_woke_at", "slept_at", "awake_started_at", "usage_compute_emitted_at", "state_reason",
 	"creation_complete_at", "continuation_reset_pending", SessionCircuitStateMetadataKey,
 	ResetCommittedAtKey,
-	"generation", "started_config_hash", "pin_awake", "held_until", "wait_hold",
+	"generation", sessionauthority.MetadataProfile, sessionauthority.MetadataAuthorization, sessionauthority.MetadataTransitions,
+	"started_config_hash", "pin_awake", "held_until", "wait_hold",
 	"churn_count", "idle_respawn_attempts", "idle_respawn_bead_id", "wake_mode", "drain_at", "sleep_intent", "instance_token", "detached_at",
 	CurrentBeadIDKey, "core_hash_breakdown", "started_provision_hash",
 	"started_launch_hash", "started_live_hash", "live_hash", "startup_dialog_verified",

@@ -14,18 +14,26 @@ import (
 // Idempotency-Key header. This set grows as each wiring slice (audit P0 #4)
 // lands; a regression that drops the header fails TestCreateEndpointsAreTriagedForIdempotency.
 var requireIdempotency = map[string]bool{
-	"create-bead":             true,
-	"send-mail":               true,
-	"create-agent":            true,
-	"create-provider":         true,
-	"create-rig":              true,
-	"create-convoy":           true,
-	"add-pack":                true,
-	"reply-mail":              true,
-	"register-extmsg-adapter": true,
-	"emit-event":              true,
-	"post-v0-city":            true,
+	"create-bead":                           true,
+	"send-mail":                             true,
+	"create-agent":                          true,
+	"create-provider":                       true,
+	"create-rig":                            true,
+	"create-convoy":                         true,
+	"add-pack":                              true,
+	"reply-mail":                            true,
+	"register-extmsg-adapter":               true,
+	"emit-event":                            true,
+	"post-v0-city":                          true,
+	"execute-pr-action":                     true,
+	"ensure-decision-frontier":              true,
+	"answer-decision-frontier":              true,
+	"ensure-prepared-human-source-proposal": true,
+	"submit-human-source-answer":            true,
 	"post-v0-city-by-city-name-session-by-id-requests": true,
+	"submit-session":       true,
+	"send-session-message": true,
+	"respond-session":      true,
 }
 
 // pendingIdempotency lists known create operations that are deliberately NOT
@@ -33,10 +41,7 @@ var requireIdempotency = map[string]bool{
 // TODO list, not an exemption: when a slice wires one of these, MOVE it to
 // requireIdempotency — the test enforces the move so the lists stay honest.
 var pendingIdempotency = map[string]bool{
-	"create-session":       true, // 202; raw+Huma split, deferred (S4)
-	"send-session-message": true, // 202; deferred (S4)
-	"respond-session":      true, // 202; deferred (S4)
-	"submit-session":       true, // 202; deferred (S4)
+	"create-session": true, // 202; raw+Huma split, deferred (S4)
 }
 
 // exemptFromIdempotency lists POST operations that are NOT resource creates and
@@ -47,51 +52,83 @@ var pendingIdempotency = map[string]bool{
 // be classified, so a new create at ANY status (201, 202, …) that is neither
 // wired nor triaged fails the test.
 var exemptFromIdempotency = map[string]bool{
+	// Preparation creates only an expiring transport reference, never a durable
+	// decision or delivery. Resume and retirement verification are guarded reads;
+	// replay must revalidate current authority rather than cache a verdict.
+	"prepare-human-source-proposal":    true,
+	"check-human-source-resume":        true,
+	"verify-retirement-release-source": true,
+	// Enrolled claims derive a deterministic transition receipt from the
+	// authenticated runtime incarnation and resulting claim generation. The
+	// controller replays that exact receipt and repairs the reciprocal session
+	// stamp after an ambiguous response, so a separate HTTP idempotency key would
+	// create a competing identity. Proof: LifecycleClaimIdentity replay tests.
+	"claim-admitted-lifecycle-work": true,
+
+	// Signed recovery requests use the mandatory body request_id, work ID and
+	// authoritative scope to derive one durable intent ID. Exact replay returns
+	// that intent; different signed content with the same identity conflicts.
+	// Intake performs no runtime action. Proof:
+	// TestLifecycleRecoverySubmitPersistsHeldIntentWithoutAction and
+	// TestPersistRecoveryIntentIsStableHeldAndReplaySafe.
+	"submit-lifecycle-recovery-request": true,
+
+	// Tracked session delivery additionally accepts Idempotency-Key; its mandatory
+	// body request_id remains its durable
+	// identity. AcceptRequest rejects changed content/generation on replay and
+	// reserves delivery once; the HTTP replay test asserts one provider send.
+	// Acknowledgement conditionally updates that same request for the exact
+	// session execution. Its path request_id and generation/token checks make
+	// retries idempotent without a second, competing Idempotency-Key identity.
+	// Proof: TestSessionRequestSubmitHTTPPreservesAcceptanceAndSendsOnce and
+	// TestSessionRequestReadAndAcknowledgementHTTP, plus the session CAS tests.
+	"post-v0-city-by-city-name-session-by-id-requests-by-request-id-ack": true,
+
 	// ensure-extmsg-group is identity-idempotent by design: the ensure
 	// semantics (same group in → same group out) make a retry safe without a
 	// key, so wiring one would be dead weight (owner decision, 2026-07-11).
 	// Accepted trade-off: the ExtMsgGroupCreated event fires on every ensure,
 	// so a retry can double-emit it — tolerable for an ensure endpoint; move
 	// this opid to requireIdempotency if that ever matters.
-	"ensure-extmsg-group":                                                true,
-	"post-v0-city-by-city-name-agent-by-base-by-action":                  true,
-	"post-v0-city-by-city-name-agent-by-dir-by-base-by-action":           true,
-	"post-v0-city-by-city-name-bead-by-id-assign":                        true,
-	"post-v0-city-by-city-name-bead-by-id-close":                         true,
-	"post-v0-city-by-city-name-bead-by-id-reopen":                        true,
-	"post-v0-city-by-city-name-bead-by-id-update":                        true,
-	"post-v0-city-by-city-name-convoy-by-id-add":                         true,
-	"post-v0-city-by-city-name-convoy-by-id-close":                       true,
-	"post-v0-city-by-city-name-convoy-by-id-remove":                      true,
-	"post-v0-city-by-city-name-extmsg-bind":                              true,
-	"post-v0-city-by-city-name-extmsg-inbound":                           true,
-	"post-v0-city-by-city-name-extmsg-outbound":                          true,
-	"post-v0-city-by-city-name-extmsg-participants":                      true,
-	"post-v0-city-by-city-name-extmsg-transcript-ack":                    true,
-	"post-v0-city-by-city-name-extmsg-unbind":                            true,
-	"post-v0-city-by-city-name-formulas-by-name-preview":                 true,
-	"post-v0-city-by-city-name-formulas-by-name-validate":                true,
-	"post-v0-city-by-city-name-mail-by-id-archive":                       true,
-	"post-v0-city-by-city-name-mail-by-id-mark-unread":                   true,
-	"post-v0-city-by-city-name-mail-by-id-read":                          true,
-	"post-v0-city-by-city-name-order-by-name-disable":                    true,
-	"post-v0-city-by-city-name-order-by-name-enable":                     true,
-	"post-v0-city-by-city-name-order-by-name-run":                        true,
-	"post-v0-city-by-city-name-rig-by-name-by-action":                    true,
-	"post-v0-city-by-city-name-runs-by-run-id-cancel":                    true,
-	"post-v0-city-by-city-name-service-by-name-restart":                  true,
-	"post-v0-city-by-city-name-session-by-id-close":                      true,
-	"post-v0-city-by-city-name-session-by-id-kill":                       true,
-	"post-v0-city-by-city-name-session-by-id-permission-mode":            true,
-	"post-v0-city-by-city-name-session-by-id-rename":                     true,
-	"post-v0-city-by-city-name-session-by-id-stop":                       true,
-	"post-v0-city-by-city-name-session-by-id-suspend":                    true,
-	"post-v0-city-by-city-name-session-by-id-wake":                       true,
-	"post-v0-city-by-city-name-session-by-id-requests-by-request-id-ack": true,
-	"post-v0-city-by-city-name-sling":                                    true,
-	"post-v0-city-by-city-name-unregister":                               true,
-	"rotate-events":                                                      true,
-	"trigger-maintenance-dolt-gc":                                        true,
+	"ensure-extmsg-group":                                      true,
+	"post-v0-city-by-city-name-agent-by-base-by-action":        true,
+	"post-v0-city-by-city-name-agent-by-dir-by-base-by-action": true,
+	"post-v0-city-by-city-name-bead-by-id-assign":              true,
+	"post-v0-city-by-city-name-bead-by-id-close":               true,
+	"post-v0-city-by-city-name-bead-by-id-reopen":              true,
+	"post-v0-city-by-city-name-bead-by-id-update":              true,
+	"post-v0-city-by-city-name-convoy-by-id-add":               true,
+	"post-v0-city-by-city-name-convoy-by-id-close":             true,
+	"post-v0-city-by-city-name-convoy-by-id-remove":            true,
+	"post-v0-city-by-city-name-extmsg-bind":                    true,
+	"post-v0-city-by-city-name-extmsg-inbound":                 true,
+	"post-v0-city-by-city-name-extmsg-outbound":                true,
+	"post-v0-city-by-city-name-extmsg-participants":            true,
+	"post-v0-city-by-city-name-extmsg-transcript-ack":          true,
+	"post-v0-city-by-city-name-extmsg-unbind":                  true,
+	"post-v0-city-by-city-name-formulas-by-name-preview":       true,
+	"post-v0-city-by-city-name-formulas-by-name-validate":      true,
+	"post-v0-city-by-city-name-mail-by-id-archive":             true,
+	"post-v0-city-by-city-name-mail-by-id-mark-unread":         true,
+	"post-v0-city-by-city-name-mail-by-id-read":                true,
+	"post-v0-city-by-city-name-order-by-name-disable":          true,
+	"post-v0-city-by-city-name-order-by-name-enable":           true,
+	"post-v0-city-by-city-name-order-by-name-run":              true,
+	"post-v0-city-by-city-name-rig-by-name-by-action":          true,
+	"post-v0-city-by-city-name-runs-by-run-id-cancel":          true,
+	"post-v0-city-by-city-name-service-by-name-restart":        true,
+	"post-v0-city-by-city-name-session-by-id-close":            true,
+	"post-v0-city-by-city-name-session-by-id-kill":             true,
+	"post-v0-city-by-city-name-session-by-id-permission-mode":  true,
+	"post-v0-city-by-city-name-session-by-id-rename":           true,
+	"post-v0-city-by-city-name-session-by-id-stop":             true,
+	"post-v0-city-by-city-name-session-by-id-suspend":          true,
+	"post-v0-city-by-city-name-session-by-id-wake":             true,
+	"post-v0-city-by-city-name-sling":                          true,
+	"post-v0-city-by-city-name-unregister":                     true,
+	"rotate-events":                                            true,
+	"trigger-maintenance-dolt-gc":                              true,
+	"post-v0-city-by-city-name-session-by-id-reset":            true,
 }
 
 type idemSpecDoc struct {

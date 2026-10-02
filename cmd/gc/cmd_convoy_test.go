@@ -576,7 +576,7 @@ func TestConvoyListAndStatusJSONCommands(t *testing.T) {
 		t.Fatalf("openCityStoreAt: %v", err)
 	}
 	_, _ = store.Create(beads.Bead{Title: "release train", Type: "convoy"})
-	_, _ = store.Create(beads.Bead{Title: "ship docs", ParentID: "gc-1"})
+	_, _ = store.Create(beads.Bead{Title: "ship docs", ParentID: "tc-1"})
 
 	t.Run("list", func(t *testing.T) {
 		var stdout, stderr bytes.Buffer
@@ -598,7 +598,7 @@ func TestConvoyListAndStatusJSONCommands(t *testing.T) {
 
 	t.Run("status", func(t *testing.T) {
 		var stdout, stderr bytes.Buffer
-		code := run([]string{"convoy", "status", "gc-1", "--json"}, &stdout, &stderr)
+		code := run([]string{"convoy", "status", "tc-1", "--json"}, &stdout, &stderr)
 		if code != 0 {
 			t.Fatalf("run convoy status --json = %d; stderr=%s stdout=%s", code, stderr.String(), stdout.String())
 		}
@@ -609,8 +609,8 @@ func TestConvoyListAndStatusJSONCommands(t *testing.T) {
 		if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
 			t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
 		}
-		if result.SchemaVersion != "1" || result.Convoy.ID != "gc-1" || len(result.Children) != 1 {
-			t.Fatalf("result = %+v, want gc-1 with one child", result)
+		if result.SchemaVersion != "1" || result.Convoy.ID != "tc-1" || len(result.Children) != 1 {
+			t.Fatalf("result = %+v, want tc-1 with one child", result)
 		}
 	})
 }
@@ -1557,21 +1557,26 @@ func (s failingSetMetadataStore) SetMetadata(string, string, string) error {
 	return errors.New("metadata write failed")
 }
 
-func TestCloseConvoyWithReasonBdStoreForwardsReasonWithoutShow(t *testing.T) {
+func TestCloseConvoyWithReasonBdStoreReadsForLifecycleGuardAndForwardsReason(t *testing.T) {
 	const id = "bd-x"
 	var closeArgs []string
+	status := "open"
 	runner := func(_, name string, args ...string) ([]byte, error) {
 		if name != "bd" {
 			return nil, fmt.Errorf("unexpected command name: %s", name)
 		}
 		if len(args) > 0 && args[0] == "show" {
-			return nil, fmt.Errorf("unexpected bd show before convoy close")
+			if len(args) != 3 || args[1] != "--json" || args[2] != id {
+				return nil, fmt.Errorf("unexpected bd show args: %v", args)
+			}
+			return []byte(fmt.Sprintf(`[{"id":"%s","title":"batch","status":%q,"issue_type":"convoy","created_at":"2025-01-15T10:30:00Z"}]`, id, status)), nil
 		}
 		switch strings.Join(args, " ") {
 		case "update --json " + id + " --set-metadata close_reason=" + convoyAutocloseReason:
 			return []byte(`[{"id":"bd-x","title":"batch","status":"open","issue_type":"convoy","created_at":"2025-01-15T10:30:00Z"}]`), nil
 		case "close --force --json --reason " + convoyAutocloseReason + " " + id:
 			closeArgs = append([]string(nil), args...)
+			status = "closed"
 			return []byte(`[{"id":"bd-x","title":"batch","status":"closed","issue_type":"convoy","created_at":"2025-01-15T10:30:00Z"}]`), nil
 		default:
 			return nil, fmt.Errorf("unexpected command: bd %s", strings.Join(args, " "))

@@ -1,0 +1,4 @@
+- queries: .
+  from: codeql/go-queries
+- include:
+    query filename: AlertSuppression.ql

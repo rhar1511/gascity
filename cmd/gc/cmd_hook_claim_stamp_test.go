@@ -44,9 +44,10 @@ func noopPublishRunMap(string, string, ...string) error {
 // CLAIMING SESSION's bead through the StampSessionClaim seam, and lets a test
 // inject an error to prove the stamp never fails the claim.
 type sessionClaimSpy struct {
-	calls     int
-	sessionID string
-	beadID    string
+	calls           int
+	sessionID       string
+	beadID          string
+	claimGeneration string
 	// beadIDs records every bead id written through the seam in order, so a test
 	// can assert a stamp is followed by a clear (empty id) rather than only seeing
 	// the last write.
@@ -54,9 +55,10 @@ type sessionClaimSpy struct {
 	err     error
 }
 
-func (s *sessionClaimSpy) fn(sessionID, beadID string) error {
+func (s *sessionClaimSpy) fn(sessionID, beadID, claimGeneration string) error {
 	s.calls++
 	s.sessionID, s.beadID = sessionID, beadID
+	s.claimGeneration = claimGeneration
 	s.beadIDs = append(s.beadIDs, beadID)
 	return s.err
 }
@@ -72,7 +74,7 @@ func noopStampWorkMeta(context.Context, string, []string, string, string, map[st
 // noopStampSessionClaim suppresses the session-bead claim back-channel stamp so
 // claim tests that don't assert on it stay hermetic — the default seam resolves
 // the city and opens the session store, which a test binary deliberately refuses.
-func noopStampSessionClaim(string, string) error { return nil }
+func noopStampSessionClaim(string, string, string) error { return nil }
 
 // popClaimedAt extracts and validates the write-once gc.claimed_at entry from
 // a fresh-claim patch, returning the remaining keys so the caller can assert
@@ -529,7 +531,7 @@ func TestDoHookClaimStampsCurrentClaimOnSession(t *testing.T) {
 	sessSpy := &sessionClaimSpy{}
 	ops := poolClaimOps(
 		`[{"id":"hw-pool","status":"open","metadata":{"gc.routed_to":"worker"}}]`,
-		map[string]string{"gc.routed_to": "worker"},
+		map[string]string{"gc.routed_to": "worker", beadmeta.ClaimGenerationMetadataKey: "claim-one"},
 		"bd-hw-pool",
 		&stampMetaSpy{},
 	)
@@ -539,9 +541,9 @@ func TestDoHookClaimStampsCurrentClaimOnSession(t *testing.T) {
 	if code := doHookClaim("bd ready --json", "/tmp/work", poolClaimOpts(), ops, &stdout, &stderr); code != 0 {
 		t.Fatalf("doHookClaim = %d, want 0; stderr=%s", code, stderr.String())
 	}
-	if sessSpy.calls != 1 || sessSpy.sessionID != "mc-sess1" || sessSpy.beadID != "hw-pool" {
-		t.Fatalf("session claim stamp = {calls:%d session:%q bead:%q}, want {1 mc-sess1 hw-pool}",
-			sessSpy.calls, sessSpy.sessionID, sessSpy.beadID)
+	if sessSpy.calls != 1 || sessSpy.sessionID != "mc-sess1" || sessSpy.beadID != "hw-pool" || sessSpy.claimGeneration != "claim-one" {
+		t.Fatalf("session claim stamp = {calls:%d session:%q bead:%q generation:%q}, want {1 mc-sess1 hw-pool claim-one}",
+			sessSpy.calls, sessSpy.sessionID, sessSpy.beadID, sessSpy.claimGeneration)
 	}
 }
 

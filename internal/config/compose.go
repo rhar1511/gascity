@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/pricing"
+	"github.com/gastownhall/gascity/internal/qualification"
 )
 
 // mergePricingByKey merges base and override pricing slices keyed by
@@ -87,8 +88,9 @@ type Provenance struct {
 	// Warnings collects non-fatal collision warnings from composition.
 	Warnings []string
 
-	sourceContents   map[string][]byte
-	revisionSnapshot *revisionSnapshot
+	sourceContents      map[string][]byte
+	revisionSnapshot    *revisionSnapshot
+	qualificationInputs qualification.InputClosure
 }
 
 // LoadOptions controls optional config-loading behavior.
@@ -125,10 +127,16 @@ type LoadOptions struct {
 	// discovery, shell completion — set this and degrade to "no pack state
 	// right now"; a load whose result the caller acts on must leave it false
 	// and wait, because a busy cache would otherwise read as an empty one.
-	RepoCacheNonBlocking    bool
-	deferRigPatches         bool
-	deferredRigPatches      *[]deferredRigPatches
-	allowLegacyOrderLayouts bool
+	RepoCacheNonBlocking bool
+	// CaptureQualificationInputs makes the long-running controller record the
+	// loader's source reads and resolved pack roots. One-shot commands do not
+	// pay for this source snapshot.
+	CaptureQualificationInputs bool
+	qualificationCapture       *qualificationCapture
+	packCompatibilityCapture   *packCompatibilityCapture
+	deferRigPatches            bool
+	deferredRigPatches         *[]deferredRigPatches
+	allowLegacyOrderLayouts    bool
 }
 
 // LoadWithIncludes loads a city.toml and merges all included fragments.
@@ -142,6 +150,14 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 
 // LoadWithIncludesOptions loads a city.toml with the supplied load options.
 func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraIncludes ...string) (*City, *Provenance, error) {
+	if opts.packCompatibilityCapture == nil {
+		opts.packCompatibilityCapture = newPackCompatibilityCapture()
+	}
+	if opts.CaptureQualificationInputs {
+		capture := newQualificationCapture(fs, filepath.Dir(path))
+		opts.qualificationCapture = capture
+		fs = qualificationCaptureFS{fs: fs, capture: capture}
+	}
 	data, err := fs.ReadFile(path)
 	if err != nil {
 		return nil, nil, fmt.Errorf("loading config %q: %w", path, err)
@@ -215,6 +231,7 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		if err := validatePackMeta(&pc.Pack); err != nil {
 			return nil, nil, fmt.Errorf("city pack.toml: %w", err)
 		}
+		opts.packCompatibilityCapture.record(cityRoot, pc.Pack, packData, opts.qualificationCapture)
 		legacyV1SurfaceWarningsEnabled = pc.Pack.Schema >= 2
 		if legacyV1SurfaceWarningsEnabled {
 			// Wave 2 hard-stop: schema=2 city packs no longer tolerate PackV1
@@ -408,7 +425,7 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	for _, inc := range includes {
 		var fragPath string
 		if isRemoteInclude(inc) || isGitHubTreeURL(inc) {
-			resolved, err := resolvePackRef(inc, cityRoot, cityRoot, opts.RepoCacheNonBlocking)
+			resolved, err := resolvePackRefWithQualification(inc, cityRoot, cityRoot, opts.RepoCacheNonBlocking, opts.qualificationCapture)
 			if err != nil {
 				return nil, nil, fmt.Errorf("resolving include %q: %w", inc, err)
 			}
@@ -478,7 +495,10 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		return nil, nil, err
 	}
 	for _, inc := range packIncludes {
-		name := readPackNameFromDir(inc)
+		if opts.qualificationCapture != nil {
+			opts.qualificationCapture.recordPackRoot(inc, "", "", "")
+		}
+		name := readPackNameFromDirWithQualification(inc, opts.qualificationCapture)
 		if name != "" && existingPacks[name] {
 			continue
 		}
@@ -492,6 +512,11 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	implicitImports, implicitPath, implicitData, implicitErr := readImplicitImportsWithData()
 	if implicitErr != nil {
 		return nil, nil, implicitErr
+	}
+	if opts.qualificationCapture != nil && implicitData != nil {
+		// This file is an actual loader input even when it contains no
+		// bootstrap import that is added to the effective city config.
+		opts.qualificationCapture.recordExternalRead(implicitPath, implicitData)
 	}
 	if len(implicitImports) > 0 {
 		// v0.15.1 collision gate: if a user's [imports.<name>] would
@@ -563,7 +588,7 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	// Anything that would change what composes has already been resolved and
 	// hard-failed upstream by then.
 	for _, ref := range root.Workspace.LegacyIncludes() {
-		topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot, opts.RepoCacheNonBlocking)
+		topoDir, _ := resolvePackRefWithQualification(ref, cityRoot, cityRoot, opts.RepoCacheNonBlocking, opts.qualificationCapture)
 		topoPath := filepath.Join(topoDir, packFile)
 		for _, a := range root.Agents {
 			if a.Dir == "" {
@@ -863,6 +888,11 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	if !opts.SkipRevisionSnapshot {
 		prov.captureRevisionSnapshot(fs, root, cityRoot)
 	}
+	if opts.qualificationCapture != nil {
+		prov.qualificationInputs = opts.qualificationCapture.closure()
+		root.qualificationInputs = prov.qualificationInputs
+	}
+	root.packCompatibilityBindings = append([]PackCompatibilityBinding(nil), opts.packCompatibilityCapture.bindings...)
 
 	return root, prov, nil
 }
@@ -1131,12 +1161,16 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 		// field still wins.
 		conditionalWrites := base.Beads.ConditionalWrites
 		guardedRelease := base.Beads.GuardedRelease
+		privateEvidence := base.Beads.PrivateEvidence
 		base.Beads = fragment.Beads
 		if !fragMeta.IsDefined("beads", "conditional_writes") {
 			base.Beads.ConditionalWrites = conditionalWrites
 		}
 		if !fragMeta.IsDefined("beads", "guarded_release") {
 			base.Beads.GuardedRelease = guardedRelease
+		}
+		if !fragMeta.IsDefined("beads", "private_evidence") {
+			base.Beads.PrivateEvidence = privateEvidence
 		}
 	}
 	if fragMeta.IsDefined("dolt") {
@@ -2012,9 +2046,16 @@ func resolvedConfigPackNames(cfg *City, sysFS fsys.FS, cityRoot string, nonBlock
 
 // readPackNameFromDir reads [pack].name from pack.toml in the given directory.
 func readPackNameFromDir(dir string) string {
+	return readPackNameFromDirWithQualification(dir, nil)
+}
+
+func readPackNameFromDirWithQualification(dir string, capture *qualificationCapture) string {
 	data, err := os.ReadFile(filepath.Join(dir, packFile))
 	if err != nil {
 		return ""
+	}
+	if capture != nil {
+		capture.recordRead(filepath.Join(dir, packFile), data)
 	}
 	var pc struct {
 		Pack struct {

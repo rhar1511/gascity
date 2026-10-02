@@ -328,6 +328,22 @@ export function buildTestCitySupervisorData(nowMs: number = Date.now()): TestCit
     status: 'ok',
     uptime_sec: 4 * 3600,
     version: 'test-fixture',
+    controller_build: {
+      status: 'unavailable',
+      reason: 'fixture_identity_unavailable',
+      artifact_status: 'unavailable',
+      source_dirty: false,
+    },
+    qualification: {
+      schema_version: 1,
+      status: 'unavailable',
+      reason: 'fixture_identity_unavailable',
+      input_roots: [],
+    },
+    release_authorization: {
+      status: 'unavailable',
+      reason: 'fixture_authority_unconfigured',
+    },
   };
   const supervisorHealth: SupervisorHealthOutputBody = {
     status: 'ok',

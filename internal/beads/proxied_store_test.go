@@ -731,6 +731,80 @@ func TestProxiedStoreMutationRepinsAcrossProxyRestart(t *testing.T) {
 	})
 }
 
+func TestProxiedDecisionFrontierWriterBracketsTheWholeLogicalMutation(t *testing.T) {
+	root := t.TempDir()
+	writeRecord := func(t *testing.T, pid, port int, birth string) {
+		t.Helper()
+		rootID, err := proxyendpoint.RootID(root)
+		if err != nil {
+			t.Fatalf("RootID: %v", err)
+		}
+		body, err := json.Marshal(proxyendpoint.Record{
+			PID: pid, Port: port, UpstreamID: "upstream", Schema: proxyendpoint.SchemaV2,
+			Kind: proxyendpoint.RecordKind, Birth: birth, RootID: rootID, ControlPort: port + 1,
+		})
+		if err != nil {
+			t.Fatalf("marshal record: %v", err)
+		}
+		if err := os.WriteFile(proxyendpoint.PIDPath(root), body, 0o600); err != nil {
+			t.Fatalf("write record: %v", err)
+		}
+	}
+	writeRecord(t, 4101, 46123, proxyendpoint.BirthToken("boot", "111"))
+	storage := &nativeDoltMemStorage{store: &MemStore{IDPrefix: "prx", HonorExplicitIDs: true}}
+	native := newNativeDoltStoreForTest(storage, WithProxiedReadOnly())
+	secondWriter := &decisionFrontierRecordWriterTestStub{}
+	secondLeaf := &decisionFrontierRecordWriterTestStore{
+		Store: newNativeDoltStoreForTest(storage), writer: secondWriter, available: true,
+	}
+	var store *ProxiedStore
+	writer := &decisionFrontierRecordWriterTestStub{onWrite: func() {
+		writeRecord(t, 4102, 46987, proxyendpoint.BirthToken("boot", "222"))
+		// The restarted generation is now served by a replacement writer leaf.
+		store.bd = secondLeaf
+	}}
+	writeLeaf := &decisionFrontierRecordWriterTestStore{
+		Store: newNativeDoltStoreForTest(storage), writer: writer, available: true,
+	}
+	store, err := NewProxiedStore(native, writeLeaf, PinForTest("/scope", root, "beads"))
+	if err != nil {
+		t.Fatalf("NewProxiedStore: %v", err)
+	}
+	capability, ok := DecisionFrontierRecordWriterFor(store)
+	if !ok || capability == nil {
+		t.Fatal("proxied store hid the write leaf's complete record-writer capability")
+	}
+	if _, err := capability.CreateDecisionFrontierRecord(Bead{ID: "gc-private-record"}); err != nil {
+		t.Fatalf("CreateDecisionFrontierRecord: %v", err)
+	}
+	if len(writer.calls) != 1 || writer.calls[0] != "create" {
+		t.Fatalf("logical record create calls = %v, want exactly one", writer.calls)
+	}
+	if !store.Demoted() {
+		t.Fatal("record create failed to bracket the proxy restart and demote the stale native read leaf")
+	}
+	if verdict := store.Verdict(); verdict == nil || verdict.Verdict != ProxiedVerdictProxyGone || verdict.Terminal() {
+		t.Fatalf("generation-change verdict = %v, want nonterminal proxy_gone", verdict)
+	}
+	if _, err := capability.CreateDecisionFrontierRecord(Bead{ID: "gc-private-record-next-generation"}); err != nil {
+		t.Fatalf("CreateDecisionFrontierRecord through previously resolved handle: %v", err)
+	}
+	if len(writer.calls) != 1 || len(secondWriter.calls) != 1 || secondWriter.calls[0] != "create" {
+		t.Fatalf("writer calls across generation change = old:%v new:%v, want one call on each leaf", writer.calls, secondWriter.calls)
+	}
+
+	incompleteRoot := t.TempDir()
+	incompleteNative := newNativeDoltStoreForTest(storage, WithProxiedReadOnly())
+	incompleteLeaf := &decisionFrontierRecordWriterTestStore{Store: newNativeDoltStoreForTest(storage)}
+	incomplete, err := NewProxiedStore(incompleteNative, incompleteLeaf, PinForTest("/scope", incompleteRoot, "beads"))
+	if err != nil {
+		t.Fatalf("NewProxiedStore for incomplete writer: %v", err)
+	}
+	if got, ok := DecisionFrontierRecordWriterFor(incomplete); ok || got != nil {
+		t.Fatalf("proxied store overclaimed an unavailable write-leaf capability: (%T, %t)", got, ok)
+	}
+}
+
 // restartingLeaf runs a side effect in the middle of every write, standing in for
 // bd's child restarting the proxy as part of servicing the command.
 type restartingLeaf struct {

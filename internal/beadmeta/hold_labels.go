@@ -1,5 +1,7 @@
 package beadmeta
 
+import "strings"
+
 // HoldMayorLabel and HoldExternalLabel are the two canonical hold:<value>
 // bd label values (engdocs/contributors/hold-label-conventions.md,
 // ga-tug8ry.1): "the required next actor is the mayor" and "the required
@@ -35,3 +37,16 @@ const (
 // The short rule: filter on holds when deciding what to DO, never when
 // deciding who EXISTS.
 var DispatchHoldLabels = []string{HoldMayorLabel, HoldExternalLabel}
+
+// HasDecisionFrontierHold reports whether the controller has an active
+// decision frontier on a bead. The value is deliberately opaque here; the
+// domain package validates its schema. An unknown nonempty value fails closed.
+func HasDecisionFrontierHold(metadata map[string]string) bool {
+	return strings.TrimSpace(metadata[DecisionFrontierHoldMetadataKey]) != ""
+}
+
+// IsDecisionFrontierMetadataKey reports whether key belongs to the reserved
+// controller-owned decision-frontier namespace.
+func IsDecisionFrontierMetadataKey(key string) bool {
+	return strings.HasPrefix(key, DecisionFrontierMetadataPrefix)
+}

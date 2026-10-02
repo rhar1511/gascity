@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2/sse"
+	"github.com/gastownhall/gascity/internal/sessionlog"
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
@@ -46,6 +46,9 @@ func (s *Server) handleAgentOutputStream(w http.ResponseWriter, r *http.Request,
 		}
 		provider = transcriptState.provider
 		logPath = transcriptState.path
+		if logPath != "" {
+			logPath, _ = s.resolveSafeStreamTranscriptPath(provider, logPath)
+		}
 		resolveLogPath = func() string {
 			resolved, err := s.resolveAgentTranscript(name, agentCfg)
 			if err != nil {
@@ -86,6 +89,23 @@ func (s *Server) handleAgentOutputStream(w http.ResponseWriter, r *http.Request,
 	}
 }
 
+func (s *Server) resolveSafeStreamTranscriptPath(provider, path string) (string, error) {
+	return sessionlog.ResolveTranscriptPath(provider, s.sessionLogPaths(), path)
+}
+
+func (s *Server) safeStreamTranscriptSize(provider, path string) (int64, error) {
+	transcript, err := sessionlog.OpenTranscript(provider, s.sessionLogPaths(), path)
+	if err != nil {
+		return 0, err
+	}
+	defer transcript.Close() //nolint:errcheck // read-only transcript
+	info, err := transcript.Stat()
+	if err != nil {
+		return 0, err
+	}
+	return info.Size(), nil
+}
+
 // streamSessionLog polls a session log file and emits new turns as SSE events.
 // Uses file size tracking to skip re-reads when the file hasn't grown, and
 // UUID-based cursor to correctly identify new turns after DAG resolution.
@@ -96,7 +116,10 @@ func (s *Server) streamSessionLog(
 	resolvePath func() string,
 	wake <-chan struct{},
 ) {
-	currentPath := strings.TrimSpace(logPath)
+	currentPath, _ := s.resolveSafeStreamTranscriptPath(provider, strings.TrimSpace(logPath))
+	if currentPath == "" {
+		return
+	}
 	lw := newLogFileWatcher(currentPath)
 	defer lw.Close()
 
@@ -112,20 +135,29 @@ func (s *Server) streamSessionLog(
 
 	readAndEmit := func() bool {
 		if resolvePath != nil {
-			if resolvedPath := strings.TrimSpace(resolvePath()); resolvedPath != "" && resolvedPath != currentPath {
-				currentPath = resolvedPath
-				lw.UpdatePath(currentPath)
+			if resolvedPath := strings.TrimSpace(resolvePath()); resolvedPath != "" {
+				if safePath, err := s.resolveSafeStreamTranscriptPath(provider, resolvedPath); err == nil && safePath != currentPath {
+					currentPath = safePath
+					lw.UpdatePath(currentPath)
+				}
 			}
 		}
 		if currentPath == "" {
 			return false
 		}
 
-		info, err := os.Stat(currentPath)
+		safePath, err := s.resolveSafeStreamTranscriptPath(provider, currentPath)
 		if err != nil {
 			return false
 		}
-		currentSize := info.Size()
+		if safePath != currentPath {
+			currentPath = safePath
+			lw.UpdatePath(currentPath)
+		}
+		currentSize, err := s.safeStreamTranscriptSize(provider, safePath)
+		if err != nil {
+			return false
+		}
 		if currentSize == lastSize {
 			return false
 		}
@@ -137,7 +169,7 @@ func (s *Server) streamSessionLog(
 		}
 		transcript, err := factory.ReadTranscript(worker.TranscriptRequest{
 			Provider:        provider,
-			TranscriptPath:  currentPath,
+			TranscriptPath:  safePath,
 			TailCompactions: 1,
 		})
 		if err != nil {
@@ -290,7 +322,10 @@ func (s *Server) streamSessionLogHuma(
 	defer cancel()
 	send = cancelOnSendError(send, cancel)
 
-	currentPath := strings.TrimSpace(logPath)
+	currentPath, _ := s.resolveSafeStreamTranscriptPath(provider, strings.TrimSpace(logPath))
+	if currentPath == "" {
+		return
+	}
 	lw := newLogFileWatcher(currentPath)
 	defer lw.Close()
 
@@ -306,20 +341,29 @@ func (s *Server) streamSessionLogHuma(
 
 	readAndEmit := func() bool {
 		if resolvePath != nil {
-			if resolvedPath := strings.TrimSpace(resolvePath()); resolvedPath != "" && resolvedPath != currentPath {
-				currentPath = resolvedPath
-				lw.UpdatePath(currentPath)
+			if resolvedPath := strings.TrimSpace(resolvePath()); resolvedPath != "" {
+				if safePath, err := s.resolveSafeStreamTranscriptPath(provider, resolvedPath); err == nil && safePath != currentPath {
+					currentPath = safePath
+					lw.UpdatePath(currentPath)
+				}
 			}
 		}
 		if currentPath == "" {
 			return false
 		}
 
-		info, err := os.Stat(currentPath)
+		safePath, err := s.resolveSafeStreamTranscriptPath(provider, currentPath)
 		if err != nil {
 			return false
 		}
-		currentSize := info.Size()
+		if safePath != currentPath {
+			currentPath = safePath
+			lw.UpdatePath(currentPath)
+		}
+		currentSize, err := s.safeStreamTranscriptSize(provider, safePath)
+		if err != nil {
+			return false
+		}
 		if currentSize == lastSize {
 			return false
 		}
@@ -330,7 +374,7 @@ func (s *Server) streamSessionLogHuma(
 		}
 		transcript, err := factory.ReadTranscript(worker.TranscriptRequest{
 			Provider:        provider,
-			TranscriptPath:  currentPath,
+			TranscriptPath:  safePath,
 			TailCompactions: 1,
 		})
 		if err != nil {

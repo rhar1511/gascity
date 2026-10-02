@@ -16,6 +16,7 @@ expectations as shell scripts committed to the repository.
 | Bead titles, descriptions, mail, formula vars, PR text, and API request fields | Untrusted data | Do not concatenate into shell commands. Pass as env, JSON, stdin, or argv. |
 | GitHub Actions `pull_request_target` payloads | Untrusted data in a privileged workflow | Do not checkout or execute contributor code. Use metadata-only operations. |
 | Ambient process environment | Untrusted for secret propagation | Orchestrator-side shell helpers strip inherited secret-looking env keys by default. |
+| Host session-authority trust file | Trusted controller input | Public keys and signer/profile bindings may authorize exact session launch-profile transitions. City, pack, session, label, and prompt data cannot add authorities. |
 
 ## Execution Surfaces
 

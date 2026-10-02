@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/worklifecycle"
 	"github.com/spf13/cobra"
 )
 
@@ -53,26 +54,28 @@ var readyKnownStatuses = []string{"open", readyStatusInProgress, "blocked", "clo
 // surfaces stay comparable. `parent` looks absent in a live capture only because
 // it is omitempty and most beads have no parent — it is part of the contract.
 type readyBead struct {
-	ID           string            `json:"id"`
-	Title        string            `json:"title"`
-	Status       string            `json:"status"`
-	Type         string            `json:"issue_type"`
-	Priority     *int              `json:"priority,omitempty"`
-	CreatedAt    time.Time         `json:"created_at"`
-	UpdatedAt    time.Time         `json:"updated_at,omitempty,omitzero"`
-	Assignee     string            `json:"assignee,omitempty"`
-	From         string            `json:"from,omitempty"`
-	ParentID     string            `json:"parent,omitempty"`
-	Ref          string            `json:"ref,omitempty"`
-	Needs        []string          `json:"needs,omitempty"`
-	Description  string            `json:"description,omitempty"`
-	Labels       []string          `json:"labels,omitempty"`
-	Metadata     map[string]string `json:"metadata,omitempty"`
-	Dependencies []readyBeadDep    `json:"dependencies,omitempty"`
-	Ephemeral    bool              `json:"ephemeral,omitempty"`
-	NoHistory    bool              `json:"no_history,omitempty"`
-	DeferUntil   *time.Time        `json:"defer_until,omitempty"`
-	IsBlocked    *bool             `json:"is_blocked,omitempty"`
+	ID             string            `json:"id"`
+	SourceStoreRef string            `json:"source_store_ref,omitempty"`
+	LifecycleScope string            `json:"lifecycle_scope,omitempty"`
+	Title          string            `json:"title"`
+	Status         string            `json:"status"`
+	Type           string            `json:"issue_type"`
+	Priority       *int              `json:"priority,omitempty"`
+	CreatedAt      time.Time         `json:"created_at"`
+	UpdatedAt      time.Time         `json:"updated_at,omitempty,omitzero"`
+	Assignee       string            `json:"assignee,omitempty"`
+	From           string            `json:"from,omitempty"`
+	ParentID       string            `json:"parent,omitempty"`
+	Ref            string            `json:"ref,omitempty"`
+	Needs          []string          `json:"needs,omitempty"`
+	Description    string            `json:"description,omitempty"`
+	Labels         []string          `json:"labels,omitempty"`
+	Metadata       map[string]string `json:"metadata,omitempty"`
+	Dependencies   []readyBeadDep    `json:"dependencies,omitempty"`
+	Ephemeral      bool              `json:"ephemeral,omitempty"`
+	NoHistory      bool              `json:"no_history,omitempty"`
+	DeferUntil     *time.Time        `json:"defer_until,omitempty"`
+	IsBlocked      *bool             `json:"is_blocked,omitempty"`
 	// BlockedBy carries the row's OPEN-or-not blocking dependencies, in bd's
 	// `bd ready --json` shape. It is populated only on the --status in_progress
 	// arm, which is the crash-recovery read: a resumed holder must be told
@@ -109,38 +112,45 @@ type readyBeadBlocker struct {
 
 // toReadyBeads projects domain beads onto the wire shape, attaching each row's
 // blocked_by projection when one was computed.
-func toReadyBeads(items []beads.Bead, blockers map[string][]readyBeadBlocker) []readyBead {
+func toReadyBeads(items []beads.Bead, blockers map[string][]readyBeadBlocker, owners map[string]readyLeg) []readyBead {
 	out := make([]readyBead, 0, len(items))
 	for _, b := range items {
 		row := toReadyBead(b)
 		row.BlockedBy = blockers[b.ID]
+		if owner, ok := owners[b.ID]; ok {
+			row.SourceStoreRef = owner.sourceStoreRef
+			row.LifecycleScope = worklifecycle.ScopeForStore(owner.cityName, owner.sourceStoreRef)
+		}
 		out = append(out, row)
 	}
 	return out
 }
 
 func toReadyBead(b beads.Bead) readyBead {
+	b = beads.PublicBead(b)
 	return readyBead{
-		ID:           b.ID,
-		Title:        b.Title,
-		Status:       b.Status,
-		Type:         b.Type,
-		Priority:     b.Priority,
-		CreatedAt:    b.CreatedAt,
-		UpdatedAt:    b.UpdatedAt,
-		Assignee:     b.Assignee,
-		From:         b.From,
-		ParentID:     b.ParentID,
-		Ref:          b.Ref,
-		Needs:        b.Needs,
-		Description:  b.Description,
-		Labels:       b.Labels,
-		Metadata:     b.Metadata,
-		Dependencies: toReadyBeadDeps(b.Dependencies),
-		Ephemeral:    b.Ephemeral,
-		NoHistory:    b.NoHistory,
-		DeferUntil:   b.DeferUntil,
-		IsBlocked:    b.IsBlocked,
+		ID:             b.ID,
+		SourceStoreRef: b.SourceStoreRef,
+		LifecycleScope: b.LifecycleScope,
+		Title:          b.Title,
+		Status:         b.Status,
+		Type:           b.Type,
+		Priority:       b.Priority,
+		CreatedAt:      b.CreatedAt,
+		UpdatedAt:      b.UpdatedAt,
+		Assignee:       b.Assignee,
+		From:           b.From,
+		ParentID:       b.ParentID,
+		Ref:            b.Ref,
+		Needs:          b.Needs,
+		Description:    b.Description,
+		Labels:         b.Labels,
+		Metadata:       b.Metadata,
+		Dependencies:   toReadyBeadDeps(b.Dependencies),
+		Ephemeral:      b.Ephemeral,
+		NoHistory:      b.NoHistory,
+		DeferUntil:     b.DeferUntil,
+		IsBlocked:      b.IsBlocked,
 	}
 }
 
@@ -330,11 +340,14 @@ func readyBeadsForOpts(legs []readyLeg, opts readyOpts) ([]readyBead, error) {
 	// Enrich AFTER the bound, so the dependency reads are paid only for the rows
 	// actually emitted. The crash-recovery tier asks for --limit=1, which makes
 	// this one dependency read on the one row that matters.
-	blockers, err := readyBlockedByForRows(items, owners)
-	if err != nil {
-		return nil, err
+	var blockers map[string][]readyBeadBlocker
+	if status == readyStatusInProgress {
+		blockers, err = readyBlockedByForRows(items, owners)
+		if err != nil {
+			return nil, err
+		}
 	}
-	return toReadyBeads(items, blockers), nil
+	return toReadyBeads(items, blockers, owners), nil
 }
 
 // readyBlockedByForRows resolves each row's blocking dependencies through the
@@ -412,8 +425,7 @@ func readyBlockedByForRows(items []beads.Bead, owners map[string]readyLeg) (map[
 // in_progress in another would resolve to the wrong store under a fresh probe.
 func readReadyCandidates(legs []readyLeg, status string) ([]beads.Bead, map[string]readyLeg, error) {
 	if status == "" {
-		items, err := federateReadyBeads(legs, beads.ReadyQuery{TierMode: beads.FederatedReadTier})
-		return items, nil, err
+		return federateReadyBeadsWithOwner(legs, beads.ReadyQuery{TierMode: beads.FederatedReadTier})
 	}
 	query := beads.ListQuery{
 		Status:   status,
@@ -424,8 +436,7 @@ func readReadyCandidates(legs []readyLeg, status string) ([]beads.Bead, map[stri
 		Live: status == readyStatusInProgress,
 	}
 	if status != readyStatusInProgress {
-		items, err := federateListBeads(legs, query)
-		return items, nil, err
+		return federateListBeadsWithOwner(legs, query)
 	}
 	return federateListBeadsWithOwner(legs, query)
 }
@@ -554,11 +565,9 @@ func beadMatchesMetadata(b beads.Bead, want []metadataFieldFilter) bool {
 // here: a second copy of a total order across a package boundary is a copy that
 // drifts, and this one decides which rows a bounded read serves.
 //
-// Imposing it is also what makes the merged set well-ordered at all. Each leg's
-// own order is deterministic but they are not the same order — a caching-wrapped
-// work store emits (priority, created_at, id) while the canonical relocated
-// graph binding emits (created_at, id) with no priority term — so the raw
-// concatenation has no single total order for --limit to cut.
+// Imposing it is also what makes the merged set well-ordered at all. Each leg
+// emits its own rows in canonical order, but a concatenation of sorted legs is
+// not sorted, so the raw merge has no single total order for --limit to cut.
 //
 // An unrecognized order is rejected rather than falling back to the default,
 // which is how a bounded query quietly serves the wrong prefix.

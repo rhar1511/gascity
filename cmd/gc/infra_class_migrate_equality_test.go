@@ -25,7 +25,7 @@ import (
 // here — never silently unwitnessed.
 //
 // The reasons matter as much as the names. An exemption is normally a promise that
-// a copy which changed this field is still a faithful copy, and two of these five
+// a copy which changed this field is still a faithful copy, and two of these
 // are only true because something else witnesses the same state.
 // IndefinitelyDeferred is the one exemption that does not carry that promise: the
 // destination cannot hold it, so the deferral genuinely does not cross. It is
@@ -33,7 +33,9 @@ import (
 // without preserving anything — not because the copy stays faithful. Do not cite
 // it as precedent for exempting a field the destination could hold.
 var beadCopyExemptFields = map[string]string{
-	"Revision": "store-internal optimistic-concurrency token. Each store mints and bumps its own; the destination's row is a fresh create, so its revision is unrelated to the source's by construction.",
+	"SourceStoreRef": "transient federated-read provenance. It is attached by a reader and is never persisted to or recreated by the destination store.",
+	"LifecycleScope": "transient trusted-ready projection. It is attached by gc ready and is never persisted to or recreated by the destination store.",
+	"Revision":       "store-internal optimistic-concurrency token. Each store mints and bumps its own; the destination's row is a fresh create, so its revision is unrelated to the source's by construction.",
 	"ClaimFence": "store-internal ownership fence, maintained per store like Revision. " +
 		"SQLiteStore.Create clears it explicitly (clearClaimFenceTx), so a copied row always starts at zero.",
 	"Needs": "create-time dependency shorthand, deliberately stripped by infraMigrationRow so the destination's Create " +
@@ -134,10 +136,12 @@ func beadCopyFieldMutations() map[string]func(beads.Bead) beads.Bead {
 // defect as an unwitnessed field, because it would refuse every faithful copy.
 func beadCopyExemptMutations() map[string]func(beads.Bead) beads.Bead {
 	return map[string]func(beads.Bead) beads.Bead{
-		"Revision":     func(b beads.Bead) beads.Bead { b.Revision = 99; return b },
-		"ClaimFence":   func(b beads.Bead) beads.Bead { b.ClaimFence = 0; return b },
-		"Needs":        func(b beads.Bead) beads.Bead { b.Needs = nil; return b },
-		"Dependencies": func(b beads.Bead) beads.Bead { b.Dependencies = nil; return b },
+		"SourceStoreRef": func(b beads.Bead) beads.Bead { b.SourceStoreRef = "city/rig/source"; return b },
+		"LifecycleScope": func(b beads.Bead) beads.Bead { b.LifecycleScope = "city/rig/source"; return b },
+		"Revision":       func(b beads.Bead) beads.Bead { b.Revision = 99; return b },
+		"ClaimFence":     func(b beads.Bead) beads.Bead { b.ClaimFence = 0; return b },
+		"Needs":          func(b beads.Bead) beads.Bead { b.Needs = nil; return b },
+		"Dependencies":   func(b beads.Bead) beads.Bead { b.Dependencies = nil; return b },
 		// The fixture carries the marker, so clearing it here is the real loss:
 		// a destination that cannot hold what the source read produced. This is
 		// the mutation that must NOT be refused, or the migration wedges.

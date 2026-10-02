@@ -2,8 +2,8 @@ common --enable_bzlmod
 common --color=no
 
 # Side-by-side opt-in bazel arm. `go build`/`go test` continues to work unchanged.
-# To use the remote cache on cherry, uncomment:
-# build --remote_cache=grpc://127.0.0.1:50051
+# To use a remote cache, uncomment:
+# build --remote_cache=<your-cache-endpoint>
 
 test --test_output=errors
 test --flaky_test_attempts=2
@@ -20,9 +20,6 @@ test --sandbox_writable_path=/tmp/bt
 # internal/bazeltest; no client export is required.
 test --test_env=GC_TEST_REPO_ROOT
 
-# Bazel test actions do not inherit HOME by default; the herdr env scrubber
-# allow-lists the real HOME value, and go-path tests depend on it.
-test --test_env=HOME
 
 # Repo-lint tests exec `go` and other dev binaries; bazel's default test PATH
 # is minimal, so forward the client's.
@@ -30,8 +27,12 @@ test --test_env=PATH
 
 # Remote execution on the NativeLink farm. The executor endpoint is
 # environment-specific and deliberately NOT hardcoded here: machines put it
-# in the gitignored .bazelrc.local (cherry: loopback grpc://127.0.0.1:50052;
-# others: grpcs://rbe.ops.gascity.com:443 with mTLS), and CI passes it via
+# in the gitignored .bazelrc.local (e.g. a loopback grpc:// endpoint on the
+# cache host, or your team's grpcs:// endpoint with mTLS), and CI passes it via
 # the RBE step. Command-line flags always win.
 try-import %workspace%/.bazelrc.local
 build:remote-exec --remote_timeout=3600
+# rbe-west accepts action-cache writes from its workers only: upload nothing
+# executed locally (it would be refused, and host-dependent local results must
+# not seed the shared cache anyway).
+build:remote-exec --noremote_upload_local_results

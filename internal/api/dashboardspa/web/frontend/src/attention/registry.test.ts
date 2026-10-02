@@ -21,6 +21,27 @@ import { createAttentionContributors, type AgentsAttentionFacts } from './regist
 // The mayor-decision marker label now flows through BeadsAttentionFacts from
 // runtime config (gascity-dashboard-bhvn) instead of a shared constant.
 const NEEDS_STEPHANIE_LABEL = 'needs/stephanie';
+const UNAVAILABLE_CITY_QUALIFICATION: Pick<
+  HealthOutputBody,
+  'controller_build' | 'qualification' | 'release_authorization'
+> = {
+  controller_build: {
+    status: 'unavailable',
+    reason: 'fixture_identity_unavailable',
+    artifact_status: 'unavailable',
+    source_dirty: false,
+  },
+  qualification: {
+    schema_version: 1,
+    status: 'unavailable',
+    reason: 'fixture_identity_unavailable',
+    input_roots: [],
+  },
+  release_authorization: {
+    status: 'unavailable',
+    reason: 'fixture_authority_unconfigured',
+  },
+};
 
 describe('createAttentionContributors', () => {
   it('registers an explicit contributor for every first-class attention domain', () => {
@@ -68,6 +89,7 @@ describe('createAttentionContributors', () => {
           supervisor: {
             status: 'available',
             data: {
+              ...UNAVAILABLE_CITY_QUALIFICATION,
               status: 'ok',
               uptime_sec: 300,
             } satisfies HealthOutputBody,
@@ -854,6 +876,7 @@ function healthyTrend(): DoltNomsTrend {
 
 function presentSupervisor(): HealthOutputBody {
   return {
+    ...UNAVAILABLE_CITY_QUALIFICATION,
     city: 'test-city',
     status: 'ok',
     uptime_sec: 300,

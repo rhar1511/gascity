@@ -3,10 +3,13 @@ package ssh
 import (
 	"context"
 	"errors"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -100,6 +103,64 @@ func TestSSHArgs_MinimalEndpoint(t *testing.T) {
 	}
 	if !slices.Equal(got, want) {
 		t.Errorf("sshArgs = %v, want %v", got, want)
+	}
+}
+
+// Exercise the real Conn -> shellRunner -> sshArgs path without a network
+// connection. The fixture substitutes only the SSH client and runs its remote
+// command through a local POSIX shell in a disposable directory.
+func TestConnExecPreservesShellMetacharacters(t *testing.T) {
+	fixture := t.TempDir()
+	client := filepath.Join(fixture, "ssh")
+	script := `#!/bin/sh
+set -eu
+[ "$#" -eq 7 ]
+[ "$1" = '-o' ]
+[ "$2" = 'BatchMode=yes' ]
+[ "$3" = '-o' ]
+[ "$4" = 'StrictHostKeyChecking=accept-new' ]
+[ "$5" = '--' ]
+[ "$6" = 'fixture.invalid' ]
+[ "$7" = "'sh'" ]
+cd "${0%/*}"
+exec /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C /bin/sh -c "$7"
+`
+	if err := os.WriteFile(client, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fixture)
+	values := []string{
+		"", "ordinary", "a'b", "a\\b", "\"quoted\"", "a\nb", "a\tb", "☃", "--help",
+		"$(printf injected > sentinel)", "`printf injected > sentinel`",
+		"x; printf injected > sentinel", "' ; printf injected > sentinel ; '",
+		"x & printf injected > sentinel #", "$HOME", "${PATH}", "*?[]{}()<>!",
+	}
+	argv := append([]string{"printf", "%s\\000"}, values...)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	c := &Conn{ep: Endpoint{Host: "fixture.invalid"}, run: shellRunner{}}
+	output, code, err := c.Exec(ctx, "fixture", argv)
+	if err != nil || code != 0 {
+		t.Fatalf("Exec: code=%d, err=%v", code, err)
+	}
+	if want := strings.Join(values, "\x00") + "\x00"; string(output) != want {
+		t.Fatalf("arguments changed: got %q, want %q", output, want)
+	}
+	if _, err := os.Stat(filepath.Join(fixture, "sentinel")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("shell injection side effect: stat sentinel: %v", err)
+	}
+	if _, code, err := c.Exec(ctx, "fixture", []string{"export", "GC_SSH_TEST=value"}); err != nil || code != 0 {
+		t.Fatalf("Exec shell builtin = (%d, %v), want (0, nil)", code, err)
+	}
+	if _, code, err := c.Exec(ctx, "fixture", []string{"sh", "-c", "exit 37"}); err != nil || code != 37 {
+		t.Fatalf("Exec exit status = (%d, %v), want (37, nil)", code, err)
+	}
+	setupOutput, setupCode, setupErr := c.execScript(ctx, []byte("printf 'setup-ok\\n'\nexit 23\n"))
+	if setupErr != nil || setupCode != 23 || string(setupOutput) != "setup-ok\n" {
+		t.Fatalf("execScript = (%q, %d, %v), want (%q, 23, nil)", setupOutput, setupCode, setupErr, "setup-ok\n")
+	}
+	if _, _, err := c.Exec(ctx, "fixture", []string{"printf", "bad\x00value"}); err == nil {
+		t.Fatal("Exec accepted an argv value containing NUL")
 	}
 }
 
@@ -198,14 +259,19 @@ func TestConn_ExecOverRealLocalhost(t *testing.T) {
 		t.Skip("passwordless ssh to localhost unavailable")
 	}
 	c := New(Endpoint{Host: "localhost", KnownHostsPath: kh})
-	out, code, err := c.Exec(context.Background(), "", []string{"printf", "%s", "ok"})
+	marker := filepath.Join(t.TempDir(), "injected")
+	payload := "literal; $(touch " + marker + "); 'single quote'\nnext line"
+	out, code, err := c.Exec(context.Background(), "", []string{"printf", "%s", payload})
 	if err != nil {
 		t.Fatalf("Exec over localhost: %v", err)
 	}
 	if code != 0 {
 		t.Errorf("code = %d, want 0", code)
 	}
-	if string(out) != "ok" {
-		t.Errorf("out = %q, want %q", out, "ok")
+	if string(out) != payload {
+		t.Errorf("out = %q, want %q", out, payload)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("shell metacharacters executed instead of remaining data; marker stat error = %v", err)
 	}
 }

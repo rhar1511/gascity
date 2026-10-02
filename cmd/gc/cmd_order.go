@@ -868,7 +868,11 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 	// caller's value (#4668).
 	stampOrderWispRuntimeVars(recipe, effectiveVars)
 
-	cookResult, err := molecule.Instantiate(context.Background(), moleculeStore, recipe, molecule.Options{Vars: effectiveVars})
+	cookResult, err := molecule.Instantiate(context.Background(), moleculeStore, recipe, molecule.Options{
+		Vars:               effectiveVars,
+		ActionGateForStore: controllerFormulaActionGateForStore(cityPath, cfg, storeTarget.ScopeRoot, genericStore, graphStore),
+		RequireActionGate:  true,
+	})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc order run: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1028,6 +1032,18 @@ func doOrderRunExecResult(a orders.Order, cityPath string, cfg *config.City, var
 		return orderRunExecResult{code: 1, failureLabel: "exec-env-failed"}
 	}
 
+	outcomeFile, outcomeErr := newOrderOutcomeFile()
+	if outcomeErr != nil {
+		fmt.Fprintf(stderr, "gc order run: %v\n", outcomeErr) //nolint:errcheck // best-effort stderr
+	} else {
+		env = append(env, outcomeFile.envEntry())
+		defer func() {
+			if err := outcomeFile.remove(); err != nil {
+				fmt.Fprintf(stderr, "gc order run: %v\n", err) //nolint:errcheck // best-effort stderr
+			}
+		}()
+	}
+
 	output, err := shellExecRunner(ctx, a.Exec, target.ScopeRoot, env)
 	// The exec env now projects the controller's GH_TOKEN/GITHUB_TOKEN into the
 	// child, so any order that echoes one would leak it. Redact the exec error
@@ -1045,6 +1061,9 @@ func doOrderRunExecResult(a orders.Order, cityPath string, cfg *config.City, var
 		fmt.Fprintf(stdout, "%s", execenv.RedactText(string(output), redactionEnv)) //nolint:errcheck
 	}
 	fmt.Fprintf(stdout, "Order %q executed (exec)\n", a.Name) //nolint:errcheck
+	if outcomeFile != nil {
+		printOrderRunOutcome(outcomeFile, a.Name, stdout, stderr)
+	}
 	return orderRunExecResult{code: 0}
 }
 

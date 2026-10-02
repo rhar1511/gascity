@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -113,6 +114,25 @@ func newFactory(manager *sessionpkg.Manager, cfg FactoryConfig) (*Factory, error
 // session manager.
 func (f *Factory) Catalog() (*SessionCatalog, error) {
 	return NewSessionCatalog(f.manager)
+}
+
+// SubmitRequestForAttempt submits controller-verified, attributed input
+// through the worker boundary. The session manager reserves delivery before
+// provider I/O and never wakes or restarts a runtime. Callers must establish
+// the work/store/session binding before invoking this method; the session
+// layer rechecks generation and reciprocal claim.
+func (f *Factory) SubmitRequestForAttempt(
+	ctx context.Context,
+	sessionID string,
+	requestID string,
+	generation int,
+	message string,
+	binding sessionpkg.RequestAttemptBinding,
+) (sessionpkg.RequestReceipt, error) {
+	if f == nil || f.manager == nil {
+		return sessionpkg.RequestReceipt{}, fmt.Errorf("%w: session manager is required", ErrHandleConfig)
+	}
+	return f.manager.SubmitRequestForAttemptExact(ctx, sessionID, requestID, generation, message, binding)
 }
 
 // UsageSink returns the usage-fact sink the factory threads into every handle it
@@ -259,7 +279,7 @@ func (f *Factory) RuntimeHandle(sessionName, providerName, transport string, pro
 // Adapter returns a transcript adapter configured with the factory's search
 // paths for callers that need transcript reads outside a session handle.
 func (f *Factory) Adapter() SessionLogAdapter {
-	return SessionLogAdapter{SearchPaths: append([]string(nil), f.searchPaths...), activity: f.activityMemo}
+	return SessionLogAdapter{SearchPaths: append([]string(nil), f.searchPaths...), requireRoots: true, activity: f.activityMemo}
 }
 
 // DiscoverTranscript returns the best available transcript path for a worker.

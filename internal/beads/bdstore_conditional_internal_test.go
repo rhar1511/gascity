@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 )
 
@@ -494,6 +495,11 @@ func (w *scriptedBd) runner(_, _ string, args ...string) ([]byte, error) {
 	switch args[0] {
 	case "show":
 		return w.handleShow()
+	case "query":
+		if strings.Join(args, " ") == "query --json ephemeral=true AND id="+w.id+" --all --limit 1" {
+			return []byte(`[]`), nil
+		}
+		return nil, fmt.Errorf("scriptedBd: unexpected query %q", args)
 	case "update", "close", "delete":
 		return w.handleWrite(args[0], args)
 	default:
@@ -640,30 +646,37 @@ func TestUpdateIfMatchSuccessAppliesFence(t *testing.T) {
 	}
 }
 
-func TestUpdateIfMatchLabelsCarryRevisionFence(t *testing.T) {
-	w := &scriptedBd{id: "ga-1", revision: 1, status: "open"}
+func TestBdStoreGenericLifecycleMetadataRefusesWhenCASIsUnsupported(t *testing.T) {
+	w := &scriptedBd{id: "ga-1", revision: 1, status: "open", probeIncapable: true}
 	s := NewBdStore("/city", w.runner)
-	if err := s.UpdateIfMatch("ga-1", 1, UpdateOpts{Labels: []string{"added"}, RemoveLabels: []string{"gc:session"}}); err != nil {
-		t.Fatalf("UpdateIfMatch labels: %v", err)
+	err := s.SetMetadata("ga-1", beadmeta.WorkflowIDMetadataKey, "wf-1")
+	if !errors.Is(err, ErrConditionalWriteUnsupported) {
+		t.Fatalf("SetMetadata error = %v, want ErrConditionalWriteUnsupported", err)
 	}
-	if !argvContains(w.writeArgv, "update", "--json", "ga-1", "--add-label", "added", "--remove-label", "gc:session", conditionalWriteFlag, "1") {
-		t.Fatalf("fenced label update argv missing expected flags: %v", w.writeArgv)
+	if w.writeCalls != 0 {
+		t.Fatalf("mutation writes = %d, want 0", w.writeCalls)
 	}
 }
 
-func TestUpdateIfMatchParentAndFieldsCarryOneRevisionFence(t *testing.T) {
-	w := &scriptedBd{id: "ga-1", revision: 1, status: "open"}
+func TestBdStoreUpdateIfMatchCannotResetRecoveryState(t *testing.T) {
+	const initial = `{"version":1,"work_item_id":"ga-1","scope":"city:pilot/city:pilot","attempts":[{"id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","reserved_at":"2026-09-27T12:00:00Z","request_id":"request-1","request_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","expected_revision":1}]}`
+	const reset = `{"version":1,"work_item_id":"ga-1","scope":"city:pilot/city:pilot","attempts":[]}`
+	w := &scriptedBd{
+		id:       "ga-1",
+		revision: 1,
+		status:   "in_progress",
+		metadata: map[string]string{beadmeta.LifecycleRecoveryStateMetadataKey: initial},
+	}
 	s := NewBdStore("/city", w.runner)
-	parent := "ga-parent"
-	title := "renamed"
-	if err := s.UpdateIfMatch("ga-1", 1, UpdateOpts{ParentID: &parent, Title: &title}); err != nil {
-		t.Fatalf("UpdateIfMatch parent and title: %v", err)
+
+	err := s.UpdateIfMatch("ga-1", 1, UpdateOpts{Metadata: map[string]string{
+		beadmeta.LifecycleRecoveryStateMetadataKey: reset,
+	}})
+	if !errors.Is(err, ErrLifecycleMutationBlocked) {
+		t.Fatalf("UpdateIfMatch recovery-state replacement: got %v, want ErrLifecycleMutationBlocked", err)
 	}
-	if w.writeCalls != 1 {
-		t.Fatalf("combined parent update issued %d writes, want one", w.writeCalls)
-	}
-	if !argvContains(w.writeArgv, "update", "--json", "ga-1", "--title", "renamed", "--parent", "ga-parent", conditionalWriteFlag, "1") {
-		t.Fatalf("combined parent update argv missing one fence: %v", w.writeArgv)
+	if w.writeCalls != 0 {
+		t.Fatalf("blocked recovery-state replacement issued %d writes, want 0", w.writeCalls)
 	}
 }
 
@@ -746,6 +759,17 @@ func TestUpdateIfMatchRuntimeUnsupportedLatches(t *testing.T) {
 	}
 	if w.writeCalls != 1 {
 		t.Fatalf("latched store attempted another write: writeCalls = %d, want 1", w.writeCalls)
+	}
+}
+
+func TestBdStoreDeleteIfMatchProtectsAttemptArchive(t *testing.T) {
+	w := &scriptedBd{id: "ga-archive", revision: 4, status: "closed", metadata: protectedAttemptEvidenceBead().Metadata}
+	s := NewBdStore("/city", w.runner)
+	if err := s.DeleteIfMatch(w.id, w.revision); !errors.Is(err, ErrProtectedAttemptEvidenceArchive) {
+		t.Fatalf("DeleteIfMatch archive = %v, want protected archive", err)
+	}
+	if w.deleted || w.writeCalls != 0 {
+		t.Fatalf("archive deletion reached writer: deleted=%v writes=%d", w.deleted, w.writeCalls)
 	}
 }
 
@@ -902,6 +926,18 @@ func TestCompareAndSetMetadataKeyWin(t *testing.T) {
 	}
 	if !argvContains(w.writeArgv, "update", "--set-metadata", "k=first", conditionalWriteFlag, "1") {
 		t.Fatalf("CAS fenced update argv missing expected flags: %v", w.writeArgv)
+	}
+}
+
+func TestCompareAndSetMetadataKeyRejectsZeroRevision(t *testing.T) {
+	w := &scriptedBd{id: "ga-1", revision: 0, status: "open"}
+	s := NewBdStore("/city", w.runner)
+	ok, err := s.CompareAndSetMetadataKey("ga-1", "k", "", "next")
+	if ok || !errors.Is(err, ErrConditionalWriteUnsupported) {
+		t.Fatalf("CompareAndSetMetadataKey = (%v, %v), want zero-revision fail-closed", ok, err)
+	}
+	if w.writeCalls != 0 {
+		t.Fatalf("conditional writes = %d, want 0", w.writeCalls)
 	}
 }
 
@@ -1162,6 +1198,9 @@ func TestDeleteIfMatchOnMissingSurfacesNotFound(t *testing.T) {
 	if IsPreconditionFailed(err) {
 		t.Fatalf("missing-bead delete misread as precondition: %v", err)
 	}
+	if w.writeCalls != 0 {
+		t.Fatalf("missing-bead preflight attempted %d writes, want none", w.writeCalls)
+	}
 }
 
 func TestConditionalWriteGateRefusalStampsIDAndVerb(t *testing.T) {
@@ -1404,5 +1443,32 @@ func TestBdIssueDecodesNullRevisionAsZero(t *testing.T) {
 	}
 	if got := issue.toBead().Revision; got != 0 {
 		t.Fatalf("Bead.Revision = %d, want 0 for a null revision column", got)
+	}
+}
+
+func TestUpdateIfMatchLabelsCarryRevisionFence(t *testing.T) {
+	w := &scriptedBd{id: "ga-1", revision: 1, status: "open"}
+	s := NewBdStore("/city", w.runner)
+	if err := s.UpdateIfMatch("ga-1", 1, UpdateOpts{Labels: []string{"added"}, RemoveLabels: []string{"gc:session"}}); err != nil {
+		t.Fatalf("UpdateIfMatch labels: %v", err)
+	}
+	if !argvContains(w.writeArgv, "update", "--json", "ga-1", "--add-label", "added", "--remove-label", "gc:session", conditionalWriteFlag, "1") {
+		t.Fatalf("fenced label update argv missing expected flags: %v", w.writeArgv)
+	}
+}
+
+func TestUpdateIfMatchParentAndFieldsCarryOneRevisionFence(t *testing.T) {
+	w := &scriptedBd{id: "ga-1", revision: 1, status: "open"}
+	s := NewBdStore("/city", w.runner)
+	parent := "ga-parent"
+	title := "renamed"
+	if err := s.UpdateIfMatch("ga-1", 1, UpdateOpts{ParentID: &parent, Title: &title}); err != nil {
+		t.Fatalf("UpdateIfMatch parent and title: %v", err)
+	}
+	if w.writeCalls != 1 {
+		t.Fatalf("combined parent update issued %d writes, want one", w.writeCalls)
+	}
+	if !argvContains(w.writeArgv, "update", "--json", "ga-1", "--title", "renamed", "--parent", "ga-parent", conditionalWriteFlag, "1") {
+		t.Fatalf("combined parent update argv missing one fence: %v", w.writeArgv)
 	}
 }

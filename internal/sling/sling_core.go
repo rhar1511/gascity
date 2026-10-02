@@ -58,6 +58,15 @@ func DoSling(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult, 
 		return SlingResult{}, err
 	}
 	a := opts.Target
+	if (opts.IsFormula || usesFormulaBackedRoute(opts)) && deps.RequireFormulaActionGate && deps.FormulaActionLease != nil {
+		if err := deps.FormulaActionLease.Acquire(); err != nil {
+			return SlingResult{Target: a.QualifiedName()}, fmt.Errorf("pinning formula action route: %w", err)
+		}
+		defer deps.FormulaActionLease.Release()
+	}
+	if opts.RequireFormulaAttach && (opts.NoFormula || (!opts.IsFormula && opts.OnFormula == "" && a.EffectiveDefaultSlingFormula() == "")) {
+		return SlingResult{}, errors.New("sling: formula attachment is required but the target has no configured formula")
+	}
 	result, preErr := preflight(opts, deps, querier)
 	if preErr != nil {
 		return result, preErr
@@ -486,7 +495,7 @@ func attachedBeadInstructionsDroppedHint(querier BeadQuerier, beadID string, use
 
 // slingDefaultFormula handles the default formula attachment path.
 func slingDefaultFormula(opts SlingOpts, deps SlingDeps, querier BeadQuerier, beadID string, result SlingResult) (SlingResult, error) {
-	result, err := attachFormulaToBead(opts, deps, querier, beadID, opts.Target.EffectiveDefaultSlingFormula(), "default-on-formula", "default formula", true, result)
+	result, err := attachFormulaToBead(opts, deps, querier, beadID, opts.Target.EffectiveDefaultSlingFormula(), "default-on-formula", "default formula", !opts.RequireFormulaAttach, result)
 	if err == nil {
 		if hint := attachedBeadInstructionsDroppedHint(querier, beadID, opts.Vars); hint != "" {
 			result.BeadWarnings = append(result.BeadWarnings, hint)
@@ -499,7 +508,7 @@ func slingDefaultFormula(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 // bead: routed to the target, but still claimed by a third party with no
 // molecule to drive it (gm-2kyaqy). Identity matches the routing write
 // (agentutil.RoutedToIdentity), so a pool target compares against its pool
-// name and a claim by one of its own sessions ("<pool>-<id>") is not
+// name and a claim by one of its own sessions (assigneeIsOwnPoolSession) is not
 // undeliverable -- the same carve-out CheckBeadState already makes. Returns
 // false when the bead is unassigned, unreadable, or already held by the
 // target, since none of those strand the hand-off.
@@ -509,7 +518,7 @@ func undeliverableHandoffWarning(querier BeadQuerier, deps SlingDeps, beadID str
 		return "", false
 	}
 	target := agentutil.RoutedToIdentity(&a)
-	claimedByOwnPoolSession := agentutil.IsMultiSessionAgent(&a) && strings.HasPrefix(holder.Assignee, target+"-")
+	claimedByOwnPoolSession := agentutil.IsMultiSessionAgent(&a) && assigneeIsOwnPoolSession(holder.Assignee, target, querier, deps.Store)
 	if holder.Assignee == target || claimedByOwnPoolSession {
 		return "", false
 	}
@@ -555,9 +564,14 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 		}
 		var fellBackToPlainRoute bool
 		lockedResult, lockedErr := withGraphV2SourceWorkflowLock(context.Background(), deps, beadID, func() (SlingResult, error) {
+			if opts.BeforeFormulaAttach != nil {
+				if err := opts.BeforeFormulaAttach(); err != nil {
+					return result, fmt.Errorf("formula attach preflight: %w", err)
+				}
+			}
 			if err := CheckNoMoleculeChildrenAllowLiveWorkflow(querier, beadID, deps.Store, &result); err != nil {
 				var molErr *MoleculeAttachedError
-				if fallbackToPlainOnMoleculeConflict && errors.As(err, &molErr) {
+				if fallbackToPlainOnMoleculeConflict && !opts.GraphOnlyMaterialization && errors.As(err, &molErr) {
 					// Mirrors the legacy branch's fallback below: the caller
 					// never asked for this formula attach -- it was only
 					// implied by the target's default_sling_formula config --
@@ -598,6 +612,7 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 			mResult, err := InstantiateSlingFormula(context.Background(), formulaName, searchPaths, molecule.Options{
 				Title:            opts.Title,
 				Vars:             formulaVars,
+				IdempotencyKey:   opts.MaterializationID,
 				PriorityOverride: BeadPriorityOverride(deps.Store, graphInv.InputConvoy),
 			}, "", opts.ScopeKind, opts.ScopeRef, a, deps, opts.Force)
 			if err != nil {
@@ -619,7 +634,15 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 			// sourceBeadID (the source is tracked through the input convoy,
 			// not gc.source_bead_id), so doStartGraphWorkflow's own restamp
 			// never covers it. Stamp the work bead here instead.
-			restampWorkBeadRouting(deps, beadID, a, &wfResult)
+			if !opts.GraphOnlyMaterialization {
+				restampWorkBeadRouting(deps, beadID, a, &wfResult)
+			}
+			if !opts.GraphOnlyMaterialization && opts.Merge != "" && deps.Store != nil {
+				if err := deps.Store.SetMetadata(beadID, beadmeta.MergeStrategyMetadataKey, opts.Merge); err != nil {
+					wfResult.MetadataErrors = append(wfResult.MetadataErrors,
+						fmt.Sprintf("setting merge strategy: %v", err))
+				}
+			}
 			return wfResult, wfErr
 		})
 		if lockedErr != nil || fellBackToPlainRoute {
@@ -646,7 +669,7 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 	// with CheckNoMoleculeChildren on this path.
 	if err := CheckNoMoleculeChildren(querier, beadID, deps.Store, &result); err != nil {
 		var molErr *MoleculeAttachedError
-		if fallbackToPlainOnMoleculeConflict && errors.As(err, &molErr) {
+		if fallbackToPlainOnMoleculeConflict && !opts.GraphOnlyMaterialization && errors.As(err, &molErr) {
 			// The caller never asked for this formula attach -- it was only
 			// implied by the target's default_sling_formula config -- so an
 			// unrelated live molecule/wisp is not a reason to block the
@@ -668,19 +691,40 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 		return result, fmt.Errorf("%w", err)
 	}
 	run := func() (SlingResult, error) {
+		if opts.BeforeFormulaAttach != nil {
+			if err := opts.BeforeFormulaAttach(); err != nil {
+				return result, fmt.Errorf("formula attach preflight: %w", err)
+			}
+		}
+		sourceID := beadID
+		if opts.GraphOnlyMaterialization {
+			sourceID = ""
+		}
 		mResult, err := InstantiateSlingFormula(context.Background(), formulaName, SlingFormulaSearchPaths(deps, a), molecule.Options{
 			Title:            opts.Title,
 			Vars:             formulaVars,
+			IdempotencyKey:   opts.MaterializationID,
 			PriorityOverride: BeadPriorityOverride(querier, beadID),
-		}, beadID, opts.ScopeKind, opts.ScopeRef, a, deps)
+		}, sourceID, opts.ScopeKind, opts.ScopeRef, a, deps)
 		if err != nil {
 			return result, fmt.Errorf("instantiating %s %q on %s: %w", errLabel, formulaName, beadID, err)
 		}
 		wispRootID := mResult.RootID
 		if mResult.GraphWorkflow || IsGraphWorkflowAttachment(deps.Store, wispRootID) {
-			wfResult, wfErr := doStartGraphWorkflow(mResult.RootID, beadID, a, method, deps)
+			workflowSourceID := beadID
+			if opts.GraphOnlyMaterialization {
+				workflowSourceID = ""
+			}
+			wfResult, wfErr := doStartGraphWorkflow(mResult.RootID, workflowSourceID, a, method, deps)
 			wfResult.FormulaName = formulaName
 			return wfResult, wfErr
+		}
+		if opts.GraphOnlyMaterialization {
+			result.WispRootID = wispRootID
+			result.FormulaName = formulaName
+			result.Target = a.QualifiedName()
+			result.Method = method
+			return result, nil
 		}
 		if err := deps.Store.SetMetadata(beadID, beadmeta.MoleculeIDMetadataKey, wispRootID); err != nil {
 			result.MetadataErrors = append(result.MetadataErrors,
@@ -742,11 +786,27 @@ func finalize(opts SlingOpts, deps SlingDeps, beadID, method string, result Slin
 			Env:     slingEnv,
 			Force:   opts.Force,
 		}
+		// Router is an external callback. Release before entering it so a
+		// custom route hook cannot deadlock a controller config mutation against
+		// this request's publication lease. A successful route must reacquire the
+		// captured generation before finalize performs any further store writes.
+		if deps.FormulaActionLease != nil {
+			deps.FormulaActionLease.Release()
+		}
 		if err := deps.Router.Route(context.Background(), req); err != nil {
 			telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), method, err)
 			return result, fmt.Errorf("%w", err)
 		}
+		if deps.FormulaActionLease != nil {
+			if err := deps.FormulaActionLease.Acquire(); err != nil {
+				telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), method, err)
+				return result, fmt.Errorf("formula action route changed during routing: %w", err)
+			}
+		}
 	} else {
+		if deps.FormulaActionLease != nil {
+			deps.FormulaActionLease.Release()
+		}
 		slingCmd, slingWarn := BuildSlingCommandForAgent("sling_query", a.EffectiveSlingQuery(), beadID, deps.CityPath, deps.CityName, a, deps.Cfg.Rigs)
 		if slingWarn != "" {
 			depsTracef(deps, "sling-core: %s", slingWarn)
@@ -754,6 +814,12 @@ func finalize(opts SlingOpts, deps SlingDeps, beadID, method string, result Slin
 		if _, err := deps.Runner(rigDir, slingCmd, slingEnv); err != nil {
 			telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), method, err)
 			return result, fmt.Errorf("%w", err)
+		}
+		if deps.FormulaActionLease != nil {
+			if err := deps.FormulaActionLease.Acquire(); err != nil {
+				telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), method, err)
+				return result, fmt.Errorf("formula action route changed during routing: %w", err)
+			}
 		}
 	}
 	telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), method, nil)
@@ -873,6 +939,9 @@ func finalize(opts SlingOpts, deps SlingDeps, beadID, method string, result Slin
 	result.Method = method
 
 	// Poke controller.
+	if deps.FormulaActionLease != nil {
+		deps.FormulaActionLease.Release()
+	}
 	if !opts.SkipPoke && deps.Notify != nil {
 		deps.Notify.PokeController(deps.CityPath)
 	}
@@ -957,7 +1026,7 @@ func doStartGraphWorkflow(rootID, sourceBeadID string, a config.Agent, method st
 		}
 		// Graph workflow launches repoint the source bead at the active root so
 		// witness/source lookups resume from the workflow currently in control.
-		if err := deps.Store.SetMetadata(sourceBeadID, "workflow_id", rootID); err != nil {
+		if err := deps.Store.SetMetadata(sourceBeadID, beadmeta.LegacyWorkflowIDMetadataKey, rootID); err != nil {
 			return result, fmt.Errorf("setting workflow_id on %s: %w", sourceBeadID, err)
 		}
 		restampWorkBeadRouting(deps, sourceBeadID, a, &result)
@@ -1384,7 +1453,7 @@ func rollbackSourceWorkflowReplacement(launch pendingSourceWorkflowLaunch, store
 		}
 	}
 	if sourceBeadID != "" {
-		if err := store.SetMetadata(sourceBeadID, "workflow_id", previousWorkflowID); err != nil && !errors.Is(err, beads.ErrNotFound) {
+		if err := store.SetMetadata(sourceBeadID, beadmeta.LegacyWorkflowIDMetadataKey, previousWorkflowID); err != nil && !errors.Is(err, beads.ErrNotFound) {
 			rollbackErr = errors.Join(rollbackErr, fmt.Errorf("restore source workflow_id on %s: %w", sourceBeadID, err))
 		}
 	}
@@ -1411,7 +1480,7 @@ func withSourceWorkflowLaunchLock(ctx context.Context, deps SlingDeps, sourceBea
 			return fmt.Errorf("get source bead %s: %w", sourceBeadID, err)
 		}
 		if err == nil {
-			previousWorkflowID = strings.TrimSpace(sourceBead.Metadata["workflow_id"])
+			previousWorkflowID = strings.TrimSpace(sourceBead.Metadata[beadmeta.LegacyWorkflowIDMetadataKey])
 		}
 		roots, err := listSourceWorkflowRoots(deps, sourceBeadID)
 		if err != nil {
@@ -1701,7 +1770,19 @@ func isGraphSlingFormula(ctx context.Context, formulaName string, searchPaths []
 func prepareGraphV2FormulaInvocation(ctx context.Context, formulaName, targetID string, opts SlingOpts, deps SlingDeps, a config.Agent) (graphv2.Invocation, bool, error) {
 	searchPaths := SlingFormulaSearchPaths(deps, a)
 	vars := buildGraphV2SlingFormulaVars(formulaName, targetID, opts.Vars, a, deps)
-	inv, err := graphv2.PrepareInvocation(ctx, deps.Store, formulaName, searchPaths, targetID, vars)
+	beforeInputConvoy := func(ctx context.Context, recipe *formula.Recipe, vars map[string]string) error {
+		if !deps.RequireFormulaActionGate && deps.FormulaActionGate == nil {
+			return nil
+		}
+		_, _, err := molecule.PrepareFormulaAction(ctx, deps.graphStore(), recipe, molecule.Options{
+			Title:             opts.Title,
+			Vars:              vars,
+			ActionGate:        deps.FormulaActionGate,
+			RequireActionGate: deps.RequireFormulaActionGate,
+		})
+		return err
+	}
+	inv, err := graphv2.PrepareInvocationWithBeforeInputConvoy(ctx, deps.Store, formulaName, searchPaths, targetID, vars, beforeInputConvoy)
 	if err != nil {
 		return graphv2.Invocation{}, false, err
 	}

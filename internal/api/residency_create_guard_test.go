@@ -38,6 +38,9 @@ var rawBeadCreateExemptions = map[string]string{
 		"placing it by class would separate a convoy from its own rows",
 	"rigidem.go": "a gc-idem record is ClassWork and is written through, and read back only through, the rig store that " +
 		"owns the request being deduplicated (see TestIdemRecordsAreWorkClass)",
+	"pr_actions.go": "PR action receipts and prepared repair tasks are both ClassWork and must stay in the selected monitor rig's " +
+		"work store beside the monitored work; their raw creates use that exact rig store and never an infrastructure binding " +
+		"(see TestPRActionExecuteKeepsLedgerAndPreparedWorkOnMonitorRig)",
 }
 
 func TestRawBeadCreatesTakeThePlacementSeam(t *testing.T) {

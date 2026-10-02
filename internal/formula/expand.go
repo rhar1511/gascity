@@ -17,6 +17,7 @@ package formula
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -78,6 +79,12 @@ func applyExpansionsWithVars(steps []*Step, compose *ComposeRules, parser *Parse
 
 		// Merge formula default vars with rule overrides
 		vars := mergeVars(expFormula, resolveOverrideVars(rule.Vars, parentVars))
+		parser.recordCompileFormulaUse(CompileTraceEntry{
+			Kind:               CompileTraceComposeExpand,
+			FormulaName:        expFormula.Formula,
+			TargetStepID:       rule.Target,
+			EffectiveVariables: vars,
+		})
 
 		// Expand the target step (start at depth 0)
 		expandedSteps, err := expandStep(targetStep, expFormula.Template, 0, vars)
@@ -131,9 +138,21 @@ func applyExpansionsWithVars(steps []*Step, compose *ComposeRules, parser *Parse
 				toExpand = append(toExpand, step)
 			}
 		}
+		// stepMap iteration is unordered. Use stable target order so the
+		// transformation and its compiler provenance are reproducible.
+		slices.SortFunc(toExpand, func(left, right *Step) int {
+			return strings.Compare(left.ID, right.ID)
+		})
 
 		// Expand each matching step
 		for _, targetStep := range toExpand {
+			parser.recordCompileFormulaUse(CompileTraceEntry{
+				Kind:               CompileTraceComposeMap,
+				FormulaName:        expFormula.Formula,
+				TargetStepID:       targetStep.ID,
+				Selector:           rule.Select,
+				EffectiveVariables: vars,
+			})
 			expandedSteps, err := expandStep(targetStep, expFormula.Template, 0, vars)
 			if err != nil {
 				return nil, fmt.Errorf("map %q -> %q: %w", rule.Select, targetStep.ID, err)
@@ -787,6 +806,12 @@ func applyInlineExpansionsRecursive(steps []*Step, parser *Parser, vars map[stri
 			// Merge formula default vars with step's ExpandVars overrides
 			// resolved against the parent invocation vars.
 			expansionVars := mergeVars(expFormula, resolveOverrideVars(step.ExpandVars, vars))
+			parser.recordCompileFormulaUse(CompileTraceEntry{
+				Kind:               CompileTraceInlineExpansion,
+				FormulaName:        expFormula.Formula,
+				TargetStepID:       step.ID,
+				EffectiveVariables: expansionVars,
+			})
 
 			// Expand the step using the template (reuse existing expandStep)
 			expandedSteps, err := expandStep(step, expFormula.Template, 0, expansionVars)

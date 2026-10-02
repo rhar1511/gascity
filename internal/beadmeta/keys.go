@@ -44,12 +44,22 @@ const Namespace = "gc."
 // cmd/. Keep this block sorted by identifier; the Go compiler rejects duplicate
 // identifiers, giving us a free compile-time uniqueness guarantee.
 const (
-	AttemptLogMetadataKey     = "gc.attempt_log"
-	AttemptMetadataKey        = "gc.attempt"
-	BondMetadataKey           = "gc.bond"
-	BondVarsMetadataKey       = "gc.bond_vars"
-	BoundStepIDMetadataKey    = "gc.bound_step_id"
-	BrainParentSIDMetadataKey = "gc.brain_parent_sid"
+	AttemptLogMetadataKey                      = "gc.attempt_log"
+	AttemptEvidenceArchiveAttemptIDMetadataKey = "gc.attempt_evidence.archive_attempt_id"
+	AttemptEvidenceArchiveOwnerIDMetadataKey   = "gc.attempt_evidence.archive_owner_id"
+	AttemptEvidenceArchivePayloadMetadataKey   = "gc.attempt_evidence.archive_payload.v1"
+	AttemptEvidenceArchiveDigestMetadataKey    = "gc.attempt_evidence.archive_digest"
+	AttemptEvidencePayloadDataMetadataKey      = "gc.attempt_evidence.content_payload.v1"
+	AttemptEvidencePayloadDigestMetadataKey    = "gc.attempt_evidence.content_digest"
+	AttemptEvidenceReferenceMetadataKey        = "gc.attempt_evidence.reference.v1"
+	AttemptMetadataKey                         = "gc.attempt"
+	AuthorityAuthorizationMetadataKey          = "gc.authority_authorization.v1"
+	AuthorityProfileMetadataKey                = "gc.authority_profile"
+	AuthorityTransitionsMetadataKey            = "gc.authority_transitions.v1"
+	BondMetadataKey                            = "gc.bond"
+	BondVarsMetadataKey                        = "gc.bond_vars"
+	BoundStepIDMetadataKey                     = "gc.bound_step_id"
+	BrainParentSIDMetadataKey                  = "gc.brain_parent_sid"
 	// BudgetDeferredUntilMetadataKey holds an RFC3339 timestamp stamped by the
 	// sling boundary (host/bin/gc in the outer city repo) when a claim attempt
 	// is refused for build-budget reasons; deacon-dispatch.sh clears it on
@@ -88,6 +98,7 @@ const (
 	ControlDispatcherFallbackMetadataKey = "gc.control_dispatcher_fallback"
 	ControlEpochMetadataKey              = "gc.control_epoch"
 	ControlForMetadataKey                = "gc.control_for"
+	ControlGrantLedgerMetadataKey        = "gc.workflow_control_ledger.v2"
 	ControlQuarantineReasonMetadataKey   = "gc.control_quarantine_reason"
 	ControlQuarantinedAtMetadataKey      = "gc.control_quarantined_at"
 	ControlQuarantinedMetadataKey        = "gc.control_quarantined"
@@ -111,6 +122,11 @@ const (
 	CoordinatorOutcomeProducerDispositionMetadataKey = "gc.coordinator_outcome.producer_disposition"
 	CurrentRunIDMetadataKey                          = "gc.current_run_id"
 	CwdMetadataKey                                   = "gc.cwd"
+	DecisionFrontierHoldMetadataKey                  = "gc.decision_frontier.hold"
+	DecisionFrontierRecordMetadataKey                = "gc.decision_frontier.record"
+	DecisionFrontierReasonMetadataKey                = "gc.decision_frontier.reason"
+	DecisionFrontierStateMetadataKey                 = "gc.decision_frontier.state"
+	DecisionFrontierRevisionReceiptsMetadataKey      = "gc.decision_frontier.revision_receipts"
 	// AttachFencePendingMetadataKey marks a fenced attach's sub-DAG root
 	// between speculative (deferred, non-runnable) creation and the CAS-last
 	// epoch fence committing. Cleared on activation; a root still carrying it
@@ -167,14 +183,21 @@ const (
 	FormulaHashMetadataKey               = "gc.formula_hash"
 	FormulaNameMetadataKey               = "gc.formula_name"
 	FormulaSourceMetadataKey             = "gc.formula_source"
-	GCExemptMetadataKey                  = "gc.gc_exempt"
-	Graphv2RootKeyMetadataKey            = "gc.graphv2_root_key"
-	IdempotencyKeyMetadataKey            = "gc.idempotency_key"
-	InputConvoyIDMetadataKey             = "gc.input_convoy_id"
-	InstantiatingMetadataKey             = "gc.instantiating"
-	IterationMetadataKey                 = "gc.iteration"
-	ItemRootKeyMetadataKey               = "gc.item_root_key"
-	KindMetadataKey                      = "gc.kind"
+	// CompatibilityRequestMetadataKey stores the exact controller compatibility
+	// request that authorized materialization of this executable formula bead.
+	CompatibilityRequestMetadataKey = "gc.compatibility_request.v1"
+	// CompatibilityAuthorizationMetadataKey stores the authority-issued record
+	// reference bound to CompatibilityRequestMetadataKey. Workers must verify it
+	// through the controller authority before execution.
+	CompatibilityAuthorizationMetadataKey = "gc.compatibility_authorization.v1"
+	GCExemptMetadataKey                   = "gc.gc_exempt"
+	Graphv2RootKeyMetadataKey             = "gc.graphv2_root_key"
+	IdempotencyKeyMetadataKey             = "gc.idempotency_key"
+	InputConvoyIDMetadataKey              = "gc.input_convoy_id"
+	InstantiatingMetadataKey              = "gc.instantiating"
+	IterationMetadataKey                  = "gc.iteration"
+	ItemRootKeyMetadataKey                = "gc.item_root_key"
+	KindMetadataKey                       = "gc.kind"
 	// CompletionFactsConvergedMetadataKey stamps a graph.v2 workflow root whose
 	// completion facts the completions backstop has fully reconciled: the root
 	// is closed, every listed step is closed, and every emittable fact is in
@@ -183,64 +206,76 @@ const (
 	// per-root step listing to rediscover a converged state every hour
 	// (ga-wevcl). Live closes on stamped roots remain covered by the delta
 	// lane, which reacts to the close events themselves.
-	CompletionFactsConvergedMetadataKey = "gc.completion_facts_converged"
-	LastFailureClassMetadataKey         = "gc.last_failure_class"
-	LastFinalizeErrorMetadataKey        = "gc.last_finalize_error"
-	LeaseOwnerMetadataKey               = "gc.lease_owner"
-	LogicalBeadIDMetadataKey            = "gc.logical_bead_id"
-	MaxAttemptsMetadataKey              = "gc.max_attempts"
-	MissingRootBeadIDMetadataKey        = "gc.missing_root_bead_id"
-	ModelMetadataKey                    = "gc.model"
-	NativeStepDependenciesMetadataKey   = "gc.native_step_dependencies.v1"
-	NextAttemptMetadataKey              = "gc.next_attempt"
-	OnExhaustedMetadataKey              = "gc.on_exhausted"
-	OnFailMetadataKey                   = "gc.on_fail"
-	OriginalKindMetadataKey             = "gc.original_kind"
-	OutcomeBeadIDMetadataKey            = "gc.outcome_bead_id"
-	OutcomeMetadataKey                  = "gc.outcome"
-	OutputJSONMetadataKey               = "gc.output_json"
-	OutputJSONRequiredMetadataKey       = "gc.output_json_required"
-	ParentBeadIDMetadataKey             = "gc.parent_bead_id"
-	ParentConvoyIDMetadataKey           = "gc.parent_convoy_id"
-	PartialFragmentMetadataKey          = "gc.partial_fragment"
-	PartialRetryMetadataKey             = "gc.partial_retry"
-	PackMetadataKey                     = "gc.pack"
-	PackRootMetadataKey                 = "gc.pack_root"
-	PackWorkspaceMetadataKey            = "gc.pack_workspace"
-	PerDispatchModelMetadataKey         = "gc.per_dispatch_model"
-	RalphStepIDMetadataKey              = "gc.ralph_step_id"
-	RSIRoleMetadataKey                  = "gc.rsi_role"
-	RSIAuthorityClassMetadataKey        = "gc.rsi_authority_class"
-	RSICandidateInputMetadataKey        = "gc.rsi_candidate_input"
-	RSIExecutionBindingMetadataKey      = "gc.rsi_execution_binding"
-	RSIManualApprovalMetadataKey        = "gc.rsi_manual_approval_required"
-	RSIPromoteMetadataKey               = "gc.rsi_promote"
-	RSIReasonMetadataKey                = "gc.rsi_reason"
-	ReasoningMetadataKey                = "gc.reasoning"
-	RequiredArtifactMetadataKey         = "gc.required_artifact"
-	RequiredArtifactsMetadataKey        = "gc.required_artifacts"
-	ReviewGateMetadataKey               = "gc.review_gate"
-	RetryAttemptMetadataKey             = "gc.retry_attempt" // see attempt.go
-	RetryCountMetadataKey               = "gc.retry_count"
-	RetryFromMetadataKey                = "gc.retry_from"
-	RetrySessionRecycledMetadataKey     = "gc.retry_session_recycled"
-	RetryStateMetadataKey               = "gc.retry_state"
-	RigRootMetadataKey                  = "gc.rig_root"
-	RootBeadIDMetadataKey               = "gc.root_bead_id"
-	RootSettleFailedAtMetadataKey       = "gc.root_settle_failed_at"
-	RootSettleFailedMetadataKey         = "gc.root_settle_failed"
-	RootStoreRefMetadataKey             = "gc.root_store_ref"
-	RouteQuarantineMetadataKey          = "gc.route_recovery_quarantined"
-	RouteQuarantineReasonMetadataKey    = "gc.route_recovery_quarantine_reason"
-	RoutedToMetadataKey                 = "gc.routed_to"
-	RunTargetMetadataKey                = "gc.run_target"
-	RuntimeVarsMetadataKey              = "gc.graphv2_vars.v1"
-	ScopeKindMetadataKey                = "gc.scope_kind"
-	ScopeNameMetadataKey                = "gc.scope_name"
-	ScopeRefMetadataKey                 = "gc.scope_ref"
-	ScopeRoleMetadataKey                = "gc.scope_role"
-	SessionAffinityMetadataKey          = "gc.session_affinity"
-	SessionIDMetadataKey                = "gc.session_id"
+	CompletionFactsConvergedMetadataKey   = "gc.completion_facts_converged"
+	LifecycleAdmissionReceiptMetadataKey  = "gc.lifecycle.admission_receipt.v1"
+	LifecycleCompletionReceiptMetadataKey = "gc.lifecycle.completion_receipt.v1"
+	LifecycleCompletionBudgetMetadataKey  = "gc.lifecycle.completion_budget.v1"
+	LifecycleHoldMetadataKey              = "gc.lifecycle.hold"
+	LifecycleHoldReasonMetadataKey        = "gc.lifecycle.hold_reason"
+	LifecycleRecoveryIntentMetadataKey    = "gc.lifecycle.recovery_intent.v1"
+	LifecycleRecoveryIntentDigestKey      = "gc.lifecycle.recovery_intent_digest.v1"
+	LifecycleRecoveryIntentWorkItemKey    = "gc.lifecycle.recovery_intent_work_item"
+	LifecycleRecoveryIntentScopeKey       = "gc.lifecycle.recovery_intent_scope"
+	LifecycleRecoveryIntentRequestIDKey   = "gc.lifecycle.recovery_intent_request_id"
+	LifecycleRecoveryStateMetadataKey     = "gc.lifecycle.recovery_state.v1"
+	LifecycleMaterializationMetadataKey   = "gc.lifecycle.materialization.v1"
+	LastFailureClassMetadataKey           = "gc.last_failure_class"
+	LastFinalizeErrorMetadataKey          = "gc.last_finalize_error"
+	LeaseOwnerMetadataKey                 = "gc.lease_owner"
+	LogicalBeadIDMetadataKey              = "gc.logical_bead_id"
+	MaxAttemptsMetadataKey                = "gc.max_attempts"
+	MissingRootBeadIDMetadataKey          = "gc.missing_root_bead_id"
+	ModelMetadataKey                      = "gc.model"
+	NativeStepDependenciesMetadataKey     = "gc.native_step_dependencies.v1"
+	NextAttemptMetadataKey                = "gc.next_attempt"
+	OnExhaustedMetadataKey                = "gc.on_exhausted"
+	OnFailMetadataKey                     = "gc.on_fail"
+	OriginalKindMetadataKey               = "gc.original_kind"
+	OutcomeBeadIDMetadataKey              = "gc.outcome_bead_id"
+	OutcomeMetadataKey                    = "gc.outcome"
+	OutputJSONMetadataKey                 = "gc.output_json"
+	OutputJSONRequiredMetadataKey         = "gc.output_json_required"
+	ParentBeadIDMetadataKey               = "gc.parent_bead_id"
+	ParentConvoyIDMetadataKey             = "gc.parent_convoy_id"
+	PartialFragmentMetadataKey            = "gc.partial_fragment"
+	PartialRetryMetadataKey               = "gc.partial_retry"
+	PackMetadataKey                       = "gc.pack"
+	PackRootMetadataKey                   = "gc.pack_root"
+	PackWorkspaceMetadataKey              = "gc.pack_workspace"
+	PerDispatchModelMetadataKey           = "gc.per_dispatch_model"
+	RalphStepIDMetadataKey                = "gc.ralph_step_id"
+	RSIRoleMetadataKey                    = "gc.rsi_role"
+	RSIAuthorityClassMetadataKey          = "gc.rsi_authority_class"
+	RSIExecutionBindingMetadataKey        = "gc.rsi_execution_binding"
+	RSICandidateInputMetadataKey          = "gc.rsi_candidate_input"
+	RSIPromoteMetadataKey                 = "gc.rsi_promote"
+	RSIReasonMetadataKey                  = "gc.rsi_reason"
+	RSIManualApprovalMetadataKey          = "gc.rsi_manual_approval_required"
+	ReasoningMetadataKey                  = "gc.reasoning"
+	RequiredArtifactMetadataKey           = "gc.required_artifact"
+	RequiredArtifactsMetadataKey          = "gc.required_artifacts"
+	ReviewGateMetadataKey                 = "gc.review_gate"
+	RetryAttemptMetadataKey               = "gc.retry_attempt" // see attempt.go
+	RetryCountMetadataKey                 = "gc.retry_count"
+	RetryFromMetadataKey                  = "gc.retry_from"
+	RetrySessionRecycledMetadataKey       = "gc.retry_session_recycled"
+	RetryStateMetadataKey                 = "gc.retry_state"
+	RigRootMetadataKey                    = "gc.rig_root"
+	RootBeadIDMetadataKey                 = "gc.root_bead_id"
+	RootSettleFailedAtMetadataKey         = "gc.root_settle_failed_at"
+	RootSettleFailedMetadataKey           = "gc.root_settle_failed"
+	RootStoreRefMetadataKey               = "gc.root_store_ref"
+	RouteQuarantineMetadataKey            = "gc.route_recovery_quarantined"
+	RouteQuarantineReasonMetadataKey      = "gc.route_recovery_quarantine_reason"
+	RoutedToMetadataKey                   = "gc.routed_to"
+	RunTargetMetadataKey                  = "gc.run_target"
+	RuntimeVarsMetadataKey                = "gc.graphv2_vars.v1"
+	ScopeKindMetadataKey                  = "gc.scope_kind"
+	ScopeNameMetadataKey                  = "gc.scope_name"
+	ScopeRefMetadataKey                   = "gc.scope_ref"
+	ScopeRoleMetadataKey                  = "gc.scope_role"
+	SessionAffinityMetadataKey            = "gc.session_affinity"
+	SessionIDMetadataKey                  = "gc.session_id"
 	// SessionIDCamelMetadataKey is the camelCase variant some bead writers stamp
 	// alongside the snake_case SessionIDMetadataKey; both are read when resolving a
 	// bead's session link.
@@ -324,6 +359,19 @@ const (
 	WorkflowExpandedMetadataKey = "gc.workflow_expanded"
 )
 
+// LifecycleAdmissionReceiptV2MetadataKey stores the separately signed v2
+// admission contract. Kept outside the large key block to avoid realigning
+// unrelated metadata declarations.
+const LifecycleAdmissionReceiptV2MetadataKey = "gc.lifecycle.admission_receipt.v2"
+
+// LifecycleTransitionHeadMetadataKey points to the latest typed lifecycle transition receipt.
+const LifecycleTransitionHeadMetadataKey = "gc.lifecycle.transition_head.v1"
+
+// LegacyWorkflowIDMetadataKey is the engine's historical bare graph workflow
+// pointer. It remains part of the run-chain and therefore must be treated as
+// lifecycle routing identity wherever the namespaced workflow key is guarded.
+const LegacyWorkflowIDMetadataKey = "workflow_id"
+
 // Work-record metadata keys (ADR-0009). These bind a work bead to its claim
 // and its outcome so observability/eval can answer "what work was done, by
 // whom, with what artifact, to what end":
@@ -359,13 +407,19 @@ const FormulaVarPrefix = Namespace + "var."
 // so it is declared as a prefix here rather than re-enumerated in this file.
 const IdemPrefix = Namespace + "idem."
 
-// SessionRequestReceiptPrefix is the dynamic key family for durable session
-// request receipts. The request ID is the open-world suffix.
-const SessionRequestReceiptPrefix = Namespace + "session_request.v1."
+// AttemptEvidenceIndexPrefix is the dynamic owner-bead metadata prefix for
+// immutable, first-write-sealed execution attempt records. The full record is
+// copied to a separate durable archive bead before a capture operation returns.
+const AttemptEvidenceIndexPrefix = Namespace + "attempt_evidence.index."
 
 // SessionRequestPurgeFenceMetadataKey blocks new request acceptance and reopen
 // while a workflow hard purge is closing and validating selected sessions.
 const SessionRequestPurgeFenceMetadataKey = Namespace + "session_request_purge_fence"
+
+// NativeAuxRevisionMetadataKey makes a native label/parent transaction also
+// change the issue row. The pinned backend's auxiliary tables do not advance
+// its issue row lock; an unchanged scalar update would be discarded as a no-op.
+const NativeAuxRevisionMetadataKey = Namespace + "native_aux_revision"
 
 // SessionInstanceTokenMetadataKey is the raw execution-incarnation credential.
 // It is deliberately bare for compatibility with the persisted session schema.
@@ -398,11 +452,20 @@ func IsExecutionCredentialMetadataKey(key string) bool {
 	return ok
 }
 
+// IsExecutionIdentityMetadataKey identifies the session lifecycle fields that
+// the trusted backend transport carries but generic bead mutations must refuse.
+func IsExecutionIdentityMetadataKey(key string) bool {
+	_, ok := executionIdentityMetadataKeys[key]
+	return ok
+}
+
 // IsGenericMutationReservedKey reports metadata owned by a privileged session
 // protocol rather than generic bead create/update tooling.
 func IsGenericMutationReservedKey(key string) bool {
 	_, executionIdentity := executionIdentityMetadataKeys[key]
 	return executionIdentity ||
+		key == ClaimedAtMetadataKey ||
+		key == NativeAuxRevisionMetadataKey ||
 		key == RSIExecutionBindingMetadataKey ||
 		strings.HasPrefix(key, SessionRequestReceiptPrefix) ||
 		key == SessionRequestPurgeFenceMetadataKey
@@ -485,6 +548,9 @@ const (
 	// step to ask `gc hook current` would close somebody else's bead. Every path
 	// that takes work off a session clears it.
 	CurrentClaimBeadIDMetadataKey = "current_claim_bead_id"
+	// CurrentClaimGenerationMetadataKey stores the epoch paired with the
+	// current claim id so same-bead claim renewals remain distinguishable.
+	CurrentClaimGenerationMetadataKey = "current_claim_generation"
 )
 
 // Dispatch metadata keys: a non-"gc."-prefixed family that sling writes onto
@@ -518,12 +584,53 @@ const (
 // key-shape rule only covers the gc. namespace.
 const OptionMetadataPrefix = "opt_"
 
+// PRActionMetadataPrefix reserves the controller-owned PR action ledger namespace.
+const PRActionMetadataPrefix = Namespace + "pr_action."
+
+// DecisionFrontierMetadataPrefix reserves controller-owned decision maps,
+// answer records, holds, and transition receipts from generic bead writers.
+const DecisionFrontierMetadataPrefix = Namespace + "decision_frontier."
+
+// PR action metadata binds durable queue records and idempotent action receipts.
+const (
+	PRActionSourceMetadataKey        = PRActionMetadataPrefix + "source"
+	PRActionQueueIndexMetadataKey    = PRActionMetadataPrefix + "queue_index"
+	PRActionIdempotencyMetadataKey   = PRActionMetadataPrefix + "idempotency_key"
+	PRActionFingerprintMetadataKey   = PRActionMetadataPrefix + "fingerprint"
+	PRActionRecordMetadataKey        = PRActionMetadataPrefix + "record"
+	PRActionTargetMetadataKey        = PRActionMetadataPrefix + "target_key"
+	PRActionClaimMetadataKey         = PRActionMetadataPrefix + "claim"
+	PRActionRouteProposalMetadataKey = PRActionMetadataPrefix + "proposed_route"
+)
+
+// SessionRequestReceiptPrefix stores execution-bound receipts keyed by request digest.
+const SessionRequestReceiptPrefix = Namespace + "session_request.v1."
+
 // KnownMetadataKeys lists every engine-owned bead-metadata key this package
 // declares. The guard test asserts every gc.* metadata literal used in non-test
 // Go resolves to a member of this slice (or a KnownMetadataPrefixes entry).
 var KnownMetadataKeys = []string{
+	PRActionSourceMetadataKey,
+	PRActionQueueIndexMetadataKey,
+	PRActionIdempotencyMetadataKey,
+	PRActionFingerprintMetadataKey,
+	PRActionRecordMetadataKey,
+	PRActionTargetMetadataKey,
+	PRActionClaimMetadataKey,
+	PRActionRouteProposalMetadataKey,
+
 	AttemptLogMetadataKey,
+	AttemptEvidenceArchiveAttemptIDMetadataKey,
+	AttemptEvidenceArchiveOwnerIDMetadataKey,
+	AttemptEvidenceArchivePayloadMetadataKey,
+	AttemptEvidenceArchiveDigestMetadataKey,
+	AttemptEvidencePayloadDataMetadataKey,
+	AttemptEvidencePayloadDigestMetadataKey,
+	AttemptEvidenceReferenceMetadataKey,
 	AttemptMetadataKey,
+	AuthorityAuthorizationMetadataKey,
+	AuthorityProfileMetadataKey,
+	AuthorityTransitionsMetadataKey,
 	BondMetadataKey,
 	BondVarsMetadataKey,
 	BoundStepIDMetadataKey,
@@ -536,11 +643,13 @@ var KnownMetadataKeys = []string{
 	CheckTimeoutMetadataKey,
 	CityPathMetadataKey,
 	ClaimedAtMetadataKey,
+	NativeAuxRevisionMetadataKey,
 	ClaimGenerationMetadataKey,
 	ClosedByAttemptMetadataKey,
 	ContinuationGroupMetadataKey,
 	ControlEpochMetadataKey,
 	ControlForMetadataKey,
+	ControlGrantLedgerMetadataKey,
 	ControlQuarantineReasonMetadataKey,
 	ControlQuarantinedAtMetadataKey,
 	ControlQuarantinedMetadataKey,
@@ -552,6 +661,11 @@ var KnownMetadataKeys = []string{
 	CoordinatorOutcomeProducerDispositionMetadataKey,
 	CurrentRunIDMetadataKey,
 	CwdMetadataKey,
+	DecisionFrontierHoldMetadataKey,
+	DecisionFrontierRecordMetadataKey,
+	DecisionFrontierReasonMetadataKey,
+	DecisionFrontierStateMetadataKey,
+	DecisionFrontierRevisionReceiptsMetadataKey,
 	AttachFencePendingMetadataKey,
 	DeferredAssigneeMetadataKey,
 	DeferredExecutionRoutedToMetadataKey,
@@ -596,6 +710,8 @@ var KnownMetadataKeys = []string{
 	FormulaHashMetadataKey,
 	FormulaNameMetadataKey,
 	FormulaSourceMetadataKey,
+	CompatibilityRequestMetadataKey,
+	CompatibilityAuthorizationMetadataKey,
 	GCExemptMetadataKey,
 	Graphv2RootKeyMetadataKey,
 	IdempotencyKeyMetadataKey,
@@ -604,6 +720,20 @@ var KnownMetadataKeys = []string{
 	IterationMetadataKey,
 	ItemRootKeyMetadataKey,
 	KindMetadataKey,
+	LifecycleAdmissionReceiptMetadataKey,
+	LifecycleAdmissionReceiptV2MetadataKey,
+	LifecycleCompletionReceiptMetadataKey,
+	LifecycleCompletionBudgetMetadataKey,
+	LifecycleHoldMetadataKey,
+	LifecycleHoldReasonMetadataKey,
+	LifecycleRecoveryIntentMetadataKey,
+	LifecycleRecoveryIntentDigestKey,
+	LifecycleRecoveryIntentWorkItemKey,
+	LifecycleRecoveryIntentScopeKey,
+	LifecycleRecoveryIntentRequestIDKey,
+	LifecycleRecoveryStateMetadataKey,
+	LifecycleTransitionHeadMetadataKey,
+	LifecycleMaterializationMetadataKey,
 	LastFailureClassMetadataKey,
 	LastFinalizeErrorMetadataKey,
 	LeaseOwnerMetadataKey,
@@ -706,9 +836,11 @@ var KnownMetadataKeys = []string{
 // begins with one of these is considered declared even though its full key is
 // not enumerable.
 var KnownMetadataPrefixes = []string{
+	DecisionFrontierMetadataPrefix,
+	SessionRequestReceiptPrefix,
 	FormulaVarPrefix,
 	IdemPrefix,
-	SessionRequestReceiptPrefix,
+	AttemptEvidenceIndexPrefix,
 }
 
 // SessionAffinityMetadataKeys are the metadata keys that pin a work bead to a

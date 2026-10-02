@@ -26,6 +26,7 @@ go_test(
         "//internal/beads",
         "//internal/convoy",
         "//internal/coordclass",
+        "//internal/formula",
         "//internal/formulatest",
         "//internal/testenv",
     ],

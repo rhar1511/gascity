@@ -33,25 +33,33 @@ import (
 //     those are load-bearing and are documented at their (absent) place below:
 //     graph-apply (H4) and CachingStore's dependency-snapshot shortcut.
 var (
-	_ Store                            = (*ProxiedStore)(nil)
-	_ AtomicTxStore                    = (*ProxiedStore)(nil)
-	_ BatchDeleter                     = (*ProxiedStore)(nil)
-	_ ConditionalAssignmentReleaser    = (*ProxiedStore)(nil)
-	_ ConditionalWriterHandleProvider  = (*ProxiedStore)(nil)
-	_ ConditionalWritesResolveTargeter = (*ProxiedStore)(nil)
-	_ Counter                          = (*ProxiedStore)(nil)
-	_ DepMetadataReader                = (*ProxiedStore)(nil)
-	_ ForeignIDCreator                 = (*ProxiedStore)(nil)
-	_ GraphApplyHandleProvider         = (*ProxiedStore)(nil)
-	_ ParentProjectionWaiter           = (*ProxiedStore)(nil)
-	_ RowWitness                       = (*ProxiedStore)(nil)
-	_ StorageCreateStore               = (*ProxiedStore)(nil)
-	_ conditionalWritesModeCarrier     = (*ProxiedStore)(nil)
-	_ listDependencyCompletenessStore  = (*ProxiedStore)(nil)
-	_ readyProjectionEnrichmentStore   = (*ProxiedStore)(nil)
-	_ interface{ IDPrefix() string }   = (*ProxiedStore)(nil)
-	_ interface{ Backing() Store }     = (*ProxiedStore)(nil)
-	_ interface{ CloseStore() error }  = (*ProxiedStore)(nil)
+	_ Store                                                   = (*ProxiedStore)(nil)
+	_ AtomicTxStore                                           = (*ProxiedStore)(nil)
+	_ BatchDeleter                                            = (*ProxiedStore)(nil)
+	_ ConditionalAssignmentReleaser                           = (*ProxiedStore)(nil)
+	_ ConditionalWriterHandleProvider                         = (*ProxiedStore)(nil)
+	_ ConditionalWritesResolveTargeter                        = (*ProxiedStore)(nil)
+	_ Counter                                                 = (*ProxiedStore)(nil)
+	_ DepMetadataReader                                       = (*ProxiedStore)(nil)
+	_ ForeignIDCreator                                        = (*ProxiedStore)(nil)
+	_ GraphApplyHandleProvider                                = (*ProxiedStore)(nil)
+	_ ControllerMetadataTransitionWriterHandleProvider        = (*ProxiedStore)(nil)
+	_ ControllerMetadataTransitionReceiptReaderHandleProvider = (*ProxiedStore)(nil)
+	_ DecisionFrontierSourceReaderHandleProvider              = (*ProxiedStore)(nil)
+	_ DecisionFrontierRecordWriterHandleProvider              = (*ProxiedStore)(nil)
+	_ RevisionTransitionReceiptReaderHandleProvider           = (*ProxiedStore)(nil)
+	_ RevisionTransitionWriterHandleProvider                  = (*ProxiedStore)(nil)
+	_ RevisionTransitionPatchWriterHandleProvider             = (*ProxiedStore)(nil)
+	_ RevisionTransitionPatchReceiptReaderHandleProvider      = (*ProxiedStore)(nil)
+	_ ParentProjectionWaiter                                  = (*ProxiedStore)(nil)
+	_ RowWitness                                              = (*ProxiedStore)(nil)
+	_ StorageCreateStore                                      = (*ProxiedStore)(nil)
+	_ conditionalWritesModeCarrier                            = (*ProxiedStore)(nil)
+	_ listDependencyCompletenessStore                         = (*ProxiedStore)(nil)
+	_ readyProjectionEnrichmentStore                          = (*ProxiedStore)(nil)
+	_ interface{ IDPrefix() string }                          = (*ProxiedStore)(nil)
+	_ interface{ Backing() Store }                            = (*ProxiedStore)(nil)
+	_ interface{ CloseStore() error }                         = (*ProxiedStore)(nil)
 	_ interface {
 		DepListBatch(ids []string) (map[string][]Dep, error)
 	} = (*ProxiedStore)(nil)
@@ -356,6 +364,300 @@ func (w proxiedConditionalWriter) CompareAndSetMetadataKey(id, key, expected, ne
 // note on ProxiedStore.
 func (s *ProxiedStore) ConditionalWritesResolveTarget() Store {
 	return s.writeLeaf()
+}
+
+// PrivatePayloadValueTransportTarget declares that private-value safety is
+// determined by the bd write leaf, not the native read leaf.
+func (s *ProxiedStore) PrivatePayloadValueTransportTarget() Store { return s.writeLeaf() }
+
+type proxiedPrivateEvidenceMetadataCASWriter struct {
+	store  *ProxiedStore
+	writer PrivateEvidenceMetadataCASWriter
+}
+
+func (w proxiedPrivateEvidenceMetadataCASWriter) CompareAndSetPrivateEvidenceMetadataKey(id, key, expected, next string) (bool, error) {
+	var swapped bool
+	err := w.store.withMutation("private-evidence-metadata-cas "+id, func(Store) error {
+		var err error
+		swapped, err = w.writer.CompareAndSetPrivateEvidenceMetadataKey(id, key, expected, next)
+		return err
+	})
+	return swapped, err
+}
+
+func (w proxiedPrivateEvidenceMetadataCASWriter) ReadPrivateEvidenceMetadataKey(id, key string) (string, bool, error) {
+	return w.writer.ReadPrivateEvidenceMetadataKey(id, key)
+}
+
+// PrivateEvidenceMetadataCASWriterHandle keeps the write inside the proxy
+// generation bracket instead of using generic conditional target resolution.
+func (s *ProxiedStore) PrivateEvidenceMetadataCASWriterHandle() (PrivateEvidenceMetadataCASWriter, bool) {
+	writer, ok := PrivateEvidenceMetadataCASWriterFor(s.writeLeaf())
+	if !ok {
+		return nil, false
+	}
+	return proxiedPrivateEvidenceMetadataCASWriter{store: s, writer: writer}, true
+}
+
+// PrivateEvidenceArchiveReaderHandle reads through the currently authoritative
+// bd write leaf. It does not resolve through the native read leaf and does not
+// put payload rows into a cache.
+func (s *ProxiedStore) PrivateEvidenceArchiveReaderHandle() (PrivateEvidenceArchiveReader, bool) {
+	return PrivateEvidenceArchiveReaderFor(s.writeLeaf())
+}
+
+type proxiedControllerMetadataTransitionWriter struct {
+	store  *ProxiedStore
+	writer ControllerMetadataTransitionWriter
+}
+
+func (w proxiedControllerMetadataTransitionWriter) TransitionMetadata(issueID string, request ControllerMetadataTransitionRequest) (ControllerMetadataTransitionResult, error) {
+	var result ControllerMetadataTransitionResult
+	err := w.store.withMutation("controller-metadata-transition "+issueID, func(Store) error {
+		var err error
+		result, err = w.writer.TransitionMetadata(issueID, request)
+		return err
+	})
+	return result, err
+}
+
+// ControllerMetadataTransitionWriterHandle keeps the remote write and any
+// receipt recovery in the proxy mutation-generation bracket.
+func (s *ProxiedStore) ControllerMetadataTransitionWriterHandle() (ControllerMetadataTransitionWriter, bool) {
+	writer, ok := ControllerMetadataTransitionWriterFor(s.writeLeaf())
+	if !ok {
+		return nil, false
+	}
+	return proxiedControllerMetadataTransitionWriter{store: s, writer: writer}, true
+}
+
+type proxiedRevisionTransitionPatchWriter struct {
+	store  *ProxiedStore
+	writer RevisionTransitionPatchWriter
+}
+
+func (w proxiedRevisionTransitionPatchWriter) TransitionPatch(issueID string, request RevisionTransitionPatchRequest) (RevisionTransitionPatchResult, error) {
+	var result RevisionTransitionPatchResult
+	err := w.store.withMutation("revision-transition-patch "+issueID, func(Store) error {
+		var writeErr error
+		result, writeErr = w.writer.TransitionPatch(issueID, request)
+		return writeErr
+	})
+	return result, err
+}
+
+// RevisionTransitionPatchWriterHandle brackets the patch and any exact-receipt
+// recovery under one proxy generation so a restart cannot split the operation.
+func (s *ProxiedStore) RevisionTransitionPatchWriterHandle() (RevisionTransitionPatchWriter, bool) {
+	if s == nil {
+		return nil, false
+	}
+	writer, ok := RevisionTransitionPatchWriterFor(s.writeLeaf())
+	if !ok || writer == nil {
+		return nil, false
+	}
+	return proxiedRevisionTransitionPatchWriter{store: s, writer: writer}, true
+}
+
+type proxiedRevisionTransitionPatchReceiptReader struct {
+	store  *ProxiedStore
+	reader RevisionTransitionPatchReceiptReader
+}
+
+func (r proxiedRevisionTransitionPatchReceiptReader) ReadRevisionTransitionPatchReceipt(receiptID string) (RevisionTransitionPatchReceipt, bool, error) {
+	var receipt RevisionTransitionPatchReceipt
+	var found bool
+	err := r.store.withMutation("revision-transition-patch-receipt "+receiptID, func(Store) error {
+		var readErr error
+		receipt, found, readErr = r.reader.ReadRevisionTransitionPatchReceipt(receiptID)
+		return readErr
+	})
+	return receipt, found, r.store.classifyReadError(err)
+}
+
+// RevisionTransitionPatchReceiptReaderHandle reads exact receipts from the
+// authoritative write leaf inside the same proxy generation bracket.
+func (s *ProxiedStore) RevisionTransitionPatchReceiptReaderHandle() (RevisionTransitionPatchReceiptReader, bool) {
+	if s == nil {
+		return nil, false
+	}
+	reader, ok := RevisionTransitionPatchReceiptReaderFor(s.writeLeaf())
+	if !ok || reader == nil {
+		return nil, false
+	}
+	return proxiedRevisionTransitionPatchReceiptReader{store: s, reader: reader}, true
+}
+
+type proxiedDecisionFrontierSourceReader struct {
+	store  *ProxiedStore
+	reader DecisionFrontierSourceReader
+}
+
+func (r proxiedDecisionFrontierSourceReader) DecisionFrontierSourceSnapshot(id string) (Bead, error) {
+	var snapshot Bead
+	err := r.store.withMutation("decision-frontier-source-snapshot "+id, func(Store) error {
+		var readErr error
+		snapshot, readErr = r.reader.DecisionFrontierSourceSnapshot(id)
+		return readErr
+	})
+	return snapshot, r.store.classifyReadError(err)
+}
+
+type proxiedRevisionTransitionReceiptReader struct {
+	store  *ProxiedStore
+	reader RevisionTransitionReceiptReader
+}
+
+func (r proxiedRevisionTransitionReceiptReader) DecisionFrontierRevisionTransitionReceipt(issueID, receiptID string) (RevisionTransitionReceipt, bool, error) {
+	var receipt RevisionTransitionReceipt
+	var found bool
+	err := r.store.withMutation("decision-frontier-transition-receipt "+issueID, func(Store) error {
+		var readErr error
+		receipt, found, readErr = r.reader.DecisionFrontierRevisionTransitionReceipt(issueID, receiptID)
+		return readErr
+	})
+	return receipt, found, r.store.classifyReadError(err)
+}
+
+// RevisionTransitionReceiptReaderHandle reads exact receipts from the same bd
+// write leaf as source snapshots and keeps the read inside the proxy generation
+// bracket. Receipt support is checked explicitly instead of inferred from the
+// source wrapper's method set.
+func (s *ProxiedStore) RevisionTransitionReceiptReaderHandle() (RevisionTransitionReceiptReader, bool) {
+	if s == nil {
+		return nil, false
+	}
+	reader, ok := RevisionTransitionReceiptReaderFor(s.writeLeaf())
+	if !ok || reader == nil {
+		return nil, false
+	}
+	return proxiedRevisionTransitionReceiptReader{store: s, reader: reader}, true
+}
+
+type proxiedControllerMetadataTransitionReceiptReader struct {
+	store  *ProxiedStore
+	reader ControllerMetadataTransitionReceiptReader
+}
+
+func (r proxiedControllerMetadataTransitionReceiptReader) ControllerMetadataTransitionReceipt(issueID, receiptID string) (ControllerMetadataTransitionReceipt, bool, error) {
+	var receipt ControllerMetadataTransitionReceipt
+	var found bool
+	err := r.store.withMutation("controller-metadata-transition-receipt "+issueID, func(Store) error {
+		var readErr error
+		receipt, found, readErr = r.reader.ControllerMetadataTransitionReceipt(issueID, receiptID)
+		return readErr
+	})
+	return receipt, found, r.store.classifyReadError(err)
+}
+
+func (s *ProxiedStore) ControllerMetadataTransitionReceiptReaderHandle() (ControllerMetadataTransitionReceiptReader, bool) {
+	if s == nil {
+		return nil, false
+	}
+	reader, ok := ControllerMetadataTransitionReceiptReaderFor(s.writeLeaf())
+	if !ok || reader == nil {
+		return nil, false
+	}
+	return proxiedControllerMetadataTransitionReceiptReader{store: s, reader: reader}, true
+}
+
+type proxiedRevisionTransitionWriter struct {
+	store  *ProxiedStore
+	writer RevisionTransitionWriter
+}
+
+type proxiedDecisionFrontierRecordWriter struct {
+	store *ProxiedStore
+}
+
+func (w proxiedDecisionFrontierRecordWriter) CreateDecisionFrontierRecord(record Bead) (Bead, error) {
+	var created Bead
+	err := w.store.withMutation("decision-frontier-record-create "+record.ID, func(leaf Store) error {
+		writer, ok := DecisionFrontierRecordWriterFor(leaf)
+		if !ok || writer == nil {
+			return ErrDecisionFrontierCapabilityUnsupported
+		}
+		var writeErr error
+		created, writeErr = writer.CreateDecisionFrontierRecord(record)
+		return writeErr
+	})
+	return created, err
+}
+
+func (w proxiedDecisionFrontierRecordWriter) CompareAndSetDecisionFrontierRecordMetadataKey(id, key, expected, next string) (bool, error) {
+	var changed bool
+	err := w.store.withMutation("decision-frontier-record-cas "+id, func(leaf Store) error {
+		writer, ok := DecisionFrontierRecordWriterFor(leaf)
+		if !ok || writer == nil {
+			return ErrDecisionFrontierCapabilityUnsupported
+		}
+		var writeErr error
+		changed, writeErr = writer.CompareAndSetDecisionFrontierRecordMetadataKey(id, key, expected, next)
+		return writeErr
+	})
+	return changed, err
+}
+
+func (w proxiedDecisionFrontierRecordWriter) EnsureDecisionFrontierLink(sourceID, targetID, depType string) error {
+	return w.store.withMutation("decision-frontier-link "+sourceID+" -> "+targetID, func(leaf Store) error {
+		writer, ok := DecisionFrontierRecordWriterFor(leaf)
+		if !ok || writer == nil {
+			return ErrDecisionFrontierCapabilityUnsupported
+		}
+		return writer.EnsureDecisionFrontierLink(sourceID, targetID, depType)
+	})
+}
+
+// DecisionFrontierRecordWriterHandle checks the current WRITE leaf before
+// advertising support. Each returned-handle call resolves the capability again
+// from the leaf passed inside its generation bracket, so an adapter retained
+// across a restart cannot keep writing through an old leaf. The native leaf is
+// a read projection and cannot own these writes.
+func (s *ProxiedStore) DecisionFrontierRecordWriterHandle() (DecisionFrontierRecordWriter, bool) {
+	if s == nil {
+		return nil, false
+	}
+	if _, ok := DecisionFrontierRecordWriterFor(s.writeLeaf()); !ok {
+		return nil, false
+	}
+	return proxiedDecisionFrontierRecordWriter{store: s}, true
+}
+
+func (w proxiedRevisionTransitionWriter) CompareAndSetMetadataKeyWithReceipt(id, key, expected, next string, expectedRevision int64, receipt RevisionTransitionReceipt) (Bead, bool, error) {
+	var bead Bead
+	var won bool
+	err := w.store.withMutation("decision-frontier-revision-transition "+id, func(Store) error {
+		var writeErr error
+		bead, won, writeErr = w.writer.CompareAndSetMetadataKeyWithReceipt(id, key, expected, next, expectedRevision, receipt)
+		return writeErr
+	})
+	return bead, won, err
+}
+
+func (s *ProxiedStore) RevisionTransitionWriterHandle() (RevisionTransitionWriter, bool) {
+	if s == nil {
+		return nil, false
+	}
+	writer, ok := RevisionTransitionWriterFor(s.writeLeaf())
+	if !ok || writer == nil {
+		return nil, false
+	}
+	return proxiedRevisionTransitionWriter{store: s, writer: writer}, true
+}
+
+// DecisionFrontierSourceReaderHandle reads the source snapshot from the
+// authoritative bd write leaf and brackets the call with the proxy generation
+// check. The native leaf is a read projection and cannot substitute for the
+// controller's authoritative source snapshot.
+func (s *ProxiedStore) DecisionFrontierSourceReaderHandle() (DecisionFrontierSourceReader, bool) {
+	if s == nil {
+		return nil, false
+	}
+	reader, ok := DecisionFrontierSourceReaderFor(s.writeLeaf())
+	if !ok || reader == nil {
+		return nil, false
+	}
+	return proxiedDecisionFrontierSourceReader{store: s, reader: reader}, true
 }
 
 // ReleaseIfCurrent releases an assignment on the write leaf, conditionally.

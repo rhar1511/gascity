@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
+	"github.com/gastownhall/gascity/internal/sessionauthority"
 )
 
 // infoKeySpec is one metadata key's codec: how a raw metadata value becomes
@@ -112,11 +113,9 @@ var infoKeyCodec = []infoKeySpec{
 	{CanonicalInstanceNameMetadata, func(i *Info, v string) { i.CanonicalInstanceNameMetadata = v }},
 	{CanonicalPoolSlotMetadata, func(i *Info, v string) { i.CanonicalPoolSlotMetadata = v }},
 
-	// Priming-marker mirrors (verbatim). The S19 Stage 3 shadow harness snapshots
-	// these compared keys off Info at tick start/end (the reconciler loop carries
-	// no raw beads), so each priming key is a projected Info field. Write-only in
-	// Stage 2: stamped by CommitStartedPatch / cleared at the started_config_hash
-	// clear sites, read by no decision path yet.
+	// Priming-marker mirrors (verbatim). Write-only in Stage 2: stamped by
+	// CommitStartedPatch / cleared at the started_config_hash clear sites, read
+	// by no decision path yet.
 	{PrimedAtMetadataKey, func(i *Info, v string) { i.PrimedAtMetadata = v }},
 	{PrimingAttemptedAtMetadataKey, func(i *Info, v string) { i.PrimingAttemptedAtMetadata = v }},
 	{PromptHashMetadataKey, func(i *Info, v string) { i.PromptHashMetadata = v }},
@@ -160,6 +159,9 @@ var infoKeyCodec = []infoKeySpec{
 	{SessionCircuitStateMetadataKey, func(i *Info, v string) { i.SessionCircuitState = v }},
 	{ResetCommittedAtKey, func(i *Info, v string) { i.ResetCommittedAt = v }},
 	{"generation", func(i *Info, v string) { i.Generation = v }},
+	{sessionauthority.MetadataProfile, func(i *Info, v string) { i.AuthorityProfile = v }},
+	{sessionauthority.MetadataAuthorization, func(i *Info, v string) { i.AuthorityAuthorization = v }},
+	{sessionauthority.MetadataTransitions, func(i *Info, v string) { i.AuthorityTransitions = v }},
 	{"started_config_hash", func(i *Info, v string) { i.StartedConfigHash = v }},
 	{"pin_awake", func(i *Info, v string) { i.PinAwake = v }},
 

@@ -1,0 +1,42 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "controlgrant",
+    srcs = [
+        "ledger.go",
+        "verifier.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/controlgrant",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/beadmeta",
+        "//internal/beads",
+    ],
+)
+
+go_test(
+    name = "controlgrant_test",
+    srcs = [
+        "ledger_test.go",
+        "testenv_import_test.go",
+        "verifier_test.go",
+    ],
+    embed = [":controlgrant"],
+    deps = [
+        "//internal/beads",
+        "//internal/fsys",
+        "//internal/testenv",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

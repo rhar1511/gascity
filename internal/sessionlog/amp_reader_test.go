@@ -184,6 +184,64 @@ func TestFindAmpSessionFileByIDAndWorkDir(t *testing.T) {
 	}
 }
 
+func TestFindAmpSessionFileByIDRejectsEscapingSymlink(t *testing.T) {
+	root := t.TempDir()
+	workDir := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatalf("mkdir workdir: %v", err)
+	}
+	outside := filepath.Join(t.TempDir(), "outside.jsonl")
+	if err := os.WriteFile(outside, []byte(`{"type":"system","cwd":`+jsonString(workDir)+`}`+"\n"), 0o600); err != nil {
+		t.Fatalf("write outside capture: %v", err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "T-escape.jsonl")); err != nil {
+		t.Fatalf("symlink outside capture: %v", err)
+	}
+
+	if got := FindAmpSessionFileByID([]string{root}, workDir, "T-escape"); got != "" {
+		t.Fatalf("FindAmpSessionFileByID() = %q, want escaping symlink rejected", got)
+	}
+}
+
+func TestFindAmpSessionFileRejectsEscapingSymlinkCandidate(t *testing.T) {
+	root := t.TempDir()
+	workDir := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatalf("mkdir workdir: %v", err)
+	}
+	outside := filepath.Join(t.TempDir(), "outside.jsonl")
+	if err := os.WriteFile(outside, []byte(`{"type":"system","cwd":`+jsonString(workDir)+`}`+"\n"), 0o600); err != nil {
+		t.Fatalf("write outside capture: %v", err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "T-escape.jsonl")); err != nil {
+		t.Fatalf("symlink outside capture: %v", err)
+	}
+
+	if got := FindAmpSessionFile([]string{root}, workDir); got != "" {
+		t.Fatalf("FindAmpSessionFile() = %q, want escaping symlink rejected", got)
+	}
+}
+
+func TestFindAmpSessionFileSupportsConfiguredSymlinkRoot(t *testing.T) {
+	actualRoot := t.TempDir()
+	configuredRoot := filepath.Join(t.TempDir(), "capture-alias")
+	if err := os.Symlink(actualRoot, configuredRoot); err != nil {
+		t.Fatalf("symlink configured root: %v", err)
+	}
+	workDir := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatalf("mkdir workdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(actualRoot, "T-session.jsonl"), []byte(`{"type":"system","cwd":`+jsonString(workDir)+`}`+"\n"), 0o600); err != nil {
+		t.Fatalf("write configured capture: %v", err)
+	}
+
+	want := filepath.Join(configuredRoot, "T-session.jsonl")
+	if got := FindAmpSessionFile([]string{configuredRoot}, workDir); got != want {
+		t.Fatalf("FindAmpSessionFile() = %q, want configured-root path %q", got, want)
+	}
+}
+
 func writeAmpJSONL(t *testing.T, lines ...string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "stream.jsonl")

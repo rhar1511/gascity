@@ -1,0 +1,77 @@
+# One real executable boundary proof: provider output deliberately contains the
+# protected signed envelope. Both stdout and stderr must stay private-safe.
+env GC_SESSION=fake
+env GC_BEADS=bd
+env GC_DOLT=skip
+env GC_CITY=$WORK/bd-city
+env BD_BIN=$WORK/provider-bd
+chmod 0755 $WORK/provider-bd
+cd $WORK/bd-city
+
+exec gc bd show gc-answer --json
+stdout 'private record'
+! stdout 'PROOF_SECRET|PAYLOAD_SECRET|OWNER_SECRET'
+! stderr 'PROOF_SECRET|PAYLOAD_SECRET|OWNER_SECRET'
+exec gc bd show gc-answer
+stdout 'private record'
+! stdout 'PROOF_SECRET|PAYLOAD_SECRET|OWNER_SECRET'
+exec gc bd list --json
+! stdout 'PROOF_SECRET|PAYLOAD_SECRET|OWNER_SECRET'
+env PROVIDER_FAIL=1
+! exec gc bd show gc-answer --json
+! stdout 'PROOF_SECRET|PAYLOAD_SECRET|OWNER_SECRET'
+! stderr 'PROOF_SECRET|PAYLOAD_SECRET|OWNER_SECRET'
+! exec gc bd-store-bridge --dir $WORK/bd-city --host 127.0.0.1 --port 12345 get gc-answer
+! stdout 'PROOF_SECRET|PAYLOAD_SECRET|OWNER_SECRET'
+! stderr 'PROOF_SECRET|PAYLOAD_SECRET|OWNER_SECRET'
+env PROVIDER_FAIL=
+exec gc bd-store-bridge --dir $WORK/bd-city --host 127.0.0.1 --port 12345 get gc-answer
+stdout 'private record'
+! stdout 'PROOF_SECRET|PAYLOAD_SECRET|OWNER_SECRET'
+exec gc bd-store-bridge --dir $WORK/bd-city --host 127.0.0.1 --port 12345 list
+stdout 'private record'
+! stdout 'PROOF_SECRET|PAYLOAD_SECRET|OWNER_SECRET'
+! exec gc bd export
+stderr 'private-safe presentation'
+! stdout 'PROOF_SECRET'
+env GC_BEADS=file
+env GC_CITY=$WORK/city
+cd $WORK/city
+exec gc beads show gc-answer --format=json
+! stdout 'PROOF_SECRET|PAYLOAD_SECRET|OWNER_SECRET'
+exec gc beads show gc-public --format=json
+stdout 'public instruction'
+! stdout 'OWNER_SECRET'
+exec gc beads list --all --format=json
+! stdout 'PROOF_SECRET|PAYLOAD_SECRET|OWNER_SECRET'
+exec gc ready --json
+! stdout 'PROOF_SECRET|PAYLOAD_SECRET|OWNER_SECRET'
+exec gc convoy status gc-convoy --json
+! stdout 'PROOF_SECRET|PAYLOAD_SECRET|OWNER_SECRET'
+exec gc convoy status gc-convoy
+! stdout 'PROOF_SECRET|PAYLOAD_SECRET|OWNER_SECRET'
+
+-- provider-bd --
+#!/bin/sh
+printf '%s\n' 'PROOF_SECRET' >&2
+if [ -n "$PROVIDER_FAIL" ]; then
+  printf '%s\n' 'PROOF_SECRET'
+  exit 7
+fi
+cat "$GC_CITY/provider.json"
+-- bd-city/provider.json --
+[{"id":"gc-answer","title":"PROOF_SECRET","status":"open","issue_type":"task","description":"{\"Proof\":\"PROOF_SECRET\"}","metadata":{"gc.decision_frontier.record":"decision-frontier/answer/v1"}}]
+-- city/city.toml --
+[workspace]
+name = "city"
+[beads]
+provider = "file"
+-- bd-city/city.toml --
+[workspace]
+name = "bd-city"
+[beads]
+provider = "bd"
+-- city/.gc/file-beads-layout --
+scope-local-v1
+-- city/.gc/beads.json --
+{"seq":4,"beads":[{"id":"gc-convoy","title":"batch","status":"open","issue_type":"convoy"},{"id":"gc-answer","title":"PROOF_SECRET","status":"closed","issue_type":"task","parent_id":"gc-convoy","description":"{\"Proof\":\"PROOF_SECRET\"}","metadata":{"gc.decision_frontier.record":"decision-frontier/answer/v1"}},{"id":"gc-payload","title":"PAYLOAD_SECRET","status":"closed","issue_type":"task","metadata":{"gc.attempt_evidence.content_payload.v1":"PAYLOAD_SECRET"}},{"id":"gc-public","title":"public work","status":"open","issue_type":"task","description":"public instruction","metadata":{"gc.stdout":"OWNER_SECRET","custom":"keep"}}]}

@@ -515,7 +515,7 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 			t.Fatal(err)
 		}
 
-		title, status, typ, desc, assignee := "renamed", "in_progress", "gate", "new description", "worker-1"
+		title, typ, desc, assignee := "renamed", "gate", "new description", "worker-1"
 		// Not 2: backends normalize the default priority back to "unset".
 		priority := 1
 		// A slice, not a map: update order is part of what is being pinned, so
@@ -526,7 +526,6 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 			opts beads.UpdateOpts
 		}{
 			{"title", beads.UpdateOpts{Title: &title}},
-			{"status", beads.UpdateOpts{Status: &status}},
 			{"type", beads.UpdateOpts{Type: &typ}},
 			{"priority", beads.UpdateOpts{Priority: &priority}},
 			{"description", beads.UpdateOpts{Description: &desc}},
@@ -546,7 +545,6 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 		}
 		for _, tc := range []struct{ field, got, want string }{
 			{"Title", got.Title, title},
-			{"Status", got.Status, status},
 			{"Type", got.Type, typ},
 			{"Description", got.Description, desc},
 			{"Assignee", got.Assignee, assignee},
@@ -579,6 +577,38 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 		}
 		if !hasLabel(got.Labels, "keep") {
 			t.Errorf("Labels = %v, want %q preserved", got.Labels, "keep")
+		}
+	})
+
+	t.Run("UpdateStatusRoundTripsOrSkipsWithoutConditionalWriter", func(t *testing.T) {
+		s := newStore()
+		b, err := s.Create(beads.Bead{Title: "status update"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		status := "in_progress"
+		if err := s.Update(b.ID, beads.UpdateOpts{Status: &status}); err != nil {
+			if !errors.Is(err, beads.ErrConditionalWriteUnsupported) {
+				t.Fatalf("Update(status): %v", err)
+			}
+			if _, ok := beads.ConditionalWriterFor(s); ok {
+				t.Fatalf("Update(status) = %v despite exposing ConditionalWriter", err)
+			}
+			current, getErr := s.Get(b.ID)
+			if getErr != nil {
+				t.Fatalf("Get after refused Update(status): %v", getErr)
+			}
+			if current.Status != "open" {
+				t.Fatalf("status after refused Update(status) = %q, want unchanged open", current.Status)
+			}
+			t.Skip("store has no conditional-write capability for lifecycle-sensitive status updates")
+		}
+		got, err := s.Get(b.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status != status {
+			t.Errorf("Status = %q, want %q", got.Status, status)
 		}
 	})
 

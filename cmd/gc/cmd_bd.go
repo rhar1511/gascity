@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +21,8 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/sessionauthority"
+	"github.com/gastownhall/gascity/internal/worklifecycle"
 	"github.com/spf13/cobra"
 )
 
@@ -104,14 +107,27 @@ invocation the generated work query builds, not with all of "bd ready" —
 "gc ready --help" lists what it takes. A city that relocates no class is
 unaffected.
 
-All arguments after "gc bd" are forwarded to bd unchanged, with one
-exception: a "list" that filters on the wisps (ephemeral) tier —
+Generic bead output is projected before presentation: private signed-answer
+and attempt-evidence records appear as private stubs, and private metadata is
+removed from public owners. Read commands request complete JSON from bd; gc
+renders text unless --json is requested. Provider diagnostics are withheld on
+these paths. Raw SQL, exports, history, and output-field selection are refused
+because they cannot preserve the private-record boundary. Scoped private reads
+retain their separate authorization requirements.
+
+A "list" that filters on the wisps (ephemeral) tier —
 "--type=molecule", "--type=wisp", "--mol-type", "--wisp-type" — also gets
 "--include-infra". bd skips that tier on any list without the flag, so those
 filters would otherwise return [] and exit 0 on a ledger full of live
-molecules. Every other list is forwarded as written. "heartbeat
+molecules. Query filters retain their meaning. "heartbeat
 <issue-id>" forwards to bd's native heartbeat, which refreshes the claim's
-lease and fails loudly when the caller no longer owns it. gc adds one
+lease and fails loudly when the caller no longer owns it. "show <id>
+--watch" (or "show --current --watch", or the "view" alias) on a scope that
+uses bd's proxied-server transport (the default for a new city), where bd
+refuses watch mode, is served by gc instead: it re-runs "bd show" every 2
+seconds and redraws when the bead's status or update time changes, until
+Ctrl+C. Like bd's own watch, it renders the plain form and ignores show's
+display flags (--json, --short, --long, --refs, --children). gc adds one
 subcommand of its own: "release-if-current <issue-id> <assignee>", which
 conditionally resets an in-progress assignment only when the bead still has
 that assignee.
@@ -352,6 +368,12 @@ func bdRigQualifiedMetadataRefusal(cfg *config.City, bdArgs []string) (string, b
 	}
 
 	validate := func(key, value string) (string, bool) {
+		if strings.HasPrefix(strings.TrimSpace(key), beadmeta.SessionRequestReceiptPrefix) {
+			return fmt.Sprintf("gc bd: refusing controller-owned session request receipt metadata %q; use the tracked session protocol\n", key), true
+		}
+		if protectedSessionAuthorityMetadata(key) {
+			return fmt.Sprintf("gc bd: refusing controller-owned session authority metadata %q; use the signed session permission-mode API\n", key), true
+		}
 		if beadmeta.IsGenericMutationReservedKey(key) {
 			return fmt.Sprintf("gc bd: refusing protected session lifecycle metadata key %q before write\n", key), true
 		}
@@ -375,7 +397,21 @@ func bdRigQualifiedMetadataRefusal(cfg *config.City, bdArgs []string) (string, b
 		}
 		value := ""
 		switch {
-		case arg == "--set-metadata" || arg == "--unset-metadata" || arg == "--metadata":
+		case arg == "--unset-metadata":
+			if i+1 >= len(args) {
+				return fmt.Sprintf("gc bd: refusing %s without a value before write\n", arg), true
+			}
+			i++
+			if msg, refused := validate(args[i], ""); refused {
+				return msg, true
+			}
+			continue
+		case strings.HasPrefix(arg, "--unset-metadata="):
+			if msg, refused := validate(strings.TrimPrefix(arg, "--unset-metadata="), ""); refused {
+				return msg, true
+			}
+			continue
+		case arg == "--set-metadata" || arg == "--metadata":
 			if i+1 >= len(args) {
 				return fmt.Sprintf("gc bd: refusing %s without a value before write\n", arg), true
 			}
@@ -383,8 +419,6 @@ func bdRigQualifiedMetadataRefusal(cfg *config.City, bdArgs []string) (string, b
 			value = args[i]
 		case strings.HasPrefix(arg, "--set-metadata="):
 			value = strings.TrimPrefix(arg, "--set-metadata=")
-		case strings.HasPrefix(arg, "--unset-metadata="):
-			value = strings.TrimPrefix(arg, "--unset-metadata=")
 		case strings.HasPrefix(arg, "--metadata="):
 			value = strings.TrimPrefix(arg, "--metadata=")
 		default:
@@ -425,15 +459,12 @@ func bdRigQualifiedMetadataRefusal(cfg *config.City, bdArgs []string) (string, b
 			return fmt.Sprintf("gc bd: refusing malformed --metadata value before write: %v\n", err), true
 		}
 		for key, rawValue := range metadata {
-			if beadmeta.IsGenericMutationReservedKey(key) {
-				return fmt.Sprintf("gc bd: refusing protected session lifecycle metadata key %q before write\n", key), true
-			}
-			if key != beadmeta.LeaseOwnerMetadataKey && key != beadmeta.RoutedToMetadataKey {
-				continue
-			}
 			var metadataValue string
 			if err := json.Unmarshal(rawValue, &metadataValue); err != nil {
-				return fmt.Sprintf("gc bd: refusing non-string %s before write\n", key), true
+				if strings.HasPrefix(strings.TrimSpace(key), beadmeta.SessionRequestReceiptPrefix) || protectedSessionAuthorityMetadata(key) || key == beadmeta.LeaseOwnerMetadataKey || key == beadmeta.RoutedToMetadataKey {
+					return fmt.Sprintf("gc bd: refusing non-string %s before write\n", key), true
+				}
+				continue
 			}
 			if msg, refused := validate(key, metadataValue); refused {
 				return msg, true
@@ -441,6 +472,142 @@ func bdRigQualifiedMetadataRefusal(cfg *config.City, bdArgs []string) (string, b
 		}
 	}
 	return "", false
+}
+
+func bdMetadataMutationKeys(bdArgs []string) (map[string]struct{}, bool) {
+	verb, args := bdflags.SplitGlobalFlags(bdArgs)
+	if verb == "new" {
+		verb = "create"
+	}
+	if verb != "create" && verb != "update" {
+		return nil, true
+	}
+	valueFlags := bdflags.ValueFlags(verb)
+	keys := make(map[string]struct{})
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			break
+		}
+		value := ""
+		switch {
+		case arg == "--unset-metadata":
+			if i+1 >= len(args) {
+				return nil, false
+			}
+			i++
+			keys[strings.TrimSpace(args[i])] = struct{}{}
+			continue
+		case strings.HasPrefix(arg, "--unset-metadata="):
+			keys[strings.TrimSpace(strings.TrimPrefix(arg, "--unset-metadata="))] = struct{}{}
+			continue
+		case arg == "--set-metadata" || arg == "--metadata":
+			if i+1 >= len(args) {
+				return nil, false
+			}
+			i++
+			value = args[i]
+		case strings.HasPrefix(arg, "--set-metadata="):
+			value = strings.TrimPrefix(arg, "--set-metadata=")
+		case strings.HasPrefix(arg, "--metadata="):
+			value = strings.TrimPrefix(arg, "--metadata=")
+		default:
+			if !strings.Contains(arg, "=") && valueFlags[arg] && i+1 < len(args) {
+				i++
+			}
+			continue
+		}
+		if strings.HasPrefix(arg, "--set-metadata") {
+			key, _, ok := strings.Cut(value, "=")
+			if !ok || strings.TrimSpace(key) == "" {
+				return nil, false
+			}
+			keys[strings.TrimSpace(key)] = struct{}{}
+			continue
+		}
+		if strings.HasPrefix(strings.TrimSpace(value), "@") {
+			return nil, false
+		}
+		var metadata map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(value), &metadata); err != nil {
+			return nil, false
+		}
+		for key := range metadata {
+			keys[strings.TrimSpace(key)] = struct{}{}
+		}
+	}
+	return keys, true
+}
+
+func bdPersistedProtectedMutationRefusal(bdArgs, writeIDs []string, current map[string]beads.Bead) (string, bool) {
+	verb, verbArgs, _ := bdRelocatedClassVerb(bdArgs)
+	if verb == "delete" && bdCascadeDeleteRequested(verbArgs) {
+		return "gc bd: refusing cascade delete because the full dependency closure cannot be checked for retained session evidence\n", true
+	}
+	for id, bead := range current {
+		if verb == "delete" && beads.HasRetainedSessionRequestEvidence(bead) {
+			return fmt.Sprintf("gc bd: refusing delete of %q because its session request evidence has no deletion policy\n", id), true
+		}
+	}
+	keys, ok := bdMetadataMutationKeys(bdArgs)
+	if !ok {
+		return "gc bd: cannot safely inspect protected metadata mutation before write\n", true
+	}
+	requiresCurrent := verb == "delete"
+	for key := range keys {
+		if sessionAuthorityOptionMetadata(key) {
+			requiresCurrent = true
+		}
+	}
+	if requiresCurrent {
+		for _, id := range writeIDs {
+			if _, ok := current[id]; !ok {
+				return fmt.Sprintf("gc bd: refusing protected mutation of %q because its current metadata could not be verified\n", id), true
+			}
+		}
+	}
+	for id, bead := range current {
+		for key := range keys {
+			if sessionauthority.ProtectsMetadataMutation(key, bead.Metadata) {
+				return fmt.Sprintf("gc bd: refusing controller-owned session authority metadata %q on protected bead %q; use the signed session permission-mode API\n", key, id), true
+			}
+		}
+	}
+	return "", false
+}
+
+func bdCascadeDeleteRequested(args []string) bool {
+	for _, arg := range args {
+		if arg == "--cascade" {
+			return true
+		}
+		value, ok := strings.CutPrefix(arg, "--cascade=")
+		if !ok {
+			continue
+		}
+		enabled, err := strconv.ParseBool(strings.TrimSpace(value))
+		if err != nil || enabled {
+			return true
+		}
+	}
+	return false
+}
+
+func protectedSessionAuthorityMetadata(key string) bool {
+	return sessionauthority.ProtectsMetadataMutation(key, nil)
+}
+
+func sessionAuthorityOptionMetadata(key string) bool {
+	switch strings.TrimSpace(key) {
+	case sessionauthority.MetadataTemplateOverrides, sessionauthority.MetadataPermissionModeOption:
+		return true
+	default:
+		return false
+	}
+}
+
+func sessionAuthorityMetadataPreviouslyProtected(metadata map[string]string) bool {
+	return sessionauthority.HasAuthorityMetadata(metadata)
 }
 
 func doBd(args []string, stdout, stderr io.Writer) int {
@@ -478,6 +645,10 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: loading config: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if cfg.Lifecycle.AdmissionEnabled && !lifecycleAdmissionBdCommandReadOnly(bdArgs) {
+		fmt.Fprintf(stderr, "gc bd: lifecycle admission is enabled; refusing raw bd command %q because it has no lifecycle proof-aware write guard\n", bdArgs) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if msg, refused := bdRigQualifiedMetadataRefusal(cfg, bdArgs); refused {
@@ -567,10 +738,8 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// names the store that actually serves the request: a class-owned `show`
 	// on a split city is answered in process from the class's own binding by
 	// maybeRouteBdByID, not from target, and disclosing target there would be
-	// wrong for that one read. This is stderr-only and additive — bd's own
-	// stdout (human or --json) is untouched, and it never changes the exit
-	// code, matching the disclosure style #5162/#5167 established for the
-	// sibling relocated-class invariant.
+	// wrong for that one read. The disclosure is stderr-only and additive; it
+	// never changes the exit code or the separate private-record projection.
 	if verb, _, ok := bdRelocatedClassVerb(bdArgs); ok && bdScopeDisclosureVerbs[verb] {
 		fmt.Fprintf(stderr, "gc bd: answering from the %s store\n", scopeLabel(target)) //nolint:errcheck // best-effort stderr
 	}
@@ -613,13 +782,11 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// value-consuming flag), the command is rejected rather than forwarded
 	// unguarded.
 	//
-	// Tradeoff: only a genuine ErrIDCollision (bd returned a *different* bead
-	// than requested) blocks the write. ErrNotFound and store-unavailable are
-	// non-fatal — the write falls through to bd, which will produce its own
-	// error if the bead truly does not exist. This preserves correctness for
-	// legitimate flows (native heartbeat lease refresh, silent-fallback paths,
-	// ephemeral/wisp rows, projection-lag writes) that proceed even when the
-	// bead isn't yet visible through the read seam.
+	// Lifecycle-enrolled writes also fail closed here because the raw bd
+	// subprocess has no authenticated session/claim proof or observed revision.
+	// A genuinely absent bead may still be forwarded to bd so its own not-found
+	// behavior remains intact; an unavailable read seam cannot establish that
+	// the target is unenrolled, so it is refused.
 	//
 	// Note: gc bd show (read passthrough) does NOT have this guard and still
 	// substring-resolves. That is intentional — reads are non-destructive.
@@ -630,47 +797,74 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	var (
 		guardStore beads.Store
 		guardBeads map[string]beads.Bead
+		guardIDs   []string
 	)
 	if writeIDs, writeOK, ambiguous := bdMutationWriteIDs(bdArgs); writeOK {
+		guardIDs = writeIDs
 		if ambiguous {
 			fmt.Fprintf(stderr, "gc bd: cannot safely verify bead IDs (unrecognized flag in args %v); aborting to prevent substring-resolution mutation of the wrong bead\n", bdArgs) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		if len(writeIDs) > 0 {
 			store, storeErr := openStoreAtForCityWithConfig(target.ScopeRoot, cityPath, cfg)
-			if storeErr != nil && bdArgs[0] == "delete" {
-				fmt.Fprintf(stderr, "gc bd: cannot inspect delete targets for protected session request evidence: %v\n", storeErr) //nolint:errcheck
+			if storeErr != nil {
+				fmt.Fprintf(stderr, "gc bd: cannot verify lifecycle enrollment for write target: %v; refusing mutation\n", storeErr) //nolint:errcheck // best-effort stderr
 				return 1
 			}
-			// Store-unavailable: we cannot verify, but we must not block
-			// legitimate writes. Fall through; bd will error on actual problems.
-			if storeErr == nil {
-				guardStore = store
-				guardBeads = make(map[string]beads.Bead, len(writeIDs))
-				for _, id := range writeIDs {
-					bead, getErr := store.Get(id)
-					if errors.Is(getErr, beads.ErrIDCollision) {
-						// bd resolved a different bead — block the write to prevent
-						// mutating the wrong bead via substring resolution.
-						fmt.Fprintf(stderr, "gc bd: bead %q resolved to a different bead ID (substring collision); aborting to prevent mutating the wrong bead\n", id) //nolint:errcheck // best-effort stderr
-						return 1
-					}
-					if getErr == nil {
-						guardBeads[id] = bead
-					}
-					// ErrNotFound or any other error: bead may be absent, ephemeral,
-					// or the read seam differs from the write seam — fall through.
+			guardStore = store
+			guardBeads = make(map[string]beads.Bead, len(writeIDs))
+			// Bulk exact reads are an optimization, never a substitute for
+			// checking every target and its lifecycle admission below.
+			var batch map[string]beads.Bead
+			if getter, ok := store.(beads.ExactBatchGetter); ok && len(writeIDs) > 1 {
+				found, _, batchErr := getter.GetExactBatch(writeIDs)
+				if batchErr == nil {
+					batch = found
+				} else if !errors.Is(batchErr, beads.ErrExactBatchGetUnsupported) {
+					fmt.Fprintf(stderr, "gc bd: cannot verify lifecycle enrollment for batch: %v; refusing mutation\n", batchErr) //nolint:errcheck
+					return 1
 				}
-				if bdArgs[0] == "delete" {
-					for _, bead := range guardBeads {
-						if session.IsSessionBeadOrRepairable(bead) || session.HasRequestEvidence(bead) {
-							fmt.Fprintf(stderr, "gc bd: delete %q requires one exact ID so session request evidence can be protected\n", bead.ID) //nolint:errcheck
-							return 1
-						}
+			}
+			for _, id := range writeIDs {
+				bead, found := batch[id]
+				var getErr error
+				if !found {
+					bead, getErr = store.Get(id)
+				} else if bead.ID != id {
+					getErr = beads.ErrIDCollision
+				}
+				if errors.Is(getErr, beads.ErrIDCollision) {
+					// bd resolved a different bead — block the write to prevent
+					// mutating the wrong bead via substring resolution.
+					fmt.Fprintf(stderr, "gc bd: bead %q resolved to a different bead ID (substring collision); aborting to prevent mutating the wrong bead\n", id) //nolint:errcheck // best-effort stderr
+					return 1
+				}
+				if errors.Is(getErr, beads.ErrNotFound) {
+					continue
+				}
+				if getErr != nil {
+					fmt.Fprintf(stderr, "gc bd: cannot verify lifecycle enrollment for %q: %v; refusing mutation\n", id, getErr) //nolint:errcheck // best-effort stderr
+					return 1
+				}
+				if err := worklifecycle.ValidateGenericMutation(bead); err != nil {
+					fmt.Fprintf(stderr, "gc bd: %s: %v\n", id, err) //nolint:errcheck // best-effort stderr
+					return 1
+				}
+				guardBeads[id] = bead
+			}
+			if bdArgs[0] == "delete" {
+				for _, bead := range guardBeads {
+					if session.IsSessionBeadOrRepairable(bead) || session.HasRequestEvidence(bead) {
+						fmt.Fprintf(stderr, "gc bd: delete %q requires one exact ID so session request evidence can be protected\n", bead.ID) //nolint:errcheck
+						return 1
 					}
 				}
 			}
 		}
+	}
+	if msg, refused := bdPersistedProtectedMutationRefusal(bdArgs, guardIDs, guardBeads); refused {
+		fmt.Fprint(stderr, msg) //nolint:errcheck // best-effort stderr
+		return 1
 	}
 
 	// Work-record close gate (ADR-0009): a close routed through the SDK seam
@@ -679,8 +873,26 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// blocks the close only when GC_WORK_RECORD_ENFORCE is set. Reuses the
 	// store/beads the write-ID guard above already opened and read, and the
 	// config the caller already loaded.
-	if runWorkRecordCloseGate(bdArgs, target.ScopeRoot, cityPath, cfg, guardStore, guardBeads, stderr) {
-		return 1
+	if gateExitCode := runWorkRecordCloseGate(bdArgs, target.ScopeRoot, cityPath, cfg, guardStore, guardBeads, stderr); gateExitCode != 0 {
+		return gateExitCode
+	}
+	if ids, reason, jsonOutput, ok := parseFencedBatchClose(bdArgs); ok {
+		written, err := closeBdBatchAtRevisions(guardStore, guardBeads, ids, reason)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc bd: batch close: %v\n", err) //nolint:errcheck
+			return 1
+		}
+		if jsonOutput {
+			if err := writeJSON(stdout, bridgeBeads(written)); err != nil {
+				fmt.Fprintln(stderr, err) //nolint:errcheck
+				return 1
+			}
+		} else {
+			for _, b := range written {
+				fmt.Fprintf(stdout, "Closed %s\n", b.ID) //nolint:errcheck
+			}
+		}
+		return 0
 	}
 	if op, ok := parseBdByIDOp(bdArgs); ok && (op.Verb == bdByIDUpdate || op.Verb == bdByIDClose || op.Verb == bdByIDReopen) {
 		store := guardStore
@@ -710,6 +922,10 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		}
 		if writeErr != nil {
 			fmt.Fprintf(stderr, "gc bd: %s %s: %v\n", op.Verb, op.ID, writeErr) //nolint:errcheck
+			if errors.Is(writeErr, beads.ErrBDSilentFallback) {
+				fmt.Fprintln(stderr, bdSilentFallbackUserMessage) //nolint:errcheck // best-effort diagnostic
+				return bdSilentFallbackExitCode
+			}
 			return 1
 		}
 		written, err := store.Get(op.ID)
@@ -755,14 +971,26 @@ protectedChecks:
 		return 1
 	}
 
-	cmd := exec.Command(bdPath, bdArgs...)
+	projectOutput, err := bdPresentationCommand(bdArgs)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	jsonOutput := bdPresentationJSONRequested(bdArgs)
+	providerArgs := append([]string(nil), bdArgs...)
+	if projectOutput && !jsonOutput {
+		providerArgs = bdJSONProviderArgs(bdArgs)
+	}
+	cmd := exec.Command(bdPath, providerArgs...)
 	cmd.Dir = target.ScopeRoot
 	cmd.Stdin = os.Stdin
-	var jsonOutput bytes.Buffer
-	if bdOutputNeedsCredentialRedaction(bdArgs) {
-		cmd.Stdout = &jsonOutput
-	} else {
-		cmd.Stdout = stdout
+	cmd.Stdout = stdout
+	var presentationOutput bytes.Buffer
+	var credentialOutput bytes.Buffer
+	if projectOutput {
+		cmd.Stdout = &presentationOutput
+	} else if bdOutputNeedsCredentialRedaction(bdArgs) {
+		cmd.Stdout = &credentialOutput
 	}
 	// Tee stderr through a bounded head buffer alongside the operator's
 	// pipe so we can scan it post-exec for bd's silent-fallback-to-on-disk
@@ -771,6 +999,9 @@ protectedChecks:
 	// (close path) — both go through this handoff.
 	stderrScan := &headLimitedWriter{limit: bdStderrScanLimit}
 	cmd.Stderr = io.MultiWriter(stderr, stderrScan)
+	if projectOutput {
+		cmd.Stderr = stderrScan
+	}
 	env, err := bdCommandEnv(cityPath, cfg, target)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -778,17 +1009,34 @@ protectedChecks:
 	}
 	cmd.Env = workQueryEnvForDir(env, cmd.Dir)
 
+	// GC serves every recognized watch using bounded JSON reads. Native bd
+	// watch rendering cannot apply the private-record projection, while proxied
+	// bd refuses watch mode altogether. Both scopes retain change polling,
+	// cancellation, tracing and managed-store diagnostics without raw egress.
+	if req, ok := parseBdShowWatchArgs(bdArgs); ok {
+		return serveBdShowWatch(req, &bdWatchRunner{
+			bdPath: bdPath, dir: cmd.Dir, env: cmd.Env,
+			cityPath: cityPath, scopeRoot: target.ScopeRoot, stderr: stderr,
+		}, stdout, stderr)
+	}
+
 	traceStart := time.Now()
 	runErr := cmd.Run()
-	if jsonOutput.Len() > 0 {
-		if redacted, ok := redactBdJSONOutput(jsonOutput.Bytes()); ok {
+	if credentialOutput.Len() > 0 {
+		if redacted, ok := redactBdJSONOutput(credentialOutput.Bytes()); ok {
 			_, _ = stdout.Write(redacted)
 		} else {
-			_, _ = stdout.Write(redactBdTextOutput(jsonOutput.Bytes()))
+			_, _ = stdout.Write(redactBdTextOutput(credentialOutput.Bytes()))
 		}
 	}
 	traceExit := 0
 	if runErr != nil {
+		if projectOutput {
+			fmt.Fprintln(stderr, "gc bd: provider command failed; private diagnostic withheld") //nolint:errcheck
+			if bdOutputSuggestsConflictingDoltStart(stderrScan.String()) {
+				fmt.Fprintln(stderr, "gc bd: provider suggested bd dolt start") //nolint:errcheck
+			}
+		}
 		var exitErr *exec.ExitError
 		if errors.As(runErr, &exitErr) {
 			traceExit = exitErr.ExitCode()
@@ -823,11 +1071,74 @@ protectedChecks:
 	// mask it. (Root cause fixed upstream in beads post-#3691; this surfaces
 	// the symptom for deployments still on stable bd builds.)
 	if bdOutputIndicatesSilentFallback(stderrScan.String()) {
+		if projectOutput {
+			fmt.Fprintln(stderr, "gc bd: provider auto-importing fallback detected; private diagnostic withheld") //nolint:errcheck
+		}
 		fmt.Fprintln(stderr, bdSilentFallbackUserMessage) //nolint:errcheck // best-effort stderr
 		return bdSilentFallbackExitCode
 	}
 
+	if projectOutput {
+		return writeBdProviderPresentation(presentationOutput.Bytes(), jsonOutput, stdout, stderr)
+	}
 	return 0
+}
+
+// lifecycleAdmissionBdCommandReadOnly allows a narrow set of raw bd reads
+// while lifecycle admission is enabled. The raw passthrough has no proof-aware
+// write guard, so every unknown command and every mutation alias must fail
+// closed. Parse persistent flags strictly so an unknown leading flag cannot
+// make its value look like an allowlisted read verb.
+func lifecycleAdmissionBdCommandReadOnly(args []string) bool {
+	globalValueFlags := bdflags.GlobalValueFlags()
+	globalBoolFlags := bdflags.GlobalBoolFlags()
+	verb := ""
+	rootHelpOrVersion := false
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			return false
+		}
+		if !strings.HasPrefix(arg, "-") {
+			verb = arg
+			break
+		}
+		name := arg
+		inline := false
+		if at := strings.IndexByte(arg, '='); at >= 0 {
+			name, inline = arg[:at], true
+		}
+		if globalValueFlags[name] {
+			if !inline {
+				if i+1 >= len(args) {
+					return false
+				}
+				i++
+			}
+			continue
+		}
+		if globalBoolFlags[name] {
+			if name == "--help" || name == "-h" || name == "--version" || name == "-V" {
+				rootHelpOrVersion = true
+			}
+			continue
+		}
+		return false
+	}
+	if verb == "" {
+		return rootHelpOrVersion
+	}
+	switch verb {
+	case "show", "list", "search", "query", "count", "ready", "blocked",
+		"children", "status", "statuses", "types", "history", "diff", "stale",
+		"graph", "stats", "info", "where", "context", "version", "help":
+		return true
+	default:
+		// This includes nested command families, aliases, raw SQL, the internal
+		// release-if-current verb, and commands added by a future bd version.
+		// A future read verb can be added here with a direct bounded read contract.
+		return false
+	}
 }
 
 // bdRequestsProtectedMutation reports whether an update changes a field whose
@@ -1009,7 +1320,7 @@ func bdMutationWriteIDs(args []string) (ids []string, ok bool, ambiguous bool) {
 
 	// valueFlags is the complete set of flags that consume the next argument as
 	// their value for this subcommand, in both long and short form.
-	// Sourced from `bd <sub> --help` (bd 1.3.0-rc.2, 2026-09-10).
+	// Sourced from `bd <sub> --help` (bd 1.3.1-rc.2, 2026-09-29).
 	valueFlags := bdSubcmdValueFlags(sub)
 
 	// boolFlags is the complete set of boolean (no-value) flags. Unknown flags
@@ -1093,6 +1404,15 @@ func doBdReleaseIfCurrent(cityPath string, cfg *config.City, target execStoreTar
 	store, err := openStoreAtForCityWithConfig(target.ScopeRoot, cityPath, cfg)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd release-if-current: opening store: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	current, err := store.Get(id)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc bd release-if-current: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if err := worklifecycle.ValidateGenericMutation(current); err != nil {
+		fmt.Fprintf(stderr, "gc bd release-if-current: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	releaser, ok := store.(beads.ConditionalAssignmentReleaser)

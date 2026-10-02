@@ -1,0 +1,33 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "runisolation",
+    srcs = [
+        "cleanup.go",
+        "runisolation.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/test/integration/runisolation",
+    visibility = ["//test/integration:__pkg__"],
+)
+
+go_test(
+    name = "runisolation_test",
+    srcs = [
+        "runisolation_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":runisolation"],
+    deps = ["//internal/testenv"],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

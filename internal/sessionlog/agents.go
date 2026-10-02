@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -169,6 +170,96 @@ func FindAgentMappings(parentLogPath string) ([]AgentMapping, error) {
 	return mappings, nil
 }
 
+// FindAgentMappings discovers and reads subagent data beneath the same
+// authorized root as an already-opened parent transcript.
+func (t *OpenedTranscript) FindAgentMappings() ([]AgentMapping, error) {
+	if t == nil || t.root == nil {
+		return nil, os.ErrInvalid
+	}
+	sessionID := strings.TrimSuffix(filepath.Base(t.path), filepath.Ext(t.path))
+	dirRelative := filepath.Join(filepath.Dir(t.relative), sessionID, "subagents")
+	dir, err := t.OpenRelative(dirRelative)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("opening subagent directory beneath transcript root: %w", err)
+	}
+	entries, readErr := dir.Readdir(-1)
+	closeErr := dir.Close()
+	if readErr != nil {
+		return nil, fmt.Errorf("reading subagent directory: %w", readErr)
+	}
+	if closeErr != nil {
+		return nil, fmt.Errorf("closing subagent directory: %w", closeErr)
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+
+	mappingsByAgent := make(map[string]string)
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasPrefix(entry.Name(), "agent-") || !strings.HasSuffix(entry.Name(), ".jsonl") {
+			continue
+		}
+		agentID := agentIDFromPath(entry.Name())
+		if agentID == "" {
+			continue
+		}
+		file, err := t.OpenRelative(filepath.Join(dirRelative, entry.Name()))
+		if err != nil {
+			return nil, fmt.Errorf("opening agent %q mapping: %w", agentID, err)
+		}
+		toolUseID, err := extractParentToolUseIDFrom(file)
+		closeErr := file.Close()
+		if err != nil {
+			return nil, fmt.Errorf("reading agent %q mapping: %w", agentID, err)
+		}
+		if closeErr != nil {
+			return nil, fmt.Errorf("closing agent %q mapping: %w", agentID, closeErr)
+		}
+		mappingsByAgent[agentID] = toolUseID
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasPrefix(entry.Name(), "agent-") || !strings.HasSuffix(entry.Name(), ".meta.json") {
+			continue
+		}
+		agentID := agentIDFromPath(entry.Name())
+		if agentID == "" {
+			continue
+		}
+		file, err := t.OpenRelative(filepath.Join(dirRelative, entry.Name()))
+		if err != nil {
+			return nil, fmt.Errorf("opening agent %q metadata: %w", agentID, err)
+		}
+		data, err := io.ReadAll(file)
+		closeErr := file.Close()
+		if err != nil {
+			return nil, fmt.Errorf("reading agent %q metadata: %w", agentID, err)
+		}
+		if closeErr != nil {
+			return nil, fmt.Errorf("closing agent %q metadata: %w", agentID, closeErr)
+		}
+		var meta struct {
+			ToolUseID string `json:"toolUseId"`
+		}
+		if err := json.Unmarshal(data, &meta); err != nil {
+			return nil, fmt.Errorf("parsing agent %q metadata: %w", agentID, err)
+		}
+		if strings.TrimSpace(meta.ToolUseID) != "" {
+			mappingsByAgent[agentID] = meta.ToolUseID
+		}
+	}
+	ids := make([]string, 0, len(mappingsByAgent))
+	for agentID := range mappingsByAgent {
+		ids = append(ids, agentID)
+	}
+	sort.Strings(ids)
+	mappings := make([]AgentMapping, 0, len(ids))
+	for _, agentID := range ids {
+		mappings = append(mappings, AgentMapping{AgentID: agentID, ParentToolUseID: mappingsByAgent[agentID]})
+	}
+	return mappings, nil
+}
+
 // ValidateAgentID checks that an agent ID is safe for use in filesystem
 // paths. It rejects IDs containing path separators or dot-dot sequences.
 func ValidateAgentID(agentID string) error {
@@ -191,15 +282,41 @@ func ReadAgentSession(parentLogPath, agentID string) (*AgentSession, error) {
 
 	dir := agentDir(parentLogPath)
 	agentPath := filepath.Join(dir, "agent-"+agentID+".jsonl")
-
-	if _, err := os.Stat(agentPath); err != nil {
+	file, err := os.Open(agentPath)
+	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, fmt.Errorf("%w: %w", ErrAgentNotFound, err)
 		}
-		return nil, fmt.Errorf("checking agent file: %w", err)
+		return nil, fmt.Errorf("opening agent file: %w", err)
 	}
+	defer file.Close() //nolint:errcheck // read-only transcript
+	return readAgentSessionFrom(file)
+}
 
-	entries, err := parseFile(agentPath)
+// ReadAgentSession opens a provider subagent transcript beneath the same
+// authorized root as the parent transcript.
+func (t *OpenedTranscript) ReadAgentSession(agentID string) (*AgentSession, error) {
+	if err := ValidateAgentID(agentID); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrAgentNotFound, err)
+	}
+	if t == nil || t.root == nil {
+		return nil, os.ErrInvalid
+	}
+	sessionID := strings.TrimSuffix(filepath.Base(t.path), filepath.Ext(t.path))
+	agentRelative := filepath.Join(filepath.Dir(t.relative), sessionID, "subagents", "agent-"+agentID+".jsonl")
+	file, err := t.OpenRelative(agentRelative)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("%w: %w", ErrAgentNotFound, err)
+		}
+		return nil, fmt.Errorf("opening agent file beneath transcript root: %w", err)
+	}
+	defer file.Close() //nolint:errcheck // read-only transcript
+	return readAgentSessionFrom(file)
+}
+
+func readAgentSessionFrom(source io.Reader) (*AgentSession, error) {
+	entries, _, err := parseFileDetailedFrom(source)
 	if err != nil {
 		return nil, fmt.Errorf("reading agent transcript: %w", err)
 	}
@@ -244,8 +361,11 @@ func extractParentToolUseID(path string) (string, error) {
 		return "", fmt.Errorf("opening transcript: %w", err)
 	}
 	defer f.Close() //nolint:errcheck // read-only
+	return extractParentToolUseIDFrom(f)
+}
 
-	scanner := bufio.NewScanner(f)
+func extractParentToolUseIDFrom(source io.Reader) (string, error) {
+	scanner := bufio.NewScanner(source)
 	// Claude Code transcript entries may contain large tool results, but the
 	// parentToolUseId is expected near the top of the file.
 	scanner.Buffer(make([]byte, 0, 256*1024), agentMappingScannerMaxTokenSize)

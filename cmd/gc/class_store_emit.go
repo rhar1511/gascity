@@ -4,10 +4,11 @@ package main
 //
 // A split city serves graph, sessions, messaging, orders and nudges from a
 // binding the controller opens at boot and one-shot commands open through the
-// funnel (cli_storage_routes.go). The controller's copy of the city's work
-// ledger sits under a CachingStore, whose notifyChange appends a bead.* row to
-// <city>/.gc/events.jsonl after every mutation. The binding has no such layer
-// on either side, so every write a one-shot command made to a relocated class —
+// funnel (cli_storage_routes.go). In the controller, every store it serves —
+// the work ledger and the binding alike — sits under a CachingStore, whose
+// notifyChange appends a bead.* row to <city>/.gc/events.jsonl after every
+// mutation (class_store_cache.go). A one-shot command has no such layer, so
+// every write it made to a relocated class —
 // `gc bd close` of a gcg- step, `gc sling`, `gc formula cook`, the control
 // dispatcher's one-shot arm, mail, nudges — landed in the store and appended
 // nothing.
@@ -29,19 +30,21 @@ package main
 //
 // So the emit target is set on the ROUTES, at the one construction that belongs
 // to a one-shot command (resolveCLIStorageRoutes), and never at the one that
-// belongs to the controller (openStorageRoutes). The controller path is
-// therefore untouched by construction rather than by a runtime test that could
-// answer wrongly: it never reaches this file at all.
+// belongs to the controller (openStorageRoutes, then withControllerCache, which
+// refuses routes that already emit). The controller path is therefore
+// untouched by construction rather than by a runtime test that could answer
+// wrongly: it never reaches this file at all.
 // TestClassStoreEmitTargetHasExactlyOneInjectionSite pins the single injector,
 // because "the controller does not emit" is a claim about the call graph and
 // nothing else keeps a second injector from appearing.
 //
 // # Why the wrapper forwards so much
 //
-// A relocated class store is a bare bead engine: openStorageRoutes hands back
-// whatever the binding's provider opened (a *beads.SQLiteStore for the built-in
-// binding, a *beads.NativeDoltStore for a workspace one) with no wrapper of any
-// kind. Emission therefore has to arrive as one, and a wrapper is exactly how
+// In a one-shot process a relocated class store is a bare bead engine:
+// openStorageRoutes hands back whatever the binding's provider opened (a
+// *beads.SQLiteStore for the built-in binding, a *beads.NativeDoltStore for a
+// workspace one) with no wrapper of any kind. Emission therefore has to arrive
+// as one, and a wrapper is exactly how
 // this repo loses capabilities: the optional interfaces are discovered by type
 // assertion, so a method the wrapper does not carry does not fail — the caller
 // simply stops matching and takes a slower or weaker path, silently. Every
@@ -65,6 +68,11 @@ package main
 // was before this file. That is a known gap rather than an oversight; closing it
 // needs a touched-id set from the Tx itself.
 //
+// The decision-frontier record and receipt roles are also event-dark by
+// design. Their immutable descriptions and controller metadata contain private
+// prompts, answers, and verification state, so those writes do not pass through
+// the generic bead-event payload.
+
 // Emission is best-effort, per the one-shot recorder precedent: the mutation has
 // already committed when the row is written, so a journal that cannot be opened
 // must not turn a landed close into a failed command. Failures are surfaced once
@@ -74,6 +82,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -89,8 +98,9 @@ import (
 )
 
 // withCLIEmission makes every class store these routes serve append a canonical
-// bead.* event to cityPath's journal after each successful mutation, and
-// returns the routes.
+// bead.* event to cityPath's journal after each successful public mutation,
+// and returns the routes. The private decision-frontier writer roles stay
+// event-dark.
 //
 // It is the ONE injector. Nil routes (a city that relocates nothing) and an
 // empty city path are returned untouched, so a single-store city reaches none
@@ -122,13 +132,16 @@ func (r *storageRoutes) withCLIEmission(cityPath string) *storageRoutes {
 }
 
 // emittingClassStore is a relocated class store that appends a bead.* event
-// after each successful mutation. The embedded Store carries the required
-// surface; every optional capability either bead engine declares is forwarded
-// explicitly below.
+// after each successful public mutation. Private decision-frontier writes are
+// forwarded through their typed roles without generic events. The embedded
+// Store carries the required surface; every optional capability either bead
+// engine declares is forwarded explicitly below.
 type emittingClassStore struct {
 	beads.Store
 	cityPath string
 }
+
+var _ beads.DecisionFrontierRecordWriterHandleProvider = (*emittingClassStore)(nil)
 
 // ---------------------------------------------------------------------------
 // Emission.
@@ -169,6 +182,7 @@ func (s *emittingClassStore) emit(emissions ...classStoreEmission) {
 			warnClassStoreEmit(fmt.Errorf("marshaling the %s payload of %s: %w", emission.eventType, emission.bead.ID, err))
 			continue
 		}
+		payload = withExplicitEdges(payload, emission.bead)
 		stepID := emission.bead.Metadata[beadmeta.StepIDMetadataKey]
 		rec.Record(events.Event{
 			Type:             emission.eventType,
@@ -191,19 +205,48 @@ func (s *emittingClassStore) emit(emissions ...classStoreEmission) {
 // the fold, because a projection applying it overwrites the row's title, status
 // and run membership with nothing.
 //
-// Dependency edges are hydrated because the controller's payload carries them
-// and a consumer comparing the two shapes would otherwise read the CLI's as an
-// edge removal.
+// Dependency edges ride the payload because the controller's does and a
+// consumer comparing the two shapes would otherwise read the CLI's as an edge
+// removal. A row that already carries its edges (the SQLite and native Dolt
+// engines return them) needs no second read. A row that carries none is
+// confirmed with DepList, and a confirmed empty set is marked (a non-nil empty
+// slice) so emit writes an explicit "dependencies":[] — without it, omitempty
+// drops the key and the controller cannot tell "no edges" from "unknown".
 func (s *emittingClassStore) snapshot(id string) (beads.Bead, bool) {
 	bead, err := s.Get(id)
 	if err != nil || strings.TrimSpace(bead.ID) == "" {
 		return beads.Bead{}, false
 	}
+	if len(bead.Dependencies) > 0 {
+		bead.Needs = nil
+		return bead, true
+	}
 	if deps, err := s.DepList(id, "down"); err == nil {
 		bead.Dependencies = deps
+		if bead.Dependencies == nil {
+			bead.Dependencies = []beads.Dep{}
+		}
 		bead.Needs = nil
 	}
 	return bead, true
+}
+
+// withExplicitEdges adds "dependencies":[] to a payload whose bead has a
+// confirmed empty edge set, which the Bead encoding would otherwise omit.
+func withExplicitEdges(payload []byte, bead beads.Bead) []byte {
+	if bead.Dependencies == nil || len(bead.Dependencies) > 0 {
+		return payload
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		return payload
+	}
+	fields["dependencies"] = json.RawMessage("[]")
+	out, err := json.Marshal(fields)
+	if err != nil {
+		return payload
+	}
+	return out
 }
 
 // emitCreated records bead.created for a landed create. A post-write read miss
@@ -457,6 +500,147 @@ func (s *emittingClassStore) DepRemove(issueID, dependsOnID string) error {
 // beads package publishes for it, or with the zero value where the question is
 // a capability question and the honest answer is "no".
 
+// StableCreateIDResolveTarget preserves the backing store's durable
+// caller-supplied ID guarantee. The resolver follows this exact target rather
+// than treating the emitting wrapper's structural methods as proof.
+func (s *emittingClassStore) StableCreateIDResolveTarget() beads.Store {
+	return s.Store
+}
+
+// PrivatePayloadValueTransportTarget preserves the exact durable transport;
+// neither a structural method nor generic Create proves private-payload safety.
+func (s *emittingClassStore) PrivatePayloadValueTransportTarget() beads.Store {
+	if s == nil {
+		return nil
+	}
+	return s.Store
+}
+
+// CreatePrivatePayloadValue is event-dark: private evidence bytes never enter
+// the public bead journal. Unsupported backings retain their hard refusal.
+func (s *emittingClassStore) CreatePrivatePayloadValue(b beads.Bead) (beads.Bead, error) {
+	return beads.CreatePrivatePayloadValue(s.PrivatePayloadValueTransportTarget(), b)
+}
+
+// DecisionFrontierRecordWriterHandle preserves the backing store's trusted
+// record capability without emitting generic bead events. Decision records,
+// answers, and their links contain private controller state and are written
+// only through this narrow role.
+func (s *emittingClassStore) DecisionFrontierRecordWriterHandle() (beads.DecisionFrontierRecordWriter, bool) {
+	if s == nil {
+		return nil, false
+	}
+	writer, ok := beads.DecisionFrontierRecordWriterFor(s.Store)
+	if !ok || writer == nil {
+		return nil, false
+	}
+	return s, true
+}
+
+// DecisionFrontierSourceReaderHandle keeps authoritative source snapshots on
+// the wrapped class store. This read-only capability adds no event emission.
+func (s *emittingClassStore) DecisionFrontierSourceReaderHandle() (beads.DecisionFrontierSourceReader, bool) {
+	reader, ok := beads.DecisionFrontierSourceReaderFor(s.Store)
+	if !ok || reader == nil {
+		return nil, false
+	}
+	return s, true
+}
+
+// RevisionTransitionReceiptReaderHandle exposes this wrapper's receipt method
+// only when the backing store explicitly provides exact receipt reads.
+func (s *emittingClassStore) RevisionTransitionReceiptReaderHandle() (beads.RevisionTransitionReceiptReader, bool) {
+	reader, ok := beads.RevisionTransitionReceiptReaderFor(s.Store)
+	if !ok || reader == nil {
+		return nil, false
+	}
+	return s, true
+}
+
+func (s *emittingClassStore) ControllerMetadataTransitionReceiptReaderHandle() (beads.ControllerMetadataTransitionReceiptReader, bool) {
+	return beads.ControllerMetadataTransitionReceiptReaderFor(s.Store)
+}
+
+// RevisionTransitionWriterHandle preserves the backing store's atomic hold
+// and receipt transition while keeping its private metadata out of generic
+// bead events.
+func (s *emittingClassStore) RevisionTransitionWriterHandle() (beads.RevisionTransitionWriter, bool) {
+	writer, ok := beads.RevisionTransitionWriterFor(s.Store)
+	if !ok || writer == nil {
+		return nil, false
+	}
+	return s, true
+}
+
+// ControllerMetadataTransitionWriterHandle forwards the private Q43 transport
+// without emitting its marker or receipt through the generic event stream.
+func (s *emittingClassStore) ControllerMetadataTransitionWriterHandle() (beads.ControllerMetadataTransitionWriter, bool) {
+	return beads.ControllerMetadataTransitionWriterFor(s.Store)
+}
+
+// CreateDecisionFrontierRecord is a private controller write. It deliberately
+// does not call emitCreated: the record description can contain prompts,
+// answers, and immutable verification material that must not enter generic
+// bead events.
+func (s *emittingClassStore) CreateDecisionFrontierRecord(bead beads.Bead) (beads.Bead, error) {
+	writer, ok := beads.DecisionFrontierRecordWriterFor(s.Store)
+	if !ok || writer == nil {
+		return beads.Bead{}, beads.ErrDecisionFrontierCapabilityUnsupported
+	}
+	return writer.CreateDecisionFrontierRecord(bead)
+}
+
+// CompareAndSetDecisionFrontierRecordMetadataKey advances private controller
+// state without publishing it as a generic bead update.
+func (s *emittingClassStore) CompareAndSetDecisionFrontierRecordMetadataKey(id, key, expected, next string) (bool, error) {
+	writer, ok := beads.DecisionFrontierRecordWriterFor(s.Store)
+	if !ok || writer == nil {
+		return false, beads.ErrDecisionFrontierCapabilityUnsupported
+	}
+	return writer.CompareAndSetDecisionFrontierRecordMetadataKey(id, key, expected, next)
+}
+
+// EnsureDecisionFrontierLink writes only the validated private relationship
+// between immutable records. Its payload is intentionally event-dark.
+func (s *emittingClassStore) EnsureDecisionFrontierLink(sourceID, targetID, depType string) error {
+	writer, ok := beads.DecisionFrontierRecordWriterFor(s.Store)
+	if !ok || writer == nil {
+		return beads.ErrDecisionFrontierCapabilityUnsupported
+	}
+	return writer.EnsureDecisionFrontierLink(sourceID, targetID, depType)
+}
+
+// DecisionFrontierSourceSnapshot returns the backing store's authoritative
+// source row and graph snapshot. It does not emit because it is read-only.
+func (s *emittingClassStore) DecisionFrontierSourceSnapshot(id string) (beads.Bead, error) {
+	reader, ok := beads.DecisionFrontierSourceReaderFor(s.Store)
+	if !ok || reader == nil {
+		return beads.Bead{}, beads.ErrConditionalWriteUnsupported
+	}
+	return reader.DecisionFrontierSourceSnapshot(id)
+}
+
+// DecisionFrontierRevisionTransitionReceipt reads the exact durable source
+// receipt without publishing its private payload through generic bead events.
+func (s *emittingClassStore) DecisionFrontierRevisionTransitionReceipt(issueID, receiptID string) (beads.RevisionTransitionReceipt, bool, error) {
+	reader, ok := beads.RevisionTransitionReceiptReaderFor(s.Store)
+	if !ok || reader == nil {
+		return beads.RevisionTransitionReceipt{}, false, beads.ErrConditionalWriteUnsupported
+	}
+	return reader.DecisionFrontierRevisionTransitionReceipt(issueID, receiptID)
+}
+
+// CompareAndSetMetadataKeyWithReceipt performs the private atomic source
+// transition without exposing its hold marker or immutable receipt in a
+// generic event payload.
+func (s *emittingClassStore) CompareAndSetMetadataKeyWithReceipt(id, key, expected, next string, expectedRevision int64, receipt beads.RevisionTransitionReceipt) (beads.Bead, bool, error) {
+	writer, ok := beads.RevisionTransitionWriterFor(s.Store)
+	if !ok || writer == nil {
+		return beads.Bead{}, false, beads.ErrConditionalWriteUnsupported
+	}
+	return writer.CompareAndSetMetadataKeyWithReceipt(id, key, expected, next, expectedRevision, receipt)
+}
+
 func (s *emittingClassStore) CreateWithStorage(bead beads.Bead, storage beads.StorageClass) (beads.Bead, error) {
 	creator, ok := s.Store.(beads.StorageCreateStore)
 	if !ok {
@@ -526,11 +710,12 @@ func (s *emittingClassStore) CloseWithMetadataIfMatch(id string, revision int64,
 // this wrapper. TestEmittingClassStoreKeepsEveryEngineCapability forces the
 // wrapper to carry CloseWithMetadataIfMatch structurally for every engine, so a
 // bare type assertion would advertise the capability even over a backing (for
-// example the sqlite CLI engine) that cannot honor it — and that discovery is
-// contractually a hard capability gate, not a rollout seam. Consulted first by
-// AtomicConditionalCloserFor, this answers yes only when the resolved backing
-// truly provides the atomic close, and returns the emitting wrapper (not the
-// raw backing) so the discovered closer still emits bead.closed.
+// example a plain MemStore, or a bd CLI store) that cannot honor it — and that
+// discovery is contractually a hard capability gate, not a rollout seam.
+// Consulted first by AtomicConditionalCloserFor, this answers yes only when the
+// resolved backing truly provides the atomic close, and returns the emitting
+// wrapper (not the raw backing) so the discovered closer still emits
+// bead.closed.
 func (s *emittingClassStore) AtomicConditionalCloserHandle() (beads.AtomicConditionalCloser, bool) {
 	if _, ok := beads.AtomicConditionalCloserFor(s.Store); !ok {
 		return nil, false

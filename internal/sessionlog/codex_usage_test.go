@@ -1390,7 +1390,7 @@ func TestFindCodexSessionFileNearScanReportsScanCleanliness(t *testing.T) {
 		// One visible in-window match...
 		want := writeCodexRolloutAt(t, root, anchor.Add(2*time.Minute), "019d9845-cccc-7000-8000-000000000008", workDir)
 		// ...plus a second in-window rollout in the SAME day dir whose cwd-probe
-		// os.Open faults with EACCES (chmod 000). codexSessionCWDMatchesScan cannot
+		// os.Open faults with EACCES (chmod 000). The cwd scan cannot
 		// confirm its cwd, so it is not counted as a match, but it clouds the scan:
 		// it could be a second same-cwd rollout, so the visible singleton is
 		// non-definitive.

@@ -244,6 +244,9 @@ func coerceMetadata(raw map[string]json.RawMessage) map[string]string {
 
 // Create persists a new bead: script create (stdin: JSON)
 func (s *Store) Create(b beads.Bead) (beads.Bead, error) {
+	if err := beads.ValidateDecisionFrontierCreate(b); err != nil {
+		return beads.Bead{}, fmt.Errorf("exec beads create: %w", err)
+	}
 	if b.Type == "" {
 		b.Type = "task"
 	}
@@ -280,6 +283,16 @@ func (s *Store) Get(id string) (beads.Bead, error) {
 
 // Update modifies fields of an existing bead: script update <id> (stdin: JSON)
 func (s *Store) Update(id string, opts beads.UpdateOpts) error {
+	if lifecycleMutationMayReopenOrClear(opts) {
+		current, err := s.Get(id)
+		if err != nil {
+			return err
+		}
+		if err := beads.ValidateLifecycleMutation(current, opts); err != nil {
+			return fmt.Errorf("updating lifecycle bead %q: %w", id, err)
+		}
+		return fmt.Errorf("updating lifecycle bead %q: %w", id, beads.ErrConditionalWriteUnsupported)
+	}
 	data, err := marshalUpdate(opts)
 	if err != nil {
 		return fmt.Errorf("exec beads update: marshaling: %w", err)
@@ -306,7 +319,14 @@ func (s *Store) Update(id string, opts beads.UpdateOpts) error {
 // would break them. A new exec: wrapper that closes agent-owned beads must
 // inject --force itself.
 func (s *Store) Close(id string) error {
-	_, err := s.run(nil, "close", id)
+	current, err := s.Get(id)
+	if err != nil {
+		return fmt.Errorf("closing bead %q: %w", id, err)
+	}
+	if err := beads.ValidateLifecycleClose(current); err != nil {
+		return fmt.Errorf("closing lifecycle bead %q: %w", id, err)
+	}
+	_, err = s.run(nil, "close", id)
 	if err != nil {
 		if isNotFoundError(err) {
 			return fmt.Errorf("closing bead %q: %w", id, beads.ErrNotFound)
@@ -318,7 +338,15 @@ func (s *Store) Close(id string) error {
 
 // Reopen sets a bead's status to "open": script reopen <id>
 func (s *Store) Reopen(id string) error {
-	_, err := s.run(nil, "reopen", id)
+	current, err := s.Get(id)
+	if err != nil {
+		return fmt.Errorf("reopening bead %q: %w", id, err)
+	}
+	open := "open"
+	if err := beads.ValidateLifecycleMutation(current, beads.UpdateOpts{Status: &open}); err != nil {
+		return fmt.Errorf("reopening lifecycle bead %q: %w", id, err)
+	}
+	_, err = s.run(nil, "reopen", id)
 	if err != nil {
 		if isNotFoundError(err) {
 			return fmt.Errorf("reopening bead %q: %w", id, beads.ErrNotFound)
@@ -328,8 +356,26 @@ func (s *Store) Reopen(id string) error {
 	return nil
 }
 
+func lifecycleMutationMayReopenOrClear(opts beads.UpdateOpts) bool {
+	return beads.LifecycleMutationNeedsValidation(opts)
+}
+
 // CloseAll closes multiple beads and sets metadata on each.
 func (s *Store) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	closedStatus := "closed"
+	closeOpts := beads.UpdateOpts{Status: &closedStatus, Metadata: metadata}
+	for _, id := range ids {
+		current, err := s.Get(id)
+		if errors.Is(err, beads.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return 0, fmt.Errorf("checking close target %q: %w", id, err)
+		}
+		if err := beads.ValidateLifecycleMutation(current, closeOpts); err != nil {
+			return 0, fmt.Errorf("closing lifecycle bead %q: %w", id, err)
+		}
+	}
 	closed := 0
 	for _, id := range ids {
 		for k, v := range metadata {
@@ -371,7 +417,7 @@ func (s *Store) List(query beads.ListQuery) ([]beads.Bead, error) {
 		// SeekAfter (like CreatedBefore) is applied Go-side after the script
 		// returns, so a script-side limit would cut rows before the boundary
 		// filter runs and silently skip page rows.
-		if query.Limit > 0 && query.CreatedBefore.IsZero() && query.SeekAfter == nil {
+		if query.Limit > 0 && query.CreatedBefore.IsZero() && query.SeekAfter == nil && query.AbsentMetadataKey == "" {
 			args = append(args, "--limit="+strconv.Itoa(query.Limit))
 		}
 		out, err = s.run(nil, args...)
@@ -473,6 +519,17 @@ func (s *Store) ListByMetadata(filters map[string]string, limit int, opts ...bea
 
 // SetMetadata sets a key-value metadata pair: script set-metadata <id> <key> (stdin: value)
 func (s *Store) SetMetadata(id, key, value string) error {
+	if lifecycleMutationMayReopenOrClear(beads.UpdateOpts{Metadata: map[string]string{key: value}}) {
+		opts := beads.UpdateOpts{Metadata: map[string]string{key: value}}
+		current, err := s.Get(id)
+		if err != nil {
+			return err
+		}
+		if err := beads.ValidateLifecycleMutation(current, opts); err != nil {
+			return fmt.Errorf("setting lifecycle metadata on %q: %w", id, err)
+		}
+		return fmt.Errorf("setting lifecycle metadata on %q: %w", id, beads.ErrConditionalWriteUnsupported)
+	}
 	_, err := s.run([]byte(value), "set-metadata", id, key)
 	if err != nil {
 		return fmt.Errorf("setting metadata on %q: %w", id, err)
@@ -483,6 +540,17 @@ func (s *Store) SetMetadata(id, key, value string) error {
 // SetMetadataBatch sets multiple key-value metadata pairs on a bead.
 // Delegates to sequential SetMetadata calls.
 func (s *Store) SetMetadataBatch(id string, kvs map[string]string) error {
+	if lifecycleMutationMayReopenOrClear(beads.UpdateOpts{Metadata: kvs}) {
+		current, err := s.Get(id)
+		if err != nil {
+			return err
+		}
+		opts := beads.UpdateOpts{Metadata: kvs}
+		if err := beads.ValidateLifecycleMutation(current, opts); err != nil {
+			return fmt.Errorf("setting lifecycle metadata batch on %q: %w", id, err)
+		}
+		return fmt.Errorf("setting lifecycle metadata batch on %q: %w", id, beads.ErrConditionalWriteUnsupported)
+	}
 	for k, v := range kvs {
 		if err := s.SetMetadata(id, k, v); err != nil {
 			return err
@@ -531,14 +599,20 @@ func (s *Store) Tx(_ string, fn func(beads.Tx) error) error {
 
 // Delete permanently removes a bead by calling the "delete" subcommand.
 func (s *Store) Delete(id string) error {
-	b, err := s.Get(id)
+	current, err := s.Get(id)
 	if err != nil {
 		return err
 	}
-	if b.Revision <= 0 {
+	if beads.IsAttemptEvidenceArchive(current) {
+		return fmt.Errorf("deleting bead %q: %w", id, beads.ErrProtectedAttemptEvidenceArchive)
+	}
+	if err := beads.ValidateLifecycleDelete(current); err != nil {
+		return fmt.Errorf("deleting lifecycle bead %q: %w", id, err)
+	}
+	if current.Revision == 0 {
 		return beads.ErrConditionalWriteUnsupported
 	}
-	if _, err := s.run(nil, "delete", id, strconv.FormatInt(b.Revision, 10)); err != nil {
+	if _, err := s.run(nil, "delete", id, strconv.FormatInt(current.Revision, 10)); err != nil {
 		return err
 	}
 	s.localMu.Lock()

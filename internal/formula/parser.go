@@ -53,6 +53,10 @@ type Parser struct {
 
 	// resolvingChain tracks the order of formulas being resolved (for error messages).
 	resolvingChain []string
+
+	// provenance is set only by the opt-in compile-with-provenance API. It
+	// records source reads, formula identities, and compiler-owned trace events.
+	provenance *compileProvenanceRecorder
 }
 
 // NewParser creates a new formula parser.
@@ -84,6 +88,12 @@ func (p *Parser) SetSource(s Source) *Parser {
 		p.source = s
 	}
 	return p
+}
+
+func (p *Parser) recordCompileFormulaUse(entry CompileTraceEntry) {
+	if p != nil && p.provenance != nil {
+		p.provenance.recordTrace(entry)
+	}
 }
 
 // Source returns the active Source. Useful for diagnostics and for
@@ -173,6 +183,11 @@ func (p *Parser) parseResolvedAt(data []byte, absPath, label string) (*Formula, 
 
 	f.Source = absPath
 	f.ContentHash = contentHash(data)
+	identity := SourceIdentity{Path: absPath, FormulaName: f.Formula, ContentSHA256: f.ContentHash}
+	f.SourceFiles = []SourceIdentity{identity}
+	if p.provenance != nil {
+		p.provenance.recordFormula(identity)
+	}
 
 	// Set source tracing info on all steps (gt-8tmz.18)
 	SetSourceInfo(f)
@@ -261,6 +276,9 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 		if err := formula.Validate(); err != nil {
 			return nil, err
 		}
+		if len(formula.SourceFiles) == 0 && formula.Source != "" && formula.ContentHash != "" {
+			formula.SourceFiles = []SourceIdentity{{Path: formula.Source, FormulaName: formula.Formula, ContentSHA256: formula.ContentHash}}
+		}
 		return formula, nil
 	}
 
@@ -276,6 +294,8 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 		Requires:    cloneRequirements(formula.Requires),
 		Type:        formula.Type,
 		Source:      formula.Source,
+		ContentHash: formula.ContentHash,
+		SourceFiles: append([]SourceIdentity(nil), formula.SourceFiles...),
 		Phase:       formula.Phase,
 		Pour:        formula.Pour,
 		Vars:        make(map[string]*VarDef),
@@ -290,12 +310,20 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 		if err != nil {
 			return nil, fmt.Errorf("extends %s: %w", parentName, err)
 		}
+		if p.provenance != nil {
+			p.provenance.recordTrace(CompileTraceEntry{
+				Kind:               CompileTraceInheritance,
+				FormulaName:        formula.Formula,
+				RelatedFormulaName: parent.Formula,
+			})
+		}
 
 		// Resolve parent recursively
 		parent, err = p.Resolve(parent)
 		if err != nil {
 			return nil, fmt.Errorf("resolve parent %s: %w", parentName, err)
 		}
+		merged.SourceFiles = append(merged.SourceFiles, parent.SourceFiles...)
 
 		parentConstraints, err := formulaCompilerConstraints(parent)
 		if err != nil {
@@ -358,6 +386,11 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 	merged.Template = mergeSteps(merged.Template, formula.Template)
 
 	merged.Compose = mergeComposeRules(merged.Compose, formula.Compose)
+	mergedSources, sourceErr := uniqueFormulaSourceIdentities(merged.SourceFiles)
+	if sourceErr != nil {
+		return nil, sourceErr
+	}
+	merged.SourceFiles = mergedSources
 
 	// Use child description if set
 	if formula.Description != "" {
@@ -432,6 +465,27 @@ func mergeSteps(parent, child []*Step) []*Step {
 	}
 
 	return result
+}
+
+func uniqueFormulaSourceIdentities(sources []SourceIdentity) ([]SourceIdentity, error) {
+	byPath := make(map[string]SourceIdentity, len(sources))
+	for _, source := range sources {
+		path := filepath.Clean(strings.TrimSpace(source.Path))
+		if path == "." || source.ContentSHA256 == "" {
+			return nil, fmt.Errorf("formula source identity is incomplete")
+		}
+		if prior, exists := byPath[path]; exists && prior.ContentSHA256 != source.ContentSHA256 {
+			return nil, fmt.Errorf("formula source %q changed while resolving composition", filepath.Base(path))
+		}
+		byPath[path] = source
+	}
+	out := make([]SourceIdentity, 0, len(byPath))
+	for path, source := range byPath {
+		source.Path = path
+		out = append(out, source)
+	}
+	slices.SortFunc(out, func(a, b SourceIdentity) int { return strings.Compare(a.Path, b.Path) })
+	return out, nil
 }
 
 func mergeFormulaMetadata(base, overlay map[string]any) map[string]any {
@@ -844,6 +898,9 @@ func (p *Parser) resolveDescriptionFiles(steps []*Step, baseDir string, strict b
 func (p *Parser) readDescriptionFile(rawPath, baseDir string) ([]byte, string, error) {
 	if winner, ok := p.winningAssetPath(rawPath); ok {
 		data, err := p.source.ReadFile(winner)
+		if p.provenance != nil {
+			p.provenance.recordDescription(winner, err == nil)
+		}
 		return data, winner, err
 	}
 
@@ -852,6 +909,9 @@ func (p *Parser) readDescriptionFile(rawPath, baseDir string) ([]byte, string, e
 		path = filepath.Join(baseDir, path)
 	}
 	data, err := p.source.ReadFile(path)
+	if p.provenance != nil {
+		p.provenance.recordDescription(path, err == nil)
+	}
 	return data, path, err
 }
 

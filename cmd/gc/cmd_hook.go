@@ -234,6 +234,7 @@ type hookCommandOptions struct {
 	Claim      bool
 	DrainAck   bool
 	JSON       bool
+	DrainAckFn hookDrainAckFunc
 }
 
 // cmdHook is the CLI entry point for gc hook. Resolves the agent from
@@ -327,9 +328,16 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 		}
 	}
 
-	st, _ := loadSuspensionState(fsys.OSFS{}, cityPath)
+	st, err := loadSuspensionState(fsys.OSFS{}, cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc hook: loading suspension state: %v\n", err) //nolint:errcheck
+		return 1
+	}
 	if citySuspendedWithState(cfg, st) {
 		fmt.Fprintln(stderr, "gc hook: city is suspended") //nolint:errcheck // best-effort stderr
+		if opts.Claim {
+			return writeHookClaimSuspensionDrain(hookClaimReasonCitySuspended, opts, stdout, stderr)
+		}
 		return 1
 	}
 
@@ -366,8 +374,17 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 		return 1
 	}
 
-	if isAgentEffectivelySuspendedWith(cfg, cityPath, &a, st) {
-		fmt.Fprintf(stderr, "gc hook: agent %q is suspended\n", agentName) //nolint:errcheck // best-effort stderr
+	if scope, name, suspended := agentSuspensionCauseWith(cfg, cityPath, &a, st); suspended {
+		reason := hookClaimReasonAgentSuspended
+		if scope == "rig" {
+			fmt.Fprintf(stderr, "gc hook: rig %q is suspended\n", name) //nolint:errcheck
+			reason = hookClaimReasonRigSuspended
+		} else {
+			fmt.Fprintf(stderr, "gc hook: agent %q is suspended\n", agentName) //nolint:errcheck
+		}
+		if opts.Claim {
+			return writeHookClaimSuspensionDrain(reason, opts, stdout, stderr)
+		}
 		return 1
 	}
 
@@ -427,6 +444,11 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	// `gc ready` does not answer. No-op on a single-store city and for a custom
 	// work_query, where both forms are the same string.
 	stores = scopeFederatedHookStores(stores, workQuery, singleStoreHookWorkQuery(cityPath, cityName, cfg, &a, topo, stderr))
+	formulaActionCheck := controllerFormulaActionCandidateCheck(cityPath, cfg, a.WorkQuery != "")
+	var discoveryStore hookStore
+	discoveryFormulaActionCheck := func(ctx context.Context, candidate beads.Bead) (formulaActionCandidate, error) {
+		return hookStoreFormulaActionCheck(formulaActionCheck, discoveryStore, false)(ctx, candidate)
+	}
 
 	// emitQueryFailure surfaces a killed/timed-out work query on the event bus
 	// so the reconciler can escalate instead of silently treating the strand as
@@ -440,7 +462,10 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 			os.Getenv("GC_SESSION_ID"), failureTemplate, command, err)
 	}
 	runner := func(command, _ string) (string, error) {
-		out, _, err := bestStoreWithWork(command, stores, stores[0], shellWorkQueryWithEnv)
+		out, selected, err := bestStoreWithWork(command, stores, stores[0], shellWorkQueryWithEnv)
+		if err == nil {
+			discoveryStore = selected
+		}
 		emitQueryFailure(command, err)
 		return out, err
 	}
@@ -470,28 +495,46 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 		agentForQuery,
 	)
 	routeTargets := hookClaimRouteTargets(hookClaimPrimaryRouteTarget(&a), resolvedAgentName, strings.TrimSpace(overrides["GC_TEMPLATE"]))
+	resolveLifecycleStore := func(ref string) (beads.Store, error) { return lifecycleStoreForRef(cityPath, cfg, ref) }
+	verifyLifecycleTransitionHead := newLifecycleClaimTransitionHeadVerifier(cityPath, cfg, resolveLifecycleStore)
 	if opts.Claim {
 		claimOpts := hookClaimOptions{
-			Assignee:           assignee,
-			SessionID:          sessionID,
-			IdentityCandidates: identityCandidates,
-			RouteTargets:       routeTargets,
-			Env:                queryEnv,
-			DrainAck:           opts.DrainAck,
-			JSON:               opts.JSON,
-			RuntimeActor:       strings.TrimSpace(os.Getenv("BEADS_ACTOR")),
+			Assignee:                      assignee,
+			SessionID:                     sessionID,
+			IdentityCandidates:            identityCandidates,
+			RouteTargets:                  routeTargets,
+			Env:                           queryEnv,
+			DrainAck:                      opts.DrainAck,
+			JSON:                          opts.JSON,
+			Lifecycle:                     cfg.Lifecycle,
+			LifecycleCity:                 cfg,
+			LifecycleCityPath:             cityPath,
+			ResolveLifecycleStore:         resolveLifecycleStore,
+			TrustedLifecycleScope:         a.WorkQuery == "",
+			RequireAuthoritativeClaimRead: true,
+			VerifyLifecycleTransitionHead: verifyLifecycleTransitionHead,
+			CheckFormulaAction:            formulaActionCheck,
+			RuntimeActor:                  strings.TrimSpace(os.Getenv("BEADS_ACTOR")),
 		}
 		return claimHookWork(cityPath, workQuery, workDir, queryEnv, stores, claimOpts, emitQueryFailure, stdout, stderr)
 	}
 	// The discovery door is fenced too: a draining seat must not be handed its
 	// preassigned continuation sibling by the packs' post-close `gc hook`.
 	return doHookDiscovery(workQuery, workDir, false, hookClaimOptions{
-		Env:      queryEnv,
-		DrainAck: opts.DrainAck,
-		JSON:     opts.JSON,
+		Env:                           queryEnv,
+		DrainAck:                      opts.DrainAck,
+		JSON:                          opts.JSON,
+		Lifecycle:                     cfg.Lifecycle,
+		LifecycleCity:                 cfg,
+		ResolveLifecycleStore:         resolveLifecycleStore,
+		TrustedLifecycleScope:         cfg.Lifecycle.AdmissionEnabled && a.WorkQuery == "",
+		VerifyLifecycleTransitionHead: verifyLifecycleTransitionHead,
+		CheckFormulaAction:            discoveryFormulaActionCheck,
 	}, hookClaimOps{}, runner, stdout, stderr, hookVisibility{
-		Identities:   identityCandidates,
-		RouteTargets: routeTargets,
+		Identities:                         identityCandidates,
+		RouteTargets:                       routeTargets,
+		CheckFormulaAction:                 discoveryFormulaActionCheck,
+		RequireStructuredFormulaCandidates: cfg.HasRequiredCompatibilityPacks(),
 	})
 }
 
@@ -710,7 +753,7 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 	// report claims_errored instead of laundering a write failure into no_work.
 	claimsErrored := false
 	for len(remaining) > 0 {
-		discovered, selected, err := selectStoreWithWorkRetrying(workQuery, remaining, primary, run)
+		discovered, selected, err := selectStoreWithWorkRetrying(workQuery, remaining, primary, run, &ops)
 		if err != nil {
 			emitFailure(workQuery, err)
 			fmt.Fprintf(stderr, "gc hook --claim: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -739,6 +782,11 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 		if len(claimStore.env) > 0 {
 			storeOpts.Env = claimStore.env
 		}
+		if claimStore.inferMissingSourceStoreRef {
+			storeOpts.ClaimSourceStoreRef = claimStore.sourceStoreRef
+			storeOpts.TrustedLifecycleScope = strings.TrimSpace(claimStore.sourceStoreRef) != ""
+		}
+		storeOpts.CheckFormulaAction = hookStoreFormulaActionCheck(storeOpts.CheckFormulaAction, claimStore, true)
 		storeDir := workDir
 		if dir := strings.TrimSpace(claimStore.dir); dir != "" {
 			storeDir = dir
@@ -779,13 +827,37 @@ var (
 // selectStoreWithWorkRetrying is bestStoreWithWork with a bounded retry around
 // the ERROR case only. It returns the first successful selection, or the last
 // error once the budget is spent.
-func selectStoreWithWorkRetrying(workQuery string, stores []hookStore, primary hookStore, run hookStoreRunner) (string, hookStore, error) {
+//
+// The retry budget is also bounded by the invocation's claim window (F-B). Three
+// paced retries on top of a work query that may itself run to
+// hookWorkQueryTimeout can carry a `gc hook --claim` process well past the turn
+// that invoked it, and a read that lands past the window buys nothing: any claim
+// it leads to is refused on arrival. So a retry runs only when it would start
+// strictly inside the window, both before the pacing sleep (the sleep must not
+// run past the window) and after it (the sleep may have overrun). When the window
+// cuts the budget short, the last read error is returned, annotated, so the
+// caller keeps its failed-read contract (exit 1, no drain) instead of treating a
+// dead invocation as an idle store.
+func selectStoreWithWorkRetrying(workQuery string, stores []hookStore, primary hookStore, run hookStoreRunner, ops *hookClaimOps) (string, hookStore, error) {
 	out, selected, err := bestStoreWithWork(workQuery, stores, primary, run)
 	for attempt := 0; err != nil && attempt < hookClaimQueryRetryAttempts; attempt++ {
-		time.Sleep(hookClaimQueryRetryInterval)
+		if ops.claimWindowSpentAfter(hookClaimQueryRetryInterval) {
+			return out, selected, hookClaimRetryWindowClosed(err, ops)
+		}
+		ops.sleepOrWallClock(hookClaimQueryRetryInterval)
+		if ops.claimWindowSpentAfter(0) {
+			return out, selected, hookClaimRetryWindowClosed(err, ops)
+		}
 		out, selected, err = bestStoreWithWork(workQuery, stores, primary, run)
 	}
 	return out, selected, err
+}
+
+// hookClaimRetryWindowClosed annotates the last claim-read error with the reason
+// the retry budget stopped early. It is a wrapped suffix, so errors.Is/As and the
+// kill/timeout markers classifyWorkQueryFailure matches on stay intact.
+func hookClaimRetryWindowClosed(err error, ops *hookClaimOps) error {
+	return fmt.Errorf("%w (claim-read retries stopped: the %s claim window closes before the next retry could run)", err, ops.claimWindowOrDefault())
 }
 
 func hookClaimPrimaryRouteTarget(a *config.Agent) string {
@@ -1003,8 +1075,10 @@ func workQueryEnvForDir(env []string, dir string) []string {
 // target for fresh unassigned claims. The zero value disables filtering
 // entirely, matching pre-ga-1xaqgo.2 behavior byte-for-byte.
 type hookVisibility struct {
-	Identities   []string
-	RouteTargets []string
+	Identities                         []string
+	RouteTargets                       []string
+	CheckFormulaAction                 formulaActionCandidateCheck
+	RequireStructuredFormulaCandidates bool
 }
 
 // doHook is the pure logic for gc hook. Runs the work query and outputs
@@ -1068,6 +1142,14 @@ func doHook(workQuery, dir string, inject bool, runner WorkQueryRunner, stdout, 
 	normalized := normalizeWorkQueryOutput(trimmed)
 	normalized = filterUnreadyHookCandidates(normalized, time.Now())
 	normalized = filterForeignHookCandidates(normalized, visibility)
+	if visibility.CheckFormulaAction != nil {
+		var err error
+		normalized, err = validateHookFormulaActionCandidates(normalized, visibility.CheckFormulaAction, visibility.RequireStructuredFormulaCandidates)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc hook: formula compatibility check failed: %v\n", err) //nolint:errcheck
+			return 1
+		}
+	}
 	hasWork := workQueryHasReadyWork(normalized)
 
 	// Non-inject mode: print normalized, ready-only output. Return 0 only when work exists.
@@ -1079,6 +1161,39 @@ func doHook(workQuery, dir string, inject bool, runner WorkQueryRunner, stdout, 
 	}
 	fmt.Fprint(stdout, normalized) //nolint:errcheck // best-effort stdout
 	return 0
+}
+
+func validateHookFormulaActionCandidates(output string, check formulaActionCandidateCheck, requireStructured bool) (string, error) {
+	if output == "" || !workQueryHasReadyWork(output) {
+		return output, nil
+	}
+	var rows []json.RawMessage
+	if err := json.Unmarshal([]byte(output), &rows); err != nil {
+		if requireStructured {
+			return "", fmt.Errorf("required formula provenance needs structured work-query rows: %w", err)
+		}
+		return output, nil
+	}
+	for _, raw := range rows {
+		var candidate beads.Bead
+		if err := json.Unmarshal(raw, &candidate); err != nil {
+			if requireStructured {
+				return "", fmt.Errorf("decoding work-query candidate for formula compatibility: %w", err)
+			}
+			continue
+		}
+		var provenance struct {
+			SourceStoreRef string `json:"source_store_ref"`
+		}
+		if err := json.Unmarshal(raw, &provenance); err != nil {
+			return "", fmt.Errorf("decoding work-query store provenance: %w", err)
+		}
+		candidate.SourceStoreRef = strings.TrimSpace(provenance.SourceStoreRef)
+		if _, err := check(context.Background(), candidate); err != nil {
+			return "", fmt.Errorf("candidate %s: %w", candidate.ID, err)
+		}
+	}
+	return output, nil
 }
 
 func workQueryHasReadyWork(output string) bool {
@@ -1221,6 +1336,13 @@ func decodeHookCandidateBead(obj map[string]any) (beads.Bead, bool) {
 	if err := json.Unmarshal(raw, &candidate); err != nil {
 		return beads.Bead{}, false
 	}
+	var provenance struct {
+		SourceStoreRef string `json:"source_store_ref"`
+	}
+	if err := json.Unmarshal(raw, &provenance); err != nil {
+		return beads.Bead{}, false
+	}
+	candidate.SourceStoreRef = strings.TrimSpace(provenance.SourceStoreRef)
 	return candidate, true
 }
 

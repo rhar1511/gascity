@@ -26,8 +26,10 @@ import (
 // flag for safe cross-goroutine reads of the ready state (e.g. test pollers).
 type convergenceStoreAdapter struct {
 	store              beads.Store
-	formulaSearchPaths []string          // search paths for formula compilation in PourWisp
-	relocated          bool              // store is a class binding, not this scope's work ledger
+	formulaSearchPaths []string // search paths for formula compilation in PourWisp
+	relocated          bool     // store is a class binding, not this scope's work ledger
+	formulaActionGate  molecule.FormulaActionGate
+	requireActionGate  bool
 	activeIndex        map[string]string // bead ID → target agent; nil until populateIndex
 	indexReady         atomic.Bool       // true once populateIndex has completed
 }
@@ -179,6 +181,18 @@ func (a *convergenceStoreAdapter) pourWisp(parentID, formulaName, idempotencyKey
 		return "", fmt.Errorf("idempotency check for %q: %w", idempotencyKey, err)
 	}
 	if found {
+		if a.requireActionGate && a.formulaActionGate == nil {
+			return "", fmt.Errorf("controller formula compatibility gate is unavailable")
+		}
+		if a.formulaActionGate != nil {
+			bead, err := a.store.Get(existing)
+			if err != nil {
+				return "", fmt.Errorf("loading existing convergence wisp %s: %w", existing, err)
+			}
+			if err := a.formulaActionGate.RevalidateBead(context.Background(), bead, a.store); err != nil {
+				return "", fmt.Errorf("revalidating existing convergence wisp %s: %w", existing, err)
+			}
+		}
 		return existing, nil
 	}
 
@@ -198,10 +212,12 @@ func (a *convergenceStoreAdapter) pourWisp(parentID, formulaName, idempotencyKey
 		return "", fmt.Errorf("convergence wisps do not support v2 formula %q; use a v1 formula until convergence has an explicit input convoy target", formulaName)
 	}
 	opts := molecule.Options{
-		Vars:           cookVars,
-		ParentID:       parentID,
-		IdempotencyKey: idempotencyKey,
-		DeferAssignees: deferAssignees,
+		Vars:              cookVars,
+		ParentID:          parentID,
+		IdempotencyKey:    idempotencyKey,
+		DeferAssignees:    deferAssignees,
+		ActionGate:        a.formulaActionGate,
+		RequireActionGate: a.requireActionGate,
 	}
 	// molecule.Cook's body, inlined only so the compiled recipe can be classified
 	// before anything is written — the same reason gc formula cook inlines it.
@@ -239,6 +255,14 @@ func (a *convergenceStoreAdapter) activateDeferredAssignees(id string) error {
 	b, err := a.store.Get(id)
 	if err != nil {
 		return err
+	}
+	if a.requireActionGate && a.formulaActionGate == nil {
+		return fmt.Errorf("controller formula compatibility gate is unavailable")
+	}
+	if a.formulaActionGate != nil {
+		if err := a.formulaActionGate.RevalidateBead(context.Background(), b, a.store); err != nil {
+			return fmt.Errorf("revalidating convergence bead %s before assignment: %w", id, err)
+		}
 	}
 	update := beads.UpdateOpts{}
 	if assignee := b.Metadata[molecule.DeferredAssigneeMetadataKey]; assignee != "" && b.Assignee != assignee {

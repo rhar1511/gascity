@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/nudgepoller"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/pidutil"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/tmux"
 	"github.com/gastownhall/gascity/internal/session"
@@ -27,6 +28,23 @@ import (
 )
 
 func intPtrNudge(n int) *int { return &n }
+
+func openNudgeFixtureStore(t *testing.T, cityPath string) beads.NudgesStore {
+	t.Helper()
+	if _, err := os.Stat(filepath.Join(cityPath, "city.toml")); os.IsNotExist(err) {
+		writeMinimalCityToml(t, cityPath)
+	}
+	store, opened, err := openNudgeBeadStoreOwned(cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := closeBeadStoreHandle(opened); err != nil {
+			t.Errorf("closing owned nudge fixture store: %v", err)
+		}
+	})
+	return store
+}
 
 func claimDueWorkerNudges(cityPath string) ([]queuedNudge, error) {
 	return claimDueQueuedNudgesMatching(cityPath, time.Now(), func(item queuedNudge) bool {
@@ -289,7 +307,7 @@ func TestPruneExpiredQueuedNudgesIgnoresMissingTerminalBead(t *testing.T) {
 func TestPruneDeadQueuedNudgesRepairsMissingTerminalBeadRecord(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
-	store := openNudgeBeadStore(dir)
+	store := openNudgeFixtureStore(t, dir)
 	now := time.Now().UTC()
 	item := newQueuedNudgeWithOptions("worker", "stale dead letter", "session", now.Add(-2*time.Minute), queuedNudgeOptions{
 		ID:        "n-dead-repair",
@@ -512,7 +530,7 @@ func TestDeliverSessionNudgeWithProviderWaitIdleQueuesForCodex(t *testing.T) {
 func TestDeliverSessionNudgeWithWorkerImmediateResumesSuspendedSession(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
-	store := openNudgeBeadStore(dir)
+	store := openNudgeFixtureStore(t, dir)
 	fake := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
 
@@ -564,7 +582,7 @@ func TestDeliverSessionNudgeWithWorkerImmediateResumesSuspendedSession(t *testin
 func TestDeliverSessionNudgeWithWorkerAcksDeliveredUnobservedInsteadOfFailing(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
-	store := openNudgeBeadStore(dir)
+	store := openNudgeFixtureStore(t, dir)
 	fake := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
 
@@ -600,7 +618,7 @@ func TestDeliverSessionNudgeWithWorkerAcksDeliveredUnobservedInsteadOfFailing(t 
 func TestDeliverSessionNudgeWithWorkerWaitIdleResumesClaudeSession(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
-	store := openNudgeBeadStore(dir)
+	store := openNudgeFixtureStore(t, dir)
 	fake := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
 
@@ -657,7 +675,7 @@ func TestDeliverSessionNudgeWithWorkerWaitIdleResumesClaudeSession(t *testing.T)
 func TestDeliverSessionNudgeWithWorkerManagedNonRunningQueuesWakeForController(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
-	store := openNudgeBeadStore(dir)
+	store := openNudgeFixtureStore(t, dir)
 	fake := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
 
@@ -672,12 +690,14 @@ func TestDeliverSessionNudgeWithWorkerManagedNonRunningQueuesWakeForController(t
 	prevManaged := nudgeCityUsesManagedReconciler
 	prevPoke := nudgePokeController
 	pokes := 0
+	var pokeKeys []reconcilekey.Key
 	nudgeCityUsesManagedReconciler = func(cityPath string) bool { return cityPath == dir }
-	nudgePokeController = func(cityPath string) error {
+	nudgePokeController = func(cityPath string, key reconcilekey.Key) error {
 		if cityPath != dir {
 			t.Fatalf("poke cityPath = %q, want %q", cityPath, dir)
 		}
 		pokes++
+		pokeKeys = append(pokeKeys, key)
 		return nil
 	}
 	t.Cleanup(func() {
@@ -705,6 +725,9 @@ func TestDeliverSessionNudgeWithWorkerManagedNonRunningQueuesWakeForController(t
 	}
 	if pokes != 1 {
 		t.Fatalf("pokes = %d, want 1", pokes)
+	}
+	if want := reconcilekey.Session(info.ID); pokeKeys[0] != want {
+		t.Fatalf("poke key = %v, want %v", pokeKeys[0], want)
 	}
 
 	updated, err := store.Get(info.ID)
@@ -740,7 +763,7 @@ func TestDeliverSessionNudgeWithWorkerManagedNonRunningQueuesWakeForController(t
 func TestDeliverSessionNudgeWithWorkerManagedQueueFailureDoesNotWake(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
-	store := openNudgeBeadStore(dir)
+	store := openNudgeFixtureStore(t, dir)
 	fake := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
 
@@ -757,7 +780,7 @@ func TestDeliverSessionNudgeWithWorkerManagedQueueFailureDoesNotWake(t *testing.
 	prevPoke := nudgePokeController
 	pokes := 0
 	nudgeCityUsesManagedReconciler = func(cityPath string) bool { return cityPath == dir }
-	nudgePokeController = func(string) error {
+	nudgePokeController = func(string, reconcilekey.Key) error {
 		pokes++
 		return nil
 	}
@@ -816,7 +839,7 @@ func TestDeliverSessionNudgeWithWorkerManagedQueueFailureDoesNotWake(t *testing.
 func TestDeliverSessionNudgeWithWorkerManagedWakeFailureRollsBackQueuedNudge(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
-	store := openNudgeBeadStore(dir)
+	store := openNudgeFixtureStore(t, dir)
 	fake := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
 
@@ -836,7 +859,7 @@ func TestDeliverSessionNudgeWithWorkerManagedWakeFailureRollsBackQueuedNudge(t *
 	prevObserve := nudgeObserveTarget
 	pokes := 0
 	nudgeCityUsesManagedReconciler = func(cityPath string) bool { return cityPath == dir }
-	nudgePokeController = func(string) error {
+	nudgePokeController = func(string, reconcilekey.Key) error {
 		pokes++
 		return nil
 	}
@@ -898,7 +921,7 @@ func TestDeliverSessionNudgeWithWorkerManagedWakeFailureRollsBackQueuedNudge(t *
 func TestDeliverSessionNudgeWithWorkerManagedWaitNudgeWithdrawFailureKeepsQueuedNudge(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
-	store := openNudgeBeadStore(dir)
+	store := openNudgeFixtureStore(t, dir)
 	fake := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
 
@@ -921,7 +944,7 @@ func TestDeliverSessionNudgeWithWorkerManagedWaitNudgeWithdrawFailureKeepsQueued
 	pokes := 0
 	withdraws := 0
 	nudgeCityUsesManagedReconciler = func(cityPath string) bool { return cityPath == dir }
-	nudgePokeController = func(string) error {
+	nudgePokeController = func(string, reconcilekey.Key) error {
 		pokes++
 		return nil
 	}
@@ -1010,7 +1033,7 @@ func TestDeliverSessionNudgeWithWorkerManagedWaitNudgeWithdrawFailureKeepsQueued
 func TestDeliverSessionNudgeWithWorkerManagedObserveErrorDoesNotResumeFromCaller(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
-	store := openNudgeBeadStore(dir)
+	store := openNudgeFixtureStore(t, dir)
 	fake := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
 
@@ -1031,7 +1054,7 @@ func TestDeliverSessionNudgeWithWorkerManagedObserveErrorDoesNotResumeFromCaller
 	nudgeObserveTarget = func(nudgeTarget, beads.Store, runtime.Provider) (worker.LiveObservation, error) {
 		return worker.LiveObservation{}, observeErr
 	}
-	nudgePokeController = func(string) error {
+	nudgePokeController = func(string, reconcilekey.Key) error {
 		pokes++
 		return nil
 	}
@@ -1084,7 +1107,7 @@ func TestDeliverSessionNudgeWithWorkerManagedObserveErrorDoesNotResumeFromCaller
 func TestDeliverSessionNudgeWithWorkerWaitIdleQueuesUnsupportedProviderAfterResume(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
-	store := openNudgeBeadStore(dir)
+	store := openNudgeFixtureStore(t, dir)
 	fake := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
 
@@ -1566,7 +1589,7 @@ func TestSendMailNotifyWithProviderQueuesWhenSessionSleeping(t *testing.T) {
 func TestSendMailNotifyWithWorkerManagedNonRunningQueuesWakeForController(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
-	store := openNudgeBeadStore(dir)
+	store := openNudgeFixtureStore(t, dir)
 	fake := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
 
@@ -1581,12 +1604,14 @@ func TestSendMailNotifyWithWorkerManagedNonRunningQueuesWakeForController(t *tes
 	prevManaged := nudgeCityUsesManagedReconciler
 	prevPoke := nudgePokeController
 	pokes := 0
+	var pokeKeys []reconcilekey.Key
 	nudgeCityUsesManagedReconciler = func(cityPath string) bool { return cityPath == dir }
-	nudgePokeController = func(cityPath string) error {
+	nudgePokeController = func(cityPath string, key reconcilekey.Key) error {
 		if cityPath != dir {
 			t.Fatalf("poke cityPath = %q, want %q", cityPath, dir)
 		}
 		pokes++
+		pokeKeys = append(pokeKeys, key)
 		return nil
 	}
 	t.Cleanup(func() {
@@ -1609,6 +1634,9 @@ func TestSendMailNotifyWithWorkerManagedNonRunningQueuesWakeForController(t *tes
 	}
 	if pokes != 1 {
 		t.Fatalf("pokes = %d, want 1", pokes)
+	}
+	if want := reconcilekey.Session(info.ID); pokeKeys[0] != want {
+		t.Fatalf("poke key = %v, want %v", pokeKeys[0], want)
 	}
 
 	updated, err := store.Get(info.ID)
@@ -1654,7 +1682,7 @@ func TestSendMailNotifyWithWorkerManagedNonRunningQueuesWakeForController(t *tes
 func TestSendMailNotifyWithWorkerCarriesMessageIDAsReference(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
-	store := openNudgeBeadStore(dir)
+	store := openNudgeFixtureStore(t, dir)
 	fake := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
 
@@ -1698,7 +1726,7 @@ func TestSendMailNotifyWithWorkerCarriesMessageIDAsReference(t *testing.T) {
 func TestSendMailNotifyWithWorkerManagedQueueFailureDoesNotWake(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
-	store := openNudgeBeadStore(dir)
+	store := openNudgeFixtureStore(t, dir)
 	fake := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
 
@@ -1715,7 +1743,7 @@ func TestSendMailNotifyWithWorkerManagedQueueFailureDoesNotWake(t *testing.T) {
 	prevPoke := nudgePokeController
 	pokes := 0
 	nudgeCityUsesManagedReconciler = func(cityPath string) bool { return cityPath == dir }
-	nudgePokeController = func(string) error {
+	nudgePokeController = func(string, reconcilekey.Key) error {
 		pokes++
 		return nil
 	}
@@ -1777,7 +1805,7 @@ func TestSendMailNotifyWithWorkerManagedQueueFailureDoesNotWake(t *testing.T) {
 func TestSendMailNotifyQueuesIndependentRemindersForEachMail(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
-	store := openNudgeBeadStore(dir)
+	store := openNudgeFixtureStore(t, dir)
 	fake := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
 
@@ -1825,7 +1853,7 @@ func TestSendMailNotifyQueuesIndependentRemindersForEachMail(t *testing.T) {
 func TestSendMailNotifyWithWorkerManagedWakeFailureRollsBackQueuedNudge(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
-	store := openNudgeBeadStore(dir)
+	store := openNudgeFixtureStore(t, dir)
 	fake := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
 
@@ -1845,7 +1873,7 @@ func TestSendMailNotifyWithWorkerManagedWakeFailureRollsBackQueuedNudge(t *testi
 	prevObserve := nudgeObserveTarget
 	pokes := 0
 	nudgeCityUsesManagedReconciler = func(cityPath string) bool { return cityPath == dir }
-	nudgePokeController = func(string) error {
+	nudgePokeController = func(string, reconcilekey.Key) error {
 		pokes++
 		return nil
 	}
@@ -1903,7 +1931,7 @@ func TestSendMailNotifyWithWorkerManagedWakeFailureRollsBackQueuedNudge(t *testi
 func TestSendMailNotifyWithWorkerManagedWaitNudgeWithdrawFailureKeepsQueuedNudge(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
-	store := openNudgeBeadStore(dir)
+	store := openNudgeFixtureStore(t, dir)
 	fake := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
 
@@ -1926,7 +1954,7 @@ func TestSendMailNotifyWithWorkerManagedWaitNudgeWithdrawFailureKeepsQueuedNudge
 	pokes := 0
 	withdraws := 0
 	nudgeCityUsesManagedReconciler = func(cityPath string) bool { return cityPath == dir }
-	nudgePokeController = func(string) error {
+	nudgePokeController = func(string, reconcilekey.Key) error {
 		pokes++
 		return nil
 	}
@@ -2010,7 +2038,7 @@ func TestSendMailNotifyWithWorkerManagedWaitNudgeWithdrawFailureKeepsQueuedNudge
 func TestSendMailNotifyWithWorkerManagedWakePokeFailureIsNonFatal(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
-	store := openNudgeBeadStore(dir)
+	store := openNudgeFixtureStore(t, dir)
 	fake := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
 
@@ -2029,7 +2057,7 @@ func TestSendMailNotifyWithWorkerManagedWakePokeFailureIsNonFatal(t *testing.T) 
 	var warnings bytes.Buffer
 	pokes := 0
 	nudgeCityUsesManagedReconciler = func(cityPath string) bool { return cityPath == dir }
-	nudgePokeController = func(cityPath string) error {
+	nudgePokeController = func(cityPath string, _ reconcilekey.Key) error {
 		if cityPath != dir {
 			t.Fatalf("poke cityPath = %q, want %q", cityPath, dir)
 		}
@@ -2166,7 +2194,7 @@ func TestSendMailNotifyWithProviderStartsClaudePollerWhenQueueingRunningSession(
 func TestSendMailNotifyWithWorkerStartsPollerBySessionIDForAliasedTarget(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
-	store := openNudgeBeadStore(dir)
+	store := openNudgeFixtureStore(t, dir)
 	fake := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "mayor", Title: "Mayor", Command: "codex", WorkDir: dir, Provider: "codex", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
@@ -2277,7 +2305,7 @@ func TestSendMailNotifyWithWorkerWaitIdlePreservesMailSource(t *testing.T) {
 	clearInheritedCityRoutingEnv(t)
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
-	store := openNudgeBeadStore(dir)
+	store := openNudgeFixtureStore(t, dir)
 	fake := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
 
@@ -2323,7 +2351,7 @@ func TestSendMailNotifyWithWorkerAcksDeliveredUnobservedInsteadOfDuplicating(t *
 	clearInheritedCityRoutingEnv(t)
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
-	store := openNudgeBeadStore(dir)
+	store := openNudgeFixtureStore(t, dir)
 	fake := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
 
@@ -2372,7 +2400,7 @@ func TestSendMailNotifyWithWorkerAcksDeliveredUnobservedInsteadOfDuplicating(t *
 func TestSendMailNotifyWithWorkerQueuesWhenRuntimeIsGone(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
-	store := openNudgeBeadStore(dir)
+	store := openNudgeFixtureStore(t, dir)
 	fake := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
 
@@ -2421,7 +2449,7 @@ func TestSendMailNotifyWithWorkerQueuesWhenDirectProviderMisses(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 
 	dir := t.TempDir()
-	store := openNudgeBeadStore(dir)
+	store := openNudgeFixtureStore(t, dir)
 	fake := &providerMissNudgeProvider{Fake: runtime.NewFake()}
 	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
 
@@ -2625,7 +2653,7 @@ func TestTryDeliverQueuedNudgesByPollerDeliversAndAcks(t *testing.T) {
 		t.Fatalf("enqueueQueuedNudge: %v", err)
 	}
 
-	store := openNudgeBeadStore(dir)
+	store := openNudgeFixtureStore(t, dir)
 	fake := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: dir, Provider: "codex", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
@@ -2701,7 +2729,7 @@ func TestTryDeliverQueuedNudgesByPollerAcksDeliveredUnobservedInsteadOfRetrying(
 		t.Fatalf("enqueueQueuedNudge: %v", err)
 	}
 
-	store := openNudgeBeadStore(dir)
+	store := openNudgeFixtureStore(t, dir)
 	fake := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: dir, Provider: "codex", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
@@ -2765,7 +2793,7 @@ func TestTryDeliverQueuedNudgesByPollerDeliversActivitylessTimedOnlySession(t *t
 		t.Fatalf("enqueueQueuedNudge: %v", err)
 	}
 
-	store := openNudgeBeadStore(dir)
+	store := openNudgeFixtureStore(t, dir)
 	fake := &activitylessTimedOnlyNudgeProvider{Fake: runtime.NewFake()}
 	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: dir, Provider: "codex", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
@@ -2824,7 +2852,7 @@ func TestTryDeliverQueuedNudgesByPollerSkipsStaleSessionGeneration(t *testing.T)
 	dir := t.TempDir()
 	now := time.Now().Add(-1 * time.Minute)
 
-	store := openNudgeBeadStore(dir)
+	store := openNudgeFixtureStore(t, dir)
 	oldSession, err := store.Create(beads.Bead{
 		Title:  "Old worker",
 		Type:   session.BeadType,
@@ -3038,7 +3066,7 @@ func TestTryDeliverQueuedNudgesByPollerReleasesClaimsWhenDeliveryDeclined(t *tes
 		t.Fatalf("enqueueQueuedNudge: %v", err)
 	}
 
-	store := openNudgeBeadStore(dir)
+	store := openNudgeFixtureStore(t, dir)
 	fake := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: dir, Provider: "codex", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
@@ -3629,7 +3657,7 @@ func TestDeliverSlingNudgeWaitIdleWrapsInSystemReminder(t *testing.T) {
 	clearInheritedCityRoutingEnv(t)
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
-	store := openNudgeBeadStore(dir)
+	store := openNudgeFixtureStore(t, dir)
 	fake := runtime.NewFake()
 
 	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
@@ -3679,7 +3707,7 @@ func TestDeliverSlingNudgeQueuesFencedReminderAndStartsPollerForAsleepSession(t 
 	clearInheritedCityRoutingEnv(t)
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
-	store := openNudgeBeadStore(dir)
+	store := openNudgeFixtureStore(t, dir)
 	fake := runtime.NewFake()
 
 	target := nudgeTarget{
@@ -4925,30 +4953,36 @@ start_command = "echo"
 func TestPruneDeadQueuedNudges_RemovesOldDeadItems(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
+	store := openNudgeFixtureStore(t, dir)
 	now := time.Now()
 
 	// Enqueue and immediately dead-letter two nudges at different ages.
 	old := newQueuedNudgeWithOptions("worker", "ancient", "session", now.Add(-3*time.Hour), queuedNudgeOptions{ID: "n-old"})
 	recent := newQueuedNudgeWithOptions("worker", "recent", "session", now.Add(-10*time.Minute), queuedNudgeOptions{ID: "n-recent"})
 	for _, item := range []queuedNudge{old, recent} {
-		if err := enqueueQueuedNudge(dir, item); err != nil {
+		if err := enqueueQueuedNudgeWithStore(dir, store, item); err != nil {
 			t.Fatalf("enqueueQueuedNudge(%s): %v", item.ID, err)
 		}
 	}
 	// Dead-letter both at different times: old at -2h, recent at -30m.
 	for i := 0; i < defaultQueuedNudgeMaxAttempts; i++ {
-		if err := recordQueuedNudgeFailure(dir, []string{"n-old"}, context.DeadlineExceeded, now.Add(-2*time.Hour+time.Duration(i)*time.Second)); err != nil {
+		if err := recordQueuedNudgeFailureWithStore(dir, store, []string{"n-old"}, context.DeadlineExceeded, now.Add(-2*time.Hour+time.Duration(i)*time.Second)); err != nil {
 			t.Fatalf("recordQueuedNudgeFailure(n-old, %d): %v", i, err)
 		}
 	}
 	for i := 0; i < defaultQueuedNudgeMaxAttempts; i++ {
-		if err := recordQueuedNudgeFailure(dir, []string{"n-recent"}, context.DeadlineExceeded, now.Add(-30*time.Minute+time.Duration(i)*time.Second)); err != nil {
+		if err := recordQueuedNudgeFailureWithStore(dir, store, []string{"n-recent"}, context.DeadlineExceeded, now.Add(-30*time.Minute+time.Duration(i)*time.Second)); err != nil {
 			t.Fatalf("recordQueuedNudgeFailure(n-recent, %d): %v", i, err)
 		}
 	}
 
 	// With defaultQueuedNudgeDeadRetention (1h), old should be pruned (has terminal bead), recent kept.
-	store := openNudgeBeadStore(dir)
+	for _, id := range []string{"n-old", "n-recent"} {
+		shadow, ok, err := nudgeFrontDoor(store).FindIncludingTerminal(id)
+		if err != nil || !ok || shadow.BeadID == "" || !nudgequeue.IsTerminalState(shadow.State) {
+			t.Fatalf("terminal shadow for %s = %+v, found=%t err=%v; want a durable terminal bead", id, shadow, ok, err)
+		}
+	}
 	err := withNudgeQueueState(dir, func(state *nudgeQueueState) error {
 		return pruneDeadQueuedNudges(state, nudgeFrontDoor(store), now, noMaintenanceDeadline())
 	})
@@ -5012,7 +5046,7 @@ func TestPruneDeadQueuedNudges_PrunesItemsWhoseBeadWasReaped(t *testing.T) {
 	// items were retained forever and paid a store lookup on every sweep.
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
-	store := openNudgeBeadStore(dir)
+	store := openNudgeFixtureStore(t, dir)
 	now := time.Now().UTC()
 	item := newQueuedNudgeWithOptions("worker", "stale dead letter", "session", now.Add(-3*time.Hour), queuedNudgeOptions{
 		ID:        "n-dead-reaped",
@@ -5083,7 +5117,7 @@ func TestEnqueueSupersedes_SameAgentSourceReference(t *testing.T) {
 	}
 
 	// Verify the superseded nudge has a terminal bead record with state "superseded".
-	store := openNudgeBeadStore(dir)
+	store := openNudgeFixtureStore(t, dir)
 	if store.Store != nil {
 		b, ok, err := nudgeFrontDoor(store).FindIncludingTerminal("n-first")
 		if err != nil {
@@ -6196,4 +6230,177 @@ func TestResolveNudgePollInterval(t *testing.T) {
 			t.Fatalf("resolveNudgePollInterval = %v, want default %v", got, defaultNudgePollInterval)
 		}
 	})
+}
+
+// setupNudgeDrainInjectFastPathCity stands up a file-beads city whose
+// GC_CITY_PATH names it and whose hook identity is GC_ALIAS=worker, with the
+// nudge target store seam counting opens (every resolveNudgeTarget opens it).
+func setupNudgeDrainInjectFastPathCity(t *testing.T) (cityDir string, targetOpens *int) {
+	t.Helper()
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_INJECT_CONTEXT", "")
+	cityDir = t.TempDir()
+	writeNamedSessionCityTOML(t, cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("GC_ALIAS", "worker")
+
+	previous := openNudgeBeadStore
+	opens := 0
+	openNudgeBeadStore = func(string) beads.NudgesStore {
+		opens++
+		return beads.NudgesStore{}
+	}
+	t.Cleanup(func() { openNudgeBeadStore = previous })
+	return cityDir, &opens
+}
+
+// withNudgeDrainHookStdin feeds payload to the drain as the provider hook's
+// piped stdin for the duration of the test.
+func withNudgeDrainHookStdin(t *testing.T, payload []byte) {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	previous := os.Stdin
+	os.Stdin = r
+	t.Cleanup(func() {
+		os.Stdin = previous
+		_ = r.Close()
+	})
+}
+
+// With nothing queued and no context-usage sample, the hook context the drain
+// writes cannot depend on the target, so it must not resolve one.
+func TestCmdNudgeDrainInjectEmptyQueueSkipsTargetResolution(t *testing.T) {
+	_, targetOpens := setupNudgeDrainInjectFastPathCity(t)
+	withNudgeDrainHookStdin(t, []byte(`{"hook_event_name":"UserPromptSubmit"}`))
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdNudgeDrainWithFormat(nil, true, "", &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdNudgeDrainWithFormat = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if *targetOpens != 0 {
+		t.Fatalf("nudge target store opens = %d, want 0 for an empty queue", *targetOpens)
+	}
+	if !strings.Contains(stdout.String(), "Current time:") {
+		t.Fatalf("stdout = %q, want the hook clock context", stdout.String())
+	}
+}
+
+// Anything the target could change keeps the full resolution path: queued or
+// unreadable queue state, a usage sample the agent's advisory policy renders,
+// a step reminder (written only once the target resolves), or a scope that the
+// explicit city environment alone does not decide.
+func TestCmdNudgeDrainInjectFallsBackToTargetResolution(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, cityDir string)
+		// wantAbsent must not appear in stdout: the full path writes the step
+		// reminder only for a resolved target, and this seam never resolves.
+		wantAbsent string
+	}{
+		{
+			name: "queued nudge for another session",
+			setup: func(t *testing.T, cityDir string) {
+				t.Helper()
+				if err := withNudgeQueueState(cityDir, func(state *nudgeQueueState) error {
+					state.Pending = []queuedNudge{{ID: "nudge-other", Agent: "other"}}
+					return nil
+				}); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "dead-lettered nudge",
+			setup: func(t *testing.T, cityDir string) {
+				t.Helper()
+				if err := withNudgeQueueState(cityDir, func(state *nudgeQueueState) error {
+					state.Dead = []queuedNudge{{ID: "nudge-dead", Agent: "worker"}}
+					return nil
+				}); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "unreadable queue",
+			setup: func(t *testing.T, cityDir string) {
+				t.Helper()
+				writeCorruptNudgeQueueState(t, cityDir)
+			},
+		},
+		{
+			name: "context usage sample",
+			setup: func(t *testing.T, _ string) {
+				t.Helper()
+				transcript := writeTranscript(t, usageLine("claude-fable-5", 10_000, 100_000, 10_000))
+				withNudgeDrainHookStdin(t, hookInputFor(transcript))
+			},
+		},
+		{
+			name: "active step reminder",
+			setup: func(t *testing.T, cityDir string) {
+				t.Helper()
+				store, err := openCityStoreAt(cityDir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				created, err := store.Create(beads.Bead{
+					Title:       "Fast path step",
+					Description: "do the fast path step",
+					Type:        "task",
+					Assignee:    "worker",
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				status := "in_progress"
+				if err := store.Update(created.ID, beads.UpdateOpts{Status: &status}); err != nil {
+					t.Fatal(err)
+				}
+				if got := wispStepInjectionContent(cityDir); !strings.Contains(got, "do the fast path step") {
+					t.Fatalf("step reminder fixture = %q, want the in-progress step", got)
+				}
+			},
+			wantAbsent: "do the fast path step",
+		},
+		{
+			name: "explicit city flag",
+			setup: func(t *testing.T, cityDir string) {
+				t.Helper()
+				previous := cityFlag
+				cityFlag = cityDir
+				t.Cleanup(func() { cityFlag = previous })
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir, targetOpens := setupNudgeDrainInjectFastPathCity(t)
+			tc.setup(t, cityDir)
+
+			var stdout, stderr bytes.Buffer
+			if code := cmdNudgeDrainWithFormat(nil, true, "", &stdout, &stderr); code != 0 {
+				t.Fatalf("cmdNudgeDrainWithFormat = %d, want fail-open 0; stderr=%s", code, stderr.String())
+			}
+			if *targetOpens != 1 {
+				t.Fatalf("nudge target store opens = %d, want 1 (full target resolution)", *targetOpens)
+			}
+			if !strings.Contains(stdout.String(), "Current time:") {
+				t.Fatalf("stdout = %q, want the hook clock context", stdout.String())
+			}
+			if tc.wantAbsent != "" && strings.Contains(stdout.String(), tc.wantAbsent) {
+				t.Fatalf("stdout = %q, want no %q for an unresolved target", stdout.String(), tc.wantAbsent)
+			}
+		})
+	}
 }

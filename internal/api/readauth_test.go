@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"encoding/base64"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -87,6 +88,40 @@ func TestReadAuthMiddleware_AcceptsValidGrant(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if !seen || rec.Code != http.StatusOK {
 		t.Fatalf("valid read grant should pass: seen=%v code=%d", seen, rec.Code)
+	}
+}
+
+func TestReadAuthMiddlewareCarriesOnlyVerifiedRequestIdentity(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	pub, priv := mustKeypair(t)
+	path := "/v0/city/acme/beads"
+	grant := readGrant(now, "acme", http.MethodGet, path, "limit=1", "read-principal")
+	grant.CID = "tenant-acme"
+	grant.Epoch = 7
+	called := false
+	h := readAuthMiddleware(newTestReadVerifier(t, pub, now), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		principal, ok := verifiedCityReadPrincipal(r.Context())
+		if !ok || principal.KeyID != "k1" || principal.City != "acme" || principal.CID != grant.CID || principal.Epoch != grant.Epoch || principal.RequestDigest != grant.Req {
+			t.Errorf("verified read identity = %+v, present=%v; want the exact signed grant facts", principal, ok)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodGet, path+"?limit=1", nil)
+	req.Header.Set(readAuthHeader, mintToken(t, priv, grant))
+	req.Header.Set("X-GC-Read-Actor", "forged-key")
+	if _, ok := verifiedCityReadPrincipal(req.Context()); ok {
+		t.Fatal("an unverified request already has a read identity")
+	}
+	response := httptest.NewRecorder()
+	h.ServeHTTP(response, req)
+	if !called || response.Code != http.StatusOK {
+		t.Fatalf("verified request reached handler=%v, status=%d", called, response.Code)
+	}
+	// Verification must not mutate the original request or leak authentication
+	// into another handler invocation that uses that original context.
+	if _, ok := verifiedCityReadPrincipal(req.Context()); ok {
+		t.Fatal("read identity escaped the authenticated handler context")
 	}
 }
 
@@ -369,6 +404,32 @@ func TestResolveReadAuthVerifier(t *testing.T) {
 			t.Fatal("config-required + missing key must error")
 		}
 	})
+}
+
+func TestResolveReadAuthVerifierBindsConfiguredTenant(t *testing.T) {
+	pub, priv := mustKeypair(t)
+	t.Setenv("GC_CITY_READ_PUBKEY", "k1:"+base64.StdEncoding.EncodeToString(pub))
+	t.Setenv("GC_CITY_READ_CID", "expected-tenant-city")
+	t.Setenv("GC_CITY_READ_EPOCH_FLOOR", "0")
+	now := time.Now()
+	path := "/v0/city/acme/beads"
+	for _, cid := range []string{"expected-tenant-city", "other-tenant-city", ""} {
+		t.Run("cid="+cid, func(t *testing.T) {
+			verifier, err := ResolveReadAuthVerifier("", true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			grant := readGrant(now, "acme", http.MethodGet, path, "", "tenant-test")
+			grant.CID = cid
+			_, err = verifier.Verify(mintToken(t, priv, grant), citywriteauth.Expect{City: "acme", ReqDigest: grant.Req})
+			if cid == "expected-tenant-city" && err != nil {
+				t.Fatalf("matching tenant rejected: %v", err)
+			}
+			if cid != "expected-tenant-city" && !errors.Is(err, citywriteauth.ErrCIDMismatch) {
+				t.Fatalf("mismatched or missing tenant error=%v", err)
+			}
+		})
+	}
 }
 
 func TestInstallReadAuth(t *testing.T) {

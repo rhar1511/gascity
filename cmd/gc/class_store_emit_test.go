@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -229,7 +231,7 @@ func closeThroughClassResolver(resolve func(*storageRoutes, beads.Store, *config
 // emitting class-store wrapper carries CloseWithMetadataIfMatch structurally for
 // every engine — TestEmittingClassStoreKeepsEveryEngineCapability forces that,
 // because *NativeDoltStore has it — so a bare type assertion would advertise
-// atomic close even over a backing (the sqlite CLI engine) that cannot honor it.
+// atomic close even over a backing (a plain MemStore, or a bd CLI store) that cannot honor it.
 // The wrapper's AtomicConditionalCloserHandle keeps discovery honest: yes only
 // when the resolved backing truly provides atomic close, and the closer it hands
 // back is the emitting wrapper itself, so a DISCOVERED atomic close still appends
@@ -573,10 +575,7 @@ func TestEmittingClassStoreKeepsEveryEngineCapability(t *testing.T) {
 	wrapped := splitClassRoutes(beads.NewMemStore()).withCLIEmission(cityPath).stores[coordclass.ClassGraph]
 	wrapper := reflect.TypeOf(wrapped)
 
-	for _, engine := range []reflect.Type{
-		reflect.TypeOf(&beads.SQLiteStore{}),
-		reflect.TypeOf(&beads.NativeDoltStore{}),
-	} {
+	for _, engine := range bindingEngineTypes {
 		var missing []string
 		for i := 0; i < engine.NumMethod(); i++ {
 			method := engine.Method(i)
@@ -595,6 +594,16 @@ func TestEmittingClassStoreKeepsEveryEngineCapability(t *testing.T) {
 			t.Errorf("the emitting class store drops %v from %s; every one is a capability assertion that stops matching", missing, engine)
 		}
 	}
+}
+
+// bindingEngineTypes are the bead engines a relocated class binding can open.
+// Every layer the binding gets wrapped in — the one-shot CLI's emitter, the
+// controller's CachingStore — is held to their method sets, because optional
+// capabilities are discovered by type assertion and a dropped method silently
+// downgrades its caller.
+var bindingEngineTypes = []reflect.Type{
+	reflect.TypeOf(&beads.SQLiteStore{}),
+	reflect.TypeOf(&beads.NativeDoltStore{}),
 }
 
 // The relic census is the one capability where carrying the method is WORSE
@@ -678,6 +687,105 @@ func TestTheEmittingClassStoreOnlyAdvertisesACensusItCanAnswer(t *testing.T) {
 					t.Errorf("censusing the binding appended %d bead event(s); a verdict reads and mutates nothing: %s", len(got), eventSummary(got))
 				}
 			})
+		}
+	})
+}
+
+func TestEmittingClassStoreFrontierRolesFollowBacking(t *testing.T) {
+	t.Run("unsupported and degraded backings are not advertised", func(t *testing.T) {
+		for _, tc := range []struct {
+			name       string
+			leaf       beads.Store
+			wantReader bool
+		}{
+			{name: "native Dolt", leaf: &beads.NativeDoltStore{}},
+			{name: "conditional writes disabled", leaf: &beads.MemStore{IDPrefix: "gcg", HonorExplicitIDs: true, DisableConditionalWrites: true}, wantReader: true},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				wrapped := splitClassRoutes(tc.leaf).withCLIEmission(t.TempDir()).stores[coordclass.ClassGraph]
+				if _, ok := wrapped.(beads.DecisionFrontierRecordWriter); !ok {
+					t.Fatalf("wrapper %T does not structurally retain the record-writer methods", wrapped)
+				}
+				if _, ok := wrapped.(beads.DecisionFrontierSourceReader); !ok {
+					t.Fatalf("wrapper %T does not structurally retain the source-reader method", wrapped)
+				}
+				if _, ok := wrapped.(beads.RevisionTransitionWriter); !ok {
+					t.Fatalf("wrapper %T does not structurally retain the transition-writer method", wrapped)
+				}
+				if _, ok := beads.DecisionFrontierRecordWriterFor(wrapped); ok {
+					t.Fatal("record writer was discovered over a backing that cannot honor it")
+				}
+				if _, ok := beads.DecisionFrontierSourceReaderFor(wrapped); ok != tc.wantReader {
+					t.Fatalf("source reader discovered = %t, want %t", ok, tc.wantReader)
+				}
+				if _, ok := beads.RevisionTransitionWriterFor(wrapped); ok {
+					t.Fatal("transition writer was discovered over a backing that cannot honor it")
+				}
+
+				recordWriter := wrapped.(beads.DecisionFrontierRecordWriter)
+				if _, err := recordWriter.CreateDecisionFrontierRecord(beads.Bead{}); !errors.Is(err, beads.ErrDecisionFrontierCapabilityUnsupported) {
+					t.Fatalf("direct unsupported record create error = %v", err)
+				}
+				if swapped, err := recordWriter.CompareAndSetDecisionFrontierRecordMetadataKey("record", "key", "", "next"); swapped || !errors.Is(err, beads.ErrDecisionFrontierCapabilityUnsupported) {
+					t.Fatalf("direct unsupported record CAS = (swapped:%t, err:%v)", swapped, err)
+				}
+				if err := recordWriter.EnsureDecisionFrontierLink("source", "target", "relates-to"); !errors.Is(err, beads.ErrDecisionFrontierCapabilityUnsupported) {
+					t.Fatalf("direct unsupported record link error = %v", err)
+				}
+				reader := wrapped.(beads.DecisionFrontierSourceReader)
+				if _, err := reader.DecisionFrontierSourceSnapshot("work"); tc.wantReader {
+					if err == nil || !errors.Is(err, beads.ErrNotFound) {
+						t.Fatalf("supported source snapshot error = %v, want not found", err)
+					}
+				} else if !errors.Is(err, beads.ErrConditionalWriteUnsupported) {
+					t.Fatalf("unsupported source snapshot error = %v", err)
+				}
+				transitionWriter := wrapped.(beads.RevisionTransitionWriter)
+				if _, won, err := transitionWriter.CompareAndSetMetadataKeyWithReceipt("work", "", "", "", 0, beads.RevisionTransitionReceipt{}); won || !errors.Is(err, beads.ErrConditionalWriteUnsupported) {
+					t.Fatalf("unsupported receipt transition = (won:%t, err:%v)", won, err)
+				}
+			})
+		}
+	})
+
+	t.Run("SQLite keeps the supported lifecycle event-dark", func(t *testing.T) {
+		cityPath := t.TempDir()
+		leaf, err := beads.OpenSQLiteStore(t.TempDir(), beads.WithSQLiteStoreIDPrefix("gcg"))
+		if err != nil {
+			t.Fatalf("opening SQLite leaf: %v", err)
+		}
+		t.Cleanup(func() {
+			if err := closeBeadStoreHandle(leaf); err != nil {
+				t.Errorf("closing SQLite leaf: %v", err)
+			}
+		})
+		work := seedClassBead(t, leaf, "frontier-work")
+		updatedTitle := "step with a persisted revision"
+		if err := leaf.Update(work.ID, beads.UpdateOpts{Title: &updatedTitle}); err != nil {
+			t.Fatalf("initializing SQLite revision on leaf: %v", err)
+		}
+		work, err = leaf.Get(work.ID)
+		if err != nil {
+			t.Fatalf("reloading source work after revision initialization: %v", err)
+		}
+		wrapped := splitClassRoutes(leaf).withCLIEmission(cityPath).stores[coordclass.ClassGraph]
+		if _, ok := beads.DecisionFrontierRecordWriterFor(wrapped); !ok {
+			t.Fatal("supported SQLite record writer was hidden by the emitting wrapper")
+		}
+		if _, ok := beads.DecisionFrontierSourceReaderFor(wrapped); !ok {
+			t.Fatal("supported SQLite source reader was hidden by the emitting wrapper")
+		}
+		if _, ok := beads.RevisionTransitionWriterFor(wrapped); !ok {
+			t.Fatal("supported SQLite transition writer was hidden by the emitting wrapper")
+		}
+
+		released := resolveLifecycleDecisionFrontier(t, wrapped, work.ID)
+		if beads.HasDecisionFrontierHold(released) || released.Metadata[beadmeta.DecisionFrontierRevisionReceiptsMetadataKey] == "" {
+			t.Fatalf("frontier lifecycle did not release with a durable receipt: hold=%t metadata=%v",
+				beads.HasDecisionFrontierHold(released), released.Metadata)
+		}
+		if got := readCityJournal(t, cityPath); len(got) != 0 {
+			t.Fatalf("private decision records, answers, links, or transition receipts entered the generic event journal: %s", eventSummary(got))
 		}
 	})
 }
@@ -1029,6 +1137,66 @@ func TestEmittingClassStoreRefusesAtomicCloseOverANonAtomicBacking(t *testing.T)
 	store := resolveGraphStore(splitClassRoutes(beads.NewMemStore()).withCLIEmission(cityPath), beads.NewMemStore(), nil, cityPath, nil)
 	if _, ok := beads.AtomicConditionalCloserFor(store); ok {
 		t.Fatal("the emitting wrapper advertised atomic close over a backing that cannot honor it")
+	}
+}
+
+func TestEmittingClassStoreKeepsPrivatePayloadTransport(t *testing.T) {
+	cityPath := t.TempDir()
+	dir := t.TempDir()
+	leaf, err := beads.OpenSQLiteStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = leaf.(*beads.SQLiteStore).CloseStore() })
+	store := resolveGraphStore(splitClassRoutes(leaf).withCLIEmission(cityPath), beads.NewMemStore(), nil, cityPath, nil)
+	content := []byte("private evidence must not enter the public journal")
+	digest := fmt.Sprintf("%x", sha256.Sum256(content))
+	createdAt := time.Date(2026, time.October, 2, 0, 0, 0, 0, time.UTC)
+	payload := beads.Bead{ID: beads.AttemptEvidencePayloadID(digest), Title: "private attempt payload", Type: "molecule", Status: "closed", CreatedAt: createdAt, UpdatedAt: createdAt, Metadata: map[string]string{
+		beadmeta.AttemptEvidencePayloadDigestMetadataKey: digest,
+		beadmeta.AttemptEvidencePayloadDataMetadataKey:   base64.StdEncoding.EncodeToString(content),
+	}}
+	backend, ok := beads.PrivatePayloadValueBackend(store)
+	if !ok || backend != leaf {
+		t.Fatalf("private payload backend = %T, %t; want exact SQLite backing", backend, ok)
+	}
+	creator, ok := store.(beads.PrivatePayloadValueCreator)
+	if !ok {
+		t.Fatal("emitting wrapper dropped the private create capability")
+	}
+	first, err := creator.CreatePrivatePayloadValue(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := creator.CreatePrivatePayloadValue(payload)
+	if err != nil || !reflect.DeepEqual(first, second) {
+		t.Fatalf("duplicate payload = %+v, %v; want unchanged exact row", second, err)
+	}
+	if err := leaf.(*beads.SQLiteStore).CloseStore(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := beads.OpenSQLiteStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.(*beads.SQLiteStore).CloseStore() })
+	stored, err := reopened.Get(first.ID)
+	if err != nil || !reflect.DeepEqual(first, stored) {
+		t.Fatalf("durable payload = %+v, %v; want exact row", stored, err)
+	}
+	if got := beadEvents(readCityJournal(t, cityPath)); len(got) != 0 {
+		t.Fatalf("private create emitted public events: %s", eventSummary(got))
+	}
+	unsupported := resolveGraphStore(splitClassRoutes(beads.NewMemStore()).withCLIEmission(cityPath), beads.NewMemStore(), nil, cityPath, nil)
+	if _, err := beads.CreatePrivatePayloadValue(unsupported, payload); !errors.Is(err, beads.ErrPrivatePayloadCreateUnsupported) {
+		t.Fatalf("unsupported backing create = %v", err)
+	}
+	unsupportedCreator, ok := unsupported.(beads.PrivatePayloadValueCreator)
+	if !ok {
+		t.Fatal("emitting wrapper has an inconsistent capability surface")
+	}
+	if _, err := unsupportedCreator.CreatePrivatePayloadValue(payload); !errors.Is(err, beads.ErrPrivatePayloadCreateUnsupported) {
+		t.Fatalf("direct unsupported backing create = %v", err)
 	}
 }
 

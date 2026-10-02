@@ -389,7 +389,7 @@ func renderConvoyListFromAPI(cr api.CachedRead[[]beads.Bead], progress []api.Con
 	fmt.Fprintln(tw, "ID\tTITLE\tPROGRESS") //nolint:errcheck // best-effort stdout
 	for i, convoy := range cr.Body {
 		p := progress[i]
-		fmt.Fprintf(tw, "%s\t%s\t%d/%d closed\n", convoy.ID, convoy.Title, p.Closed, p.Total) //nolint:errcheck // best-effort stdout
+		fmt.Fprintf(tw, "%s\t%s\t%d/%d closed\n", convoy.ID, beads.PublicBead(convoy).Title, p.Closed, p.Total) //nolint:errcheck // best-effort stdout
 	}
 	tw.Flush() //nolint:errcheck // best-effort stdout
 	if cr.AgeSeconds > cacheAgeBannerThresholdSeconds {
@@ -401,7 +401,7 @@ func renderConvoyListFromAPI(cr api.CachedRead[[]beads.Bead], progress []api.Con
 func convoySummaryFromAPI(convoy beads.Bead, progress api.ConvoyCheckView) convoySummaryJSON {
 	return convoySummaryJSON{
 		ID:       convoy.ID,
-		Title:    convoy.Title,
+		Title:    beads.PublicBead(convoy).Title,
 		Status:   convoy.Status,
 		Progress: convoyProgressFromAPI(progress),
 		Owned:    hasLabel(convoy.Labels, "owned"),
@@ -1096,7 +1096,7 @@ func doConvoyListAcrossStores(stores []convoyStoreView, jsonOut bool, stdout, st
 			return 1
 		}
 		progress := convoyProgressFromChildren(children)
-		fmt.Fprintf(tw, "%s\t%s\t%s\n", c.bead.ID, c.bead.Title, formatConvoyProgress(progress)) //nolint:errcheck // best-effort stdout
+		fmt.Fprintf(tw, "%s\t%s\t%s\n", c.bead.ID, beads.PublicBead(c.bead).Title, formatConvoyProgress(progress)) //nolint:errcheck // best-effort stdout
 	}
 	tw.Flush() //nolint:errcheck // best-effort stdout
 	return 0
@@ -1131,7 +1131,7 @@ func convoySummaryFromBead(convoy beads.Bead, children []beads.Bead) convoySumma
 	}
 	return convoySummaryJSON{
 		ID:       convoy.ID,
-		Title:    convoy.Title,
+		Title:    beads.PublicBead(convoy).Title,
 		Status:   convoy.Status,
 		Progress: convoyProgressFromChildren(children),
 		Owned:    hasLabel(convoy.Labels, "owned"),
@@ -1141,7 +1141,8 @@ func convoySummaryFromBead(convoy beads.Bead, children []beads.Bead) convoySumma
 }
 
 func convoyFieldsFromBead(convoy beads.Bead) convoyFieldsJSON {
-	fields := getConvoyFields(convoy)
+	convoy = beads.PublicBead(convoy)
+	fields := getConvoyFields(beads.PublicBead(convoy))
 	return convoyFieldsJSON{
 		Owner:  fields.Owner,
 		Notify: fields.Notify,
@@ -1229,10 +1230,10 @@ func renderConvoyStatusFromAPI(cr api.CachedRead[api.ConvoyStatusView], jsonOut 
 
 	w := func(s string) { fmt.Fprintln(stdout, s) } //nolint:errcheck // best-effort stdout
 	w(fmt.Sprintf("Convoy:   %s", convoy.ID))
-	w(fmt.Sprintf("Title:    %s", convoy.Title))
+	w(fmt.Sprintf("Title:    %s", beads.PublicBead(convoy).Title))
 	w(fmt.Sprintf("Status:   %s", convoy.Status))
 	w(fmt.Sprintf("Progress: %d/%d closed", progress.Closed, progress.Total))
-	fields := getConvoyFields(convoy)
+	fields := getConvoyFields(beads.PublicBead(convoy))
 	if hasLabel(convoy.Labels, "owned") {
 		w("Lifecycle: owned")
 	}
@@ -1253,6 +1254,7 @@ func renderConvoyStatusFromAPI(cr api.CachedRead[api.ConvoyStatusView], jsonOut 
 		tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
 		fmt.Fprintln(tw, "ID\tTITLE\tSTATUS\tASSIGNEE") //nolint:errcheck // best-effort stdout
 		for _, ch := range children {
+			ch = beads.PublicBead(ch)
 			assignee := ch.Assignee
 			if assignee == "" {
 				assignee = "-"
@@ -1312,10 +1314,10 @@ func doConvoyStatusWithJSON(store beads.Store, args []string, jsonOut bool, stdo
 
 	w := func(s string) { fmt.Fprintln(stdout, s) } //nolint:errcheck // best-effort stdout
 	w(fmt.Sprintf("Convoy:   %s", convoy.ID))
-	w(fmt.Sprintf("Title:    %s", convoy.Title))
+	w(fmt.Sprintf("Title:    %s", beads.PublicBead(convoy).Title))
 	w(fmt.Sprintf("Status:   %s", convoy.Status))
 	w(fmt.Sprintf("Progress: %s", formatConvoyProgress(progress)))
-	fields := getConvoyFields(convoy)
+	fields := getConvoyFields(beads.PublicBead(convoy))
 	if hasLabel(convoy.Labels, "owned") {
 		w("Lifecycle: owned")
 	}
@@ -1337,6 +1339,7 @@ func doConvoyStatusWithJSON(store beads.Store, args []string, jsonOut bool, stdo
 		tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
 		fmt.Fprintln(tw, "ID\tTITLE\tSTATUS\tASSIGNEE") //nolint:errcheck // best-effort stdout
 		for _, ch := range children {
+			ch = beads.PublicBead(ch)
 			assignee := ch.Assignee
 			if assignee == "" {
 				assignee = "-"
@@ -1349,11 +1352,13 @@ func doConvoyStatusWithJSON(store beads.Store, args []string, jsonOut bool, stdo
 }
 
 func writeConvoyStatusJSON(convoy beads.Bead, children []beads.Bead, progress convoyProgressJSON, stdout, stderr io.Writer) int {
+	convoy = beads.PublicBead(convoy)
+	children = beads.PublicBeads(children)
 	childItems := make([]convoyChildJSON, 0, len(children))
 	for _, ch := range children {
 		childItems = append(childItems, convoyChildJSON{
 			ID:            ch.ID,
-			Title:         ch.Title,
+			Title:         beads.PublicBead(ch).Title,
 			Status:        ch.Status,
 			Type:          ch.Type,
 			Assignee:      ch.Assignee,
@@ -1364,7 +1369,7 @@ func writeConvoyStatusJSON(convoy beads.Bead, children []beads.Bead, progress co
 		SchemaVersion: "1",
 		Convoy: convoyDetailJSON{
 			ID:     convoy.ID,
-			Title:  convoy.Title,
+			Title:  beads.PublicBead(convoy).Title,
 			Status: convoy.Status,
 			Owned:  hasLabel(convoy.Labels, "owned"),
 			Fields: convoyFieldsFromBead(convoy),
@@ -1798,7 +1803,7 @@ func doConvoyCheckAcrossStoresJSON(stores []convoyStoreView, rec events.Recorder
 				Subject: item.bead.ID,
 			})
 			if !jsonOut {
-				fmt.Fprintf(stdout, "Auto-closed convoy %s %q\n", item.bead.ID, item.bead.Title) //nolint:errcheck // best-effort stdout
+				fmt.Fprintf(stdout, "Auto-closed convoy %s %q\n", item.bead.ID, beads.PublicBead(item.bead).Title) //nolint:errcheck // best-effort stdout
 			}
 			closed++
 		}
@@ -1925,7 +1930,7 @@ func doConvoyStrandedAcrossStoresJSON(stores []convoyStoreView, jsonOut bool, st
 	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "CONVOY\tISSUE\tTITLE") //nolint:errcheck // best-effort stdout
 	for _, item := range items {
-		fmt.Fprintf(tw, "%s\t%s\t%s\n", item.convoyID, item.issue.ID, item.issue.Title) //nolint:errcheck // best-effort stdout
+		fmt.Fprintf(tw, "%s\t%s\t%s\n", item.convoyID, item.issue.ID, beads.PublicBead(item.issue).Title) //nolint:errcheck // best-effort stdout
 	}
 	tw.Flush() //nolint:errcheck // best-effort stdout
 	return 0
@@ -2027,7 +2032,7 @@ func doConvoyLandJSON(store beads.Store, rec events.Recorder, args []string, opt
 	// Already closed → idempotent success.
 	if convoycore.IsTerminalStatus(convoy.Status) {
 		if jsonOut {
-			return writeCLIJSONLineOrExit(stdout, stderr, "gc convoy land", convoyActionResult{SchemaVersion: "1", OK: true, Command: "convoy.land", Action: "land", ConvoyID: convoyID, Title: convoy.Title, AlreadyClosed: true, DryRun: opts.DryRun, Forced: opts.Force})
+			return writeCLIJSONLineOrExit(stdout, stderr, "gc convoy land", convoyActionResult{SchemaVersion: "1", OK: true, Command: "convoy.land", Action: "land", ConvoyID: convoyID, Title: beads.PublicBead(convoy).Title, AlreadyClosed: true, DryRun: opts.DryRun, Forced: opts.Force})
 		}
 		fmt.Fprintf(stdout, "Convoy %s already closed\n", convoyID) //nolint:errcheck // best-effort stdout
 		return 0
@@ -2050,7 +2055,7 @@ func doConvoyLandJSON(store beads.Store, rec events.Recorder, args []string, opt
 	if len(openChildren) > 0 && !opts.Force {
 		fmt.Fprintf(stderr, "gc convoy land: %d open child(ren):\n", len(openChildren)) //nolint:errcheck // best-effort stderr
 		for _, ch := range openChildren {
-			fmt.Fprintf(stderr, "  %s %s (%s)\n", ch.ID, ch.Title, ch.Status) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "  %s %s (%s)\n", ch.ID, beads.PublicBead(ch).Title, ch.Status) //nolint:errcheck // best-effort stderr
 		}
 		fmt.Fprintln(stderr, "Use --force to land anyway") //nolint:errcheck // best-effort stderr
 		return 1
@@ -2059,10 +2064,10 @@ func doConvoyLandJSON(store beads.Store, rec events.Recorder, args []string, opt
 	// Dry-run: preview what would happen.
 	if opts.DryRun {
 		if jsonOut {
-			return writeCLIJSONLineOrExit(stdout, stderr, "gc convoy land", convoyActionResult{SchemaVersion: "1", OK: true, Command: "convoy.land", Action: "land", ConvoyID: convoyID, Title: convoy.Title, TotalChildren: intRef(len(children)), OpenChildren: intRef(len(openChildren)), DryRun: true, Forced: opts.Force})
+			return writeCLIJSONLineOrExit(stdout, stderr, "gc convoy land", convoyActionResult{SchemaVersion: "1", OK: true, Command: "convoy.land", Action: "land", ConvoyID: convoyID, Title: beads.PublicBead(convoy).Title, TotalChildren: intRef(len(children)), OpenChildren: intRef(len(openChildren)), DryRun: true, Forced: opts.Force})
 		}
-		fmt.Fprintf(stdout, "Would land convoy %s %q\n", convoyID, convoy.Title)                 //nolint:errcheck // best-effort stdout
-		fmt.Fprintf(stdout, "  Children: %d total, %d open\n", len(children), len(openChildren)) //nolint:errcheck // best-effort stdout
+		fmt.Fprintf(stdout, "Would land convoy %s %q\n", convoyID, beads.PublicBead(convoy).Title) //nolint:errcheck // best-effort stdout
+		fmt.Fprintf(stdout, "  Children: %d total, %d open\n", len(children), len(openChildren))   //nolint:errcheck // best-effort stdout
 		return 0
 	}
 
@@ -2079,14 +2084,14 @@ func doConvoyLandJSON(store beads.Store, rec events.Recorder, args []string, opt
 	})
 
 	// Notification.
-	fields := getConvoyFields(convoy)
+	fields := getConvoyFields(beads.PublicBead(convoy))
 	switch {
 	case jsonOut:
-		return writeCLIJSONLineOrExit(stdout, stderr, "gc convoy land", convoyActionResult{SchemaVersion: "1", OK: true, Command: "convoy.land", Action: "land", ConvoyID: convoyID, Title: convoy.Title, TotalChildren: intRef(len(children)), OpenChildren: intRef(len(openChildren)), Forced: opts.Force, Notify: fields.Notify})
+		return writeCLIJSONLineOrExit(stdout, stderr, "gc convoy land", convoyActionResult{SchemaVersion: "1", OK: true, Command: "convoy.land", Action: "land", ConvoyID: convoyID, Title: beads.PublicBead(convoy).Title, TotalChildren: intRef(len(children)), OpenChildren: intRef(len(openChildren)), Forced: opts.Force, Notify: fields.Notify})
 	case fields.Notify != "":
-		fmt.Fprintf(stdout, "Landed convoy %s %q (notify: %s)\n", convoyID, convoy.Title, fields.Notify) //nolint:errcheck // best-effort stdout
+		fmt.Fprintf(stdout, "Landed convoy %s %q (notify: %s)\n", convoyID, beads.PublicBead(convoy).Title, fields.Notify) //nolint:errcheck // best-effort stdout
 	default:
-		fmt.Fprintf(stdout, "Landed convoy %s %q\n", convoyID, convoy.Title) //nolint:errcheck // best-effort stdout
+		fmt.Fprintf(stdout, "Landed convoy %s %q\n", convoyID, beads.PublicBead(convoy).Title) //nolint:errcheck // best-effort stdout
 	}
 	return 0
 }
@@ -2285,5 +2290,5 @@ func autocloseConvoyIfComplete(store beads.Store, rec events.Recorder, convoy be
 		Subject: convoy.ID,
 	})
 
-	fmt.Fprintf(stdout, "Auto-closed convoy %s %q\n", convoy.ID, convoy.Title) //nolint:errcheck // best-effort stdout
+	fmt.Fprintf(stdout, "Auto-closed convoy %s %q\n", convoy.ID, beads.PublicBead(convoy).Title) //nolint:errcheck // best-effort stdout
 }

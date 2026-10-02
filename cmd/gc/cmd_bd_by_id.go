@@ -179,6 +179,7 @@ package main
 // the plainest reason — it yields no ids to probe.
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -189,12 +190,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/attemptevidence"
 	"github.com/gastownhall/gascity/internal/bdflags"
-	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/storebinding"
+	"github.com/gastownhall/gascity/internal/worklifecycle"
 )
 
 // bdByIDVerb names a recognized by-ID gc bd invocation.
@@ -277,6 +279,9 @@ type bdByIDOp struct {
 	// translated into the object model's own shape.
 	Update        beads.UpdateOpts
 	ReplaceLabels *[]string
+	// InspectedRevision is the close gate's verified post-capture snapshot.
+	// It is never populated from CLI input.
+	InspectedRevision int64
 }
 
 // parseBdByIDOp recognizes the by-ID invocations this surface serves. Anything
@@ -1114,8 +1119,15 @@ func serveBdByIDResolved(door bdByIDClassDoor, op bdByIDOp, bdArgs []string, rig
 		// So neither is taken. See refuseRigScopedClassOwnedTarget.
 		return refuseRigScopedClassOwnedTarget(door, op.ID, rig, stderr)
 	}
-	if gateBdByIDClassClose(door, op, bdArgs, resolution, repoDirs, stderr) {
-		return 1, true
+	if gateExitCode := gateBdByIDClassClose(door, op, bdArgs, resolution, repoDirs, stderr); gateExitCode != 0 {
+		return gateExitCode, true
+	}
+	if op.Verb == bdByIDClose || (op.Verb == bdByIDUpdate && op.Update.Status != nil && strings.EqualFold(strings.TrimSpace(*op.Update.Status), "closed")) {
+		current, err := attemptevidence.RefreshOwnerAfterCapture(door.Store, resolution.Bead)
+		if err != nil {
+			return attemptEvidenceCaptureFailure(stderr, err), true
+		}
+		op.InspectedRevision = current.Revision
 	}
 	switch op.Verb {
 	case bdByIDShow:
@@ -1183,14 +1195,24 @@ func doBdByIDDelete(store beads.Store, b beads.Bead, op bdByIDOp, stdout, stderr
 // not-a-close for show/claim/release/dep/reopen and for updates that do not set
 // status closed. The resolved bead is handed in as the preFetched value so the
 // gate reuses it rather than re-reading the class store, and door.Store answers
-// any other id the argv might name. Returns true only when the close must be
-// blocked (enforcement on and the work record invalid).
-func gateBdByIDClassClose(door bdByIDClassDoor, op bdByIDOp, bdArgs []string, resolution bdByIDResolution, repoDirs workRecordRepoDirs, stderr io.Writer) bool {
+// any other id the argv might name. It blocks when exact attempt evidence cannot
+// be sealed, or when work-record enforcement rejects the close.
+func gateBdByIDClassClose(door bdByIDClassDoor, op bdByIDOp, bdArgs []string, resolution bdByIDResolution, repoDirs workRecordRepoDirs, stderr io.Writer) int {
 	if op.Verb != bdByIDClose && op.Verb != bdByIDUpdate {
-		return false
+		return 0
 	}
 	preFetched := map[string]beads.Bead{op.ID: resolution.Bead}
-	return evaluateWorkRecordCloseGate(bdArgs, door.Store, preFetched, repoDirs, workRecordEnforceEnabled(), stderr)
+	ids, ok := workRecordCloseTargets(bdArgs)
+	if !ok {
+		return 0
+	}
+	if err := captureWorkbenchCloseTargets(context.Background(), door.Store, ids, preFetched, repoDirs, door.CityPath, nil); err != nil {
+		return attemptEvidenceCaptureFailure(stderr, err)
+	}
+	if evaluateWorkRecordCloseGate(bdArgs, door.Store, preFetched, repoDirs, workRecordEnforceEnabled(), stderr) {
+		return 1
+	}
+	return 0
 }
 
 // refuseRigScopedClassOwnedTarget refuses a by-ID invocation that pins a rig
@@ -1506,6 +1528,15 @@ func doBdByIDClaim(graph storebinding.GraphStore, id, assignee string, jsonOut b
 		fmt.Fprintf(stderr, "gc bd: claiming %s requires BEADS_ACTOR to name the claimant\n", id) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	current, err := graph.Get(id)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc bd: claiming %s: %v\n", id, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if err := worklifecycle.ValidateGenericMutation(current); err != nil {
+		fmt.Fprintf(stderr, "gc bd: claiming %s: %v\n", id, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	claimed, ok, err := graph.Claim(id, assignee)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: claiming %s: %v\n", id, err) //nolint:errcheck // best-effort stderr
@@ -1531,6 +1562,15 @@ func doBdByIDClaim(graph storebinding.GraphStore, id, assignee string, jsonOut b
 // the orphan-recovery scripts that read it keep working when the bead lives in
 // a class binding.
 func doBdByIDReleaseIfCurrent(graph storebinding.GraphStore, id, expectedAssignee string, stdout, stderr io.Writer) int {
+	current, err := graph.Get(id)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc bd release-if-current: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if err := worklifecycle.ValidateGenericMutation(current); err != nil {
+		fmt.Fprintf(stderr, "gc bd release-if-current: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	released, err := graph.ReleaseIfCurrent(id, expectedAssignee)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd release-if-current: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -1583,7 +1623,7 @@ func doBdByIDDepList(graph storebinding.GraphStore, op bdByIDOp, stdout, stderr 
 		bead, err := graph.Get(related)
 		switch {
 		case err == nil:
-			rows = append(rows, bdByIDDepRow{Bead: bead, DepType: dep.Type})
+			rows = append(rows, bdByIDDepRow{Bead: beads.PublicBead(bead), DepType: dep.Type})
 		case errors.Is(err, beads.ErrNotFound):
 			rows = append(rows, bdByIDDepRow{Bead: beads.Bead{ID: related}, DepType: dep.Type, External: true})
 		default:
@@ -1650,7 +1690,7 @@ func doBdByIDDepTree(graph storebinding.GraphStore, root beads.Bead, op bdByIDOp
 	// Recursion depth is bounded by op.MaxDepth, which the parser floors at 1.
 	var walk func(bead beads.Bead, depth int, parentID, edge string) error
 	walk = func(bead beads.Bead, depth int, parentID, edge string) error {
-		row := bdByIDTreeRow{Bead: bead, Depth: depth, TreeParentID: parentID, EdgeFromParent: edge}
+		row := bdByIDTreeRow{Bead: beads.PublicBead(bead), Depth: depth, TreeParentID: parentID, EdgeFromParent: edge}
 		visited[bead.ID] = true
 		deps, err := graph.DepList(bead.ID, op.Direction)
 		if err != nil {
@@ -1746,7 +1786,7 @@ const bdByIDDepTreeLooseEdge = "relates-to"
 // the record came from, so a human who expected bd's own layout can see why it
 // differs rather than assume the bead is thin.
 func printBdByIDBead(b beads.Bead, jsonOut bool, binding string, stdout, stderr io.Writer) int {
-	b.Metadata = beadmeta.RedactGenericMetadata(b.Metadata)
+	b = beads.PublicBead(b)
 	if jsonOut {
 		out, err := json.MarshalIndent([]beads.Bead{b}, "", "  ")
 		if err != nil {
@@ -1830,10 +1870,16 @@ func doBdByIDUpdate(graph storebinding.GraphStore, op bdByIDOp, binding string, 
 		updateErr = currentErr
 	} else {
 		materializeBdByIDReplacementLabels(current, &op)
-		if err := session.GuardGenericMutation(current, op.Update); err != nil {
+		if err := worklifecycle.ValidateEnrolledMutation(current, op.Update); err != nil {
+			updateErr = err
+		} else if err := session.GuardGenericMutation(current, op.Update); err != nil {
 			updateErr = err
 		} else {
-			updateErr = graph.UpdateIfMatch(op.ID, current.Revision, op.Update)
+			revision := current.Revision
+			if op.InspectedRevision != 0 {
+				revision = op.InspectedRevision
+			}
+			updateErr = graph.UpdateIfMatch(op.ID, revision, op.Update)
 		}
 	}
 	if updateErr != nil {
@@ -1860,7 +1906,11 @@ func doBdByIDClose(graph storebinding.GraphStore, op bdByIDOp, binding string, s
 			return err
 		}
 		closed := "closed"
-		return graph.UpdateIfMatch(id, current.Revision, beads.UpdateOpts{Status: &closed})
+		revision := current.Revision
+		if op.InspectedRevision != 0 {
+			revision = op.InspectedRevision
+		}
+		return graph.UpdateIfMatch(id, revision, beads.UpdateOpts{Status: &closed})
 	}, binding, stdout, stderr)
 }
 
@@ -1895,6 +1945,27 @@ func doBdByIDReopen(graph storebinding.GraphStore, op bdByIDOp, binding string, 
 // visible here as an error, and invisible to a caller that only echoed the
 // verb.
 func doBdByIDLifecycleWrite(graph storebinding.GraphStore, op bdByIDOp, verb string, write func(string) error, binding string, stdout, stderr io.Writer) int {
+	if verb == "reopen" || verb == "close" {
+		current, err := graph.Get(op.ID)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc bd %s: %s: %v\n", verb, op.ID, err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		var validationErr error
+		if verb == "close" {
+			validationErr = worklifecycle.ValidateGenericMutation(current)
+			if validationErr == nil {
+				validationErr = beads.ValidateLifecycleClose(current)
+			}
+		} else {
+			open := "open"
+			validationErr = worklifecycle.ValidateEnrolledMutation(current, beads.UpdateOpts{Status: &open})
+		}
+		if validationErr != nil {
+			fmt.Fprintf(stderr, "gc bd %s: %s: %v\n", verb, op.ID, validationErr) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+	}
 	if err := write(op.ID); err != nil {
 		fmt.Fprintf(stderr, "gc bd %s: %s: %v\n", verb, op.ID, err) //nolint:errcheck // best-effort stderr
 		return 1

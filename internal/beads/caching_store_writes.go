@@ -48,7 +48,7 @@ func (c *CachingStore) createWith(create func() (Bead, error)) (Bead, error) {
 	c.mu.Lock()
 	c.noteLocalMutationLocked(created.ID)
 	c.absorbFreshLocked(created.ID, created, time.Now(), absorbOpts{
-		depsMode:   depsFromFields,
+		depsMode:   depsFromFieldsIfCarried,
 		seqMode:    seqKeep,
 		clearDirty: true,
 	})
@@ -101,7 +101,7 @@ func (c *CachingStore) Update(id string, opts UpdateOpts) error {
 		if current, ok := c.beads[id]; ok {
 			fresh = applyUpdateOptsToBead(current, opts)
 			c.absorbFreshLocked(id, fresh, time.Now(), absorbOpts{
-				depsMode:   depsFromFields,
+				depsMode:   depsKeepCached,
 				seqMode:    seqKeep,
 				clearDirty: false,
 			})
@@ -125,7 +125,7 @@ func (c *CachingStore) Update(id string, opts UpdateOpts) error {
 	c.mu.Lock()
 	c.noteLocalMutationLocked(id)
 	c.absorbFreshLocked(id, fresh, time.Now(), absorbOpts{
-		depsMode:   depsFromFields,
+		depsMode:   depsFromFieldsIfCarried,
 		seqMode:    seqKeep,
 		clearDirty: true,
 	})
@@ -159,7 +159,7 @@ func (c *CachingStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, erro
 	c.noteLocalMutationLocked(id)
 	if refreshed {
 		c.absorbFreshLocked(id, fresh, time.Now(), absorbOpts{
-			depsMode:   depsFromFields,
+			depsMode:   depsFromFieldsIfCarried,
 			seqMode:    seqKeep,
 			clearDirty: true,
 		})
@@ -270,6 +270,14 @@ func (c *CachingStore) Reopen(id string) error {
 		setBeadStatus(&reopened, "open")
 		found = true
 		refreshed = true
+		// A close may have dropped the cached edges (CloseAll does). A row from
+		// a backing whose rows omit their edges gets them from the backing, as
+		// the overlay does; a complete row already answers.
+		if !beadCarriesDependencyFields(reopened) && !c.backingRowsCarryDependencies() {
+			if deps, depErr := c.backing.DepList(id, "down"); depErr == nil {
+				reopened.Dependencies = deps
+			}
+		}
 	} else if !errors.Is(err, ErrNotFound) {
 		c.recordProblem("refresh bead after reopen", fmt.Errorf("%s: %w", id, err))
 	}
@@ -278,7 +286,7 @@ func (c *CachingStore) Reopen(id string) error {
 	c.noteLocalMutationLocked(id)
 	if refreshed {
 		c.absorbFreshLocked(id, reopened, time.Now(), absorbOpts{
-			depsMode:   depsKeepCached,
+			depsMode:   depsFromFieldsIfCarried,
 			seqMode:    seqKeep,
 			clearDirty: true,
 		})
@@ -387,7 +395,7 @@ func (c *CachingStore) SetMetadata(id, key, value string) error {
 	c.noteLocalMutationLocked(id)
 	if refreshed {
 		c.absorbFreshLocked(id, fresh, time.Now(), absorbOpts{
-			depsMode:   depsFromFields,
+			depsMode:   depsFromFieldsIfCarried,
 			seqMode:    seqKeep,
 			clearDirty: true,
 		})
@@ -449,7 +457,7 @@ func (c *CachingStore) SetMetadataBatch(id string, kvs map[string]string) error 
 	c.noteLocalMutationLocked(id)
 	if refreshed {
 		c.absorbFreshLocked(id, fresh, time.Now(), absorbOpts{
-			depsMode:   depsFromFields,
+			depsMode:   depsFromFieldsIfCarried,
 			seqMode:    seqKeep,
 			clearDirty: true,
 		})
@@ -649,7 +657,7 @@ func (c *CachingStore) refreshTxTouchedBeads(ids []string, closed map[string]str
 				statusChanged = true
 			}
 			c.absorbFreshLocked(item.id, fresh, now, absorbOpts{
-				depsMode:   depsFromFields,
+				depsMode:   depsFromFieldsIfCarried,
 				seqMode:    seqKeep,
 				clearDirty: true,
 			})
@@ -1097,34 +1105,49 @@ func (c *CachingStore) reconcilePartialBatchDelete(err error, events []Bead) err
 // (MemStore, FileStore, and other non-BatchDeleter stores) drops only the bead
 // row, so DeleteBatch must clean the edge rows itself to honor the same
 // orphaning contract a BatchDeleter backing gets from the schema's ON DELETE
-// CASCADE. It performs the same edge-strip-then-delete as the per-bead workflow
-// delete (deleteWorkflowBead in cmd/gc), and the DepRemove/Delete methods it
-// calls keep the cache coherent. Unlike deleteWorkflowBead it intentionally does
-// not roll back already-stripped edges when a mid-strip DepRemove or the final
-// Delete fails: this fallback runs only against non-BatchDeleter backings
-// (MemStore/FileStore), whose in-memory edge operations do not fail partway, and
-// the wisp GC re-collects and re-deletes any half-stripped member idempotently
-// on a later tick.
+// CASCADE. It snapshots edges, performs the backend delete first so a lifecycle
+// refusal cannot strip edges, then removes the saved edges with DepRemove.
+// Cleanup failure after deletion is reported as a partial outcome; later cleanup
+// can remove any remaining orphan edges.
 func (c *CachingStore) deleteOrphaningDeps(id string) error {
-	downDeps, err := c.DepList(id, "down")
+	current, err := c.backing.Get(id)
+	if err != nil {
+		if errors.Is(err, ErrIDCollision) {
+			return fmt.Errorf("checking lifecycle delete target %q: %w", id, err)
+		}
+		if !errors.Is(err, ErrNotFound) {
+			return fmt.Errorf("checking lifecycle delete target %q: %w", id, err)
+		}
+	} else if err := ValidateLifecycleDelete(current); err != nil {
+		return fmt.Errorf("deleting lifecycle bead %q: %w", id, err)
+	}
+
+	// Snapshot the edges before the delete, but do not mutate them yet. Delete
+	// performs the backend's final lifecycle check under its own write boundary;
+	// if recovery state appeared after the preflight read, that delete must fail
+	// while every edge is still intact.
+	downDeps, err := c.backing.DepList(id, "down")
 	if err != nil {
 		return fmt.Errorf("list down deps for %s: %w", id, err)
 	}
-	for _, dep := range downDeps {
-		if err := c.DepRemove(id, dep.DependsOnID); err != nil {
-			return fmt.Errorf("remove down dep %s -> %s: %w", id, dep.DependsOnID, err)
-		}
-	}
-	upDeps, err := c.DepList(id, "up")
+	upDeps, err := c.backing.DepList(id, "up")
 	if err != nil {
 		return fmt.Errorf("list up deps for %s: %w", id, err)
 	}
-	for _, dep := range upDeps {
-		if err := c.DepRemove(dep.IssueID, id); err != nil {
-			return fmt.Errorf("remove up dep %s -> %s: %w", dep.IssueID, id, err)
+	if err := c.Delete(id); err != nil {
+		return err
+	}
+	for _, dep := range downDeps {
+		if err := c.DepRemove(id, dep.DependsOnID); err != nil {
+			return fmt.Errorf("deleted %s but could not remove down dep %s -> %s: %w", id, id, dep.DependsOnID, err)
 		}
 	}
-	return c.Delete(id)
+	for _, dep := range upDeps {
+		if err := c.DepRemove(dep.IssueID, id); err != nil {
+			return fmt.Errorf("deleted %s but could not remove up dep %s -> %s: %w", id, dep.IssueID, id, err)
+		}
+	}
+	return nil
 }
 
 // dropIncomingEdgesToDeletedLocked scrubs cached dependency rows that point at a

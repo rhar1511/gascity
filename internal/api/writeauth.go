@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"encoding/base64"
 	"errors"
@@ -55,7 +56,7 @@ const (
 	// maxWriteBodyBytes caps the request body the middleware buffers to compute
 	// the request digest, so an unauthenticated caller cannot exhaust memory by
 	// streaming a huge body before verification.
-	maxWriteBodyBytes = 1 << 20 // 1 MiB
+	maxWriteBodyBytes = citywriteauth.MaxHTTPBodyBytes
 
 	// writeAuthMaxTTL and writeAuthSkew bound grant lifetime and clock drift.
 	// The minter and verifier share a pod, so drift is small.
@@ -251,14 +252,34 @@ func writeAuthMiddleware(v *citywriteauth.Verifier, readOnly bool, next http.Han
 			City:      city,
 			ReqDigest: citywriteauth.ReqDigest(r.Method, r.URL.Path, r.URL.RawQuery, body),
 		}
-		if _, err := v.Verify(token, expect); err != nil {
+		grant, err := v.Verify(token, expect)
+		if err != nil {
 			// Deliberately generic to the client (no verification oracle); the
 			// specific reason is for server-side audit, not the response.
 			problemWriteAuthRejected.writeTo(w)
 			return
 		}
-		next.ServeHTTP(w, r)
+		principal := VerifiedCityWritePrincipal{KeyID: grant.Kid, City: grant.City, CID: grant.CID, Epoch: grant.Epoch}
+		ctx := context.WithValue(r.Context(), cityWritePrincipalContextKey{}, principal)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+type cityWritePrincipalContextKey struct{}
+
+// VerifiedCityWritePrincipal carries only facts authenticated by the
+// city-write grant. It has no human subject or role; privileged PR policy
+// authorization uses a separate human verifier.
+type VerifiedCityWritePrincipal struct {
+	KeyID string
+	City  string
+	CID   string
+	Epoch int64
+}
+
+func verifiedCityWritePrincipal(ctx context.Context) (VerifiedCityWritePrincipal, bool) {
+	principal, ok := ctx.Value(cityWritePrincipalContextKey{}).(VerifiedCityWritePrincipal)
+	return principal, ok && principal.KeyID != ""
 }
 
 // Pre-serialized RFC 9457 problem responses for the write-auth gate. Like the
@@ -439,8 +460,15 @@ func InstallWriteAuth(sm *SupervisorMux, configKey string, configRequired bool, 
 	if err := writeAuthBootGate(v != nil, bind); err != nil {
 		return err
 	}
+	var workerKeys map[string]ed25519.PublicKey
 	if v != nil {
+		workerKeys = v.PublicKeys()
 		sm.WithWriteAuth(v)
 	}
+	human, err := ResolvePRHumanGrantVerifier(os.Getenv(PRHumanTrustEnv), workerKeys, nil)
+	if err != nil {
+		return err
+	}
+	sm.WithPRHumanGrantVerifier(human).WithDecisionAnswerGrantVerifier(NewDecisionAnswerGrantVerifier(human))
 	return nil
 }

@@ -17,10 +17,12 @@ import (
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/executionevent"
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/rsipolicy"
+	"github.com/gastownhall/gascity/internal/worklifecycle"
 )
 
 const hookClaimCommandName = "hook"
@@ -46,6 +48,9 @@ const (
 	hookClaimReasonNonTurnContext             = "non_turn_context"
 	hookClaimReasonDrainPending               = "drain_pending"
 	hookClaimReasonMissingSessionRegistration = "missing_session_registration"
+	hookClaimReasonCitySuspended              = "city_suspended"
+	hookClaimReasonAgentSuspended             = "agent_suspended"
+	hookClaimReasonRigSuspended               = "rig_suspended"
 )
 
 // Reasons carried on a bead.claim_released event: which unwind gave the claim
@@ -160,6 +165,34 @@ type hookClaimOptions struct {
 	Env                []string
 	DrainAck           bool
 	JSON               bool
+	Lifecycle          config.LifecycleConfig
+	LifecycleCity      *config.City
+	LifecycleCityPath  string
+	// ResolveLifecycleStore returns the exact city/rig/class store named by
+	// trusted gc ready provenance. Lifecycle checks never substitute a
+	// different store when this resolver fails.
+	ResolveLifecycleStore func(string) (beads.Store, error)
+	// CheckFormulaAction resolves and revalidates the exact canonical row before
+	// hook discovery, claim, and any continuation assignment. Required formula
+	// rows use revision-conditional writes; they never fall back to bd claim.
+	CheckFormulaAction formulaActionCandidateCheck
+	// TrustedLifecycleScope is true only when the production query is gc's
+	// generated default work query or a custom query's exact controller-selected
+	// single-store scope is available.
+	TrustedLifecycleScope bool
+	// ClaimSourceStoreRef is set by the controller only when a custom query ran
+	// against one exact store. It supplies provenance omitted by that query and
+	// rejects a candidate that claims a different source store.
+	ClaimSourceStoreRef string
+	// RequireAuthoritativeClaimRead requires claim candidates to be replaced
+	// with a read from the exact controller-selected source store before any
+	// existing-assignment or generic claim path is selected. This prevents a
+	// partial/custom projection from hiding durable lifecycle enrollment.
+	RequireAuthoritativeClaimRead bool
+	// VerifyLifecycleTransitionHead builds a read-only verifier from controller
+	// config and exact stores, then validates the source's durable Q43/Q54 head
+	// before a lifecycle descendant is claimable.
+	VerifyLifecycleTransitionHead lifecycleClaimTransitionHeadVerifier
 	// AutoReclaimStaleClaims opts into a scoped stale-lease reclaim attempt
 	// (ga-7rj87d) when a route-matched candidate's only claim blocker is an
 	// existing assignee. Off by default; wired from config.Agent.
@@ -260,6 +293,9 @@ type hookClaimOps struct {
 	EmitClaimWindowExpired func(hookClaimWindowExpiry)
 	EmitClaimReleased      func(hookClaimReleaseRecord)
 	Now                    func() time.Time
+	// Sleep paces the claim-read retry loop (selectStoreWithWorkRetrying). It is
+	// a seam so tests can drive the loop against a fake clock that Now reads.
+	Sleep func(time.Duration)
 	// InvokedAt is when this `gc hook --claim` invocation began, and ClaimWindow
 	// is how long after it a claim mutation may still run. Together they are the
 	// turn-binding fence: a claim reaching a CAS past InvokedAt+ClaimWindow has
@@ -288,6 +324,10 @@ type hookClaimOps struct {
 	// restampHookAdoption). Only a CAS may back it: a lost CAS is how the
 	// caller learns someone else took the bead.
 	RestampAdopted hookClaimRestampFunc
+	// ClaimLifecycle is the only enrolled-work claim path. It submits the
+	// observed source head and managed session incarnation to the controller,
+	// which performs the typed Q54 transition and reciprocal stamp.
+	ClaimLifecycle hookLifecycleClaimFunc
 }
 
 type (
@@ -300,7 +340,7 @@ type (
 	hookResolveWorkBranchFunc     func(tree hookClaimWorkTree) string
 	hookResolveSessionWorkDirFunc func(sessionID string) string
 	hookStampWorkMetaFunc         func(ctx context.Context, dir string, env []string, beadID, assignee string, patch map[string]string) error
-	hookStampSessionClaimFunc     func(sessionID, beadID string) error
+	hookStampSessionClaimFunc     func(sessionID, beadID, claimGeneration string) error
 	hookPublishRunMapFunc         func(runID, beadID string, sessionKeys ...string) error
 	hookClaimReleaseFunc          func(ctx context.Context, dir string, env []string, beadID, assignee string) (bool, error)
 	// hookClaimReclaimFunc attempts a scoped stale-lease reclaim for exactly
@@ -311,8 +351,15 @@ type (
 	// moves an in_progress bead from one exact assignee to another only while
 	// it still carries fromAssignee, reporting whether it now carries
 	// toAssignee.
-	hookClaimRestampFunc func(context.Context, string, []string, string, string, string) (bool, error)
+	hookClaimRestampFunc   func(context.Context, string, []string, string, string, string) (bool, error)
+	hookLifecycleClaimFunc func(context.Context, beads.Bead, hookClaimOptions) (beads.Bead, hookLifecycleClaimResult, error)
 )
+
+type hookLifecycleClaimResult struct {
+	Generation string
+	ReceiptID  string
+	Replayed   bool
+}
 
 type hookClaimJSONResult struct {
 	SchemaVersion        string   `json:"schema_version"`
@@ -327,6 +374,10 @@ type hookClaimJSONResult struct {
 	ContinuationGroup    string   `json:"continuation_group,omitempty"`
 	ContinuationAssigned []string `json:"continuation_assigned,omitempty"`
 	DrainAcknowledged    bool     `json:"drain_acknowledged,omitempty"`
+	// Internal handoff from claim selection to the result writer. These values
+	// are intentionally absent from the public hook result contract.
+	lifecycleClaimGeneration string `json:"-"`
+	lifecycleClaimReceiptID  string `json:"-"`
 }
 
 // hookClaimResult is the outcome of attempting a claim against one store's
@@ -463,14 +514,90 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 		fmt.Fprintf(stderr, "gc hook --claim: requires JSON work_query output to identify claim candidates: %v\n", err) //nolint:errcheck
 		return hookClaimResult{terminal: true, code: 1}
 	}
+	if opts.RequireAuthoritativeClaimRead {
+		candidates, err = assignTrustedHookClaimProvenance(candidates, *opts)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc hook --claim: refusing candidate set without exact source-store provenance: %v\n", err) //nolint:errcheck
+			return hookClaimResult{terminal: true, code: 1}
+		}
+		candidates, err = rereadHookClaimCandidates(candidates, *opts)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc hook --claim: refusing candidate set without authoritative source reads: %v\n", err) //nolint:errcheck
+			return hookClaimResult{terminal: true, code: 1}
+		}
+		candidates, err = filterCanonicalHookClaimCandidates(candidates, *opts, now())
+		if err != nil {
+			fmt.Fprintf(stderr, "gc hook --claim: refusing candidate set without authoritative readiness checks: %v\n", err) //nolint:errcheck
+			return hookClaimResult{terminal: true, code: 1}
+		}
+	}
 	for _, skip := range skipped {
 		fmt.Fprintf(stderr, "gc hook --claim: skipping undecodable bead %s: %v\n", skip.ID, skip.Err) //nolint:errcheck
+	}
+	candidates = filterHookLifecycleCandidates(candidates, *opts, stderr)
+	if opts.CheckFormulaAction != nil {
+		for i := range candidates {
+			state, err := checkHookFormulaAction(context.Background(), *opts, candidates[i])
+			if err != nil {
+				fmt.Fprintf(stderr, "gc hook --claim: formula compatibility check failed for %s: %v\n", candidates[i].ID, err) //nolint:errcheck
+				return hookClaimResult{terminal: true, code: 1}
+			}
+			if state.Bead.ID != "" {
+				if state.Bead.ID != candidates[i].ID {
+					fmt.Fprintf(stderr, "gc hook --claim: formula compatibility read resolved a different bead for %s\n", candidates[i].ID) //nolint:errcheck
+					return hookClaimResult{terminal: true, code: 1}
+				}
+				candidates[i] = state.Bead
+			}
+		}
+	}
+	if opts.RequireAuthoritativeClaimRead {
+		// Formula compatibility results have been re-read from the exact source
+		// store by checkHookFormulaAction. Re-run lifecycle and general readiness
+		// checks because that authoritative read may expose enrollment, holds,
+		// deferrals, or dependency state omitted by the projection.
+		candidates = filterHookLifecycleCandidates(candidates, *opts, stderr)
+		candidates, err = filterCanonicalHookClaimCandidates(candidates, *opts, now())
+		if err != nil {
+			fmt.Fprintf(stderr, "gc hook --claim: refusing formula candidates without authoritative readiness checks: %v\n", err) //nolint:errcheck
+			return hookClaimResult{terminal: true, code: 1}
+		}
 	}
 	if len(candidates) == 0 {
 		return hookClaimResult{}
 	}
 
 	if result, bead, ok := hookClaimExistingAssignment(candidates, *opts); ok {
+		if opts.CheckFormulaAction != nil {
+			state, err := checkHookFormulaAction(context.Background(), *opts, bead)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc hook --claim: formula compatibility check failed for %s: %v\n", bead.ID, err) //nolint:errcheck
+				return hookClaimResult{terminal: true, code: 1}
+			}
+			if state.Required {
+				bead = state.Bead
+				if strings.TrimSpace(opts.RuntimeActor) == "" || strings.TrimSpace(bead.Assignee) != strings.TrimSpace(opts.RuntimeActor) {
+					fmt.Fprintf(stderr, "gc hook --claim: refusing to restamp compatibility-guarded assignment %s without a verified conditional transfer\n", bead.ID) //nolint:errcheck
+					return hookClaimResult{terminal: true, code: 1}
+				}
+			}
+		}
+		if lifecycleEnrollmentEvidence(bead) {
+			_, canonical, current := lifecycleAuthoritativeCandidate(bead, *opts)
+			if !current || !strings.EqualFold(strings.TrimSpace(canonical.Status), "in_progress") ||
+				!hookClaimHasIdentity(canonical.Assignee, opts.IdentityCandidates) {
+				fmt.Fprintf(stderr, "gc hook --claim: holding lifecycle assignment %s: current owner, status, admission, or lineage could not be verified\n", bead.ID) //nolint:errcheck
+				return hookClaimResult{}
+			}
+			ready, err := authoritativeHookClaimCandidateReady(canonical, *opts, now())
+			if err != nil || !ready {
+				fmt.Fprintf(stderr, "gc hook --claim: holding lifecycle assignment %s because canonical readiness changed or could not be checked: %v\n", bead.ID, err) //nolint:errcheck
+				return hookClaimResult{}
+			}
+			bead = canonical
+			result.Assignee = canonical.Assignee
+			return hookClaimResult{terminal: true, code: writeHookClaimWorkResultForBead(result, bead, *opts, *ops, dir, false, stdout, stderr)}
+		}
 		// Adoption mints no CAS, so until now it minted its receipt on the word
 		// of the work query alone — and a stale caching-store row survives long
 		// enough to re-serve a bead the dispatcher already gave to a fresher
@@ -507,6 +634,366 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 		eligibleResult.claimsErrored = true
 	}
 	return eligibleResult
+}
+
+func rereadHookClaimCandidates(candidates []beads.Bead, opts hookClaimOptions) ([]beads.Bead, error) {
+	needsSourceRead := false
+	for _, candidate := range candidates {
+		if !hookClaimCandidateIsMessage(candidate) {
+			needsSourceRead = true
+			break
+		}
+	}
+	if !needsSourceRead {
+		return candidates, nil
+	}
+	if !opts.TrustedLifecycleScope {
+		return nil, errors.New("work query does not provide trusted source-store provenance")
+	}
+	if opts.ResolveLifecycleStore == nil {
+		return nil, errors.New("authoritative source-store resolver is unavailable")
+	}
+	currentCandidates := make([]beads.Bead, len(candidates))
+	copy(currentCandidates, candidates)
+	for i, projected := range currentCandidates {
+		if hookClaimCandidateIsMessage(projected) {
+			continue
+		}
+		if strings.TrimSpace(projected.ID) == "" || strings.TrimSpace(projected.ID) != projected.ID {
+			return nil, errors.New("candidate has no canonical bead ID")
+		}
+		storeRef := strings.TrimSpace(projected.SourceStoreRef)
+		if storeRef == "" || storeRef != projected.SourceStoreRef {
+			return nil, fmt.Errorf("candidate %s has no exact source-store reference", projected.ID)
+		}
+		store, err := opts.ResolveLifecycleStore(storeRef)
+		if err != nil {
+			return nil, fmt.Errorf("resolve source store %s for candidate %s: %w", storeRef, projected.ID, err)
+		}
+		if store == nil {
+			return nil, fmt.Errorf("resolve source store %s for candidate %s: resolver returned nil", storeRef, projected.ID)
+		}
+		current, err := store.Get(projected.ID)
+		if err != nil {
+			return nil, fmt.Errorf("read canonical candidate %s from source store %s: %w", projected.ID, storeRef, err)
+		}
+		if current.ID != projected.ID {
+			return nil, fmt.Errorf("source store %s returned %s while reading candidate %s", storeRef, current.ID, projected.ID)
+		}
+		current.SourceStoreRef = storeRef
+		current.LifecycleScope = projected.LifecycleScope
+		currentCandidates[i] = current
+	}
+	return currentCandidates, nil
+}
+
+// filterCanonicalHookClaimCandidates reapplies the hook's general readiness
+// gates after a lossy query/formula projection has been replaced with rows from
+// the exact source stores. Open rows are checked against Store.Ready, which
+// supplies authoritative dependency readiness even when Get omits is_blocked.
+// In-progress rows need their own dependency walk because Ready intentionally
+// excludes them; this uses the same blocked_by projection as gc ready.
+func filterCanonicalHookClaimCandidates(candidates []beads.Bead, opts hookClaimOptions, now time.Time) ([]beads.Bead, error) {
+	if !opts.RequireAuthoritativeClaimRead || len(candidates) == 0 {
+		return candidates, nil
+	}
+	type sourceGroup struct {
+		store      beads.Store
+		open       []beads.Bead
+		inProgress []beads.Bead
+	}
+	type candidateKey struct {
+		storeRef string
+		id       string
+	}
+	groups := make(map[string]*sourceGroup)
+	eligible := make(map[candidateKey]bool, len(candidates))
+	for _, candidate := range candidates {
+		if hookClaimCandidateIsMessage(candidate) {
+			eligible[candidateKey{id: candidate.ID}] = true
+			continue
+		}
+		status := strings.ToLower(strings.TrimSpace(candidate.Status))
+		if status == "closed" || status == "blocked" || beads.IsDeferred(candidate, now) ||
+			(candidate.IsBlocked != nil && *candidate.IsBlocked) || lifecycleRowHeld(candidate) ||
+			hookCandidateBudgetDeferred(candidate, now) {
+			continue
+		}
+		if status != "open" && status != "in_progress" {
+			continue
+		}
+		storeRef := strings.TrimSpace(candidate.SourceStoreRef)
+		if storeRef == "" || storeRef != candidate.SourceStoreRef {
+			return nil, fmt.Errorf("candidate %s has no exact source-store reference for readiness checks", candidate.ID)
+		}
+		group := groups[storeRef]
+		if group == nil {
+			if opts.ResolveLifecycleStore == nil {
+				return nil, errors.New("authoritative readiness store resolver is unavailable")
+			}
+			store, err := opts.ResolveLifecycleStore(storeRef)
+			if err != nil {
+				return nil, fmt.Errorf("resolve source store %s for readiness checks: %w", storeRef, err)
+			}
+			if store == nil {
+				return nil, fmt.Errorf("resolve source store %s for readiness checks: resolver returned nil", storeRef)
+			}
+			group = &sourceGroup{store: store}
+			groups[storeRef] = group
+		}
+		if status == "open" {
+			group.open = append(group.open, candidate)
+		} else {
+			group.inProgress = append(group.inProgress, candidate)
+		}
+	}
+	for storeRef, group := range groups {
+		if len(group.open) > 0 {
+			ready, err := group.store.Ready(beads.ReadyQuery{TierMode: beads.TierBoth})
+			if err != nil {
+				return nil, fmt.Errorf("read ready candidates from source store %s: %w", storeRef, err)
+			}
+			readyIDs := make(map[string]struct{}, len(ready))
+			for _, bead := range ready {
+				readyIDs[bead.ID] = struct{}{}
+			}
+			for _, candidate := range group.open {
+				_, eligible[candidateKey{storeRef: storeRef, id: candidate.ID}] = readyIDs[candidate.ID]
+			}
+		}
+		if len(group.inProgress) > 0 {
+			owners := make(map[string]readyLeg, len(group.inProgress))
+			for _, candidate := range group.inProgress {
+				owners[candidate.ID] = readyLeg{label: "claim source", store: group.store}
+			}
+			blockedBy, err := readyBlockedByForRows(group.inProgress, owners)
+			if err != nil {
+				return nil, fmt.Errorf("check in-progress dependencies in source store %s: %w", storeRef, err)
+			}
+			for _, candidate := range group.inProgress {
+				blocked := false
+				for _, blocker := range blockedBy[candidate.ID] {
+					if status := strings.TrimSpace(blocker.Status); status != "" && !strings.EqualFold(status, "closed") {
+						blocked = true
+						break
+					}
+				}
+				eligible[candidateKey{storeRef: storeRef, id: candidate.ID}] = !blocked
+			}
+		}
+	}
+	filtered := make([]beads.Bead, 0, len(candidates))
+	for _, candidate := range candidates {
+		key := candidateKey{storeRef: strings.TrimSpace(candidate.SourceStoreRef), id: candidate.ID}
+		if hookClaimCandidateIsMessage(candidate) {
+			key.storeRef = ""
+		}
+		if eligible[key] {
+			filtered = append(filtered, candidate)
+		}
+	}
+	return filtered, nil
+}
+
+func authoritativeHookClaimCandidateReady(candidate beads.Bead, opts hookClaimOptions, now time.Time) (bool, error) {
+	if !opts.RequireAuthoritativeClaimRead || hookClaimCandidateIsMessage(candidate) {
+		return true, nil
+	}
+	filtered, err := filterCanonicalHookClaimCandidates([]beads.Bead{candidate}, opts, now)
+	if err != nil {
+		return false, err
+	}
+	return len(filtered) == 1, nil
+}
+
+func canonicalHookClaimCandidateReady(store beads.Store, candidate beads.Bead, now time.Time) (bool, error) {
+	if store == nil || strings.TrimSpace(candidate.ID) == "" ||
+		beads.IsDeferred(candidate, now) || hookCandidateBudgetDeferred(candidate, now) ||
+		(candidate.IsBlocked != nil && *candidate.IsBlocked) || lifecycleRowHeld(candidate) {
+		return false, nil
+	}
+	status := strings.ToLower(strings.TrimSpace(candidate.Status))
+	switch status {
+	case "open":
+		ready, err := store.Ready(beads.ReadyQuery{TierMode: beads.TierBoth})
+		if err != nil {
+			return false, err
+		}
+		for _, bead := range ready {
+			if bead.ID == candidate.ID {
+				return true, nil
+			}
+		}
+		return false, nil
+	case "in_progress":
+		owners := map[string]readyLeg{candidate.ID: {label: "claim source", store: store}}
+		blockedBy, err := readyBlockedByForRows([]beads.Bead{candidate}, owners)
+		if err != nil {
+			return false, err
+		}
+		for _, blocker := range blockedBy[candidate.ID] {
+			if status := strings.TrimSpace(blocker.Status); status != "" && !strings.EqualFold(status, "closed") {
+				return false, nil
+			}
+		}
+		return true, nil
+	default:
+		return false, nil
+	}
+}
+
+func assignTrustedHookClaimProvenance(candidates []beads.Bead, opts hookClaimOptions) ([]beads.Bead, error) {
+	storeRef := strings.TrimSpace(opts.ClaimSourceStoreRef)
+	if storeRef == "" {
+		return candidates, nil
+	}
+	if storeRef != opts.ClaimSourceStoreRef || !opts.TrustedLifecycleScope {
+		return nil, errors.New("controller-selected claim store provenance is unavailable or malformed")
+	}
+	cityName := loadedCityName(opts.LifecycleCity, opts.LifecycleCityPath)
+	scope := worklifecycle.ScopeForStore(cityName, storeRef)
+	if scope == "" {
+		return nil, errors.New("cannot derive lifecycle scope for controller-selected claim store")
+	}
+	withProvenance := make([]beads.Bead, len(candidates))
+	copy(withProvenance, candidates)
+	for i := range withProvenance {
+		candidate := &withProvenance[i]
+		if hookClaimCandidateIsMessage(*candidate) {
+			continue
+		}
+		if candidate.SourceStoreRef != "" && candidate.SourceStoreRef != storeRef {
+			return nil, fmt.Errorf("candidate %s source store %q does not match controller-selected store %q", candidate.ID, candidate.SourceStoreRef, storeRef)
+		}
+		if candidate.LifecycleScope != "" && candidate.LifecycleScope != scope {
+			return nil, fmt.Errorf("candidate %s lifecycle scope does not match controller-selected store", candidate.ID)
+		}
+		candidate.SourceStoreRef = storeRef
+		candidate.LifecycleScope = scope
+	}
+	return withProvenance, nil
+}
+
+func checkHookFormulaAction(ctx context.Context, opts hookClaimOptions, candidate beads.Bead) (formulaActionCandidate, error) {
+	if opts.CheckFormulaAction == nil {
+		return formulaActionCandidate{Bead: candidate}, nil
+	}
+	state, err := opts.CheckFormulaAction(ctx, candidate)
+	if err != nil {
+		return formulaActionCandidate{}, err
+	}
+	state, err = normalizeHookFormulaActionState(state, candidate)
+	if err != nil {
+		return formulaActionCandidate{}, err
+	}
+	if !opts.RequireAuthoritativeClaimRead {
+		return state, nil
+	}
+	canonical, err := rereadHookClaimCandidates([]beads.Bead{state.Bead}, opts)
+	if err != nil {
+		return formulaActionCandidate{}, err
+	}
+	if len(canonical) != 1 {
+		return formulaActionCandidate{}, fmt.Errorf("formula compatibility lookup lost candidate %s", candidate.ID)
+	}
+	// Formula checkers may return a projection of their own. Re-run the formula
+	// decision against the canonical source row so omitted compatibility keys
+	// cannot leave Required=false and select the generic claim path.
+	verified, err := opts.CheckFormulaAction(ctx, canonical[0])
+	if err != nil {
+		return formulaActionCandidate{}, err
+	}
+	verified, err = normalizeHookFormulaActionState(verified, canonical[0])
+	if err != nil {
+		return formulaActionCandidate{}, err
+	}
+	if verified.Bead.Revision != 0 && canonical[0].Revision != 0 && verified.Bead.Revision != canonical[0].Revision {
+		return formulaActionCandidate{}, fmt.Errorf("formula compatibility lookup changed canonical revision for %s", candidate.ID)
+	}
+	// Use the exact row whose compatibility state was just checked. The
+	// checker’s formula result controls Required and Store; its row projection
+	// never replaces canonical claim data.
+	verified.Bead = canonical[0]
+	return verified, nil
+}
+
+func normalizeHookFormulaActionState(state formulaActionCandidate, candidate beads.Bead) (formulaActionCandidate, error) {
+	if state.Bead.ID == "" {
+		state.Bead = candidate
+	}
+	if state.Bead.ID != candidate.ID {
+		return formulaActionCandidate{}, fmt.Errorf("formula compatibility lookup changed bead identity")
+	}
+	if state.Bead.SourceStoreRef != "" && state.Bead.SourceStoreRef != candidate.SourceStoreRef {
+		return formulaActionCandidate{}, fmt.Errorf("formula compatibility lookup changed source-store provenance")
+	}
+	if state.Bead.LifecycleScope != "" && state.Bead.LifecycleScope != candidate.LifecycleScope {
+		return formulaActionCandidate{}, fmt.Errorf("formula compatibility lookup changed lifecycle-scope provenance")
+	}
+	if state.Bead.SourceStoreRef == "" {
+		state.Bead.SourceStoreRef = candidate.SourceStoreRef
+	}
+	if state.Bead.LifecycleScope == "" {
+		state.Bead.LifecycleScope = candidate.LifecycleScope
+	}
+	return state, nil
+}
+
+func conditionalFormulaActionClaim(ctx context.Context, state formulaActionCandidate, actor string, readyAssignment bool, opts hookClaimOptions) (beads.Bead, bool, error) {
+	if !state.Required || state.Store == nil {
+		return beads.Bead{}, false, beads.ErrConditionalWriteUnsupported
+	}
+	current := state.Bead
+	actor = strings.TrimSpace(actor)
+	if actor == "" || !hookClaimHasIdentity(actor, opts.IdentityCandidates) || current.Revision == 0 {
+		return beads.Bead{}, false, nil
+	}
+	if !strings.EqualFold(strings.TrimSpace(current.Status), "open") {
+		return beads.Bead{}, false, nil
+	}
+	if opts.RequireAuthoritativeClaimRead {
+		ready, err := canonicalHookClaimCandidateReady(state.Store, current, time.Now().UTC())
+		if err != nil {
+			return beads.Bead{}, false, fmt.Errorf("checking formula action readiness: %w", err)
+		}
+		if !ready {
+			return beads.Bead{}, false, nil
+		}
+	}
+	owner := strings.TrimSpace(current.Assignee)
+	if readyAssignment {
+		if owner == "" || owner != actor || !hookClaimHasIdentity(owner, opts.IdentityCandidates) {
+			return beads.Bead{}, false, nil
+		}
+	} else if owner != "" {
+		return beads.Bead{}, false, nil
+	}
+	writer, supported := beads.ConditionalWriterFor(state.Store)
+	if !supported || !beads.InspectConditionalWrites(state.Store).Capable {
+		return beads.Bead{}, false, beads.ErrConditionalWriteUnsupported
+	}
+	if err := writer.UpdateIfMatch(current.ID, current.Revision, beads.UpdateOpts{
+		Status:   stringPtr("in_progress"),
+		Assignee: stringPtr(actor),
+	}); err != nil {
+		return beads.Bead{}, false, err
+	}
+	claimed, err := state.Store.Get(current.ID)
+	if err != nil {
+		return beads.Bead{}, true, fmt.Errorf("formula action claim committed but readback failed: %w", err)
+	}
+	claimed.SourceStoreRef = current.SourceStoreRef
+	if !strings.EqualFold(strings.TrimSpace(claimed.Status), "in_progress") || strings.TrimSpace(claimed.Assignee) != actor {
+		return claimed, true, fmt.Errorf("formula action claim readback disagrees with requested owner/status")
+	}
+	claimedState, err := checkHookFormulaAction(ctx, opts, claimed)
+	if err != nil {
+		return claimed, true, fmt.Errorf("revalidating formula action after claim: %w", err)
+	}
+	if !claimedState.Required {
+		return claimed, true, fmt.Errorf("formula action requirement disappeared after claim")
+	}
+	return claimedState.Bead, true, nil
 }
 
 // applyDefaults fills any unset op seam with its production implementation, so
@@ -570,11 +1057,17 @@ func (ops *hookClaimOps) applyDefaults() {
 	if ops.RestampAdopted == nil {
 		ops.RestampAdopted = hookClaimRestampWithBdStore
 	}
+	if ops.ClaimLifecycle == nil {
+		ops.ClaimLifecycle = hookClaimLifecycleWork
+	}
 	if ops.EmitHookClaimReclaimedStale == nil {
 		ops.EmitHookClaimReclaimedStale = hookEmitClaimReclaimedStale
 	}
 	if ops.Now == nil {
 		ops.Now = time.Now
+	}
+	if ops.Sleep == nil {
+		ops.Sleep = time.Sleep
 	}
 	// Stamped once per invocation and never refreshed: every federated leg the
 	// claim loop tries shares the window the FIRST one opened, which is what
@@ -590,6 +1083,30 @@ func (ops *hookClaimOps) applyDefaults() {
 // claimWindowSpent reports whether this invocation's claim window has elapsed.
 func (ops *hookClaimOps) claimWindowSpent() bool {
 	return ops.invocationAge() > ops.claimWindowOrDefault()
+}
+
+// claimWindowSpentAfter reports whether the claim window will be spent, or
+// closes exactly then, once a further wait of d has elapsed. A retry or backoff
+// loop consults it BEFORE sleeping, so it stops at the window rather than
+// discovering the window has passed only after sleeping through it. The boundary
+// counts as spent: work started at the last instant of the window cannot finish
+// inside it. Like claimWindowSpent, it never fires for a caller that opened no
+// invocation window (zero InvokedAt).
+func (ops *hookClaimOps) claimWindowSpentAfter(d time.Duration) bool {
+	if ops.InvokedAt.IsZero() {
+		return false
+	}
+	return ops.invocationAge()+d >= ops.claimWindowOrDefault()
+}
+
+// sleepOrWallClock is ops.Sleep with its production default applied inline, for
+// the same reason nowOrWallClock exists.
+func (ops *hookClaimOps) sleepOrWallClock(d time.Duration) {
+	if ops.Sleep != nil {
+		ops.Sleep(d)
+		return
+	}
+	time.Sleep(d)
 }
 
 // invocationAge is how long this `gc hook --claim` invocation has been running.
@@ -705,13 +1222,45 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 			fmt.Fprintf(stderr, "gc hook --claim: ready assignment %s claim deadline exhausted: %v\n", candidate.ID, ctx.Err()) //nolint:errcheck
 			return hookClaimResult{terminal: true, code: 1}
 		}
+		actionState := formulaActionCandidate{Bead: candidate}
+		if opts.CheckFormulaAction != nil {
+			var err error
+			actionState, err = checkHookFormulaAction(ctx, opts, candidate)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc hook --claim: formula compatibility check failed for %s: %v\n", candidate.ID, err) //nolint:errcheck
+				return hookClaimResult{terminal: true, code: 1}
+			}
+			candidate = actionState.Bead
+		}
+		if ready, err := authoritativeHookClaimCandidateReady(candidate, opts, now); err != nil {
+			fmt.Fprintf(stderr, "gc hook --claim: authoritative readiness check failed for %s: %v\n", candidate.ID, err) //nolint:errcheck
+			return hookClaimResult{terminal: true, code: 1}
+		} else if !ready {
+			continue
+		}
 		// Use the bead's current own-identity assignee as the claim actor.
 		// BEADS_ACTOR may be represented by the runtime name, session bead id,
 		// or alias; bd's idempotent --claim path requires the actor to match the
 		// existing assignee exactly.
 		claimActor := strings.TrimSpace(candidate.Assignee)
-		claimed, ok, err := ops.Claim(ctx, dir, opts.Env, candidate.ID, claimActor)
+		var claimed beads.Bead
+		var ok bool
+		var err error
+		var lifecycleClaim hookLifecycleClaimResult
+		switch {
+		case lifecycleEnrollmentEvidence(candidate):
+			claimed, lifecycleClaim, err = ops.ClaimLifecycle(ctx, candidate, opts)
+			ok = err == nil
+		case actionState.Required:
+			claimed, ok, err = conditionalFormulaActionClaim(ctx, actionState, claimActor, true, opts)
+		default:
+			claimed, ok, err = ops.Claim(ctx, dir, opts.Env, candidate.ID, claimActor)
+		}
 		if err != nil {
+			if lifecycleEnrollmentEvidence(candidate) {
+				fmt.Fprintf(stderr, "gc hook --claim: holding enrolled ready assignment %s because its controller transition did not complete: %v\n", candidate.ID, err) //nolint:errcheck
+				return hookClaimResult{terminal: true, code: 1}
+			}
 			if !ok && (hookClaimBeadIsElsewhere(err) || hookClaimBindingRefusedTheClaim(err)) {
 				// The read federated and the write did not: the assigned tier
 				// reads city-wide, so a graph step in a relocated class store
@@ -759,6 +1308,20 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 			)
 			return hookClaimResult{terminal: true, code: 1}
 		}
+		// The claim ran as the bead's stored spelling (bd's idempotent --claim
+		// requires it), so a ready bead assigned to a legacy spelling of this
+		// session — e.g. an open bead pinned to the pool session_name before
+		// #6324 — is now in_progress under that spelling, and bd would reject
+		// this worker's close/update actored as BEADS_ACTOR (ga-uk5jj). Move it
+		// to the claim identity exactly as adoption does. A lost CAS means the
+		// bead changed hands after our claim: move on to the next candidate. A
+		// failed one still hands the bead out (this invocation just minted the
+		// claim, and refusing would strand it) with the manual recovery on stderr.
+		restamped, keep := restampHookAdoption(claimed, claimed.Assignee, hookClaimMinted, opts, ops, dir, stderr)
+		if !keep {
+			continue
+		}
+		claimed = restamped
 		claimed = mergeHookClaimCandidateMetadata(candidate, claimed)
 		result := hookClaimJSONResult{
 			SchemaVersion: "1",
@@ -775,6 +1338,10 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 		}
 		if result.Assignee == "" {
 			result.Assignee = claimActor
+		}
+		if lifecycleEnrollmentEvidence(claimed) {
+			result.lifecycleClaimGeneration = lifecycleClaim.Generation
+			result.lifecycleClaimReceiptID = lifecycleClaim.ReceiptID
 		}
 		return hookClaimResult{terminal: true, code: writeHookClaimWorkResultForBead(result, claimed, opts, ops, dir, true, stdout, stderr)}
 	}
@@ -812,8 +1379,16 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 	claimsErrored := false
 	now := ops.nowOrWallClock()
 	for _, candidate := range candidates {
+		// An enrolled owner never enters the global stale-lease reclaim path.
+		// Authorized lifecycle recovery has its own explicit receipt and budget.
+		if lifecycleEnrollmentEvidence(candidate) && !hookCandidateClaimable(candidate, opts.RouteTargets, now) {
+			continue
+		}
 		reclaimedFrom := ""
 		if !hookCandidateClaimable(candidate, opts.RouteTargets, now) {
+			if lifecycleEnrollmentEvidence(candidate) {
+				continue
+			}
 			// ga-7rj87d FR1/FR2: a route-matched candidate whose ONLY claim
 			// blocker is an existing (possibly stale) assignee gets a scoped,
 			// opt-in reclaim attempt before being skipped. Off by default
@@ -821,6 +1396,27 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 			// hookCandidateReclaimEligible or ops.ReclaimStale ever run, so the
 			// flag-off path is byte-for-byte unchanged.
 			if !opts.AutoReclaimStaleClaims || !hookCandidateReclaimEligible(candidate, opts.RouteTargets, now) {
+				continue
+			}
+			if opts.CheckFormulaAction != nil {
+				state, err := checkHookFormulaAction(ctx, opts, candidate)
+				if err != nil {
+					fmt.Fprintf(stderr, "gc hook --claim: formula compatibility check failed before stale-claim reclaim of %s: %v\n", candidate.ID, err) //nolint:errcheck
+					return hookClaimResult{terminal: true, code: 1}
+				}
+				if state.Required {
+					fmt.Fprintf(stderr, "gc hook --claim: refusing stale-claim reclaim for compatibility-guarded work %s; conditional recovery is unavailable\n", candidate.ID) //nolint:errcheck
+					return hookClaimResult{terminal: true, code: 1}
+				}
+				candidate = state.Bead
+				if lifecycleEnrollmentEvidence(candidate) {
+					continue
+				}
+			}
+			if ready, err := authoritativeHookClaimCandidateReady(candidate, opts, now); err != nil {
+				fmt.Fprintf(stderr, "gc hook --claim: authoritative readiness check failed before stale-claim reclaim of %s: %v\n", candidate.ID, err) //nolint:errcheck
+				return hookClaimResult{terminal: true, code: 1}
+			} else if !ready {
 				continue
 			}
 			if ops.claimWindowSpent() {
@@ -851,8 +1447,40 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 			// next tick (NDI).
 			break
 		}
-		claimed, ok, err := ops.Claim(ctx, dir, opts.Env, candidate.ID, opts.Assignee)
+		actionState := formulaActionCandidate{Bead: candidate}
+		if opts.CheckFormulaAction != nil {
+			var err error
+			actionState, err = checkHookFormulaAction(ctx, opts, candidate)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc hook --claim: formula compatibility check failed for %s: %v\n", candidate.ID, err) //nolint:errcheck
+				return hookClaimResult{terminal: true, code: 1}
+			}
+			candidate = actionState.Bead
+		}
+		if ready, err := authoritativeHookClaimCandidateReady(candidate, opts, now); err != nil {
+			fmt.Fprintf(stderr, "gc hook --claim: authoritative readiness check failed for %s: %v\n", candidate.ID, err) //nolint:errcheck
+			return hookClaimResult{terminal: true, code: 1}
+		} else if !ready {
+			continue
+		}
+		var claimed beads.Bead
+		var ok bool
+		var err error
+		var lifecycleClaim hookLifecycleClaimResult
+		switch {
+		case lifecycleEnrollmentEvidence(candidate):
+			claimed, lifecycleClaim, err = ops.ClaimLifecycle(ctx, candidate, opts)
+			ok = err == nil
+		case actionState.Required:
+			claimed, ok, err = conditionalFormulaActionClaim(ctx, actionState, opts.Assignee, false, opts)
+		default:
+			claimed, ok, err = ops.Claim(ctx, dir, opts.Env, candidate.ID, opts.Assignee)
+		}
 		if err != nil {
+			if lifecycleEnrollmentEvidence(candidate) {
+				fmt.Fprintf(stderr, "gc hook --claim: holding enrolled work %s because its controller transition did not complete: %v\n", candidate.ID, err) //nolint:errcheck
+				return hookClaimResult{terminal: true, code: 1}
+			}
 			if ok {
 				// The atomic mutation committed, but its canonical readback failed.
 				// Stop immediately: trying another candidate or draining would strand
@@ -922,6 +1550,10 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 			// since the bead was never ours to begin with.
 			ops.EmitHookClaimReclaimedStale(result.BeadID, reclaimedFrom, result.Assignee)
 		}
+		if lifecycleEnrollmentEvidence(claimed) {
+			result.lifecycleClaimGeneration = lifecycleClaim.Generation
+			result.lifecycleClaimReceiptID = lifecycleClaim.ReceiptID
+		}
 		return hookClaimResult{terminal: true, code: writeHookClaimWorkResultForBead(result, claimed, opts, ops, dir, true, stdout, stderr)}
 	}
 
@@ -933,11 +1565,17 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 // returned by the mutation.
 func mergeHookClaimCandidateMetadata(candidate, claimed beads.Bead) beads.Bead {
 	if len(candidate.Metadata) == 0 {
+		if claimed.SourceStoreRef == "" {
+			claimed.SourceStoreRef = candidate.SourceStoreRef
+		}
 		return claimed
 	}
 	metadata := maps.Clone(candidate.Metadata)
 	maps.Copy(metadata, claimed.Metadata)
 	claimed.Metadata = metadata
+	if claimed.SourceStoreRef == "" {
+		claimed.SourceStoreRef = candidate.SourceStoreRef
+	}
 	return claimed
 }
 
@@ -1009,6 +1647,12 @@ const (
 	// hookAdoptionRefused: the canonical store names a different owner. The
 	// receipt is withheld.
 	hookAdoptionRefused
+	// hookClaimMinted: not an adoption at all — the ready-assignment tier just
+	// won this claim and read it back canonically. Used only to tell
+	// restampHookAdoption that a failed re-stamp must still hand the bead out
+	// (with the recovery warning): refusing would strand a claim this
+	// invocation minted.
+	hookClaimMinted
 )
 
 // certifyHookAdoption checks a bead the work query says this session already
@@ -1036,6 +1680,23 @@ func certifyHookAdoption(bead beads.Bead, opts hookClaimOptions, ops hookClaimOp
 	if err != nil {
 		fmt.Fprintf(stderr, "gc hook --claim: adopting %s without a canonical ownership readback: %v\n", beadID, err) //nolint:errcheck
 		return hookAdoptionUnverified, ""
+	}
+	if opts.RequireAuthoritativeClaimRead {
+		current, err := rereadHookClaimCandidates([]beads.Bead{bead}, opts)
+		if err != nil || len(current) != 1 {
+			fmt.Fprintf(stderr, "gc hook --claim: holding assignment %s because its exact source row could not be re-read: %v\n", beadID, err) //nolint:errcheck
+			return hookAdoptionRefused, ""
+		}
+		ready, err := authoritativeHookClaimCandidateReady(current[0], opts, ops.nowOrWallClock())
+		if err != nil || !ready {
+			fmt.Fprintf(stderr, "gc hook --claim: holding assignment %s because its canonical readiness changed or could not be checked: %v\n", beadID, err) //nolint:errcheck
+			return hookAdoptionRefused, ""
+		}
+		canonical = current[0]
+	}
+	if !strings.EqualFold(strings.TrimSpace(canonical.Status), "in_progress") {
+		fmt.Fprintf(stderr, "gc hook --claim: refusing to re-serve %s: the canonical store records status=%q, not in_progress\n", beadID, strings.TrimSpace(canonical.Status)) //nolint:errcheck
+		return hookAdoptionRefused, ""
 	}
 	if !hookClaimHasIdentity(canonical.Assignee, opts.IdentityCandidates) {
 		_, _ = fmt.Fprintf(stderr,
@@ -1118,6 +1779,9 @@ func adoptAfterFailedRestamp(beadID, current, target string, verdict hookAdoptio
 	case errors.Is(err, errRestampGraphResident):
 		fmt.Fprintf(stderr, "gc hook --claim: adopting %s under legacy assignee %q: it is graph-resident, which has no conditional-transfer primitive and no close-path actor fence, so the spelling does not need to move to %q\n", beadID, current, target) //nolint:errcheck
 		return true
+	case verdict == hookClaimMinted:
+		fmt.Fprintf(stderr, "gc hook --claim: claimed %s under assignee %q; re-stamping it to %q failed: %v (bd will reject this worker's close/update until it moves; recover with: bd update %s --if-assignee %q --if-status in_progress --assignee %q)\n", beadID, current, target, err, beadID, current, target) //nolint:errcheck
+		return true
 	case verdict == hookAdoptionUnverified:
 		fmt.Fprintf(stderr, "gc hook --claim: adopting %s under assignee %q without a canonical readback; re-stamping it to %q failed: %v (if the stored spelling really is %q, bd will reject this worker's close/update; recover with: bd update %s --if-assignee %q --if-status in_progress --assignee %q)\n", beadID, current, target, err, current, beadID, current, target) //nolint:errcheck
 		return true
@@ -1171,6 +1835,7 @@ func hookClaimCandidateIsMessage(candidate beads.Bead) bool {
 // turn legitimately made. A held claim that goes undelivered is re-served to the
 // next turn by the existing-assignment tier instead.
 func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, minted bool, stdout, stderr io.Writer) int {
+	enrolled := lifecycleEnrollmentEvidence(bead)
 	// F-B straddle. The CAS was STARTED inside the window and LANDED outside it:
 	// the claim-write child carries its own ceiling, so a claim can commit after
 	// the invoking turn is already gone. That is the same parked claim by another
@@ -1178,28 +1843,86 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 	if minted && ops.claimWindowSpent() {
 		cause := fmt.Sprintf("claim of %s landed after the %s claim window closed (invocation age %s); releasing it rather than parking it",
 			bead.ID, ops.claimWindowOrDefault(), ops.invocationAge().Round(time.Millisecond))
+		if enrolled {
+			fmt.Fprintf(stderr, "gc hook --claim: %s; keeping the durable lifecycle claim for same-session replay\n", cause) //nolint:errcheck
+			return 1
+		}
 		return unwindUndeliveredHookClaim(hookClaimReleaseReasonStraddled, cause, bead, opts, ops, dir, stderr)
+	}
+	if !enrolled && opts.CheckFormulaAction != nil {
+		state, err := checkHookFormulaAction(context.Background(), opts, bead)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc hook --claim: formula compatibility changed before delivery of %s: %v\n", bead.ID, err) //nolint:errcheck
+			if minted {
+				cause := fmt.Sprintf("formula compatibility revalidation failed before delivery of %s: %v", bead.ID, err)
+				return unwindUndeliveredHookClaim(hookClaimReleaseReasonUndelivered, cause, bead, opts, ops, dir, stderr)
+			}
+			return 1
+		}
+		if state.Required {
+			bead = state.Bead
+		}
 	}
 	result.RootBeadID = strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
 	result.ContinuationGroup = strings.TrimSpace(bead.Metadata[beadmeta.ContinuationGroupMetadataKey])
-	durable, stamped := stampHookClaimIdentity(bead, opts, ops, dir, stderr)
+	var durable beads.Bead
+	var stamped bool
+	if enrolled {
+		if result.lifecycleClaimReceiptID == "" || result.lifecycleClaimGeneration == "" {
+			var lifecycleResult hookLifecycleClaimResult
+			var err error
+			durable, lifecycleResult, err = ops.ClaimLifecycle(context.Background(), bead, opts)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc hook --claim: lifecycle assignment %s remains held because controller replay or reciprocal repair failed: %v\n", bead.ID, err) //nolint:errcheck
+				return 1
+			}
+			result.lifecycleClaimGeneration = lifecycleResult.Generation
+			result.lifecycleClaimReceiptID = lifecycleResult.ReceiptID
+		} else {
+			durable = bead
+		}
+		if result.lifecycleClaimReceiptID == "" || result.lifecycleClaimGeneration == "" ||
+			strings.TrimSpace(durable.Assignee) == "" ||
+			strings.TrimSpace(durable.Metadata[beadmeta.SessionIDMetadataKey]) != strings.TrimSpace(opts.SessionID) ||
+			durable.Metadata[beadmeta.ClaimGenerationMetadataKey] != result.lifecycleClaimGeneration ||
+			!strings.EqualFold(strings.TrimSpace(durable.Status), "in_progress") {
+			fmt.Fprintf(stderr, "gc hook --claim: lifecycle assignment %s readback does not match its durable claim receipt\n", bead.ID) //nolint:errcheck
+			return 1
+		}
+		result.Assignee = durable.Assignee
+		stamped = true
+	} else {
+		durable, stamped = stampHookClaimIdentity(bead, opts, ops, dir, stderr)
+	}
 	if stamped && hookClaimLifecycleCandidate(durable, opts) {
 		ops.EmitExecutionStepStarted(durable, dir, opts.Env, opts.Assignee)
 	}
-	stampHookSessionCurrentClaim(bead, opts, ops, stderr)
-	publishHookClaimRunMap(bead, opts, ops, stderr)
-	assigned, err := preassignHookContinuationGroup(bead, opts, ops, dir)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc hook --claim: preassigning continuation group for %s: %v\n", bead.ID, err) //nolint:errcheck
-		return 1
+	if !enrolled {
+		claimStamp := durable
+		if strings.TrimSpace(claimStamp.ID) == "" {
+			claimStamp = bead
+		}
+		stampHookSessionCurrentClaim(claimStamp, opts, ops, stderr)
 	}
-	result.ContinuationAssigned = assigned
+	publishHookClaimRunMap(bead, opts, ops, stderr)
+	if !enrolled {
+		assigned, err := preassignHookContinuationGroup(bead, opts, ops, dir)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc hook --claim: preassigning continuation group for %s: %v\n", bead.ID, err) //nolint:errcheck
+			return 1
+		}
+		result.ContinuationAssigned = assigned
+	}
 	if writeErr := writeHookClaimResultLine(result, opts.JSON, stdout); writeErr != nil {
 		// F-C. The claim is won but its result never left the process — the
 		// orphaned tool call's signature is EPIPE on a stdout whose reader the
 		// provider already closed. A closed pipe cannot deliver, so nobody will
 		// execute this claim; give it back instead of parking it.
 		cause := fmt.Sprintf("writing result for %s: %v", bead.ID, writeErr)
+		if enrolled {
+			fmt.Fprintf(stderr, "gc hook --claim: %s; durable lifecycle claim and reciprocal stamp remain available for same-session replay\n", cause) //nolint:errcheck
+			return 1
+		}
 		if !minted {
 			fmt.Fprintf(stderr, "gc hook --claim: %s\n", cause) //nolint:errcheck
 			return 1
@@ -1375,6 +2098,14 @@ func writeHookClaimStaleSessionDrain(opts hookCommandOptions, stdout, stderr io.
 	return writeHookClaimDrain(hookClaimLabel, hookClaimReasonStaleSession, opts.JSON, opts.DrainAck, hookRuntimeDrainAck, stdout, stderr)
 }
 
+func writeHookClaimSuspensionDrain(reason string, opts hookCommandOptions, stdout, stderr io.Writer) int {
+	drainAckFn := opts.DrainAckFn
+	if drainAckFn == nil {
+		drainAckFn = hookRuntimeDrainAck
+	}
+	return writeHookClaimDrain(hookClaimLabel, reason, opts.JSON, opts.DrainAck, drainAckFn, stdout, stderr)
+}
+
 // writeHookClaimMissingSessionRegistrationDrain emits the terminal result for a
 // runtime that carries pool-membership identity (GC_TEMPLATE) but no durable
 // session bead to verify (GC_SESSION_ID empty) — a managed pool session that
@@ -1446,6 +2177,17 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 	if err != nil {
 		return nil, err
 	}
+	// BdStore.List and the class GraphStore return persisted rows and therefore
+	// do not carry the transient SourceStoreRef that gc ready adds to federated
+	// candidates. The selected claim has already passed the exact canonical
+	// store check; the continuation query is issued against that same owner (or
+	// the class route records its own ref), so preserve that proven provenance
+	// for the sibling canonical checks below.
+	for i := range siblings {
+		if strings.TrimSpace(siblings[i].SourceStoreRef) == "" {
+			siblings[i].SourceStoreRef = strings.TrimSpace(bead.SourceStoreRef)
+		}
+	}
 	pinAssignee := continuationPinAssignee(opts)
 	assigned := make([]string, 0, len(siblings))
 	for _, sibling := range siblings {
@@ -1456,12 +2198,91 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 			!hookClaimMatchesRoute(sibling, opts.RouteTargets) {
 			continue
 		}
+		if opts.RequireAuthoritativeClaimRead {
+			canonical, err := rereadHookClaimCandidates([]beads.Bead{sibling}, opts)
+			if err != nil {
+				return assigned, fmt.Errorf("reading canonical continuation %s: %w", sibling.ID, err)
+			}
+			if len(canonical) != 1 {
+				return assigned, fmt.Errorf("canonical continuation lookup lost %s", sibling.ID)
+			}
+			sibling = canonical[0]
+			ready, err := authoritativeHookClaimCandidateReady(sibling, opts, ops.nowOrWallClock())
+			if err != nil {
+				return assigned, fmt.Errorf("checking canonical continuation readiness %s: %w", sibling.ID, err)
+			}
+			if !ready {
+				continue
+			}
+		}
+		actionState := formulaActionCandidate{Bead: sibling}
+		if opts.CheckFormulaAction != nil {
+			var err error
+			actionState, err = checkHookFormulaAction(ctx, opts, sibling)
+			if err != nil {
+				return assigned, fmt.Errorf("validating continuation formula %s: %w", sibling.ID, err)
+			}
+			sibling = actionState.Bead
+		}
+		if ready, err := authoritativeHookClaimCandidateReady(sibling, opts, ops.nowOrWallClock()); err != nil {
+			return assigned, fmt.Errorf("checking canonical continuation readiness %s: %w", sibling.ID, err)
+		} else if !ready {
+			continue
+		}
+		if actionState.Required {
+			if err := conditionalFormulaActionAssign(ctx, actionState, pinAssignee, opts); err != nil {
+				return assigned, fmt.Errorf("conditionally assigning formula continuation %s: %w", sibling.ID, err)
+			}
+			assigned = append(assigned, sibling.ID)
+			continue
+		}
 		if err := ops.AssignContinuation(ctx, dir, opts.Env, sibling.ID, pinAssignee); err != nil {
 			return assigned, fmt.Errorf("assigning %s: %w", sibling.ID, err)
 		}
 		assigned = append(assigned, sibling.ID)
 	}
 	return assigned, nil
+}
+
+func conditionalFormulaActionAssign(ctx context.Context, state formulaActionCandidate, assignee string, opts hookClaimOptions) error {
+	if !state.Required || state.Store == nil || state.Bead.Revision == 0 || strings.TrimSpace(assignee) == "" || strings.TrimSpace(state.Bead.Assignee) != "" {
+		return beads.ErrConditionalWriteUnsupported
+	}
+	if !strings.EqualFold(strings.TrimSpace(state.Bead.Status), "open") {
+		return nil
+	}
+	if opts.RequireAuthoritativeClaimRead {
+		ready, err := canonicalHookClaimCandidateReady(state.Store, state.Bead, time.Now().UTC())
+		if err != nil {
+			return fmt.Errorf("checking formula continuation readiness: %w", err)
+		}
+		if !ready {
+			return errors.New("formula continuation is no longer ready")
+		}
+	}
+	writer, ok := beads.ConditionalWriterFor(state.Store)
+	if !ok || !beads.InspectConditionalWrites(state.Store).Capable {
+		return beads.ErrConditionalWriteUnsupported
+	}
+	if err := writer.UpdateIfMatch(state.Bead.ID, state.Bead.Revision, beads.UpdateOpts{Assignee: &assignee}); err != nil {
+		return err
+	}
+	readback, err := state.Store.Get(state.Bead.ID)
+	if err != nil {
+		return fmt.Errorf("reading assigned formula continuation: %w", err)
+	}
+	readback.SourceStoreRef = state.Bead.SourceStoreRef
+	if strings.TrimSpace(readback.Assignee) != strings.TrimSpace(assignee) {
+		return fmt.Errorf("formula continuation readback assignee is %q, want %q", readback.Assignee, assignee)
+	}
+	verified, err := checkHookFormulaAction(ctx, opts, readback)
+	if err != nil {
+		return fmt.Errorf("revalidating formula continuation after assignment: %w", err)
+	}
+	if !verified.Required {
+		return fmt.Errorf("formula continuation compatibility requirement disappeared")
+	}
+	return nil
 }
 
 func hookClaimWithBdStore(ctx context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, error) {
@@ -2206,7 +3027,8 @@ func stampHookSessionCurrentClaim(bead beads.Bead, opts hookClaimOptions, ops ho
 	if sessionID == "" || beadID == "" {
 		return
 	}
-	if err := ops.StampSessionClaim(sessionID, beadID); err != nil {
+	claimGeneration := strings.TrimSpace(bead.Metadata[beadmeta.ClaimGenerationMetadataKey])
+	if err := ops.StampSessionClaim(sessionID, beadID, claimGeneration); err != nil {
 		fmt.Fprintf(stderr, "gc hook --claim: recording current claim %s on session %s: %v\n", beadID, sessionID, err) //nolint:errcheck
 	}
 }
@@ -2232,7 +3054,7 @@ func clearHookSessionCurrentClaim(opts hookClaimOptions, ops hookClaimOps, stder
 	if sessionID == "" {
 		return
 	}
-	if err := ops.StampSessionClaim(sessionID, ""); err != nil {
+	if err := ops.StampSessionClaim(sessionID, "", ""); err != nil {
 		fmt.Fprintf(stderr, "gc hook --claim: clearing current claim on session %s: %v\n", sessionID, err) //nolint:errcheck
 	}
 }
@@ -2993,6 +3815,16 @@ func decodeHookClaimBeads(output string) ([]beads.Bead, []hookClaimSkip, error) 
 			skipped = append(skipped, hookClaimSkip{ID: hookClaimBeadIDForLog(raw), Err: err})
 			continue
 		}
+		var provenance struct {
+			SourceStoreRef string `json:"source_store_ref"`
+			LifecycleScope string `json:"lifecycle_scope"`
+		}
+		if err := json.Unmarshal(raw, &provenance); err != nil {
+			skipped = append(skipped, hookClaimSkip{ID: bead.ID, Err: err})
+			continue
+		}
+		bead.SourceStoreRef = provenance.SourceStoreRef
+		bead.LifecycleScope = provenance.LifecycleScope
 		candidates = append(candidates, bead)
 	}
 	return candidates, skipped, nil

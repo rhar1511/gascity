@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -22,8 +23,11 @@ func ReadAmpFile(path string, _ int) (*Session, error) {
 		return nil, err
 	}
 	defer f.Close() //nolint:errcheck
+	return readAmpFileFrom(path, f, 0)
+}
 
-	scanner := bufio.NewScanner(f)
+func readAmpFileFrom(path string, source io.Reader, _ int) (*Session, error) {
+	scanner := bufio.NewScanner(source)
 	scanner.Buffer(make([]byte, 0, 256*1024), 50*1024*1024)
 
 	var messages []*Entry
@@ -424,11 +428,13 @@ func FindAmpSessionFileByID(searchPaths []string, workDir, sessionID string) str
 			filepath.Join(root, sessionID, "stream.jsonl"),
 			filepath.Join(root, sessionID, "events.jsonl"),
 		} {
-			info, err := os.Stat(path)
-			if err != nil || info.IsDir() {
+			transcript, err := OpenTranscript("amp", []string{root}, path)
+			if err != nil {
 				continue
 			}
-			if strings.TrimSpace(workDir) != "" && !ampSessionCWDMatches(path, workDir) {
+			matches := strings.TrimSpace(workDir) == "" || ampSessionCWDMatches(transcript.ReadSeeker(), workDir)
+			_ = transcript.Close()
+			if !matches {
 				continue
 			}
 			return path
@@ -451,7 +457,13 @@ func FindAmpSessionFile(searchPaths []string, workDir string) string {
 		return candidates[i].modTime.After(candidates[j].modTime)
 	})
 	for _, candidate := range candidates {
-		if ampSessionCWDMatches(candidate.path, workDir) {
+		transcript, err := OpenTranscript("amp", []string{candidate.root}, candidate.path)
+		if err != nil {
+			continue
+		}
+		matches := ampSessionCWDMatches(transcript.ReadSeeker(), workDir)
+		_ = transcript.Close()
+		if matches {
 			return candidate.path
 		}
 	}
@@ -459,24 +471,38 @@ func FindAmpSessionFile(searchPaths []string, workDir string) string {
 }
 
 type ampSessionFileCandidate struct {
+	root    string
 	path    string
 	modTime time.Time
 }
 
 func ampSessionCandidates(root string) []ampSessionFileCandidate {
-	info, err := os.Stat(root)
+	rootFS, err := os.OpenRoot(root)
+	if err != nil {
+		return nil
+	}
+	defer rootFS.Close() //nolint:errcheck
+	info, err := rootFS.Stat(".")
 	if err != nil || !info.IsDir() {
 		return nil
 	}
 	var candidates []ampSessionFileCandidate
 	appendCandidate := func(path string) {
-		info, err := os.Stat(path)
-		if err != nil || info.IsDir() || filepath.Ext(path) != ".jsonl" {
+		if filepath.Ext(path) != ".jsonl" {
 			return
 		}
-		candidates = append(candidates, ampSessionFileCandidate{path: path, modTime: info.ModTime()})
+		transcript, err := OpenTranscript("amp", []string{root}, path)
+		if err != nil {
+			return
+		}
+		info, err := transcript.Stat()
+		_ = transcript.Close()
+		if err != nil {
+			return
+		}
+		candidates = append(candidates, ampSessionFileCandidate{root: root, path: path, modTime: info.ModTime()})
 	}
-	entries, err := os.ReadDir(root)
+	entries, err := readAmpSessionDir(rootFS, ".")
 	if err != nil {
 		return nil
 	}
@@ -486,7 +512,7 @@ func ampSessionCandidates(root string) []ampSessionFileCandidate {
 			appendCandidate(path)
 			continue
 		}
-		childEntries, err := os.ReadDir(path)
+		childEntries, err := readAmpSessionDir(rootFS, entry.Name())
 		if err != nil {
 			continue
 		}
@@ -500,22 +526,25 @@ func ampSessionCandidates(root string) []ampSessionFileCandidate {
 	return candidates
 }
 
-func ampSessionCWDMatches(path, workDir string) bool {
-	cwd := ampSessionCWD(path)
+func readAmpSessionDir(rootFS *os.Root, path string) ([]os.DirEntry, error) {
+	dir, err := rootFS.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer dir.Close() //nolint:errcheck
+	return dir.ReadDir(-1)
+}
+
+func ampSessionCWDMatches(source io.Reader, workDir string) bool {
+	cwd := ampSessionCWD(source)
 	if cwd == "" || workDir == "" {
 		return false
 	}
 	return pathutil.SamePath(cwd, workDir)
 }
 
-func ampSessionCWD(path string) string {
-	f, err := os.Open(path)
-	if err != nil {
-		return ""
-	}
-	defer f.Close() //nolint:errcheck
-
-	scanner := bufio.NewScanner(f)
+func ampSessionCWD(source io.Reader) string {
+	scanner := bufio.NewScanner(source)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
 		line := bytes.TrimSpace(scanner.Bytes())

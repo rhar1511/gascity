@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/pathutil"
+	"github.com/gastownhall/gascity/internal/qualification"
 	"github.com/gastownhall/gascity/internal/supervisor"
 )
 
@@ -68,6 +69,14 @@ type cityRegistry struct {
 	supervisorRecorder   events.Recorder                     // supervisor-level event recorder for city lifecycle events
 
 	gen uint64 // monotonic generation counter
+	// compatibilityAuthority is captured once by runSupervisor before any
+	// city start workers are launched. Per-city state copies this trusted
+	// handle; config reloads and worker environment never replace it.
+	compatibilityAuthority qualification.CompatibilityAuthority
+	// beadsPermitResolver is the supervisor-owned, host-authenticated signing
+	// authority snapshot. It is loaded once before any city is published and
+	// closed only after all city runtimes stop.
+	beadsPermitResolver *hostBeadsPermitResolver
 }
 
 type recentlyUnregisteredCity struct {
@@ -546,7 +555,7 @@ func (r *cityRegistry) toCityView(path string, mc *managedCity) *cityView {
 	// SAFETY: cs is a pointer to controllerState, which has its own internal
 	// RWMutex protecting all field access. API handlers that receive this pointer
 	// call methods like Config(), SessionProvider(), etc. which acquire cs.mu.RLock().
-	// The Poke() method only does a non-blocking channel send — no managedCity access.
+	// The Enqueue() method only does non-blocking channel sends — no managedCity access.
 	var cs api.State
 	if mc.cr != nil {
 		cs = mc.cr.cs

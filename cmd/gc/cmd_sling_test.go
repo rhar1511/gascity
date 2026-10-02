@@ -712,8 +712,9 @@ func TestCliBeadRouterAllowsSameStoreRoute(t *testing.T) {
 			MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3),
 		}},
 	}
-	store := newSlingTestStore()
-	if _, err := store.Create(beads.Bead{ID: "RIG-1", Type: "task", Status: "open"}); err != nil {
+	store := beads.NewMemStore()
+	created, err := store.Create(beads.Bead{ID: "RIG-1", Type: "task", Status: "open"})
+	if err != nil {
 		t.Fatalf("seed RIG-1: %v", err)
 	}
 	deps := &slingDeps{
@@ -726,17 +727,238 @@ func TestCliBeadRouterAllowsSameStoreRoute(t *testing.T) {
 	router := cliBeadRouter{deps: deps}
 
 	if err := router.Route(context.Background(), sling.RouteRequest{
-		BeadID: "RIG-1",
+		BeadID: created.ID,
 		Target: "alpha/polecat",
 	}); err != nil {
 		t.Fatalf("same-store route should succeed, got: %v", err)
 	}
-	bead, err := store.Get("RIG-1")
+	bead, err := store.Get(created.ID)
 	if err != nil {
-		t.Fatalf("store.Get(RIG-1): %v", err)
+		t.Fatalf("store.Get(%s): %v", created.ID, err)
 	}
 	if bead.Metadata["gc.routed_to"] != "alpha/polecat" {
 		t.Errorf("gc.routed_to = %q, want alpha/polecat", bead.Metadata["gc.routed_to"])
+	}
+}
+
+func TestCliBeadRouterBuiltInRouteRequiresConditionalWriter(t *testing.T) {
+	base := beads.NewMemStore()
+	created, err := base.Create(beads.Bead{ID: "ROUTE-CAS-UNSUPPORTED", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	router := cliBeadRouter{deps: &slingDeps{Store: routeNoConditionalStore{Store: base}}}
+	err = router.Route(context.Background(), sling.RouteRequest{BeadID: created.ID, Target: "pool/worker"})
+	if err == nil || !strings.Contains(err.Error(), "conditional") {
+		t.Fatalf("Route error = %v, want conditional-writer refusal", err)
+	}
+	after, err := base.Get(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Metadata[beadmeta.RoutedToMetadataKey] != "" {
+		t.Fatalf("unsupported route wrote gc.routed_to=%q", after.Metadata[beadmeta.RoutedToMetadataKey])
+	}
+}
+
+func TestCliBeadRouterBuiltInRouteUsesObservedRevisionAndFailsClosed(t *testing.T) {
+	t.Run("zero revision", func(t *testing.T) {
+		base := beads.NewMemStore()
+		created, err := base.Create(beads.Bead{ID: "ROUTE-CAS-ZERO", Type: "task", Status: "open"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		router := cliBeadRouter{deps: &slingDeps{Store: routeZeroRevisionStore{Store: base}}}
+		err = router.Route(context.Background(), sling.RouteRequest{BeadID: created.ID, Target: "pool/worker"})
+		if err == nil || !strings.Contains(err.Error(), "nonzero") {
+			t.Fatalf("Route error = %v, want nonzero-revision refusal", err)
+		}
+		after, err := base.Get(created.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if after.Metadata[beadmeta.RoutedToMetadataKey] != "" {
+			t.Fatalf("zero-revision route wrote gc.routed_to=%q", after.Metadata[beadmeta.RoutedToMetadataKey])
+		}
+	})
+
+	t.Run("runtime unsupported", func(t *testing.T) {
+		store := beads.NewMemStore()
+		store.DisableConditionalWrites = true
+		created, err := store.Create(beads.Bead{ID: "ROUTE-CAS-RUNTIME", Type: "task", Status: "open"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = (cliBeadRouter{deps: &slingDeps{Store: store}}).Route(context.Background(), sling.RouteRequest{BeadID: created.ID, Target: "pool/worker"})
+		if !beads.IsConditionalWriteUnsupported(err) {
+			t.Fatalf("Route error = %v, want ErrConditionalWriteUnsupported", err)
+		}
+		after, err := store.Get(created.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if after.Metadata[beadmeta.RoutedToMetadataKey] != "" {
+			t.Fatalf("runtime-unsupported route wrote gc.routed_to=%q", after.Metadata[beadmeta.RoutedToMetadataKey])
+		}
+	})
+}
+
+func TestCliBeadRouterAndAdmissionCASHaveOneWinner(t *testing.T) {
+	base := beads.NewMemStore()
+	created, err := base.Create(beads.Bead{ID: "ROUTE-CAS-RACE", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseWriter, ok := beads.ConditionalWriterFor(base)
+	if !ok {
+		t.Fatal("MemStore lacks ConditionalWriter")
+	}
+	entered := make(chan struct{}, 2)
+	release := make(chan struct{})
+	store := &routeBarrierStore{
+		Store:  base,
+		writer: &routeBarrierWriter{ConditionalWriter: baseWriter, entered: entered, release: release},
+	}
+	routeResult := make(chan error, 1)
+	go func() {
+		routeResult <- (cliBeadRouter{deps: &slingDeps{Store: store}}).Route(context.Background(), sling.RouteRequest{BeadID: created.ID, Target: "pool/worker"})
+	}()
+	admissionResult := make(chan error, 1)
+	go func() {
+		writer, ok := beads.ConditionalWriterFor(store)
+		if !ok {
+			admissionResult <- errors.New("route barrier store lost ConditionalWriter")
+			return
+		}
+		admissionResult <- writer.UpdateIfMatch(created.ID, created.Revision, beads.UpdateOpts{Metadata: map[string]string{
+			beadmeta.LifecycleAdmissionReceiptV2MetadataKey: "attached admission",
+		}})
+	}()
+	<-entered
+	<-entered
+	close(release)
+	routeErr, admissionErr := <-routeResult, <-admissionResult
+	if (routeErr == nil) == (admissionErr == nil) {
+		t.Fatalf("route/admission CAS results = (%v, %v), want exactly one winner", routeErr, admissionErr)
+	}
+	after, err := base.Get(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	routed := after.Metadata[beadmeta.RoutedToMetadataKey] != ""
+	enrolled := beads.HasLifecycleEvidence(after)
+	if routed == enrolled {
+		t.Fatalf("final row has routed=%v enrolled=%v; route and admission must not both win", routed, enrolled)
+	}
+}
+
+func TestCliBeadRouterRefusesCustomQueryWhenLifecycleAdmissionEnabled(t *testing.T) {
+	store := beads.NewMemStore()
+	created, err := store.Create(beads.Bead{ID: "ROUTE-CUSTOM-GATED", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	called := 0
+	cfg := &config.City{
+		Lifecycle: config.LifecycleConfig{AdmissionEnabled: true},
+		Agents:    []config.Agent{{Name: "worker", SlingQuery: "custom-dispatch {}"}},
+	}
+	router := cliBeadRouter{deps: &slingDeps{
+		Cfg: cfg, Store: store,
+		Runner: func(string, string, map[string]string) (string, error) {
+			called++
+			return "", nil
+		},
+	}}
+	err = router.Route(context.Background(), sling.RouteRequest{BeadID: created.ID, Target: "worker"})
+	if err == nil || !strings.Contains(err.Error(), "admission is enabled") {
+		t.Fatalf("Route error = %v, want custom-routing refusal while admission is enabled", err)
+	}
+	if called != 0 {
+		t.Fatalf("custom query called %d times, want 0", called)
+	}
+	after, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Metadata[beadmeta.RoutedToMetadataKey] != "" {
+		t.Fatalf("refused custom route wrote gc.routed_to=%q", after.Metadata[beadmeta.RoutedToMetadataKey])
+	}
+}
+
+func TestCliBeadRouterAllowsCustomQueryWhenLifecycleAdmissionDisabled(t *testing.T) {
+	store := beads.NewMemStore()
+	created, err := store.Create(beads.Bead{ID: "ROUTE-CUSTOM-OPEN", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	called := 0
+	router := cliBeadRouter{deps: &slingDeps{
+		Cfg: &config.City{Agents: []config.Agent{{Name: "worker", SlingQuery: "custom-dispatch {}"}}}, Store: store,
+		Runner: func(string, string, map[string]string) (string, error) { called++; return "", nil },
+	}}
+	if err := router.Route(context.Background(), sling.RouteRequest{BeadID: created.ID, Target: "worker"}); err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if called != 1 {
+		t.Fatalf("custom query called %d times, want 1", called)
+	}
+}
+
+type routeNoConditionalStore struct{ beads.Store }
+
+type routeZeroRevisionStore struct{ beads.Store }
+
+func (s routeZeroRevisionStore) Get(id string) (beads.Bead, error) {
+	b, err := s.Store.Get(id)
+	b.Revision = 0
+	return b, err
+}
+
+type routeBarrierStore struct {
+	beads.Store
+	writer beads.ConditionalWriter
+}
+
+func (s *routeBarrierStore) ConditionalWriterHandle() (beads.ConditionalWriter, bool) {
+	return s.writer, s.writer != nil
+}
+
+type routeBarrierWriter struct {
+	beads.ConditionalWriter
+	entered chan struct{}
+	release <-chan struct{}
+}
+
+func (w *routeBarrierWriter) UpdateIfMatch(id string, revision int64, opts beads.UpdateOpts) error {
+	w.entered <- struct{}{}
+	<-w.release
+	return w.ConditionalWriter.UpdateIfMatch(id, revision, opts)
+}
+
+func TestCliBeadRouterRefusesLifecycleEnrolledWork(t *testing.T) {
+	cityPath := t.TempDir()
+	store := newSlingTestStore()
+	bead, err := store.Create(beads.Bead{
+		ID:       "RIG-ENROLLED",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{beadmeta.LifecycleAdmissionReceiptMetadataKey: "persisted admission evidence"},
+	})
+	if err != nil {
+		t.Fatalf("seed enrolled work: %v", err)
+	}
+	router := cliBeadRouter{deps: &slingDeps{CityPath: cityPath, Store: store}}
+	err = router.Route(context.Background(), sling.RouteRequest{BeadID: bead.ID, Target: "alpha/polecat"})
+	if err == nil || !strings.Contains(err.Error(), "generic mutation lacks current session, claim, and row-revision proof") {
+		t.Fatalf("Route() error = %v, want enrolled-work fence", err)
+	}
+	current, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("store.Get(): %v", err)
+	}
+	if current.Metadata[beadmeta.RoutedToMetadataKey] != "" {
+		t.Fatalf("refused route changed gc.routed_to to %q", current.Metadata[beadmeta.RoutedToMetadataKey])
 	}
 }
 
@@ -750,23 +972,86 @@ func TestCliBeadRouterAllowsCityTargetFromCityStore(t *testing.T) {
 		}},
 	}
 	store := newSlingTestStore()
-	if _, err := store.Create(beads.Bead{ID: "HQ-2", Type: "task", Status: "open"}); err != nil {
+	created, err := store.Create(beads.Bead{ID: "HQ-2", Type: "task", Status: "open"})
+	if err != nil {
 		t.Fatalf("seed HQ-2: %v", err)
 	}
+	writer, ok := beads.ConditionalWriterFor(store.Store)
+	if !ok {
+		t.Fatal("test store lacks conditional writer")
+	}
+	routeStore := &routeBarrierStore{Store: store, writer: writer}
 	deps := &slingDeps{
 		CityName: "test-city",
 		CityPath: cityPath,
 		Cfg:      cfg,
-		Store:    store,
+		Store:    routeStore,
 		StoreRef: "city:test-city",
 	}
 	router := cliBeadRouter{deps: deps}
 
 	if err := router.Route(context.Background(), sling.RouteRequest{
-		BeadID: "HQ-2",
+		BeadID: created.ID,
 		Target: "mayor",
 	}); err != nil {
 		t.Fatalf("HQ->HQ route should succeed, got: %v", err)
+	}
+}
+
+func TestCliBeadRouterRefusesLifecycleEnrollmentBeforeCustomQuery(t *testing.T) {
+	store := newSlingTestStore()
+	bead, err := store.Create(beads.Bead{
+		ID: "LIFE-CLI-1", Type: "task", Status: "open",
+		Metadata: map[string]string{beadmeta.LifecycleAdmissionReceiptMetadataKey: "durable admission evidence"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	called := 0
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker", SlingQuery: "custom-dispatch {}"}}}
+	router := cliBeadRouter{deps: &slingDeps{
+		Cfg: cfg, Store: store,
+		Runner: func(string, string, map[string]string) (string, error) {
+			called++
+			return "", nil
+		},
+	}}
+	err = router.Route(context.Background(), sling.RouteRequest{BeadID: bead.ID, Target: "worker"})
+	if !errors.Is(err, beads.ErrLifecycleMutationBlocked) {
+		t.Fatalf("Route error = %v, want lifecycle routing refusal", err)
+	}
+	if called != 0 {
+		t.Fatalf("custom sling query called %d times, want 0", called)
+	}
+	after, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Metadata[beadmeta.RoutedToMetadataKey] != "" {
+		t.Fatalf("refused route wrote gc.routed_to=%q", after.Metadata[beadmeta.RoutedToMetadataKey])
+	}
+}
+
+func TestCliBeadRouterRefusesLifecycleEnrollmentBeforeBuiltInRoute(t *testing.T) {
+	store := newSlingTestStore()
+	bead, err := store.Create(beads.Bead{
+		ID: "LIFE-CLI-2", Type: "task", Status: "open",
+		Metadata: map[string]string{"gc.lifecycle.admission_receipt.v2": "durable v2 admission evidence"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	router := cliBeadRouter{deps: &slingDeps{Store: store}}
+	err = router.Route(context.Background(), sling.RouteRequest{BeadID: bead.ID, Target: "pool/worker"})
+	if !errors.Is(err, beads.ErrLifecycleMutationBlocked) {
+		t.Fatalf("Route error = %v, want lifecycle routing refusal", err)
+	}
+	after, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Metadata[beadmeta.RoutedToMetadataKey] != "" {
+		t.Fatalf("refused route wrote gc.routed_to=%q", after.Metadata[beadmeta.RoutedToMetadataKey])
 	}
 }
 
@@ -1509,7 +1794,7 @@ func TestBuiltInSlingPoolRouteContractUsesMetadataOnly(t *testing.T) {
 		},
 	}
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
-	store := newSlingTestStore()
+	store := beads.NewMemStore()
 	deps.Store = store
 	// The bead lives in the saitoc rig store (single physical store reused
 	// below as both source and rig store for the scale_check probe), so

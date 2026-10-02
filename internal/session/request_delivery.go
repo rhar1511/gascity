@@ -2,9 +2,7 @@ package session
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
 	"strconv"
 	"time"
 
@@ -12,21 +10,52 @@ import (
 )
 
 // SubmitRequest sends a tracked request only to the execution selected when
-// acceptance was persisted. Session-name metadata changes cannot retarget it.
+// acceptance was persisted. Session-name changes cannot retarget that request.
 // It never wakes, resumes, interrupts, or restarts a session. The durable send
 // reservation precedes provider I/O. After an uncertain send, retries read the
 // existing receipt rather than risking a second delivery. The mutation lock
 // fences cooperating in-process incarnation changes; provider/credential
 // isolation is still required against external writers and runtime replacement.
 func (m *Manager) SubmitRequest(ctx context.Context, id, requestID string, generation int, message string) (RequestReceipt, error) {
+	return m.submitRequest(ctx, id, requestID, generation, message, nil, false)
+}
+
+// SubmitRequestForAttempt accepts controller-verified attempt attribution and
+// uses the same live-only, single-send protocol as SubmitRequest.
+func (m *Manager) SubmitRequestForAttempt(ctx context.Context, id, requestID string, generation int, message string, binding RequestAttemptBinding) (RequestReceipt, error) {
+	if !validRequestAttemptBinding(binding, id, generation) {
+		return RequestReceipt{}, ErrRequestConflict
+	}
+	return m.submitRequest(ctx, id, requestID, generation, message, &binding, false)
+}
+
+// SubmitRequestForAttemptExact additionally requires the complete stored
+// binding, including its original work revision, at the send reservation.
+func (m *Manager) SubmitRequestForAttemptExact(ctx context.Context, id, requestID string, generation int, message string, binding RequestAttemptBinding) (RequestReceipt, error) {
+	if !validRequestAttemptBinding(binding, id, generation) {
+		return RequestReceipt{}, ErrRequestConflict
+	}
+	return m.submitRequest(ctx, id, requestID, generation, message, &binding, true)
+}
+
+func (m *Manager) submitRequest(ctx context.Context, id, requestID string, generation int, message string, binding *RequestAttemptBinding, exactBinding bool) (RequestReceipt, error) {
 	var result RequestReceipt
 	err := withSessionMutationLock(id, func() error {
 		front := NewStore(beads.SessionStore{Store: m.store})
-		accepted, err := front.AcceptRequest(id, requestID, generation, message, time.Now())
+		var accepted RequestAcceptance
+		var err error
+		if binding == nil {
+			accepted, err = front.AcceptRequest(id, requestID, generation, message, time.Now())
+		} else {
+			accepted, err = front.AcceptRequestForAttempt(id, requestID, generation, message, *binding, time.Now())
+		}
 		if err != nil {
 			return err
 		}
 		result = accepted.RequestReceipt
+		if exactBinding && !sameRequestAttemptExact(result.Attempt, binding) {
+			return ErrRequestConflict
+		}
 		if result.Delivery != RequestDeliveryPending {
 			return nil
 		}
@@ -36,7 +65,10 @@ func (m *Manager) SubmitRequest(ctx context.Context, id, requestID string, gener
 			return err
 		}
 		info := infoFromPersistedBead(b)
-		if info.Generation != strconv.Itoa(generation) || requestDigest(info.InstanceToken) != accepted.executionTokenDigest || info.Closed || pendingConversationRestart(b) || (info.State != StateActive && info.State != StateAwake) || !m.sp.IsRunning(targetName) {
+		if targetName == "" || info.Generation != strconv.Itoa(generation) ||
+			requestDigest(info.InstanceToken) != accepted.executionTokenDigest || info.Closed ||
+			IsRequestPurgeFenced(b) || pendingConversationRestart(b) ||
+			(info.State != StateActive && info.State != StateAwake) || !m.sp.IsRunning(targetName) {
 			return ErrRequestConflict
 		}
 		if err := ctx.Err(); err != nil {
@@ -48,7 +80,13 @@ func (m *Manager) SubmitRequest(ctx context.Context, id, requestID string, gener
 		claimed := false
 		result, err = front.mutateRequestReceipt(id, requestID, func(current beads.Bead, record *storedRequestReceipt) (bool, error) {
 			claimed = false
-			if current.Metadata["generation"] != strconv.Itoa(generation) || requestDigest(current.Metadata["instance_token"]) != record.ExecutionTokenDigest || record.TargetSessionName != targetName || current.Status == "closed" {
+			if current.Metadata["generation"] != strconv.Itoa(generation) || requestDigest(current.Metadata["instance_token"]) != record.ExecutionTokenDigest || record.TargetSessionName != targetName || current.Status == "closed" || IsRequestPurgeFenced(current) {
+				return false, ErrRequestConflict
+			}
+			if exactBinding && !sameRequestAttemptExact(record.Attempt, binding) {
+				return false, ErrRequestConflict
+			}
+			if !requestAttemptClaimMatches(current, record.Attempt) {
 				return false, ErrRequestConflict
 			}
 			if record.Delivery != RequestDeliveryPending {
@@ -57,6 +95,11 @@ func (m *Manager) SubmitRequest(ctx context.Context, id, requestID string, gener
 			stamp := time.Now().UTC()
 			record.DeliveryAttemptedAt = &stamp
 			record.Delivery = RequestDeliveryUnknown
+			if record.Version == 2 {
+				if err := appendRequestEvent(record, RequestEventDeliveryAttempt, stamp, "", nil); err != nil {
+					return false, err
+				}
+			}
 			claimed = true
 			return true, nil
 		})
@@ -64,21 +107,7 @@ func (m *Manager) SubmitRequest(ctx context.Context, id, requestID string, gener
 			return err
 		}
 		// JSON keeps arbitrary message text distinct from the request identity.
-		envelope, err := json.Marshal(struct {
-			RequestID       string `json:"request_id"`
-			SessionID       string `json:"session_id"`
-			Generation      int    `json:"generation"`
-			Instruction     string `json:"instruction"`
-			AcknowledgeWith string `json:"acknowledge_with"`
-			Message         string `json:"message"`
-		}{
-			RequestID:       requestID,
-			SessionID:       id,
-			Generation:      generation,
-			Instruction:     "Acknowledge receipt before acting by running the command in acknowledge_with.",
-			AcknowledgeWith: fmt.Sprintf("gc session request ack %q", requestID),
-			Message:         message,
-		})
+		envelope, err := marshalTrackedRequestEnvelope(requestID, id, generation, message)
 		if err != nil {
 			return err
 		}

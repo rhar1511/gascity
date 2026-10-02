@@ -106,20 +106,22 @@ type cachedCityServer struct {
 // dashboard is attached — the embedded SPA at "/" and the host-side dashboard
 // plane at "/api/". Everything else is a typed Huma operation.
 type SupervisorMux struct {
-	resolver        CityResolver
-	initializer     cityInitializer
-	readOnly        bool
-	version         string
-	buildID         string
-	startedAt       time.Time
-	allowedOrigins  []string
-	allowedHosts    []string
-	allowAnyHost    bool
-	writeAuth       *citywriteauth.Verifier
-	readAuth        *citywriteauth.Verifier
-	dashboardBase   func() string
-	runCensusSource RunCensusSource
-	server          *http.Server
+	resolver               CityResolver
+	initializer            cityInitializer
+	readOnly               bool
+	version                string
+	buildID                string
+	startedAt              time.Time
+	allowedOrigins         []string
+	allowedHosts           []string
+	allowAnyHost           bool
+	writeAuth              *citywriteauth.Verifier
+	readAuth               *citywriteauth.Verifier
+	prHumanVerifier        *PRHumanGrantVerifier
+	decisionAnswerVerifier *DecisionAnswerGrantVerifier
+	dashboardBase          func() string
+	runCensusSource        RunCensusSource
+	server                 *http.Server
 
 	// Single Huma API (Phase 3.5 — Topology 1). Owns every typed
 	// operation: supervisor-scope (/v0/cities, /health, /v0/readiness,
@@ -351,6 +353,22 @@ func (sm *SupervisorMux) WithWriteAuth(v *citywriteauth.Verifier) *SupervisorMux
 	return sm
 }
 
+// WithPRHumanGrantVerifier installs the separate exact-subject authority used
+// by privileged PR actions. Production composition should prefer
+// InstallWriteAuth, which loads this trust set separately and rejects key
+// overlap with the city-write verifier.
+func (sm *SupervisorMux) WithPRHumanGrantVerifier(v *PRHumanGrantVerifier) *SupervisorMux {
+	sm.prHumanVerifier = v
+	return sm
+}
+
+// WithDecisionAnswerGrantVerifier installs the signed answer verifier used by
+// decision-frontier services that do not supply their own verifier.
+func (sm *SupervisorMux) WithDecisionAnswerGrantVerifier(v *DecisionAnswerGrantVerifier) *SupervisorMux {
+	sm.decisionAnswerVerifier = v
+	return sm
+}
+
 // WithReadAuth installs the read-auth verifier so city-scoped reads (GET/HEAD)
 // are gated on a signed grant, and rebuilds the internal http.Server handler. A
 // nil verifier leaves read-auth disabled. Must be called before Serve.
@@ -478,6 +496,8 @@ func (sm *SupervisorMux) getCityServer(name string, state State) *Server {
 	// cached server observes the final provider.
 	srv.dashboardBase = sm.dashboardBase
 	srv.runCensusSource = sm.runCensusSource
+	srv.prHumanVerifier = sm.prHumanVerifier
+	srv.decisionAnswerVerifier = sm.decisionAnswerVerifier
 
 	sm.cacheMu.Lock()
 	defer sm.cacheMu.Unlock()

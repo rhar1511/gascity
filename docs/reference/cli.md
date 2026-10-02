@@ -294,14 +294,27 @@ invocation the generated work query builds, not with all of "bd ready" —
 "gc ready --help" lists what it takes. A city that relocates no class is
 unaffected.
 
-All arguments after "gc bd" are forwarded to bd unchanged, with one
-exception: a "list" that filters on the wisps (ephemeral) tier —
+Generic bead output is projected before presentation: private signed-answer
+and attempt-evidence records appear as private stubs, and private metadata is
+removed from public owners. Read commands request complete JSON from bd; gc
+renders text unless --json is requested. Provider diagnostics are withheld on
+these paths. Raw SQL, exports, history, and output-field selection are refused
+because they cannot preserve the private-record boundary. Scoped private reads
+retain their separate authorization requirements.
+
+A "list" that filters on the wisps (ephemeral) tier —
 "--type=molecule", "--type=wisp", "--mol-type", "--wisp-type" — also gets
 "--include-infra". bd skips that tier on any list without the flag, so those
 filters would otherwise return [] and exit 0 on a ledger full of live
-molecules. Every other list is forwarded as written. "heartbeat
+molecules. Query filters retain their meaning. "heartbeat
 &lt;issue-id&gt;" forwards to bd's native heartbeat, which refreshes the claim's
-lease and fails loudly when the caller no longer owns it. gc adds one
+lease and fails loudly when the caller no longer owns it. "show &lt;id&gt;
+--watch" (or "show --current --watch", or the "view" alias) on a scope that
+uses bd's proxied-server transport (the default for a new city), where bd
+refuses watch mode, is served by gc instead: it re-runs "bd show" every 2
+seconds and redraws when the bead's status or update time changes, until
+Ctrl+C. Like bd's own watch, it renders the plain form and ignores show's
+display flags (--json, --short, --long, --refs, --children). gc adds one
 subcommand of its own: "release-if-current &lt;issue-id&gt; &lt;assignee&gt;", which
 conditionally resets an in-progress assignment only when the bead still has
 that assignee.
@@ -1929,11 +1942,11 @@ gc github
 
 | Subcommand | Description |
 |------------|-------------|
-| [gc github pr](#gc-github-pr) | GitHub pull-request monitor commands |
+| [gc github pr](#gc-github-pr) | Read and act on the central PR queue |
 
 ## gc github pr
 
-GitHub pull-request monitor commands
+Read and act on the central PR queue
 
 ```
 gc github pr
@@ -1941,17 +1954,43 @@ gc github pr
 
 | Subcommand | Description |
 |------------|-------------|
-| [gc github pr backfill](#gc-github-pr-backfill) | Query configured GitHub PR readiness monitors |
+| [gc github pr action](#gc-github-pr-action) | Submit an exact revision to the central PR action API |
+| [gc github pr backfill](#gc-github-pr-backfill) | Read the Gas City server's PR queue and policy verdicts |
+
+## gc github pr action
+
+Submit a prepare or queue_review action using revisions and policy from
+backfill --all --json. Reuse the same idempotency key and exact arguments after
+an uncertain response. queue_review requires --work-id and --attempt-id from the
+server queue. GitHub merge actions remain unavailable. Output is JSON.
+
+```
+gc github pr action <prepare|queue_review> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--attempt-id` | string |  | exact immutable attempt from the queue |
+| `--base-sha` | string |  | exact base revision |
+| `--head-sha` | string |  | exact candidate revision |
+| `--idempotency-key` | string |  | stable key reused for retries of this exact request |
+| `--monitor` | string |  | server monitor name |
+| `--policy-version` | string |  | server policy version |
+| `--pr` | int |  | pull request number |
+| `--repo` | string |  | exact owner/repository from server queue |
+| `--timeout` | duration | `45s` | server request timeout |
+| `--work-id` | string |  | exact work record from the queue |
 
 ## gc github pr backfill
 
-Query configured GitHub PR readiness monitors.
+Read the Gas City server's PR queue and policy verdicts.
 
-The command reads [[github.pr_monitor]] entries from the resolved city
-configuration, queries open pull requests from GitHub, and reports PRs that
-need repair: failed checks, merge conflicts, blocked mergeability, or branches
-behind their base. By default clean and pending-only PRs are omitted; pass
---all to include every observed PR.
+The server supplies repository revisions, policy versions, evidence and permitted
+actions. By default, show items with an available action; --all includes blocked
+items. --create-repair-beads submits only server-permitted prepare actions with
+stable revision-specific idempotency keys. Prepared work is not dispatched by
+this command. A server failure never falls back to local policy or ledger writes.
+JSON schema version 2 contains the server queue and verified action receipts.
 
 ```
 gc github pr backfill [monitor-name] [flags]
@@ -1959,10 +1998,10 @@ gc github pr backfill [monitor-name] [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--all` | bool |  | include clean and pending-only PRs |
-| `--create-repair-beads` | bool |  | create deduped repair beads for actionable PRs |
+| `--all` | bool |  | include items without available actions |
+| `--create-repair-beads` | bool |  | submit server-permitted prepare actions |
 | `--json` | bool |  | emit JSON |
-| `--timeout` | duration | `45s` | GitHub query timeout |
+| `--timeout` | duration | `45s` | server request timeout |
 
 ## gc graph
 
@@ -4434,6 +4473,13 @@ work remain attached to the existing session bead. For named sessions, reset
 also clears any tripped named-session respawn circuit breaker before requesting
 the fresh restart.
 
+One case is not an in-place restart. A session whose create never completed,
+is past its start lease, and has no running runtime cannot be restarted in
+place, because its unfinished create is what blocks it. Reset rolls that
+session back instead: it closes the bead as a failed create and releases the
+alias so the controller can create a replacement. A create that is still
+starting, or whose runtime is running, is never rolled back.
+
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).
 
 ```
@@ -4736,6 +4782,13 @@ unregisters it (equivalent to a following "gc unregister") — the city
 will not be found by name or auto-started again until it is re-registered
 with "gc register". Use "gc unregister" directly to remove a registration
 without stopping sessions.
+
+gc stop reports "City stopped." only when it could confirm that every
+session stopped. If it could not list the runtime's sessions completely,
+or could not check whether a session is still running, it names what it
+could not verify, still stops every session it did see, and exits
+non-zero; a supervisor registration is restored. Resolve the reported
+error and run gc stop again.
 
 Use --timeout=DURATION to cap the wall-clock time gc stop will spend
 before giving up; the default budgets configured session interrupt and

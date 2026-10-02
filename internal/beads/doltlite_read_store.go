@@ -915,7 +915,7 @@ func (s *DoltliteReadStore) queryIssuesOrderedInTables(query ListQuery, sets []d
 		// this fetch; a SQL LIMIT cut before that filter would silently drop
 		// page rows, so seeked reads fetch unbounded and let the Go
 		// filter+sort+limit below cut the exact page.
-		if query.SeekAfter != nil {
+		if query.SeekAfter != nil || query.AbsentMetadataKey != "" {
 			tableLimit = 0
 		}
 		// A before-filter admits NULL-julianday rows into the SQL result (see
@@ -968,6 +968,7 @@ func doltliteCanSelectBoundedTopN(query ListQuery, sets []doltliteTableSet, extr
 		extraWhere == "" &&
 		query.ParentID == "" &&
 		len(query.Metadata) == 0 &&
+		query.AbsentMetadataKey == "" &&
 		query.CreatedBefore.IsZero() &&
 		query.UpdatedBefore.IsZero() &&
 		query.SeekAfter == nil
@@ -1466,11 +1467,16 @@ func doltliteSQLiteTime(t time.Time) string {
 }
 
 func filterDoltliteBeforeTimes(rows []Bead, query ListQuery) []Bead {
-	if len(rows) == 0 || (query.CreatedBefore.IsZero() && query.UpdatedBefore.IsZero() && query.SeekAfter == nil) {
+	if len(rows) == 0 || (query.CreatedBefore.IsZero() && query.UpdatedBefore.IsZero() && query.SeekAfter == nil && query.AbsentMetadataKey == "") {
 		return rows
 	}
 	out := rows[:0]
 	for _, row := range rows {
+		if query.AbsentMetadataKey != "" {
+			if _, present := row.Metadata[query.AbsentMetadataKey]; present {
+				continue
+			}
+		}
 		if !query.CreatedBefore.IsZero() && !row.CreatedAt.Before(query.CreatedBefore) {
 			continue
 		}

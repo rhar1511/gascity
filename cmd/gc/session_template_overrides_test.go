@@ -84,6 +84,7 @@ func TestParseSessionTemplateOverridesForLaunch_ParseSeam(t *testing.T) {
 		session  *beads.Bead
 		want     map[string]string
 		wantNone bool
+		wantErr  bool
 	}{
 		{name: "nil session", session: nil, wantNone: true},
 		{name: "nil metadata", session: &beads.Bead{ID: "gc-1"}, wantNone: true},
@@ -94,8 +95,8 @@ func TestParseSessionTemplateOverridesForLaunch_ParseSeam(t *testing.T) {
 		// for every caller (len checks, range loops, key lookups), so the
 		// pin is len==0, not nil-ness.
 		{name: "empty object", session: &beads.Bead{ID: "gc-1", Metadata: map[string]string{"template_overrides": "{}"}}, wantNone: true},
-		{name: "invalid json", session: &beads.Bead{ID: "gc-1", Metadata: map[string]string{"template_overrides": "{not json"}}, wantNone: true},
-		{name: "non-string value", session: &beads.Bead{ID: "gc-1", Metadata: map[string]string{"template_overrides": `{"model":1}`}}, wantNone: true},
+		{name: "invalid json", session: &beads.Bead{ID: "gc-1", Metadata: map[string]string{"template_overrides": "{not json"}}, wantErr: true},
+		{name: "non-string value", session: &beads.Bead{ID: "gc-1", Metadata: map[string]string{"template_overrides": `{"model":1}`}}, wantErr: true},
 		{
 			name:    "valid object retains initial_message",
 			session: &beads.Bead{ID: "gc-1", Metadata: map[string]string{"template_overrides": `{"model":"sonnet","initial_message":"hi"}`}},
@@ -108,7 +109,16 @@ func TestParseSessionTemplateOverridesForLaunch_ParseSeam(t *testing.T) {
 			if tt.session != nil {
 				info = seedSessionInfo(*tt.session)
 			}
-			got := parseSessionTemplateOverridesForLaunch(info)
+			got, err := parseSessionTemplateOverridesForLaunch(info)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("parseSessionTemplateOverridesForLaunch() error = nil, want error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseSessionTemplateOverridesForLaunch() error = %v", err)
+			}
 			if tt.wantNone {
 				if len(got) != 0 {
 					t.Fatalf("parseSessionTemplateOverridesForLaunch() = %v, want no overrides", got)

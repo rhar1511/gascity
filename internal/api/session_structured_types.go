@@ -4,6 +4,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 	"github.com/gastownhall/gascity/internal/worker"
 )
@@ -33,15 +34,16 @@ type SessionStreamStructuredMessageEvent struct {
 // SessionStructuredHistory is the normalized worker-history envelope projected
 // onto the session transcript API.
 type SessionStructuredHistory struct {
-	GCSessionID           string                        `json:"gc_session_id,omitempty"`
-	LogicalConversationID string                        `json:"logical_conversation_id,omitempty"`
-	ProviderSessionID     string                        `json:"provider_session_id,omitempty"`
-	TranscriptStreamID    string                        `json:"transcript_stream_id"`
-	Generation            SessionStructuredGeneration   `json:"generation"`
-	Cursor                SessionStructuredCursor       `json:"cursor"`
-	Continuity            SessionStructuredContinuity   `json:"continuity"`
-	TailState             SessionStructuredTailState    `json:"tail_state"`
-	Diagnostics           []SessionStructuredDiagnostic `json:"diagnostics,omitempty"`
+	GCSessionID           string                           `json:"gc_session_id,omitempty"`
+	LogicalConversationID string                           `json:"logical_conversation_id,omitempty"`
+	ProviderSessionID     string                           `json:"provider_session_id,omitempty"`
+	TranscriptStreamID    string                           `json:"transcript_stream_id"`
+	Generation            SessionStructuredGeneration      `json:"generation"`
+	Cursor                SessionStructuredCursor          `json:"cursor"`
+	Continuity            SessionStructuredContinuity      `json:"continuity"`
+	TailState             SessionStructuredTailState       `json:"tail_state"`
+	Diagnostics           []SessionStructuredDiagnostic    `json:"diagnostics,omitempty"`
+	RequestLedger         *session.RequestLedgerProjection `json:"request_ledger,omitempty" doc:"Current durable session request status and append-only lifecycle transcript. Availability is explicit for legacy records or unavailable storage."`
 }
 
 // SessionStructuredGeneration identifies a raw transcript stream instance.
@@ -364,7 +366,8 @@ func structuredHistoryFromSnapshot(snapshot *worker.HistorySnapshot) *SessionStr
 			Degraded:              snapshot.TailState.Degraded,
 			DegradedReason:        snapshot.TailState.DegradedReason,
 		},
-		Diagnostics: diagnostics,
+		Diagnostics:   diagnostics,
+		RequestLedger: snapshot.RequestLedger,
 	}
 }
 

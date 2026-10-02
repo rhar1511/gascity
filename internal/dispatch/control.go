@@ -144,6 +144,20 @@ func processAttemptControl(store beads.Store, bead beads.Bead, opts ProcessOptio
 	if err != nil {
 		return ControlResult{}, err
 	}
+	if opts.CaptureAttemptEvidence != nil {
+		ctx := opts.Context
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		outcome := eval.logOutcome
+		if eval.reason != "" {
+			outcome += ":" + eval.reason
+		}
+		if err := opts.CaptureAttemptEvidence(ctx, bead, attempt, attemptNum, outcome); err != nil {
+			opts.tracef("attempt-evidence pending control=%s execution=%s attempt=%d err=%v", bead.ID, attempt.ID, attemptNum, err)
+			return ControlResult{}, ErrControlPending
+		}
+	}
 	attemptLog, err := appendAttemptLogValue(bead.Metadata[beadmeta.AttemptLogMetadataKey], attemptNum, eval.logOutcome, eval.logDetail, opts.tracef)
 	if err != nil {
 		return ControlResult{}, fmt.Errorf("%s: recording attempt log: %w", bead.ID, err)
@@ -378,6 +392,11 @@ func syncControlEpochToAttempt(store beads.Store, control, attempt beads.Bead) e
 }
 
 func markControllerSpawnError(store beads.Store, beadID string, err error, opts ProcessOptions) bool {
+	var actionErr *molecule.FormulaActionError
+	if errors.As(err, &actionErr) {
+		opts.tracef("controller-spawn-error bead=%s formula action refused; preserving controller state", beadID)
+		return false
+	}
 	metadata := map[string]string{
 		beadmeta.ControllerErrorMetadataKey: err.Error(),
 	}
@@ -732,8 +751,10 @@ func spawnNextAttempt(ctx context.Context, store beads.Store, control beads.Bead
 	}
 
 	result, err := molecule.Attach(ctx, store, recipe, control.ID, molecule.AttachOptions{
-		IdempotencyKey: fmt.Sprintf("%s:attempt:%d", control.ID, attemptNum),
-		ExpectedEpoch:  epoch,
+		IdempotencyKey:    fmt.Sprintf("%s:attempt:%d", control.ID, attemptNum),
+		ExpectedEpoch:     epoch,
+		ActionGate:        opts.FormulaActionGate,
+		RequireActionGate: opts.RequireFormulaActionGate,
 	})
 	if err != nil {
 		// An epoch conflict is a ROUTINE convergence signal under the CAS-last

@@ -23,6 +23,15 @@ import (
 
 // Options configures molecule instantiation.
 type Options struct {
+	// ActionGate is the controller compatibility authority for formulas whose
+	// loaded pack declares requires_gc. When RequireActionGate is true, a nil
+	// gate refuses materialization before the first store write.
+	ActionGate        FormulaActionGate
+	RequireActionGate bool
+	// ActionGateForStore chooses the exact gate after a compiled recipe has
+	// selected its destination store (for CookChoosingStore callers).
+	ActionGateForStore func(beads.Store) FormulaActionGate
+
 	// Title overrides the root bead's title. If empty, the formula's
 	// default title (or {{title}} placeholder after substitution) is used.
 	Title string
@@ -59,6 +68,9 @@ type Options struct {
 	// the intended assignee in metadata for later activation.
 	DeferAssignees bool
 
+	actionAuthorization *FormulaActionAuthorization
+	actionPrepared      bool
+
 	nativeStepTopologyPrepared bool
 }
 
@@ -90,6 +102,14 @@ const (
 // FragmentOptions configures instantiation of a rootless recipe fragment into
 // an existing workflow root.
 type FragmentOptions struct {
+	// ActionGate is the controller compatibility authority for dynamic formula
+	// fragments whose loaded source pack declares requires_gc.
+	ActionGate        FormulaActionGate
+	RequireActionGate bool
+	// ActionGateForStore chooses the gate for the store receiving this
+	// fragment when a caller selects the destination dynamically.
+	ActionGateForStore func(beads.Store) FormulaActionGate
+
 	// RootID is the existing workflow root bead ID to stamp onto all created
 	// beads as gc.root_bead_id.
 	RootID string
@@ -105,6 +125,8 @@ type FragmentOptions struct {
 	// PriorityOverride forces every created bead to use the given priority.
 	// When nil, the existing workflow root's priority is inherited.
 	PriorityOverride *int
+
+	actionAuthorization *FormulaActionAuthorization
 
 	nativeStepTopologyPrepared bool
 }
@@ -130,6 +152,8 @@ type Result struct {
 
 	// Created is the total number of beads created.
 	Created int
+
+	actionAuthorization *FormulaActionAuthorization
 }
 
 // FragmentResult reports the outcome of fragment instantiation.
@@ -204,6 +228,34 @@ func CookChoosingStore(ctx context.Context, formulaName string, searchPaths []st
 	return result, store, nil
 }
 
+// PrepareFormulaAction resolves the destination-specific compatibility gate
+// and obtains its authorization before a caller performs earlier controller
+// writes such as replacing an idempotent root. The returned recipe and options
+// must be passed together to Instantiate. Instantiate revalidates this
+// authorization immediately before its first write.
+func PrepareFormulaAction(ctx context.Context, store beads.Store, recipe *formula.Recipe, opts Options) (*formula.Recipe, Options, error) {
+	if recipe == nil {
+		return nil, opts, fmt.Errorf("recipe is nil")
+	}
+	if !opts.nativeStepTopologyPrepared {
+		recipe = recipeWithNativeStepDependencies(recipe)
+		opts.nativeStepTopologyPrepared = true
+	}
+	if opts.ActionGateForStore != nil {
+		opts.ActionGate = opts.ActionGateForStore(store)
+	}
+	if opts.actionPrepared {
+		return recipe, opts, nil
+	}
+	authorization, err := authorizeRecipeAction(ctx, opts.ActionGate, recipe, store, opts.RequireActionGate)
+	if err != nil {
+		return nil, opts, fmt.Errorf("authorizing formula %q: %w", recipe.Name, err)
+	}
+	opts.actionAuthorization = authorization
+	opts.actionPrepared = true
+	return recipe, opts, nil
+}
+
 // CookOn compiles a formula and attaches it to an existing bead.
 // Shorthand for Cook with opts.ParentID set.
 func CookOn(ctx context.Context, store beads.Store, formulaName string, searchPaths []string, opts Options) (*Result, error) {
@@ -215,6 +267,12 @@ func CookOn(ctx context.Context, store beads.Store, formulaName string, searchPa
 
 // AttachOptions configures graph-attach mode for late-bound DAG expansion.
 type AttachOptions struct {
+	// ActionGate is forwarded to the common molecule materializer so a
+	// required attach formula is authorized before any bead is created.
+	ActionGate         FormulaActionGate
+	RequireActionGate  bool
+	ActionGateForStore func(beads.Store) FormulaActionGate
+
 	// Title overrides the sub-DAG root bead's title.
 	Title string
 
@@ -321,12 +379,25 @@ func Attach(ctx context.Context, store beads.Store, recipe *formula.Recipe, atta
 	}
 
 	rootStoreRef := parentBead.Metadata[beadmeta.RootStoreRefMetadataKey]
+	actionGate := opts.ActionGate
+	if opts.ActionGateForStore != nil {
+		actionGate = opts.ActionGateForStore(store)
+	}
 
 	// Idempotency: check for existing sub-DAG with the same key.
 	// This runs before epoch fencing so that crash-retries with stale epochs
 	// still return the existing result instead of failing.
 	if opts.IdempotencyKey != "" {
-		if existing, err := findExistingAttach(store, recipe, rootBeadID, attachBeadID, opts.IdempotencyKey, opts.ExpectedEpoch); err != nil {
+		validateExisting := func(existing beads.Bead) error {
+			if actionGate == nil {
+				if opts.RequireActionGate {
+					return fmt.Errorf("formula compatibility gate is unavailable")
+				}
+				return nil
+			}
+			return actionGate.RevalidateBead(ctx, existing, store)
+		}
+		if existing, err := findExistingAttach(store, recipe, rootBeadID, attachBeadID, opts.IdempotencyKey, opts.ExpectedEpoch, validateExisting); err != nil {
 			return nil, fmt.Errorf("idempotency check: %w", err)
 		} else if existing != nil {
 			return existing, nil
@@ -405,6 +476,9 @@ func Attach(ctx context.Context, store beads.Store, recipe *formula.Recipe, atta
 		PriorityOverride:           clonePriority(parentBead.Priority),
 		PreserveRootType:           true,
 		DeferAssignees:             fencedDeferred,
+		ActionGate:                 actionGate,
+		RequireActionGate:          opts.RequireActionGate,
+		ActionGateForStore:         opts.ActionGateForStore,
 		nativeStepTopologyPrepared: true,
 	})
 	if err != nil {
@@ -481,7 +555,7 @@ func claimAttachCandidate(store beads.Store, rootID, from, to string) (bool, err
 
 // findExistingAttach checks if a sub-DAG root with the given idempotency key
 // already exists in the workflow. Returns nil if not found.
-func findExistingAttach(store beads.Store, recipe *formula.Recipe, rootBeadID, attachBeadID, key string, expectedEpoch int) (*AttachResult, error) {
+func findExistingAttach(store beads.Store, recipe *formula.Recipe, rootBeadID, attachBeadID, key string, expectedEpoch int, validateExisting func(beads.Bead) error) (*AttachResult, error) {
 	all, err := store.List(beads.ListQuery{
 		Metadata: map[string]string{
 			beadmeta.IdempotencyKeyMetadataKey: key,
@@ -506,6 +580,11 @@ func findExistingAttach(store beads.Store, recipe *formula.Recipe, rootBeadID, a
 		}
 		if b.Metadata[beadmeta.RootBeadIDMetadataKey] != rootBeadID {
 			continue
+		}
+		if validateExisting != nil {
+			if err := validateExisting(b); err != nil {
+				return nil, fmt.Errorf("revalidating existing attach candidate %s: %w", b.ID, err)
+			}
 		}
 		if b.Metadata[beadmeta.MoleculeFailedMetadataKey] == "true" ||
 			b.Metadata[beadmeta.AttachFencePendingMetadataKey] == attachFencePendingFailed {
@@ -831,14 +910,16 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 	if len(recipe.Steps) == 0 {
 		return nil, fmt.Errorf("recipe %q has no steps", recipe.Name)
 	}
-	if !opts.nativeStepTopologyPrepared {
-		recipe = recipeWithNativeStepDependencies(recipe)
-		opts.nativeStepTopologyPrepared = true
+	var err error
+	recipe, opts, err = PrepareFormulaAction(ctx, store, recipe, opts)
+	if err != nil {
+		return nil, err
 	}
 	if !opts.DeferAssignees && IsGraphApplyEnabled() {
 		if applier, ok := beads.GraphApplyFor(store); ok {
-			result, err := instantiateViaGraphApply(ctx, applier, recipe, opts)
+			result, err := instantiateViaGraphApply(ctx, store, applier, recipe, opts)
 			if err == nil {
+				result.actionAuthorization = opts.actionAuthorization
 				return result, nil
 			}
 			if !isTransientGraphApplyError(err) {
@@ -852,8 +933,9 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 			case <-ctx.Done():
 				return nil, fmt.Errorf("retrying graph apply for recipe %q: %w", recipe.Name, ctx.Err())
 			}
-			result, retryErr := instantiateViaGraphApply(ctx, applier, recipe, opts)
+			result, retryErr := instantiateViaGraphApply(ctx, store, applier, recipe, opts)
 			if retryErr == nil {
+				result.actionAuthorization = opts.actionAuthorization
 				return result, nil
 			}
 			if !isTransientGraphApplyError(retryErr) {
@@ -863,6 +945,9 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 		} else {
 			graphApplyTracef("graph-apply unavailable recipe=%s store=%T", recipe.Name, store)
 		}
+	}
+	if err := revalidateRecipeAction(ctx, opts.ActionGate, recipe, store, opts.actionAuthorization); err != nil {
+		return nil, err
 	}
 
 	// Merge variable defaults from recipe with caller-provided vars.
@@ -1010,6 +1095,18 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 		if fenceGraphWorkflow {
 			fenceGraphWorkflowBead(&b)
 		}
+		if recipe.FormulaSource != "" {
+			if b.Metadata == nil {
+				b.Metadata = make(map[string]string, 2)
+			}
+			b.Metadata[beadmeta.FormulaSourceMetadataKey] = recipe.FormulaSource
+		}
+		if opts.actionAuthorization != nil {
+			if b.Metadata == nil {
+				b.Metadata = make(map[string]string, 2)
+			}
+			stampFormulaActionAuthorization(b.Metadata, opts.actionAuthorization)
+		}
 
 		// Catch unresolved {{...}} in the bead title — the field agents see
 		// first. Unresolved placeholders here cause agent churn (#618).
@@ -1123,18 +1220,17 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 	}
 
 	return &Result{
-		RootID:        rootID,
-		GraphWorkflow: graphWorkflow,
-		IDMapping:     idMapping,
-		Created:       len(createdIDs),
+		RootID:              rootID,
+		GraphWorkflow:       graphWorkflow,
+		IDMapping:           idMapping,
+		Created:             len(createdIDs),
+		actionAuthorization: opts.actionAuthorization,
 	}, nil
 }
 
 // InstantiateFragment creates beads from a rootless recipe fragment and stamps
 // them onto an existing workflow root.
 func InstantiateFragment(ctx context.Context, store beads.Store, recipe *formula.FragmentRecipe, opts FragmentOptions) (*FragmentResult, error) {
-	_ = ctx
-
 	if recipe == nil {
 		return nil, fmt.Errorf("recipe is nil")
 	}
@@ -1144,9 +1240,17 @@ func InstantiateFragment(ctx context.Context, store beads.Store, recipe *formula
 	if len(recipe.Steps) == 0 {
 		return &FragmentResult{IDMapping: map[string]string{}}, nil
 	}
-	recipe = fragmentRecipeWithNativeStepDependencies(recipe)
-	if err := applyExternalNativeStepDependencies(store, opts.RootID, recipe.Steps, opts.ExternalDeps); err != nil {
+	prepared, err := prepareFragmentForStore(store, recipe, opts.RootID, opts.ExternalDeps)
+	if err != nil {
 		return nil, err
+	}
+	recipe = prepared
+	if opts.ActionGateForStore != nil {
+		opts.ActionGate = opts.ActionGateForStore(store)
+	}
+	opts.actionAuthorization, err = authorizeFragmentAction(ctx, opts.ActionGate, recipe, store, opts.RequireActionGate)
+	if err != nil {
+		return nil, fmt.Errorf("authorizing fragment %q: %w", recipe.Name, err)
 	}
 	opts.nativeStepTopologyPrepared = true
 	priorityOverride := clonePriority(opts.PriorityOverride)
@@ -1174,6 +1278,9 @@ func InstantiateFragment(ctx context.Context, store beads.Store, recipe *formula
 	existingLogicalBeadIDs, err := existingLogicalBeadIDIndex(store, opts.RootID)
 	if err != nil {
 		return nil, fmt.Errorf("indexing existing logical beads: %w", err)
+	}
+	if err := revalidateFragmentAction(ctx, opts.ActionGate, recipe, store, opts.actionAuthorization); err != nil {
+		return nil, err
 	}
 	externalDepsByStep, err := groupExternalDeps(opts.ExternalDeps)
 	if err != nil {
@@ -1236,6 +1343,10 @@ func InstantiateFragment(ctx context.Context, store beads.Store, recipe *formula
 			b.Metadata[beadmeta.StepRefMetadataKey] = step.ID
 		}
 		b.Metadata[beadmeta.RootBeadIDMetadataKey] = opts.RootID
+		if recipe.FormulaSource != "" {
+			b.Metadata[beadmeta.FormulaSourceMetadataKey] = recipe.FormulaSource
+		}
+		stampFormulaActionAuthorization(b.Metadata, opts.actionAuthorization)
 		b.Ref = step.ID
 
 		if logicalStepID, ok := logicalRecipeStepID(step); ok {
@@ -1337,6 +1448,14 @@ func InstantiateFragment(ctx context.Context, store beads.Store, recipe *formula
 		IDMapping: idMapping,
 		Created:   len(createdIDs),
 	}, nil
+}
+
+func prepareFragmentForStore(store beads.Store, recipe *formula.FragmentRecipe, rootID string, externalDeps []ExternalDep) (*formula.FragmentRecipe, error) {
+	prepared := fragmentRecipeWithNativeStepDependencies(recipe)
+	if err := applyExternalNativeStepDependencies(store, rootID, prepared.Steps, externalDeps); err != nil {
+		return nil, err
+	}
+	return prepared, nil
 }
 
 func recipeParentDeps(deps []formula.RecipeDep) map[string]string {

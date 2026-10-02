@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/coordclass"
+	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/formulatest"
 )
 
@@ -73,6 +74,52 @@ title = "Inspect {{convoy_id}}"
 	}
 	if again.InputConvoy == inv.InputConvoy {
 		t.Fatalf("input convoy was reused: first=%s second=%s", inv.InputConvoy, again.InputConvoy)
+	}
+}
+
+func TestPrepareInvocationRunsActionGateBeforeCreatingInputConvoy(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	writeFormula(t, dir, "work.formula.toml", `
+formula = "work"
+version = 1
+contract = "graph.v2"
+type = "workflow"
+
+[[steps]]
+id = "inspect"
+title = "Inspect {{convoy_id}}"
+`)
+	store := beads.NewMemStore()
+	target, err := store.Create(beads.Bead{Title: "target", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create target: %v", err)
+	}
+	denied := fmt.Errorf("compatibility unavailable")
+	called := false
+	_, err = PrepareInvocationWithBeforeInputConvoy(context.Background(), store, "work", []string{dir}, target.ID, nil,
+		func(_ context.Context, recipe *formula.Recipe, vars map[string]string) error {
+			called = true
+			if recipe == nil || recipe.Name != "work" {
+				t.Fatalf("preflight recipe = %#v, want compiled work formula", recipe)
+			}
+			if vars[ConvoyIDVar] != "graphv2-validation-placeholder" {
+				t.Fatalf("preflight vars[%s] = %q, want validation placeholder", ConvoyIDVar, vars[ConvoyIDVar])
+			}
+			return denied
+		})
+	if err == nil || !strings.Contains(err.Error(), denied.Error()) {
+		t.Fatalf("PrepareInvocation error = %v, want preflight denial", err)
+	}
+	if !called {
+		t.Fatal("before-input-convoy gate was not called")
+	}
+	convoys, err := store.List(beads.ListQuery{Type: "convoy"})
+	if err != nil {
+		t.Fatalf("List convoys: %v", err)
+	}
+	if len(convoys) != 0 {
+		t.Fatalf("gate denial left %d synthetic convoys, want none: %+v", len(convoys), convoys)
 	}
 }
 

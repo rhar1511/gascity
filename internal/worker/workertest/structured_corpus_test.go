@@ -30,6 +30,8 @@ func TestStructuredCorpusConformance(t *testing.T) {
 	for _, capture := range captures {
 		capture := capture
 		t.Run(capture.Provider+"/"+filepath.Base(capture.Path), func(t *testing.T) {
+			copiedRoot := copyRunfilesFixtureTree(t, filepath.Dir(capture.Path))
+			capture.Path = filepath.Join(copiedRoot, filepath.Base(capture.Path))
 			history, err := LoadCorpusHistory(capture)
 			if err != nil {
 				t.Fatalf("normalize %s: %v", capture.Path, err)

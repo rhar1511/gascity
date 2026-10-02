@@ -139,12 +139,14 @@ func TestProviderProcessPassthroughEnvPinsControllerOnlyKeysEmpty(t *testing.T) 
 // into a session variable no key-level guard is watching.
 func TestExpandSessionEnvValueMasksControllerOnlyKeys(t *testing.T) {
 	t.Setenv("GC_CONTROLLER_TOKEN", "super-secret-controller-token")
+	t.Setenv("GC_BEADS_PROTECTED_MUTATION_AUTHORITY_DIR", "/run/gc/protected-authority")
 	t.Setenv("GC_CONTROLLER_TRACE", "on")
 
 	for _, tc := range []struct{ in, want string }{
 		{"$GC_CONTROLLER_TOKEN", ""},
 		{"${GC_CONTROLLER_TOKEN}", ""},
 		{"Bearer $GC_CONTROLLER_TOKEN", "Bearer "},
+		{"$GC_BEADS_PROTECTED_MUTATION_AUTHORITY_DIR", ""},
 		{"$GC_CONTROLLER_TRACE", "on"},
 		{"trace=${GC_CONTROLLER_TRACE}", "trace=on"},
 	} {

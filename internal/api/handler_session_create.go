@@ -12,7 +12,9 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/sessionauthority"
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
@@ -47,6 +49,10 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.LegacySessionName != nil {
 		writeError(w, http.StatusBadRequest, "invalid", "session_name is no longer accepted; use alias")
+		return
+	}
+	if sessionauthority.EnforcementEnabled() && strings.TrimSpace(body.Options[sessionPermissionModeOptionKey]) != "" {
+		writeError(w, http.StatusBadRequest, "invalid_option_value", "permission_mode requires a signed authority-profile transition after session creation")
 		return
 	}
 
@@ -221,7 +227,7 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 	// Do NOT overwrite it here — the old code clobbered initial_message by
 	// writing only the options portion.
 	s.persistSessionMeta(store, info.ID, body.ProjectID, optMeta)
-	s.state.Poke() // wake reconciler to start the agent
+	s.state.Enqueue(reconcilekey.Session(info.ID)) // wake reconciler to start the agent
 
 	// Auto-generate a title from the user's message if no explicit title was provided.
 	titleProvider := s.resolveTitleProvider()
@@ -292,6 +298,9 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 			writeError(w, http.StatusBadRequest, "invalid_option_value", optErr.Error())
 			return
 		}
+	}
+	if sessionauthority.EnforcementEnabled() {
+		delete(optMeta, sessionPermissionModeOptionKey)
 	}
 
 	template := providerName
@@ -392,7 +401,7 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 	// Persist kind, option metadata, and project_id on the bead.
 	s.persistSessionMeta(store, info.ID, body.ProjectID, optMeta)
 	if body.Async {
-		s.state.Poke()
+		s.state.Enqueue(reconcilekey.Session(info.ID))
 	}
 
 	// Auto-generate a title from the user's message if no explicit title was provided.

@@ -58,32 +58,40 @@ import (
 // with the store named: an unreachable store reported as a missing bead is the
 // root-loss shape this lane exists to prevent.
 func (s *Server) resolveBeadOwner(id string) (beads.Store, beads.Bead, error) {
+	store, bead, _, err := s.resolveBeadOwnerRef(id)
+	return store, bead, err
+}
+
+// resolveBeadOwnerRef resolves the bead and preserves the controller's
+// canonical physical-store reference for operations whose authorization or
+// durable identity is store-scoped.
+func (s *Server) resolveBeadOwnerRef(id string) (beads.Store, beads.Bead, storeref.StoreRef, error) {
 	if strings.TrimSpace(id) == "" {
 		// The router never dispatches a by-id handler with an empty path
 		// segment, so this is unreachable in practice. It answers "absent"
 		// rather than surfacing the resolver's malformed-intent error because
 		// that is what the pre-resolver candidate scan produced, and a defensive
 		// branch is a poor place to change a status code.
-		return nil, beads.Bead{}, apierr.BeadNotFound.Msg("bead " + id + " not found")
+		return nil, beads.Bead{}, "", apierr.BeadNotFound.Msg("bead " + id + " not found")
 	}
 	plan, err := storeref.Plan(storeref.ByID{ID: id, WorkAxis: apiWorkAxis{s}}, s.residencyTopology())
 	if err != nil {
-		return nil, beads.Bead{}, apierr.Internal.Msg(err.Error())
+		return nil, beads.Bead{}, "", apierr.Internal.Msg(err.Error())
 	}
 	owner, err := storeref.ResolveOwnerRow(plan, id)
 	if err != nil {
-		return nil, beads.Bead{}, beadOwnerError(id, err)
+		return nil, beads.Bead{}, "", beadOwnerError(id, err)
 	}
 	if owner.Read {
 		// A probe answered, and its read is the read this handler needed. Doing
 		// it again would double every by-id operation against the binding.
-		return owner.Store, owner.Bead, nil
+		return owner.Store, owner.Bead, owner.Ref, nil
 	}
 	b, err := owner.Store.Get(id)
 	if err != nil {
-		return nil, beads.Bead{}, beadOwnerError(id, err)
+		return nil, beads.Bead{}, "", beadOwnerError(id, err)
 	}
-	return owner.Store, b, nil
+	return owner.Store, b, owner.Ref, nil
 }
 
 // apiWorkAxis is this plane's by-id work-axis router, declared to the resolver.

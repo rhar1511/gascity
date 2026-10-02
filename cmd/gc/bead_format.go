@@ -99,12 +99,14 @@ func filterBeads(bs []beads.Bead, f beadFilters) []beads.Bead {
 
 // writeBeadJSON writes a single bead as indented JSON.
 func writeBeadJSON(b beads.Bead, stdout io.Writer) {
+	b = beads.PublicBead(b)
 	data, _ := json.MarshalIndent(b, "", "  ")
 	fmt.Fprintln(stdout, string(data)) //nolint:errcheck // best-effort stdout
 }
 
 // writeBeadsJSON writes a slice of beads as a JSON array.
 func writeBeadsJSON(bs []beads.Bead, stdout io.Writer) {
+	bs = beads.PublicBeads(bs)
 	data, _ := json.MarshalIndent(bs, "", "  ")
 	fmt.Fprintln(stdout, string(data)) //nolint:errcheck // best-effort stdout
 }
@@ -114,6 +116,7 @@ func writeBeadsJSON(bs []beads.Bead, stdout io.Writer) {
 // Used only on the API routing path; the fallback path omits the envelope
 // by calling writeBeadJSON.
 func writeBeadJSONWithCache(b beads.Bead, cacheAgeS float64, stdout io.Writer) {
+	b = beads.PublicBead(b)
 	env := struct {
 		Bead      beads.Bead `json:"bead"`
 		CacheAgeS float64    `json:"_cache_age_s"`
@@ -127,6 +130,7 @@ func writeBeadJSONWithCache(b beads.Bead, cacheAgeS float64, stdout io.Writer) {
 // Used only on the API routing path; the fallback path omits the envelope
 // by calling writeBeadsJSON.
 func writeBeadsJSONWithCache(bs []beads.Bead, cacheAgeS float64, stdout io.Writer) {
+	bs = beads.PublicBeads(bs)
 	env := struct {
 		Beads     []beads.Bead `json:"beads"`
 		CacheAgeS float64      `json:"_cache_age_s"`
@@ -137,6 +141,7 @@ func writeBeadsJSONWithCache(bs []beads.Bead, cacheAgeS float64, stdout io.Write
 
 // writeBeadDetail writes a single bead in human-readable detail format.
 func writeBeadDetail(b beads.Bead, stdout io.Writer) {
+	b = beads.PublicBead(b)
 	w := func(s string) { fmt.Fprintln(stdout, s) } //nolint:errcheck // best-effort stdout
 	w(fmt.Sprintf("ID:       %s", b.ID))
 	w(fmt.Sprintf("Status:   %s", b.Status))
@@ -153,6 +158,7 @@ func writeBeadDetail(b beads.Bead, stdout io.Writer) {
 // writeBeadTable writes beads in a tab-aligned table. If showAssignee is true,
 // includes the ASSIGNEE column.
 func writeBeadTable(bs []beads.Bead, stdout io.Writer, showAssignee bool) {
+	bs = beads.PublicBeads(bs)
 	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
 	if showAssignee {
 		fmt.Fprintln(tw, "ID\tSTATUS\tASSIGNEE\tTITLE") //nolint:errcheck // best-effort stdout

@@ -531,7 +531,13 @@ func (s *Server) humaHandleSessionAgentList(_ context.Context, input *SessionIDI
 		}, nil
 	}
 
-	mappings, err := sessionlog.FindAgentMappings(logPath)
+	transcript, err := sessionlog.OpenTranscript("auto", s.sessionLogPaths(), logPath)
+	if err != nil {
+		log.Printf("gc api: session %s transcript open failed for agent mapping at %s: %v", id, logPath, err)
+		return nil, apierr.Internal.Msg("failed to list agents")
+	}
+	defer transcript.Close() //nolint:errcheck // read-only transcript
+	mappings, err := transcript.FindAgentMappings()
 	if err != nil {
 		log.Printf("gc api: session %s agent mapping failed for %s: %v", id, logPath, err)
 		return nil, apierr.Internal.Msg("failed to list agents")
@@ -576,7 +582,12 @@ func (s *Server) humaHandleSessionAgentGet(_ context.Context, input *SessionAgen
 		return nil, apierr.SessionNotFound.Msg("no transcript found for session " + id)
 	}
 
-	agentSession, err := sessionlog.ReadAgentSession(logPath, input.AgentID)
+	transcript, err := sessionlog.OpenTranscript("auto", s.sessionLogPaths(), logPath)
+	if err != nil {
+		return nil, apierr.Internal.Msg("failed to open session transcript")
+	}
+	defer transcript.Close() //nolint:errcheck // read-only transcript
+	agentSession, err := transcript.ReadAgentSession(input.AgentID)
 	if err != nil {
 		if errors.Is(err, sessionlog.ErrAgentNotFound) {
 			return nil, apierr.AgentNotFound.Msg("agent not found")

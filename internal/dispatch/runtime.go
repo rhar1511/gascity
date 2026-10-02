@@ -44,12 +44,22 @@ type ProcessOptions struct {
 	FormulaSearchPaths []string
 	PrepareFragment    func(*formula.FragmentRecipe, beads.Bead) error
 	PrepareRecipe      func(*formula.Recipe, beads.Bead) error
-	RecycleSession     func(beads.Bead) error
+	// FormulaActionGate is the controller's source-aware compatibility gate
+	// for formula molecules created by this dispatch pass.
+	FormulaActionGate molecule.FormulaActionGate
+	// RequireFormulaActionGate refuses materialization if the dispatcher was
+	// wired without the controller-owned gate.
+	RequireFormulaActionGate bool
+	RecycleSession           func(beads.Bead) error
 	// ResolveRSIEvaluation loads and verifies controller-owned evaluation and
 	// human-approval evidence for the RSI promotion gate. When nil, the gate
 	// fails closed.
 	ResolveRSIEvaluation rsipolicy.ResolveTrustedEvaluationFunc
-	RSIEvaluationContext rsipolicy.EvaluationContext
+	// CaptureAttemptEvidence seals the closed execution attempt's immutable
+	// evidence before the control loop records its outcome, spawns a retry, or
+	// closes the logical control. A capture error leaves the control pending.
+	CaptureAttemptEvidence func(context.Context, beads.Bead, beads.Bead, int, string) error
+	RSIEvaluationContext   rsipolicy.EvaluationContext
 	// RequiredArtifactStat checks required-artifact files. When nil, the
 	// dispatcher uses os.Stat.
 	RequiredArtifactStat func(path string) (os.FileInfo, error)
@@ -174,6 +184,18 @@ func ProcessControl(store beads.Store, bead beads.Bead, opts ProcessOptions) (Co
 		opts.tracef("process-control bead=%s kind=%s skip reason=bead_not_open status=%s",
 			bead.ID, bead.Metadata[beadmeta.KindMetadataKey], bead.Status)
 		return ControlResult{}, nil
+	}
+	if opts.RequireFormulaActionGate && opts.FormulaActionGate == nil {
+		return ControlResult{}, &molecule.FormulaActionError{Err: fmt.Errorf("controller formula compatibility gate is unavailable")}
+	}
+	if opts.FormulaActionGate != nil {
+		ctx := opts.Context
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		if err := opts.FormulaActionGate.RevalidateBead(ctx, bead, store); err != nil {
+			return ControlResult{}, &molecule.FormulaActionError{Err: fmt.Errorf("revalidating control %s formula compatibility before dispatch: %w", bead.ID, err)}
+		}
 	}
 	if result, handled, err := closeOrphanedControl(store, bead, opts); handled || err != nil {
 		return result, err
@@ -1227,6 +1249,15 @@ func walkSourceBeadChain(rootStore beads.Store, rootID string, opts ProcessOptio
 				return nil
 			}
 			if !mutate {
+				return nil
+			}
+			if beads.HasLifecycleAdmissionReceipt(loaded) ||
+				strings.TrimSpace(loaded.Metadata[beadmeta.LifecycleMaterializationMetadataKey]) != "" {
+				// Workflow finalization is not acceptance of the deliverable.
+				// Enrolled source work closes only through the controller's
+				// signed, revision-conditional completion reconciliation.
+				opts.tracef("close-source-chain root=%s stop reason=lifecycle_acceptance_required source=%s ref=%s", rootID, nextID, sourceChainStoreLabel(effectiveRef))
+				stopWalk = true
 				return nil
 			}
 			if err := propagateSourceBeadTerminalMetadata(nextStore, loaded, current.Metadata); err != nil {

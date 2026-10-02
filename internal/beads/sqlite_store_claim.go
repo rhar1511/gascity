@@ -60,6 +60,9 @@ func (s *SQLiteStore) Claim(id, assignee string) (Bead, bool, error) {
 			ok = true
 			return tx.Commit()
 		}
+		if HasDecisionFrontierHold(b) {
+			return ErrDecisionFrontierMutationBlocked
+		}
 		before := b
 		b.Assignee = assignee
 		b.Status = "in_progress"

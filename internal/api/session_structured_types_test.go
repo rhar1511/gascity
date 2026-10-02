@@ -4,8 +4,43 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
 )
+
+func TestStructuredHistoryCarriesCurrentSessionRequestLedger(t *testing.T) {
+	ledger := &session.RequestLedgerProjection{
+		SessionID: "gc-session",
+		Status:    session.RequestLedgerAvailable,
+		Digest:    "ledger-digest",
+		Requests: []session.RequestReceipt{{
+			RequestID: "request-1", SessionID: "gc-session", Generation: 4,
+			MessageDigest: "message-digest", Delivery: session.RequestDeliveryPending, Effect: "unverified",
+			Ledger: &session.RequestLedger{
+				Status: session.RequestLedgerAvailable,
+				Events: []session.RequestEvent{{
+					Sequence: 1, Kind: session.RequestEventAccepted, SessionID: "gc-session", Generation: 4,
+					RequestID: "request-1", MessageDigest: "message-digest",
+				}},
+			},
+		}},
+	}
+	history := structuredHistoryFromSnapshot(&worker.HistorySnapshot{RequestLedger: ledger})
+	if history == nil || history.RequestLedger == nil || history.RequestLedger.Status != session.RequestLedgerAvailable || len(history.RequestLedger.Requests) != 1 || history.RequestLedger.Requests[0].RequestID != "request-1" {
+		t.Fatalf("structured history omitted authoritative request ledger: %+v", history)
+	}
+	wire, err := json.Marshal(history)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(wire, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := decoded["request_ledger"]; !ok {
+		t.Fatalf("structured history wire lacks request_ledger: %s", wire)
+	}
+}
 
 func TestHistorySnapshotStructuredMessagesPreferWorkerCarriedStructuredData(t *testing.T) {
 	exitCode := 7

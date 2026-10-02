@@ -58,6 +58,11 @@ func (FSSource) ReadFile(path string) ([]byte, error) {
 	return os.ReadFile(path)
 }
 
+func (s FSSource) readFileWithCompileSourceInfo(path string) ([]byte, compileSourceReadInfo, error) {
+	data, err := s.ReadFile(path)
+	return data, compileSourceReadInfo{mode: CompileSourceReadModeFilesystem}, err
+}
+
 // ListDir returns the file-only entries in dir (no subdirectories).
 func (FSSource) ListDir(dir string) ([]string, error) {
 	entries, err := os.ReadDir(dir)
@@ -198,6 +203,11 @@ func (g *GitRefSource) ReadFile(path string) ([]byte, error) {
 	return stdout.Bytes(), nil
 }
 
+func (g *GitRefSource) readFileWithCompileSourceInfo(path string) ([]byte, compileSourceReadInfo, error) {
+	data, err := g.ReadFile(path)
+	return data, compileSourceReadInfo{mode: CompileSourceReadModeGitRef, ref: g.Ref()}, err
+}
+
 // ListDir returns the file-only entries directly under dir at the
 // configured ref. Subtrees (subdirectories) are filtered out by
 // matching on object type — `git ls-tree`'s default output includes
@@ -274,10 +284,15 @@ func (f FallbackSource) Stat(path string) bool {
 
 // ReadFile prefers the primary Source when the file is present there.
 func (f FallbackSource) ReadFile(path string) ([]byte, error) {
+	data, _, err := f.readFileWithCompileSourceInfo(path)
+	return data, err
+}
+
+func (f FallbackSource) readFileWithCompileSourceInfo(path string) ([]byte, compileSourceReadInfo, error) {
 	if f.Primary.Stat(path) {
-		return f.Primary.ReadFile(path)
+		return readFileWithCompileSourceInfo(f.Primary, path)
 	}
-	return f.Fallback.ReadFile(path)
+	return readFileWithCompileSourceInfo(f.Fallback, path)
 }
 
 // ListDir returns the union of entries from both Sources, primary
@@ -336,10 +351,16 @@ func (g gitRepoAwareFallback) Stat(path string) bool {
 // ReadFile mirrors Stat: in-repo reads go through the ref; out-of-repo
 // reads hit the filesystem.
 func (g gitRepoAwareFallback) ReadFile(path string) ([]byte, error) {
+	data, _, err := g.readFileWithCompileSourceInfo(path)
+	return data, err
+}
+
+func (g gitRepoAwareFallback) readFileWithCompileSourceInfo(path string) ([]byte, compileSourceReadInfo, error) {
 	if _, _, inRepo := g.git.repoTopAndRelPath(path); inRepo {
-		return g.git.ReadFile(path)
+		return g.git.readFileWithCompileSourceInfo(path)
 	}
-	return g.fs.ReadFile(path)
+	data, err := g.fs.ReadFile(path)
+	return data, compileSourceReadInfo{mode: CompileSourceReadModeFilesystem, ref: g.git.Ref()}, err
 }
 
 // ListDir mirrors Stat: in-repo directories list the ref's tree;

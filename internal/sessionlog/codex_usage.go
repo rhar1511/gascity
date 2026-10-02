@@ -50,8 +50,12 @@ func ExtractCodexTailMeta(path string) (*TailMeta, error) {
 		return nil, err
 	}
 	defer f.Close() //nolint:errcheck // best-effort close on read-only file
+	return ExtractCodexTailMetaFrom(f)
+}
 
-	data, startsMidLine, truncated, err := readTailWindow(f, tailChunkSize)
+// ExtractCodexTailMetaFrom reads Codex metadata from an already-open descriptor.
+func ExtractCodexTailMetaFrom(source io.ReadSeeker) (*TailMeta, error) {
+	data, startsMidLine, truncated, err := readTailWindow(source, tailChunkSize)
 	if err != nil {
 		return nil, err
 	}
@@ -66,11 +70,12 @@ func ExtractCodexTailMeta(path string) (*TailMeta, error) {
 // verifying path resolves under one of the merged Codex session roots (the
 // defaults plus searchPaths).
 func ExtractCodexTailMetaFromSearchPaths(searchPaths []string, path string) (*TailMeta, error) {
-	safePath, err := validateSearchPathFile(mergeCodexSearchPaths(searchPaths), path)
+	transcript, err := OpenTranscript("codex", searchPaths, path)
 	if err != nil {
 		return nil, err
 	}
-	return ExtractCodexTailMeta(safePath)
+	defer transcript.Close() //nolint:errcheck
+	return transcript.TailMeta()
 }
 
 func extractCodexTailMetaFromLines(lines [][]byte, startsMidLine, truncated bool) *TailMeta {
@@ -274,12 +279,16 @@ func ExtractCodexTailUsage(path string) ([]TailUsage, error) {
 		return nil, err
 	}
 	defer f.Close() //nolint:errcheck // best-effort close on read-only file
+	return ExtractCodexTailUsageFrom(f)
+}
 
+// ExtractCodexTailUsageFrom reads Codex usage from an already-open descriptor.
+func ExtractCodexTailUsageFrom(source io.ReadSeeker) ([]TailUsage, error) {
 	// One size snapshot feeds both windows. The seed and the tail read are
 	// adjacent halves of the same file, so deriving them from separate SeekEnd
 	// calls would leave the bytes appended in between — these rollouts are
 	// appended to while they are read — inside neither.
-	size, err := f.Seek(0, io.SeekEnd)
+	size, err := source.Seek(0, io.SeekEnd)
 	if err != nil {
 		return nil, err
 	}
@@ -287,12 +296,12 @@ func ExtractCodexTailUsage(path string) ([]TailUsage, error) {
 	// Recover the model in effect for the tail before scanning it: in a
 	// long-lived session the turn_context has scrolled out of the tail window,
 	// so without this seed every recent invocation records an empty model.
-	seedModel, err := codexPrecedingModel(f, size-tailChunkSize)
+	seedModel, err := codexPrecedingModel(source, size-tailChunkSize)
 	if err != nil {
 		return nil, err
 	}
 
-	data, _, err := readTailAt(f, size, tailChunkSize)
+	data, _, err := readTailAt(source, size, tailChunkSize)
 	if err != nil {
 		return nil, err
 	}
@@ -519,9 +528,10 @@ func codexTurnContextModel(line []byte) string {
 // verifying path resolves under one of the merged codex session roots (the
 // defaults plus searchPaths). Mirrors ExtractTailUsageFromSearchPaths.
 func ExtractCodexTailUsageFromSearchPaths(searchPaths []string, path string) ([]TailUsage, error) {
-	safePath, err := validateSearchPathFile(mergeCodexSearchPaths(searchPaths), path)
+	transcript, err := OpenTranscript("codex", searchPaths, path)
 	if err != nil {
 		return nil, err
 	}
-	return ExtractCodexTailUsage(safePath)
+	defer transcript.Close() //nolint:errcheck
+	return transcript.TailUsage()
 }

@@ -7,10 +7,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/splittest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -178,6 +180,27 @@ func TestDrainAckReleasesUnexecutedClaims(t *testing.T) {
 	}
 }
 
+func TestDrainAckRetainsLifecycleWorkWithoutControllerAuthorization(t *testing.T) {
+	store := beads.NewMemStore()
+	work := mustCreateDrainAckBead(t, store, beads.Bead{
+		Title:    "lifecycle-enrolled work",
+		Type:     "task",
+		Metadata: map[string]string{beadmeta.LifecycleAdmissionReceiptMetadataKey: "signed enrollment evidence"},
+	}, "in_progress", "worker-1")
+	cfg := &config.City{Lifecycle: config.LifecycleConfig{AdmissionEnabled: true}}
+	var stderr bytes.Buffer
+
+	releaseUnexecutedClaimsOnDrainAck("", cfg, store, nil, drainAckSessionBead(), time.Minute, &stderr)
+
+	status, assignee := drainAckBeadStatus(t, store, work.ID)
+	if status != "in_progress" || assignee != "worker-1" {
+		t.Fatalf("drain-ack detached lifecycle work without authorization: status=%q assignee=%q; stderr=%s", status, assignee, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "controller authorization is required") {
+		t.Fatalf("stderr = %q, want lifecycle hold explanation", stderr.String())
+	}
+}
+
 // TestDrainAckLeavesForeignClaimsAlone is the foreign-claim control: the release
 // is compare-and-swap on THIS session's identity, so a bead another live session
 // legitimately holds is untouched. A release that swept by status alone would
@@ -316,7 +339,7 @@ func TestDrainAckReleasesBeforeAcknowledging(t *testing.T) {
 		drainAckReleaseHeldClaims = originalRelease
 		drainAckPokeController = originalPoke
 	})
-	drainAckPokeController = func(string) error { return nil }
+	drainAckPokeController = func(string, reconcilekey.Key) error { return nil }
 
 	dops := newFakeDrainOps()
 	releaseRan := false
@@ -331,7 +354,7 @@ func TestDrainAckReleasesBeforeAcknowledging(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	if code := doRuntimeDrainAck(dops, t.TempDir(), "worker-1", "worker-1", false, &stdout, &stderr); code != 0 {
+	if code := doRuntimeDrainAck(dops, t.TempDir(), "worker-1", "worker-1", "", false, &stdout, &stderr); code != 0 {
 		t.Fatalf("doRuntimeDrainAck = %d, want 0; stderr=%s", code, stderr.String())
 	}
 	if !releaseRan {

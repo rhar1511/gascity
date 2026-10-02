@@ -157,6 +157,10 @@ func (s *SQLiteStore) ApplyGraphPlanWithStorage(ctx context.Context, plan *Graph
 				return err
 			}
 		}
+		createdSources := make(map[string]struct{}, len(working))
+		for _, b := range working {
+			createdSources[b.ID] = struct{}{}
+		}
 		parentPairs := sqliteGraphApplyParentDepPairs(working)
 		for i, edge := range plan.Edges {
 			from := graphApplyResolveRef(edge.FromKey, edge.FromID, keyToID)
@@ -177,15 +181,21 @@ func (s *SQLiteStore) ApplyGraphPlanWithStorage(ctx context.Context, plan *Graph
 			if parentPairs[sqliteGraphApplyDepPairKey(to, from)] && sqliteGraphApplyCycleRelevantDependencyType(depType) {
 				return fmt.Errorf("sqlite graph apply: edge %d %s->%s creates a blocking reverse of a parent-child relationship", i, from, to)
 			}
-			if err := s.depAddWithMetadataTx(ctx, tx, from, to, edge.Type, edge.Metadata); err != nil {
-				return err
+			var addErr error
+			if _, created := createdSources[from]; created {
+				addErr = s.depAddInitialWithMetadataTx(ctx, tx, from, to, edge.Type, edge.Metadata)
+			} else {
+				addErr = s.depAddWithMetadataTx(ctx, tx, from, to, edge.Type, edge.Metadata)
+			}
+			if addErr != nil {
+				return addErr
 			}
 		}
 		for _, b := range working {
 			if b.ParentID == "" {
 				continue
 			}
-			if err := s.depAddTx(ctx, tx, b.ID, b.ParentID, "parent-child"); err != nil {
+			if err := s.depAddInitialTx(ctx, tx, b.ID, b.ParentID, "parent-child"); err != nil {
 				return err
 			}
 		}

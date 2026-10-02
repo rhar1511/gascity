@@ -553,6 +553,14 @@ func doSupervisorStart(stdout, stderr io.Writer) int {
 }
 
 func doSupervisorStartJSON(stdout, stderr io.Writer, jsonOut bool) int {
+	if directory := os.Getenv(hostBeadsPermitAuthorityDirEnv); directory != "" {
+		// The authority broker releases key material only to a controller PID
+		// registered by its root launcher with a pidfd-backed launch record. This
+		// user-level fork cannot create that record, so refuse it explicitly. The
+		// trusted launcher must invoke `gc supervisor run` directly.
+		fmt.Fprintln(stderr, "gc supervisor start: configured Beads signing authority requires a root broker launcher; invoke supervisor run through that launcher") //nolint:errcheck
+		return 1
+	}
 	delegation, delegated, err := supervisorSystemdDelegation()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc supervisor start: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -1342,7 +1350,10 @@ var supervisorServiceEnvNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // Keep persistent service-file env narrow. Provider credentials and user
 // context need to survive launchd/systemd startup; arbitrary shell state can
-// be opted in with GC_SUPERVISOR_ENV.
+// be opted in with GC_SUPERVISOR_ENV. That same opt-in list is also read by
+// passthroughEnv (cmd_start.go) to decide which non-GC_-prefixed vars reach
+// every spawned agent session — one list, not two that have to be kept in
+// sync by hand.
 var supervisorServiceEnvKeys = map[string]bool{
 	"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": true,
 	"CLAUDE_CODE_EFFORT_LEVEL":                 true,

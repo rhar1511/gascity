@@ -66,6 +66,10 @@ type Provider struct {
 	reqSeq       int
 	watchers     map[string]context.CancelFunc
 	recentStarts map[string]time.Time
+	// trustedWorkDirs are captured from local runtime.Config values when Start
+	// succeeds. Snapshot workDir fields come from the remote T3 service and are
+	// not trusted as filesystem write roots.
+	trustedWorkDirs map[string]string
 
 	// Cached snapshot for batching multiple IsRunning/ProcessAlive calls.
 	snapshotSnapshot map[string]interface{}
@@ -503,8 +507,9 @@ func authenticatedWsURL(wsURL string) (string, http.Header, error) {
 func NewProvider() *Provider {
 	cleanupLegacyStateDir()
 	return &Provider{
-		watchers:     make(map[string]context.CancelFunc),
-		recentStarts: make(map[string]time.Time),
+		watchers:        make(map[string]context.CancelFunc),
+		recentStarts:    make(map[string]time.Time),
+		trustedWorkDirs: make(map[string]string),
 	}
 }
 
@@ -667,53 +672,122 @@ func resolveContainedPath(baseDir, relPath string) (string, error) {
 	return target, nil
 }
 
+func validateWorktreeDestination(requestedPath, returnedPath string) (string, error) {
+	requestedPath = strings.TrimSpace(requestedPath)
+	returnedPath = strings.TrimSpace(returnedPath)
+	if requestedPath == "" || returnedPath == "" {
+		return "", fmt.Errorf("worktree destination is empty")
+	}
+	requestedAbs, err := filepath.Abs(filepath.Clean(requestedPath))
+	if err != nil {
+		return "", err
+	}
+	returnedAbs, err := filepath.Abs(filepath.Clean(returnedPath))
+	if err != nil {
+		return "", err
+	}
+	if requestedAbs != returnedAbs {
+		return "", fmt.Errorf("returned worktree path %q does not match requested path %q", returnedAbs, requestedAbs)
+	}
+	return requestedAbs, nil
+}
+
 func copyFileToPath(src, dstRoot, relDst string) error {
+	base, err := resolveContainedPath(dstRoot, "")
+	if err != nil {
+		return err
+	}
+	root, err := os.OpenRoot(base)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+	return copyFileToRoot(src, root, relDst)
+}
+
+func copyFileToRoot(src string, root *os.Root, relDst string) (retErr error) {
 	src = filepath.Clean(strings.TrimSpace(src))
 	if src == "" || src == "." {
 		return fmt.Errorf("empty source path")
 	}
-	dst, err := resolveContainedPath(dstRoot, relDst)
-	if err != nil {
-		return err
+	relDst = strings.TrimSpace(relDst)
+	if relDst == "" || filepath.IsAbs(relDst) {
+		return fmt.Errorf("invalid destination path: %q", relDst)
 	}
-
+	relDst = filepath.Clean(relDst)
+	if relDst == "." || relDst == ".." || strings.HasPrefix(relDst, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("destination escapes work dir: %q", relDst)
+	}
 	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = in.Close() }()
-
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return err
+	if parent := filepath.Dir(relDst); parent != "." {
+		if err := root.MkdirAll(parent, 0o755); err != nil {
+			return err
+		}
 	}
-	out, err := os.Create(dst)
+	info, err := in.Stat()
 	if err != nil {
 		return err
 	}
-	defer func() { _ = out.Close() }()
-
+	// Check the existing entry before replacement. Root.Stat rejects a final
+	// symlink that resolves outside this root; the later atomic rename replaces
+	// a hard link without mutating the shared inode.
+	if _, err := root.Stat(relDst); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("inspect destination %q: %w", relDst, err)
+	}
+	tempRel := filepath.Join(filepath.Dir(relDst), ".gc-copy-"+uuid.NewString())
+	out, err := root.OpenFile(tempRel, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := root.Remove(tempRel); err != nil && !errors.Is(err, os.ErrNotExist) {
+			retErr = errors.Join(retErr, fmt.Errorf("remove temporary copy %q: %w", tempRel, err))
+		}
+	}()
 	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return err
+	}
+	if err := out.Chmod(info.Mode().Perm()); err != nil {
+		_ = out.Close()
 		return err
 	}
 	if err := out.Close(); err != nil {
 		return err
 	}
-	if info, err := os.Stat(src); err == nil {
-		_ = os.Chmod(dst, info.Mode())
-	}
-	return nil
+	return root.Rename(tempRel, relDst)
 }
 
-func copyDirContents(srcDir, dstDir string) error {
+func copyDirContents(srcDir, dstDir, relDst string) error {
 	srcDir = filepath.Clean(strings.TrimSpace(srcDir))
 	if srcDir == "" || srcDir == "." {
 		return fmt.Errorf("empty source dir")
 	}
-	dstRoot, err := resolveContainedPath(dstDir, "")
+	base, err := resolveContainedPath(dstDir, "")
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(dstRoot, 0o755); err != nil {
+	dst, err := resolveContainedPath(base, relDst)
+	if err != nil {
+		return err
+	}
+	dstRel, err := filepath.Rel(base, dst)
+	if err != nil {
+		return err
+	}
+	// Keep the session work directory as the root even when relDst names a
+	// subdirectory. Opening that subdirectory as a new root would follow an
+	// existing symlink before confinement begins.
+	root, err := os.OpenRoot(base)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+	if err := root.MkdirAll(dstRel, 0o755); err != nil {
 		return err
 	}
 	return filepath.Walk(srcDir, func(path string, info os.FileInfo, err error) error {
@@ -723,19 +797,59 @@ func copyDirContents(srcDir, dstDir string) error {
 		if path == srcDir {
 			return nil
 		}
-		rel, err := filepath.Rel(srcDir, path)
+		sourceRel, err := filepath.Rel(srcDir, path)
 		if err != nil {
 			return err
 		}
-		target, err := resolveContainedPath(dstRoot, rel)
-		if err != nil {
-			return err
+		targetRel := filepath.Join(dstRel, sourceRel)
+		if targetRel == "." || filepath.IsAbs(targetRel) || targetRel == ".." || strings.HasPrefix(targetRel, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("destination escapes work dir: %q", targetRel)
 		}
 		if info.IsDir() {
-			return os.MkdirAll(target, info.Mode())
+			return root.MkdirAll(targetRel, info.Mode().Perm())
 		}
-		return copyFileToPath(path, dstRoot, rel)
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return fmt.Errorf("unsupported source entry %q (%s)", path, info.Mode())
+		}
+		return copyFileToRoot(path, root, targetRel)
 	})
+}
+
+func (p *Provider) setTrustedWorkDir(name, workDir string) {
+	name = strings.TrimSpace(name)
+	workDir = strings.TrimSpace(workDir)
+	if name == "" {
+		return
+	}
+	if workDir != "" {
+		if abs, err := filepath.Abs(filepath.Clean(workDir)); err == nil {
+			workDir = abs
+		} else {
+			workDir = ""
+		}
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.trustedWorkDirs == nil {
+		p.trustedWorkDirs = make(map[string]string)
+	}
+	if workDir == "" {
+		delete(p.trustedWorkDirs, name)
+		return
+	}
+	p.trustedWorkDirs[name] = workDir
+}
+
+func (p *Provider) trustedWorkDir(name string) string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.trustedWorkDirs[name]
+}
+
+func (p *Provider) clearTrustedWorkDir(name string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.trustedWorkDirs, name)
 }
 
 func parseMetadataValue(value interface{}) string {
@@ -1965,6 +2079,23 @@ func beadStoreForWatcher(workDir string, env map[string]string) *beads.CachingSt
 	return beads.NewCachingStore(bd, nil)
 }
 
+// watchedBeadEvent filters the journal to the bead events the watcher
+// projects and canonicalizes their identity. The cache applies the payload
+// under the snapshot's own ID, so the subject the watcher then reads back must
+// be that same ID; an event whose subject names a different bead is dropped
+// rather than reported as activity on the wrong bead.
+func watchedBeadEvent(ev events.Event) (events.Event, bool) {
+	if ev.Type != events.BeadUpdated && ev.Type != events.BeadClosed && ev.Type != events.BeadCreated {
+		return events.Event{}, false
+	}
+	id, err := beads.BeadEventID(ev.Subject, ev.Payload)
+	if err != nil || id == "" {
+		return events.Event{}, false
+	}
+	ev.Subject = id
+	return ev, true
+}
+
 func beadEventRelevant(ev events.Event, bead beads.Bead, agentName, currentBead string) bool {
 	if ev.Actor == agentName {
 		return true
@@ -2145,7 +2276,8 @@ func (p *Provider) runEventWatcher(ctx context.Context, _ string, cfg runtime.Co
 		if err != nil {
 			return
 		}
-		if ev.Type != events.BeadUpdated && ev.Type != events.BeadClosed && ev.Type != events.BeadCreated {
+		ev, ok := watchedBeadEvent(ev)
+		if !ok {
 			continue
 		}
 		cache.ApplyEvent(ev.Type, ev.Payload)
@@ -2357,6 +2489,8 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 // Start creates or reuses a T3 thread for the named session and dispatches the
 // startup prompt and any nudge.
 func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) error {
+	p.clearTrustedWorkDir(name)
+	trustedWorkDir := strings.TrimSpace(cfg.WorkDir)
 	fmt.Fprintf(os.Stderr, "t3bridge: Start(%s) called, wsURL=%s\n", name, resolveWsURL())
 
 	var envelope StartupEnvelope
@@ -2439,6 +2573,17 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 		worktreePath, worktreeBranch, err = p.rpcCreateWorktree(cwd, branch, newBranch, desiredPath)
 		if err != nil {
 			return softenBridgeStartupError(fmt.Errorf("t3bridge: create worktree: %w", err))
+		}
+		if strings.TrimSpace(desiredPath) == "" {
+			trustedWorkDir = ""
+		} else {
+			trustedWorkDir, err = validateWorktreeDestination(desiredPath, worktreePath)
+			if err != nil {
+				// Do not use a server-returned path as either a local write root or
+				// a cleanup target when it differs from the requested destination.
+				worktreePath = ""
+				return softenBridgeStartupError(fmt.Errorf("t3bridge: reject worktree destination: %w", err))
+			}
 		}
 		cfg.WorkDir = worktreePath
 		envelope.Worktree = &WorktreeSection{
@@ -2528,6 +2673,7 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 				"decision":    string(reuse.Decision),
 			})
 			p.ensureEventWatcher(name, cfg, binding, envelope, providerName)
+			p.setTrustedWorkDir(name, trustedWorkDir)
 			return nil
 		default:
 			fmt.Fprintf(os.Stderr, "t3bridge: Start(%s) discard existing thread=%s decision=%s\n", name, existingBinding.ThreadID, reuse.Decision) //nolint:errcheck
@@ -2627,6 +2773,7 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 			"textLength": len(nudgeText),
 		})
 	}
+	p.setTrustedWorkDir(name, trustedWorkDir)
 	p.clearSnapshotCache()
 	return nil
 }
@@ -2639,6 +2786,7 @@ func (p *Provider) Stop(name string) error {
 	if err != nil {
 		if isSoftBridgeUnavailable(err) {
 			p.clearRecentStart(name)
+			p.clearTrustedWorkDir(name)
 			p.clearBridgeMeta(name)
 			return nil
 		}
@@ -2648,6 +2796,7 @@ func (p *Provider) Stop(name string) error {
 	binding := snapshotThreadBinding(thread)
 	if binding == nil {
 		p.clearRecentStart(name)
+		p.clearTrustedWorkDir(name)
 		p.clearBridgeMeta(name)
 		return nil
 	}
@@ -2669,6 +2818,7 @@ func (p *Provider) Stop(name string) error {
 		p.removeWorktreeForThread(thread)
 	}
 	p.clearRecentStart(name)
+	p.clearTrustedWorkDir(name)
 	p.clearBridgeMeta(name)
 	p.clearSnapshotCache()
 	return nil
@@ -2937,56 +3087,34 @@ func (p *Provider) CopyTo(name, src, relDst string) error {
 	if strings.TrimSpace(name) == "" || strings.TrimSpace(src) == "" {
 		return nil
 	}
-	snapshot, err := p.rpcSnapshot()
-	if err != nil {
-		if isSoftBridgeUnavailable(err) {
-			return nil
-		}
-		return nil
-	}
-	thread := snapshotThreadBySessionName(snapshot, name)
-	binding := snapshotThreadBinding(thread)
-	workDir := ""
-	if binding != nil {
-		workDir = strings.TrimSpace(binding.WorkDir)
-	}
-	if workDir == "" {
-		meta := threadCustomMetadata(thread)
-		workDir = strings.TrimSpace(meta["gc.startupWorkDir"])
-	}
+	workDir := p.trustedWorkDir(name)
 	if workDir == "" {
 		return nil
 	}
 
 	info, err := os.Stat(src)
 	if err != nil {
-		return nil
+		if os.IsNotExist(err) {
+			return nil // CopyTo has a best-effort contract for missing sources.
+		}
+		return fmt.Errorf("inspect copy source %q: %w", src, err)
 	}
 	if info.IsDir() {
-		dstRoot := workDir
-		if strings.TrimSpace(relDst) != "" {
-			var err error
-			dstRoot, err = resolveContainedPath(workDir, relDst)
-			if err != nil {
-				return nil
-			}
-		}
-		if err := copyDirContents(src, dstRoot); err != nil {
-			return nil
+		if err := copyDirContents(src, workDir, relDst); err != nil {
+			return fmt.Errorf("copy directory %q into session %q: %w", src, name, err)
 		}
 		return nil
 	}
-
 	fileRelDst := strings.TrimSpace(relDst)
 	if strings.TrimSpace(relDst) != "" {
 		if _, err := resolveContainedPath(workDir, fileRelDst); err != nil {
-			return nil
+			return fmt.Errorf("validate copy destination %q: %w", relDst, err)
 		}
 	} else {
 		fileRelDst = filepath.Base(src)
 	}
 	if err := copyFileToPath(src, workDir, fileRelDst); err != nil {
-		return nil
+		return fmt.Errorf("copy file %q into session %q: %w", src, name, err)
 	}
 	return nil
 }

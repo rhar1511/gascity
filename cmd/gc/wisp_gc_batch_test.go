@@ -59,7 +59,7 @@ func TestWispGCClosureUsesRevisionFencedDeletes(t *testing.T) {
 	store := &batchGCStore{gcTestStore: base}
 
 	wg := newWispGC(5*time.Minute, time.Hour, 0)
-	purged, err := wg.runGC(beads.GraphStore{Store: store}, beads.MailStore{Store: store}, now)
+	purged, err := wg.runGC(beads.GraphStore{Store: store}, beads.SessionStore{}, beads.MailStore{Store: store}, now)
 	if err != nil {
 		t.Fatalf("runGC: %v", err)
 	}
@@ -70,10 +70,18 @@ func TestWispGCClosureUsesRevisionFencedDeletes(t *testing.T) {
 	if len(store.batchCalls) != 0 {
 		t.Fatalf("batch calls = %v, want none because batch delete has no per-row revision fence", store.batchCalls)
 	}
-	if store.depRemoves == 0 {
-		t.Fatal("revision-fenced purge did not remove workflow dependencies")
+	if store.depRemoves != 0 {
+		t.Fatalf("dependency removals = %d, want checked deletion to own atomic cleanup", store.depRemoves)
 	}
 	assertDeletedIDs(t, base.deletedIDs, "mol-1", "mol-1.1", "mol-1.2")
+	for _, id := range []string{"mol-1", "mol-1.1", "mol-1.2"} {
+		for _, direction := range []string{"down", "up"} {
+			deps, err := base.DepList(id, direction)
+			if err != nil || len(deps) != 0 {
+				t.Fatalf("DepList(%s, %s) after checked deletion = %v, %v", id, direction, deps, err)
+			}
+		}
+	}
 }
 
 // The production controller rewraps the store in beadPolicyStore. This pins

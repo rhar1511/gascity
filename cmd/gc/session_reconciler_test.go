@@ -23,6 +23,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/session/sessiontest"
@@ -1312,11 +1313,13 @@ func TestQueueDrainAckAsyncStopRecoversStopPanic(t *testing.T) {
 // Not parallel — modifies the package-level drainAckAsyncStopPokeController seam.
 func TestQueueDrainAckAsyncStopPokesAfterSuccessfulStop(t *testing.T) {
 	var pokeCalls int
+	var pokeKey reconcilekey.Key
 	var pokeMu sync.Mutex
 	old := drainAckAsyncStopPokeController
-	drainAckAsyncStopPokeController = func(string) error {
+	drainAckAsyncStopPokeController = func(_ string, key reconcilekey.Key) error {
 		pokeMu.Lock()
 		pokeCalls++
+		pokeKey = key
 		pokeMu.Unlock()
 		return nil
 	}
@@ -1335,10 +1338,13 @@ func TestQueueDrainAckAsyncStopPokesAfterSuccessfulStop(t *testing.T) {
 	}
 
 	pokeMu.Lock()
-	got := pokeCalls
+	got, gotKey := pokeCalls, pokeKey
 	pokeMu.Unlock()
 	if got != 1 {
 		t.Fatalf("poke count = %d, want 1 after successful stop", got)
+	}
+	if want := reconcilekey.SessionRef("gc-worker", "worker"); gotKey != want {
+		t.Fatalf("poke key = %v, want %v", gotKey, want)
 	}
 }
 
@@ -1350,7 +1356,7 @@ func TestQueueDrainAckAsyncStopDoesNotPokeOnHardError(t *testing.T) {
 	var pokeCalls int
 	var pokeMu sync.Mutex
 	old := drainAckAsyncStopPokeController
-	drainAckAsyncStopPokeController = func(string) error {
+	drainAckAsyncStopPokeController = func(string, reconcilekey.Key) error {
 		pokeMu.Lock()
 		pokeCalls++
 		pokeMu.Unlock()
@@ -1389,7 +1395,7 @@ func TestQueueDrainAckAsyncStopTokenFenceSkipsReusedName(t *testing.T) {
 	var pokeCalls int
 	var pokeMu sync.Mutex
 	old := drainAckAsyncStopPokeController
-	drainAckAsyncStopPokeController = func(string) error {
+	drainAckAsyncStopPokeController = func(string, reconcilekey.Key) error {
 		pokeMu.Lock()
 		pokeCalls++
 		pokeMu.Unlock()
@@ -1617,7 +1623,7 @@ func TestFinalizeDrainAckStopPendingSessionsConfirmsProcessNameSurvivor(t *testi
 	drainAckStopConfirmDeadTimeout = 200 * time.Millisecond
 	drainAckStopConfirmDeadPoll = 20 * time.Millisecond
 	oldPoke := drainAckAsyncStopPokeController
-	drainAckAsyncStopPokeController = func(string) error { return nil }
+	drainAckAsyncStopPokeController = func(string, reconcilekey.Key) error { return nil }
 	t.Cleanup(func() {
 		drainAckStopConfirmDeadTimeout = oldTimeout
 		drainAckStopConfirmDeadPoll = oldPoll
@@ -3464,6 +3470,9 @@ func emitStrandedDiagnosticForTest(t *testing.T, store beads.Store, session *bea
 		"worker",
 		rec,
 		&clock.Fake{Time: time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)},
+		func(ctx context.Context, spec string) detachedProbeResult {
+			return probeDetachedWorkWithTimeout(ctx, spec, 5*time.Second)
+		},
 		&stderr,
 	)
 	if stderr.Len() != 0 {
@@ -4116,7 +4125,7 @@ func TestReconcileSessionBeads_PoolSlotStrandedThrottleSurvivesSetMetadataFailur
 	snap := newSessionBeadSnapshot([]beads.Bead{session})
 	emit := func() {
 		row := snap.OpenForReconcile()[0]
-		emitSessionStrandedDiagnostic("", env.cfg, failingStore, nil, row.Info, snap, "worker", rec, env.clk, &env.stderr)
+		emitSessionStrandedDiagnostic("", env.cfg, failingStore, nil, row.Info, snap, "worker", rec, env.clk, probeDetachedWork, &env.stderr)
 	}
 
 	// First emit — diagnostic fires AND the durable SetMarker fails on the throttle key.
@@ -10140,6 +10149,10 @@ func TestReconcileSessionBeads_ConfigDriftAttachmentErrorDefersLiveDrift(t *test
 	session := env.createSessionBead("worker", "worker")
 	env.setSessionMetadata(&session, map[string]string{
 		"started_config_hash": runtime.CoreFingerprint(runtime.Config{Command: "test-cmd"}),
+		// Converged with the live runtime, so no status heal (which re-reads
+		// the row before writing) consumes the one injected Get failure
+		// ahead of the attachment observation under test.
+		"state": "awake",
 	})
 	backing := env.store
 	env.store = &sessionObservationGetErrorStore{

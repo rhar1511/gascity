@@ -41,6 +41,8 @@ type detachedProbeResult struct {
 	Err    error
 }
 
+type detachedWorkProbe func(context.Context, string) detachedProbeResult
+
 var detachedProbeErrorCounts = struct {
 	sync.Mutex
 	byBead map[string]int
