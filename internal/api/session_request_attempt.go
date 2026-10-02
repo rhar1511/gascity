@@ -76,7 +76,22 @@ func (s *Server) resolveSessionRequestAttempt(sessionID string, generation int) 
 	return &session.RequestAttemptBinding{StoreRef: ref, AttemptID: id, WorkRevision: strconv.FormatInt(work.Revision, 10), Identity: identity}, nil
 }
 
-func (s *Server) acceptAttributedSessionRequest(front *session.Store, sessionID, requestID string, generation int, message string, now time.Time) (session.RequestAcceptance, error) {
+func (s *Server) acceptAttributedSessionRequest(front *session.Store, sessionID, requestID string, generation int, message string, selectedWorkID, selectedClaimGeneration *string, now time.Time) (session.RequestAcceptance, error) {
+	if selectedWorkID != nil || selectedClaimGeneration != nil {
+		if selectedWorkID == nil || selectedClaimGeneration == nil {
+			return session.RequestAcceptance{}, session.ErrRequestConflict
+		}
+		binding, err := s.resolveSessionRequestAttempt(sessionID, generation)
+		if err != nil {
+			return session.RequestAcceptance{}, err
+		}
+		if binding == nil || binding.Identity.OwnerBeadID != *selectedWorkID ||
+			binding.Identity.ExecutionBeadID != *selectedWorkID ||
+			binding.Identity.ClaimGeneration != *selectedClaimGeneration {
+			return session.RequestAcceptance{}, session.ErrRequestConflict
+		}
+		return front.AcceptRequestForAttempt(sessionID, requestID, generation, message, *binding, now)
+	}
 	prior, err := front.GetRequest(sessionID, requestID)
 	if err != nil && !errors.Is(err, session.ErrRequestNotFound) {
 		return session.RequestAcceptance{}, err

@@ -1076,9 +1076,9 @@ func TestSessionHandleHistoryLoadsNormalizedTranscript(t *testing.T) {
 		WorkDir:  "/tmp/gascity/phase1/claude",
 		Provider: "claude",
 	})
-	handle.adapter.SearchPaths = []string{
+	handle.adapter.SearchPaths = []string{copyTranscriptFixtureTree(t,
 		filepath.Join("workertest", "testdata", "fixtures", "claude", "fresh"),
-	}
+	)}
 
 	if err := handle.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)

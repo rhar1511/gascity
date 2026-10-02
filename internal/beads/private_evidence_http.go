@@ -668,7 +668,8 @@ func decodePrivateEvidenceContext(body []byte, status int, err error) (privateEv
 }
 
 func (c *privateEvidenceHTTPClient) verifyContextIdentity(response privateEvidenceServerContext) error {
-	if response.ProjectID != c.projectID || response.Database != c.database || response.Backend != "dolt" || response.DoltMode != "server" {
+	serverMode := response.DoltMode == "server" || response.DoltMode == "proxied-server"
+	if response.ProjectID != c.projectID || response.Database != c.database || response.Backend != "dolt" || !serverMode {
 		return fmt.Errorf("%w: configured scope %q does not match the served Beads workspace", ErrPrivateEvidenceHTTPIdentity, c.scopeRef)
 	}
 	return nil

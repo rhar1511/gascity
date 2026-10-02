@@ -170,14 +170,17 @@ func (m *Manager) interruptAndSubmitLocked(ctx context.Context, id string, b bea
 		return m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, true)
 	}
 	if requiresHardRestartInterrupt(b) {
-		piTranscriptPath, err := piPendingTurnPath(b, hints)
+		piTranscript, err := piPendingTurnTranscript(b, hints)
 		if err != nil {
 			return err
+		}
+		if piTranscript != nil {
+			defer piTranscript.Close() //nolint:errcheck
 		}
 		if err := m.sp.Stop(sessName); err != nil {
 			return fmt.Errorf("stopping session for interrupt replacement: %w", err)
 		}
-		if err := discardPiPendingTurn(piTranscriptPath, hints); err != nil {
+		if err := discardPiPendingTurn(piTranscript, hints); err != nil {
 			// Pi must be stopped before transcript truncation so it cannot race the
 			// write. If truncation fails, restart on the dirty transcript; the
 			// caller's retry will repeat this stop-and-discard sequence.
@@ -486,40 +489,44 @@ func (m *Manager) restoreAfterHardRestartFailureLocked(ctx context.Context, id s
 	return m.waitUntilRunningLocked(ctx, id, sessName, 2*time.Second)
 }
 
-func piPendingTurnPath(b beads.Bead, hints runtime.Config) (string, error) {
+func piPendingTurnTranscript(b beads.Bead, hints runtime.Config) (*sessionlog.OpenedTranscript, error) {
 	searchPaths := piSessionSearchPaths(hints)
 	workDir := b.Metadata["work_dir"]
 	if sessionKey := strings.TrimSpace(b.Metadata["session_key"]); sessionKey != "" {
-		if path := strings.TrimSpace(sessionlog.FindPiSessionFileByID(searchPaths, workDir, sessionKey)); path != "" {
-			return path, nil
+		if transcript, err := sessionlog.FindPiSessionTranscriptByID(searchPaths, workDir, sessionKey); err != nil {
+			return nil, err
+		} else if transcript != nil {
+			return transcript, nil
 		}
-		fallback, err := sessionlog.FindPiSessionFileStrict(searchPaths, workDir)
+		fallback, err := sessionlog.FindPiSessionTranscriptStrict(searchPaths, workDir)
 		if err != nil {
 			if errors.Is(err, sessionlog.ErrAmbiguousPiSessionFile) {
-				return "", fmt.Errorf("resolving pi interrupted transcript for session_key %q workdir %q: %w", sessionKey, workDir, err)
+				return nil, fmt.Errorf("resolving pi interrupted transcript for session_key %q workdir %q: %w", sessionKey, workDir, err)
 			}
-			return "", err
+			return nil, err
 		}
-		if fallback != "" {
-			return "", fmt.Errorf("resolving pi interrupted transcript for session_key %q workdir %q: keyed transcript not found; refusing same-workdir fallback %q", sessionKey, workDir, fallback)
+		if fallback != nil {
+			fallbackPath := fallback.Path()
+			_ = fallback.Close()
+			return nil, fmt.Errorf("resolving pi interrupted transcript for session_key %q workdir %q: keyed transcript not found; refusing same-workdir fallback %q", sessionKey, workDir, fallbackPath)
 		}
-		return "", nil
+		return nil, nil
 	}
-	path, err := sessionlog.FindPiSessionFileStrict(searchPaths, workDir)
+	transcript, err := sessionlog.FindPiSessionTranscriptStrict(searchPaths, workDir)
 	if err != nil {
 		if errors.Is(err, sessionlog.ErrAmbiguousPiSessionFile) {
-			return "", fmt.Errorf("resolving pi interrupted transcript for workdir %q: %w", workDir, err)
+			return nil, fmt.Errorf("resolving pi interrupted transcript for workdir %q: %w", workDir, err)
 		}
-		return "", err
+		return nil, err
 	}
-	return strings.TrimSpace(path), nil
+	return transcript, nil
 }
 
-func discardPiPendingTurn(path string, hints runtime.Config) error {
-	if strings.TrimSpace(path) == "" {
+func discardPiPendingTurn(transcript *sessionlog.OpenedTranscript, hints runtime.Config) error {
+	if transcript == nil {
 		return nil
 	}
-	if err := sessionlog.ResetPiInterruptedTurn(path, strings.TrimSpace(hints.Env["GC_PI_TRANSCRIPT_DIR"])); err != nil {
+	if err := sessionlog.ResetPiInterruptedTurn(transcript, strings.TrimSpace(hints.Env["GC_PI_TRANSCRIPT_DIR"])); err != nil {
 		return fmt.Errorf("discarding pi interrupted turn: %w", err)
 	}
 	return nil

@@ -131,3 +131,34 @@ func TestHandleSessionAgentGet(t *testing.T) {
 		t.Fatalf("Messages[0][parentToolUseId] = %#v, want toolu_123", got)
 	}
 }
+
+func TestHumaSessionAgentGetRejectsEscapingTranscriptSymlink(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	searchBase := t.TempDir()
+	srv.sessionLogSearchPaths = []string{searchBase}
+
+	workDir := filepath.Join(t.TempDir(), "claude-project")
+	info := createTranscriptBackedSession(t, fs.cityBeadStore, fs.sp, workDir)
+	writeSessionAgentTranscriptFixture(t, searchBase, workDir, info)
+	slugDir := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir))
+	agentPath := filepath.Join(slugDir, info.SessionKey, "subagents", "agent-helper.jsonl")
+	if err := os.Remove(agentPath); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), "agent.jsonl")
+	if err := os.WriteFile(outside, []byte(`{"uuid":"outside","type":"assistant","message":{"role":"assistant","content":"outside secret"}}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, agentPath); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	_, err := srv.humaHandleSessionAgentGet(context.Background(), &SessionAgentGetInput{
+		ID:      info.ID,
+		AgentID: "helper",
+	})
+	if err == nil {
+		t.Fatal("Huma agent endpoint accepted a sidecar symlink outside the configured root")
+	}
+}

@@ -2,9 +2,9 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 
@@ -42,8 +42,24 @@ func TestSessionRequestDeliveryIsDurableAndNeverReplayed(t *testing.T) {
 	for _, call := range sp.SnapshotCalls() {
 		if call.Method == "Nudge" || call.Method == "NudgeNow" {
 			count++
-			if !strings.Contains(call.Message, "tracked-1") {
-				t.Fatalf("delivery missing request identity: %+v", call)
+			var envelope struct {
+				RequestID            string `json:"request_id"`
+				SessionID            string `json:"session_id"`
+				Generation           int    `json:"generation"`
+				Message              string `json:"message"`
+				AcknowledgeWith      string `json:"acknowledge_with"`
+				AcknowledgeWhen      string `json:"acknowledge_when"`
+				AcknowledgementMeans string `json:"acknowledgement_means"`
+			}
+			if err := json.Unmarshal([]byte(call.Message), &envelope); err != nil {
+				t.Fatalf("decode tracked delivery envelope: %v; message=%q", err, call.Message)
+			}
+			if envelope.RequestID != "tracked-1" || envelope.SessionID != info.ID ||
+				envelope.Generation != gen || envelope.Message != "report progress" ||
+				envelope.AcknowledgeWith != "gc session request ack -- tracked-1" ||
+				envelope.AcknowledgeWhen != "after reading this request and before acting on it" ||
+				envelope.AcknowledgementMeans != "receipt_only; this does not verify completion or effect" {
+				t.Fatalf("delivery did not explain exact receipt acknowledgement: %+v", envelope)
 			}
 		}
 	}
@@ -52,6 +68,35 @@ func TestSessionRequestDeliveryIsDurableAndNeverReplayed(t *testing.T) {
 	}
 	if _, err := mgr.SubmitRequest(context.Background(), info.ID, "wrong-generation", gen+1, "report progress"); !errors.Is(err, ErrRequestConflict) {
 		t.Fatalf("wrong generation: %v", err)
+	}
+}
+
+func TestSessionRequestAcknowledgementCommandHandlesLeadingHyphens(t *testing.T) {
+	backing := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(backing, sp)
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: t.TempDir(), Provider: "claude"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := mgr.SubmitRequest(context.Background(), info.ID, "-request-123", 1, "report progress")
+	if err != nil || receipt.Delivery != RequestDeliveryAccepted {
+		t.Fatalf("submit = %+v, %v", receipt, err)
+	}
+	var envelope struct {
+		AcknowledgeWith string `json:"acknowledge_with"`
+	}
+	for _, call := range sp.SnapshotCalls() {
+		if call.Method != "Nudge" && call.Method != "NudgeNow" {
+			continue
+		}
+		if err := json.Unmarshal([]byte(call.Message), &envelope); err != nil {
+			t.Fatalf("decode delivery envelope: %v", err)
+		}
+		break
+	}
+	if envelope.AcknowledgeWith != "gc session request ack -- -request-123" {
+		t.Fatalf("acknowledgement command = %q, want leading-hyphen-safe command", envelope.AcknowledgeWith)
 	}
 }
 
@@ -192,7 +237,7 @@ type requestClaimGenerationRace struct {
 func (s *requestClaimGenerationRace) UpdateIfMatch(id string, revision int64, opts beads.UpdateOpts) error {
 	s.updates++
 	if s.updates == s.changeOnUpdate {
-		if err := s.MemStore.SetMetadata(id, beadmeta.CurrentClaimGenerationMetadataKey, "claim-two"); err != nil {
+		if err := s.SetMetadata(id, beadmeta.CurrentClaimGenerationMetadataKey, "claim-two"); err != nil {
 			return err
 		}
 	}

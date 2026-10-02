@@ -50,7 +50,10 @@ func TestSessionRequestSubmitHTTPBindsAuthoritativeAttempt(t *testing.T) {
 		front = session.NewStore(fs.SessionsBeadStore())
 		h := newTestCityHandler(t, fs)
 		response := httptest.NewRecorder()
-		body, err := json.Marshal(map[string]any{"request_id": "http-bound", "generation": generation, "message": "report progress"})
+		body, err := json.Marshal(map[string]any{
+			"request_id": "http-bound", "generation": generation, "message": "report progress",
+			"work_id": work.ID, "claim_generation": "http-claim",
+		})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -71,6 +74,162 @@ func TestSessionRequestSubmitHTTPBindsAuthoritativeAttempt(t *testing.T) {
 			t.Fatalf("delivery invented acknowledgement or effect: %+v", receipt)
 		}
 	})
+}
+
+func TestSessionRequestAcknowledgementRemainsSessionScopedAfterClaimChanges(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		fs := newSessionFakeState(t)
+		info := createTestSession(t, fs.cityBeadStore, fs.sp, "bound target")
+		front := session.NewStore(fs.SessionsBeadStore())
+		info, err := front.Get(info.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		generation, err := strconv.Atoi(info.Generation)
+		if err != nil {
+			t.Fatal(err)
+		}
+		firstWork, err := fs.cityBeadStore.Create(beads.Bead{Title: "first work", Type: "task", Metadata: beads.StringMap{
+			beadmeta.SessionIDMetadataKey: info.ID, beadmeta.ClaimGenerationMetadataKey: "claim-one",
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		status := "in_progress"
+		if err := fs.cityBeadStore.Update(firstWork.ID, beads.UpdateOpts{Status: &status, Assignee: &info.ID}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := front.SetCurrentClaimForGeneration(info.ID, firstWork.ID, "claim-one"); err != nil {
+			t.Fatal(err)
+		}
+		h := newTestCityHandler(t, fs)
+		submitBody := `{"request_id":"claim-rollover-request","generation":` + strconv.Itoa(generation) + `,"message":"report progress","work_id":"` + firstWork.ID + `","claim_generation":"claim-one"}`
+		submit := httptest.NewRecorder()
+		h.ServeHTTP(submit, newPostRequest(cityURL(fs, "/session/"+info.ID+"/requests"), strings.NewReader(submitBody)))
+		if submit.Code != http.StatusAccepted {
+			t.Fatalf("submit=%d %s", submit.Code, submit.Body.String())
+		}
+		synctest.Wait()
+		original, err := front.GetRequest(info.ID, "claim-rollover-request")
+		if err != nil || original.Attempt == nil || original.Attempt.Identity.ClaimGeneration != "claim-one" || original.AcknowledgedAt != nil {
+			t.Fatalf("original receipt = %+v, %v", original, err)
+		}
+
+		secondWork, err := fs.cityBeadStore.Create(beads.Bead{Title: "second work", Type: "task", Metadata: beads.StringMap{
+			beadmeta.SessionIDMetadataKey: info.ID, beadmeta.ClaimGenerationMetadataKey: "claim-two",
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := fs.cityBeadStore.Update(secondWork.ID, beads.UpdateOpts{Status: &status, Assignee: &info.ID}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := front.SetCurrentClaimForGeneration(info.ID, secondWork.ID, "claim-two"); err != nil {
+			t.Fatal(err)
+		}
+
+		ackBody := `{"generation":` + strconv.Itoa(generation) + `}`
+		ack := httptest.NewRecorder()
+		ackReq := newPostRequest(cityURL(fs, "/session/"+info.ID+"/requests/claim-rollover-request/ack"), strings.NewReader(ackBody))
+		ackReq.Header.Set("X-GC-Session-Token", info.InstanceToken)
+		h.ServeHTTP(ack, ackReq)
+		if ack.Code != http.StatusOK {
+			t.Fatalf("ack=%d %s; the same live session execution should be able to acknowledge receipt after its claim changes", ack.Code, ack.Body.String())
+		}
+		acknowledged, err := front.GetRequest(info.ID, "claim-rollover-request")
+		if err != nil || acknowledged.AcknowledgedAt == nil || acknowledged.Attempt == nil || *acknowledged.Attempt != *original.Attempt || acknowledged.Effect != "unverified" {
+			t.Fatalf("acknowledgement changed attempt binding or implied effect: %+v, %v", acknowledged, err)
+		}
+	})
+}
+
+func TestSessionRequestSubmitOpenAPIDeclaresAttemptSelectorDependency(t *testing.T) {
+	sm := NewSupervisorMux(nil, nil, false, "test", "", time.Now())
+	schema, ok := sm.humaAPI.OpenAPI().Components.Schemas.Map()["SessionRequestSubmitInputBody"]
+	if !ok {
+		t.Fatal("OpenAPI is missing SessionRequestSubmitInputBody")
+	}
+	if got := schema.DependentRequired["work_id"]; len(got) != 1 || got[0] != "claim_generation" {
+		t.Fatalf("work_id dependentRequired = %v, want claim_generation", got)
+	}
+	if got := schema.DependentRequired["claim_generation"]; len(got) != 1 || got[0] != "work_id" {
+		t.Fatalf("claim_generation dependentRequired = %v, want work_id", got)
+	}
+}
+
+func TestSessionRequestSubmitRequiresSelectedAttemptMatch(t *testing.T) {
+	for _, tc := range []struct {
+		name                string
+		selectedWork        func(string) string
+		selectedClaim       string
+		omitWorkID          bool
+		omitClaimGeneration bool
+		wantStatus          int
+	}{
+		{name: "different bead", selectedWork: func(string) string { return "another-work" }, selectedClaim: "claim-current"},
+		{name: "different claim generation", selectedWork: func(workID string) string { return workID }, selectedClaim: "claim-old"},
+		{name: "incomplete selector", selectedWork: func(workID string) string { return workID }, omitClaimGeneration: true, wantStatus: http.StatusUnprocessableEntity},
+		{name: "claim without bead", selectedClaim: "claim-current", omitWorkID: true, wantStatus: http.StatusUnprocessableEntity},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := newSessionFakeState(t)
+			info := createTestSession(t, fs.cityBeadStore, fs.sp, "selected attempt")
+			front := session.NewStore(fs.SessionsBeadStore())
+			persisted, err := front.Get(info.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			generation, err := strconv.Atoi(persisted.Generation)
+			if err != nil {
+				t.Fatal(err)
+			}
+			work, err := fs.cityBeadStore.Create(beads.Bead{Title: "current work", Type: "task", Metadata: beads.StringMap{
+				beadmeta.SessionIDMetadataKey: info.ID, beadmeta.ClaimGenerationMetadataKey: "claim-current",
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			status := "in_progress"
+			if err := fs.cityBeadStore.Update(work.ID, beads.UpdateOpts{Status: &status, Assignee: &info.ID}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := front.SetCurrentClaimForGeneration(info.ID, work.ID, "claim-current"); err != nil {
+				t.Fatal(err)
+			}
+
+			body := map[string]any{
+				"request_id": "wrong-attempt", "generation": generation, "message": "report progress",
+			}
+			if !tc.omitWorkID {
+				body["work_id"] = tc.selectedWork(work.ID)
+			}
+			if !tc.omitClaimGeneration {
+				body["claim_generation"] = tc.selectedClaim
+			}
+			encoded, err := json.Marshal(body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			response := httptest.NewRecorder()
+			url := cityURL(fs, "/session/"+info.ID+"/requests")
+			newTestCityHandler(t, fs).ServeHTTP(response, newPostRequest(url, strings.NewReader(string(encoded))))
+			wantStatus := tc.wantStatus
+			if wantStatus == 0 {
+				wantStatus = http.StatusConflict
+			}
+			if response.Code != wantStatus {
+				t.Fatalf("submit=%d %s; mismatched selected attempt must be rejected with %d", response.Code, response.Body.String(), wantStatus)
+			}
+			if _, err := front.GetRequest(info.ID, "wrong-attempt"); !errors.Is(err, session.ErrRequestNotFound) {
+				t.Fatalf("mismatched selection persisted a receipt: %v", err)
+			}
+			for _, call := range fs.sp.SnapshotCalls() {
+				if call.Method == "Nudge" || call.Method == "NudgeNow" {
+					t.Fatalf("mismatched selection reached provider: %+v", call)
+				}
+			}
+		})
+	}
 }
 
 func TestAttemptAcknowledgementsReportUnattributedAndCorruptReceipts(t *testing.T) {

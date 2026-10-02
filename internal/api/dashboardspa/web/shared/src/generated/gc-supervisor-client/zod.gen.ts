@@ -2294,9 +2294,11 @@ export const zSessionRequestAcknowledgementInputBody = z.object({
 });
 
 export const zSessionRequestSubmitInputBody = z.object({
+    claim_generation: z.string().min(1).max(200).optional(),
     generation: z.coerce.bigint().gte(BigInt(1)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
     message: z.string().min(1),
-    request_id: z.string().min(1).max(200)
+    request_id: z.string().min(1).max(200),
+    work_id: z.string().min(1).max(200).optional()
 });
 
 export const zSessionResetStalledPayload = z.object({

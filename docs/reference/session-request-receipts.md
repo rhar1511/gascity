@@ -27,6 +27,9 @@ After receiving the request, the intended execution acknowledges it:
 gc session request ack request-456
 ```
 
+The delivery envelope includes `--` before the request ID so IDs beginning
+with a hyphen are treated as positional arguments by the CLI.
+
 The command takes its identity from `GC_SESSION_ID`, `GC_RUNTIME_EPOCH`, and
 `GC_INSTANCE_TOKEN`. Credentials are sent in a header and are absent from the
 public receipt. The server checks the exact request, generation, and current
@@ -64,10 +67,15 @@ generation. It records the original work revision as a decimal string. The
 submit body cannot supply this binding. Acceptance and delivery check the
 session's reciprocal work claim; a changed claim rejects the request.
 
-The binding records an observation. It does not grant ownership, establish an
-atomic transaction across the work and session stores, or authorize an effect.
-Replays preserve the original binding and revision. Requests accepted without
-a binding remain unattributed, including after a later work claim.
+The binding is an immutable observation of the selected attempt when the
+request is accepted. It does not grant ownership, establish an atomic
+transaction across the work and session stores, or authorize an effect. The
+acknowledgement is session-execution scoped: the exact session generation and
+credential may acknowledge receipt even after the session's current Bead claim
+changes. That does not update the original attempt binding, assert that the
+claim is still current, or prove the requested work took effect. Replays
+preserve the original binding and revision. Requests accepted without a
+binding remain unattributed, including after a later work claim.
 
 An authorized exact attempt read includes matching receipts under
 `related_records.acknowledgements.records`. The join checks the attempt ID,

@@ -51,12 +51,18 @@ func TestRequestTranscriptEvidenceMatchesOnlyCanonicalGeneratedEnvelope(t *testi
 	if !RequestEnvelopeMatchesReceipt(string(canonical), receipt) {
 		t.Fatal("canonical tracked envelope did not match its receipt")
 	}
+	legacy := `{"request_id":"request-envelope","session_id":"gc-session","generation":2,"instruction":"Acknowledge receipt before acting by running the command in acknowledge_with.","acknowledge_with":"gc session request ack \"request-envelope\"","message":"say hello"}`
+	if !RequestEnvelopeMatchesReceipt(legacy, receipt) {
+		t.Fatal("retained canonical tracked envelope did not match its receipt")
+	}
 	for name, text := range map[string]string{
 		"surrounding prose":       "copied envelope: " + string(canonical),
 		"extra field":             strings.TrimSuffix(string(canonical), "}") + `,"extra":"ignored"}`,
 		"noncanonical whitespace": " " + string(canonical),
 		"changed message":         strings.Replace(string(canonical), "say hello", "say goodbye", 1),
 		"wrong execution":         strings.Replace(string(canonical), `"generation":2`, `"generation":3`, 1),
+		"legacy wrong execution":  strings.Replace(legacy, `"generation":2`, `"generation":3`, 1),
+		"legacy extra field":      strings.TrimSuffix(legacy, "}") + `,"extra":"ignored"}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			if RequestEnvelopeMatchesReceipt(text, receipt) {

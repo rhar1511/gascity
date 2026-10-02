@@ -1,0 +1,5 @@
+{"type":"metadata","protocol_version":"1.5","created_at":1787252689000}
+{"type":"context.append_message","message":{"id":"msg_user","role":"user","content":[{"type":"text","text":"Summarize the Kimi worker transcript contract."}],"toolCalls":[]},"time":1787252689001}
+{"type":"context.append_message","message":{"id":"msg_assistant","role":"assistant","content":[{"type":"text","text":"Kimi phase 1 validates the native context JSONL transcript contract."}],"toolCalls":[]},"time":1787252689002}
+{"type":"context.append_message","message":{"id":"msg_recall_prompt","role":"user","content":[{"type":"text","text":"Repeat the exact Kimi phase-1 summary from earlier before answering."}],"toolCalls":[]},"time":1787252689003}
+{"type":"context.append_message","message":{"id":"msg_recall_answer","role":"assistant","content":[{"type":"text","text":"Kimi phase 1 validates the native context JSONL transcript contract."}],"toolCalls":[]},"time":1787252689004}

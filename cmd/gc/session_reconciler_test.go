@@ -3464,6 +3464,9 @@ func emitStrandedDiagnosticForTest(t *testing.T, store beads.Store, session *bea
 		"worker",
 		rec,
 		&clock.Fake{Time: time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)},
+		func(ctx context.Context, spec string) detachedProbeResult {
+			return probeDetachedWorkWithTimeout(ctx, spec, 5*time.Second)
+		},
 		&stderr,
 	)
 	if stderr.Len() != 0 {
@@ -4116,7 +4119,7 @@ func TestReconcileSessionBeads_PoolSlotStrandedThrottleSurvivesSetMetadataFailur
 	snap := newSessionBeadSnapshot([]beads.Bead{session})
 	emit := func() {
 		row := snap.OpenForReconcile()[0]
-		emitSessionStrandedDiagnostic("", env.cfg, failingStore, nil, row.Info, snap, "worker", rec, env.clk, &env.stderr)
+		emitSessionStrandedDiagnostic("", env.cfg, failingStore, nil, row.Info, snap, "worker", rec, env.clk, probeDetachedWork, &env.stderr)
 	}
 
 	// First emit — diagnostic fires AND the durable SetMarker fails on the throttle key.

@@ -131,3 +131,83 @@ links preserved. No docs gate or hook was bypassed.
 Both origin fetch and push URLs were verified as
 `https://github.com/rhar1511/gascity.git`. Source commit completion does not
 authorize a push, production activation, script retirement, or a live trial.
+
+## PR23 reconciliation — 2026-10-02
+
+The isolated controller branch reconciles exact PR23 head
+`fd452caaadf7e0b1bac7f854e1c3a237aa743106` with reviewed controller source
+`65002d16648b2bef2df18b1dac949375706fcd4b`. No foreign worktree or live runtime
+was changed. The resolved source preserves signed work revisions, reciprocal
+claim-generation fences, private-evidence context/capability checks and separate
+proxy/Dolt process and listener ownership.
+
+Existing tests reproduced missing acknowledgement guidance and refusal of the
+durable proxied-server context. The shared envelope and context helpers now
+retain both histories. Exact retained legacy transcript envelopes still match;
+changed fields, extra fields and wrong execution identity remain rejected.
+The API claim-rollover fixture now stamps its matching claim generation rather
+than weakening production attribution checks. Focused session, Beads, worker,
+lifecycle-recovery and API checks pass after the reproduced failures.
+
+Dashboard production/test/E2E typechecks, build, serving and smoke checks pass.
+Its Bazel asset inputs match the regenerated bundle. Bazel execution itself is
+unavailable on this host and is not claimed as passing.
+
+The first graph check stopped during a pinned-tool download because DNS was
+unavailable. The supported installed Beads 1.3.0 override avoids that download.
+With subprocess/owned-run/isolated-Dolt settings, the graph assertions passed but
+exposed cleanup refusal when no supervisor had been started. Owned cleanup now
+checks its process census before requesting a stop and independently rechecks
+absence before root removal. The graph and bounded supervisor-timeout checks
+then passed (6.481s). Uncertain census or remaining owned processes still refuse
+cleanup; cross-run sweeps are not enabled.
+
+These are source-integration checks, not proof of a production atomic backend,
+an accepted merge, a qualified trial or permission to disable WIP orders.
+
+Standards follow-up found an inherited Pi-reset write race. A new filesystem
+regression reproduced both a lexical-root swap writing outside the retained
+root and an escaping parent-directory swap being accepted, with mirrors
+disabled. Native replacement now uses the retained `os.Root` for temporary
+creation, permission enforcement and rename; temporary creation is exclusive.
+Both swap cases and the existing mirror-failure behavior pass after the fix.
+Discovery-side Gemini/OpenCode/ZCode reads share one root-confined opening
+helper. The graph proxy wait now uses the existing context-bounded polling
+helper instead of a separate timer/ticker loop.
+
+The preliminary hook run completed lint (zero issues), code generation, vet
+and docs checks, then was intentionally stopped before dashboard processing to
+run the newly added red/green regression. It is not a completed hook pass; the
+normal commit must rerun the full mandatory hooks on the final source.
+
+### Exact-ref qualification
+
+The operator explicitly authorized temporary-ref qualification in
+`rhar1511/gascity` and gated landing of reviewed, CI-green head/base pairs.
+The published GitHub GraphQL schema describes `updateRefs` as an atomic
+transaction with an expected `beforeOid` for each ref. This differs from the
+head-only REST merge operation, which the controller still refuses.
+
+Two temporary refs, `qualification/exact-merge-20261002-base` and
+`qualification/exact-merge-20261002-head`, were created atomically with expected
+absence. Their initial OIDs were `284fd816f16de5a09db2f55ef26eb262bd71a31e`
+and `fd452caaadf7e0b1bac7f854e1c3a237aa743106`. A matching pair advanced the
+base ref to `90a0a050188c43b3884530c6cf5aee2cae5f8cff` while requiring the
+head ref to remain at the exact approved OID. Both updates used `force:false`.
+
+Stale head and stale base requests were rejected. Independent readback showed
+neither paired operation partially changed the refs, including a stale-base
+request paired with deletion of the head test ref. GitHub returned opaque
+GraphQL errors for stale expectations rather than a stable conflict category;
+such an error must remain failed/unknown pending exact readback, never a reason
+for blind retries. The earlier non-fast-forward rejection alone is not relied
+on as proof of the expected-head check.
+
+Both temporary refs were then deleted atomically with their exact current OIDs,
+and readback confirmed both absent. They can be recreated from the retained
+immutable commits. No actual PR, main branch or live city was modified.
+
+This qualifies the ref primitive only. Landing still requires an exact reviewed
+merge artifact, passing current-head CI, repository/PR policy and independent
+PR/commit readback. The existing controller merge capability remains disabled;
+this experiment did not change trusted production composition or trial gates.

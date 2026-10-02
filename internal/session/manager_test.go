@@ -4550,6 +4550,49 @@ func TestTranscriptPathPrefersSessionKey(t *testing.T) {
 	}
 }
 
+func TestTranscriptPathRejectsDiscoveredSymlinkOutsideSearchRoots(t *testing.T) {
+	store := beads.NewMemStore()
+	mgr := NewManagerWithOptions(store, runtime.NewFake())
+	workDir := t.TempDir()
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{
+		Template: "helper",
+		Command:  "claude",
+		WorkDir:  workDir,
+		Provider: "claude",
+		ExtraMeta: map[string]string{
+			"session_origin": "manual",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	searchRoot := t.TempDir()
+	slugDir := filepath.Join(searchRoot, sessionlog.ProjectSlug(workDir))
+	if err := os.MkdirAll(slugDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	outside := filepath.Join(t.TempDir(), "private.jsonl")
+	if err := os.WriteFile(outside, []byte("{}\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile(outside): %v", err)
+	}
+	link := filepath.Join(slugDir, "latest-session.jsonl")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlinks not supported: %v", err)
+	}
+
+	path, lookup, err := mgr.TranscriptPathClassified(info.ID, []string{searchRoot})
+	if err != nil {
+		t.Fatalf("TranscriptPathClassified: %v", err)
+	}
+	if path != "" {
+		t.Fatalf("TranscriptPathClassified() = %q, want no path for a transcript symlink outside configured roots", path)
+	}
+	if lookup != TranscriptAbsent {
+		t.Fatalf("lookup = %v, want TranscriptAbsent for a rejected discovered path", lookup)
+	}
+}
+
 func TestTranscriptPathAllowsClosedSession(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()

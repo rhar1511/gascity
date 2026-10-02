@@ -9,9 +9,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
+	"net/http/httptrace"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -19,6 +20,8 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -178,6 +181,11 @@ func TestGraphProxyProofRejectsReachableUnownedPortMirror(t *testing.T) {
 	}
 	if got, ok := graphFixtureProxyPortForTest(cityDir); ok {
 		t.Fatalf("graph proxy proof accepted unowned reachable port %q", got)
+	}
+	if runtime.GOOS == "linux" {
+		if _, err := graphFixtureProxyPortForTestWithDiagnostic(cityDir); err == nil || !strings.Contains(err.Error(), "proxy root is absent") {
+			t.Fatalf("detailed graph proxy proof error = %v, want the missing fixture-root reason", err)
+		}
 	}
 }
 
@@ -350,14 +358,21 @@ func setupGraphWorkflowCity(t *testing.T, mode string) string {
 }
 
 type graphPrivateEvidenceTransport struct {
-	endpoint       string
-	projectID      string
-	database       string
-	scopeRef       string
-	tokenFile      string
-	token          string
-	configRevision string
-	bdLauncher     string
+	endpoint           string
+	projectID          string
+	database           string
+	scopeRef           string
+	tokenFile          string
+	token              string
+	configRevision     string
+	bdLauncher         string
+	client             *http.Client
+	serviceDone        <-chan struct{}
+	serviceDiagnostics func() string
+}
+
+func newGraphPrivateEvidenceHTTPClient() *http.Client {
+	return &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{Proxy: nil}}
 }
 
 const graphFixtureCityDatabase = "hq"
@@ -365,6 +380,141 @@ const graphFixtureCityDatabase = "hq"
 type graphBeadsIdentity struct {
 	projectID string
 	database  string
+}
+
+type boundedTailBuffer struct {
+	mu  sync.Mutex
+	buf []byte
+	max int
+}
+
+func (b *boundedTailBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	n := len(p)
+	if b.max <= 0 {
+		return n, nil
+	}
+	b.buf = append(b.buf, p...)
+	if len(b.buf) > b.max {
+		copy(b.buf, b.buf[len(b.buf)-b.max:])
+		b.buf = b.buf[:b.max]
+	}
+	return n, nil
+}
+
+func (b *boundedTailBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return string(b.buf)
+}
+
+func TestBoundedTailBufferKeepsRecentOutput(t *testing.T) {
+	var output boundedTailBuffer
+	output.max = 5
+	if _, err := output.Write([]byte("first")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := output.Write([]byte(" second")); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := output.String(), "econd"; got != want {
+		t.Fatalf("output = %q, want %q", got, want)
+	}
+}
+
+func TestBoundedTailBufferConcurrentReadAndWrite(t *testing.T) {
+	var output boundedTailBuffer
+	output.max = 128
+	var workers sync.WaitGroup
+	workers.Add(2)
+	go func() {
+		defer workers.Done()
+		for range 1000 {
+			_, _ = output.Write([]byte(strings.Repeat("x", 32)))
+		}
+	}()
+	go func() {
+		defer workers.Done()
+		for range 1000 {
+			_ = output.String()
+		}
+	}()
+	workers.Wait()
+	if got := len(output.String()); got > output.max {
+		t.Fatalf("tail buffer size = %d, exceeds bound %d", got, output.max)
+	}
+}
+
+func TestGraphIssueReadsReuseHTTPConnection(t *testing.T) {
+	var connections atomic.Int64
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintln(w, `{"id":"gc-test","status":"open","metadata":{}}`)
+	}))
+	server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			connections.Add(1)
+		}
+	}
+	server.Start()
+	t.Cleanup(server.Close)
+
+	client := newGraphPrivateEvidenceHTTPClient()
+	t.Cleanup(client.CloseIdleConnections)
+	transport := graphPrivateEvidenceTransport{
+		endpoint: server.URL,
+		client:   client,
+		serviceDiagnostics: func() string {
+			return `service=running stdout="" stderr=""`
+		},
+	}
+	for range 4 {
+		if _, err := readGraphBeadOverHTTPContext(context.Background(), transport, "gc-test"); err != nil {
+			t.Fatalf("read graph issue: %v", err)
+		}
+	}
+	if got := connections.Load(); got != 1 {
+		t.Fatalf("issue reads opened %d HTTP connections, want one reused connection", got)
+	}
+}
+
+func TestGraphIssueReadTimeoutReportsHTTPProgress(t *testing.T) {
+	const token = "private-test-token"
+	started := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+		close(started)
+		<-request.Context().Done()
+	}))
+	t.Cleanup(server.Close)
+
+	client := &http.Client{Timeout: 25 * time.Millisecond, Transport: &http.Transport{Proxy: nil}}
+	t.Cleanup(client.CloseIdleConnections)
+	transport := graphPrivateEvidenceTransport{
+		endpoint: server.URL,
+		client:   client,
+		token:    token,
+		serviceDiagnostics: func() string {
+			return redactGraphPrivateEvidenceToken(`service=running stdout="" stderr="private-test-token"`, token)
+		},
+	}
+	_, err := readGraphBeadOverHTTPContext(context.Background(), transport, "gc-test")
+	if err == nil {
+		t.Fatal("stalled issue read unexpectedly succeeded")
+	}
+	select {
+	case <-started:
+	default:
+		t.Fatal("stalled server never received the issue request")
+	}
+	for _, evidence := range []string{"request failed after", "got_connection=true", "first_response_byte=false", "service=running"} {
+		if !strings.Contains(err.Error(), evidence) {
+			t.Fatalf("timeout diagnostic %q does not include %q", err, evidence)
+		}
+	}
+	if strings.Contains(err.Error(), token) {
+		t.Fatalf("timeout diagnostic exposed the service token: %q", err)
+	}
 }
 
 func setupGraphWorkflowCityWithPrivateEvidence(t *testing.T, mode string) (string, graphPrivateEvidenceTransport) {
@@ -518,8 +668,8 @@ func setupGraphWorkflowCityWithOptions(t *testing.T, mode string, privateEvidenc
 	}
 	cityCommand := commandEnvForDir(cityDir, true)
 	assertGraphWorkflowCityEnv(t, cityCommand, gcHome, cityDir, cityRoot)
-	if _, ok := graphFixtureProxyPortForTest(cityDir); !ok {
-		t.Fatal("graph city has no verified fixture-owned Beads proxy and Dolt listener after isolated startup")
+	if _, err := waitForGraphFixtureProxyForTest(cityDir, 30*time.Second); err != nil {
+		t.Fatalf("graph city did not establish a verified fixture-owned Beads proxy and Dolt listener after isolated startup: %v", err)
 	}
 	var transport graphPrivateEvidenceTransport
 	if privateEvidence {
@@ -762,25 +912,50 @@ func graphPathWithin(root, path string) bool {
 
 // graphFixtureProxyPortForTest accepts only the BD-owned proxied lifecycle
 // initialized for this graph city. The proxy record proves which supervisor
-// owns the root; the child pidfile and /proc listener ownership prove that its
-// published database port belongs to the Dolt child in that same root.
+// owns the root and identifies the proxy listener. The child pidfile and /proc
+// listener ownership independently prove the Dolt backend listener in that
+// same root; those two listeners intentionally have distinct ports.
 func graphFixtureProxyPortForTest(cityDir string) (string, bool) {
+	port, err := graphFixtureProxyPortForTestWithDiagnostic(cityDir)
+	return port, err == nil
+}
+
+func waitForGraphFixtureProxyForTest(cityDir string, timeout time.Duration) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	var port string
+	_, err := pollUntilContext(ctx, "graph fixture proxy ownership", 100*time.Millisecond,
+		func(context.Context) (bool, string, error) {
+			observedPort, checkErr := graphFixtureProxyPortForTestWithDiagnostic(cityDir)
+			if checkErr != nil {
+				return false, checkErr.Error(), nil
+			}
+			port = observedPort
+			return true, "proxy and Dolt listeners have verified owners", nil
+		})
+	if err != nil {
+		return "", err
+	}
+	return port, nil
+}
+
+func graphFixtureProxyPortForTestWithDiagnostic(cityDir string) (string, error) {
 	if runtime.GOOS != "linux" || cityDir == "" || !filepath.IsAbs(cityDir) {
-		return "", false
+		return "", errors.New("proof requires an absolute city path on Linux")
 	}
 	cityDir = filepath.Clean(cityDir)
 	resolvedCity, err := filepath.EvalSymlinks(cityDir)
 	if err != nil || filepath.Clean(resolvedCity) != cityDir {
-		return "", false
+		return "", errors.New("city path is missing or resolves through a symlink")
 	}
 	beadsDir := filepath.Join(cityDir, ".beads")
 	root := filepath.Join(beadsDir, proxyendpoint.DefaultRootDirName)
 	if !graphFixturePathIsReal(root) {
-		return "", false
+		return "", errors.New("proxy root is absent or not a real fixture directory")
 	}
 	metadataData, ok := graphReadFixtureRegularFile(filepath.Join(beadsDir, proxyendpoint.MetadataFileName), 1<<20)
 	if !ok {
-		return "", false
+		return "", errors.New("Beads metadata is absent or not a regular file")
 	}
 	var metadata struct {
 		Backend      string `json:"backend"`
@@ -789,9 +964,11 @@ func graphFixtureProxyPortForTest(cityDir string) (string, bool) {
 		ProjectID    string `json:"project_id"`
 		DoltDataDir  string `json:"dolt_data_dir"`
 	}
-	if json.Unmarshal(metadataData, &metadata) != nil || metadata.Backend != "dolt" || metadata.DoltMode != "proxied-server" ||
-		metadata.DoltDatabase != graphFixtureCityDatabase || strings.TrimSpace(metadata.ProjectID) == "" {
-		return "", false
+	if err := json.Unmarshal(metadataData, &metadata); err != nil {
+		return "", fmt.Errorf("decode Beads metadata: %w", err)
+	}
+	if metadata.Backend != "dolt" || metadata.DoltMode != "proxied-server" || metadata.DoltDatabase != graphFixtureCityDatabase || strings.TrimSpace(metadata.ProjectID) == "" {
+		return "", fmt.Errorf("Beads metadata does not describe the fixture's proxied Dolt database (backend=%q mode=%q database=%q project_id_present=%t)", metadata.Backend, metadata.DoltMode, metadata.DoltDatabase, strings.TrimSpace(metadata.ProjectID) != "")
 	}
 	dataDir := root
 	if metadata.DoltDataDir != "" {
@@ -801,14 +978,17 @@ func graphFixtureProxyPortForTest(cityDir string) (string, bool) {
 		}
 	}
 	if !graphFixturePathEquals(dataDir, root) {
-		return "", false
+		return "", errors.New("Dolt data directory does not match the fixture proxy root")
 	}
 	sidecar, err := proxyendpoint.ReadSidecar(beadsDir)
 	if err != nil || !sidecar.Present {
-		return "", false
+		if err != nil {
+			return "", fmt.Errorf("read proxy endpoint sidecar: %w", err)
+		}
+		return "", errors.New("proxy endpoint sidecar has not been published")
 	}
 	if sidecar.RootPath != "" && !graphFixturePathEquals(sidecar.ResolvedRootPath(beadsDir), root) {
-		return "", false
+		return "", errors.New("proxy endpoint sidecar names a different root")
 	}
 	configPath := filepath.Join(root, proxyendpoint.ConfigFileName)
 	if sidecar.ConfigPath != "" {
@@ -817,7 +997,7 @@ func graphFixtureProxyPortForTest(cityDir string) (string, bool) {
 			resolved = filepath.Join(beadsDir, resolved)
 		}
 		if !graphFixturePathEquals(resolved, configPath) {
-			return "", false
+			return "", errors.New("proxy endpoint sidecar names a different config")
 		}
 	}
 	if sidecar.LogPath != "" {
@@ -826,58 +1006,75 @@ func graphFixtureProxyPortForTest(cityDir string) (string, bool) {
 			resolved = filepath.Join(beadsDir, resolved)
 		}
 		if !graphFixturePathEquals(resolved, filepath.Join(root, "server.log")) {
-			return "", false
+			return "", errors.New("proxy endpoint sidecar names a different log")
 		}
 	}
 	if _, ok := graphReadFixtureRegularFile(configPath, 1<<20); !ok {
-		return "", false
+		return "", errors.New("proxy config is absent or not a regular file")
 	}
 	if _, ok := graphReadFixtureRegularFile(proxyendpoint.PIDPath(root), 16<<10); !ok {
-		return "", false
+		return "", errors.New("proxy PID record is absent or not a regular file")
 	}
 	endpoint := proxyendpoint.Inspect(root, proxyendpoint.DefaultProcessTable())
 	if endpoint.Verdict != proxyendpoint.VerdictLive || endpoint.Liveness.Evidence != proxyendpoint.EvidenceArgvBirth ||
 		endpoint.Record.Kind != proxyendpoint.RecordKind || endpoint.Record.Port <= 0 || endpoint.Record.Port > 65535 {
-		return "", false
+		return "", fmt.Errorf("proxy endpoint is not verified live (verdict=%s evidence=%s record_kind=%q port=%d)", endpoint.Verdict, endpoint.Liveness.Evidence, endpoint.Record.Kind, endpoint.Record.Port)
 	}
 	proxyRootArg, proxyRootFound, proxyRootValid := graphProcessFlag(endpoint.Liveness.Argv, proxyendpoint.RootFlag)
 	if !proxyRootFound || !proxyRootValid || !graphFixturePathEquals(proxyRootArg, root) || !proxyendpoint.ArgvNamesRoot(endpoint.Liveness.Argv, root) {
-		return "", false
+		return "", errors.New("verified proxy process argv does not name the fixture root exactly once")
 	}
 	childData, ok := graphReadFixtureRegularFile(filepath.Join(root, graphProxyChildPIDFileName), 16<<10)
 	if !ok {
-		return "", false
+		return "", errors.New("Dolt child PID record has not been published")
 	}
 	var child graphProxyProcessRecord
-	if json.Unmarshal(childData, &child) != nil || child.PID <= 0 || child.Port <= 0 || child.Port > 65535 ||
+	if err := json.Unmarshal(childData, &child); err != nil {
+		return "", fmt.Errorf("decode Dolt child PID record: %w", err)
+	}
+	if child.PID <= 0 || child.Port <= 0 || child.Port > 65535 ||
 		child.Kind != graphDoltBackendRecordKind || child.Schema < proxyendpoint.SchemaV2 || child.Birth == "" || child.RootID != endpoint.RootID {
-		return "", false
+		return "", fmt.Errorf(
+			"Dolt child identity is invalid or belongs to another proxy root (pid=%d backend_port=%d kind=%q schema=%d birth_present=%t root_id_matches=%t)",
+			child.PID, child.Port, child.Kind, child.Schema, child.Birth != "", child.RootID == endpoint.RootID,
+		)
 	}
 	if child.PID == endpoint.Record.PID {
-		return "", false
+		return "", errors.New("Dolt child and proxy must be distinct processes")
 	}
 	processes := proxyendpoint.DefaultProcessTable()
 	if !processes.Alive(child.PID) {
-		return "", false
+		return "", errors.New("Dolt child process is not alive")
 	}
 	childBirth, err := processes.Birth(child.PID)
-	if err != nil || childBirth != child.Birth {
-		return "", false
+	if err != nil {
+		return "", fmt.Errorf("read Dolt child process birth identity: %w", err)
+	}
+	if childBirth != child.Birth {
+		return "", errors.New("Dolt child process birth identity does not match its PID record")
 	}
 	argv, err := processes.Argv(child.PID)
-	if err != nil || !graphDoltChildCommandMatches(child.PID, argv, configPath, root, child.Port) {
-		return "", false
+	if err != nil {
+		return "", fmt.Errorf("read Dolt child process argv: %w", err)
+	}
+	if !graphDoltChildCommandMatches(child.PID, argv, configPath, root, child.Port) {
+		return "", errors.New("Dolt child process argv does not match the fixture config and root")
 	}
 	configData, ok := graphReadFixtureRegularFile(configPath, 1<<20)
-	if !ok || !graphProxyConfigMatches(configData, child.Port) ||
-		!graphFixtureListenersOwned(endpoint.Record.PID, endpoint.Record.Port, child.PID, child.Port) {
-		return "", false
+	if !ok {
+		return "", errors.New("proxy config is absent or not a regular file")
+	}
+	if !graphProxyConfigMatches(configData, child.Port) {
+		return "", errors.New("proxy config does not publish the verified Dolt child port")
+	}
+	if !graphFixtureListenersOwned(endpoint.Record.PID, endpoint.Record.Port, child.PID, child.Port) {
+		return "", errors.New("verified proxy and Dolt child do not own their respective listening sockets")
 	}
 	port := strconv.Itoa(endpoint.Record.Port)
 	if !testPortReachable(port) {
-		return "", false
+		return "", errors.New("published Dolt listener is not reachable on loopback")
 	}
-	return port, true
+	return port, nil
 }
 
 // graphFixtureProcessesMayRemain is a cleanup-only proof. The city root is
@@ -1241,11 +1438,23 @@ func startGraphPrivateEvidenceService(t *testing.T, cityEnv []string, cityDir, c
 			t.Fatalf("graph Beads service has an unexpected endpoint override %s", name)
 		}
 	}
+	// bd serve resolves its project context from Git. Give the disposable city
+	// an explicitly bounded repository instead of letting Git discover the
+	// ambient checkout (the service environment intentionally strips Git vars).
+	if output, err := runCommand(cityDir, serviceEnv, 10*time.Second, "git", "init", "--quiet", cityDir); err != nil {
+		t.Fatalf("initialize private-evidence fixture repository: %v\noutput: %s", err, output)
+	}
+	root, err := runCommand(cityDir, serviceEnv, 10*time.Second, "git", "rev-parse", "--show-toplevel")
+	if err != nil || filepath.Clean(strings.TrimSpace(root)) != filepath.Clean(cityDir) {
+		t.Fatalf("private-evidence fixture repository root = %q, want %q (err=%v)", strings.TrimSpace(root), cityDir, err)
+	}
 	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
 	serviceCtx, stopService := context.WithCancel(context.Background())
 	cmd := buildCommand(serviceCtx, cityDir, serviceEnv, realBDBinary, "serve", "--addr", addr, "--auth-token-file", tokenFile)
-	cmd.Stdout = io.Discard
-	cmd.Stderr = io.Discard
+	serviceStdout := &boundedTailBuffer{max: 8 << 10}
+	serviceStderr := &boundedTailBuffer{max: 8 << 10}
+	cmd.Stdout = serviceStdout
+	cmd.Stderr = serviceStderr
 	if err := cmd.Start(); err != nil {
 		stopService()
 		t.Fatalf("start installed Beads service for graph city: %v", err)
@@ -1270,6 +1479,9 @@ func startGraphPrivateEvidenceService(t *testing.T, cityEnv []string, cityDir, c
 			t.Errorf("installed Beads service did not exit after kill; fixture root will be preserved if its process remains")
 		}
 	})
+	diagnosticOutput := func(output *boundedTailBuffer) string {
+		return redactGraphPrivateEvidenceToken(strings.TrimSpace(output.String()), token)
+	}
 
 	endpoint := "http://" + addr
 	client := &http.Client{Timeout: time.Second, Transport: &http.Transport{Proxy: nil}}
@@ -1280,10 +1492,11 @@ func startGraphPrivateEvidenceService(t *testing.T, cityEnv []string, cityDir, c
 		func(ctx context.Context) (bool, string, error) {
 			select {
 			case <-done:
+				diagnostics := fmt.Sprintf("stdout=%q stderr=%q", diagnosticOutput(serviceStdout), diagnosticOutput(serviceStderr))
 				if processErr != nil {
-					return false, "service process exited", fmt.Errorf("installed Beads service exited before graph readiness: %w", processErr)
+					return false, "service process exited", fmt.Errorf("installed Beads service exited before graph readiness: %w; %s", processErr, diagnostics)
 				}
-				return false, "service process exited", errors.New("installed Beads service exited before graph readiness")
+				return false, "service process exited", fmt.Errorf("installed Beads service exited before graph readiness; %s", diagnostics)
 			default:
 			}
 			request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint+"/v0/beads/context", nil)
@@ -1316,9 +1529,21 @@ func startGraphPrivateEvidenceService(t *testing.T, cityEnv []string, cityDir, c
 	if err != nil {
 		t.Fatalf("installed Beads service did not expose its authenticated graph context: %v", err)
 	}
+	issueClient := newGraphPrivateEvidenceHTTPClient()
+	t.Cleanup(issueClient.CloseIdleConnections)
+	serviceDiagnostics := func() string {
+		state := "running"
+		select {
+		case <-done:
+			state = "exited"
+		default:
+		}
+		return fmt.Sprintf("service=%s stdout=%q stderr=%q", state, diagnosticOutput(serviceStdout), diagnosticOutput(serviceStderr))
+	}
 	return graphPrivateEvidenceTransport{
 		endpoint: endpoint, projectID: loadedIdentity.projectID, database: loadedIdentity.database,
-		scopeRef: "city:" + cityName, tokenFile: tokenFile, token: token,
+		scopeRef: "city:" + cityName, tokenFile: tokenFile, token: token, client: issueClient,
+		serviceDone: done, serviceDiagnostics: serviceDiagnostics,
 	}
 }
 
@@ -1345,6 +1570,9 @@ func listGraphIssuesOverHTTP(t *testing.T, transport graphPrivateEvidenceTranspo
 }
 
 func readGraphIssuesOverHTTP(ctx context.Context, transport graphPrivateEvidenceTransport) ([]graphBead, error) {
+	if transport.client == nil {
+		return nil, errors.New("graph issue transport has no HTTP client")
+	}
 	query := url.Values{
 		"all":               {"true"},
 		"include_templates": {"true"},
@@ -1352,7 +1580,6 @@ func readGraphIssuesOverHTTP(ctx context.Context, transport graphPrivateEvidence
 		"include_infra":     {"true"},
 		"limit":             {"100"},
 	}
-	client := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{Proxy: nil}}
 	var issues []graphBead
 	cursor := ""
 	for pageNumber := 0; pageNumber < 16; pageNumber++ {
@@ -1365,9 +1592,9 @@ func readGraphIssuesOverHTTP(ctx context.Context, transport graphPrivateEvidence
 		}
 		request.Header.Set("Authorization", "Bearer "+transport.token)
 		request.Header.Set("Bd-Project-Id", transport.projectID)
-		response, err := client.Do(request)
+		response, err := transport.client.Do(request)
 		if err != nil {
-			return nil, errors.New("could not read graph issues through installed service")
+			return nil, fmt.Errorf("could not read graph issues through installed service: %s", safeGraphHTTPTransportError(err, transport.token))
 		}
 		var page struct {
 			Items      []graphBead `json:"items"`
@@ -1425,7 +1652,11 @@ func waitForBeadClosedWithoutPrivatePayloadDiagnostics(t *testing.T, cityDir str
 		func(ctx context.Context) (bool, string, error) {
 			bead, err := readGraphBeadOverHTTPContext(ctx, transport, beadID)
 			if err != nil {
-				return false, "workflow bead read is unavailable", nil
+				// The error contains token-redacted transport details or an HTTP
+				// status, never the private response body. Preserve it as the last
+				// observation so CI distinguishes an unreachable service from a
+				// missing route or issue.
+				return false, "workflow bead read is unavailable: " + err.Error(), nil
 			}
 			if bead.Status == "closed" {
 				closed = bead
@@ -1447,6 +1678,16 @@ func readGraphBeadOverHTTP(t *testing.T, transport graphPrivateEvidenceTransport
 }
 
 func readGraphBeadOverHTTPContext(ctx context.Context, transport graphPrivateEvidenceTransport, beadID string) (graphBead, error) {
+	if transport.client == nil {
+		return graphBead{}, errors.New("graph issue transport has no HTTP client")
+	}
+	if transport.serviceDone != nil {
+		select {
+		case <-transport.serviceDone:
+			return graphBead{}, fmt.Errorf("installed Beads service exited before issue read: %s", graphServiceDiagnosticText(transport))
+		default:
+		}
+	}
 	endpoint := transport.endpoint + "/v0/beads/issues/" + url.PathEscape(beadID)
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
@@ -1454,10 +1695,26 @@ func readGraphBeadOverHTTPContext(ctx context.Context, transport graphPrivateEvi
 	}
 	request.Header.Set("Authorization", "Bearer "+transport.token)
 	request.Header.Set("Bd-Project-Id", transport.projectID)
-	client := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{Proxy: nil}}
-	response, err := client.Do(request)
+	var gotConnection, reusedConnection, firstResponseByte atomic.Bool
+	trace := &httptrace.ClientTrace{
+		GotConn: func(info httptrace.GotConnInfo) {
+			gotConnection.Store(true)
+			reusedConnection.Store(info.Reused)
+		},
+		GotFirstResponseByte: func() { firstResponseByte.Store(true) },
+	}
+	request = request.WithContext(httptrace.WithClientTrace(request.Context(), trace))
+	started := time.Now()
+	response, err := transport.client.Do(request)
 	if err != nil {
-		return graphBead{}, errors.New("could not read graph issue through installed service")
+		observation := fmt.Sprintf(
+			"request failed after %s (got_connection=%t connection_reused=%t first_response_byte=%t)",
+			time.Since(started).Round(time.Millisecond), gotConnection.Load(), reusedConnection.Load(), firstResponseByte.Load(),
+		)
+		if diagnostic := graphServiceDiagnosticText(transport); diagnostic != "" {
+			observation += "; " + diagnostic
+		}
+		return graphBead{}, fmt.Errorf("could not read graph issue through installed service: %s; %s", safeGraphHTTPTransportError(err, transport.token), observation)
 	}
 	if response.StatusCode != http.StatusOK {
 		if err := response.Body.Close(); err != nil {
@@ -1480,6 +1737,24 @@ func readGraphBeadOverHTTPContext(ctx context.Context, transport graphPrivateEvi
 		}
 	}
 	return bead, nil
+}
+
+func graphServiceDiagnosticText(transport graphPrivateEvidenceTransport) string {
+	if transport.serviceDiagnostics == nil {
+		return ""
+	}
+	return transport.serviceDiagnostics()
+}
+
+func safeGraphHTTPTransportError(err error, token string) string {
+	return redactGraphPrivateEvidenceToken(err.Error(), token)
+}
+
+func redactGraphPrivateEvidenceToken(message, token string) string {
+	if token != "" {
+		message = strings.ReplaceAll(message, token, "[redacted]")
+	}
+	return message
 }
 
 func isGraphPrivateEvidenceMetadataKey(key string) bool {

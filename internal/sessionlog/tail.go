@@ -8,10 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
-
-	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 // TailMeta holds metadata extracted from the tail of a session file.
@@ -43,8 +40,12 @@ func ExtractTailMeta(path string) (*TailMeta, error) {
 		return nil, err
 	}
 	defer f.Close() //nolint:errcheck // best-effort close on read-only file
+	return ExtractTailMetaFrom(f)
+}
 
-	data, startsMidLine, err := readTail(f)
+// ExtractTailMetaFrom reads metadata from an already-open transcript.
+func ExtractTailMetaFrom(source io.ReadSeeker) (*TailMeta, error) {
+	data, startsMidLine, err := readTail(source)
 	if err != nil {
 		return nil, err
 	}
@@ -59,36 +60,112 @@ func ExtractTailMeta(path string) (*TailMeta, error) {
 // ExtractTailMetaFromSearchPaths reads tail metadata only after verifying
 // path resolves under one of the configured session-log search roots.
 func ExtractTailMetaFromSearchPaths(searchPaths []string, path string) (*TailMeta, error) {
-	safePath, err := validateSearchPathFile(searchPaths, path)
+	transcript, err := OpenTranscript("claude", searchPaths, path)
 	if err != nil {
 		return nil, err
 	}
-	return ExtractTailMeta(safePath)
+	defer transcript.Close() //nolint:errcheck
+	return transcript.TailMeta()
 }
 
-func validateSearchPathFile(searchPaths []string, path string) (string, error) {
-	if strings.TrimSpace(path) == "" {
-		return "", fmt.Errorf("empty session log path")
-	}
-	cleanPath, err := filepath.Abs(filepath.Clean(path))
+// ValidateTranscriptPath opens a discovered provider transcript beneath an
+// allowed root and closes it, returning the caller's lexical path. It is a
+// discovery-time check only; callers that read the transcript must retain and
+// use the OpenedTranscript returned by OpenTranscript.
+func ValidateTranscriptPath(provider string, searchPaths []string, path string) (string, error) {
+	transcript, err := OpenTranscript(provider, searchPaths, path)
 	if err != nil {
-		return "", fmt.Errorf("resolving session log path: %w", err)
+		return "", err
 	}
-	for _, root := range searchPaths {
-		if strings.TrimSpace(root) == "" {
-			continue
+	defer transcript.Close() //nolint:errcheck
+	return transcript.Path(), nil
+}
+
+// ResolveTranscriptPath is retained for source compatibility. It now returns
+// the caller's lexical path rather than a physical EvalSymlinks result. The
+// returned string is not an authorization capability; reads must use
+// OpenTranscript and its descriptor-based parser methods.
+func ResolveTranscriptPath(provider string, searchPaths []string, path string) (string, error) {
+	return ValidateTranscriptPath(provider, searchPaths, path)
+}
+
+func providerTranscriptSearchPaths(provider string, extraPaths []string) []string {
+	family := ProviderFamily(provider)
+	var roots []string
+	switch family {
+	case "codex":
+		roots = mergeCodexSearchPaths(extraPaths)
+		return withCodexSessionLinkRoots(roots)
+	case "gemini":
+		roots = mergeGeminiSearchPaths(extraPaths)
+	case "kimi":
+		roots = mergeKimiSearchPaths(extraPaths)
+		return withKimiSessionLinkRoots(roots)
+	case "pi":
+		roots = mergePiSearchPaths(extraPaths)
+	case "antigravity":
+		roots = mergeAntigravitySearchPaths(extraPaths)
+	case "copilot":
+		roots = mergeCopilotSearchPaths(extraPaths)
+	case "cursor":
+		roots = mergePaths(DefaultCursorSearchPaths(), extraPaths)
+	case "kiro":
+		roots = mergeKiroSearchPaths(extraPaths)
+	case "mimocode":
+		roots = mergeMimoCodeSearchPaths(extraPaths)
+	case "opencode":
+		roots = mergeOpenCodeSearchPaths(extraPaths)
+	case "zcode":
+		roots = mergeZCodeSearchPaths(extraPaths)
+	case "auto":
+		for _, family := range []string{
+			"amp", "antigravity", "auggie", "claude", "codex", "copilot", "cursor",
+			"gemini", "grok", "kimi", "kiro", "mimocode", "opencode", "pi", "zcode",
+		} {
+			roots = append(roots, providerTranscriptSearchPaths(family, extraPaths)...)
 		}
-		cleanRoot, err := filepath.Abs(filepath.Clean(root))
+		return mergePaths(nil, roots)
+	default:
+		// Auggie, Amp, Grok, Claude, and unknown provider aliases discover only
+		// beneath the caller's roots (the manager supplies its normal defaults).
+		roots = mergePaths(nil, extraPaths)
+	}
+	return roots
+}
+
+// withCodexSessionLinkRoots preserves Codex's direct symlinked extra-account
+// roots, but does not recursively bless arbitrary nested symlink directories.
+func withCodexSessionLinkRoots(roots []string) []string {
+	return mergePaths(codexSessionLinkRoots(roots), roots)
+}
+
+func codexSessionLinkRoots(roots []string) []string {
+	var linked []string
+	for _, root := range roots {
+		_, names := splitCodexSessionRoots(root)
+		for _, name := range names {
+			linked = append(linked, filepath.Join(root, name))
+		}
+	}
+	return mergePaths(nil, linked)
+}
+
+// withKimiSessionLinkRoots preserves Kimi's direct symlinked account roots.
+// Each accepted link is itself opened as a root; nested links are not added.
+func withKimiSessionLinkRoots(roots []string) []string {
+	var linked []string
+	for _, root := range roots {
+		entries, err := os.ReadDir(root)
 		if err != nil {
 			continue
 		}
-		rel, err := filepath.Rel(cleanRoot, cleanPath)
-		if err != nil || rel == "." || filepath.IsAbs(rel) || pathutil.IsOutsideDir(rel) {
-			continue
+		for _, entry := range entries {
+			if entry.Type()&os.ModeSymlink != 0 {
+				linked = append(linked, filepath.Join(root, entry.Name()))
+			}
 		}
-		return cleanPath, nil
 	}
-	return "", fmt.Errorf("session log path is outside configured search paths")
+	return mergePaths(linked, roots)
 }
 
 // readTail reads the last tailChunkSize bytes of r (or the whole thing if smaller).

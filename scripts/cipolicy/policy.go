@@ -77,7 +77,10 @@ const (
 	// internal/bootstrap/packs/core/assets/scripts/** so a reaper.sh-only
 	// change runs the real-Dolt reaper tests. Reviewed delta: one filter path,
 	// no new job, trigger or permission.
-	expectedCIExecutionHash     = "7bf12250c2b6d756458cc48e70fd716b01e517fa4d629f237b542aa8f67cb139"
+	// Reviewed follow-up: REST smoke shards now have a 30-minute budget, and the
+	// PR evidence watchdog can observe required suites up to 90 minutes plus
+	// setup/aggregation overhead. No new job, trigger, or permission.
+	expectedCIExecutionHash     = "5132e99517e7b4db8c346700df3573c472fc8202ba10ff4705a010aed291fccf"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,

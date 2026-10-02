@@ -41,16 +41,22 @@ func TestKimiCodeDiscovery(t *testing.T) {
 	if got := FindKimiSessionFile([]string{root}, "/some/other/workdir"); got != "" {
 		t.Errorf("wrong workdir matched %q", got)
 	}
-	legacy := writeKimiContext(t, filepath.Join(root, "sessions", kimiWorkDirHash(workDir), "legacy", "context.jsonl"), []string{`{"role":"user","content":"old"}`})
-	past := time.Now().Add(-time.Hour)
-	if err := os.Chtimes(legacy, past, past); err != nil {
+	// Legacy Kimi CLI stores sessions in an MD5-named bucket. Do not discover
+	// that layout automatically; only the native Kimi Code key format is
+	// supported for transcript lookup.
+	legacy := writeKimiContext(t, filepath.Join(root, "sessions", "83d3ef5552b32ae3a340745394997089", "legacy", "context.jsonl"), []string{`{"role":"user","content":"old"}`})
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(legacy, future, future); err != nil {
 		t.Fatal(err)
 	}
-	if got := FindKimiSessionFileIfUnambiguous([]string{root}, workDir); got != "" {
-		t.Fatalf("mixed layouts are ambiguous, got %q", got)
+	if got := FindKimiSessionFileIfUnambiguous([]string{root}, workDir); !samePath(got, path) {
+		t.Fatalf("legacy bucket affected native lookup; got %q, want %q", got, path)
 	}
 	if got := FindKimiSessionFile([]string{root}, workDir); !samePath(got, path) {
-		t.Fatalf("newest mixed layout = %q", got)
+		t.Fatalf("newest lookup included legacy bucket: got %q, want %q", got, path)
+	}
+	if got := FindKimiSessionFileByID([]string{root}, workDir, "legacy"); got != "" {
+		t.Fatalf("legacy session ID was discovered at %q", got)
 	}
 }
 
@@ -258,37 +264,32 @@ func TestKimiCodeSuccessfulLookupDoesNotWarnAboutLegacyLayout(t *testing.T) {
 	}
 }
 
-func TestKimiCodeMissingWorkDirDiagnosticNamesTheLayoutsOwnKey(t *testing.T) {
+func TestKimiCodeMissingWorkDirDiagnosticNamesExpectedKey(t *testing.T) {
 	isolateKimiSearchRoots(t)
 	workDir := "/tmp/kimi-probe-ws"
-	legacyKey, codeKey := kimiWorkDirHash(workDir), kimiCodeWorkDirKey(workDir)
-	for _, tc := range []struct{ name, bucket, want, reject string }{
-		{"native only", "wd_other-workspace_0123456789ab", codeKey, legacyKey},
-		{"legacy only", "0605e102fc4db5e001e792f4c16f94e8", legacyKey, codeKey},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			root := t.TempDir()
-			if err := os.MkdirAll(filepath.Join(root, tc.bucket, "session-1"), 0o755); err != nil {
-				t.Fatal(err)
-			}
-			var logs bytes.Buffer
-			oldWriter, oldFlags := log.Writer(), log.Flags()
-			log.SetOutput(&logs)
-			log.SetFlags(0)
-			defer func() {
-				log.SetOutput(oldWriter)
-				log.SetFlags(oldFlags)
-			}()
-			if got := FindKimiSessionFile([]string{root}, workDir); got != "" {
-				t.Fatalf("FindKimiSessionFile() = %q, want empty", got)
-			}
-			logText := logs.String()
-			if !strings.Contains(logText, `expected workdir hash "`+tc.want+`"`) {
-				t.Fatalf("diagnostic did not name the key this store's layout uses (%q):\n%s", tc.want, logText)
-			}
-			if strings.Contains(logText, tc.reject) {
-				t.Fatalf("diagnostic named the other layout's key (%q), which this CLI never mints:\n%s", tc.reject, logText)
-			}
-		})
+	workKey := kimiCodeWorkDirKey(workDir)
+	root := t.TempDir()
+	for _, bucket := range []string{"wd_other-workspace_0123456789ab", "0605e102fc4db5e001e792f4c16f94e8"} {
+		if err := os.MkdirAll(filepath.Join(root, bucket, "session-1"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var logs bytes.Buffer
+	oldWriter, oldFlags := log.Writer(), log.Flags()
+	log.SetOutput(&logs)
+	log.SetFlags(0)
+	defer func() {
+		log.SetOutput(oldWriter)
+		log.SetFlags(oldFlags)
+	}()
+	if got := FindKimiSessionFile([]string{root}, workDir); got != "" {
+		t.Fatalf("FindKimiSessionFile() = %q, want empty", got)
+	}
+	logText := logs.String()
+	if !strings.Contains(logText, `expected Kimi Code workdir key "`+workKey+`"`) {
+		t.Fatalf("diagnostic did not name the expected Kimi Code key (%q):\n%s", workKey, logText)
+	}
+	if strings.Contains(logText, "0605e102fc4db5e001e792f4c16f94e8") {
+		t.Fatalf("diagnostic exposed or recommended the legacy MD5 bucket:\n%s", logText)
 	}
 }

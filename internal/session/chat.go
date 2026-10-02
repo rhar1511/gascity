@@ -1233,7 +1233,11 @@ func (m *Manager) TranscriptPathClassified(id string, searchPaths []string) (str
 		searchPaths = sessionlog.DefaultSearchPaths()
 	}
 	if path := workertranscript.DiscoverKeyedPath(searchPaths, provider, workDir, b.Metadata["session_key"]); path != "" {
-		return path, TranscriptFound, nil
+		validated, err := sessionlog.ValidateTranscriptPath(provider, searchPaths, path)
+		if err != nil {
+			return "", TranscriptAbsent, nil
+		}
+		return validated, TranscriptFound, nil
 	}
 	// zcode carries no session_key — no session-id flag, no hook plugin — so
 	// the keyed lookup above can never hit for it and the ambiguity guard below
@@ -1248,7 +1252,11 @@ func (m *Manager) TranscriptPathClassified(id string, searchPaths []string) (str
 		b.ID,
 		b.Metadata["continuation_epoch"],
 	); path != "" {
-		return path, TranscriptFound, nil
+		validated, err := sessionlog.ValidateTranscriptPath(provider, searchPaths, path)
+		if err != nil {
+			return "", TranscriptAbsent, nil
+		}
+		return validated, TranscriptFound, nil
 	}
 
 	sameWorkDirSessions, err := m.sameWorkDirSessionBeads(b, provider, workDir)
@@ -1261,14 +1269,22 @@ func (m *Manager) TranscriptPathClassified(id string, searchPaths []string) (str
 			sameWorkDirInfos = append(sameWorkDirInfos, infoFromPersistedBead(s))
 		}
 		if path := ResolveCodexTranscriptBySessionOrder(searchPaths, provider, workDir, b.ID, sameWorkDirInfos); path != "" {
-			return path, TranscriptFound, nil
+			validated, err := sessionlog.ValidateTranscriptPath(provider, searchPaths, path)
+			if err != nil {
+				return "", TranscriptAbsent, nil
+			}
+			return validated, TranscriptFound, nil
 		}
 		// Without a stable session key, multiple sessions sharing the same
 		// workdir cannot be mapped safely to a single transcript.
 		return "", TranscriptAmbiguous, nil
 	}
 	if path := workertranscript.DiscoverPath(searchPaths, provider, workDir, ""); path != "" {
-		return path, TranscriptFound, nil
+		validated, err := sessionlog.ValidateTranscriptPath(provider, searchPaths, path)
+		if err != nil {
+			return "", TranscriptAbsent, nil
+		}
+		return validated, TranscriptFound, nil
 	}
 	return "", TranscriptAbsent, nil
 }

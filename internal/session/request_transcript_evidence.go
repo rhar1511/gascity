@@ -82,24 +82,32 @@ type RequestTranscriptEvidence struct {
 }
 
 type trackedRequestEnvelope struct {
-	RequestID       string `json:"request_id"`
-	SessionID       string `json:"session_id"`
-	Generation      int    `json:"generation"`
-	Instruction     string `json:"instruction"`
-	AcknowledgeWith string `json:"acknowledge_with"`
-	Message         string `json:"message"`
+	RequestID            string `json:"request_id"`
+	SessionID            string `json:"session_id"`
+	Generation           int    `json:"generation"`
+	Instruction          string `json:"instruction"`
+	AcknowledgeWith      string `json:"acknowledge_with"`
+	Message              string `json:"message"`
+	AcknowledgeWhen      string `json:"acknowledge_when,omitempty"`
+	AcknowledgementMeans string `json:"acknowledgement_means,omitempty"`
 }
 
-const trackedRequestEnvelopeInstruction = "Acknowledge receipt before acting by running the command in acknowledge_with."
+const (
+	trackedRequestEnvelopeInstruction  = "Acknowledge receipt before acting by running the command in acknowledge_with."
+	trackedRequestAcknowledgeWhen      = "after reading this request and before acting on it"
+	trackedRequestAcknowledgementMeans = "receipt_only; this does not verify completion or effect"
+)
 
 func marshalTrackedRequestEnvelope(requestID, sessionID string, generation int, message string) ([]byte, error) {
 	return json.Marshal(trackedRequestEnvelope{
-		RequestID:       requestID,
-		SessionID:       sessionID,
-		Generation:      generation,
-		Instruction:     trackedRequestEnvelopeInstruction,
-		AcknowledgeWith: fmt.Sprintf("gc session request ack %q", requestID),
-		Message:         message,
+		RequestID:            requestID,
+		SessionID:            sessionID,
+		Generation:           generation,
+		Instruction:          trackedRequestEnvelopeInstruction,
+		AcknowledgeWith:      "gc session request ack -- " + requestID,
+		Message:              message,
+		AcknowledgeWhen:      trackedRequestAcknowledgeWhen,
+		AcknowledgementMeans: trackedRequestAcknowledgementMeans,
 	})
 }
 
@@ -113,8 +121,14 @@ func RequestEnvelopeMatchesReceipt(text string, receipt RequestReceipt) bool {
 	if err := json.Unmarshal([]byte(text), &envelope); err != nil {
 		return false
 	}
+	acknowledgeWith := "gc session request ack -- " + receipt.RequestID
+	if envelope.AcknowledgeWhen == "" && envelope.AcknowledgementMeans == "" {
+		acknowledgeWith = fmt.Sprintf("gc session request ack %q", receipt.RequestID)
+	} else if envelope.AcknowledgeWhen != trackedRequestAcknowledgeWhen || envelope.AcknowledgementMeans != trackedRequestAcknowledgementMeans {
+		return false
+	}
 	if envelope.RequestID != receipt.RequestID || envelope.SessionID != receipt.SessionID || envelope.Generation != receipt.Generation ||
-		envelope.Instruction != trackedRequestEnvelopeInstruction || envelope.AcknowledgeWith != fmt.Sprintf("gc session request ack %q", receipt.RequestID) ||
+		envelope.Instruction != trackedRequestEnvelopeInstruction || envelope.AcknowledgeWith != acknowledgeWith ||
 		requestDigest(envelope.Message) != receipt.MessageDigest {
 		return false
 	}

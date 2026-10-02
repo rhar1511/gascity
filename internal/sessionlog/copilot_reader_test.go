@@ -270,6 +270,110 @@ func TestFindCopilotSessionFileByIDAndWorkDir(t *testing.T) {
 	}
 }
 
+func TestFindCopilotSessionFileRejectsTranscriptSymlinkEscape(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside-events.jsonl")
+	workDir := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatalf("mkdir workdir: %v", err)
+	}
+	sessionDir := filepath.Join(root, "session-escape")
+	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+		t.Fatalf("mkdir session dir: %v", err)
+	}
+	writeFile(t, outside, `{"type":"session.start","data":{"sessionId":"session-escape","context":{"cwd":`+jsonString(workDir)+`}}}`+"\n")
+	if err := os.Symlink(outside, filepath.Join(sessionDir, "events.jsonl")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	if got := FindCopilotSessionFileByID([]string{root}, workDir, "session-escape"); got != "" {
+		t.Fatalf("FindCopilotSessionFileByID() = %q, want no transcript outside the configured root", got)
+	}
+	if got := FindCopilotSessionFile([]string{root}, workDir); got != "" {
+		t.Fatalf("FindCopilotSessionFile() = %q, want no transcript outside the configured root", got)
+	}
+}
+
+func TestFindCopilotSessionFileSupportsConfiguredRootSymlink(t *testing.T) {
+	physicalRoot := t.TempDir()
+	rootAlias := filepath.Join(t.TempDir(), "copilot-sessions")
+	if err := os.Symlink(physicalRoot, rootAlias); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	workDir := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatalf("mkdir workdir: %v", err)
+	}
+	path := filepath.Join(rootAlias, "session-123", "events.jsonl")
+	writeFile(t, path, `{"type":"session.start","data":{"sessionId":"session-123","context":{"cwd":`+jsonString(workDir)+`}}}`+"\n")
+
+	if got := FindCopilotSessionFileByID([]string{rootAlias}, workDir, "session-123"); got != path {
+		t.Fatalf("FindCopilotSessionFileByID() = %q, want lexical path %q through configured root", got, path)
+	}
+	if got := FindCopilotSessionFile([]string{rootAlias}, workDir); got != path {
+		t.Fatalf("FindCopilotSessionFile() = %q, want lexical path %q through configured root", got, path)
+	}
+}
+
+func TestFindCopilotSessionFileRejectsEscapingWorkspaceSidecarSymlink(t *testing.T) {
+	root := t.TempDir()
+	workDir := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatalf("mkdir workdir: %v", err)
+	}
+	sessionDir := filepath.Join(root, "session-sidecar")
+	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+		t.Fatalf("mkdir session dir: %v", err)
+	}
+	writeFile(t, filepath.Join(sessionDir, "events.jsonl"), `{"type":"assistant.message","data":{"content":"hello"}}`+"\n")
+	outside := filepath.Join(t.TempDir(), "workspace.yaml")
+	writeFile(t, outside, fmt.Sprintf("cwd: %q\n", workDir))
+	if err := os.Symlink(outside, filepath.Join(sessionDir, "workspace.yaml")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	if got := FindCopilotSessionFileByID([]string{root}, workDir, "session-sidecar"); got != "" {
+		t.Fatalf("FindCopilotSessionFileByID() = %q, want escaping sidecar rejected", got)
+	}
+	if got := FindCopilotSessionFile([]string{root}, workDir); got != "" {
+		t.Fatalf("FindCopilotSessionFile() = %q, want escaping sidecar rejected", got)
+	}
+}
+
+func TestReadCopilotTranscriptUsesOpenedDescriptorAfterPathReplacement(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "session-123", "events.jsonl")
+	writeFile(t, path,
+		`{"type":"session.start","data":{"sessionId":"inside-session"}}`+"\n"+
+			`{"type":"user.message","data":{"content":"inside transcript"}}`+"\n",
+	)
+	transcript, err := OpenTranscript("copilot", []string{root}, path)
+	if err != nil {
+		t.Fatalf("open Copilot transcript: %v", err)
+	}
+	defer transcript.Close() //nolint:errcheck
+
+	outside := filepath.Join(t.TempDir(), "outside-events.jsonl")
+	writeFile(t, outside,
+		`{"type":"session.start","data":{"sessionId":"outside-session"}}`+"\n"+
+			`{"type":"user.message","data":{"content":"outside transcript"}}`+"\n",
+	)
+	if err := os.Rename(path, path+".opened"); err != nil {
+		t.Fatalf("rename opened transcript: %v", err)
+	}
+	if err := os.Symlink(outside, path); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	session, err := transcript.Read(0)
+	if err != nil {
+		t.Fatalf("read opened Copilot transcript: %v", err)
+	}
+	if session.ID != "inside-session" || len(session.Messages) != 1 || session.Messages[0].TextContent() != "inside transcript" {
+		t.Fatalf("read returned session %#v, want content from the already-open descriptor", session)
+	}
+}
+
 func writeCopilotJSONL(t *testing.T, lines ...string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "events.jsonl")

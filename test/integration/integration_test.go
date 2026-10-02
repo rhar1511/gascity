@@ -224,6 +224,16 @@ func TestMain(m *testing.M) {
 		}
 		return cleanupOwnedIntegrationRun(runParent, tmpDir, gcHome, func() error {
 			if testsStarted {
+				procs := readProcessSnapshot()
+				if procs == nil {
+					return fmt.Errorf("owned supervisor cleanup: process absence could not be checked")
+				}
+				// Narrow runs may never start a supervisor. Skip the stop only
+				// when the owned process census proves there is nothing to stop;
+				// CleanupOwnedRoot checks absence again before removing the root.
+				if len(ownedIntegrationProcesses(procs, runParent, gcHome)) == 0 {
+					return nil
+				}
 				return stopIntegrationSupervisorWithTimeout(integrationSupervisorStopTimeout)
 			}
 			return nil

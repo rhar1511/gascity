@@ -2,6 +2,7 @@ package sessionlog
 
 import (
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -12,7 +13,16 @@ import (
 // ReadOpenCodeFile reads an OpenCode session export JSON file and converts it
 // to the standard Session format used by gc session logs.
 func ReadOpenCodeFile(path string, tailCompactions int) (*Session, error) {
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close() //nolint:errcheck
+	return readOpenCodeFileFrom(path, f, tailCompactions)
+}
+
+func readOpenCodeFileFrom(path string, source io.Reader, tailCompactions int) (*Session, error) {
+	data, err := io.ReadAll(source)
 	if err != nil {
 		return nil, err
 	}
@@ -74,38 +84,31 @@ func findOpenCodeExportInRoots(roots []string, workDir string) string {
 		return ""
 	}
 
-	var (
-		bestPath string
-		bestTime time.Time
-	)
+	var best openCodeExportCandidate
 	for _, root := range roots {
-		path := findOpenCodeSessionFileIn(root, workDir)
-		if path == "" {
+		candidate, ok := findOpenCodeSessionIn(root, workDir)
+		if !ok {
 			continue
 		}
-		info, err := os.Stat(path)
-		if err != nil {
-			continue
-		}
-		if bestPath == "" || info.ModTime().After(bestTime) {
-			bestPath = path
-			bestTime = info.ModTime()
+		if best.path == "" || candidate.modTime.After(best.modTime) {
+			best = candidate
 		}
 	}
-	return bestPath
+	return best.path
 }
 
-func findOpenCodeSessionFileIn(root, workDir string) string {
+type openCodeExportCandidate struct {
+	path    string
+	modTime time.Time
+}
+
+func findOpenCodeSessionIn(root, workDir string) (openCodeExportCandidate, bool) {
 	info, err := os.Stat(root)
 	if err != nil || !info.IsDir() {
-		return ""
+		return openCodeExportCandidate{}, false
 	}
 
-	type candidate struct {
-		path    string
-		modTime time.Time
-	}
-	var candidates []candidate
+	var candidates []openCodeExportCandidate
 	err = filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return nil
@@ -116,27 +119,24 @@ func findOpenCodeSessionFileIn(root, workDir string) string {
 		if !strings.HasSuffix(strings.ToLower(entry.Name()), ".json") {
 			return nil
 		}
-		if cleanOpenCodeWorkDir(openCodeExportDirectory(path)) != workDir {
+		directory, openedInfo, err := inspectOpenCodeExport(root, path)
+		if err != nil || cleanOpenCodeWorkDir(directory) != workDir {
 			return nil
 		}
-		info, err := entry.Info()
-		if err != nil {
-			return nil
-		}
-		candidates = append(candidates, candidate{path: path, modTime: info.ModTime()})
+		candidates = append(candidates, openCodeExportCandidate{path: path, modTime: openedInfo.ModTime()})
 		return nil
 	})
 	if err != nil {
-		return ""
+		return openCodeExportCandidate{}, false
 	}
 
 	sort.Slice(candidates, func(i, j int) bool {
 		return candidates[i].modTime.After(candidates[j].modTime)
 	})
 	if len(candidates) == 0 {
-		return ""
+		return openCodeExportCandidate{}, false
 	}
-	return candidates[0].path
+	return candidates[0], true
 }
 
 func convertOpenCodeMessage(rawMessage json.RawMessage, sessionID string, syntheticID stableSyntheticEntryIDSource, orphanedToolUseIDs map[string]bool) *Entry {
@@ -384,10 +384,22 @@ func openCodePartMetadataInteraction(raw json.RawMessage) (ContentBlock, bool) {
 	}, true
 }
 
-func openCodeExportDirectory(path string) string {
-	data, err := os.ReadFile(path)
+func inspectOpenCodeExport(root, path string) (string, os.FileInfo, error) {
+	f, err := openProviderFileBeneath(root, path)
 	if err != nil {
-		return ""
+		return "", nil, err
+	}
+	defer f.Close() //nolint:errcheck
+	info, err := f.Stat()
+	if err != nil {
+		return "", nil, err
+	}
+	if info.IsDir() {
+		return "", nil, os.ErrInvalid
+	}
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return "", nil, err
 	}
 	var export struct {
 		Info struct {
@@ -395,9 +407,9 @@ func openCodeExportDirectory(path string) string {
 		} `json:"info"`
 	}
 	if err := json.Unmarshal(data, &export); err != nil {
-		return ""
+		return "", nil, err
 	}
-	return export.Info.Directory
+	return export.Info.Directory, info, nil
 }
 
 func cleanOpenCodeWorkDir(path string) string {

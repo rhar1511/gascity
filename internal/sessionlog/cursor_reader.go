@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,8 +20,11 @@ func ReadCursorFile(path string, _ int) (*Session, error) {
 		return nil, err
 	}
 	defer f.Close() //nolint:errcheck
+	return readCursorFileFrom(path, f, 0)
+}
 
-	scanner := bufio.NewScanner(f)
+func readCursorFileFrom(path string, source io.Reader, _ int) (*Session, error) {
+	scanner := bufio.NewScanner(source)
 	scanner.Buffer(make([]byte, 0, 256*1024), 50*1024*1024)
 
 	var messages []*Entry
@@ -812,8 +816,13 @@ func findCursorNativeSessionFileByID(searchPaths []string, sessionID string) str
 	seen := make(map[string]struct{})
 	var matches []string
 	add := func(path string) {
-		info, err := os.Stat(path)
-		if err != nil || info.IsDir() {
+		transcript, err := OpenTranscript("cursor", searchPaths, path)
+		if err != nil {
+			return
+		}
+		info, statErr := transcript.Stat()
+		_ = transcript.Close()
+		if statErr != nil || info.IsDir() {
 			return
 		}
 		path = filepath.Clean(path)

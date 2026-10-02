@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -76,9 +77,11 @@ type SessionRequestSubmitInput struct {
 	CityScope
 	ID   string `path:"id" doc:"Exact durable session ID."`
 	Body struct {
-		RequestID  string `json:"request_id" minLength:"1" maxLength:"200" doc:"Durable idempotency identity for this request."`
-		Generation int    `json:"generation" minimum:"1" doc:"Exact intended execution generation."`
-		Message    string `json:"message" minLength:"1" doc:"Message delivered with its request identity."`
+		RequestID       string  `json:"request_id" minLength:"1" maxLength:"200" doc:"Durable idempotency identity for this request."`
+		Generation      int     `json:"generation" minimum:"1" doc:"Exact intended execution generation."`
+		Message         string  `json:"message" minLength:"1" doc:"Message delivered with its request identity."`
+		WorkID          *string `json:"work_id,omitempty" minLength:"1" maxLength:"200" dependentRequired:"claim_generation" doc:"Optional Workbench attempt selector. Provide with claim_generation; the server verifies both against the current session claim."`
+		ClaimGeneration *string `json:"claim_generation,omitempty" minLength:"1" maxLength:"200" dependentRequired:"work_id" doc:"Optional Workbench attempt selector. Provide with work_id; the server verifies both against the current session claim."`
 	}
 }
 
@@ -93,7 +96,13 @@ func (s *Server) humaHandleSessionRequestSubmit(_ context.Context, input *Sessio
 	if err != nil {
 		return nil, humaResolveError(err)
 	}
-	accepted, err := s.acceptAttributedSessionRequest(session.NewStore(store), input.ID, input.Body.RequestID, input.Body.Generation, input.Body.Message, time.Now())
+	if (input.Body.WorkID == nil) != (input.Body.ClaimGeneration == nil) {
+		return nil, sessionRequestError(session.ErrRequestConflict)
+	}
+	if input.Body.WorkID != nil && (strings.TrimSpace(*input.Body.WorkID) != *input.Body.WorkID || *input.Body.WorkID == "" || strings.TrimSpace(*input.Body.ClaimGeneration) != *input.Body.ClaimGeneration || *input.Body.ClaimGeneration == "") {
+		return nil, sessionRequestError(session.ErrRequestConflict)
+	}
+	accepted, err := s.acceptAttributedSessionRequest(session.NewStore(store), input.ID, input.Body.RequestID, input.Body.Generation, input.Body.Message, input.Body.WorkID, input.Body.ClaimGeneration, time.Now())
 	if err != nil {
 		return nil, sessionRequestError(err)
 	}

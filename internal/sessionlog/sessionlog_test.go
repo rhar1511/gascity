@@ -1080,6 +1080,40 @@ func TestFindSessionFileByIDRejectsTraversalSessionID(t *testing.T) {
 	}
 }
 
+func TestFindSessionFileDiscoveryRejectsEscapingClaudeTranscriptSymlinks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires elevated privileges on Windows")
+	}
+
+	base := t.TempDir()
+	outside := t.TempDir()
+	workDir := "/home/user/symlink-escape"
+	slugDir := filepath.Join(base, ProjectSlug(workDir))
+	if err := os.MkdirAll(slugDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(outside, "secret.jsonl")
+	if err := os.WriteFile(target, []byte(`{"type":"assistant"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, name := range []string{"session-123.jsonl", "latest-session.jsonl", "auto.jsonl"} {
+		if err := os.Symlink(target, filepath.Join(slugDir, name)); err != nil {
+			t.Skipf("symlink unsupported on this platform: %v", err)
+		}
+	}
+
+	if got := FindSessionFileByID([]string{base}, workDir, "session-123"); got != "" {
+		t.Errorf("FindSessionFileByID() = %q, want no escaping transcript", got)
+	}
+	if got := FindProviderFallbackSessionFile([]string{base}, "claude", workDir); got != "" {
+		t.Errorf("FindProviderFallbackSessionFile() = %q, want no escaping transcript", got)
+	}
+	if got := FindSessionFile([]string{base}, workDir); got != "" {
+		t.Errorf("FindSessionFile() = %q, want no escaping transcript", got)
+	}
+}
+
 func TestFindSessionFileByIDUsesClaudeProjectPathAlias(t *testing.T) {
 	skipUnlessDarwinClaudePathAliases(t)
 
@@ -2056,6 +2090,56 @@ func TestFindCodexSessionFileUsesObservedRoots(t *testing.T) {
 	}
 }
 
+func TestFindCodexSessionFileRejectsEscapingCandidateAndAllowsLinkedSessionRoot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires elevated privileges on Windows")
+	}
+	workDir := "/data/projects/symlink-escape"
+	const sessionID = "019e9966-aaaa-7000-8000-26a2dd7e15b3"
+	rolloutTime := time.Date(2026, 3, 27, 12, 0, 0, 0, time.Local)
+	outside := t.TempDir()
+	secret := filepath.Join(outside, "outside-rollout.jsonl")
+	meta := fmt.Sprintf(`{"type":"session_meta","payload":{"cwd":%q}}`, workDir)
+	if err := os.WriteFile(secret, []byte(meta+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	configuredRoot := t.TempDir()
+	escapingCandidate := writeCodexRolloutAt(t, configuredRoot, rolloutTime, sessionID, workDir)
+	if err := os.Remove(escapingCandidate); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secret, escapingCandidate); err != nil {
+		t.Skipf("symlink unsupported on this platform: %v", err)
+	}
+	if got := FindCodexSessionFile([]string{configuredRoot}, workDir); got != "" {
+		t.Fatalf("FindCodexSessionFile() = %q, want no escaping candidate", got)
+	}
+
+	// Codex account roots are an intentional direct symlink under the configured
+	// sessions directory; discovery must continue to accept those transcripts.
+	linkedTarget := t.TempDir()
+	linkedDay := filepath.Join(linkedTarget, "2026", "03", "27")
+	if err := os.MkdirAll(linkedDay, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(linkedDay, "rollout-linked.jsonl")
+	if err := os.WriteFile(want, []byte(meta+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	linkedRoot := filepath.Join(configuredRoot, "account-linked")
+	if err := os.Symlink(linkedTarget, linkedRoot); err != nil {
+		t.Skipf("symlink unsupported on this platform: %v", err)
+	}
+	resolvedWant, err := filepath.EvalSymlinks(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := FindCodexSessionFile([]string{configuredRoot}, workDir); got != resolvedWant {
+		t.Fatalf("FindCodexSessionFile() = %q, want allowed linked account transcript %q", got, resolvedWant)
+	}
+}
+
 func TestFindCodexSessionFileByIDNoWindowMatchesRolloutSuffix(t *testing.T) {
 	sessDir := t.TempDir()
 	workDir := "/data/projects/myproject"
@@ -2190,7 +2274,11 @@ func TestFindCodexSessionFileMatchesEquivalentResolvedWorkDir(t *testing.T) {
 
 func TestCodexSessionCWD(t *testing.T) {
 	dir := t.TempDir()
-	f := filepath.Join(dir, "test.jsonl")
+	dayDir := filepath.Join(dir, "2026", "06", "21")
+	if err := os.MkdirAll(dayDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f := filepath.Join(dayDir, "test.jsonl")
 
 	// Valid session_meta.
 	if err := os.WriteFile(f, []byte(`{"type":"session_meta","payload":{"cwd":"/foo/bar"}}`+"\n"), 0o644); err != nil {
@@ -2211,6 +2299,31 @@ func TestCodexSessionCWD(t *testing.T) {
 	// Missing file.
 	if got := codexSessionCWD(filepath.Join(dir, "nope.jsonl")); got != "" {
 		t.Errorf("expected empty for missing file, got %q", got)
+	}
+}
+
+func TestCodexSessionCWDRejectsEscapingTranscriptSymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires elevated privileges on Windows")
+	}
+	root := t.TempDir()
+	outside := t.TempDir()
+	workDir := "/work/codex-symlink-escape"
+	rolloutTime := time.Date(2026, 6, 21, 12, 0, 0, 0, time.Local)
+	path := writeCodexRolloutAt(t, root, rolloutTime, "019e9966-aaaa-7000-8000-26a2dd7e15b3", workDir)
+	secret := filepath.Join(outside, "secret.jsonl")
+	if err := os.WriteFile(secret, []byte(codexSessionMetaLine(rolloutTime.Format(time.RFC3339Nano), workDir)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secret, path); err != nil {
+		t.Skipf("symlink unsupported on this platform: %v", err)
+	}
+
+	if got := codexSessionCWD(path); got != "" {
+		t.Fatalf("codexSessionCWD() = %q, want no metadata from outside the Codex root", got)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -14,8 +15,17 @@ import (
 )
 
 func readCapturedACPFile(path string, tailCompactions int, syntheticPrefix string) (*Session, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close() //nolint:errcheck
+	return readCapturedACPFileFrom(path, f, tailCompactions, syntheticPrefix)
+}
+
+func readCapturedACPFileFrom(path string, source io.Reader, tailCompactions int, syntheticPrefix string) (*Session, error) {
 	_ = tailCompactions
-	return readKiroFile(path, syntheticPrefix)
+	return readKiroFileFrom(path, source, syntheticPrefix)
 }
 
 func findCapturedACPSessionFileByID(searchPaths, defaultSearchPaths []string, workDir, sessionID string) string {
@@ -29,11 +39,13 @@ func findCapturedACPSessionFileByID(searchPaths, defaultSearchPaths []string, wo
 			filepath.Join(root, sessionID, "stream.jsonl"),
 			filepath.Join(root, sessionID, "events.jsonl"),
 		} {
-			info, err := os.Stat(path)
-			if err != nil || info.IsDir() {
+			transcript, err := OpenTranscript("", []string{root}, path)
+			if err != nil {
 				continue
 			}
-			if strings.TrimSpace(workDir) != "" && !capturedACPSessionCWDMatches(path, workDir) {
+			matches := strings.TrimSpace(workDir) == "" || capturedACPSessionCWDMatches(transcript.ReadSeeker(), workDir)
+			_ = transcript.Close()
+			if !matches {
 				continue
 			}
 			return path
@@ -54,7 +66,13 @@ func findCapturedACPSessionFile(searchPaths, defaultSearchPaths []string, workDi
 		return candidates[i].modTime.After(candidates[j].modTime)
 	})
 	for _, candidate := range candidates {
-		if capturedACPSessionCWDMatches(candidate.path, workDir) {
+		transcript, err := OpenTranscript("", mergePaths(defaultSearchPaths, searchPaths), candidate.path)
+		if err != nil {
+			continue
+		}
+		matches := capturedACPSessionCWDMatches(transcript.ReadSeeker(), workDir)
+		_ = transcript.Close()
+		if matches {
 			return candidate.path
 		}
 	}
@@ -67,19 +85,32 @@ type capturedACPSessionFileCandidate struct {
 }
 
 func capturedACPSessionCandidates(root string) []capturedACPSessionFileCandidate {
-	info, err := os.Stat(root)
+	rootFS, err := os.OpenRoot(root)
+	if err != nil {
+		return nil
+	}
+	defer rootFS.Close() //nolint:errcheck
+	info, err := rootFS.Stat(".")
 	if err != nil || !info.IsDir() {
 		return nil
 	}
 	var candidates []capturedACPSessionFileCandidate
 	appendCandidate := func(path string) {
-		info, err := os.Stat(path)
-		if err != nil || info.IsDir() || filepath.Ext(path) != ".jsonl" {
+		if filepath.Ext(path) != ".jsonl" {
+			return
+		}
+		transcript, err := OpenTranscript("", []string{root}, path)
+		if err != nil {
+			return
+		}
+		info, err := transcript.Stat()
+		_ = transcript.Close()
+		if err != nil {
 			return
 		}
 		candidates = append(candidates, capturedACPSessionFileCandidate{path: path, modTime: info.ModTime()})
 	}
-	entries, err := os.ReadDir(root)
+	entries, err := readCapturedACPDir(rootFS, ".")
 	if err != nil {
 		return nil
 	}
@@ -89,7 +120,7 @@ func capturedACPSessionCandidates(root string) []capturedACPSessionFileCandidate
 			appendCandidate(path)
 			continue
 		}
-		childEntries, err := os.ReadDir(path)
+		childEntries, err := readCapturedACPDir(rootFS, entry.Name())
 		if err != nil {
 			continue
 		}
@@ -103,22 +134,25 @@ func capturedACPSessionCandidates(root string) []capturedACPSessionFileCandidate
 	return candidates
 }
 
-func capturedACPSessionCWDMatches(path, workDir string) bool {
-	cwd := capturedACPSessionCWD(path)
+func readCapturedACPDir(rootFS *os.Root, path string) ([]os.DirEntry, error) {
+	dir, err := rootFS.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer dir.Close() //nolint:errcheck
+	return dir.ReadDir(-1)
+}
+
+func capturedACPSessionCWDMatches(source io.Reader, workDir string) bool {
+	cwd := capturedACPSessionCWD(source)
 	if cwd == "" || workDir == "" {
 		return false
 	}
 	return pathutil.SamePath(cwd, workDir)
 }
 
-func capturedACPSessionCWD(path string) string {
-	f, err := os.Open(path)
-	if err != nil {
-		return ""
-	}
-	defer f.Close() //nolint:errcheck
-
-	scanner := bufio.NewScanner(f)
+func capturedACPSessionCWD(source io.Reader) string {
+	scanner := bufio.NewScanner(source)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
 		line := bytes.TrimSpace(scanner.Bytes())

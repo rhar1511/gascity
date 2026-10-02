@@ -47,6 +47,31 @@ func TestPRActionRoutesReportUnavailableSourceAndRequireVerifiedWriter(t *testin
 	}
 }
 
+func TestPRActionQueueRouteReportsConflictReasonAndMergeState(t *testing.T) {
+	fx := newPRActionFixture(t, true)
+	fx.forge.pullRequests[0].MergeStateStatus = "DIRTY"
+	sm := NewSupervisorMux(&singleStateResolver{state: fx.state}, nil, false, "test", "", time.Now()).WithAnyHostAllowed()
+	sm.getCityServer(fx.state.CityName(), fx.state).prActionService = fx.service
+
+	get := httptest.NewRequest(http.MethodGet, "/v0/city/test-city/pr-actions/queue", nil)
+	getRec := httptest.NewRecorder()
+	sm.ServeHTTP(getRec, get)
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("GET status = %d body=%s", getRec.Code, getRec.Body.String())
+	}
+	var queue PRActionQueue
+	if err := json.Unmarshal(getRec.Body.Bytes(), &queue); err != nil {
+		t.Fatalf("decode queue: %v; body=%s", err, getRec.Body.String())
+	}
+	if len(queue.Items) != 1 || queue.Items[0].MergeState != "DIRTY" {
+		t.Fatalf("queue did not preserve the conflicted merge state: %+v", queue.Items)
+	}
+	option, found := prActionOptionForTest(queue.Items[0])
+	if !found || option.Available || !strings.Contains(strings.ToLower(option.Reason), "conflict") {
+		t.Fatalf("route did not expose an actionable unavailable conflict verdict: %+v", queue.Items[0].Actions)
+	}
+}
+
 func TestPRActionRoutesAppearInOpenAPISchema(t *testing.T) {
 	sm := NewSupervisorMux(nil, nil, false, "test", "", time.Now())
 	spec := sm.humaAPI.OpenAPI()

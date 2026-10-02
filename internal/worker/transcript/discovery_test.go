@@ -1,8 +1,6 @@
 package transcript
 
 import (
-	"crypto/md5"
-	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -214,20 +212,20 @@ func TestDiscoverPathGeminiPrefersProviderSessionID(t *testing.T) {
 
 func TestDiscoverPathKimiPrefersSessionKey(t *testing.T) {
 	base := t.TempDir()
-	workDir := "/tmp/gascity/phase1/kimi"
-	workHash := md5Hex(workDir)
-	keyed := filepath.Join(base, "sessions", workHash, "session-key", "context.jsonl")
+	workDir := "/tmp/kimi-probe-ws"
+	workKey := "wd_kimi-probe-ws_87061d3d7a56"
+	keyed := filepath.Join(base, "sessions", workKey, "session-key", "agents", "main", "wire.jsonl")
 	if err := os.MkdirAll(filepath.Dir(keyed), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(keyed, []byte(`{"role":"user","content":"keyed"}`+"\n"), 0o644); err != nil {
+	if err := os.WriteFile(keyed, []byte(`{"type":"context.append_message","message":{"role":"user","content":"keyed"}}`+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	other := filepath.Join(base, "sessions", workHash, "newer-session", "context.jsonl")
+	other := filepath.Join(base, "sessions", workKey, "newer-session", "agents", "main", "wire.jsonl")
 	if err := os.MkdirAll(filepath.Dir(other), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(other, []byte(`{"role":"user","content":"newer"}`+"\n"), 0o644); err != nil {
+	if err := os.WriteFile(other, []byte(`{"type":"context.append_message","message":{"role":"user","content":"newer"}}`+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	past := time.Now().Add(-time.Hour)
@@ -430,13 +428,13 @@ func samePath(a, b string) bool {
 
 func TestDiscoverPathKimiSessionKeyMissDoesNotUseNewestWorkdirTranscript(t *testing.T) {
 	base := t.TempDir()
-	workDir := "/tmp/gascity/phase1/kimi"
-	workHash := md5Hex(workDir)
-	other := filepath.Join(base, "sessions", workHash, "newer-session", "context.jsonl")
+	workDir := "/tmp/kimi-probe-ws"
+	workKey := "wd_kimi-probe-ws_87061d3d7a56"
+	other := filepath.Join(base, "sessions", workKey, "newer-session", "agents", "main", "wire.jsonl")
 	if err := os.MkdirAll(filepath.Dir(other), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(other, []byte(`{"role":"user","content":"newer"}`+"\n"), 0o644); err != nil {
+	if err := os.WriteFile(other, []byte(`{"type":"context.append_message","message":{"role":"user","content":"newer"}}`+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -798,11 +796,6 @@ func TestHasKeyedTranscript(t *testing.T) {
 			t.Fatal("empty sessionKey probeable = true, want false")
 		}
 	})
-}
-
-func md5Hex(value string) string {
-	sum := md5.Sum([]byte(value))
-	return hex.EncodeToString(sum[:])
 }
 
 func quoteJSONString(value string) string {

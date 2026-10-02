@@ -92,18 +92,15 @@ func FindZCodeSessionFileByID(searchPaths []string, workDir, sessionID string) s
 			if walkErr != nil || entry.IsDir() || entry.Name() != sessionID+".json" {
 				return nil //nolint:nilerr // a missing root is simply no match
 			}
+			directory, info, err := inspectOpenCodeExport(root, path)
+			if err != nil || !pathutil.SamePath(directory, workDir) {
+				return nil
+			}
 			// Compared via pathutil.SamePath, not raw string inequality: on
 			// macOS a real work dir resolves through the /var alias while the
 			// adapter's shelled-out cwd lands on the physical /private/var
 			// path, so a plain != always misses even though it is the same
 			// directory. See findZCodeMirrorInScope below for the same fix.
-			if !pathutil.SamePath(openCodeExportDirectory(path), workDir) {
-				return nil
-			}
-			info, err := entry.Info()
-			if err != nil {
-				return nil
-			}
 			if bestPath == "" || info.ModTime().After(bestTime) {
 				bestPath = path
 				bestTime = info.ModTime()
@@ -218,7 +215,12 @@ func findZCodeMirrorInScope(roots []string, scope, workDir string) string {
 	)
 	for _, root := range roots {
 		dir := filepath.Join(root, scope)
-		entries, err := os.ReadDir(dir)
+		openedDir, err := openProviderFileBeneath(root, dir)
+		if err != nil {
+			continue
+		}
+		entries, err := openedDir.ReadDir(-1)
+		_ = openedDir.Close()
 		if err != nil {
 			continue
 		}
@@ -228,6 +230,10 @@ func findZCodeMirrorInScope(roots []string, scope, workDir string) string {
 				continue
 			}
 			path := filepath.Join(dir, name)
+			directory, info, err := inspectOpenCodeExport(root, path)
+			if err != nil || !pathutil.SamePath(directory, workDir) {
+				continue
+			}
 			// The placeholder embeds its work dir (written through load_export
 			// when a boot turn is canceled), so it is scoped like a real mirror.
 			//
@@ -236,13 +242,6 @@ func findZCodeMirrorInScope(roots []string, scope, workDir string) string {
 			// adapter's shelled-out cwd lands on the physical /private/var
 			// path, so a plain != always misses even though it is the same
 			// directory.
-			if !pathutil.SamePath(openCodeExportDirectory(path), workDir) {
-				continue
-			}
-			info, err := entry.Info()
-			if err != nil {
-				continue
-			}
 			// The placeholder holds turns canceled before a session id existed.
 			// A real mirror always wins — it adopts the placeholder on the first
 			// successful turn — but a first-turn failure leaves ONLY the

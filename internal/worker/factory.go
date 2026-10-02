@@ -279,7 +279,7 @@ func (f *Factory) RuntimeHandle(sessionName, providerName, transport string, pro
 // Adapter returns a transcript adapter configured with the factory's search
 // paths for callers that need transcript reads outside a session handle.
 func (f *Factory) Adapter() SessionLogAdapter {
-	return SessionLogAdapter{SearchPaths: append([]string(nil), f.searchPaths...), activity: f.activityMemo}
+	return SessionLogAdapter{SearchPaths: append([]string(nil), f.searchPaths...), requireRoots: true, activity: f.activityMemo}
 }
 
 // DiscoverTranscript returns the best available transcript path for a worker.

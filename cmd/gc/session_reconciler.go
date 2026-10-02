@@ -4451,7 +4451,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// happened. Emit a single diagnostic per session bead
 			// generation; the throttle marker on the bead itself
 			// keeps subsequent reconciler ticks quiet.
-			if fold := emitSessionStrandedDiagnostic(cityPath, cfg, store, rigStores, infoByID[target.info.ID], snapshot, target.tp.TemplateName, rec, clk, stderr); fold != nil {
+			if fold := emitSessionStrandedDiagnostic(cityPath, cfg, store, rigStores, infoByID[target.info.ID], snapshot, target.tp.TemplateName, rec, clk, probeDetachedWork, stderr); fold != nil {
 				tick.apply(target.info.ID, fold)
 			}
 			// Beyond diagnosis: once THIS stranding episode has been confirmed
@@ -5443,6 +5443,7 @@ func emitSessionStrandedDiagnostic(
 	template string,
 	rec events.Recorder,
 	clk clock.Clock,
+	probe detachedWorkProbe,
 	stderr io.Writer,
 ) sessionpkg.MetadataPatch {
 	if rec == nil {
@@ -5455,7 +5456,7 @@ func emitSessionStrandedDiagnostic(
 	if err != nil {
 		fmt.Fprintf(stderr, "session reconciler: collecting stranded work ids for %s: %v\n", info.SessionNameMetadata, err) //nolint:errcheck
 	}
-	diagnosticWork := filterDetachedStrandedDiagnosticWork(assignedWork)
+	diagnosticWork := filterDetachedStrandedDiagnosticWork(assignedWork, probe)
 	if err == nil && len(assignedWork) > 0 && len(diagnosticWork) == 0 {
 		return nil
 	}
@@ -5634,7 +5635,7 @@ type strandedAssignedWork struct {
 	store beads.Store
 }
 
-func filterDetachedStrandedDiagnosticWork(work []strandedAssignedWork) []strandedAssignedWork {
+func filterDetachedStrandedDiagnosticWork(work []strandedAssignedWork, probe detachedWorkProbe) []strandedAssignedWork {
 	if len(work) == 0 {
 		return work
 	}
@@ -5645,7 +5646,7 @@ func filterDetachedStrandedDiagnosticWork(work []strandedAssignedWork) []strande
 			out = append(out, item)
 			continue
 		}
-		result := probeDetachedWork(context.Background(), spec)
+		result := probe(context.Background(), spec)
 		switch result.Status {
 		case detachedProbeAlive:
 			log.Printf("session reconciler: suppressing session.stranded for %s: detached probe alive: %s", item.bead.ID, spec)

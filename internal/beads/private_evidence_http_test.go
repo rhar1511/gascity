@@ -1,6 +1,7 @@
 package beads
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -308,6 +309,34 @@ func TestBdStorePrivateEvidenceGetUsesHTTPBodyReader(t *testing.T) {
 	}
 	if got := runnerCalls.Load(); got != 0 {
 		t.Fatalf("bd runner calls = %d, want 0", got)
+	}
+}
+
+func TestPrivateEvidenceHTTPAcceptsOnlyDurableDoltServerModes(t *testing.T) {
+	for _, tt := range []struct {
+		mode string
+		want bool
+	}{
+		{mode: "server", want: true},
+		{mode: "proxied-server", want: true},
+		{mode: "embedded"},
+		{mode: "unknown"},
+	} {
+		t.Run(tt.mode, func(t *testing.T) {
+			handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/v0/beads/context" {
+					http.NotFound(w, r)
+					return
+				}
+				_, _ = fmt.Fprintf(w, `{"api_version":"v0","backend":"dolt","bd_version":"1.3.0","capabilities":["issues.casMetadata","issues.create","issues.get","project.enforce"],"database":"gc_fixture","dolt_mode":%q,"project_id":"project-a","schema_version":1}`, tt.mode)
+			})
+			store := privateEvidenceHTTPStore(t, "http://127.0.0.1:1")
+			store.privateEvidenceHTTP.client.Transport = privateEvidenceHandlerTransport{handler: handler}
+			err := store.privateEvidenceHTTP.verifyContext(context.Background())
+			if (err == nil) != tt.want {
+				t.Fatalf("verifyContext() error = %v, want success = %v", err, tt.want)
+			}
+		})
 	}
 }
 

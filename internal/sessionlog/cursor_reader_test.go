@@ -340,6 +340,29 @@ func TestFindCursorNativeSessionFileByID(t *testing.T) {
 	}
 }
 
+func TestFindCursorNativeSessionFileByIDRejectsEscapingTranscriptSymlink(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	root := t.TempDir()
+	const sessionID = "native-session-123"
+	transcriptPath := filepath.Join(root, sessionID, sessionID+".jsonl")
+	if err := os.MkdirAll(filepath.Dir(transcriptPath), 0o755); err != nil {
+		t.Fatalf("mkdir transcript directory: %v", err)
+	}
+
+	outsideTranscript := filepath.Join(t.TempDir(), sessionID+".jsonl")
+	if err := os.WriteFile(outsideTranscript, []byte("outside transcript\n"), 0o600); err != nil {
+		t.Fatalf("write outside transcript: %v", err)
+	}
+	if err := os.Symlink(outsideTranscript, transcriptPath); err != nil {
+		t.Fatalf("symlink outside transcript: %v", err)
+	}
+
+	if got := FindCursorSessionFileByID([]string{root}, "/work/project", sessionID); got != "" {
+		t.Fatalf("FindCursorSessionFileByID() = %q, want empty for escaping transcript symlink", got)
+	}
+}
+
 func writeCursorJSONL(t *testing.T, lines ...string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "cursor.jsonl")

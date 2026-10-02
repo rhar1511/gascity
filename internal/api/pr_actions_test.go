@@ -49,6 +49,137 @@ func TestPRActionQueueJoinsFreshForgeStateWorkAndImmutableEvidence(t *testing.T)
 	}
 }
 
+func TestPRActionQueueReviewIsUnavailableForConflictedPullRequest(t *testing.T) {
+	fx := newPRActionFixture(t, true)
+	fx.forge.pullRequests[0].MergeStateStatus = "DIRTY"
+
+	queue, err := fx.service.Queue(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(queue.Items) != 1 {
+		t.Fatalf("queue items = %d, want one: %+v", len(queue.Items), queue)
+	}
+	item := queue.Items[0]
+	if item.MergeState != "DIRTY" {
+		t.Fatalf("merge state = %q, want DIRTY", item.MergeState)
+	}
+	option, found := prActionOptionForTest(item)
+	if !found {
+		t.Fatalf("queue review verdict is missing for conflicted PR: %+v", item.Actions)
+	}
+	if option.Available {
+		t.Fatalf("conflicted PR was offered for review queueing: %+v", option)
+	}
+	if !strings.Contains(strings.ToLower(option.Reason), "conflict") || !strings.Contains(option.Reason, "DIRTY") {
+		t.Fatalf("conflict verdict should explain the blocking state, got %q", option.Reason)
+	}
+}
+
+func TestPRActionQueueReviewFailsClosedWhenMergeStateIsUnknown(t *testing.T) {
+	fx := newPRActionFixture(t, true)
+	fx.forge.pullRequests[0].MergeStateStatus = "UNKNOWN"
+
+	queue, err := fx.service.Queue(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := queue.Items[0]
+	if item.MergeState != "UNKNOWN" {
+		t.Fatalf("merge state = %q, want UNKNOWN", item.MergeState)
+	}
+	option, found := prActionOptionForTest(item)
+	if !found || option.Available {
+		t.Fatalf("unknown merge state should produce an unavailable queue verdict: %+v", item.Actions)
+	}
+	if !strings.Contains(strings.ToLower(option.Reason), "unknown") || !strings.Contains(option.Reason, "refresh") {
+		t.Fatalf("unknown-state verdict should explain how to proceed, got %q", option.Reason)
+	}
+}
+
+func TestPRActionQueueReviewAllowsKnownNonConflictStatesAndRejectsUnknownValues(t *testing.T) {
+	tests := []struct {
+		name          string
+		mergeState    string
+		wantState     string
+		wantAvailable bool
+	}{
+		{name: "clean", mergeState: "CLEAN", wantState: "CLEAN", wantAvailable: true},
+		{name: "waiting for review", mergeState: "BLOCKED", wantState: "BLOCKED", wantAvailable: true},
+		{name: "waiting for checks", mergeState: "UNSTABLE", wantState: "UNSTABLE", wantAvailable: true},
+		{name: "behind base", mergeState: "BEHIND", wantState: "BEHIND", wantAvailable: true},
+		{name: "merge hooks", mergeState: "HAS_HOOKS", wantState: "HAS_HOOKS", wantAvailable: true},
+		{name: "blank is unknown", mergeState: "", wantState: "UNKNOWN", wantAvailable: false},
+		{name: "unrecognized is unknown", mergeState: "FUTURE_STATE", wantState: "FUTURE_STATE", wantAvailable: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fx := newPRActionFixture(t, true)
+			fx.forge.pullRequests[0].MergeStateStatus = tt.mergeState
+			if tt.mergeState == "UNSTABLE" {
+				fx.forge.pullRequests[0].Checks = []githubmonitor.Check{{Name: "ci", Status: "IN_PROGRESS"}}
+			}
+			queue, err := fx.service.Queue(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			item := queue.Items[0]
+			if item.MergeState != tt.wantState {
+				t.Fatalf("merge state = %q, want %q", item.MergeState, tt.wantState)
+			}
+			option, found := prActionOptionForTest(item)
+			if !found || option.Available != tt.wantAvailable {
+				t.Fatalf("queue-review verdict = %+v found=%v, want available=%t", option, found, tt.wantAvailable)
+			}
+			if !tt.wantAvailable && option.Reason == "" {
+				t.Fatal("unavailable verdict has no actionable reason")
+			}
+		})
+	}
+}
+
+func TestPRActionExecuteRejectsQueueReviewForConflictedPullRequest(t *testing.T) {
+	fx := newPRActionFixture(t, true)
+	fx.forge.pullRequests[0].MergeStateStatus = "DIRTY"
+
+	_, err := fx.service.Execute(context.Background(), fx.actionRequest(PRActionQueueReview), fx.workerActor())
+	if !errors.Is(err, ErrPRActionStale) {
+		t.Fatalf("conflicted queue-review error = %v, want stale/unavailable action", err)
+	}
+	if got := fx.actionRecordCount(); got != 0 {
+		t.Fatalf("conflicted pull request created %d durable action records", got)
+	}
+}
+
+func TestPRActionExecuteRevalidatesQueueReviewConflictTransition(t *testing.T) {
+	fx := newPRActionFixture(t, true)
+	fx.forge.onList = func(call int) {
+		if call == 2 {
+			fx.forge.pullRequests[0].MergeStateStatus = "DIRTY"
+		}
+	}
+
+	result, err := fx.service.Execute(context.Background(), fx.actionRequest(PRActionQueueReview), fx.workerActor())
+	if !errors.Is(err, ErrPRActionStale) {
+		t.Fatalf("clean-to-conflicted queue-review error = %v, want stale", err)
+	}
+	if result.Status != PRActionStatusRejected || result.Outcome == PRActionOutcomeReviewQueued {
+		t.Fatalf("conflict transition was not recorded as a rejected action: %+v", result)
+	}
+	if len(fx.forge.mergeCalls) != 0 {
+		t.Fatalf("queue-review conflict transition caused forge mutation: %v", fx.forge.mergeCalls)
+	}
+}
+
+func prActionOptionForTest(item PRActionQueueItem) (PRActionOption, bool) {
+	for _, option := range item.Actions {
+		if option.Action == PRActionQueueReview {
+			return option, true
+		}
+	}
+	return PRActionOption{}, false
+}
+
 func TestPRActionQueueShowsExactDurableReviewSubmission(t *testing.T) {
 	fx := newPRActionFixture(t, true)
 	request := fx.actionRequest(PRActionQueueReview)
@@ -957,9 +1088,19 @@ type fakePRActionForge struct {
 	beforeMerge  func()
 	afterMerge   func()
 	listBarrier  *prActionListBarrier
+	listMu       sync.Mutex
+	listCalls    int
+	onList       func(int)
 }
 
 func (f *fakePRActionForge) ListOpenPullRequests(context.Context, string, string) ([]githubmonitor.PullRequest, error) {
+	f.listMu.Lock()
+	f.listCalls++
+	call := f.listCalls
+	f.listMu.Unlock()
+	if f.onList != nil {
+		f.onList(call)
+	}
 	if f.listBarrier != nil {
 		f.listBarrier.arrive()
 	}
