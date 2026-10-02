@@ -1,6 +1,7 @@
 package scripts_test
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -161,6 +162,58 @@ func TestPrePushReplaysRefListToBeadsAndSuiteScan(t *testing.T) {
 	}
 	if got := f.read(t, f.makeRuns); !strings.Contains(got, "test-fast-parallel") {
 		t.Fatalf("push-time suite not reached (make invocations = %q); the Go-change scan lost its stdin", got)
+	}
+}
+
+func TestPrePushRejectsUnresolvableDiffBase(t *testing.T) {
+	f := newPrePushFixture(t)
+	refLine := "refs/heads/main " + f.commitNew + " refs/heads/main " + strings.Repeat("f", 40) + "\n"
+
+	code, out := f.run(t, refLine)
+	if code == 0 {
+		t.Fatalf("pre-push allowed an unresolved Go-change scan without running the suite: %s", out)
+	}
+	if got := f.read(t, f.makeRuns); got != "" {
+		t.Fatalf("suite ran despite an unresolved diff base: %q", got)
+	}
+}
+
+func TestPrePushRunsSuiteForLargeGoDiff(t *testing.T) {
+	f := newPrePushFixture(t)
+	for i := range 1024 {
+		name := fmt.Sprintf("%04d_%s.go", i, strings.Repeat("g", 180))
+		if err := os.WriteFile(filepath.Join(f.repo, name), []byte("package fixture\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.git(t, "add", "-A")
+	f.git(t, "commit", "-q", "--no-verify", "-m", "large Go diff")
+	refLine := "refs/heads/main " + f.gitOut(t, "rev-parse", "HEAD") + " refs/heads/main " + f.commitOld + "\n"
+	for range 3 {
+		code, out := f.run(t, refLine)
+		if code != 0 {
+			t.Fatalf("pre-push exit = %d, want 0\n%s", code, out)
+		}
+	}
+	if got := f.read(t, f.makeRuns); strings.Count(got, "test-fast-parallel") != 3 {
+		t.Fatalf("large Go diff skipped a push-time suite: make invocations = %q", got)
+	}
+}
+
+func TestPrePushDoesNotTrustExternalDiffForGateSelection(t *testing.T) {
+	f := newPrePushFixture(t)
+	f.env = append(f.env,
+		"GIT_CONFIG_COUNT=2",
+		"GIT_CONFIG_KEY_0=diff.external", "GIT_CONFIG_VALUE_0=true",
+		"GIT_CONFIG_KEY_1=diff.trustExitCode", "GIT_CONFIG_VALUE_1=true",
+	)
+	refLine := "refs/heads/main " + f.commitNew + " refs/heads/main " + f.commitOld + "\n"
+	code, out := f.run(t, refLine)
+	if code != 0 {
+		t.Fatalf("pre-push exit = %d, want 0\n%s", code, out)
+	}
+	if got := f.read(t, f.makeRuns); !strings.Contains(got, "test-fast-parallel") {
+		t.Fatalf("trusted external diff suppressed the push-time suite: %q", got)
 	}
 }
 

@@ -445,12 +445,16 @@ func setQuietOrderWindowCheckpoint(f *collectorFixture) {
 	f.orders.snapshot.SequenceStart = 42
 	f.orders.snapshot.SequenceEnd = 43
 	f.orders.snapshot.Sequences = []selectorinventory.LedgerSequence{
-		{Sequence: 42, SourceScope: ScopeOrders,
+		{
+			Sequence: 42, SourceScope: ScopeOrders,
 			EntrySHA256: selectorinventory.LedgerSequenceCoverageCheckpointDigest(42, firstCoverage),
-			EntryKind:   selectorinventory.LedgerSequenceKindCoverageCheckpoint, CoverageWindow: &firstCoverage},
-		{Sequence: 43, SourceScope: ScopeOrders,
+			EntryKind:   selectorinventory.LedgerSequenceKindCoverageCheckpoint, CoverageWindow: &firstCoverage,
+		},
+		{
+			Sequence: 43, SourceScope: ScopeOrders,
 			EntrySHA256: selectorinventory.LedgerSequenceCoverageCheckpointDigest(43, secondCoverage),
-			EntryKind:   selectorinventory.LedgerSequenceKindCoverageCheckpoint, CoverageWindow: &secondCoverage},
+			EntryKind:   selectorinventory.LedgerSequenceKindCoverageCheckpoint, CoverageWindow: &secondCoverage,
+		},
 	}
 }
 
@@ -637,10 +641,14 @@ func TestVerifyAndJoinUsesExistingCanonicalExternalLedgerJoin(t *testing.T) {
 	revocationDigest := sha256.Sum256(revocationPayload)
 	bundle := selectorattestation.Bundle{
 		Keys: []selectorattestation.TrustedKey{
-			{KeyID: "observation-fixture-key", Issuer: "fixture-observation-authority", Subject: "fixture-collector",
-				Purpose: selectorattestation.ObservationKeyPurpose, PublicKey: base64.StdEncoding.EncodeToString(observationPublic)},
-			{KeyID: "revocation-fixture-key", Issuer: "fixture-revocation-authority",
-				Purpose: selectorattestation.RevocationKeyPurpose, PublicKey: base64.StdEncoding.EncodeToString(revocationPublic)},
+			{
+				KeyID: "observation-fixture-key", Issuer: "fixture-observation-authority", Subject: "fixture-collector",
+				Purpose: selectorattestation.ObservationKeyPurpose, PublicKey: base64.StdEncoding.EncodeToString(observationPublic),
+			},
+			{
+				KeyID: "revocation-fixture-key", Issuer: "fixture-revocation-authority",
+				Purpose: selectorattestation.RevocationKeyPurpose, PublicKey: base64.StdEncoding.EncodeToString(revocationPublic),
+			},
 		},
 		Revocations: selectorattestation.SignedRevocations{
 			Payload:   append(json.RawMessage(nil), revocationPayload...),

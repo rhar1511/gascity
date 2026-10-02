@@ -439,15 +439,12 @@ func writeCityTOML(t *testing.T, dir string, cityName string, agentNames ...stri
 	requireNoLeakedDoltAfterForPaths(t, dir)
 	tomlPath := filepath.Join(dir, "city.toml")
 	var buf bytes.Buffer
-	buf.WriteString("[workspace]\nname = " + `"` + cityName + `"` + "\n\n")
+	buf.WriteString("[workspace]\n\n")
 	buf.WriteString("[beads]\nprovider = \"file\"\n\n")
 	for _, name := range agentNames {
-		buf.WriteString("[[agent]]\nname = " + `"` + name + `"` + "\n")
-		buf.WriteString("start_command = \"echo hello\"\n\n")
+		writeCompletionAgentToml(t, dir, config.Agent{Name: name, StartCommand: "echo hello"})
 	}
-	if err := os.WriteFile(tomlPath, buf.Bytes(), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeSchema2RigCity(t, dir, cityName, buf.String(), "")
 	return tomlPath
 }
 
@@ -457,17 +454,12 @@ func writeControllerNamedSessionCityTOML(t *testing.T, dir, cityName, mode, idle
 	requireNoLeakedDoltAfterForPaths(t, dir)
 	tomlPath := filepath.Join(dir, "city.toml")
 	var buf bytes.Buffer
-	buf.WriteString("[workspace]\nname = " + `"` + cityName + `"` + "\n\n")
+	buf.WriteString("[workspace]\n\n")
 	buf.WriteString("[beads]\nprovider = \"file\"\n\n")
 	buf.WriteString("[daemon]\nshutdown_timeout = \"100ms\"\n\n")
-	buf.WriteString("[[agent]]\nname = \"mayor\"\nstart_command = \"echo hello\"\n")
-	if idleTimeout != "" {
-		buf.WriteString("idle_timeout = " + `"` + idleTimeout + `"` + "\n")
-	}
+	writeCompletionAgentToml(t, dir, config.Agent{Name: "mayor", StartCommand: "echo hello", IdleTimeout: idleTimeout})
 	buf.WriteString("\n[[named_session]]\ntemplate = \"mayor\"\nmode = " + `"` + mode + `"` + "\n")
-	if err := os.WriteFile(tomlPath, buf.Bytes(), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeSchema2RigCity(t, dir, cityName, buf.String(), "")
 	return tomlPath
 }
 
@@ -479,7 +471,7 @@ func TestControllerReloadsConfig(t *testing.T) {
 	dir := shortSocketTempDir(t, "gc-reload-")
 	tomlPath := writeCityTOML(t, dir, "test", "mayor")
 
-	cfg, err := config.Load(osFS{}, tomlPath)
+	cfg, _, err := config.LoadWithIncludes(osFS{}, tomlPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -571,7 +563,7 @@ func TestControllerReloadsConfigImmediatelyOnWatchEvent(t *testing.T) {
 	dir := shortSocketTempDir(t, "gc-reload-poke-")
 	tomlPath := writeCityTOML(t, dir, "test", "mayor")
 
-	cfg, err := config.Load(osFS{}, tomlPath)
+	cfg, _, err := config.LoadWithIncludes(osFS{}, tomlPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1784,7 +1776,7 @@ func TestControllerReloadInvalidConfig(t *testing.T) {
 	disableManagedDoltRecoveryForTest(t)
 	cleanupManagedDoltTestCity(t, dir)
 
-	cfg, err := config.Load(osFS{}, tomlPath)
+	cfg, _, err := config.LoadWithIncludes(osFS{}, tomlPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1849,7 +1841,7 @@ func TestControllerReloadCityNameChange(t *testing.T) {
 	cleanupManagedDoltTestCity(t, dir)
 	tomlPath := writeCityTOML(t, dir, "test", "mayor")
 
-	cfg, err := config.Load(osFS{}, tomlPath)
+	cfg, _, err := config.LoadWithIncludes(osFS{}, tomlPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1937,7 +1929,7 @@ func TestControllerReloadCommandReloadsConfigImmediately(t *testing.T) {
 	}
 	tomlPath := writeCityTOML(t, dir, "test", "mayor")
 
-	cfg, err := config.Load(osFS{}, tomlPath)
+	cfg, _, err := config.LoadWithIncludes(osFS{}, tomlPath)
 	if err != nil {
 		t.Fatal(err)
 	}

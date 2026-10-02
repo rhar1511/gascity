@@ -1,8 +1,6 @@
 package beads
 
-var (
-	_ DecisionFrontierRecordWriterHandleProvider = (*BdStore)(nil)
-)
+var _ DecisionFrontierRecordWriterHandleProvider = (*BdStore)(nil)
 
 // WithBdStoreDecisionFrontierRecordWriter attaches a caller-constructed
 // protected remote decision-frontier writer to a BdStore. It does not load

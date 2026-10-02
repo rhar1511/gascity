@@ -55,11 +55,11 @@ func (s *revisionTransitionWrapperTestStore) RevisionTransitionWriterHandle() (R
 	return s, s != nil
 }
 
-func (s *revisionTransitionWrapperTestStore) CompareAndSetMetadataKeyWithReceipt(id, key, expected, next string, expectedRevision int64, receipt RevisionTransitionReceipt) (Bead, bool, error) {
+func (s *revisionTransitionWrapperTestStore) CompareAndSetMetadataKeyWithReceipt(id, _, _, _ string, _ int64, _ RevisionTransitionReceipt) (Bead, bool, error) {
 	if s.transitionFn != nil {
 		s.transitionFn(id)
 	}
-	bead, err := s.Store.Get(id)
+	bead, err := s.Get(id)
 	return bead, err == nil, err
 }
 
@@ -367,7 +367,9 @@ func writeProxyRecordForControllerTransitionTest(t *testing.T, root string, pid,
 	}
 }
 
-var _ ControllerMetadataTransitionWriter = (*controllerTransitionWrapperTestStore)(nil)
-var _ RevisionTransitionWriterHandleProvider = (*revisionTransitionWrapperTestStore)(nil)
-var _ RevisionTransitionPatchWriter = (*revisionTransitionPatchWrapperTestStore)(nil)
-var _ RevisionTransitionPatchReceiptReader = (*revisionTransitionPatchWrapperTestStore)(nil)
+var (
+	_ ControllerMetadataTransitionWriter     = (*controllerTransitionWrapperTestStore)(nil)
+	_ RevisionTransitionWriterHandleProvider = (*revisionTransitionWrapperTestStore)(nil)
+	_ RevisionTransitionPatchWriter          = (*revisionTransitionPatchWrapperTestStore)(nil)
+	_ RevisionTransitionPatchReceiptReader   = (*revisionTransitionPatchWrapperTestStore)(nil)
+)

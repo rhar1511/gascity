@@ -245,7 +245,7 @@ func (v *Verifier) Verify(ctx context.Context, token string, want Expectation) (
 	}
 	bundle, err := v.source.Load(ctx)
 	if err != nil {
-		return VerifiedGrant{}, fmt.Errorf("load protected mutation authority: %w: %v", ErrUnavailable, err)
+		return VerifiedGrant{}, fmt.Errorf("load protected mutation authority: %w: %s", ErrUnavailable, err.Error())
 	}
 	keys, err := validateKeys(bundle.Keys)
 	if err != nil {
@@ -541,7 +541,7 @@ func decodeStrictJSON(raw []byte, destination any) error {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(destination); err != nil {
-		return fmt.Errorf("%w: %v", ErrMalformed, err)
+		return fmt.Errorf("%w: %s", ErrMalformed, err.Error())
 	}
 	var trailing any
 	if err := decoder.Decode(&trailing); err != io.EOF {

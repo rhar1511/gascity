@@ -288,7 +288,7 @@ func TestDispatchAllQueuedNudgesHoldsNudgesForKillFencedSession(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
 
-	store := openNudgeBeadStore(dir)
+	store := openNudgeFixtureStore(t, dir)
 	fake := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(dir, store.Store, fake, nil)
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: dir, Provider: "codex", Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})

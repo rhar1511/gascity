@@ -1211,8 +1211,11 @@ func TestPromptBindingAndPresentationSurviveRestartAndReplay(t *testing.T) {
 				}
 			}
 			held, err := activeStore.Get(work.ID)
-			if err != nil || held.Metadata[beadmeta.DecisionFrontierHoldMetadataKey] == "" {
-				return fmt.Errorf("source hold missing before delivery: bead=%+v err=%v", held, err)
+			if err != nil {
+				return fmt.Errorf("source missing before delivery: %w", err)
+			}
+			if held.Metadata[beadmeta.DecisionFrontierHoldMetadataKey] == "" {
+				return fmt.Errorf("source hold missing before delivery: bead=%+v", held)
 			}
 			if request.WorkDigest == "" || len(request.Questions) != 2 {
 				return fmt.Errorf("delivery request is incomplete: %+v", request)
@@ -1254,10 +1257,14 @@ func TestPromptBindingAndPresentationSurviveRestartAndReplay(t *testing.T) {
 		t.Fatalf("persisted prompt binding/presentation = %+v, %+v", persistedPrompt.PromptBinding, persistedPrompt.Questions)
 	}
 	wantPresentation := []PromptQuestionPresentation{
-		{ID: "scope", TicketID: frontierQuestionID(scope, mapID, "scope"), Version: persistedPrompt.Questions[0].Version,
-			Title: "Pilot scope", Prompt: "Choose the pilot scope.", Recommendations: []string{"one rig"}, SourceLinks: []string{"https://example.test/notes"}, SourceIssue: issue},
-		{ID: "rollout", TicketID: frontierQuestionID(scope, mapID, "rollout"), Version: persistedPrompt.Questions[1].Version,
-			Title: "Rollout", Prompt: "Choose the rollout after scope.", DependsOn: []string{"scope"}, SourceIssue: issue},
+		{
+			ID: "scope", TicketID: frontierQuestionID(scope, mapID, "scope"), Version: persistedPrompt.Questions[0].Version,
+			Title: "Pilot scope", Prompt: "Choose the pilot scope.", Recommendations: []string{"one rig"}, SourceLinks: []string{"https://example.test/notes"}, SourceIssue: issue,
+		},
+		{
+			ID: "rollout", TicketID: frontierQuestionID(scope, mapID, "rollout"), Version: persistedPrompt.Questions[1].Version,
+			Title: "Rollout", Prompt: "Choose the rollout after scope.", DependsOn: []string{"scope"}, SourceIssue: issue,
+		},
 	}
 	gotJSON, _ := json.Marshal(persistedPrompt.Questions)
 	wantJSON, _ := json.Marshal(wantPresentation)

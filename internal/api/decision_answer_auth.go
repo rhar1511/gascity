@@ -18,6 +18,8 @@ const decisionAnswerProtocol = "gascity.decision-answer.v1"
 
 var decisionAnswerSigningDomain = []byte(decisionAnswerProtocol + "\x00")
 
+// ErrDecisionAnswerGrantMalformed and the other grant errors distinguish the
+// rejected human answer protocol, authority scope, and exact challenge binding.
 var (
 	ErrDecisionAnswerGrantMalformed = errors.New("decision answer grant is malformed")
 	ErrDecisionAnswerGrantDomain    = errors.New("decision answer grant protocol is unsupported")

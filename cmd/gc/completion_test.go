@@ -619,6 +619,9 @@ func writeCompletionAgentToml(t *testing.T, cityPath string, agent config.Agent)
 	if agent.StartCommand != "" {
 		fmt.Fprintf(&b, "start_command = %q\n", agent.StartCommand)
 	}
+	if agent.IdleTimeout != "" {
+		fmt.Fprintf(&b, "idle_timeout = %q\n", agent.IdleTimeout)
+	}
 	if err := os.WriteFile(filepath.Join(agentDir, "agent.toml"), []byte(b.String()), 0o644); err != nil {
 		t.Fatal(err)
 	}

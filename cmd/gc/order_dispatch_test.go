@@ -4090,6 +4090,16 @@ func TestOrderTrackingRetentionPolicyUsesConfiguredDeleteAfterClose(t *testing.T
 	}
 }
 
+// newVersionedOrderTrackingStore restores positive retention fixtures. A
+// physical closed row still has a revision; CloseAll does not version it again.
+func newVersionedOrderTrackingStore(seed []beads.Bead) *beads.MemStore {
+	seed = slices.Clone(seed)
+	for i := range seed {
+		seed[i].Revision = 1
+	}
+	return beads.NewMemStoreFrom(100, seed, nil)
+}
+
 func TestSweepClosedOrderTrackingRetentionKeepsLatestTenPerOrderAcrossTiers(t *testing.T) {
 	now := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
 	beadTime := now.Add(-48 * time.Hour)
@@ -4156,7 +4166,7 @@ func TestSweepClosedOrderTrackingRetentionKeepsLatestTenPerOrderAcrossTiers(t *t
 			Ephemeral: true,
 		},
 	)
-	store := beads.NewMemStoreFrom(100, seed, nil)
+	store := newVersionedOrderTrackingStore(seed)
 
 	deleted, err := sweepClosedOrderTrackingRetention(store, now, orderTrackingRetentionPolicy{
 		deleteAfterClose: 24 * time.Hour,
@@ -4233,7 +4243,7 @@ func TestSweepClosedOrderTrackingRetentionRetainsRootsThatStillOwnOpenSteps(t *t
 			Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "alpha-01"},
 		},
 	)
-	store := beads.NewMemStoreFrom(100, seed, nil)
+	store := newVersionedOrderTrackingStore(seed)
 
 	var (
 		deleted int
@@ -4295,7 +4305,7 @@ func TestSweepClosedOrderTrackingRetentionBoundedRetainsRootsThatStillOwnOpenSte
 		CreatedAt: beadTime, Ephemeral: true,
 		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "alpha-00"},
 	})
-	store := beads.NewMemStoreFrom(100, seed, nil)
+	store := newVersionedOrderTrackingStore(seed)
 
 	deleted, err := sweepClosedOrderTrackingRetentionBounded(store, now, orderTrackingRetentionPolicy{
 		deleteAfterClose: 24 * time.Hour,
@@ -4330,7 +4340,7 @@ func TestSweepClosedOrderTrackingRetentionPrunesLegacyUnscopedTracking(t *testin
 			Ephemeral: i%2 == 0,
 		})
 	}
-	store := beads.NewMemStoreFrom(100, seed, nil)
+	store := newVersionedOrderTrackingStore(seed)
 
 	deleted, err := sweepClosedOrderTrackingRetention(store, now, orderTrackingRetentionPolicy{
 		deleteAfterClose: 24 * time.Hour,
@@ -4371,7 +4381,7 @@ func TestSweepClosedOrderTrackingRetentionRanksLatestByClosedReferenceTime(t *te
 		})
 	}
 	seed[0].UpdatedAt = now.Add(-25 * time.Hour)
-	store := beads.NewMemStoreFrom(100, seed, nil)
+	store := newVersionedOrderTrackingStore(seed)
 
 	deleted, err := sweepClosedOrderTrackingRetention(store, now, orderTrackingRetentionPolicy{
 		deleteAfterClose: 24 * time.Hour,
@@ -4408,7 +4418,7 @@ func TestSweepClosedOrderTrackingRetentionAcrossStoresTracksSuccessfulStores(t *
 		})
 	}
 	store := &failingDeleteStore{
-		MemStore: beads.NewMemStoreFrom(100, seed, nil),
+		MemStore: newVersionedOrderTrackingStore(seed),
 		failID:   "failed-00",
 	}
 
@@ -4418,6 +4428,9 @@ func TestSweepClosedOrderTrackingRetentionAcrossStoresTracksSuccessfulStores(t *
 	}, nil)
 	if err == nil {
 		t.Fatal("sweepClosedOrderTrackingRetentionAcrossStores err = nil, want delete failure")
+	}
+	if !strings.Contains(err.Error(), "delete failed") {
+		t.Fatalf("retention did not reach the injected delete failure: %v", err)
 	}
 	if result.storesSwept != 0 {
 		t.Fatalf("storesSwept = %d, want 0 when retention prune failed", result.storesSwept)
@@ -4460,7 +4473,7 @@ func TestSweepClosedOrderTrackingRetentionDeletesForAnyConfiguredStorageTarget(t
 					Ephemeral: storage == config.BeadStorageEphemeral,
 				})
 			}
-			store := beads.NewMemStoreFrom(100, seed, nil)
+			store := newVersionedOrderTrackingStore(seed)
 
 			deleted, err := sweepClosedOrderTrackingRetention(store, now, policy, nil)
 			if err != nil {
@@ -10368,7 +10381,7 @@ func TestSweepClosedOrderTrackingRetentionAcrossStoresBounded_HonorsBudgetAcross
 				Ephemeral: true,
 			})
 		}
-		return beads.NewMemStoreFrom(100, seed, nil)
+		return newVersionedOrderTrackingStore(seed)
 	}
 	storeA := makeStore("alpha")
 	storeB := makeStore("beta")
@@ -10402,7 +10415,7 @@ func TestSweepClosedOrderTrackingRetentionAcrossStoresBounded_ReturnsPartialCoun
 			Ephemeral: true,
 		})
 	}
-	store := beads.NewMemStoreFrom(100, seed, nil)
+	store := newVersionedOrderTrackingStore(seed)
 
 	// limit=2, 5 eligible: returns 2 with nil error.
 	deleted, err := sweepClosedOrderTrackingRetentionAcrossStoresBounded(

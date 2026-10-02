@@ -22,6 +22,8 @@ import (
 	"github.com/gastownhall/gascity/internal/selectorinventory"
 )
 
+// Collector constants define the signed record format, trusted key purpose,
+// capture age, retention policy, and bounded input sizes.
 const (
 	SchemaVersion     = "gc.external-writer-host-record.v1"
 	SigningDomain     = "gascity.external-writer-host-record.v1\n"
@@ -51,6 +53,8 @@ const (
 
 var mandatoryScopes = []string{ScopeCron, ScopeManual, ScopeOrders, ScopeServices, ScopeStartup}
 
+// ErrUnavailable and the other collector errors classify missing, malformed,
+// misbound, unauthenticated, or stale external-writer evidence.
 var (
 	ErrUnavailable = errors.New("external writer evidence unavailable")
 	ErrMalformed   = errors.New("external writer evidence malformed")
@@ -483,7 +487,7 @@ func validOrderSnapshot(snapshot OrderLedgerSnapshot, window selectorinventory.C
 }
 
 func validOrderSequences(sequenceStart, sequenceEnd uint64, sequences []selectorinventory.LedgerSequence, window selectorinventory.CaptureWindow) bool {
-	if sequences == nil || len(sequences) == 0 || len(sequences) > maxLedgerEntries ||
+	if len(sequences) == 0 || len(sequences) > maxLedgerEntries ||
 		sequenceStart == 0 || sequenceEnd < sequenceStart || uint64(len(sequences)) != sequenceEnd-sequenceStart+1 {
 		return false
 	}

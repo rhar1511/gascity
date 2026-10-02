@@ -184,7 +184,11 @@ func TestLinuxFilesystemReaderClassifiesSocketRootWithoutOpeningItForReading(t *
 	if err != nil {
 		t.Skipf("Unix sockets unavailable in test environment: %v", err)
 	}
-	defer listener.Close()
+	t.Cleanup(func() {
+		if err := listener.Close(); err != nil {
+			t.Errorf("close fixture Unix listener: %v", err)
+		}
+	})
 	reader, err := NewLinuxFilesystemReader(map[string][]LinuxFilesystemRoot{
 		SourceSystemdSystemUnits: {{Path: path, Prefix: "system"}},
 	})
@@ -207,7 +211,11 @@ func TestLinuxFilesystemReaderClassifiesSocketEntryWithoutOpeningItForReading(t 
 	if err != nil {
 		t.Skipf("Unix sockets unavailable in test environment: %v", err)
 	}
-	defer listener.Close()
+	t.Cleanup(func() {
+		if err := listener.Close(); err != nil {
+			t.Errorf("close fixture Unix listener: %v", err)
+		}
+	})
 	reader, err := NewLinuxFilesystemReader(map[string][]LinuxFilesystemRoot{
 		SourceSystemdSystemUnits: {{Path: root, Prefix: "system"}},
 	})

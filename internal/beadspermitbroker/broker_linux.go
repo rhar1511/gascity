@@ -189,7 +189,7 @@ func (b *Broker) RegisterLaunch(pid int, uid uint32, executable string, argument
 	return nil
 }
 
-// Serve accepts key requests until Close is called or ctx is cancelled.
+// Serve accepts key requests until Close is called or ctx is canceled.
 func (b *Broker) Serve(ctx context.Context) error {
 	if b == nil {
 		return errors.New("protected key broker is unavailable")
@@ -682,10 +682,6 @@ func readRootFileWithMode(root *os.Root, name string, limit int64, private bool,
 		return nil, errors.New("file changed while reading or exceeded its size limit")
 	}
 	return data, nil
-}
-
-func safeRootFile(info os.FileInfo, limit int64, private bool) bool {
-	return safeRootFileWithMode(info, limit, private, 0)
 }
 
 func safeRootFileWithMode(info os.FileInfo, limit int64, private bool, requiredMode os.FileMode) bool {

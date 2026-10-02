@@ -30,13 +30,13 @@ func TestResolveCanonicalAdmissionPoolV2(t *testing.T) {
 }
 
 func TestResolveCanonicalAdmissionPoolV2RequiresEffectiveRigSuspensionAndBindsConfig(t *testing.T) {
-	max := 3
+	maximum := 3
 	defaultFormula := "mol-work"
 	agent := config.Agent{Name: "worker", Dir: "rig-a", MinActiveSessions: intPtr(1), DefaultSlingFormula: &defaultFormula}
 	baseCity := &config.City{
 		Agents:    []config.Agent{agent},
 		Workspace: config.Workspace{MaxActiveSessions: intPtr(12)},
-		Rigs:      []config.Rig{{Name: "rig-a", MaxActiveSessions: intPtr(max)}},
+		Rigs:      []config.Rig{{Name: "rig-a", MaxActiveSessions: intPtr(maximum)}},
 	}
 	runtimeSuspended := false
 	target, err := ResolveCanonicalAdmissionPoolV2("rig-a/worker", AdmissionTargetResolutionContextV2{City: baseCity, RuntimeRigSuspended: &runtimeSuspended})
@@ -325,8 +325,7 @@ func TestDigestAdmissionPolicyV2IsStableForMapSourceOrderAndFilesystemPath(t *te
 	}
 	second.EffectiveCompileVariables = map[string]string{"mode": "safe", "component": "api"}
 	first.ExternalAssets[0], first.ExternalAssets[3] = first.ExternalAssets[3], first.ExternalAssets[0]
-	first.CheckClosures[0].DependencyLogicalIDs[0], first.CheckClosures[0].DependencyLogicalIDs[1] =
-		first.CheckClosures[0].DependencyLogicalIDs[1], first.CheckClosures[0].DependencyLogicalIDs[0]
+	first.CheckClosures[0].DependencyLogicalIDs[0], first.CheckClosures[0].DependencyLogicalIDs[1] = first.CheckClosures[0].DependencyLogicalIDs[1], first.CheckClosures[0].DependencyLogicalIDs[0]
 	first.CheckClosures[0], first.CheckClosures[1] = first.CheckClosures[1], first.CheckClosures[0]
 
 	// Formula SourceIdentity.Path is process-local. Only its stable logical ID

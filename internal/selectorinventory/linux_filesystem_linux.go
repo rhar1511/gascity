@@ -506,7 +506,7 @@ func (b *linuxTreeBuild) addPhysicalObject(info unix.Stat_t) error {
 	if b.physical == nil {
 		b.physical = make(map[linuxTreeObjectIdentity]struct{})
 	}
-	identity := linuxTreeObjectIdentity{device: uint64(info.Dev), inode: uint64(info.Ino)}
+	identity := linuxTreeObjectIdentity{device: info.Dev, inode: info.Ino}
 	if _, duplicate := b.physical[identity]; duplicate {
 		return errLinuxTreeAlias
 	}

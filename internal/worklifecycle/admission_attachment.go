@@ -16,6 +16,8 @@ import (
 
 const admissionAttachmentKind = "lifecycle_admission_v2_attach"
 
+// ErrAdmissionAttachmentUnavailable and the other attachment errors classify
+// unsupported ledgers and invalid admission evidence.
 var (
 	ErrAdmissionAttachmentUnavailable = errors.New("v2 admission attachment proof is unavailable")
 	ErrAdmissionAttachmentInvalid     = errors.New("v2 admission attachment proof is invalid")
@@ -106,7 +108,7 @@ func (a *AdmissionAttachmentAdapter) Attach(encoded string, cfg config.Lifecycle
 		if err := verifyAdmissionAttachmentCurrent(current, encoded, proof); err != nil {
 			return beads.Bead{}, AdmissionAttachmentProof{}, err
 		}
-		if _, err := verifyAdmissionReceiptForSource(current, encoded, cfg, scope); err != nil {
+		if err := verifyAdmissionReceiptForSource(current, encoded, cfg, scope); err != nil {
 			return beads.Bead{}, AdmissionAttachmentProof{}, err
 		}
 		return current, proof, nil
@@ -121,7 +123,7 @@ func (a *AdmissionAttachmentAdapter) Attach(encoded string, cfg config.Lifecycle
 		current.Metadata[beadmeta.LifecycleAdmissionReceiptV2MetadataKey] != "" {
 		return beads.Bead{}, AdmissionAttachmentProof{}, fmt.Errorf("%w: current source does not match the exact reviewed revision or has prior admission evidence", ErrAdmissionAttachmentInvalid)
 	}
-	if _, err := verifyAdmissionReceiptForSource(current, encoded, cfg, scope); err != nil {
+	if err := verifyAdmissionReceiptForSource(current, encoded, cfg, scope); err != nil {
 		return beads.Bead{}, AdmissionAttachmentProof{}, err
 	}
 
@@ -198,7 +200,7 @@ func (a *AdmissionAttachmentAdapter) verify(id string, cfg config.LifecycleConfi
 	if err := decodeStrict(encoded, &receipt); err != nil || receipt.WorkItemID != id || receipt.Scope != scope {
 		return beads.Bead{}, AdmissionAttachmentProof{}, fmt.Errorf("%w: current v2 receipt identity does not match", ErrAdmissionAttachmentInvalid)
 	}
-	if _, err := verifyAdmissionReceiptForSource(current, encoded, cfg, scope); err != nil {
+	if err := verifyAdmissionReceiptForSource(current, encoded, cfg, scope); err != nil {
 		return beads.Bead{}, AdmissionAttachmentProof{}, err
 	}
 	digest, err := AdmissionDigestV2(receipt)
@@ -304,15 +306,15 @@ func admissionAttachmentReceiptID(payload []byte, encoded string) (string, error
 	return "admission-v2-" + hex.EncodeToString(sum[:]), nil
 }
 
-func verifyAdmissionReceiptForSource(current beads.Bead, encoded string, cfg config.LifecycleConfig, scope string) (AdmissionReceiptV2, error) {
+func verifyAdmissionReceiptForSource(current beads.Bead, encoded string, cfg config.LifecycleConfig, scope string) error {
 	check := current
 	check.Metadata = cloneStringMap(current.Metadata)
 	check.Metadata[beadmeta.LifecycleAdmissionReceiptV2MetadataKey] = encoded
-	receipt, err := VerifyAdmissionReceiptV2(check, cfg, scope)
+	_, err := VerifyAdmissionReceiptV2(check, cfg, scope)
 	if err != nil {
-		return AdmissionReceiptV2{}, errors.Join(ErrAdmissionAttachmentInvalid, err)
+		return errors.Join(ErrAdmissionAttachmentInvalid, err)
 	}
-	return receipt, nil
+	return nil
 }
 
 func verifyAdmissionAttachmentReceipt(actual beads.ControllerMetadataTransitionReceipt, issueID string, request beads.ControllerMetadataTransitionRequest, digest string) (AdmissionAttachmentProof, error) {

@@ -103,6 +103,8 @@ run_in_test_env() {
     GOINSECURE="${GOINSECURE-}" \
     GOVCS="${GOVCS-}" \
     GOWORK="${GOWORK-}" \
+    BEADS_TEST_BD_BINARY="${BEADS_TEST_BD_BINARY-}" \
+    BEADS_TEST_DOLT_BINARY="${BEADS_TEST_DOLT_BINARY-}" \
     GC_FAST_UNIT="${GC_FAST_UNIT:-0}" \
     CGO_CPPFLAGS="${cgo_cppflags}" \
     CGO_LDFLAGS="${cgo_ldflags}" \

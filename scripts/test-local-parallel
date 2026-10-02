@@ -347,6 +347,8 @@ run_fan_out() {
     GOINSECURE="${GOINSECURE-}" \
     GOVCS="${GOVCS-}" \
     GOWORK="${GOWORK-}" \
+    BEADS_TEST_BD_BINARY="${BEADS_TEST_BD_BINARY-}" \
+    BEADS_TEST_DOLT_BINARY="${BEADS_TEST_DOLT_BINARY-}" \
     bash -lc "$command" >"$log" 2>&1; then
     echo "[$label] ok"
   else

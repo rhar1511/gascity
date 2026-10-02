@@ -255,22 +255,32 @@ func (s WorkStore) RevisionTransitionReceiptReaderHandle() (RevisionTransitionRe
 	return RevisionTransitionReceiptReaderFor(s.Store)
 }
 
+// RevisionTransitionReceiptReaderHandle forwards exact receipt reads through
+// this typed store view only when the backing ledger supports them.
 func (s GraphStore) RevisionTransitionReceiptReaderHandle() (RevisionTransitionReceiptReader, bool) {
 	return RevisionTransitionReceiptReaderFor(s.Store)
 }
 
+// RevisionTransitionReceiptReaderHandle forwards exact receipt reads through
+// this typed store view only when the backing ledger supports them.
 func (s SessionStore) RevisionTransitionReceiptReaderHandle() (RevisionTransitionReceiptReader, bool) {
 	return RevisionTransitionReceiptReaderFor(s.Store)
 }
 
+// RevisionTransitionReceiptReaderHandle forwards exact receipt reads through
+// this typed store view only when the backing ledger supports them.
 func (s MailStore) RevisionTransitionReceiptReaderHandle() (RevisionTransitionReceiptReader, bool) {
 	return RevisionTransitionReceiptReaderFor(s.Store)
 }
 
+// RevisionTransitionReceiptReaderHandle forwards exact receipt reads through
+// this typed store view only when the backing ledger supports them.
 func (s OrdersStore) RevisionTransitionReceiptReaderHandle() (RevisionTransitionReceiptReader, bool) {
 	return RevisionTransitionReceiptReaderFor(s.Store)
 }
 
+// RevisionTransitionReceiptReaderHandle forwards exact receipt reads through
+// this typed store view only when the backing ledger supports them.
 func (s NudgesStore) RevisionTransitionReceiptReaderHandle() (RevisionTransitionReceiptReader, bool) {
 	return RevisionTransitionReceiptReaderFor(s.Store)
 }
@@ -281,22 +291,32 @@ func (s WorkStore) ControllerMetadataTransitionReceiptReaderHandle() (Controller
 	return ControllerMetadataTransitionReceiptReaderFor(s.Store)
 }
 
+// ControllerMetadataTransitionReceiptReaderHandle forwards durable Q43 receipt envelopes
+// through this typed store view without inventing backing-ledger support.
 func (s GraphStore) ControllerMetadataTransitionReceiptReaderHandle() (ControllerMetadataTransitionReceiptReader, bool) {
 	return ControllerMetadataTransitionReceiptReaderFor(s.Store)
 }
 
+// ControllerMetadataTransitionReceiptReaderHandle forwards durable Q43 receipt envelopes
+// through this typed store view without inventing backing-ledger support.
 func (s SessionStore) ControllerMetadataTransitionReceiptReaderHandle() (ControllerMetadataTransitionReceiptReader, bool) {
 	return ControllerMetadataTransitionReceiptReaderFor(s.Store)
 }
 
+// ControllerMetadataTransitionReceiptReaderHandle forwards durable Q43 receipt envelopes
+// through this typed store view without inventing backing-ledger support.
 func (s MailStore) ControllerMetadataTransitionReceiptReaderHandle() (ControllerMetadataTransitionReceiptReader, bool) {
 	return ControllerMetadataTransitionReceiptReaderFor(s.Store)
 }
 
+// ControllerMetadataTransitionReceiptReaderHandle forwards durable Q43 receipt envelopes
+// through this typed store view without inventing backing-ledger support.
 func (s OrdersStore) ControllerMetadataTransitionReceiptReaderHandle() (ControllerMetadataTransitionReceiptReader, bool) {
 	return ControllerMetadataTransitionReceiptReaderFor(s.Store)
 }
 
+// ControllerMetadataTransitionReceiptReaderHandle forwards durable Q43 receipt envelopes
+// through this typed store view without inventing backing-ledger support.
 func (s NudgesStore) ControllerMetadataTransitionReceiptReaderHandle() (ControllerMetadataTransitionReceiptReader, bool) {
 	return ControllerMetadataTransitionReceiptReaderFor(s.Store)
 }
@@ -307,22 +327,32 @@ func (s WorkStore) RevisionTransitionWriterHandle() (RevisionTransitionWriter, b
 	return RevisionTransitionWriterFor(s.Store)
 }
 
+// RevisionTransitionWriterHandle forwards the complete atomic source transition
+// through this typed store view only when the backing ledger supports it.
 func (s GraphStore) RevisionTransitionWriterHandle() (RevisionTransitionWriter, bool) {
 	return RevisionTransitionWriterFor(s.Store)
 }
 
+// RevisionTransitionWriterHandle forwards the complete atomic source transition
+// through this typed store view only when the backing ledger supports it.
 func (s SessionStore) RevisionTransitionWriterHandle() (RevisionTransitionWriter, bool) {
 	return RevisionTransitionWriterFor(s.Store)
 }
 
+// RevisionTransitionWriterHandle forwards the complete atomic source transition
+// through this typed store view only when the backing ledger supports it.
 func (s MailStore) RevisionTransitionWriterHandle() (RevisionTransitionWriter, bool) {
 	return RevisionTransitionWriterFor(s.Store)
 }
 
+// RevisionTransitionWriterHandle forwards the complete atomic source transition
+// through this typed store view only when the backing ledger supports it.
 func (s OrdersStore) RevisionTransitionWriterHandle() (RevisionTransitionWriter, bool) {
 	return RevisionTransitionWriterFor(s.Store)
 }
 
+// RevisionTransitionWriterHandle forwards the complete atomic source transition
+// through this typed store view only when the backing ledger supports it.
 func (s NudgesStore) RevisionTransitionWriterHandle() (RevisionTransitionWriter, bool) {
 	return RevisionTransitionWriterFor(s.Store)
 }
@@ -333,22 +363,32 @@ func (s WorkStore) DecisionFrontierRecordWriterHandle() (DecisionFrontierRecordW
 	return DecisionFrontierRecordWriterFor(s.Store)
 }
 
+// DecisionFrontierRecordWriterHandle forwards protected record writes through
+// this typed store view without inventing backing-ledger support.
 func (s GraphStore) DecisionFrontierRecordWriterHandle() (DecisionFrontierRecordWriter, bool) {
 	return DecisionFrontierRecordWriterFor(s.Store)
 }
 
+// DecisionFrontierRecordWriterHandle forwards protected record writes through
+// this typed store view without inventing backing-ledger support.
 func (s SessionStore) DecisionFrontierRecordWriterHandle() (DecisionFrontierRecordWriter, bool) {
 	return DecisionFrontierRecordWriterFor(s.Store)
 }
 
+// DecisionFrontierRecordWriterHandle forwards protected record writes through
+// this typed store view without inventing backing-ledger support.
 func (s MailStore) DecisionFrontierRecordWriterHandle() (DecisionFrontierRecordWriter, bool) {
 	return DecisionFrontierRecordWriterFor(s.Store)
 }
 
+// DecisionFrontierRecordWriterHandle forwards protected record writes through
+// this typed store view without inventing backing-ledger support.
 func (s OrdersStore) DecisionFrontierRecordWriterHandle() (DecisionFrontierRecordWriter, bool) {
 	return DecisionFrontierRecordWriterFor(s.Store)
 }
 
+// DecisionFrontierRecordWriterHandle forwards protected record writes through
+// this typed store view without inventing backing-ledger support.
 func (s NudgesStore) DecisionFrontierRecordWriterHandle() (DecisionFrontierRecordWriter, bool) {
 	return DecisionFrontierRecordWriterFor(s.Store)
 }
