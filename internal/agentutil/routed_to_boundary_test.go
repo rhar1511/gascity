@@ -97,7 +97,7 @@ func routedToIdentityViolations(root string) ([]string, error) {
 		}
 		refusalChecks := make(map[*ast.BinaryExpr]bool)
 		ast.Inspect(file, func(node ast.Node) bool {
-			if branch, ok := node.(*ast.IfStmt); ok && isTerminalPoolRefusal(branch, file) {
+			if branch, ok := node.(*ast.IfStmt); ok && isTerminalPoolRefusal(branch, file, path) {
 				markDirectRefusalChecks(branch.Cond, refusalChecks)
 			}
 			if comparison, ok := node.(*ast.BinaryExpr); ok && comparesPoolNameToEmpty(comparison) && !refusalChecks[comparison] {
@@ -155,6 +155,9 @@ var _ = fmt.Errorf
 func RoutedToIdentity(*Agent) string { return "rig/worker" }
 type formatter string
 func (formatter) Errorf(string) error { route = selectedAgent.PoolName; return nil }
+type routingStringer struct{}
+func (routingStringer) String() string { route = selectedAgent.PoolName; return "blocked" }
+var trigger routingStringer
 `
 	const pureConstructor = `func refusal(reason string) error { return fmt.Errorf("refused: %s", reason) }
 `
@@ -216,6 +219,11 @@ func (formatter) Errorf(string) error { route = selectedAgent.PoolName; return n
 			constructor: "func refusal(fmt formatter) error { return fmt.Errorf(\"blocked\") }\n",
 			body:        `if a.PoolName != "" { return Result{}, refusal("blocked") }; return Result{}, nil`,
 		},
+		{
+			name:        "formatter invokes side effecting stringer",
+			constructor: "func refusal(string) error { return fmt.Errorf(\"%s\", trigger) }\n",
+			body:        `if a.PoolName != "" { return Result{}, refusal("blocked") }; return Result{}, nil`,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
@@ -259,6 +267,52 @@ func TestRoutingPolicyWalksWorktreeRootAndRejectsMalformedSource(t *testing.T) {
 	}
 }
 
+func TestRoutingPolicyAllowsOnlyClosedSentinelReferences(t *testing.T) {
+	const source = `package fixture
+import ("errors"; "fmt")
+type Agent struct { PoolName string }
+type Result struct{}
+var route string
+var selectedAgent Agent
+var sentinel = errors.New("blocked")
+type trigger struct{}
+func (trigger) Error() string { route = selectedAgent.PoolName; return "blocked" }
+func refusal(reason string) error { return fmt.Errorf("%w: %s", sentinel, reason) }
+func selectTarget(a Agent) (Result, error) {
+    if a.PoolName != "" { return Result{}, refusal("blocked") }
+    return Result{}, nil
+}`
+	for _, tc := range []struct {
+		name, peer string
+		allowed    bool
+	}{
+		{name: "closed literal sentinel", allowed: true},
+		{name: "cross file reassignment", peer: `package fixture; func replace() { sentinel = trigger{} }`},
+		{name: "address escape", peer: `package fixture; var escaped = &sentinel`},
+		{name: "package builtin shadow", peer: `package fixture; type string struct{}`},
+		{name: "unparseable peer", peer: `package fixture; func malformed(`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			if err := os.WriteFile(filepath.Join(root, "policy.go"), []byte(source), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if tc.peer != "" {
+				if err := os.WriteFile(filepath.Join(root, "peer_test.go"), []byte(tc.peer), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			violations, err := routedToIdentityViolations(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (len(violations) == 0) != tc.allowed {
+				t.Fatalf("routing policy violations = %v, want allowed=%t", violations, tc.allowed)
+			}
+		})
+	}
+}
+
 // Only direct Boolean predicates belong to a terminal refusal. Keep walking
 // calls and function literals normally, so an inline routing derivation hidden
 // inside a condition is still rejected.
@@ -283,7 +337,7 @@ func markDirectRefusalChecks(expr ast.Expr, checks map[*ast.BinaryExpr]bool) {
 // A refusal does not derive an identity: it returns only a zero struct result
 // and a literal-argument, locally declared error constructor. Do not exempt the surrounding file/function or
 // a branch with an initializer, else, assignment, or identity-bearing return.
-func isTerminalPoolRefusal(branch *ast.IfStmt, file *ast.File) bool {
+func isTerminalPoolRefusal(branch *ast.IfStmt, file *ast.File, sourcePath string) bool {
 	if branch.Init != nil || branch.Else != nil || len(branch.Body.List) != 1 {
 		return false
 	}
@@ -360,7 +414,11 @@ func isTerminalPoolRefusal(branch *ast.IfStmt, file *ast.File) bool {
 		return false
 	}
 	formatError, ok := constructorReturn.Results[0].(*ast.CallExpr)
-	if !ok || len(formatError.Args) == 0 {
+	if !ok || len(formatError.Args) == 0 || formatError.Ellipsis.IsValid() {
+		return false
+	}
+	format, ok := formatError.Args[0].(*ast.BasicLit)
+	if !ok || format.Kind != token.STRING {
 		return false
 	}
 	method, ok := formatError.Fun.(*ast.SelectorExpr)
@@ -385,14 +443,20 @@ func isTerminalPoolRefusal(branch *ast.IfStmt, file *ast.File) bool {
 	if !importedFmt {
 		return false
 	}
-	// Literal/identifier arguments cannot perform writes or hide another call.
-	// In particular, a function that merely returns error may still select an
-	// identity or return nil; only this straight-line non-nil constructor is safe.
-	for _, arg := range formatError.Args {
+	packageFiles, ok := routingPackageFiles(file, sourcePath)
+	if !ok {
+		return false
+	}
+	// Formatting invokes user methods on arbitrary values. Accept only literal
+	// strings, builtin string parameters, and a closed literal error sentinel.
+	for _, arg := range formatError.Args[1:] {
 		switch arg := arg.(type) {
 		case *ast.BasicLit:
+			if arg.Kind != token.STRING {
+				return false
+			}
 		case *ast.Ident:
-			if arg.Name == "PoolName" {
+			if !isRoutingStringParameter(arg, constructor) && !isClosedRoutingErrorSentinel(arg, formatError, file, packageFiles) {
 				return false
 			}
 		default:
@@ -400,6 +464,109 @@ func isTerminalPoolRefusal(branch *ast.IfStmt, file *ast.File) bool {
 		}
 	}
 	return true
+}
+
+func isRoutingStringParameter(operand *ast.Ident, constructor *ast.FuncDecl) bool {
+	if operand.Obj == nil || constructor.Type.Params == nil {
+		return false
+	}
+	for _, parameter := range constructor.Type.Params.List {
+		kind, ok := parameter.Type.(*ast.Ident)
+		if ok && kind.Name == "string" && kind.Obj == nil && operand.Obj.Decl == parameter {
+			return true
+		}
+	}
+	return false
+}
+
+// A sentinel is safe only in the closed declaration/formatting seam. Inspect
+// every same-package source (including tests and build variants) and refuse
+// any other reference, rather than trying to infer writes or address escapes.
+func isClosedRoutingErrorSentinel(operand *ast.Ident, formatting *ast.CallExpr, file *ast.File, packageFiles []*ast.File) bool {
+	if operand.Obj == nil || operand.Obj.Kind != ast.Var || ast.IsExported(operand.Name) || file.Scope.Lookup(operand.Name) != operand.Obj {
+		return false
+	}
+	declaration, ok := operand.Obj.Decl.(*ast.ValueSpec)
+	if !ok || declaration.Type != nil || len(declaration.Names) != 1 || len(declaration.Values) != 1 {
+		return false
+	}
+	initializer, ok := declaration.Values[0].(*ast.CallExpr)
+	if !ok || initializer.Ellipsis.IsValid() || len(initializer.Args) != 1 {
+		return false
+	}
+	message, ok := initializer.Args[0].(*ast.BasicLit)
+	if !ok || message.Kind != token.STRING {
+		return false
+	}
+	method, ok := initializer.Fun.(*ast.SelectorExpr)
+	if !ok || method.Sel.Name != "New" {
+		return false
+	}
+	pkg, ok := method.X.(*ast.Ident)
+	if !ok || pkg.Obj != nil {
+		return false
+	}
+	importedErrors := false
+	for _, imported := range file.Imports {
+		if imported.Path.Value == `"errors"` {
+			name := "errors"
+			if imported.Name != nil {
+				name = imported.Name.Name
+			}
+			importedErrors = name == pkg.Name
+		}
+	}
+	if !importedErrors {
+		return false
+	}
+	allowed := map[*ast.Ident]bool{declaration.Names[0]: true}
+	for _, argument := range formatting.Args {
+		if identifier, ok := argument.(*ast.Ident); ok && identifier.Obj == operand.Obj {
+			allowed[identifier] = true
+		}
+	}
+	for _, candidate := range packageFiles {
+		safe := true
+		ast.Inspect(candidate, func(node ast.Node) bool {
+			if identifier, ok := node.(*ast.Ident); ok && identifier.Name == operand.Name && !allowed[identifier] {
+				safe = false
+			}
+			return true
+		})
+		if !safe {
+			return false
+		}
+	}
+	return true
+}
+
+func routingPackageFiles(file *ast.File, sourcePath string) ([]*ast.File, bool) {
+	entries, err := os.ReadDir(filepath.Dir(sourcePath))
+	if err != nil {
+		return nil, false
+	}
+	var files []*ast.File
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".go") {
+			continue
+		}
+		path := filepath.Join(filepath.Dir(sourcePath), entry.Name())
+		candidate := file
+		if path != sourcePath {
+			candidate, err = parser.ParseFile(token.NewFileSet(), path, nil, 0)
+			if err != nil {
+				return nil, false
+			}
+		}
+		if candidate.Name.Name != file.Name.Name {
+			continue
+		}
+		if candidate.Scope.Lookup("string") != nil || candidate.Scope.Lookup("error") != nil {
+			return nil, false
+		}
+		files = append(files, candidate)
+	}
+	return files, true
 }
 
 func unparenRoutingExpr(expr ast.Expr) ast.Expr {

@@ -595,3 +595,24 @@ Retirement fixture assurance remains fixture-only, with trial qualification
 and activation readiness false. Normal corrective hooks, a complete normal
 push-time baseline and exact-head remote CI remain required. WIP dispatch
 remains enabled.
+
+The final spec follow-up identified a further policy-guard counterexample:
+genuine `fmt.Errorf` can invoke a side-effecting `String` method on an arbitrary
+identifier operand. The actual filesystem regression reproduced that bypass in
+`/var/tmp/controller-pr23-routing-format-method-red.log`. The exemption now
+accepts only a literal format, literal strings, builtin string parameters and a
+closed `errors.New` literal sentinel. Every same-package source, including
+tests and build variants, is checked for builtin shadowing and unexpected
+sentinel references; reassignment, address escape and unreadable/malformed
+peers refuse the exemption. The initial correction passed the gate matrix in
+`/var/tmp/controller-pr23-routing-format-method-green.log`.
+This is an ordinary-Go source-policy check, not a runtime immutability or
+production capability proof. The earlier fixture commit was not pushed; this
+additional correction is a new commit, never an amendment or hook bypass.
+
+The complete agent-utilities package (1.351s) and work-lifecycle package
+(0.298s), including the Stringer and five closed-sentinel filesystem cases,
+passed in `/var/tmp/controller-pr23-routing-format-method-final.log`.
+Independent standards and spec follow-ups found no remaining hard violations
+or P0-P2 findings in this final guard correction. These source reviews do not
+replace normal hooks, the full push-time baseline or exact-head remote CI.
