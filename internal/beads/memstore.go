@@ -776,6 +776,51 @@ func (m *MemStore) Delete(id string) error {
 	return fmt.Errorf("deleting bead %q: %w", id, ErrNotFound)
 }
 
+// deleteDependencyReferencesLocked implements conditional deletion's atomic
+// cascade. Guard every surviving source before changing any of its edges.
+// Ordinary Delete retains its historical dangling-reference behavior.
+func (m *MemStore) deleteDependencyReferencesLocked(target Bead) error {
+	id := target.ID
+	owners := make(map[string]struct{})
+	for _, dep := range m.deps {
+		if dep.DependsOnID == id && dep.IssueID != id {
+			if err := m.checkDependencySourceMutationLocked(dep.IssueID); err != nil {
+				return err
+			}
+			owners[dep.IssueID] = struct{}{}
+		}
+	}
+	for _, row := range m.beads {
+		if row.ParentID == id && row.ID != id {
+			owners[row.ID] = struct{}{}
+		}
+	}
+	for owner := range owners {
+		if err := m.checkDependencySourceMutationLocked(owner); err != nil {
+			return err
+		}
+		if i := m.indexOfLocked(owner); i >= 0 {
+			if err := validateTerminalDeleteReferenceOwner(target, m.beads[i]); err != nil {
+				return err
+			}
+		}
+	}
+	remaining := make([]Dep, 0, len(m.deps))
+	for _, dep := range m.deps {
+		if dep.IssueID != id && dep.DependsOnID != id {
+			remaining = append(remaining, dep)
+		}
+	}
+	m.deps = remaining
+	for owner := range owners {
+		if i := m.indexOfLocked(owner); i >= 0 && m.beads[i].ParentID == id {
+			m.beads[i].ParentID = ""
+		}
+		m.bumpDependencySourceRevisionLocked(owner)
+	}
+	return nil
+}
+
 // Ping always succeeds for MemStore (in-memory, always available).
 func (m *MemStore) Ping() error {
 	return nil

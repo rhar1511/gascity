@@ -12,6 +12,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worklifecycle"
 	"github.com/spf13/cobra"
 )
@@ -58,6 +59,7 @@ type bdStoreBridgeBead struct {
 	Description string            `json:"description,omitempty"`
 	Labels      []string          `json:"labels,omitempty"`
 	Metadata    map[string]string `json:"metadata,omitempty"`
+	Revision    int64             `json:"revision"`
 }
 
 func newBdStoreBridgeCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -140,6 +142,30 @@ func runBdStoreBridge(op string, args []string, dir, host, port, user string, st
 	if strings.TrimSpace(port) == "" {
 		return fmt.Errorf("missing --port")
 	}
+	privateRead := strings.HasPrefix(op, "private-")
+	internalSessionWrite := strings.HasPrefix(op, "internal-")
+	if internalSessionWrite {
+		if os.Getenv("GC_BD_STORE_BRIDGE_PRIVATE") != "1" {
+			return fmt.Errorf("internal bridge write requires internal exec-store mode")
+		}
+		op = strings.TrimPrefix(op, "internal-")
+		switch op {
+		case "create", "update", "set-metadata":
+		default:
+			return fmt.Errorf("unsupported internal bridge operation %q", op)
+		}
+	}
+	if privateRead {
+		if os.Getenv("GC_BD_STORE_BRIDGE_PRIVATE") != "1" {
+			return fmt.Errorf("private bridge read requires internal exec-store mode")
+		}
+		op = strings.TrimPrefix(op, "private-")
+		switch op {
+		case "get", "list", "ready", "children", "list-by-label":
+		default:
+			return fmt.Errorf("unsupported private bridge operation %q", op)
+		}
+	}
 	password := bdStoreBridgePassword()
 	env := bdStoreBridgeEnv(dir, host, port, user, password)
 	// Bridge operations can trigger bd hooks that recursively invoke gc. Pin
@@ -162,8 +188,15 @@ func runBdStoreBridge(op string, args []string, dir, host, port, user string, st
 		if err := decodeJSON(stdin, &req); err != nil {
 			return err
 		}
-		if err := validateBdStoreBridgeAuthorityMetadata(req.Metadata, nil); err != nil {
+		metadata := req.Metadata
+		if internalSessionWrite && req.Type == session.BeadType {
+			metadata = genericBridgeSessionMetadata(metadata)
+		}
+		if err := validateBdStoreBridgeAuthorityMetadata(metadata, nil); err != nil {
 			return err
+		}
+		if err := session.ValidateUnownedRequestMetadata(metadata); err != nil {
+			return fmt.Errorf("protected session request metadata: %w", err)
 		}
 		created, err := store.Create(beads.Bead{
 			Title:       req.Title,
@@ -181,7 +214,7 @@ func runBdStoreBridge(op string, args []string, dir, host, port, user string, st
 		if err != nil {
 			return err
 		}
-		return writeJSON(stdout, bridgeBead(created))
+		return writeJSON(stdout, bridgeReadBead(created, internalSessionWrite && req.Type == session.BeadType))
 	case "get":
 		if len(args) < 1 {
 			return fmt.Errorf("usage: get <id>")
@@ -190,7 +223,7 @@ func runBdStoreBridge(op string, args []string, dir, host, port, user string, st
 		if err != nil {
 			return err
 		}
-		return writeJSON(stdout, bridgeBead(bead))
+		return writeJSON(stdout, bridgeReadBead(bead, privateRead))
 	case "update":
 		if len(args) < 1 {
 			return fmt.Errorf("usage: update <id>")
@@ -199,8 +232,15 @@ func runBdStoreBridge(op string, args []string, dir, host, port, user string, st
 		if err := decodeJSON(stdin, &req); err != nil {
 			return err
 		}
-		if err := validateBdStoreBridgeAuthorityMetadata(req.Metadata, nil); err != nil {
-			return err
+		if !internalSessionWrite {
+			if err := validateBdStoreBridgeAuthorityMetadata(req.Metadata, nil); err != nil {
+				return err
+			}
+		}
+		if !internalSessionWrite {
+			if err := session.ValidateUnownedRequestMetadata(req.Metadata); err != nil {
+				return fmt.Errorf("protected session request metadata: %w", err)
+			}
 		}
 		opts := beads.UpdateOpts{
 			Title:        req.Title,
@@ -214,38 +254,19 @@ func runBdStoreBridge(op string, args []string, dir, host, port, user string, st
 			RemoveLabels: req.RemoveLabels,
 			Metadata:     req.Metadata,
 		}
-		current, err := store.Get(args[0])
-		if err != nil {
-			return err
-		}
-		if err := validateBdStoreBridgeAuthorityMetadata(req.Metadata, current.Metadata); err != nil {
-			return err
-		}
-		if err := worklifecycle.ValidateEnrolledMutation(current, opts); err != nil {
-			return err
-		}
-		return store.Update(args[0], opts)
+		return updateBdStoreBridgeForMode(store, args[0], opts, internalSessionWrite)
 	case "close":
 		if len(args) < 1 {
 			return fmt.Errorf("usage: close <id>")
 		}
-		if err := validateBridgeGenericMutation(store, args[0]); err != nil {
-			return err
-		}
-		return store.Close(args[0])
+		closed := "closed"
+		return updateBdStoreBridge(store, args[0], beads.UpdateOpts{Status: &closed})
 	case "reopen":
 		if len(args) < 1 {
 			return fmt.Errorf("usage: reopen <id>")
 		}
-		current, err := store.Get(args[0])
-		if err != nil {
-			return err
-		}
 		open := "open"
-		if err := worklifecycle.ValidateEnrolledMutation(current, beads.UpdateOpts{Status: &open}); err != nil {
-			return err
-		}
-		return store.Reopen(args[0])
+		return updateBdStoreBridge(store, args[0], beads.UpdateOpts{Status: &open})
 	case "list":
 		query := beads.ListQuery{AllowScan: true}
 		for _, arg := range args {
@@ -268,13 +289,13 @@ func runBdStoreBridge(op string, args []string, dir, host, port, user string, st
 		if err != nil {
 			return err
 		}
-		return writeJSON(stdout, bridgeBeads(items))
+		return writeJSON(stdout, bridgeReadBeads(items, privateRead))
 	case "ready":
 		items, err := beads.HandlesFor(store).Live.Ready()
 		if err != nil {
 			return err
 		}
-		return writeJSON(stdout, bridgeBeads(items))
+		return writeJSON(stdout, bridgeReadBeads(items, privateRead))
 	case "children":
 		if len(args) < 1 {
 			return fmt.Errorf("usage: children <parent-id>")
@@ -283,7 +304,7 @@ func runBdStoreBridge(op string, args []string, dir, host, port, user string, st
 		if err != nil {
 			return err
 		}
-		return writeJSON(stdout, bridgeBeads(items))
+		return writeJSON(stdout, bridgeReadBeads(items, privateRead))
 	case "list-by-label":
 		if len(args) < 1 {
 			return fmt.Errorf("usage: list-by-label <label> [limit]")
@@ -300,13 +321,15 @@ func runBdStoreBridge(op string, args []string, dir, host, port, user string, st
 		if err != nil {
 			return err
 		}
-		return writeJSON(stdout, bridgeBeads(items))
+		return writeJSON(stdout, bridgeReadBeads(items, privateRead))
 	case "set-metadata":
 		if len(args) < 2 {
 			return fmt.Errorf("usage: set-metadata <id> <key>")
 		}
-		if strings.HasPrefix(strings.TrimSpace(args[1]), beadmeta.SessionRequestReceiptPrefix) {
-			return fmt.Errorf("refusing controller-owned session request receipt metadata %q; use the tracked session protocol", args[1])
+		if !internalSessionWrite || !beadmeta.IsExecutionIdentityMetadataKey(args[1]) {
+			if err := session.ValidateUnownedRequestMetadata(map[string]string{args[1]: ""}); err != nil {
+				return fmt.Errorf("controller-owned session lifecycle metadata: %w", err)
+			}
 		}
 		if protectedSessionAuthorityMetadata(args[1]) {
 			return fmt.Errorf("refusing controller-owned session authority metadata %q; use the signed session permission-mode API", args[1])
@@ -327,16 +350,9 @@ func runBdStoreBridge(op string, args []string, dir, host, port, user string, st
 		if err != nil {
 			return fmt.Errorf("read stdin: %w", err)
 		}
-		return store.SetMetadata(args[0], args[1], string(value))
+		return updateBdStoreBridgeForMode(store, args[0], beads.UpdateOpts{Metadata: map[string]string{args[1]: string(value)}}, internalSessionWrite)
 	case "delete":
-		if len(args) < 1 {
-			return fmt.Errorf("usage: delete <id>")
-		}
-		id := args[len(args)-1]
-		if err := validateBridgeGenericMutation(store, id); err != nil {
-			return err
-		}
-		return store.Delete(id)
+		return deleteBdStoreBridge(store, args)
 	case "dep-add":
 		if len(args) < 3 {
 			return fmt.Errorf("usage: dep-add <issue-id> <depends-on-id> <type>")
@@ -381,6 +397,9 @@ func (bdBridgeProviderError) Error() string {
 func (e bdBridgeProviderError) Unwrap() error { return e.cause }
 
 func validateBdStoreBridgeAuthorityMetadata(metadata, current map[string]string) error {
+	if err := session.ValidateUnownedRequestMetadata(metadata); err != nil {
+		return fmt.Errorf("controller-owned session request metadata: %w", err)
+	}
 	for key := range metadata {
 		if strings.HasPrefix(strings.TrimSpace(key), beadmeta.SessionRequestReceiptPrefix) {
 			return fmt.Errorf("refusing controller-owned session request receipt metadata %q; use the tracked session protocol", key)
@@ -398,6 +417,107 @@ func validateBridgeGenericMutation(store beads.Store, id string) error {
 		return err
 	}
 	return worklifecycle.ValidateGenericMutation(current)
+}
+
+func updateBdStoreBridge(store beads.Store, id string, opts beads.UpdateOpts) error {
+	return updateBdStoreBridgeForMode(store, id, opts, false)
+}
+
+// genericBridgeSessionMetadata removes only identity fields carried by the
+// internal session backend. It never waives receipt, purge, RSI, or signed
+// permission-mode guards. This transport has the backend's host credentials;
+// its mode marker is not a worker permission or an HTTP authorization grant.
+func genericBridgeSessionMetadata(metadata map[string]string) map[string]string {
+	filtered := make(map[string]string, len(metadata))
+	for key, value := range metadata {
+		if !beadmeta.IsExecutionIdentityMetadataKey(key) {
+			filtered[key] = value
+		}
+	}
+	return filtered
+}
+
+func updateBdStoreBridgeForMode(store beads.Store, id string, opts beads.UpdateOpts, internal bool) error {
+	current, err := store.Get(id)
+	if err != nil {
+		return err
+	}
+	if internal && session.IsSessionBeadOrRepairable(current) {
+		if session.IsRequestPurgeFenced(current) {
+			return session.ErrRequestConflict
+		}
+		generic := opts
+		generic.Metadata = genericBridgeSessionMetadata(opts.Metadata)
+		if err := validateBdStoreBridgeAuthorityMetadata(generic.Metadata, current.Metadata); err != nil {
+			return err
+		}
+		if err := session.GuardGenericMutation(current, generic); err != nil {
+			return err
+		}
+		if err := worklifecycle.ValidateEnrolledMutation(current, opts); err != nil {
+			return err
+		}
+		if opts.Title != nil || opts.Status != nil || opts.Type != nil || opts.Priority != nil || opts.Description != nil ||
+			opts.ParentID != nil || opts.Assignee != nil || len(opts.Labels) > 0 || len(opts.RemoveLabels) > 0 {
+			// Ordinary row fields remain on the generic fenced path. The
+			// internal exception carries only a session-owned metadata patch.
+			return updateBdStoreBridgeAtRevision(store, current, opts)
+		}
+		return session.NewStore(beads.SessionStore{Store: store}).ApplyBackendIdentityPatchIfMatch(id, current.Revision, session.MetadataPatch(opts.Metadata))
+	}
+	return updateBdStoreBridgeAtRevision(store, current, opts)
+}
+
+func updateBdStoreBridgeAtRevision(store beads.Store, current beads.Bead, opts beads.UpdateOpts) error {
+	if err := validateBdStoreBridgeAuthorityMetadata(opts.Metadata, current.Metadata); err != nil {
+		return err
+	}
+	if err := worklifecycle.ValidateEnrolledMutation(current, opts); err != nil {
+		return err
+	}
+	if opts.Title == nil && opts.Status == nil && opts.Type == nil && opts.Priority == nil &&
+		opts.Description == nil && opts.ParentID == nil && opts.Assignee == nil && len(opts.Labels) == 0 && len(opts.RemoveLabels) == 0 && len(opts.Metadata) == 0 {
+		return store.Update(current.ID, opts)
+	}
+	if err := session.GuardGenericMutation(current, opts); err != nil {
+		return err
+	}
+	writer, ok := beads.ConditionalWriterFor(store)
+	if !ok || !beads.InspectConditionalWrites(store).Capable || current.Revision == 0 {
+		return beads.ErrConditionalWriteUnsupported
+	}
+	return writer.UpdateIfMatch(current.ID, current.Revision, opts)
+}
+
+func deleteBdStoreBridge(store beads.Store, args []string) error {
+	if len(args) != 2 {
+		return fmt.Errorf("usage: delete <id> <revision>")
+	}
+	revision, err := strconv.ParseInt(args[1], 10, 64)
+	if err != nil || revision == 0 || strconv.FormatInt(revision, 10) != args[1] {
+		return fmt.Errorf("invalid delete revision %q", args[1])
+	}
+	writer, ok := beads.ConditionalWriterFor(store)
+	if !ok || !beads.InspectConditionalWrites(store).Capable {
+		return beads.ErrConditionalWriteUnsupported
+	}
+	b, err := store.Get(args[0])
+	if err != nil {
+		return err
+	}
+	if b.Revision != revision {
+		return &beads.PreconditionFailedError{ID: args[0], Expected: revision, Current: b.Revision}
+	}
+	if err := worklifecycle.ValidateGenericMutation(b); err != nil {
+		return err
+	}
+	if err := beads.ValidateLifecycleDelete(b); err != nil {
+		return err
+	}
+	if session.HasRequestEvidence(b) {
+		return session.ErrRequestEvidenceRetained
+	}
+	return writer.DeleteIfMatch(args[0], revision)
 }
 
 func bdStoreBridgeEnv(dir, host, port, user, password string) map[string]string {
@@ -491,15 +611,25 @@ func writeJSON(w io.Writer, value any) error {
 }
 
 func bridgeBeads(items []beads.Bead) []bdStoreBridgeBead {
+	return bridgeReadBeads(items, false)
+}
+
+func bridgeReadBeads(items []beads.Bead, private bool) []bdStoreBridgeBead {
 	out := make([]bdStoreBridgeBead, 0, len(items))
 	for _, item := range items {
-		out = append(out, bridgeBead(item))
+		out = append(out, bridgeReadBead(item, private))
 	}
 	return out
 }
 
 func bridgeBead(item beads.Bead) bdStoreBridgeBead {
-	item = beads.PublicBead(item)
+	return bridgeReadBead(item, false)
+}
+
+func bridgeReadBead(item beads.Bead, private bool) bdStoreBridgeBead {
+	if !private {
+		item = beads.PublicBead(item)
+	}
 	metadata := item.Metadata
 	return bdStoreBridgeBead{
 		ID:          item.ID,
@@ -516,5 +646,6 @@ func bridgeBead(item beads.Bead) bdStoreBridgeBead {
 		Description: item.Description,
 		Labels:      item.Labels,
 		Metadata:    metadata,
+		Revision:    item.Revision,
 	}
 }

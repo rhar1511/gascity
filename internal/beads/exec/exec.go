@@ -211,6 +211,7 @@ func (w *beadWire) toBead() beads.Bead {
 		Ephemeral:   w.Ephemeral,
 		NoHistory:   w.NoHistory,
 		DeferUntil:  cloneTimePtr(w.DeferUntil),
+		Revision:    w.Revision,
 	}
 }
 
@@ -608,7 +609,10 @@ func (s *Store) Delete(id string) error {
 	if err := beads.ValidateLifecycleDelete(current); err != nil {
 		return fmt.Errorf("deleting lifecycle bead %q: %w", id, err)
 	}
-	if _, err := s.run(nil, "delete", "--force", id); err != nil {
+	if current.Revision == 0 {
+		return beads.ErrConditionalWriteUnsupported
+	}
+	if _, err := s.run(nil, "delete", id, strconv.FormatInt(current.Revision, 10)); err != nil {
 		return err
 	}
 	s.localMu.Lock()

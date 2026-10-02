@@ -11,12 +11,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
 const (
 	ledgerSchemaVersion  = "gc.workflow-control-ledger.v2"
-	ledgerMetadataKey    = "gc.workflow_control_ledger.v2"
+	ledgerMetadataKey    = beadmeta.ControlGrantLedgerMetadataKey
 	ledgerTitle          = "workflow control reservation ledger"
 	ledgerLabel          = "gc:control-ledger"
 	ledgerBeadIDSuffix   = "-control-ledger-"
@@ -738,9 +739,10 @@ func validLedgerBeadPrefix(prefix string) bool {
 	for index, r := range prefix {
 		isLetter := r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z'
 		isDigit := r >= '0' && r <= '9'
-		if !(isLetter || isDigit || index > 0 && (r == '-' || r == '_' || r == '.')) {
-			return false
+		if isLetter || isDigit || index > 0 && (r == '-' || r == '_' || r == '.') {
+			continue
 		}
+		return false
 	}
 	return !strings.HasSuffix(prefix, "-")
 }

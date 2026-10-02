@@ -771,14 +771,10 @@ func deleteExpiredBeadClosure(store beads.Store, rootID string) error {
 	if live.Status != "closed" {
 		return errBeadNoLongerEligible
 	}
-	// The closure is deleted as one batch: a store that supports
-	// beads.BatchDeleter (the sqlite/Dolt graph store) removes the collected
-	// ownership tree with a single `bd delete … --force`, which deletes exactly
-	// those ids and lets ON DELETE CASCADE drop their edges while orphaning any
-	// external dependents; other stores fall back to per-bead deletion. Because
-	// the delete is not dependent-recursive, collectExpiredBeadClosure must (and
-	// does) gather only the ownership closure so live work outside it is never
-	// reached.
+	// Collect only the ownership closure, never external dependents. The checked
+	// deletion path verifies closed rows and their revisions, orders sources
+	// before targets, and refuses to remove references owned by active external
+	// work. A partial failure preserves the remaining closure for a later retry.
 	ids, err := collectExpiredBeadClosure(store, rootID)
 	if err != nil {
 		return err

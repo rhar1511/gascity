@@ -10378,7 +10378,8 @@ export const zPostV0CityByCityNameSessionByIdRenameResponse = zSessionResponse;
 export const zPostV0CityByCityNameSessionByIdRequestsBody = zSessionRequestSubmitInputBody;
 
 export const zPostV0CityByCityNameSessionByIdRequestsHeaders = z.object({
-    'X-GC-Request': z.string().min(1)
+    'X-GC-Request': z.string().min(1),
+    'Idempotency-Key': z.string().optional()
 });
 
 export const zPostV0CityByCityNameSessionByIdRequestsPath = z.object({
@@ -10406,7 +10407,7 @@ export const zPostV0CityByCityNameSessionByIdRequestsByRequestIdAckBody = zSessi
 
 export const zPostV0CityByCityNameSessionByIdRequestsByRequestIdAckHeaders = z.object({
     'X-GC-Request': z.string().min(1),
-    'X-GC-Session-Token': z.string().optional()
+    'X-GC-Session-Token': z.string()
 });
 
 export const zPostV0CityByCityNameSessionByIdRequestsByRequestIdAckPath = z.object({

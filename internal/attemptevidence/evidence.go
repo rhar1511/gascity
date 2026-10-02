@@ -14,6 +14,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -589,6 +591,53 @@ func IsArchiveRecord(b beads.Bead) bool {
 func IsExecutionRecord(b beads.Bead) bool {
 	return strings.TrimSpace(b.Metadata[beadmeta.SessionIDMetadataKey]) != "" &&
 		strings.TrimSpace(b.Metadata[beadmeta.ClaimGenerationMetadataKey]) != ""
+}
+
+// RefreshOwnerAfterCapture advances a caller's inspected revision only across
+// capture's sealed private index and its verified public digest reference. It
+// does not authorize a concurrent claim, authority, or ordinary field change.
+// Callers must still use the returned revision in their final conditional write.
+func RefreshOwnerAfterCapture(store beads.Store, inspected beads.Bead) (beads.Bead, error) {
+	if !IsExecutionRecord(inspected) {
+		return inspected, nil
+	}
+	current, err := store.Get(inspected.ID)
+	if err != nil {
+		return beads.Bead{}, fmt.Errorf("read owner after capture: %w", err)
+	}
+	key := beadmeta.AttemptEvidenceReferenceMetadataKey
+	if current.Metadata[key] != inspected.Metadata[key] {
+		var reference Reference
+		if inspected.Metadata[key] != "" || json.Unmarshal([]byte(current.Metadata[key]), &reference) != nil || reference.WorkID != inspected.ID {
+			return beads.Bead{}, errors.New("attempt reference changed during capture")
+		}
+		evidence, err := Read(store, inspected.ID, reference.AttemptID)
+		if err != nil || evidence.Identity.SessionID != inspected.Metadata[beadmeta.SessionIDMetadataKey] ||
+			evidence.Identity.ClaimGeneration != inspected.Metadata[beadmeta.ClaimGenerationMetadataKey] ||
+			!reflect.DeepEqual(reference, EvidenceReference(evidence, evidence.StoreRef)) {
+			return beads.Bead{}, errors.New("attempt reference does not match sealed capture")
+		}
+	}
+	normalize := func(b beads.Bead) beads.Bead {
+		b.Revision = 0
+		b.UpdatedAt = time.Time{}
+		b.CreatedAt = b.CreatedAt.UTC()
+		if b.DeferUntil != nil {
+			deferred := b.DeferUntil.UTC()
+			b.DeferUntil = &deferred
+		}
+		b.Metadata = maps.Clone(b.Metadata)
+		for key := range b.Metadata {
+			if strings.HasPrefix(key, beadmeta.AttemptEvidenceIndexPrefix) || key == beadmeta.AttemptEvidenceReferenceMetadataKey {
+				delete(b.Metadata, key)
+			}
+		}
+		return b
+	}
+	if !reflect.DeepEqual(normalize(inspected), normalize(current)) {
+		return beads.Bead{}, errors.New("owner changed during attempt capture")
+	}
+	return current, nil
 }
 
 // DecodeDiff decompresses the stored canonical diff bundle and verifies its

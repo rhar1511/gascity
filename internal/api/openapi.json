@@ -52329,6 +52329,15 @@
             }
           },
           {
+            "description": "Idempotency key for exact request replay.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "schema": {
+              "description": "Idempotency key for exact request replay.",
+              "type": "string"
+            }
+          },
+          {
             "description": "Exact durable session ID.",
             "in": "path",
             "name": "id",
@@ -52657,6 +52666,7 @@
             "description": "Credential of the intended session execution.",
             "in": "header",
             "name": "X-GC-Session-Token",
+            "required": true,
             "schema": {
               "description": "Credential of the intended session execution.",
               "type": "string"
@@ -55363,6 +55373,21 @@
               }
             },
             "description": "Not Found",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Conflict",
             "headers": {
               "X-GC-Request-Id": {
                 "$ref": "#/components/headers/X-GC-Request-Id"

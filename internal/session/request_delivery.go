@@ -9,7 +9,8 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
-// SubmitRequest sends a tracked request only to the selected live execution.
+// SubmitRequest sends a tracked request only to the execution selected when
+// acceptance was persisted. Session-name changes cannot retarget that request.
 // It never wakes, resumes, interrupts, or restarts a session. The durable send
 // reservation precedes provider I/O. After an uncertain send, retries read the
 // existing receipt rather than risking a second delivery. The mutation lock
@@ -40,22 +41,9 @@ func (m *Manager) SubmitRequestForAttemptExact(ctx context.Context, id, requestI
 func (m *Manager) submitRequest(ctx context.Context, id, requestID string, generation int, message string, binding *RequestAttemptBinding, exactBinding bool) (RequestReceipt, error) {
 	var result RequestReceipt
 	err := withSessionMutationLock(id, func() error {
-		b, name, err := m.sessionBead(id)
-		if err != nil {
-			return err
-		}
-		info := infoFromPersistedBead(b)
-		if info.Generation != strconv.Itoa(generation) || info.Closed || pendingConversationRestart(b) || (info.State != StateActive && info.State != StateAwake) || !m.sp.IsRunning(name) {
-			return ErrRequestConflict
-		}
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if err := m.pendingInteractionLocked(name); err != nil {
-			return err
-		}
 		front := NewStore(beads.SessionStore{Store: m.store})
 		var accepted RequestAcceptance
+		var err error
 		if binding == nil {
 			accepted, err = front.AcceptRequest(id, requestID, generation, message, time.Now())
 		} else {
@@ -65,10 +53,34 @@ func (m *Manager) submitRequest(ctx context.Context, id, requestID string, gener
 			return err
 		}
 		result = accepted.RequestReceipt
+		if exactBinding && !sameRequestAttemptExact(result.Attempt, binding) {
+			return ErrRequestConflict
+		}
+		if result.Delivery != RequestDeliveryPending {
+			return nil
+		}
+		targetName := accepted.targetSessionName
+		b, err := front.requestReceiptBead(id)
+		if err != nil {
+			return err
+		}
+		info := infoFromPersistedBead(b)
+		if targetName == "" || info.Generation != strconv.Itoa(generation) ||
+			requestDigest(info.InstanceToken) != accepted.executionTokenDigest || info.Closed ||
+			IsRequestPurgeFenced(b) || pendingConversationRestart(b) ||
+			(info.State != StateActive && info.State != StateAwake) || !m.sp.IsRunning(targetName) {
+			return ErrRequestConflict
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := m.pendingInteractionLocked(targetName); err != nil {
+			return err
+		}
 		claimed := false
 		result, err = front.mutateRequestReceipt(id, requestID, func(current beads.Bead, record *storedRequestReceipt) (bool, error) {
 			claimed = false
-			if current.Metadata["generation"] != strconv.Itoa(generation) || requestDigest(current.Metadata["instance_token"]) != record.ExecutionTokenDigest || current.Status == "closed" {
+			if current.Metadata["generation"] != strconv.Itoa(generation) || requestDigest(current.Metadata["instance_token"]) != record.ExecutionTokenDigest || record.TargetSessionName != targetName || current.Status == "closed" || IsRequestPurgeFenced(current) {
 				return false, ErrRequestConflict
 			}
 			if exactBinding && !sameRequestAttemptExact(record.Attempt, binding) {
@@ -99,7 +111,7 @@ func (m *Manager) submitRequest(ctx context.Context, id, requestID string, gener
 		if err != nil {
 			return err
 		}
-		sendErr := m.nudgeSession(ctx, name, string(envelope), false)
+		sendErr := m.nudgeSession(ctx, targetName, string(envelope), false)
 		delivery := RequestDeliveryAccepted
 		if sendErr != nil {
 			delivery = RequestDeliveryUnknown

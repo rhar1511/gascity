@@ -190,9 +190,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/attemptevidence"
 	"github.com/gastownhall/gascity/internal/bdflags"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/storebinding"
 	"github.com/gastownhall/gascity/internal/worklifecycle"
 )
@@ -248,6 +250,7 @@ const (
 	// it. Only the bare form is served — see parseBdByIDCloseArgs.
 	bdByIDClose  bdByIDVerb = "close"
 	bdByIDReopen bdByIDVerb = "reopen"
+	bdByIDDelete bdByIDVerb = "delete"
 )
 
 // bdByIDDepDirectionUp asks for the beads that depend ON the subject; the
@@ -274,7 +277,11 @@ type bdByIDOp struct {
 	MaxDepth int
 	// Update carries the field and metadata writes of the update verb, already
 	// translated into the object model's own shape.
-	Update beads.UpdateOpts
+	Update        beads.UpdateOpts
+	ReplaceLabels *[]string
+	// InspectedRevision is the close gate's verified post-capture snapshot.
+	// It is never populated from CLI input.
+	InspectedRevision int64
 }
 
 // parseBdByIDOp recognizes the by-ID invocations this surface serves. Anything
@@ -301,6 +308,8 @@ func parseBdByIDOp(bdArgs []string) (bdByIDOp, bool) {
 	case "reopen":
 		op, _, ok := parseBdByIDCloseArgs(bdByIDReopen, bdArgs[1:])
 		return op, ok
+	case "delete":
+		return parseBdByIDDeleteArgs(bdArgs[1:])
 	case "release-if-current":
 		id, assignee, ok, err := parseBdReleaseIfCurrentArgs(bdArgs)
 		if err != nil || !ok {
@@ -322,15 +331,34 @@ func parseBdByIDOp(bdArgs []string) (bdByIDOp, bool) {
 	return bdByIDOp{}, false
 }
 
+func parseBdByIDDeleteArgs(args []string) (bdByIDOp, bool) {
+	op := bdByIDOp{Verb: bdByIDDelete}
+	for _, arg := range args {
+		switch {
+		case arg == "--force":
+		case arg == "--json":
+			op.JSON = true
+		case strings.HasPrefix(arg, "-"):
+			return bdByIDOp{}, false
+		case op.ID == "" && arg != "":
+			op.ID = arg
+		default:
+			return bdByIDOp{}, false
+		}
+	}
+	return op, op.ID != ""
+}
+
 // parseBdByIDUpdateArgs parses the tail of `gc bd update`.
 //
 // rejected names the first flag that stopped this from being served, so the
 // refusal an unserved class-owned update produces can say WHICH flag it was
 // rather than leaving an operator to bisect their own command line.
 //
-// The served set is exactly the flags that map onto beads.UpdateOpts, which is
-// the whole of what the object model can represent. Anything else is rejected
-// rather than dropped: a flag this arm silently ignored would change the
+// The served set is exactly the flags that map onto beads.UpdateOpts. The one
+// translation is --set-labels, which becomes additions/removals after reading
+// the fenced row. Anything else is rejected rather than dropped: a flag this
+// arm silently ignored would change the
 // meaning of a command it then reported as executed, and on the step-completion
 // write that means an outcome an operator believes was recorded and was not.
 //
@@ -391,9 +419,30 @@ func parseBdByIDUpdateArgs(args []string) (op bdByIDOp, rejected string, ok bool
 			}
 			op.Update.Priority = &priority
 		case "--add-label":
+			if op.ReplaceLabels != nil {
+				return bdByIDOp{}, name, false
+			}
 			op.Update.Labels = append(op.Update.Labels, value)
 		case "--remove-label":
+			if op.ReplaceLabels != nil {
+				return bdByIDOp{}, name, false
+			}
 			op.Update.RemoveLabels = append(op.Update.RemoveLabels, value)
+		case "--set-labels":
+			if op.ReplaceLabels != nil || len(op.Update.Labels) > 0 || len(op.Update.RemoveLabels) > 0 {
+				return bdByIDOp{}, name, false
+			}
+			labels := make([]string, 0)
+			if value != "" {
+				for _, label := range strings.Split(value, ",") {
+					label = strings.TrimSpace(label)
+					if label == "" {
+						return bdByIDOp{}, name, false
+					}
+					labels = append(labels, label)
+				}
+			}
+			op.ReplaceLabels = &labels
 		case "--set-metadata":
 			key, metaValue, split := strings.Cut(value, "=")
 			if !split || strings.TrimSpace(key) == "" {
@@ -435,7 +484,7 @@ var bdByIDUpdateValueFlags = map[string]bool{
 	"--status": true, "-s": true, "--title": true, "--description": true,
 	"-d": true, "--assignee": true, "-a": true, "--type": true, "-t": true,
 	"--parent": true, "--priority": true, "-p": true, "--add-label": true,
-	"--remove-label": true, "--set-metadata": true,
+	"--remove-label": true, "--set-labels": true, "--set-metadata": true,
 }
 
 // bdByIDUpdateUnrepresentable explains the rejection an operator is most likely
@@ -457,7 +506,34 @@ func bdByIDUpdateWritesFields(op bdByIDOp, metadata map[string]string) bool {
 	return u.Status != nil || u.Title != nil || u.Description != nil ||
 		u.Assignee != nil || u.Type != nil || u.ParentID != nil ||
 		u.Priority != nil || len(u.Labels) > 0 || len(u.RemoveLabels) > 0 ||
-		len(metadata) > 0
+		op.ReplaceLabels != nil || len(metadata) > 0
+}
+
+func materializeBdByIDReplacementLabels(current beads.Bead, op *bdByIDOp) {
+	if op == nil || op.ReplaceLabels == nil {
+		return
+	}
+	desired := make(map[string]struct{}, len(*op.ReplaceLabels))
+	currentLabels := make(map[string]struct{}, len(current.Labels))
+	for _, label := range *op.ReplaceLabels {
+		desired[label] = struct{}{}
+	}
+	for _, label := range current.Labels {
+		currentLabels[label] = struct{}{}
+		if _, keep := desired[label]; !keep {
+			op.Update.RemoveLabels = append(op.Update.RemoveLabels, label)
+		}
+	}
+	added := make(map[string]struct{}, len(*op.ReplaceLabels))
+	for _, label := range *op.ReplaceLabels {
+		if _, seen := added[label]; seen {
+			continue
+		}
+		added[label] = struct{}{}
+		if _, exists := currentLabels[label]; !exists {
+			op.Update.Labels = append(op.Update.Labels, label)
+		}
+	}
 }
 
 // parseBdByIDCloseArgs parses the tail of `gc bd close` and `gc bd reopen`.
@@ -1046,6 +1122,13 @@ func serveBdByIDResolved(door bdByIDClassDoor, op bdByIDOp, bdArgs []string, rig
 	if gateExitCode := gateBdByIDClassClose(door, op, bdArgs, resolution, repoDirs, stderr); gateExitCode != 0 {
 		return gateExitCode, true
 	}
+	if op.Verb == bdByIDClose || (op.Verb == bdByIDUpdate && op.Update.Status != nil && strings.EqualFold(strings.TrimSpace(*op.Update.Status), "closed")) {
+		current, err := attemptevidence.RefreshOwnerAfterCapture(door.Store, resolution.Bead)
+		if err != nil {
+			return attemptEvidenceCaptureFailure(stderr, err), true
+		}
+		op.InspectedRevision = current.Revision
+	}
 	switch op.Verb {
 	case bdByIDShow:
 		return printBdByIDBead(resolution.Bead, op.JSON, door.bindingName(), stdout, stderr), true
@@ -1063,6 +1146,8 @@ func serveBdByIDResolved(door bdByIDClassDoor, op bdByIDOp, bdArgs []string, rig
 		return doBdByIDClose(resolution.Graph, op, door.bindingName(), stdout, stderr), true
 	case bdByIDReopen:
 		return doBdByIDReopen(resolution.Graph, op, door.bindingName(), stdout, stderr), true
+	case bdByIDDelete:
+		return doBdByIDDelete(door.Store, resolution.Bead, op, stdout, stderr), true
 	}
 	// Unreachable while the verb set and this switch agree, and a refusal
 	// rather than a fall-through because the two disagreeing is exactly the
@@ -1070,6 +1155,35 @@ func serveBdByIDResolved(door bdByIDClassDoor, op bdByIDOp, bdArgs []string, rig
 	// so the passthrough would run a verb this build recognized against the one
 	// ledger that cannot hold the bead.
 	return refuseClassOwnedTarget(door, string(op.Verb), op.ID, "", stderr)
+}
+
+func deleteBdBeadProtected(store beads.Store, b beads.Bead) error {
+	if session.IsSessionBeadOrRepairable(b) {
+		return session.NewStore(beads.SessionStore{Store: store}).DeleteClosedSession(b.ID)
+	}
+	if session.HasRequestEvidence(b) {
+		return session.ErrRequestEvidenceRetained
+	}
+	writer, ok := beads.ConditionalWriterFor(store)
+	if !ok || !beads.InspectConditionalWrites(store).Capable {
+		return beads.ErrConditionalWriteUnsupported
+	}
+	return writer.DeleteIfMatch(b.ID, b.Revision)
+}
+
+func doBdByIDDelete(store beads.Store, b beads.Bead, op bdByIDOp, stdout, stderr io.Writer) int {
+	if !session.IsSessionBeadOrRepairable(b) && !session.HasRequestEvidence(b) {
+		fmt.Fprintf(stderr, "gc bd: delete %s is not served from the class binding\n", b.ID) //nolint:errcheck
+		return 1
+	}
+	if err := deleteBdBeadProtected(store, b); err != nil {
+		fmt.Fprintf(stderr, "gc bd: delete %s: %v\n", b.ID, err) //nolint:errcheck
+		return 1
+	}
+	if op.JSON {
+		fmt.Fprintf(stdout, "{\"deleted\":%q}\n", b.ID) //nolint:errcheck
+	}
+	return 0
 }
 
 // gateBdByIDClassClose runs the ADR-0009 work-record close gate against the
@@ -1750,17 +1864,26 @@ func printBdByIDBead(b beads.Bead, jsonOut bool, binding string, stdout, stderr 
 // have learned to trust that output; rendering the UpdateOpts back would report
 // what was asked for rather than what the store now holds.
 func doBdByIDUpdate(graph storebinding.GraphStore, op bdByIDOp, binding string, stdout, stderr io.Writer) int {
-	current, err := graph.Get(op.ID)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc bd update: %s: %v\n", op.ID, err) //nolint:errcheck // best-effort stderr
-		return 1
+	var updateErr error
+	current, currentErr := graph.Get(op.ID)
+	if currentErr != nil {
+		updateErr = currentErr
+	} else {
+		materializeBdByIDReplacementLabels(current, &op)
+		if err := worklifecycle.ValidateEnrolledMutation(current, op.Update); err != nil {
+			updateErr = err
+		} else if err := session.GuardGenericMutation(current, op.Update); err != nil {
+			updateErr = err
+		} else {
+			revision := current.Revision
+			if op.InspectedRevision != 0 {
+				revision = op.InspectedRevision
+			}
+			updateErr = graph.UpdateIfMatch(op.ID, revision, op.Update)
+		}
 	}
-	if err := worklifecycle.ValidateEnrolledMutation(current, op.Update); err != nil {
-		fmt.Fprintf(stderr, "gc bd update: %s: %v\n", op.ID, err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	if err := graph.Update(op.ID, op.Update); err != nil {
-		fmt.Fprintf(stderr, "gc bd update: %s: %v\n", op.ID, err) //nolint:errcheck // best-effort stderr
+	if updateErr != nil {
+		fmt.Fprintf(stderr, "gc bd update: %s: %v\n", op.ID, updateErr) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	updated, err := graph.Get(op.ID)
@@ -1777,13 +1900,38 @@ func doBdByIDUpdate(graph storebinding.GraphStore, op bdByIDOp, binding string, 
 // canonical no-op semantics, and a "is it closed yet" check here would be a
 // second implementation of a rule the store already has, free to drift from it.
 func doBdByIDClose(graph storebinding.GraphStore, op bdByIDOp, binding string, stdout, stderr io.Writer) int {
-	return doBdByIDLifecycleWrite(graph, op, "close", graph.Close, binding, stdout, stderr)
+	return doBdByIDLifecycleWrite(graph, op, "close", func(id string) error {
+		current, err := graph.Get(id)
+		if err != nil {
+			return err
+		}
+		closed := "closed"
+		revision := current.Revision
+		if op.InspectedRevision != 0 {
+			revision = op.InspectedRevision
+		}
+		return graph.UpdateIfMatch(id, revision, beads.UpdateOpts{Status: &closed})
+	}, binding, stdout, stderr)
 }
 
 // doBdByIDReopen is doBdByIDClose's undo, and exists for the same reason: a
 // drain that can close a class resident but not reopen one is a one-way door.
 func doBdByIDReopen(graph storebinding.GraphStore, op bdByIDOp, binding string, stdout, stderr io.Writer) int {
-	return doBdByIDLifecycleWrite(graph, op, "reopen", graph.Reopen, binding, stdout, stderr)
+	return doBdByIDLifecycleWrite(graph, op, "reopen", func(id string) error {
+		current, err := graph.Get(id)
+		if err != nil {
+			return err
+		}
+		if current.Status != "closed" {
+			return fmt.Errorf("bead is not closed (status: %s)", current.Status)
+		}
+		open := "open"
+		opts := beads.UpdateOpts{Status: &open}
+		if err := session.GuardGenericMutation(current, opts); err != nil {
+			return err
+		}
+		return graph.UpdateIfMatch(id, current.Revision, opts)
+	}, binding, stdout, stderr)
 }
 
 // doBdByIDLifecycleWrite applies a status transition through the closed graph

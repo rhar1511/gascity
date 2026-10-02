@@ -252,7 +252,19 @@ func TestSessionHistoryPersistsExactRequestTranscriptReferencesAcrossHandleRecre
 	}
 	storedReceipt := ""
 	for key, value := range bead.Metadata {
-		if strings.HasPrefix(key, beadmeta.SessionRequestReceiptPrefix) && strings.Contains(key, "request-integration") {
+		if !strings.HasPrefix(key, beadmeta.SessionRequestReceiptPrefix) {
+			continue
+		}
+		var record struct {
+			RequestID string `json:"request_id"`
+		}
+		if err := json.Unmarshal([]byte(value), &record); err != nil {
+			t.Fatalf("decode stored request evidence: %v", err)
+		}
+		if record.RequestID == "request-integration" {
+			if storedReceipt != "" {
+				t.Fatal("duplicate stored request identity")
+			}
 			storedReceipt = value
 		}
 	}

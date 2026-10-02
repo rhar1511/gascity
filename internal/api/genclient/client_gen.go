@@ -10872,6 +10872,9 @@ type PostV0CityByCityNameSessionByIdRenameParams struct {
 type PostV0CityByCityNameSessionByIdRequestsParams struct {
 	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
 	XGCRequest string `json:"X-GC-Request"`
+
+	// IdempotencyKey Idempotency key for exact request replay.
+	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
 }
 
 // PostV0CityByCityNameSessionByIdRequestsByRequestIdAckParams defines parameters for PostV0CityByCityNameSessionByIdRequestsByRequestIdAck.
@@ -10880,7 +10883,7 @@ type PostV0CityByCityNameSessionByIdRequestsByRequestIdAckParams struct {
 	XGCRequest string `json:"X-GC-Request"`
 
 	// XGCSessionToken Credential of the intended session execution.
-	XGCSessionToken *string `json:"X-GC-Session-Token,omitempty"`
+	XGCSessionToken string `json:"X-GC-Session-Token"`
 }
 
 // RespondSessionParams defines parameters for RespondSession.
@@ -34158,6 +34161,17 @@ func NewPostV0CityByCityNameSessionByIdRequestsRequestWithBody(server string, ci
 
 		req.Header.Set("X-GC-Request", headerParam0)
 
+		if params.IdempotencyKey != nil {
+			var headerParam1 string
+
+			headerParam1, err = runtime.StyleParamWithOptions("simple", false, "Idempotency-Key", *params.IdempotencyKey, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("Idempotency-Key", headerParam1)
+		}
+
 	}
 
 	return req, nil
@@ -34280,16 +34294,14 @@ func NewPostV0CityByCityNameSessionByIdRequestsByRequestIdAckRequestWithBody(ser
 
 		req.Header.Set("X-GC-Request", headerParam0)
 
-		if params.XGCSessionToken != nil {
-			var headerParam1 string
+		var headerParam1 string
 
-			headerParam1, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Session-Token", *params.XGCSessionToken, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
-			if err != nil {
-				return nil, err
-			}
-
-			req.Header.Set("X-GC-Session-Token", headerParam1)
+		headerParam1, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Session-Token", params.XGCSessionToken, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
 		}
+
+		req.Header.Set("X-GC-Session-Token", headerParam1)
 
 	}
 
@@ -41433,6 +41445,7 @@ type DeleteV0CityByCityNameWorkflowByWorkflowIdResponse struct {
 	ApplicationproblemJSON401 *ErrorModel
 	ApplicationproblemJSON403 *ErrorModel
 	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON409 *ErrorModel
 	ApplicationproblemJSON422 *ErrorModel
 	ApplicationproblemJSON500 *ErrorModel
 }
@@ -55006,6 +55019,13 @@ func ParseDeleteV0CityByCityNameWorkflowByWorkflowIdResponse(rsp *http.Response)
 			return nil, err
 		}
 		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON409 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest ErrorModel

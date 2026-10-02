@@ -810,7 +810,7 @@ func reserveGuardTestSource(t *testing.T, store Store, sourceID string) (Bead, s
 	return held, string(hold), transition
 }
 
-func TestMemDeletePreservesDanglingDependencyEdges(t *testing.T) {
+func TestMemDeletePreservesDanglingEdgesAndConditionalDeleteCascades(t *testing.T) {
 	store := explicitMemStore()
 	source, err := store.Create(Bead{Title: "source"})
 	if err != nil {
@@ -852,7 +852,7 @@ func TestMemDeletePreservesDanglingDependencyEdges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if after.Revision != before.Revision || len(deps) != 2 {
+	if after.Revision == before.Revision || len(deps) != 1 || deps[0].DependsOnID != firstTarget.ID {
 		t.Fatalf("Mem target deletion changed source snapshot: revision %d -> %d, deps=%+v", before.Revision, after.Revision, deps)
 	}
 	reader, ok := DecisionFrontierSourceReaderFor(store)
@@ -863,8 +863,41 @@ func TestMemDeletePreservesDanglingDependencyEdges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(snapshot.Dependencies) != 2 {
+	if len(snapshot.Dependencies) != 1 || snapshot.Dependencies[0].DependsOnID != firstTarget.ID {
 		t.Fatalf("Mem source snapshot lost dangling dependency edges: %+v", snapshot.Dependencies)
+	}
+}
+
+func TestConditionalDeletePreservesHeldIncomingSource(t *testing.T) {
+	for _, native := range []bool{false, true} {
+		t.Run(strconv.FormatBool(native), func(t *testing.T) {
+			target := Bead{ID: "gc-target", Title: "target", Status: "open", Type: "task", Revision: 1}
+			source := Bead{
+				ID: "gc-source", Title: "held source", Status: "open", Type: "task", Revision: 1,
+				Metadata: map[string]string{beadmeta.DecisionFrontierHoldMetadataKey: "map-1"},
+			}
+			mem := NewMemStoreFrom(3, []Bead{target, source}, []Dep{{IssueID: source.ID, DependsOnID: target.ID, Type: "blocks"}})
+			var store Store = mem
+			if native {
+				storage := newNativeDoltMemStorage()
+				storage.store = mem
+				store = newNativeDoltStoreForTest(storage)
+			}
+			writer, ok := ConditionalWriterFor(store)
+			if !ok {
+				t.Fatal("conditional writer missing")
+			}
+			if err := writer.DeleteIfMatch(target.ID, 1); !errors.Is(err, ErrDecisionFrontierMutationBlocked) {
+				t.Fatalf("conditional cascade bypassed held source: %v", err)
+			}
+			if _, err := store.Get(target.ID); err != nil {
+				t.Fatalf("refused cascade deleted target: %v", err)
+			}
+			deps, err := store.DepList(source.ID, "down")
+			if err != nil || len(deps) != 1 || deps[0].DependsOnID != target.ID {
+				t.Fatalf("refused cascade changed held edge: %+v %v", deps, err)
+			}
+		})
 	}
 }
 

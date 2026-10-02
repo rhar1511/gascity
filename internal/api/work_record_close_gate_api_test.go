@@ -283,6 +283,56 @@ func TestAPIBeadRetirementCapturesWorkbenchAttemptBeforeClosing(t *testing.T) {
 	}
 }
 
+func TestAttemptCaptureRefreshPreservesMutationFence(t *testing.T) {
+	for _, field := range []string{"private index only", "claim generation", "status", "public metadata"} {
+		t.Run(field, func(t *testing.T) {
+			store := beads.NewMemStore()
+			work, err := store.Create(beads.Bead{Title: "execution", Type: "task", Metadata: beads.StringMap{
+				beadmeta.SessionIDMetadataKey: "session", beadmeta.ClaimGenerationMetadataKey: "original",
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !attemptevidence.IsExecutionRecord(work) {
+				t.Fatal("fixture is not an execution record")
+			}
+			update := beads.UpdateOpts{Metadata: map[string]string{beadmeta.AttemptEvidenceIndexPrefix + "fixture": "retained-index"}}
+			switch field {
+			case "claim generation":
+				update.Metadata[beadmeta.ClaimGenerationMetadataKey] = "renewed"
+			case "status":
+				status := "in_progress"
+				update.Status = &status
+			case "public metadata":
+				update.Metadata["work_note"] = "concurrent edit"
+			}
+			if err := store.Update(work.ID, update); err != nil {
+				t.Fatal(err)
+			}
+			current, err := refreshAfterAttemptCapture(store, work)
+			if field != "private index only" {
+				if err == nil {
+					t.Fatal("capture refresh accepted a concurrent public/claim mutation")
+				}
+				return
+			}
+			if err != nil || current.Revision == work.Revision {
+				t.Fatalf("private index refresh = %+v, %v", current, err)
+			}
+			if err := store.SetMetadata(work.ID, "work_note", "later edit"); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.CloseIfMatch(work.ID, current.Revision); !beads.IsPreconditionFailed(err) {
+				t.Fatalf("refreshed close lost its revision fence: %v", err)
+			}
+			row, err := store.Get(work.ID)
+			if err != nil || row.Status == "closed" {
+				t.Fatalf("stale close retired execution: %+v, %v", row, err)
+			}
+		})
+	}
+}
+
 func newWorkRecordGateRepo(t *testing.T) (string, string) {
 	t.Helper()
 	repo := t.TempDir()

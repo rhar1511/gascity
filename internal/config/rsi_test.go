@@ -16,17 +16,17 @@ func TestParseRSITrustedKeysAndPaths(t *testing.T) {
 	approver := rsiTestPublicKey(t, "approver")
 	cfg, err := Parse([]byte(fmt.Sprintf(`
 [rsi]
-evaluation_file = ".gc/rsi/evaluation.json"
+evaluation_file = ".gc/rsi/{gate_id}/evaluation.json"
 evaluation_key_id = "evaluator-v1"
 evaluation_public_key = %q
-human_approval_file = ".gc/rsi/approval.json"
+human_approval_file = ".gc/rsi/{gate_id}/approval.json"
 human_approval_key_id = "approval-key"
 human_approval_public_key = %q
 `, evaluator, approver)))
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if cfg.RSI.EvaluationFile != ".gc/rsi/evaluation.json" || cfg.RSI.HumanApprovalKeyID != "approval-key" {
+	if cfg.RSI.EvaluationFile != ".gc/rsi/{gate_id}/evaluation.json" || cfg.RSI.HumanApprovalKeyID != "approval-key" {
 		t.Fatalf("RSI config = %+v, want configured evaluator and approver", cfg.RSI)
 	}
 }
@@ -44,18 +44,23 @@ func TestParseRSIRejectsPartialAuthorityAndUnsafeConfig(t *testing.T) {
 			want: "requires evaluation_file",
 		},
 		{
+			name: "singleton path without gate scope",
+			raw:  fmt.Sprintf("[rsi]\nevaluation_file = '.gc/rsi/evaluation.json'\nevaluation_key_id = 'e'\nevaluation_public_key = %q\n", key),
+			want: "exactly one {gate_id}",
+		},
+		{
 			name: "traversal",
-			raw:  fmt.Sprintf("[rsi]\nevaluation_file = '../evaluation.json'\nevaluation_key_id = 'e'\nevaluation_public_key = %q\n", key),
+			raw:  fmt.Sprintf("[rsi]\nevaluation_file = '../{gate_id}/evaluation.json'\nevaluation_key_id = 'e'\nevaluation_public_key = %q\n", key),
 			want: "must remain inside",
 		},
 		{
 			name: "absolute path",
-			raw:  fmt.Sprintf("[rsi]\nevaluation_file = '/tmp/evaluation.json'\nevaluation_key_id = 'e'\nevaluation_public_key = %q\n", key),
+			raw:  fmt.Sprintf("[rsi]\nevaluation_file = '/tmp/{gate_id}/evaluation.json'\nevaluation_key_id = 'e'\nevaluation_public_key = %q\n", key),
 			want: "must be relative",
 		},
 		{
 			name: "same evaluator and approver key",
-			raw:  fmt.Sprintf("[rsi]\nevaluation_file = '.gc/rsi/evaluation.json'\nevaluation_key_id = 'e'\nevaluation_public_key = %q\nhuman_approval_file = '.gc/rsi/approval.json'\nhuman_approval_key_id = 'h'\nhuman_approval_public_key = %q\n", key, key),
+			raw:  fmt.Sprintf("[rsi]\nevaluation_file = '.gc/rsi/{gate_id}/evaluation.json'\nevaluation_key_id = 'e'\nevaluation_public_key = %q\nhuman_approval_file = '.gc/rsi/{gate_id}/approval.json'\nhuman_approval_key_id = 'h'\nhuman_approval_public_key = %q\n", key, key),
 			want: "must differ",
 		},
 	} {

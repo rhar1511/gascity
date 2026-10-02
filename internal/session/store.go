@@ -47,6 +47,37 @@ func (s *Store) ApplyPatch(id string, patch MetadataPatch) error {
 	return s.store.SetMetadataBatch(id, map[string]string(patch))
 }
 
+// ApplyBackendIdentityPatchIfMatch carries a session-owned metadata patch over
+// the credential-bearing backend transport. It is not a public mutation API or
+// a permission grant. Only execution identity escapes the generic-key guard;
+// request evidence, purge fences and other reserved protocols remain protected.
+func (s *Store) ApplyBackendIdentityPatchIfMatch(id string, revision int64, patch MetadataPatch) error {
+	current, err := s.store.Get(id)
+	if err != nil {
+		return err
+	}
+	if !IsSessionBeadOrRepairable(current) || IsRequestPurgeFenced(current) {
+		return ErrRequestConflict
+	}
+	generic := make(map[string]string, len(patch))
+	for key, value := range patch {
+		if key == beadmeta.AuthorityAuthorizationMetadataKey || key == beadmeta.AuthorityProfileMetadataKey || key == beadmeta.AuthorityTransitionsMetadataKey {
+			return ErrRequestConflict
+		}
+		if !beadmeta.IsExecutionIdentityMetadataKey(key) {
+			generic[key] = value
+		}
+	}
+	if err := GuardGenericMutation(current, beads.UpdateOpts{Metadata: generic}); err != nil {
+		return err
+	}
+	writer, ok := beads.ConditionalWriterFor(s.store.Store)
+	if !ok || !beads.InspectConditionalWrites(s.store.Store).Capable || revision == 0 {
+		return beads.ErrConditionalWriteUnsupported
+	}
+	return writer.UpdateIfMatch(id, revision, beads.UpdateOpts{Metadata: map[string]string(patch)})
+}
+
 // CommitStartedIfCurrent fences start completion against pending-create rollback
 // and incarnation allocation in this process. The lease is re-read under the
 // same mutation lock as those writers, not before acquiring it.
@@ -426,31 +457,59 @@ func (s *Store) Close(id, stateCode string, now time.Time) (bool, error) {
 	return true, nil
 }
 
-// SetStatusOpen sets the session bead status to "open". It is the front door
-// for the raw store.Update(id, UpdateOpts{Status: &"open"}) writes in the
-// reopen and named-session retire-archive paths (session_beads.go), which open
-// the bead row after stamping archive/reopen metadata via setMetaBatch. It
-// emits a single Update op with only Status set, byte-identical to the raw
-// write.
-func (s *Store) SetStatusOpen(id string) error {
-	open := "open"
-	if err := s.store.Update(id, beads.UpdateOpts{Status: &open}); err != nil {
-		return err
-	}
-	return nil
+type conditionalStatusStore interface {
+	Get(string) (beads.Bead, error)
+	UpdateIfMatch(string, int64, beads.UpdateOpts) error
 }
 
-// RepairType sets the session bead Type to the canonical session bead type. It
-// is the front door for the empty-type repair write in session_beads.go, where
-// a session-labeled bead with an empty Type (left by a schema migration or a
-// partial write) is healed back to the session type. It emits a single Update
-// op with only Type set, byte-identical to the raw write.
-func (s *Store) RepairType(id string) error {
-	t := BeadType
-	if err := s.store.Update(id, beads.UpdateOpts{Type: &t}); err != nil {
+// SetStatusOpenIfUnfenced atomically opens a session row and applies metadata
+// only when the exact inspected revision is still current and no workflow purge
+// fence is active.
+func SetStatusOpenIfUnfenced(store conditionalStatusStore, id string, metadata map[string]string) error {
+	b, err := store.Get(id)
+	if err != nil {
 		return err
 	}
-	return nil
+	if b.Revision == 0 {
+		return beads.ErrConditionalWriteUnsupported
+	}
+	open := "open"
+	opts := beads.UpdateOpts{Status: &open, Metadata: metadata}
+	if err := GuardRequestPurgeFenceMutation(b, opts); err != nil {
+		return err
+	}
+	return store.UpdateIfMatch(id, b.Revision, opts)
+}
+
+// SetStatusOpen is the front door for session repair/retire status writes.
+func (s *Store) SetStatusOpen(id string) error {
+	writer, ok := beads.ConditionalWriterFor(s.store.Store)
+	if !ok || !beads.InspectConditionalWrites(s.store.Store).Capable {
+		return beads.ErrConditionalWriteUnsupported
+	}
+	return SetStatusOpenIfUnfenced(struct {
+		beads.Store
+		beads.ConditionalWriter
+	}{s.store.Store, writer}, id, nil)
+}
+
+// RepairType sets an empty session bead Type to the canonical value. The write
+// is fenced to the inspected revision and refuses a concurrent purge fence.
+func (s *Store) RepairType(id string) error {
+	b, err := s.store.Get(id)
+	if err != nil {
+		return err
+	}
+	if b.Type != "" || !hasSessionLabel(b) || IsRequestPurgeFenced(b) {
+		return ErrRequestConflict
+	}
+	t := BeadType
+	opts := beads.UpdateOpts{Type: &t}
+	writer, ok := beads.ConditionalWriterFor(s.store.Store)
+	if !ok || !beads.InspectConditionalWrites(s.store.Store).Capable {
+		return beads.ErrConditionalWriteUnsupported
+	}
+	return writer.UpdateIfMatch(id, b.Revision, opts)
 }
 
 // RepairTypeBestEffort re-issues the empty-type heal (RepairType) and logs a

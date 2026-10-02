@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"log"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -552,11 +553,27 @@ func TestWispGC_DoesNotDeleteExternalDependents(t *testing.T) {
 
 	wg := newWispGC(5*time.Minute, time.Hour, 0)
 	purged, err := wg.runGC(beads.GraphStore{Store: store}, beads.MailStore{Store: store}, now)
-	if err != nil {
-		t.Fatalf("runGC: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "active_reference_owner") {
+		t.Fatalf("runGC: %v, want active external reference refusal", err)
 	}
-	if purged != 1 {
-		t.Fatalf("purged = %d, want 1", purged)
+	if purged != 0 || len(store.deletedIDs) != 0 {
+		t.Fatalf("purged = %d, deleted = %v, want no deletion", purged, store.deletedIDs)
+	}
+	for _, id := range []string{"mol-1", "mol-1.1", "external-1"} {
+		if _, err := store.Get(id); err != nil {
+			t.Fatalf("Get(%s) after refusal: %v", id, err)
+		}
+	}
+	deps, err := store.DepList("external-1", "down")
+	if err != nil || len(deps) != 1 || deps[0].DependsOnID != "mol-1.1" {
+		t.Fatalf("external references after refusal = %v, %v", deps, err)
+	}
+	if err := store.Close("external-1"); err != nil {
+		t.Fatalf("Close(external-1): %v", err)
+	}
+	purged, err = wg.runGC(beads.GraphStore{Store: store}, beads.MailStore{Store: store}, now)
+	if err != nil || purged != 1 {
+		t.Fatalf("retry after external completion = %d, %v, want 1, nil", purged, err)
 	}
 	assertDeletedIDs(t, store.deletedIDs, "mol-1", "mol-1.1")
 	if _, err := store.Get("external-1"); err != nil {
@@ -693,10 +710,13 @@ func TestWispGC_PartialChildDeleteRemainsRetryable(t *testing.T) {
 	if _, err := store.Get("mol-1.2"); err != nil {
 		t.Fatalf("failing child deleted unexpectedly: %v", err)
 	}
-	if _, err := store.Get("mol-1.1"); err == nil {
-		t.Fatalf("expected an earlier child to be deleted before downstream failure")
+	if _, err := store.Get("mol-1.1"); err != nil {
+		t.Fatalf("parent deleted after sibling failure: %v", err)
 	}
-	assertDeletedIDs(t, store.deletedIDs, "mol-1.1.1", "mol-1.1")
+	if _, err := store.Get("mol-1.1.1"); err == nil {
+		t.Fatal("expected an independent leaf deletion before sibling failure")
+	}
+	assertDeletedIDs(t, store.deletedIDs, "mol-1.1.1")
 
 	delete(store.deleteErrors, "mol-1.2")
 	purged, err = wg.runGC(beads.GraphStore{Store: store}, beads.MailStore{Store: store}, now)
@@ -706,7 +726,7 @@ func TestWispGC_PartialChildDeleteRemainsRetryable(t *testing.T) {
 	if purged != 1 {
 		t.Fatalf("second purged = %d, want 1", purged)
 	}
-	for _, id := range []string{"mol-1", "mol-1.2"} {
+	for _, id := range []string{"mol-1", "mol-1.1", "mol-1.2"} {
 		if _, err := store.Get(id); err == nil {
 			t.Fatalf("Get(%s) succeeded after retry cleanup", id)
 		}
@@ -1884,6 +1904,14 @@ type gcTestStore struct {
 }
 
 func newGCStore(existing []beads.Bead) *gcTestStore {
+	// Fixtures represent persisted, versioned rows. Preserve explicit revisions
+	// while giving otherwise unversioned seeds a usable initial CAS token.
+	existing = slices.Clone(existing)
+	for i := range existing {
+		if existing[i].Revision == 0 {
+			existing[i].Revision = 1
+		}
+	}
 	return &gcTestStore{
 		MemStore:     beads.NewMemStoreFrom(0, existing, nil),
 		listErrors:   map[gcQueryKey]error{},
@@ -1922,6 +1950,18 @@ func (s *gcTestStore) Delete(id string) error {
 		return err
 	}
 	if err := s.MemStore.Delete(id); err != nil {
+		return err
+	}
+	s.deletedIDs = append(s.deletedIDs, id)
+	return nil
+}
+
+func (s *gcTestStore) DeleteIfMatch(id string, revision int64) error {
+	s.deleteAttempts = append(s.deleteAttempts, id)
+	if err := s.deleteErrors[id]; err != nil {
+		return err
+	}
+	if err := s.MemStore.DeleteIfMatch(id, revision); err != nil {
 		return err
 	}
 	s.deletedIDs = append(s.deletedIDs, id)

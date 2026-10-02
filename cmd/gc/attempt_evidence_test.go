@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/storebinding"
 	"github.com/gastownhall/gascity/internal/testutil"
 )
 
@@ -50,8 +51,9 @@ func TestCLICloseGateCapturesWorkbenchAttemptBeforeClose(t *testing.T) {
 		t.Fatalf("create work bead: %v", err)
 	}
 	var stderr strings.Builder
+	inspected := map[string]beads.Bead{owner.ID: owner}
 	gateExitCode := runWorkRecordCloseGate([]string{"close", owner.ID}, repo, repo, nil, store,
-		map[string]beads.Bead{owner.ID: owner}, &stderr)
+		inspected, &stderr)
 	if gateExitCode != 0 {
 		t.Fatalf("close was blocked after capture succeeded: %s", stderr.String())
 	}
@@ -83,6 +85,10 @@ func TestCLICloseGateCapturesWorkbenchAttemptBeforeClose(t *testing.T) {
 	}
 	if reference.AttemptID != attemptID || reference.DiffSHA256 != evidence.Diff.SHA256 {
 		t.Fatalf("execution record reference = %+v, want exact attempt %s digest %s", reference, attemptID, evidence.Diff.SHA256)
+	}
+	closed := "closed"
+	if err := updateBdStoreBridgeAtRevision(store, inspected[owner.ID], beads.UpdateOpts{Status: &closed}); err != nil {
+		t.Fatalf("first close failed against its own evidence capture: %v", err)
 	}
 }
 
@@ -246,6 +252,37 @@ func TestCLIClassCloseGateCapturesWorkbenchAttemptBeforeClose(t *testing.T) {
 	}
 	if _, err := attemptevidence.Read(store, owner.ID, attemptID); err != nil {
 		t.Fatalf("class close did not seal attempt before write: %v", err)
+	}
+	inspected, err := attemptevidence.RefreshOwnerAfterCapture(store, owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	graph, err := storebinding.NewBeadsGraphStore(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	op.InspectedRevision = inspected.Revision
+	var stdout, stderr strings.Builder
+	if code := doBdByIDClose(graph, op, "fixture", &stdout, &stderr); code != 0 {
+		t.Fatalf("class first close rejected its own capture: %s", stderr.String())
+	}
+	if err := store.Reopen(owner.ID); err != nil {
+		t.Fatal(err)
+	}
+	inspected, err = store.Get(owner.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetMetadata(owner.ID, "work_note", "concurrent public edit"); err != nil {
+		t.Fatal(err)
+	}
+	op.InspectedRevision = inspected.Revision
+	if code := doBdByIDClose(graph, op, "fixture", &stdout, &stderr); code == 0 {
+		t.Fatal("class close replaced the inspected fence with an unchecked re-read")
+	}
+	current, err := store.Get(owner.ID)
+	if err != nil || current.Status != "open" {
+		t.Fatalf("stale class close retired the owner: %+v %v", current, err)
 	}
 }
 

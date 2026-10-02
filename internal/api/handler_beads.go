@@ -47,6 +47,14 @@ func appendMetadataAttachedChildren(store beads.Store, parent beads.Bead, childr
 	return children
 }
 
+func redactGenericBead(b beads.Bead) beads.Bead {
+	return beads.PublicBead(b)
+}
+
+func redactGenericBeads(items []beads.Bead) []beads.Bead {
+	return beads.PublicBeads(items)
+}
+
 func (s *Server) beadListAssigneeTerms(ctx context.Context, assignee string) []string {
 	assignee = strings.TrimSpace(assignee)
 	if assignee == "" {

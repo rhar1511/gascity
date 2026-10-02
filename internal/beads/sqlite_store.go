@@ -1894,7 +1894,7 @@ func (s *SQLiteStore) Delete(id string) error {
 		if err := ValidateLifecycleDelete(current); err != nil {
 			return fmt.Errorf("deleting lifecycle bead %q: %w", id, err)
 		}
-		if err := s.guardAndFenceIncomingDependenciesTx(context.Background(), tx, []string{id}, []string{id}); err != nil {
+		if err := s.guardAndFenceIncomingDependenciesTx(context.Background(), tx, []string{id}, []string{id}, nil); err != nil {
 			return fmt.Errorf("deleting bead %q incoming dependencies: %w", id, err)
 		}
 		res, err := tx.Exec(`DELETE FROM beads WHERE id=?`, id)

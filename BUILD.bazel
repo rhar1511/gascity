@@ -362,6 +362,7 @@ filegroup(
         "//internal/selectorwriter:bazel_repo_srcs",
         "//internal/session:bazel_repo_srcs",
         "//internal/session/sessiontest:bazel_repo_srcs",
+        "//internal/sessionauthority:bazel_repo_srcs",
         "//internal/sessionlog:bazel_repo_srcs",
         "//internal/shellquote:bazel_repo_srcs",
         "//internal/sling:bazel_repo_srcs",

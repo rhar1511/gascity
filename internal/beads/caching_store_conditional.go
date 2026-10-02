@@ -121,6 +121,8 @@ func (c *CachingStore) RevisionTransitionReceiptReaderHandle() (RevisionTransiti
 	return RevisionTransitionReceiptReaderFor(c.backing)
 }
 
+// ControllerMetadataTransitionReceiptReaderHandle delegates private controller
+// transition receipt reads directly to the backing store.
 func (c *CachingStore) ControllerMetadataTransitionReceiptReaderHandle() (ControllerMetadataTransitionReceiptReader, bool) {
 	if c == nil {
 		return nil, false
@@ -180,6 +182,8 @@ func (w cachingRevisionTransitionWriter) CompareAndSetMetadataKeyWithReceipt(id,
 	return bead, won, nil
 }
 
+// RevisionTransitionWriterHandle forwards checked transition writes while
+// invalidating the affected cached bead after a successful write.
 func (c *CachingStore) RevisionTransitionWriterHandle() (RevisionTransitionWriter, bool) {
 	if c == nil {
 		return nil, false
@@ -442,6 +446,24 @@ func (c *CachingStore) DeleteIfMatch(id string, expectedRevision int64) error {
 
 	c.mu.Lock()
 	seq := c.noteLocalMutationLocked(id)
+	// A checked cascade also advances surviving dependency owners. Readiness
+	// invalidation alone would still serve their old row versions to callers.
+	for owner := range c.beads {
+		if owner == id {
+			continue
+		}
+		affected := !c.depsComplete || c.beads[owner].ParentID == id
+		for _, dep := range c.deps[owner] {
+			if dep.DependsOnID == id {
+				affected = true
+				break
+			}
+		}
+		if affected {
+			c.markDirtyLocked(owner)
+			c.noteMutationLocked(owner)
+		}
+	}
 	c.tombstoneLocked(id, seq)
 	c.clearDependentReadyProjectionsLocked(id)
 	c.markFreshLocked(time.Now())
@@ -529,6 +551,9 @@ func (c *CachingStore) evictForConditionalWrite(id string) {
 	c.noteLocalMutationLocked(id)
 	delete(c.beads, id)
 	delete(c.deps, id)
+	// A backing Get may omit dependencies; only an authoritative dependency
+	// refresh can restore coverage after discarding this list.
+	c.depsComplete = false
 	c.dirty[id] = struct{}{}
 	c.clearDependentReadyProjectionsLocked(id)
 	c.markFreshLocked(time.Now())

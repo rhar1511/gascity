@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionauthority"
 	"github.com/gastownhall/gascity/internal/worklifecycle"
 	"github.com/spf13/cobra"
@@ -367,6 +368,9 @@ func bdRigQualifiedMetadataRefusal(cfg *config.City, bdArgs []string) (string, b
 		if protectedSessionAuthorityMetadata(key) {
 			return fmt.Sprintf("gc bd: refusing controller-owned session authority metadata %q; use the signed session permission-mode API\n", key), true
 		}
+		if beadmeta.IsGenericMutationReservedKey(key) {
+			return fmt.Sprintf("gc bd: refusing protected session lifecycle metadata key %q before write\n", key), true
+		}
 		if key != beadmeta.LeaseOwnerMetadataKey && key != beadmeta.RoutedToMetadataKey {
 			return "", false
 		}
@@ -414,6 +418,17 @@ func bdRigQualifiedMetadataRefusal(cfg *config.City, bdArgs []string) (string, b
 		default:
 			if !strings.Contains(arg, "=") && valueFlags[arg] && i+1 < len(args) {
 				i++
+			}
+			continue
+		}
+
+		if strings.HasPrefix(arg, "--unset-metadata") {
+			key := strings.TrimSpace(value)
+			if key == "" {
+				return fmt.Sprintf("gc bd: refusing malformed --unset-metadata value %q before write\n", value), true
+			}
+			if msg, refused := validate(key, ""); refused {
+				return msg, true
 			}
 			continue
 		}
@@ -731,6 +746,26 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	// Exact generic reads and deletes stay inside the typed store boundary.
+	// Reads are redacted by printBdByIDBead; deletes use request-evidence and
+	// revision guards instead of falling through to raw bd.
+	if op, ok := parseBdByIDOp(bdArgs); ok && op.Verb == bdByIDDelete {
+		store, openErr := openStoreAtForCityWithConfig(target.ScopeRoot, cityPath, cfg)
+		if openErr != nil {
+			fmt.Fprintf(stderr, "gc bd: opening store for %s: %v\n", op.Verb, openErr) //nolint:errcheck
+			return 1
+		}
+		b, getErr := store.Get(op.ID)
+		if getErr != nil {
+			fmt.Fprintf(stderr, "gc bd: %s %s: %v\n", op.Verb, op.ID, getErr) //nolint:errcheck
+			return 1
+		}
+		if session.IsSessionBeadOrRepairable(b) || session.HasRequestEvidence(b) {
+			return doBdByIDDelete(store, b, op, stdout, stderr)
+		}
+		// Ordinary work deletion retains bd's established output and semantics.
+	}
+
 	// Pre-flight exact-ID guard for write-mutating subcommands (gcy-g4o).
 	// bd's fuzzy/substring resolver can silently match a longer ID that
 	// contains the supplied ID as a substring (e.g. "gcy-dv7" → "gcy-wisp-dv78").
@@ -793,6 +828,14 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 				}
 				guardBeads[id] = bead
 			}
+			if bdArgs[0] == "delete" {
+				for _, bead := range guardBeads {
+					if session.IsSessionBeadOrRepairable(bead) || session.HasRequestEvidence(bead) {
+						fmt.Fprintf(stderr, "gc bd: delete %q requires one exact ID so session request evidence can be protected\n", bead.ID) //nolint:errcheck
+						return 1
+					}
+				}
+			}
 		}
 	}
 	if msg, refused := bdPersistedProtectedMutationRefusal(bdArgs, guardIDs, guardBeads); refused {
@@ -808,6 +851,61 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// config the caller already loaded.
 	if gateExitCode := runWorkRecordCloseGate(bdArgs, target.ScopeRoot, cityPath, cfg, guardStore, guardBeads, stderr); gateExitCode != 0 {
 		return gateExitCode
+	}
+	if op, ok := parseBdByIDOp(bdArgs); ok && (op.Verb == bdByIDUpdate || op.Verb == bdByIDClose || op.Verb == bdByIDReopen) {
+		store := guardStore
+		if store == nil {
+			goto protectedChecks
+		}
+		current, found := guardBeads[op.ID]
+		if !found {
+			goto protectedChecks
+		}
+		materializeBdByIDReplacementLabels(current, &op)
+		var writeErr error
+		switch op.Verb {
+		case bdByIDUpdate:
+			writeErr = updateBdStoreBridgeAtRevision(store, current, op.Update)
+		case bdByIDClose:
+			closed := "closed"
+			writeErr = updateBdStoreBridgeAtRevision(store, current, beads.UpdateOpts{Status: &closed})
+		case bdByIDReopen:
+			open := "open"
+			opts := beads.UpdateOpts{Status: &open}
+			if current.Status != "closed" {
+				writeErr = fmt.Errorf("bead is not closed (status: %s)", current.Status)
+			} else {
+				writeErr = updateBdStoreBridgeAtRevision(store, current, opts)
+			}
+		}
+		if writeErr != nil {
+			fmt.Fprintf(stderr, "gc bd: %s %s: %v\n", op.Verb, op.ID, writeErr) //nolint:errcheck
+			return 1
+		}
+		written, err := store.Get(op.ID)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc bd: %s %s was written and could not be re-read: %v\n", op.Verb, op.ID, err) //nolint:errcheck
+			return 1
+		}
+		return printBdByIDBead(written, op.JSON, scopeLabel(target), stdout, stderr)
+	}
+
+protectedChecks:
+	if len(bdArgs) > 0 {
+		if bdRequestsProtectedMutation(bdArgs) && len(guardBeads) > 0 {
+			fmt.Fprintln(stderr, "gc bd: refusing unrevisioned protected mutation; use a supported exact-ID status, type, or metadata form") //nolint:errcheck
+			return 1
+		}
+		for _, bead := range guardBeads {
+			if session.IsRequestPurgeFenced(bead) {
+				fmt.Fprintf(stderr, "gc bd: refusing unrevisioned %s of purge-fenced bead %q\n", bdArgs[0], bead.ID) //nolint:errcheck
+				return 1
+			}
+			if bdArgs[0] == "update" && session.HasRequestEvidence(bead) && bdUpdateRequestsTypeChange(bdArgs[1:]) {
+				fmt.Fprintf(stderr, "gc bd: refusing issue-type change of receipt-bearing bead %q\n", bead.ID) //nolint:errcheck
+				return 1
+			}
+		}
 	}
 
 	reapStaleBdExportJSONL(target.ScopeRoot)
@@ -842,8 +940,11 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = stdout
 	var presentationOutput bytes.Buffer
+	var credentialOutput bytes.Buffer
 	if projectOutput {
 		cmd.Stdout = &presentationOutput
+	} else if bdOutputNeedsCredentialRedaction(bdArgs) {
+		cmd.Stdout = &credentialOutput
 	}
 	// Tee stderr through a bounded head buffer alongside the operator's
 	// pipe so we can scan it post-exec for bd's silent-fallback-to-on-disk
@@ -864,6 +965,13 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 
 	traceStart := time.Now()
 	runErr := cmd.Run()
+	if credentialOutput.Len() > 0 {
+		if redacted, ok := redactBdJSONOutput(credentialOutput.Bytes()); ok {
+			_, _ = stdout.Write(redacted)
+		} else {
+			_, _ = stdout.Write(redactBdTextOutput(credentialOutput.Bytes()))
+		}
+	}
 	traceExit := 0
 	if runErr != nil {
 		if projectOutput {
@@ -973,6 +1081,135 @@ func lifecycleAdmissionBdCommandReadOnly(args []string) bool {
 		// release-if-current verb, and commands added by a future bd version.
 		// A future read verb can be added here with a direct bounded read contract.
 		return false
+	}
+}
+
+// bdRequestsProtectedMutation reports whether an update changes a field whose
+// authorization depends on the inspected row, or whether the verb itself is a
+// lifecycle transition. Callers that cannot parse such a mutation into an
+// UpdateIfMatch must refuse it rather than hand an unrevisioned write to bd.
+func bdRequestsProtectedMutation(args []string) bool {
+	verb, rest := bdflags.SplitGlobalFlags(args)
+	if verb == "close" || verb == "reopen" {
+		return true
+	}
+	if verb != "update" {
+		return false
+	}
+	valueFlags := bdflags.ValueFlags("update")
+	for i := 0; i < len(rest); i++ {
+		arg := rest[i]
+		if arg == "--" {
+			break
+		}
+		if !strings.HasPrefix(arg, "-") {
+			continue
+		}
+		name, _, inline := strings.Cut(arg, "=")
+		switch name {
+		case "--title", "--status", "-s", "--type", "-t", "--priority", "-p",
+			"--description", "-d", "--assignee", "-a", "--add-label", "--remove-label", "--set-labels",
+			"--metadata", "--set-metadata", "--unset-metadata":
+			return true
+		}
+		if !inline && valueFlags[name] && i+1 < len(rest) {
+			i++
+		}
+	}
+	return false
+}
+
+func bdUpdateRequestsTypeChange(args []string) bool {
+	for _, arg := range args {
+		if arg == "--type" || arg == "-t" || strings.HasPrefix(arg, "--type=") || strings.HasPrefix(arg, "-t=") {
+			return true
+		}
+	}
+	return false
+}
+
+func bdRequestsJSONOutput(args []string) bool {
+	return bdflags.RequestsJSONOutput(args)
+}
+
+func bdOutputNeedsCredentialRedaction(args []string) bool {
+	verb, _ := bdflags.SplitGlobalFlags(args)
+	return bdRequestsJSONOutput(args) || verb == "show"
+}
+
+func redactBdTextOutput(data []byte) []byte {
+	lines := bytes.SplitAfter(data, []byte("\n"))
+	out := make([]byte, 0, len(data))
+	credentialKeys := []string{
+		beadmeta.SessionInstanceTokenMetadataKey,
+		"execution_token",
+		beadmeta.Namespace + "instance_token",
+		beadmeta.Namespace + "execution_token",
+	}
+	for _, line := range lines {
+		credential := false
+		for _, key := range credentialKeys {
+			if bdTextContainsMetadataKey(string(line), key) {
+				credential = true
+				break
+			}
+		}
+		if !credential {
+			out = append(out, line...)
+		}
+	}
+	return out
+}
+
+func bdTextContainsMetadataKey(line, key string) bool {
+	for start := 0; ; {
+		index := strings.Index(line[start:], key)
+		if index < 0 {
+			return false
+		}
+		end := start + index + len(key)
+		if end == len(line) || !unicode.IsLetter(rune(line[end])) && !unicode.IsDigit(rune(line[end])) && line[end] != '_' && line[end] != '.' {
+			return true
+		}
+		start = end
+	}
+}
+
+func redactBdJSONOutput(data []byte) ([]byte, bool) {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	var output bytes.Buffer
+	encoder := json.NewEncoder(&output)
+	decoded := false
+	for {
+		var value any
+		if err := decoder.Decode(&value); err != nil {
+			if errors.Is(err, io.EOF) {
+				return output.Bytes(), decoded
+			}
+			return nil, false
+		}
+		redactBdJSONValue(value)
+		if err := encoder.Encode(value); err != nil {
+			return nil, false
+		}
+		decoded = true
+	}
+}
+
+func redactBdJSONValue(value any) {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, child := range typed {
+			if beadmeta.IsExecutionCredentialMetadataKey(key) {
+				delete(typed, key)
+				continue
+			}
+			redactBdJSONValue(child)
+		}
+	case []any:
+		for _, child := range typed {
+			redactBdJSONValue(child)
+		}
 	}
 }
 

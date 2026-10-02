@@ -57,17 +57,23 @@ func processRSIPromotionGate(store beads.Store, bead beads.Bead, opts ProcessOpt
 			if err := decodeRSIOutput(rawOutput, &proposal); err != nil {
 				return closeRSIPromotionGate(store, bead, rsiReject(rsiCandidateEvidenceMalformed), beadmeta.OutcomeFail, "rsi-reject")
 			}
+			binding, bindErr := rsipolicy.ParseExecutionBinding(actual.Metadata[beadmeta.RSIExecutionBindingMetadataKey])
+			if bindErr != nil {
+				return closeRSIPromotionGate(store, bead, rsiReject(rsiTrustedEvaluationUnavailable), beadmeta.OutcomeFail, "rsi-reject")
+			}
 			candidate = rsipolicy.CandidateRecord{
-				BeadID:        actual.ID,
-				ControlBeadID: dependency.ID,
-				Attempt:       beadmeta.RetryAttemptNumber(actual.Metadata),
-				MaxAttempts:   retryMaxAttempts(dependency),
-				ActorID:       strings.TrimSpace(actual.Assignee),
-				SessionID:     strings.TrimSpace(actual.Metadata[beadmeta.SessionIDMetadataKey]),
-				Status:        strings.TrimSpace(actual.Status),
-				Outcome:       strings.TrimSpace(actual.Metadata[beadmeta.OutcomeMetadataKey]),
-				RawOutput:     rawOutput,
-				Proposal:      proposal,
+				BeadID:          actual.ID,
+				BeadRevision:    actual.Revision,
+				ControlBeadID:   dependency.ID,
+				ControlRevision: dependency.Revision,
+				Attempt:         beadmeta.RetryAttemptNumber(actual.Metadata),
+				MaxAttempts:     retryMaxAttempts(dependency),
+				ActorID:         binding.ActorID,
+				SessionID:       binding.SessionID,
+				Status:          strings.TrimSpace(actual.Status),
+				Outcome:         strings.TrimSpace(actual.Metadata[beadmeta.OutcomeMetadataKey]),
+				RawOutput:       rawOutput,
+				Proposal:        proposal,
 			}
 		case beadmeta.RSIRoleJudge:
 			actual, resolveErr := resolveRSIWorkerExecution(store, dependency)
@@ -79,10 +85,16 @@ func processRSIPromotionGate(store beads.Store, bead beads.Bead, opts ProcessOpt
 			if err := decodeRSIOutput(rawOutput, &lane.Lane); err != nil {
 				return closeRSIPromotionGate(store, bead, rsiReject(rsiJudgeEvidenceMalformed), beadmeta.OutcomeFail, "rsi-reject")
 			}
+			binding, bindErr := rsipolicy.ParseExecutionBinding(actual.Metadata[beadmeta.RSIExecutionBindingMetadataKey])
+			if bindErr != nil {
+				return closeRSIPromotionGate(store, bead, rsiReject(rsiTrustedEvaluationUnavailable), beadmeta.OutcomeFail, "rsi-reject")
+			}
 			lane.BeadID = actual.ID
+			lane.BeadRevision = actual.Revision
 			lane.ControlBeadID = dependency.ID
-			lane.ActorID = strings.TrimSpace(actual.Assignee)
-			lane.SessionID = strings.TrimSpace(actual.Metadata[beadmeta.SessionIDMetadataKey])
+			lane.ControlRevision = dependency.Revision
+			lane.ActorID = binding.ActorID
+			lane.SessionID = binding.SessionID
 			lane.Status = strings.TrimSpace(actual.Status)
 			lane.Outcome = strings.TrimSpace(actual.Metadata[beadmeta.OutcomeMetadataKey])
 			lane.RawOutput = rawOutput
@@ -98,7 +110,12 @@ func processRSIPromotionGate(store beads.Store, bead beads.Bead, opts ProcessOpt
 	if opts.ResolveRSIEvaluation == nil {
 		return closeRSIPromotionGate(store, bead, rsiReject(rsiTrustedEvaluationUnavailable), beadmeta.OutcomeFail, "rsi-reject")
 	}
-	trusted, err := opts.ResolveRSIEvaluation(opts.Context, rsipolicy.ResolveRequest{Candidate: candidate, Judges: judges})
+	request := rsipolicy.ResolveRequest{Context: opts.RSIEvaluationContext, Candidate: candidate, Judges: judges}
+	request.Context.ProtocolVersion = rsipolicy.ProtocolVersionV1
+	request.Context.WorkflowRootID = strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
+	request.Context.GateID = bead.ID
+	request.Context.InputSHA256 = rsipolicy.ResolveRequestInputSHA256(request)
+	trusted, err := opts.ResolveRSIEvaluation(opts.Context, request)
 	if err != nil {
 		if errors.Is(err, rsipolicy.ErrTrustedEvaluationPending) {
 			return ControlResult{}, fmt.Errorf("%w: %w", ErrControlPending, err)
@@ -113,7 +130,7 @@ func processRSIPromotionGate(store beads.Store, bead beads.Bead, opts ProcessOpt
 	if decision.Promote {
 		return closeRSIPromotionGate(store, bead, decision, beadmeta.OutcomePass, "rsi-promote")
 	}
-	return closeRSIPromotionGate(store, bead, decision, beadmeta.OutcomePass, "rsi-reject")
+	return closeRSIPromotionGate(store, bead, decision, beadmeta.OutcomeFail, "rsi-reject")
 }
 
 // resolveRSIWorkerExecution follows a retry control to the exact successful
@@ -141,9 +158,6 @@ func resolveRSIWorkerExecution(store beads.Store, logical beads.Bead) (beads.Bea
 	}
 	if actual.Metadata[beadmeta.RSIRoleMetadataKey] != logical.Metadata[beadmeta.RSIRoleMetadataKey] {
 		return beads.Bead{}, fmt.Errorf("RSI retry execution %s does not carry the logical worker role", actual.ID)
-	}
-	if strings.TrimSpace(actual.Assignee) == "" || strings.TrimSpace(actual.Metadata[beadmeta.SessionIDMetadataKey]) == "" {
-		return beads.Bead{}, fmt.Errorf("RSI worker execution %s lacks assigned actor or session", actual.ID)
 	}
 	return actual, nil
 }

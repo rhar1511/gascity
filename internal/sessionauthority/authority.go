@@ -17,6 +17,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
 const (
@@ -38,11 +40,11 @@ const (
 	ProfileOperator Profile = "operator"
 
 	// MetadataProfile stores the current authority profile.
-	MetadataProfile = "gc.authority_profile"
+	MetadataProfile = beadmeta.AuthorityProfileMetadataKey
 	// MetadataAuthorization stores the accepted signed authorization.
-	MetadataAuthorization = "gc.authority_authorization.v1"
+	MetadataAuthorization = beadmeta.AuthorityAuthorizationMetadataKey
 	// MetadataTransitions stores the bounded transition audit history.
-	MetadataTransitions = "gc.authority_transitions.v1"
+	MetadataTransitions = beadmeta.AuthorityTransitionsMetadataKey
 	// MetadataTemplateOverrides stores provider launch-option overrides.
 	MetadataTemplateOverrides = "template_overrides"
 	// MetadataPermissionModeOption stores the flattened permission-mode override.

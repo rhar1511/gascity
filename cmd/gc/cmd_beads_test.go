@@ -485,6 +485,68 @@ func TestRouteBeadsList_APIJSONIncludesCacheAge(t *testing.T) {
 	}
 }
 
+func TestBeadsLocalFallbackRedactsExecutionCredentialsBeforeRendering(t *testing.T) {
+	cityPath := writeBeadsTestCity(t)
+	store := workStoreFor(t, cityPath)
+	created, err := store.Create(beads.Bead{
+		Title: "credential-bearing bead",
+		Type:  "task",
+		Metadata: map[string]string{
+			"instance_token":     "bare-instance-secret",
+			"execution_token":    "bare-execution-secret",
+			"gc.instance_token":  "namespaced-instance-secret",
+			"gc.execution_token": "namespaced-execution-secret",
+			"generation":         "7",
+			"ordinary_metadata":  "still-visible",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, reason := range []string{"controller-down", "escape-hatch"} {
+		for _, format := range []string{"text", "json"} {
+			for _, command := range []string{"list", "show"} {
+				t.Run(reason+"/"+format+"/"+command, func(t *testing.T) {
+					var stdout, stderr bytes.Buffer
+					var code int
+					if command == "list" {
+						code = routeBeadsList(cityPath, nil, reason, format, beadFilters{}, &stdout, &stderr)
+					} else {
+						code = routeBeadsShow(cityPath, nil, reason, created.ID, format, &stdout, &stderr)
+					}
+					if code != 0 {
+						t.Fatalf("fallback %s exited %d: %s", command, code, stderr.String())
+					}
+					output := stdout.String()
+					for _, forbidden := range []string{
+						"bare-instance-secret",
+						"bare-execution-secret",
+						"namespaced-instance-secret",
+						"namespaced-execution-secret",
+						`"instance_token"`,
+						`"execution_token"`,
+						`"gc.instance_token"`,
+						`"gc.execution_token"`,
+					} {
+						if strings.Contains(output, forbidden) {
+							t.Fatalf("fallback %s %s leaked %q:\n%s", command, format, forbidden, output)
+						}
+					}
+					if format == "json" && (!strings.Contains(output, `"ordinary_metadata": "still-visible"`) || !strings.Contains(output, `"generation": "7"`)) {
+						t.Fatalf("fallback redaction removed safe metadata:\n%s", output)
+					}
+				})
+			}
+		}
+	}
+
+	stored, err := store.Get(created.ID)
+	if err != nil || stored.Metadata["instance_token"] != "bare-instance-secret" {
+		t.Fatalf("fallback redaction mutated storage: %+v, %v", stored, err)
+	}
+}
+
 func TestRouteBeadsList_StaleBannerOver30s(t *testing.T) {
 	t.Setenv("GC_DEBUG", "0")
 	cityPath := writeBeadsTestCity(t)

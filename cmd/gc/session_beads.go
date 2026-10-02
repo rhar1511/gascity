@@ -447,6 +447,9 @@ func reopenClosedConfiguredNamedSessionBead(
 	if !ok {
 		return beads.Bead{}, "", false
 	}
+	if session.IsRequestPurgeFenced(bead) {
+		return beads.Bead{}, "", false
+	}
 	// Explicit gc session close retires the canonical identifiers before
 	// closing. In that case, mint a fresh canonical bead instead of reviving
 	// a deliberately retired runtime identity.
@@ -523,20 +526,20 @@ func reopenClosedConfiguredNamedSessionBead(
 		for k, v := range extraMeta {
 			batch[k] = v
 		}
-		// The status flip and the terminal metadata are a single recoverable
-		// store write: UpdateOpts carries both Status and Metadata, so every
-		// backing store commits them together (native Dolt folds both into one
-		// UpdateIssue; MemStore/FileStore apply them under one lock). A failed
-		// write leaves the bead closed with its prior metadata intact -- the
-		// "open without its reopen metadata" split cannot occur, even on a store
-		// whose Tx executes callbacks sequentially without rollback
-		// (ga-igcny0.1.1). The Tx wrapper is kept only for the labeled commit.
-		open := "open"
-		txErr := store.Tx("gc: reopen configured named session "+bead.ID, func(tx beads.Tx) error {
-			return tx.Update(bead.ID, beads.UpdateOpts{Status: &open, Metadata: batch})
-		})
-		if txErr != nil {
-			fmt.Fprintf(stderr, "session beads: reopening configured named session %q: %v\n", identity, txErr) //nolint:errcheck
+		// Status and metadata share one revision-conditional write. A workflow
+		// purge fence acquired after the original lookup either appears on the
+		// helper's fresh read or makes this update stale.
+		writer, ok := beads.ConditionalWriterFor(store)
+		if !ok || !beads.InspectConditionalWrites(store).Capable {
+			fmt.Fprintf(stderr, "session beads: reopening configured named session %q: conditional writes unavailable\n", identity) //nolint:errcheck
+			return nil
+		}
+		protectedStore := struct {
+			beads.Store
+			beads.ConditionalWriter
+		}{store, writer}
+		if err := session.SetStatusOpenIfUnfenced(protectedStore, bead.ID, batch); err != nil {
+			fmt.Fprintf(stderr, "session beads: reopening configured named session %q: %v\n", identity, err) //nolint:errcheck
 			return nil
 		}
 		// S19 Stage 3 shadow: record the legacy priming-marker clears so the

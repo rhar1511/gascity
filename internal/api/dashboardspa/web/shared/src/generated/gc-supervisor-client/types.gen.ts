@@ -19745,6 +19745,10 @@ export type PostV0CityByCityNameSessionByIdRequestsData = {
          * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
          */
         'X-GC-Request': string;
+        /**
+         * Idempotency key for exact request replay.
+         */
+        'Idempotency-Key'?: string;
     };
     path: {
         /**
@@ -19866,7 +19870,7 @@ export type PostV0CityByCityNameSessionByIdRequestsByRequestIdAckData = {
         /**
          * Credential of the intended session execution.
          */
-        'X-GC-Session-Token'?: string;
+        'X-GC-Session-Token': string;
     };
     path: {
         /**
@@ -20954,6 +20958,10 @@ export type DeleteV0CityByCityNameWorkflowByWorkflowIdErrors = {
      * Not Found
      */
     404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
     /**
      * Unprocessable Entity
      */

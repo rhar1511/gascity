@@ -801,10 +801,10 @@ RSIConfig points the controller at signed, controller-owned evaluation and human
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `evaluation_file` | string |  |  |  |
+| `evaluation_file` | string |  |  | Per-gate evaluation path template containing exactly one &#123;gate_id&#125; token. |
 | `evaluation_key_id` | string |  |  |  |
 | `evaluation_public_key` | string |  |  |  |
-| `human_approval_file` | string |  |  |  |
+| `human_approval_file` | string |  |  | Per-gate approval path template containing exactly one &#123;gate_id&#125; token. |
 | `human_approval_key_id` | string |  |  |  |
 | `human_approval_public_key` | string |  |  |  |
 

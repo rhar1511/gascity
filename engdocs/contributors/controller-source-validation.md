@@ -211,3 +211,219 @@ This qualifies the ref primitive only. Landing still requires an exact reviewed
 merge artifact, passing current-head CI, repository/PR policy and independent
 PR/commit readback. The existing controller merge capability remains disabled;
 this experiment did not change trusted production composition or trial gates.
+
+## Current-main reconciliation — 2026-10-02
+
+The same isolated branch now reconciles main
+`90a0a050188c43b3884530c6cf5aee2cae5f8cff` with controller merge
+`5a53160f133727b4e1bff567594f3dfdf4aec9da`. Both histories are retained.
+This is distinct from the subsequent reviewed upstream-baseline assembly.
+
+Session receipts retain the incoming immutable target, execution-token and purge
+fences together with the fork's append-only event ledger and exact-attempt
+attribution. Literal and encoded retained keys remain readable without migration;
+duplicate identities and missing historical delivery targets fail closed.
+Generic acceptance replay remains immutable after churn, while attempt-bound and
+cached HTTP replay recheck current claims. Acknowledgements require a prior
+delivery reservation and the current execution credential.
+
+The merged CLI/bridge keeps controller-owned metadata, signed session authority,
+enrolled-work guards, private internal reads and exact-revision deletion.
+Attempt capture may advance its private index, but public-field or claim changes
+still refuse closure; timestamp comparison preserves instants across file-store
+JSON round trips. Native Dolt keeps transaction-fenced parent and label changes.
+RSI preserves trusted per-gate context and controller-reserved execution identity.
+
+The production RSI formula stays outside the core catalog. Its independent-lane
+prompt contract is tested in the private pack, whose exact-copy provenance now
+pins the incoming source at `ae572374330af0d0742cc24584bf386ed4797234` with SHA-256
+`4270cec24a63d4986fc39b8bb9c2c4448bbbbf715ded897af046deffe0b155f3`.
+Controller conformance accepts only a verified scratch snapshot of those bytes.
+Neither this source pin nor fixture conformance is activation authority.
+
+Existing regressions reproduced the merge mismatches before fixes: delivery
+fixtures omitted reservations; public reads expected private receipt storage;
+bridge delete fixtures omitted revisions; ledger-bearing CLI output failed its
+schemas; the metadata registry did not cover retained controller keys. Tests now
+exercise the stronger merged contracts rather than bypassing those guards.
+The metadata registry distinguishes actual keys from transcript hash domains.
+Build manifests include ledger/transcript inputs and the session-authority
+package, and the repository-source inventory check passes.
+
+Bounded focused API and CLI sweeps pass, including cache/claim renewal, legacy
+target refusal, receipt/ledger schemas, private projections and bridge guards.
+The full API suite passes (93.909s). Dashboard production/test/E2E checks, embedded
+bundle build and serving smoke pass. The remaining full suites pass: Beads
+75.128s, session 3.867s, worker 21.283s, dispatch 2.821s, metadata registry
+0.886s, control grants 0.033s and session authority 0.006s. The worker privacy
+test now identifies the stored request by its persisted identity instead of
+assuming that a hashed key contains the ID; all opacity and handle-recreation
+assertions remain. Independent review and normal hooks must still pass before
+this candidate can be published and landed.
+No current-main reconciliation result is an accepted PR merge or permission to
+disable WIP dispatch.
+
+### Review corrections after the first reconciliation sweep
+
+The normal commit was deliberately stopped during lint when independent review
+found correctness defects. Its incomplete hook invocation is not a hook pass.
+The following changes must be included in the final reviewed merge tree:
+
+- Native parent/label CAS changes now also change a reserved auxiliary nonce in
+  the issue row, in the same transaction. The pinned backend's auxiliary tables
+  do not themselves mint an issue revision. A fixture that models this weaker
+  behavior reproduced the reusable-token failure before the fix.
+- `gc.claimed_at` is controller-reserved: generic clearing cannot re-enable the
+  write-once RSI execution stamp. The generic-key regression failed before this
+  change and passed afterward.
+- A retained attempt-bound receipt cannot replay through generic acceptance
+  after its reciprocal claim was cleared. Exact historical reads remain valid.
+  Both implicit and explicit cached HTTP selectors exercise this refusal.
+- CLI and API close capture share a checked refresh of the exact inspected row.
+  A newly written evidence reference must match its sealed archive and original
+  session/claim identity. Only the verified capture fields and private indexes
+  may change; final writes retain the returned revision fence.
+- Conditional deletion owns reference cleanup rather than performing unfenced
+  `DepRemove` calls before the checked delete. The previous sequence reproduced
+  a stale revision after its own edge removal. Protected surviving edge owners
+  remain guarded. Ordinary memory-store deletion retains its prior dangling-edge
+  behavior; conditional deletion is the explicit cascade contract.
+- Backend session identity writes use an explicit internal transport and a
+  session-owned conditional write. This is not a human grant or a worker API;
+  public mutations still reject identity keys even with the transport marker.
+  Other reserved authority, receipt, purge and RSI keys remain refused.
+
+The first full follow-up run failed in session-wrapper capability resolution and
+memory-store deletion compatibility, while evidence and metadata packages passed.
+The wrapper now resolves CAS on its underlying store; ordinary deletion no
+longer changes cache/dangling-edge semantics. Focused follow-up session and Beads
+regressions passed (0.095s and 5.586s). The prior full-suite passes above predate
+these corrections and do not qualify the new final source.
+
+The initial real native auxiliary test failed explicitly because the default
+backend selected embedded Dolt without CGO. It was not skipped or counted as a
+backend pass. The new auxiliary qualification instead uses a disposable local
+SQL-server listener/database; its final result is recorded separately. No test
+uses the live city's Dolt listener or modifies production storage.
+
+SQLite deletion now plans sources before targets so a cascade cannot invalidate
+another selected row's already-verified revision. Cycles are refused before
+closing/fencing/deleting any selected row, not repaired by accepting refreshed
+revisions. Connected SQLite CLI/API purge and cycle-no-write regressions cover
+this distinction. Final independent review, broader affected suites and complete
+normal hooks are still required.
+
+### Terminal purge and cache follow-up qualification
+
+The surviving-reference contract now includes field-only ancestry. Deletion
+planning unions `ParentID` with explicit edges, while checked deletion guards
+current owners inside the memory/file lock or native/SQLite transaction. A
+closed target cannot be purged if a reference owner is no longer closed. A
+permitted cascade clears physical parent fields and mints fresh surviving-owner
+revisions. Purge verification requires every selected row to remain closed;
+the API stops at the first refused delete rather than deleting its ancestors.
+
+The shared terminal-owner conformance case failed on all five compositions
+before their guards were added. The parent-only case then exposed SQLite's
+independent `parent_id` column: its incoming census now unions that column with
+the dependency table and updates both column and retained JSON during cleanup.
+The shared parent case covers active-owner refusal, allowed closed-owner
+cleanup, fresh revisions and rejection of the old owner token. API
+interleavings cover initial and late-added edge/parent references.
+
+Cache conformance also reproduced a stale surviving-owner token after an
+owner's conditional update followed by `Get`. Conditional eviction now marks
+dependency coverage incomplete; a later cascade refreshes affected owners
+rather than accepting a dependency-omitting row as complete coverage. The
+strengthened shared case passed (5.045s) before the terminal-owner additions.
+
+The first broader follow-up passed Beads (90.984s), session (6.617s), evidence
+(2.273s), and metadata (1.118s), but API failed (108.372s): its client fixture
+acknowledged before asynchronous delivery was reserved. It now waits for the
+existing correlated delivery event. Both receipt clients reuse the generated
+client and full guarded handler through the existing in-process transport,
+removing two redundant sockets without bypassing request construction or
+middleware. An initial fixture host was correctly rejected with 421; the
+fixture now uses the already-allowed loopback host. These failures are retained
+in `/var/tmp/controller-review-final-domain-suites.log` and
+`/var/tmp/controller-terminal-and-client-final-green.log`; neither command is
+an overall pass. Final affected-suite results are recorded after completion.
+
+The source resource-census gate is still red on reconciled/inherited growth.
+No ratchet, waiver expiry, or classification threshold was relaxed. The
+combined upstream/controller artifact must pass that gate before publication.
+The isolated native server proof and normal hooks are separate from production
+atomic-frontier capability and the operational WIP cutover gates.
+
+The final affected-domain run passed API (108.776s), Beads (67.727s), session
+(3.769s), attempt evidence (1.924s), and metadata (1.091s); its complete log is
+`/var/tmp/controller-closed-owner-qualified-domain.log`.
+
+The isolated native terminal-cascade proof initially stopped at the normal
+parent-close guard because its child was open. Its corrected fixture closes
+both rows through normal operations, then reopens the child through checked
+CAS before testing refusal. The unchanged active-owner refusal, retained-edge,
+allowed closed-owner cascade, fresh-revision and stale-token assertions passed
+against the disposable real Dolt server (13.169s), recorded in
+`/var/tmp/controller-terminal-native-reopened-child.log`. This is not a
+production atomic-frontier or live-trial qualification.
+
+The focused CLI run also exposed unversioned SQLite fixture rows. Explicitly
+closed creation preserves that status but leaves revision zero; subsequent
+close calls are no-ops. The fixture now creates open rows and closes
+leaf/child/root before purge so real transitions mint checked revisions. Both
+failed setup runs remain recorded in
+`/var/tmp/controller-closed-owner-qualified-cli.log` and
+`/var/tmp/controller-terminal-cli-closed-fixture.log`. The final focused CLI
+close-capture, bridge, purge, cycle and SQLite checked-delete sweep passed
+(1.603s), recorded in `/var/tmp/controller-terminal-cli-versioned-fixture.log`.
+
+Read-only standards and spec follow-ups found no unresolved hard violations or
+P0-P2 findings in the final test-only corrections. Complete normal hooks and
+the separate upstream-combined resource-census gate remain required. No result
+here authorizes publication, script retirement or runtime activation by itself.
+
+### Normal-hook lint and broader fixture follow-up
+
+Two normal commit attempts completed with exit 1 in staged lint; neither is a
+hook pass or an interrupted command. Logs are
+`/var/tmp/controller-main-reconciliation-commit-final.log` and
+`/var/tmp/controller-main-reconciliation-commit-6g.log`. The four findings were
+an unreachable duplicate argument case, missing exported-handle comments, a
+builtin-shadowing test local, and redundant boolean negation in prefix
+validation. Their corrections preserve behavior. The lint formatter's
+equivalent receipt-test switch is retained. Full control-grant tests passed
+(0.047s), recorded in `/var/tmp/controller-ledger-prefix-hook-regressions.log`.
+
+The broader regression command in
+`/var/tmp/controller-hook-lint-fixes-regressions.log` passed Beads (3.987s) and
+its selected control-grant tests (0.032s), but CLI failed (24.656s) with six
+failures. This is not a full CLI pass. Receipt-specific refusal diagnostics,
+fake writers without conditional capability, Unix socket path length, hidden
+pool-route CAS capability, and unversioned GC seeds require distinct fixture
+or composition corrections; production guards must not be weakened to make
+these fixtures pass.
+
+GC seeds now model persisted rows with explicit initial revisions, without
+mutating the caller's seed slice. The first targeted run in
+`/var/tmp/controller-versioned-gc-fixture-regressions.log` still failed: it
+exposed old expectations that an active external reference could be orphaned
+and that incidental parent ordering governed partial deletion. Revised tests
+require refusal with the external edge preserved, retry only after external
+completion, and leaf-first partial progress with remaining parents retained.
+The complete GC group and receipt-diagnostic result are recorded separately
+after completion. These are test-contract corrections, not relaxation of
+terminal deletion, reference-owner or revision fences.
+
+The complete GC rerun also exposed an inherited spy assertion requiring
+separate dependency removal. The checked deletion contract now owns that
+cleanup atomically; the corrected test prohibits unfenced batch deletion and
+direct edge removal, and checks both edge directions for every deleted row.
+The initial complete run remains in
+`/var/tmp/controller-versioned-gc-complete-regressions.log` as a failure.
+The final complete GC group plus receipt-diagnostic run passed (0.809s), in
+`/var/tmp/controller-versioned-gc-complete-regressions-v2.log`. Read-only
+standards and spec reviewers found no remaining hard violations or P0-P2
+findings in these four fixture/comment deltas. Unsupported fake-writer,
+socket-length and pool-capability cases remain outstanding before combined
+publication, alongside the unchanged resource-census gate.

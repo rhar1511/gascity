@@ -1752,3 +1752,31 @@ echo '[{"id":"private","title":"private","status":"open","type":"task","metadata
 		t.Fatalf("private prefix consumed exec public page: %+v err=%v", rows, err)
 	}
 }
+
+func TestDeleteSuppliesInspectedRevision(t *testing.T) {
+	dir := t.TempDir()
+	argsFile := filepath.Join(dir, "delete.args")
+	script := writeScript(t, dir, `
+op="$1"; shift
+case "$op" in
+  get)
+    echo '{"id":"EX-1","title":"found","status":"closed","type":"task","revision":17,"created_at":"2026-02-27T10:00:00Z"}'
+    ;;
+  delete)
+    printf '%s\n' "$*" > "`+argsFile+`"
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	s := NewStore(script)
+	if err := s.Delete("EX-1"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	args, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(args)); got != "EX-1 17" {
+		t.Fatalf("delete args = %q, want revision-fenced protocol", got)
+	}
+}

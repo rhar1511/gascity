@@ -46,6 +46,29 @@ func TestApplyPatchByteIdenticalToSetMetaBatch(t *testing.T) {
 	}
 }
 
+func TestBackendIdentityPatchIsRevisionFenced(t *testing.T) {
+	store := beads.NewMemStore()
+	front := NewStore(beads.SessionStore{Store: store})
+	info, err := front.CreateSessionInfo(CreateSpec{Title: "worker", AgentName: "worker", Metadata: map[string]string{"generation": "1", "instance_token": "original"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := front.ApplyBackendIdentityPatchIfMatch(info.ID, before.Revision, MetadataPatch{"generation": "2", "instance_token": "replacement"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := front.ApplyBackendIdentityPatchIfMatch(info.ID, before.Revision, MetadataPatch{"generation": "3"}); !beads.IsPreconditionFailed(err) {
+		t.Fatalf("stale internal identity patch was accepted: %v", err)
+	}
+	current, err := store.Get(info.ID)
+	if err != nil || current.Metadata["generation"] != "2" || current.Metadata["instance_token"] != "replacement" {
+		t.Fatalf("stale internal identity patch changed the session: %+v, %v", current, err)
+	}
+}
+
 // TestApplyPatchInfoPersistsAndFoldsEqualsReprojection proves ApplyPatchInfo
 // persists the patch byte-identically (one SetMetadataBatch) AND returns the
 // LOCAL fold — never a re-Get — and that the folded Info equals a full
@@ -511,53 +534,169 @@ func TestCloseWithoutReasonEmitsSingleClose(t *testing.T) {
 	}
 }
 
-// TestSetStatusOpenEmitsStatusOnlyUpdate proves SetStatusOpen emits exactly one
-// Update with only Status="open" set — byte-identical to the raw
-// store.Update(id, UpdateOpts{Status: &"open"}) reopen/retire-archive writes.
+// TestSetStatusOpenEmitsStatusOnlyUpdate proves SetStatusOpen conditionally
+// reopens the exact inspected row.
 func TestSetStatusOpenEmitsStatusOnlyUpdate(t *testing.T) {
 	b := sessionBeadFixture("s-1", "closed", map[string]string{"state": "archived"})
-	is, rec := recordingStore(t, b)
+	mem := &beads.MemStore{HonorExplicitIDs: true}
+	created, err := mem.Create(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mem.Close(created.ID); err != nil {
+		t.Fatal(err)
+	}
+	created, err = mem.Get(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	is := NewStore(beads.SessionStore{Store: mem})
 
 	if err := is.SetStatusOpen("s-1"); err != nil {
 		t.Fatalf("SetStatusOpen: %v", err)
 	}
-	gotOps := opsOf(rec.Calls())
-	if !reflect.DeepEqual(gotOps, []string{"Update"}) {
-		t.Fatalf("SetStatusOpen ops = %v, want [Update]", gotOps)
+	got, err := mem.Get("s-1")
+	if err != nil {
+		t.Fatal(err)
 	}
-	c := rec.CallsForOp("Update")[0]
-	if c.ID != "s-1" {
-		t.Errorf("Update target = %q, want s-1", c.ID)
-	}
-	if c.Opts.Status == nil || *c.Opts.Status != "open" {
-		t.Errorf("Update Status = %v, want open", c.Opts.Status)
-	}
-	if c.Opts.Type != nil || c.Opts.Metadata != nil || c.Opts.Labels != nil {
-		t.Errorf("Update set fields beyond Status: %#v", c.Opts)
+	if got.Status != "open" || got.Revision == created.Revision {
+		t.Fatalf("SetStatusOpen result = %+v, want open with advanced revision", got)
 	}
 }
 
-// TestRepairTypeEmitsTypeOnlyUpdate proves RepairType emits exactly one Update
-// with only Type set to the canonical session bead type — byte-identical to the
-// raw store.Update(id, UpdateOpts{Type: &"session"}) empty-type repair write.
-func TestRepairTypeEmitsTypeOnlyUpdate(t *testing.T) {
+func TestSetStatusOpenRejectsRequestPurgeFence(t *testing.T) {
+	b := sessionBeadFixture("s-1", "closed", map[string]string{
+		"state": "archived", beadmeta.SessionRequestPurgeFenceMetadataKey: "purge-owner",
+	})
+	mem := &beads.MemStore{HonorExplicitIDs: true}
+	created, err := mem.Create(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mem.Close(created.ID); err != nil {
+		t.Fatal(err)
+	}
+	is := NewStore(beads.SessionStore{Store: mem})
+	if err := is.SetStatusOpen("s-1"); !errors.Is(err, ErrRequestConflict) {
+		t.Fatalf("SetStatusOpen = %v, want request conflict", err)
+	}
+	got, err := mem.Get("s-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "closed" || !IsRequestPurgeFenced(got) {
+		t.Fatalf("fenced row changed: %+v", got)
+	}
+}
+
+func TestRepairTypeUsesInspectedRevision(t *testing.T) {
 	b := sessionBeadFixture("s-1", "open", nil)
 	b.Type = ""
-	is, rec := recordingStore(t, b)
+	mem := beads.NewMemStoreFrom(1, []beads.Bead{b}, nil)
+	is := NewStore(beads.SessionStore{Store: mem})
 
 	if err := is.RepairType("s-1"); err != nil {
 		t.Fatalf("RepairType: %v", err)
 	}
-	gotOps := opsOf(rec.Calls())
-	if !reflect.DeepEqual(gotOps, []string{"Update"}) {
-		t.Fatalf("RepairType ops = %v, want [Update]", gotOps)
+	got, err := mem.Get("s-1")
+	if err != nil {
+		t.Fatal(err)
 	}
-	c := rec.CallsForOp("Update")[0]
-	if c.Opts.Type == nil || *c.Opts.Type != BeadType {
-		t.Errorf("Update Type = %v, want %q", c.Opts.Type, BeadType)
+	if got.Type != BeadType || got.Revision == b.Revision {
+		t.Fatalf("RepairType result = %+v, want canonical type and advanced revision", got)
 	}
-	if c.Opts.Status != nil || c.Opts.Metadata != nil {
-		t.Errorf("Update set fields beyond Type: %#v", c.Opts)
+}
+
+func TestRepairTypeRejectsRequestPurgeFence(t *testing.T) {
+	b := sessionBeadFixture("s-1", "closed", map[string]string{
+		beadmeta.SessionRequestPurgeFenceMetadataKey: "purge-owner",
+	})
+	b.Type = ""
+	mem := beads.NewMemStoreFrom(1, []beads.Bead{b}, nil)
+	is := NewStore(beads.SessionStore{Store: mem})
+
+	if err := is.RepairType("s-1"); !errors.Is(err, ErrRequestConflict) {
+		t.Fatalf("RepairType = %v, want request conflict", err)
+	}
+	got, err := mem.Get("s-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Type != "" || RequestPurgeFence(got) != "purge-owner" {
+		t.Fatalf("fenced repair changed row: %+v", got)
+	}
+}
+
+func TestRepairTypeRejectsRowThatIsNoLongerRepairable(t *testing.T) {
+	b := sessionBeadFixture("s-1", "open", nil)
+	b.Type = "task"
+	mem := beads.NewMemStoreFrom(1, []beads.Bead{b}, nil)
+
+	if err := NewStore(beads.SessionStore{Store: mem}).RepairType(b.ID); !errors.Is(err, ErrRequestConflict) {
+		t.Fatalf("RepairType = %v, want request conflict", err)
+	}
+	got, err := mem.Get(b.ID)
+	if err != nil || got.Type != "task" {
+		t.Fatalf("legitimate type was overwritten: %+v, %v", got, err)
+	}
+}
+
+type repairTypeRaceStore struct {
+	*beads.MemStore
+	beforeUpdate func()
+}
+
+func (s *repairTypeRaceStore) UpdateIfMatch(id string, revision int64, opts beads.UpdateOpts) error {
+	if s.beforeUpdate != nil {
+		before := s.beforeUpdate
+		s.beforeUpdate = nil
+		before()
+	}
+	return s.MemStore.UpdateIfMatch(id, revision, opts)
+}
+
+func TestRepairTypeDoesNotOverwriteConcurrentPurgeFence(t *testing.T) {
+	b := sessionBeadFixture("s-1", "closed", nil)
+	b.Type = ""
+	mem := beads.NewMemStoreFrom(1, []beads.Bead{b}, nil)
+	race := &repairTypeRaceStore{MemStore: mem}
+	race.beforeUpdate = func() {
+		if ok, err := mem.CompareAndSetMetadataKey("s-1", beadmeta.SessionRequestPurgeFenceMetadataKey, "", "purge-owner"); err != nil || !ok {
+			t.Fatalf("install concurrent purge fence = (%v, %v)", ok, err)
+		}
+	}
+	is := NewStore(beads.SessionStore{Store: race})
+
+	if err := is.RepairType("s-1"); err == nil {
+		t.Fatal("RepairType succeeded across concurrent purge fence")
+	}
+	got, err := mem.Get("s-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Type != "" || RequestPurgeFence(got) != "purge-owner" {
+		t.Fatalf("concurrent fence/type result = %+v", got)
+	}
+}
+
+func TestRepairTypeDoesNotOverwriteConcurrentLegitimateType(t *testing.T) {
+	b := sessionBeadFixture("s-1", "open", nil)
+	b.Type = ""
+	mem := beads.NewMemStoreFrom(1, []beads.Bead{b}, nil)
+	race := &repairTypeRaceStore{MemStore: mem}
+	race.beforeUpdate = func() {
+		legitimate := "task"
+		if err := mem.Update("s-1", beads.UpdateOpts{Type: &legitimate}); err != nil {
+			t.Fatalf("install concurrent type = %v", err)
+		}
+	}
+
+	if err := NewStore(beads.SessionStore{Store: race}).RepairType(b.ID); err == nil {
+		t.Fatal("RepairType succeeded across concurrent legitimate type change")
+	}
+	got, err := mem.Get(b.ID)
+	if err != nil || got.Type != "task" {
+		t.Fatalf("concurrent legitimate type was overwritten: %+v, %v", got, err)
 	}
 }
 

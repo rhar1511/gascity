@@ -100,6 +100,56 @@ func TestSessionRequestAcknowledgementCommandHandlesLeadingHyphens(t *testing.T)
 	}
 }
 
+func TestSessionRequestLegacyPendingTargetIsNotInferred(t *testing.T) {
+	for _, version := range []int{1, 2} {
+		t.Run(strconv.Itoa(version), func(t *testing.T) {
+			backing := beads.NewMemStore()
+			sp := runtime.NewFake()
+			mgr := NewManagerWithOptions(backing, sp)
+			info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: t.TempDir(), Provider: "claude"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			front := NewStore(beads.SessionStore{Store: backing})
+			if _, err := front.AcceptRequest(info.ID, "legacy-pending", 1, "report progress", time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			row, err := backing.Get(info.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			key := mustRequestReceiptKey(t, "legacy-pending")
+			var stored storedRequestReceipt
+			if err := json.Unmarshal([]byte(row.Metadata[key]), &stored); err != nil {
+				t.Fatal(err)
+			}
+			stored.Version, stored.TargetSessionName = version, ""
+			if version == 1 {
+				stored.Events = nil
+			}
+			raw, err := json.Marshal(stored)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := backing.SetMetadata(info.ID, key, string(raw)); err != nil {
+				t.Fatal(err)
+			}
+			before, err := backing.Get(info.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			providerCalls := len(sp.SnapshotCalls())
+			if _, err := mgr.SubmitRequest(context.Background(), info.ID, "legacy-pending", 1, "report progress"); !errors.Is(err, ErrRequestConflict) {
+				t.Fatalf("legacy target was inferred from current runtime: %v", err)
+			}
+			after, err := backing.Get(info.ID)
+			if err != nil || after.Revision != before.Revision || len(sp.SnapshotCalls()) != providerCalls {
+				t.Fatalf("legacy refusal mutated history or contacted provider: %v", err)
+			}
+		})
+	}
+}
+
 func TestSessionRequestDeliveryDoesNotWakeOrRestart(t *testing.T) {
 	backing := beads.NewMemStore()
 	sp := runtime.NewFake()
@@ -299,4 +349,60 @@ func requestDeliveryAttemptFixture(t *testing.T) (*Manager, *Store, *runtime.Fak
 		t.Fatal(err)
 	}
 	return mgr, front, sp, info, binding, generation
+}
+
+func TestSessionRequestDeliveryUsesTargetCapturedAtAcceptance(t *testing.T) {
+	backing := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(backing, sp)
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: t.TempDir(), Provider: "claude"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	front := NewStore(beads.SessionStore{Store: backing})
+	if _, err := front.AcceptRequest(info.ID, "immutable-target", 1, "report progress", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := backing.SetMetadata(info.ID, "session_name", "retargeted-runtime"); err != nil {
+		t.Fatal(err)
+	}
+
+	receipt, err := mgr.SubmitRequest(context.Background(), info.ID, "immutable-target", 1, "report progress")
+	if err != nil || receipt.Delivery != RequestDeliveryAccepted {
+		t.Fatalf("submit = %+v, %v", receipt, err)
+	}
+	if got := sp.CountCalls("Nudge", info.SessionName); got != 1 {
+		t.Fatalf("accepted target deliveries = %d, want 1", got)
+	}
+	if got := sp.CountCalls("Nudge", "retargeted-runtime"); got != 0 {
+		t.Fatalf("retargeted runtime deliveries = %d, want 0", got)
+	}
+}
+
+func TestSessionRequestDeliveryRejectsGenerationReplacementAfterAcceptance(t *testing.T) {
+	backing := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(backing, sp)
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: t.TempDir(), Provider: "claude"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	front := NewStore(beads.SessionStore{Store: backing})
+	if _, err := front.AcceptRequest(info.ID, "generation-target", 1, "report progress", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := backing.SetMetadataBatch(info.ID, map[string]string{"generation": "2", "instance_token": NewInstanceToken()}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := mgr.SubmitRequest(context.Background(), info.ID, "generation-target", 1, "report progress"); !errors.Is(err, ErrRequestConflict) {
+		t.Fatalf("replacement generation submit = %v, want request conflict", err)
+	}
+	receipt, err := front.GetRequest(info.ID, "generation-target")
+	if err != nil || receipt.Delivery != RequestDeliveryPending || receipt.DeliveryAttemptedAt != nil {
+		t.Fatalf("replacement generation receipt = %+v, %v", receipt, err)
+	}
+	if got := sp.CountCalls("Nudge", info.SessionName); got != 0 {
+		t.Fatalf("replacement generation deliveries = %d, want 0", got)
+	}
 }

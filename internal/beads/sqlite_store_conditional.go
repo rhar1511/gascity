@@ -90,7 +90,7 @@ func (s *SQLiteStore) DeleteIfMatch(id string, expectedRevision int64) error {
 		if err := ValidateLifecycleDelete(current); err != nil {
 			return err
 		}
-		if err := s.guardAndFenceIncomingDependenciesTx(ctx, tx, []string{id}, []string{id}); err != nil {
+		if err := s.guardAndFenceIncomingDependenciesTx(ctx, tx, []string{id}, []string{id}, &current); err != nil {
 			return fmt.Errorf("deleting bead %q incoming dependencies: %w", id, err)
 		}
 		if _, err := tx.Exec(`DELETE FROM beads WHERE id=?`, id); err != nil {
@@ -473,7 +473,7 @@ func (s *SQLiteStore) deleteBatchChunk(chunk []string) error {
 				return err
 			}
 		}
-		if err := s.guardAndFenceIncomingDependenciesTx(ctx, tx, chunk, chunk); err != nil {
+		if err := s.guardAndFenceIncomingDependenciesTx(ctx, tx, chunk, chunk, nil); err != nil {
 			return fmt.Errorf("deleting batch incoming dependencies: %w", err)
 		}
 		args := make([]any, 0, len(chunk))

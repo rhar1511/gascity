@@ -7,7 +7,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 func TestConvoyCreateAndGet(t *testing.T) {
@@ -62,6 +64,44 @@ func TestConvoyCreateAndGet(t *testing.T) {
 	}
 	if len(getResp.Children) != 1 || getResp.Children[0].ID != item.ID {
 		t.Fatalf("children = %+v, want tracked item %s", getResp.Children, item.ID)
+	}
+}
+
+func TestConvoyGetRedactsMemberExecutionCredential(t *testing.T) {
+	state := newFakeMutatorState(t)
+	store := state.stores["myrig"]
+	convoy, err := store.Create(beads.Bead{Title: "convoy", Type: "convoy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	member, err := store.Create(beads.Bead{
+		Title: "session member", Type: session.BeadType, Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			beadmeta.SessionInstanceTokenMetadataKey: "convoy-secret",
+			"generation":                             "7",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DepAdd(convoy.ID, member.ID, "tracks"); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	newTestCityHandler(t, state).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, cityURL(state, "/convoy/")+convoy.ID, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET convoy = %d: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "convoy-secret") || strings.Contains(rec.Body.String(), `"instance_token"`) {
+		t.Fatalf("convoy response leaked member credential: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"generation":"7"`) {
+		t.Fatalf("convoy response lost safe metadata: %s", rec.Body.String())
+	}
+	stored, err := store.Get(member.ID)
+	if err != nil || stored.Metadata[beadmeta.SessionInstanceTokenMetadataKey] != "convoy-secret" {
+		t.Fatalf("convoy response mutated stored member: %+v, %v", stored, err)
 	}
 }
 

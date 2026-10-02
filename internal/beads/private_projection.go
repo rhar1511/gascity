@@ -18,7 +18,8 @@ func IsPrivatePresentationRecord(b Bead) bool {
 
 // IsPrivatePresentationMetadataKey identifies private fields on public owners.
 func IsPrivatePresentationMetadataKey(key string) bool {
-	return key == beadmeta.AttemptEvidenceArchiveAttemptIDMetadataKey ||
+	return beadmeta.IsExecutionCredentialMetadataKey(key) ||
+		key == beadmeta.AttemptEvidenceArchiveAttemptIDMetadataKey ||
 		key == beadmeta.AttemptEvidenceArchiveOwnerIDMetadataKey ||
 		key == beadmeta.AttemptEvidenceArchivePayloadMetadataKey ||
 		key == beadmeta.AttemptEvidenceArchiveDigestMetadataKey ||

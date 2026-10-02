@@ -2658,6 +2658,7 @@ type nativeDoltTransactionTestStorage interface {
 	AddDependency(context.Context, *beadslib.Dependency, string) error
 	RemoveDependency(context.Context, string, string, string) error
 	GetDependencyRecords(context.Context, string) ([]*beadslib.Dependency, error)
+	GetDependentRecordsForIssues(context.Context, []string) (map[string][]*beadslib.Dependency, error)
 }
 
 type nativeDoltTransactionForTest struct {
@@ -2679,6 +2680,10 @@ func (tx nativeDoltTransactionForTest) CloseIssue(ctx context.Context, id, reaso
 
 func (tx nativeDoltTransactionForTest) DeleteIssue(ctx context.Context, id string) error {
 	return tx.storage.DeleteIssue(ctx, id)
+}
+
+func (tx nativeDoltTransactionForTest) GetDependentRecordsForIssues(ctx context.Context, ids []string) (map[string][]*beadslib.Dependency, error) {
+	return tx.storage.GetDependentRecordsForIssues(ctx, ids)
 }
 
 func (tx nativeDoltTransactionForTest) GetIssue(ctx context.Context, id string) (*beadslib.Issue, error) {
@@ -2711,29 +2716,30 @@ func (tx nativeDoltTransactionForTest) GetDependencyRecords(ctx context.Context,
 
 type nativeDoltStorageSpy struct {
 	beadslib.Storage
-	createIssue                 func(context.Context, *beadslib.Issue, string) error
-	createIssues                func(context.Context, []*beadslib.Issue, string) error
-	getIssue                    func(context.Context, string) (*beadslib.Issue, error)
-	updateIssue                 func(context.Context, string, map[string]interface{}, string) error
-	updateIssueChecked          func(context.Context, string, map[string]interface{}, string, beadslib.UpdateIssueOptions) error
-	runInTransaction            func(context.Context, string, func(beadslib.Transaction) error) error
-	issueLifecycle              func() (beadops.Lifecycle, error)
-	reopenIssue                 func(context.Context, string, string, string) error
-	closeIssue                  func(context.Context, string, string, string, string) error
-	closeIssueChecked           func(context.Context, string, string, beadslib.CloseIssueOptions) (beadslib.CloseIssueResult, error)
-	deleteIssue                 func(context.Context, string) error
-	searchIssues                func(context.Context, string, beadslib.IssueFilter) ([]*beadslib.Issue, error)
-	countIssues                 func(context.Context, string, beadslib.IssueFilter) (int64, error)
-	getReadyWork                func(context.Context, beadslib.WorkFilter) ([]*beadslib.Issue, error)
-	addLabel                    func(context.Context, string, string, string) error
-	removeLabel                 func(context.Context, string, string, string) error
-	addDependency               func(context.Context, *beadslib.Dependency, string) error
-	removeDependency            func(context.Context, string, string, string) error
-	getDependencyRecords        func(context.Context, string) ([]*beadslib.Dependency, error)
-	getDependenciesWithMetadata func(context.Context, string) ([]*beadslib.IssueWithDependencyMetadata, error)
-	getDependentsWithMetadata   func(context.Context, string) ([]*beadslib.IssueWithDependencyMetadata, error)
-	getConfig                   func(context.Context, string) (string, error)
-	close                       func() error
+	createIssue                  func(context.Context, *beadslib.Issue, string) error
+	createIssues                 func(context.Context, []*beadslib.Issue, string) error
+	getIssue                     func(context.Context, string) (*beadslib.Issue, error)
+	updateIssue                  func(context.Context, string, map[string]interface{}, string) error
+	updateIssueChecked           func(context.Context, string, map[string]interface{}, string, beadslib.UpdateIssueOptions) error
+	runInTransaction             func(context.Context, string, func(beadslib.Transaction) error) error
+	issueLifecycle               func() (beadops.Lifecycle, error)
+	reopenIssue                  func(context.Context, string, string, string) error
+	closeIssue                   func(context.Context, string, string, string, string) error
+	closeIssueChecked            func(context.Context, string, string, beadslib.CloseIssueOptions) (beadslib.CloseIssueResult, error)
+	deleteIssue                  func(context.Context, string) error
+	searchIssues                 func(context.Context, string, beadslib.IssueFilter) ([]*beadslib.Issue, error)
+	countIssues                  func(context.Context, string, beadslib.IssueFilter) (int64, error)
+	getReadyWork                 func(context.Context, beadslib.WorkFilter) ([]*beadslib.Issue, error)
+	addLabel                     func(context.Context, string, string, string) error
+	removeLabel                  func(context.Context, string, string, string) error
+	addDependency                func(context.Context, *beadslib.Dependency, string) error
+	removeDependency             func(context.Context, string, string, string) error
+	getDependencyRecords         func(context.Context, string) ([]*beadslib.Dependency, error)
+	getDependenciesWithMetadata  func(context.Context, string) ([]*beadslib.IssueWithDependencyMetadata, error)
+	getDependentsWithMetadata    func(context.Context, string) ([]*beadslib.IssueWithDependencyMetadata, error)
+	getDependentRecordsForIssues func(context.Context, []string) (map[string][]*beadslib.Dependency, error)
+	getConfig                    func(context.Context, string) (string, error)
+	close                        func() error
 }
 
 func (s *nativeDoltStorageSpy) CreateIssue(ctx context.Context, issue *beadslib.Issue, actor string) error {
@@ -2816,6 +2822,13 @@ func (s *nativeDoltStorageSpy) DeleteIssue(ctx context.Context, id string) error
 		return nil
 	}
 	return s.deleteIssue(ctx, id)
+}
+
+func (s *nativeDoltStorageSpy) GetDependentRecordsForIssues(ctx context.Context, ids []string) (map[string][]*beadslib.Dependency, error) {
+	if s.getDependentRecordsForIssues != nil {
+		return s.getDependentRecordsForIssues(ctx, ids)
+	}
+	return map[string][]*beadslib.Dependency{}, nil
 }
 
 func (s *nativeDoltStorageSpy) SearchIssues(ctx context.Context, query string, filter beadslib.IssueFilter) ([]*beadslib.Issue, error) {
@@ -3064,7 +3077,27 @@ func (s *nativeDoltMemStorage) CloseIssueChecked(
 }
 
 func (s *nativeDoltMemStorage) DeleteIssue(_ context.Context, id string) error {
-	return s.store.Delete(id)
+	// Model the pinned backend's transactional cascade, not MemStore's
+	// legacy unconditional dangling-edge deletion.
+	current, err := s.store.Get(id)
+	if err != nil {
+		return err
+	}
+	return s.store.DeleteIfMatch(id, current.Revision)
+}
+
+func (s *nativeDoltMemStorage) GetDependentRecordsForIssues(_ context.Context, ids []string) (map[string][]*beadslib.Dependency, error) {
+	result := make(map[string][]*beadslib.Dependency, len(ids))
+	for _, id := range ids {
+		deps, err := s.store.DepList(id, "up")
+		if err != nil {
+			return nil, err
+		}
+		for _, dep := range deps {
+			result[id] = append(result[id], &beadslib.Dependency{IssueID: dep.IssueID, DependsOnID: dep.DependsOnID, Type: beadslib.DependencyType(dep.Type)})
+		}
+	}
+	return result, nil
 }
 
 func nativeDoltMemCheckedError(err error) error {

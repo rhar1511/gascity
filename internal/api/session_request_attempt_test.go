@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -74,6 +76,99 @@ func TestSessionRequestSubmitHTTPBindsAuthoritativeAttempt(t *testing.T) {
 			t.Fatalf("delivery invented acknowledgement or effect: %+v", receipt)
 		}
 	})
+}
+
+func TestSessionRequestCachedReplayRechecksBoundClaim(t *testing.T) {
+	for _, scenario := range []struct {
+		name             string
+		explicitSelector bool
+		clearClaim       bool
+	}{
+		{"renewed implicit", false, false},
+		{"renewed explicit", true, false},
+		{"cleared implicit", false, true},
+		{"cleared explicit", true, true},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				fs := newSessionFakeState(t)
+				info := createTestSession(t, fs.cityBeadStore, fs.sp, "cached bound target")
+				front := session.NewStore(fs.SessionsBeadStore())
+				info, err := front.Get(info.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				generation, err := strconv.Atoi(info.Generation)
+				if err != nil {
+					t.Fatal(err)
+				}
+				work, err := fs.cityBeadStore.Create(beads.Bead{Title: "claimed work", Type: "task", Metadata: beads.StringMap{
+					beadmeta.SessionIDMetadataKey: info.ID, beadmeta.ClaimGenerationMetadataKey: "original-claim",
+				}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				status := "in_progress"
+				if err := fs.cityBeadStore.Update(work.ID, beads.UpdateOpts{Status: &status, Assignee: &info.ID}); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := front.SetCurrentClaimForGeneration(info.ID, work.ID, "original-claim"); err != nil {
+					t.Fatal(err)
+				}
+				body := map[string]any{"request_id": "cached-bound", "generation": generation, "message": "report progress"}
+				if scenario.explicitSelector {
+					body["work_id"], body["claim_generation"] = work.ID, "original-claim"
+				}
+				encoded, err := json.Marshal(body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				h := newTestCityHandler(t, fs)
+				post := func() *httptest.ResponseRecorder {
+					response := httptest.NewRecorder()
+					req := newPostRequest(cityURL(fs, "/session/"+info.ID+"/requests"), strings.NewReader(string(encoded)))
+					req.Header.Set("Idempotency-Key", "cached-bound-key")
+					h.ServeHTTP(response, req)
+					return response
+				}
+				if response := post(); response.Code != http.StatusAccepted {
+					t.Fatalf("initial submit = %d: %s", response.Code, response.Body.String())
+				}
+				synctest.Wait()
+				original, err := front.GetRequest(info.ID, "cached-bound")
+				if err != nil || original.Attempt == nil || original.Delivery != session.RequestDeliveryAccepted {
+					t.Fatalf("original receipt = %+v, %v", original, err)
+				}
+				if scenario.clearClaim {
+					if err := fs.cityBeadStore.SetMetadataBatch(info.ID, map[string]string{
+						beadmeta.CurrentClaimBeadIDMetadataKey: "", beadmeta.CurrentClaimGenerationMetadataKey: "",
+					}); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					if err := fs.cityBeadStore.SetMetadata(work.ID, beadmeta.ClaimGenerationMetadataKey, "renewed-claim"); err != nil {
+						t.Fatal(err)
+					}
+					if _, err := front.SetCurrentClaimForGeneration(info.ID, work.ID, "renewed-claim"); err != nil {
+						t.Fatal(err)
+					}
+				}
+				before, err := fs.cityBeadStore.Get(info.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				providerCalls := len(fs.sp.SnapshotCalls())
+				if response := post(); response.Code != http.StatusConflict {
+					t.Fatalf("cached replay bypassed claim renewal = %d: %s", response.Code, response.Body.String())
+				}
+				synctest.Wait()
+				after, err := fs.cityBeadStore.Get(info.ID)
+				if err != nil || after.Revision != before.Revision || len(fs.sp.SnapshotCalls()) != providerCalls {
+					t.Fatalf("rejected cached replay changed receipt or contacted provider: %v", err)
+				}
+			})
+		})
+	}
 }
 
 func TestSessionRequestAcknowledgementRemainsSessionScopedAfterClaimChanges(t *testing.T) {
@@ -257,6 +352,9 @@ func TestAttemptAcknowledgementsReportUnattributedAndCorruptReceipts(t *testing.
 	if _, err := front.AcceptRequest(info.ID, "legacy", generation, "report", time.Now()); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := front.RecordRequestDelivery(info.ID, "legacy", generation, session.RequestDeliveryAccepted, time.Now()); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := front.AcknowledgeRequest(info.ID, "legacy", generation, info.InstanceToken, time.Now()); err != nil {
 		t.Fatal(err)
 	}
@@ -290,7 +388,8 @@ func TestSessionRequestReceiptCannotBeForgedThroughGenericBeadUpdate(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	key := beadmeta.SessionRequestReceiptPrefix + "protected-request"
+	requestKeyDigest := sha256.Sum256([]byte("protected-request"))
+	key := beadmeta.SessionRequestReceiptPrefix + hex.EncodeToString(requestKeyDigest[:])
 	var forged map[string]any
 	if err := json.Unmarshal([]byte(row.Metadata[key]), &forged); err != nil {
 		t.Fatal(err)
@@ -479,6 +578,9 @@ func TestAttemptAcknowledgementsRemainExactAfterOwnerDeletionAndSQLiteReopen(t *
 			t.Fatalf("binding=%+v err=%v", binding, err)
 		}
 		if _, err := front.AcceptRequestForAttempt(row.ID, "request-"+suffix, 2, "report progress", *binding, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := front.RecordRequestDelivery(row.ID, "request-"+suffix, 2, session.RequestDeliveryAccepted, time.Now()); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := front.AcknowledgeRequest(row.ID, "request-"+suffix, 2, "private-execution-token", time.Now()); err != nil {

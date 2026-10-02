@@ -176,11 +176,33 @@ type failingReopenWriteStore struct {
 	fail bool
 }
 
+type fenceOnSessionReopenStore struct {
+	*beads.MemStore
+	fenceBeforeUpdate bool
+}
+
+func (s *fenceOnSessionReopenStore) UpdateIfMatch(id string, revision int64, opts beads.UpdateOpts) error {
+	if s.fenceBeforeUpdate && opts.Status != nil && *opts.Status == "open" {
+		s.fenceBeforeUpdate = false
+		if ok, err := s.CompareAndSetMetadataKey(id, beadmeta.SessionRequestPurgeFenceMetadataKey, "", "purge-owner"); err != nil || !ok {
+			return fmt.Errorf("inject purge fence: swapped=%v: %w", ok, err)
+		}
+	}
+	return s.MemStore.UpdateIfMatch(id, revision, opts)
+}
+
 func (s *failingReopenWriteStore) Update(id string, opts beads.UpdateOpts) error {
 	if s.fail && len(opts.Metadata) > 0 {
 		return errors.New("status+metadata update failed")
 	}
 	return s.MemStore.Update(id, opts)
+}
+
+func (s *failingReopenWriteStore) UpdateIfMatch(id string, revision int64, opts beads.UpdateOpts) error {
+	if s.fail && len(opts.Metadata) > 0 {
+		return errors.New("status+metadata update failed")
+	}
+	return s.MemStore.UpdateIfMatch(id, revision, opts)
 }
 
 func (s *failingReopenWriteStore) SetMetadataBatch(id string, kvs map[string]string) error {
@@ -295,6 +317,7 @@ type txSpyStore struct {
 	directSetMetadata      int
 	directClose            int
 	directUpdate           int
+	conditionalUpdate      int
 }
 
 func newTxSpyStore() *txSpyStore {
@@ -329,6 +352,11 @@ func (s *txSpyStore) Close(id string) error {
 func (s *txSpyStore) Update(id string, opts beads.UpdateOpts) error {
 	s.directUpdate++
 	return s.MemStore.Update(id, opts)
+}
+
+func (s *txSpyStore) UpdateIfMatch(id string, revision int64, opts beads.UpdateOpts) error {
+	s.conditionalUpdate++
+	return s.MemStore.UpdateIfMatch(id, revision, opts)
 }
 
 // allConfiguredDS builds configuredNames from a desiredState map.
@@ -1332,6 +1360,57 @@ func TestSyncSessionBeads_ReopensClosedConfiguredNamedSession(t *testing.T) {
 	}
 }
 
+func TestReopenClosedConfiguredNamedSessionHonorsPurgeFence(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		preFenced  bool
+		concurrent bool
+	}{
+		{name: "already fenced", preFenced: true},
+		{name: "fence wins conditional race", concurrent: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &fenceOnSessionReopenStore{MemStore: beads.NewMemStore(), fenceBeforeUpdate: tc.concurrent}
+			cfg := &config.City{
+				Workspace: config.Workspace{Name: "test-city"},
+				Agents:    []config.Agent{{Name: "refinery", StartCommand: "true", MaxActiveSessions: intPtr(2)}},
+				NamedSessions: []config.NamedSession{
+					{Template: "refinery", Mode: "on_demand"},
+				},
+			}
+			sessionName := config.NamedSessionRuntimeName(cfg.Workspace.Name, cfg.Workspace, "refinery")
+			metadata := map[string]string{
+				"session_name": sessionName, "alias": "refinery", "template": "refinery", "state": "suspended",
+				namedSessionMetadataKey: "true", namedSessionIdentityMetadata: "refinery", namedSessionModeMetadata: "on_demand",
+			}
+			if tc.preFenced {
+				metadata[beadmeta.SessionRequestPurgeFenceMetadataKey] = "purge-owner"
+			}
+			closed, err := store.Create(beads.Bead{Title: "refinery", Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: metadata})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Close(closed.ID); err != nil {
+				t.Fatal(err)
+			}
+
+			var stderr bytes.Buffer
+			if reopened, _, ok := reopenClosedConfiguredNamedSessionBead(
+				t.TempDir(), store, cfg, cfg.Workspace.Name, "refinery", sessionName, "active", time.Now(), nil, &stderr,
+			); ok || reopened.ID != "" {
+				t.Fatalf("reopened fenced session: %+v", reopened)
+			}
+			row, err := store.Get(closed.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if row.Status != "closed" || !session.IsRequestPurgeFenced(row) {
+				t.Fatalf("fenced reconciler row changed: %+v", row)
+			}
+		})
+	}
+}
+
 func TestReopenClosedConfiguredNamedSessionBeadClearsPendingCreateStartedAtWhenActive(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
@@ -1493,8 +1572,8 @@ func TestReopenClosedConfiguredNamedSessionBeadClearsStaleStartMarkersWhenRecrea
 
 // TestReopenClosedConfiguredNamedSessionBeadUsesSingleTransactionForStatusAndMetadata
 // pins ga-igcny0.1.1: the status flip to "open" and the terminal reopen
-// metadata batch must land inside exactly one store.Tx call, not two
-// independent direct writes.
+// metadata batch must land in one revision-conditional write, not two
+// independent writes.
 func TestReopenClosedConfiguredNamedSessionBeadUsesSingleTransactionForStatusAndMetadata(t *testing.T) {
 	cityPath := t.TempDir()
 	store := newTxSpyStore()
@@ -1538,8 +1617,11 @@ func TestReopenClosedConfiguredNamedSessionBeadUsesSingleTransactionForStatusAnd
 	if !ok {
 		t.Fatalf("reopenClosedConfiguredNamedSessionBead failed: %s", stderr.String())
 	}
-	if store.txCalls != 1 {
-		t.Fatalf("txCalls = %d, want 1", store.txCalls)
+	if store.txCalls != 0 {
+		t.Fatalf("txCalls = %d, want 0", store.txCalls)
+	}
+	if store.conditionalUpdate != 1 {
+		t.Fatalf("conditionalUpdate = %d, want 1", store.conditionalUpdate)
 	}
 	if store.directUpdate != 0 {
 		t.Fatalf("directUpdate = %d, want 0 (status flip must happen inside the Tx)", store.directUpdate)
@@ -6102,6 +6184,55 @@ func TestSyncSessionBeads_RepairsEmptyType(t *testing.T) {
 	}
 	if got.Type != sessionBeadType {
 		t.Errorf("type after repair = %q, want %q", got.Type, sessionBeadType)
+	}
+}
+
+type repairTypeFenceRaceStore struct {
+	*beads.MemStore
+	beforeRepair func()
+}
+
+func (s *repairTypeFenceRaceStore) UpdateIfMatch(id string, revision int64, opts beads.UpdateOpts) error {
+	if opts.Type != nil && s.beforeRepair != nil {
+		before := s.beforeRepair
+		s.beforeRepair = nil
+		before()
+	}
+	return s.MemStore.UpdateIfMatch(id, revision, opts)
+}
+
+func TestSyncSessionBeads_TypeRepairDoesNotOverwriteConcurrentPurgeFence(t *testing.T) {
+	base := beads.NewMemStore()
+	b, err := base.Create(beads.Bead{
+		Title: "mayor", Type: sessionBeadType, Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{"session_name": "mayor", "state": "active"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	emptyType := ""
+	if err := base.Update(b.ID, beads.UpdateOpts{Type: &emptyType}); err != nil {
+		t.Fatal(err)
+	}
+	store := &repairTypeFenceRaceStore{MemStore: base}
+	store.beforeRepair = func() {
+		if ok, err := base.CompareAndSetMetadataKey(b.ID, beadmeta.SessionRequestPurgeFenceMetadataKey, "", "purge-owner"); err != nil || !ok {
+			t.Fatalf("install concurrent purge fence = (%v, %v)", ok, err)
+		}
+	}
+	sp := runtime.NewFake()
+	_ = sp.Start(context.TODO(), "mayor", runtime.Config{Command: "claude"})
+	ds := map[string]TemplateParams{"mayor": {TemplateName: "mayor", Command: "claude"}}
+	var stderr bytes.Buffer
+
+	syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), nil, &clock.Fake{Time: time.Date(2026, 4, 2, 12, 0, 0, 0, time.UTC)}, &stderr, false)
+
+	got, err := base.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Type != "" || session.RequestPurgeFence(got) != "purge-owner" {
+		t.Fatalf("concurrent type-repair result = %+v, want empty type with retained purge fence", got)
 	}
 }
 

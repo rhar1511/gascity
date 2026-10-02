@@ -1354,14 +1354,14 @@ func TestBdStoreTxRefusesUnfenceableLifecycleLabelUpdate(t *testing.T) {
 			RemoveLabels: []string{"a"},
 		})
 	})
-	var unsupported *beads.ConditionalUpdateFieldUnsupportedError
-	if !errors.As(err, &unsupported) || unsupported.Field != "labels" {
-		t.Fatalf("Tx label update error = %v, want labels conditional-write refusal", err)
+	if !errors.Is(err, beads.ErrConditionalWriteUnsupported) {
+		t.Fatalf("Tx label update error = %v, want unsupported conditional-write refusal", err)
 	}
 
 	want := []string{
 		"bd show --json bd-42", // Tx initial Get
 		"bd show --json bd-42", // lifecycle preflight before status update
+		"bd update --help",     // unsupported backend must refuse before any label write
 	}
 	if !reflect.DeepEqual(commands, want) {
 		t.Fatalf("commands = %#v, want %#v", commands, want)

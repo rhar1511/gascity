@@ -30,7 +30,8 @@ func (c *Client) SubmitSessionRequest(id, requestID string, generation int, mess
 	if err := c.requireCityScope(); err != nil {
 		return SessionRequestReceipt{}, err
 	}
-	resp, err := c.cw.PostV0CityByCityNameSessionByIdRequestsWithResponse(context.Background(), c.cityName, id, nil, genclient.SessionRequestSubmitInputBody{RequestId: requestID, Generation: int64(generation), Message: message})
+	params := &genclient.PostV0CityByCityNameSessionByIdRequestsParams{IdempotencyKey: &requestID, XGCRequest: "gc"}
+	resp, err := c.cw.PostV0CityByCityNameSessionByIdRequestsWithResponse(context.Background(), c.cityName, id, params, genclient.SessionRequestSubmitInputBody{RequestId: requestID, Generation: int64(generation), Message: message})
 	if err := checkMutation(resp, err); err != nil {
 		return SessionRequestReceipt{}, err
 	}
@@ -45,7 +46,7 @@ func (c *Client) AcknowledgeSessionRequest(id, requestID string, generation int,
 	if err := c.requireCityScope(); err != nil {
 		return SessionRequestReceipt{}, err
 	}
-	params := &genclient.PostV0CityByCityNameSessionByIdRequestsByRequestIdAckParams{XGCRequest: "gc", XGCSessionToken: &executionToken}
+	params := &genclient.PostV0CityByCityNameSessionByIdRequestsByRequestIdAckParams{XGCRequest: "gc", XGCSessionToken: executionToken}
 	resp, err := c.cw.PostV0CityByCityNameSessionByIdRequestsByRequestIdAckWithResponse(context.Background(), c.cityName, id, requestID, params, genclient.SessionRequestAcknowledgementInputBody{Generation: int64(generation)})
 	if err := checkMutation(resp, err); err != nil {
 		return SessionRequestReceipt{}, err

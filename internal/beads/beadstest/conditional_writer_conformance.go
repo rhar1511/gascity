@@ -19,12 +19,9 @@ type ConditionalWriterOptions struct {
 	// preserve every unconditional flavor leave this false.
 	RowBackedMutationFlavors bool
 
-	// RestrictedUpdateFields declares that this store persists parent and
-	// labels through writes it cannot fold into a revision-guarded update, so
-	// UpdateIfMatch must reject those options with
-	// *beads.ConditionalUpdateFieldUnsupportedError instead of applying them.
-	// bd-backed and Dolt-backed stores do; a store that keeps the whole bead in
-	// one row can apply them and leaves this false.
+	// RestrictedUpdateFields is retained for source compatibility with existing
+	// conformance registrations. Parent and label changes are now required parts
+	// of UpdateIfMatch, so this option no longer changes the suite.
 	RestrictedUpdateFields bool
 
 	// OpenDisabled returns a fresh store of the same kind whose conditional
@@ -73,9 +70,8 @@ func RunConditionalWriterConformanceWithOptions(t *testing.T, name string, open 
 
 	t.Run(name, func(t *testing.T) { runEmptyUpdateContract(t, open) })
 	conformanceWholeBeadWriteChangesRevision(t, name, open)
-	if opts.RestrictedUpdateFields {
-		conformanceRestrictedUpdateFieldsRejected(t, name, open)
-	}
+	conformanceLabelWritesAreRevisionFenced(t, name, open)
+	conformanceParentWritesAreRevisionFenced(t, name, open)
 	conformanceReadsNeverBump(t, name, open)
 	conformanceRevisionTokensNeverReused(t, name, open)
 	conformanceReleaseIfCurrentMintsRevision(t, name, open)
@@ -84,6 +80,8 @@ func RunConditionalWriterConformanceWithOptions(t *testing.T, name string, open 
 	}
 	conformanceStaleRevisionIsPreconditionFailed(t, name, open, opts)
 	conformanceConditionalSuccessPaths(t, name, open)
+	conformanceTerminalDeletePreservesActiveOwner(t, name, open)
+	conformanceTerminalDeletePreservesParentOwner(t, name, open)
 	conformanceCASEmptyExpectedClaimsAbsentOrEmpty(t, name, open)
 	conformanceCASValueMismatchIsFalseNil(t, name, open)
 	conformanceCASWinnerValueVisibleToLoser(t, name, open)
@@ -143,55 +141,75 @@ func conformanceWholeBeadWriteChangesRevision(t *testing.T, name string, open fu
 	})
 }
 
-// conformanceRestrictedUpdateFieldsRejected asserts a store that cannot fold
-// parent/labels into a revision-guarded update rejects them with the typed
-// unsupported error and mutates nothing.
-func conformanceRestrictedUpdateFieldsRejected(t *testing.T, name string, open func(t *testing.T) beads.Store) {
-	t.Run(name+"/restricted_update_fields_are_rejected_without_mutation", func(t *testing.T) {
+func conformanceLabelWritesAreRevisionFenced(t *testing.T, name string, open func(t *testing.T) beads.Store) {
+	t.Run(name+"/label_writes_are_revision_fenced", func(t *testing.T) {
 		s := open(t)
 		w := conformanceWriterFor(t, s)
-		parentBefore, err := s.Create(beads.Bead{Title: "restricted-update-parent"})
+		created, err := s.Create(beads.Bead{Title: "labels", Labels: []string{"keep", "remove"}})
 		if err != nil {
-			t.Fatalf("Create parent fixture: %v", err)
+			t.Fatal(err)
 		}
-		parent := "parent-after"
-		tests := []struct {
-			name string
-			opts beads.UpdateOpts
-		}{
-			{name: "parent", opts: beads.UpdateOpts{ParentID: &parent}},
-			{name: "add_labels", opts: beads.UpdateOpts{Labels: []string{"added"}}},
-			{name: "remove_labels", opts: beads.UpdateOpts{RemoveLabels: []string{"remove"}}},
+		before, err := s.Get(created.ID)
+		if err != nil {
+			t.Fatal(err)
 		}
+		if err := w.UpdateIfMatch(created.ID, before.Revision, beads.UpdateOpts{Labels: []string{"added"}, RemoveLabels: []string{"remove"}}); err != nil {
+			t.Fatalf("UpdateIfMatch labels: %v", err)
+		}
+		after, err := s.Get(created.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(after.Labels, []string{"keep", "added"}) || after.Revision == before.Revision {
+			t.Fatalf("label update = labels %v revision %d, want [keep added] and revision after %d", after.Labels, after.Revision, before.Revision)
+		}
+		if err := w.UpdateIfMatch(created.ID, before.Revision, beads.UpdateOpts{Labels: []string{"stale"}}); err == nil {
+			t.Fatal("stale label update succeeded")
+		}
+	})
+}
 
-		for _, tt := range tests {
-			t.Run(tt.name, func(t *testing.T) {
-				created, err := s.Create(beads.Bead{
-					Title:    "restricted-update",
-					ParentID: parentBefore.ID,
-					Labels:   []string{"keep", "remove"},
-				})
-				if err != nil {
-					t.Fatal(err)
-				}
-				before, err := s.Get(created.ID)
-				if err != nil {
-					t.Fatal(err)
-				}
-
-				err = w.UpdateIfMatch(created.ID, before.Revision, tt.opts)
-				var unsupported *beads.ConditionalUpdateFieldUnsupportedError
-				if !errors.As(err, &unsupported) {
-					t.Fatalf("UpdateIfMatch(%s) = %v, want *ConditionalUpdateFieldUnsupportedError", tt.name, err)
-				}
-				after, err := s.Get(created.ID)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if !reflect.DeepEqual(after, before) {
-					t.Fatalf("restricted conditional update mutated bead: before=%#v after=%#v", before, after)
-				}
-			})
+func conformanceParentWritesAreRevisionFenced(t *testing.T, name string, open func(t *testing.T) beads.Store) {
+	t.Run(name+"/parent_writes_are_revision_fenced", func(t *testing.T) {
+		s := open(t)
+		w := conformanceWriterFor(t, s)
+		parentBefore, err := s.Create(beads.Bead{Title: "parent-before"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		parentAfter, err := s.Create(beads.Bead{Title: "parent-after"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		created, err := s.Create(beads.Bead{Title: "child", ParentID: parentBefore.ID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		before, err := s.Get(created.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		title := "child-renamed"
+		if err := w.UpdateIfMatch(created.ID, before.Revision, beads.UpdateOpts{Title: &title, ParentID: &parentAfter.ID}); err != nil {
+			t.Fatalf("combined parent UpdateIfMatch: %v", err)
+		}
+		after, err := s.Get(created.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if after.ParentID != parentAfter.ID || after.Title != title || after.Revision == before.Revision {
+			t.Fatalf("combined parent update = parent %q title %q revision %d; want %q, %q, revision after %d", after.ParentID, after.Title, after.Revision, parentAfter.ID, title, before.Revision)
+		}
+		clearParent := ""
+		if err := w.UpdateIfMatch(created.ID, before.Revision, beads.UpdateOpts{ParentID: &clearParent}); !beads.IsPreconditionFailed(err) {
+			t.Fatalf("stale parent UpdateIfMatch = %v, want precondition failure", err)
+		}
+		unchanged, err := s.Get(created.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if unchanged.ParentID != after.ParentID || unchanged.Revision != after.Revision {
+			t.Fatalf("stale parent update mutated bead: before=%#v after=%#v", after, unchanged)
 		}
 	})
 }
@@ -521,11 +539,115 @@ func conformanceConditionalSuccessPaths(t *testing.T, name string, open func(t *
 		if err != nil {
 			t.Fatal(err)
 		}
+		if err := s.DepAdd(c.ID, b.ID, "blocks"); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.DepAdd(a.ID, c.ID, "relates-to"); err != nil {
+			t.Fatal(err)
+		}
+		// A backing row need not embed dependencies. Conditional write eviction
+		// and a subsequent Get must not turn a missing list into complete coverage.
+		if err := w.UpdateIfMatch(a.ID, conformanceRevOf(t, s, a.ID), beads.UpdateOpts{Title: conformanceStrPtr("refreshed owner")}); err != nil {
+			t.Fatalf("refresh incoming owner before cascade: %v", err)
+		}
+		ownerRevision := conformanceRevOf(t, s, a.ID)
 		if err := w.DeleteIfMatch(c.ID, conformanceRevOf(t, s, c.ID)); err != nil {
 			t.Fatalf("DeleteIfMatch at current revision: %v", err)
 		}
 		if _, err := s.Get(c.ID); !errors.Is(err, beads.ErrNotFound) {
 			t.Fatalf("DeleteIfMatch left the bead present: Get returned %v, want ErrNotFound", err)
+		}
+		for _, direction := range []string{"down", "up"} {
+			deps, err := s.DepList(c.ID, direction)
+			if err != nil || len(deps) != 0 {
+				t.Fatalf("conditional deletion left %s references: %+v, %v", direction, deps, err)
+			}
+		}
+		if current := conformanceRevOf(t, s, a.ID); current == 0 || current == ownerRevision {
+			t.Fatalf("conditional cascade reused surviving owner's revision: %d -> %d", ownerRevision, current)
+		}
+		staleTitle := "stale owner"
+		if err := w.UpdateIfMatch(a.ID, ownerRevision, beads.UpdateOpts{Title: &staleTitle}); !beads.IsPreconditionFailed(err) {
+			t.Fatalf("owner snapshot before reference cleanup remained writable: %v", err)
+		}
+	})
+}
+
+func conformanceTerminalDeletePreservesParentOwner(t *testing.T, name string, open func(t *testing.T) beads.Store) {
+	t.Run(name+"/terminal_delete_preserves_parent_owner", func(t *testing.T) {
+		s := open(t)
+		w := conformanceWriterFor(t, s)
+		target, err := s.Create(beads.Bead{Title: "terminal parent"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		owner, err := s.Create(beads.Bead{Title: "field-only owner"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := w.UpdateIfMatch(owner.ID, conformanceRevOf(t, s, owner.ID), beads.UpdateOpts{ParentID: &target.ID}); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Close(target.ID); err != nil {
+			t.Fatal(err)
+		}
+		targetRevision := conformanceRevOf(t, s, target.ID)
+		if err := w.DeleteIfMatch(target.ID, targetRevision); !beads.IsGateRefusal(err) {
+			t.Fatalf("terminal cascade lost active parent reference: %v", err)
+		}
+		current, err := s.Get(owner.ID)
+		if err != nil || current.ParentID != target.ID {
+			t.Fatalf("refusal changed parent: %+v %v", current, err)
+		}
+		if err := s.Close(owner.ID); err != nil {
+			t.Fatal(err)
+		}
+		ownerRevision := conformanceRevOf(t, s, owner.ID)
+		if err := w.DeleteIfMatch(target.ID, targetRevision); err != nil {
+			t.Fatalf("terminal parent cleanup: %v", err)
+		}
+		current, err = s.Get(owner.ID)
+		if err != nil || current.ParentID != "" || current.Revision == ownerRevision {
+			t.Fatalf("cleanup lost owner fence or left parent: %+v previous=%d error=%v", current, ownerRevision, err)
+		}
+		if err := w.UpdateIfMatch(owner.ID, ownerRevision, beads.UpdateOpts{Title: conformanceStrPtr("stale parent owner")}); !beads.IsPreconditionFailed(err) {
+			t.Fatalf("parent cleanup accepted the old owner revision: %v", err)
+		}
+	})
+}
+
+func conformanceTerminalDeletePreservesActiveOwner(t *testing.T, name string, open func(t *testing.T) beads.Store) {
+	t.Run(name+"/terminal_delete_preserves_active_owner", func(t *testing.T) {
+		s := open(t)
+		w := conformanceWriterFor(t, s)
+		target, err := s.Create(beads.Bead{Title: "terminal target"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		owner, err := s.Create(beads.Bead{Title: "active owner"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Close(target.ID); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.DepAdd(owner.ID, target.ID, "relates-to"); err != nil {
+			t.Fatal(err)
+		}
+		targetRevision := conformanceRevOf(t, s, target.ID)
+		ownerRevision := conformanceRevOf(t, s, owner.ID)
+		if err := w.DeleteIfMatch(target.ID, targetRevision); !beads.IsGateRefusal(err) {
+			t.Fatalf("terminal cascade removed an active owner's reference: %v", err)
+		}
+		if got := conformanceRevOf(t, s, target.ID); got != targetRevision {
+			t.Fatalf("refusal changed target revision: %d -> %d", targetRevision, got)
+		}
+		if got := conformanceRevOf(t, s, owner.ID); got != ownerRevision {
+			t.Fatalf("refusal changed owner revision: %d -> %d", ownerRevision, got)
+		}
+		deps, err := s.DepList(owner.ID, "down")
+		if err != nil || len(deps) != 1 || deps[0].DependsOnID != target.ID {
+			t.Fatalf("refusal lost the active reference: %+v %v", deps, err)
 		}
 	})
 }

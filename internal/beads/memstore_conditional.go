@@ -229,7 +229,14 @@ func (m *MemStore) DeleteIfMatch(id string, expectedRevision int64) error {
 	if err := ValidateLifecycleDelete(m.beads[i]); err != nil {
 		return err
 	}
+	// Like the pinned SQL backend's ON DELETE CASCADE, remove references only
+	// after the row fence and guards succeed, in the same critical section.
+	// Never make a caller remove edges before attempting its conditional delete.
+	if err := m.deleteDependencyReferencesLocked(m.beads[i]); err != nil {
+		return err
+	}
 	m.beads = append(m.beads[:i], m.beads[i+1:]...)
+	delete(m.localStrings, id)
 	return nil
 }
 

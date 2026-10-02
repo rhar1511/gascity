@@ -30,6 +30,7 @@ var requireIdempotency = map[string]bool{
 	"answer-decision-frontier":              true,
 	"ensure-prepared-human-source-proposal": true,
 	"submit-human-source-answer":            true,
+	"post-v0-city-by-city-name-session-by-id-requests": true,
 }
 
 // pendingIdempotency lists known create operations that are deliberately NOT
@@ -72,7 +73,8 @@ var exemptFromIdempotency = map[string]bool{
 	// TestPersistRecoveryIntentIsStableHeldAndReplaySafe.
 	"submit-lifecycle-recovery-request": true,
 
-	// Tracked session delivery uses the mandatory body request_id as its durable
+	// Tracked session delivery additionally accepts Idempotency-Key; its mandatory
+	// body request_id remains its durable
 	// identity. AcceptRequest rejects changed content/generation on replay and
 	// reserves delivery once; the HTTP replay test asserts one provider send.
 	// Acknowledgement conditionally updates that same request for the exact
@@ -80,7 +82,6 @@ var exemptFromIdempotency = map[string]bool{
 	// retries idempotent without a second, competing Idempotency-Key identity.
 	// Proof: TestSessionRequestSubmitHTTPPreservesAcceptanceAndSendsOnce and
 	// TestSessionRequestReadAndAcknowledgementHTTP, plus the session CAS tests.
-	"post-v0-city-by-city-name-session-by-id-requests":                   true,
 	"post-v0-city-by-city-name-session-by-id-requests-by-request-id-ack": true,
 
 	// ensure-extmsg-group is identity-idempotent by design: the ensure

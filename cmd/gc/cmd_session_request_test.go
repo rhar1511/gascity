@@ -63,6 +63,36 @@ func TestSessionRequestAttributedJSONSchemas(t *testing.T) {
 	}
 }
 
+func TestSessionRequestLedgerJSONSchemas(t *testing.T) {
+	for _, tc := range []struct{ name, ledger string }{
+		{"unavailable", `{"status":"unavailable","unavailable_reason":"legacy receipt has no event history"}`},
+		{"available", `{"status":"available","digest":"ledger-digest","attempt_attribution":{"status":"available","reference":{"store_ref":"city:test","work_id":"work-1","attempt_id":"attempt-1","work_revision":"-9223372036854775807"}},"events":[{"sequence":1,"kind":"accepted","session_id":"gc-1","generation":2,"request_id":"req-1","message_digest":"digest","at":"2026-09-27T00:00:00Z"}],"transcript_evidence":{"status":"available","tool_status":"unavailable","tool_unavailable_reason":"no_tool_lineage","references":[{"session_id":"gc-1","generation":2,"request_id":"req-1","transcript_stream_id":"stream","transcript_generation_id":"generation","entry_id":"entry-1","kind":"request_entry"}]}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var receipt api.SessionRequestReceipt
+			wire := `{"request_id":"req-1","session_id":"gc-1","generation":2,"accepted_at":"2026-09-27T00:00:00Z","delivery":"accepted","effect":"unverified","message_digest":"digest","ledger":` + tc.ledger + `}`
+			if err := json.Unmarshal([]byte(wire), &receipt); err != nil {
+				t.Fatal(err)
+			}
+			var out bytes.Buffer
+			if err := writeSessionRequestReceiptJSON(&out, receipt); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(out.String(), `"ledger"`) {
+				t.Fatal("CLI discarded the server's explicit ledger status")
+			}
+			if tc.name == "available" && !strings.Contains(out.String(), `"work_revision":"-9223372036854775807"`) {
+				t.Fatal("CLI discarded or rounded the ledger attempt revision")
+			}
+			for _, action := range []string{"submit", "get", "ack"} {
+				t.Run(action, func(t *testing.T) {
+					validateJSONResultSchema(t, []string{"session", "request", action}, out.Bytes())
+				})
+			}
+		})
+	}
+}
+
 func TestSessionRequestClientUsesSupervisorForAliveCityWithoutStandalonePort(t *testing.T) {
 	cityPath := writeBeadsTestCity(t)
 	t.Setenv("GC_CITY", cityPath)

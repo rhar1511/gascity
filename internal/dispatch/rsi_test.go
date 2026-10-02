@@ -33,6 +33,10 @@ var (
 	rsiTestFormulaSHA256 = flag.String("rsi-test-formula-sha256", "", "Required exact source digest when using an external RSI formula")
 )
 
+func TestRSIFormulaFixtureIsAvailable(t *testing.T) {
+	compileRSIRecipe(t)
+}
+
 func TestRSIFormulaConformanceWiresTrustedGateToCandidateAndBothJudges(t *testing.T) {
 	recipe := compileRSIRecipe(t)
 	gateID := recipe.Name + ".promote-gate"
@@ -77,18 +81,11 @@ func TestRSIFormulaConformancePromotesOnlyFromSignedTrustedEvaluation(t *testing
 		setRSIWorkerEvidence(t, store, judge.BeadID, judge.ActorID, judge.SessionID, judge.RawOutput)
 	}
 	formulaDir := filepath.Dir(recipe.FormulaSource)
-	candidateID := processRSIRetryToSecondAttempt(t, store, candidateControlID, formulaDir, "improver", "session-improver", candidateRaw)
+	processRSIRetryToSecondAttempt(t, store, candidateControlID, formulaDir, "improver", "session-improver", candidateRaw)
 	for _, controlID := range []string{judges[0].ControlBeadID, judges[1].ControlBeadID} {
 		processPassingRSIRetry(t, store, controlID)
 	}
 
-	cityPath := t.TempDir()
-	resolver := writeSignedRSIEvaluation(t, cityPath, candidateID, candidateControlID, "improver", "session-improver", candidateRaw, judges, pair, true, func(m *rsipolicy.TrustedEvaluationManifest) { m.Attempt = 2 })
-	actualCandidate := mustGet(t, store, candidateID)
-	var candidateProposal rsipolicy.CandidateProposal
-	if err := json.Unmarshal([]byte(candidateRaw), &candidateProposal); err != nil {
-		t.Fatal(err)
-	}
 	candidateControl := mustGet(t, store, candidateControlID)
 	if got := candidateControl.Metadata[beadmeta.ClosedByAttemptMetadataKey]; got != "2" {
 		t.Fatalf("candidate retry gc.closed_by_attempt = %q, want successful attempt 2", got)
@@ -102,20 +99,18 @@ func TestRSIFormulaConformancePromotesOnlyFromSignedTrustedEvaluation(t *testing
 	if _, err := resolveRSIWorkerExecution(store, wrongClosedBy); err == nil {
 		t.Fatal("retry control with gc.closed_by_attempt=1 accepted successful attempt 2")
 	}
-	if _, err := resolver(context.Background(), rsipolicy.ResolveRequest{Candidate: rsipolicy.CandidateRecord{
-		BeadID: actualCandidate.ID, ControlBeadID: candidateControl.ID, Attempt: beadmeta.RetryAttemptNumber(actualCandidate.Metadata),
-		MaxAttempts: retryMaxAttempts(candidateControl), ActorID: actualCandidate.Assignee,
-		SessionID: actualCandidate.Metadata[beadmeta.SessionIDMetadataKey], Status: actualCandidate.Status,
-		Outcome: actualCandidate.Metadata[beadmeta.OutcomeMetadataKey], RawOutput: candidateRaw, Proposal: candidateProposal,
-	}, Judges: judges}); err != nil {
-		t.Fatalf("resolve signed evaluation before dispatch: %v", err)
-	}
 	gateID := result.IDMapping[recipe.Name+".promote-gate"]
 	gate, err := store.Get(gateID)
 	if err != nil {
 		t.Fatalf("load compiled gate: %v", err)
 	}
-	processed, err := ProcessControl(store, gate, ProcessOptions{Context: context.Background(), ResolveRSIEvaluation: resolver})
+	request := rsiRequestFromStore(t, store, gate)
+	cityPath := t.TempDir()
+	resolver := writeSignedRSIEvaluation(t, cityPath, request, pair, true, func(m *rsipolicy.TrustedEvaluationManifest) { m.Attempt = 2 })
+	if _, err := resolver(context.Background(), request); err != nil {
+		t.Fatalf("resolve signed evaluation before dispatch: %v", err)
+	}
+	processed, err := ProcessControl(store, gate, rsiProcessOptions(gate, resolver))
 	if err != nil {
 		t.Fatalf("ProcessControl: %v", err)
 	}
@@ -154,8 +149,8 @@ func TestRSIGateRequiresExactHumanSignatureForTrustedPromotion(t *testing.T) {
 	store, gate := createRSIGateInputs(t, false)
 	request := rsiRequestFromStore(t, store, gate)
 	cityPath := t.TempDir()
-	resolver := writeSignedRSIEvaluation(t, cityPath, request.Candidate.BeadID, request.Candidate.ControlBeadID, request.Candidate.ActorID, request.Candidate.SessionID, request.Candidate.RawOutput, request.Judges, testBundlePair(), false, nil)
-	processed, err := ProcessControl(store, gate, ProcessOptions{ResolveRSIEvaluation: resolver})
+	resolver := writeSignedRSIEvaluation(t, cityPath, request, testBundlePair(), false, nil)
+	processed, err := ProcessControl(store, gate, rsiProcessOptions(gate, resolver))
 	if !errors.Is(err, ErrControlPending) {
 		t.Fatalf("ProcessControl error = %v, want pending human approval", err)
 	}
@@ -172,8 +167,8 @@ func TestRSIGateRetriesUntilEvaluationAndApprovalArtifactsArrive(t *testing.T) {
 	store, gate := createRSIGateInputs(t, false)
 	request := rsiRequestFromStore(t, store, gate)
 	cityPath := t.TempDir()
-	resolver := writeSignedRSIEvaluation(t, cityPath, request.Candidate.BeadID, request.Candidate.ControlBeadID, request.Candidate.ActorID, request.Candidate.SessionID, request.Candidate.RawOutput, request.Judges, testBundlePair(), true, nil)
-	evidenceDir := filepath.Join(cityPath, ".gc", "rsi")
+	resolver := writeSignedRSIEvaluation(t, cityPath, request, testBundlePair(), true, nil)
+	evidenceDir := rsiGateEvidenceDir(cityPath, gate.ID)
 	evaluationPath := filepath.Join(evidenceDir, "evaluation.json")
 	approvalPath := filepath.Join(evidenceDir, "approval.json")
 	evaluation, err := os.ReadFile(evaluationPath)
@@ -193,7 +188,7 @@ func TestRSIGateRetriesUntilEvaluationAndApprovalArtifactsArrive(t *testing.T) {
 
 	processPending := func(want string) {
 		t.Helper()
-		result, processErr := ProcessControl(store, mustGet(t, store, gate.ID), ProcessOptions{Context: context.Background(), ResolveRSIEvaluation: resolver})
+		result, processErr := ProcessControl(store, mustGet(t, store, gate.ID), rsiProcessOptions(gate, resolver))
 		if !errors.Is(processErr, ErrControlPending) {
 			t.Fatalf("ProcessControl error = %v, want pending %s", processErr, want)
 		}
@@ -205,14 +200,10 @@ func TestRSIGateRetriesUntilEvaluationAndApprovalArtifactsArrive(t *testing.T) {
 		}
 	}
 	processPending("evaluation")
-	if err := os.WriteFile(evaluationPath, evaluation, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	publishRSIFile(t, evaluationPath, evaluation)
 	processPending("human approval")
-	if err := os.WriteFile(approvalPath, approval, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	result, err := ProcessControl(store, mustGet(t, store, gate.ID), ProcessOptions{Context: context.Background(), ResolveRSIEvaluation: resolver})
+	publishRSIFile(t, approvalPath, approval)
+	result, err := ProcessControl(store, mustGet(t, store, gate.ID), rsiProcessOptions(gate, resolver))
 	if err != nil {
 		t.Fatalf("ProcessControl after trusted artifacts arrived: %v", err)
 	}
@@ -240,8 +231,8 @@ func TestRSIGateRejectsCandidatePermissionToReadHeldOutDataOrSigningKey(t *testi
 			store, gate := createRSIGateInputs(t, true)
 			request := rsiRequestFromStore(t, store, gate)
 			cityPath := t.TempDir()
-			resolver := writeSignedRSIEvaluation(t, cityPath, request.Candidate.BeadID, request.Candidate.ControlBeadID, request.Candidate.ActorID, request.Candidate.SessionID, request.Candidate.RawOutput, request.Judges, testBundlePair(), true, test.edit)
-			processed, err := ProcessControl(store, gate, ProcessOptions{ResolveRSIEvaluation: resolver})
+			resolver := writeSignedRSIEvaluation(t, cityPath, request, testBundlePair(), true, test.edit)
+			processed, err := ProcessControl(store, gate, rsiProcessOptions(gate, resolver))
 			if err != nil {
 				t.Fatalf("ProcessControl: %v", err)
 			}
@@ -259,10 +250,10 @@ func TestRSIGateRejectsCandidatePermissionToReadHeldOutDataOrSigningKey(t *testi
 func TestRSIGateRejectsJudgePermissionToReadHeldOutData(t *testing.T) {
 	store, gate := createRSIGateInputs(t, true)
 	request := rsiRequestFromStore(t, store, gate)
-	resolver := writeSignedRSIEvaluation(t, t.TempDir(), request.Candidate.BeadID, request.Candidate.ControlBeadID, request.Candidate.ActorID, request.Candidate.SessionID, request.Candidate.RawOutput, request.Judges, testBundlePair(), true, func(m *rsipolicy.TrustedEvaluationManifest) {
+	resolver := writeSignedRSIEvaluation(t, t.TempDir(), request, testBundlePair(), true, func(m *rsipolicy.TrustedEvaluationManifest) {
 		m.Judges[0].Permissions.HeldOutDataRead = true
 	})
-	processed, err := ProcessControl(store, gate, ProcessOptions{ResolveRSIEvaluation: resolver})
+	processed, err := ProcessControl(store, gate, rsiProcessOptions(gate, resolver))
 	if err != nil {
 		t.Fatalf("ProcessControl: %v", err)
 	}
@@ -286,8 +277,8 @@ func TestRSIGateRejectsEvaluatorAttemptBudgetNotMatchingControllerState(t *testi
 		t.Run(test.name, func(t *testing.T) {
 			store, gate := createRSIGateInputs(t, true)
 			request := rsiRequestFromStore(t, store, gate)
-			resolver := writeSignedRSIEvaluation(t, t.TempDir(), request.Candidate.BeadID, request.Candidate.ControlBeadID, request.Candidate.ActorID, request.Candidate.SessionID, request.Candidate.RawOutput, request.Judges, testBundlePair(), true, test.edit)
-			result, err := ProcessControl(store, gate, ProcessOptions{ResolveRSIEvaluation: resolver})
+			resolver := writeSignedRSIEvaluation(t, t.TempDir(), request, testBundlePair(), true, test.edit)
+			result, err := ProcessControl(store, gate, rsiProcessOptions(gate, resolver))
 			if err != nil {
 				t.Fatalf("ProcessControl: %v", err)
 			}
@@ -305,10 +296,10 @@ func TestRSIGateRejectsEvaluatorAttemptBudgetNotMatchingControllerState(t *testi
 func TestRSIGateRejectsUnknownEvaluatorAuthorityClass(t *testing.T) {
 	store, gate := createRSIGateInputs(t, true)
 	request := rsiRequestFromStore(t, store, gate)
-	resolver := writeSignedRSIEvaluation(t, t.TempDir(), request.Candidate.BeadID, request.Candidate.ControlBeadID, request.Candidate.ActorID, request.Candidate.SessionID, request.Candidate.RawOutput, request.Judges, testBundlePair(), true, func(m *rsipolicy.TrustedEvaluationManifest) {
+	resolver := writeSignedRSIEvaluation(t, t.TempDir(), request, testBundlePair(), true, func(m *rsipolicy.TrustedEvaluationManifest) {
 		m.AuthorityClass = "unknown-candidate-selected-class"
 	})
-	processed, err := ProcessControl(store, gate, ProcessOptions{ResolveRSIEvaluation: resolver})
+	processed, err := ProcessControl(store, gate, rsiProcessOptions(gate, resolver))
 	if err != nil {
 		t.Fatalf("ProcessControl: %v", err)
 	}
@@ -318,6 +309,176 @@ func TestRSIGateRejectsUnknownEvaluatorAuthorityClass(t *testing.T) {
 	decision := readRSIDecision(t, mustGet(t, store, gate.ID))
 	if decision.Promote || !containsRSIReason(decision.Reasons, rsipolicy.ReasonUnknownAuthorityClass) {
 		t.Fatalf("decision = %+v, want unknown authority rejection", decision)
+	}
+	after := mustGet(t, store, gate.ID)
+	if after.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeFail || !beadOutcomeFailed(after) {
+		t.Fatalf("rejected gate outcome = %q, want terminal workflow failure", after.Metadata[beadmeta.OutcomeMetadataKey])
+	}
+	finalizer := mustCreate(t, store, beads.Bead{Title: "finalizer", Metadata: map[string]string{
+		beadmeta.KindMetadataKey: beadmeta.KindWorkflowFinalize, beadmeta.RootBeadIDMetadataKey: "workflow-root",
+	}})
+	mustDep(t, store, finalizer.ID, gate.ID, "blocks")
+	if outcome, err := resolveFinalizeOutcome(store, finalizer); err != nil || outcome != beadmeta.OutcomeFail {
+		t.Fatalf("workflow finalization outcome = %q, %v; want fail so source success cannot propagate", outcome, err)
+	}
+}
+
+func TestRSIGateIgnoresSpoofedMutableAssignmentIdentity(t *testing.T) {
+	store, gate := createRSIGateInputs(t, false)
+	deps, err := store.DepList(gate.ID, "down")
+	if err != nil {
+		t.Fatal(err)
+	}
+	shared, _ := rsipolicy.MarshalExecutionBinding("protected-shared-actor", "protected-shared-session")
+	changed := 0
+	for _, dep := range deps {
+		worker := mustGet(t, store, dep.DependsOnID)
+		if worker.Metadata[beadmeta.RSIRoleMetadataKey] == beadmeta.RSIRoleImprover ||
+			(worker.Metadata[beadmeta.RSIRoleMetadataKey] == beadmeta.RSIRoleJudge && changed == 1) {
+			mutableActor := "spoofed-distinct-actor-" + strconv.Itoa(changed)
+			mutableSession := "spoofed-distinct-session-" + strconv.Itoa(changed)
+			if err := store.Update(worker.ID, beads.UpdateOpts{Assignee: stringPtr(mutableActor), Metadata: map[string]string{
+				beadmeta.SessionIDMetadataKey: mutableSession, beadmeta.RSIExecutionBindingMetadataKey: shared,
+			}}); err != nil {
+				t.Fatal(err)
+			}
+			changed++
+		}
+	}
+	request := rsiRequestFromStore(t, store, gate)
+	resolver := writeSignedRSIEvaluation(t, t.TempDir(), request, testBundlePair(), true, nil)
+	result, err := ProcessControl(store, gate, rsiProcessOptions(gate, resolver))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Action != "rsi-reject" {
+		t.Fatalf("result = %+v, want rejection despite spoofed distinct mutable identities", result)
+	}
+	decision := readRSIDecision(t, mustGet(t, store, gate.ID))
+	if !containsRSIReason(decision.Reasons, rsiTrustedEvaluationUnavailable) {
+		t.Fatalf("decision = %+v, want fail-closed protected-identity rejection", decision)
+	}
+}
+
+func TestRSIGateScopesArtifactsPerGateAndRejectsContextReplay(t *testing.T) {
+	cityPath := t.TempDir()
+	storeA, gateA := createRSIGateInputs(t, false)
+	requestA := rsiRequestFromStore(t, storeA, gateA)
+	resolver := writeSignedRSIEvaluation(t, cityPath, requestA, testBundlePair(), true, nil)
+
+	storeB, gateB := createRSIGateInputs(t, false)
+	requestB := rsiRequestFromStore(t, storeB, gateB)
+	requestB.Context.GateID = gateA.ID + "-other"
+	requestB.Context.InputSHA256 = rsipolicy.ResolveRequestInputSHA256(requestB)
+	if _, err := resolver(context.Background(), requestB); !errors.Is(err, rsipolicy.ErrTrustedEvaluationPending) {
+		t.Fatalf("unpublished gate B resolve error = %v, want pending rather than stale-artifact rejection", err)
+	}
+
+	dirA := rsiGateEvidenceDir(cityPath, gateA.ID)
+	dirB := rsiGateEvidenceDir(cityPath, requestB.Context.GateID)
+	if err := os.MkdirAll(dirB, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"evaluation.json", "approval.json"} {
+		raw, err := os.ReadFile(filepath.Join(dirA, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		publishRSIFile(t, filepath.Join(dirB, name), raw)
+	}
+	if _, err := resolver(context.Background(), requestB); err == nil || errors.Is(err, rsipolicy.ErrTrustedEvaluationPending) {
+		t.Fatalf("copied gate A artifacts resolved for gate B: %v", err)
+	}
+	for _, edit := range []func(*rsipolicy.ResolveRequest){
+		func(r *rsipolicy.ResolveRequest) { r.Context.CityID = "other-city" },
+		func(r *rsipolicy.ResolveRequest) { r.Context.StoreRef = "rig:other" },
+		func(r *rsipolicy.ResolveRequest) { r.Context.WorkflowRootID = "other-root" },
+		func(r *rsipolicy.ResolveRequest) { r.Context.InputSHA256 = strings.Repeat("f", 64) },
+	} {
+		replay := requestA
+		edit(&replay)
+		if _, err := resolver(context.Background(), replay); err == nil {
+			t.Fatal("context-mutated signed evaluation was accepted")
+		}
+	}
+}
+
+func TestRSIEnvelopeRejectsWrongDomainDuplicateKeysAndWritablePublication(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(t *testing.T, payload json.RawMessage, key ed25519.PrivateKey) []byte
+	}{
+		{name: "approval signature domain", mutate: func(t *testing.T, payload json.RawMessage, key ed25519.PrivateKey) []byte {
+			return signRSIDomain(t, key, "gascity:rsi:human-approval:v1\x00", payload)
+		}},
+		{name: "nested duplicate key", mutate: func(t *testing.T, payload json.RawMessage, key ed25519.PrivateKey) []byte {
+			duplicated := strings.Replace(string(payload), `"candidate":{"id":`, `"candidate":{"id":"duplicate","id":`, 1)
+			return signRSIDomain(t, key, "gascity:rsi:evaluator:v1\x00", json.RawMessage(duplicated))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, gate := createRSIGateInputs(t, false)
+			request := rsiRequestFromStore(t, store, gate)
+			cityPath := t.TempDir()
+			resolver := writeSignedRSIEvaluation(t, cityPath, request, testBundlePair(), true, nil)
+			path := filepath.Join(rsiGateEvidenceDir(cityPath, gate.ID), "evaluation.json")
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var envelope struct {
+				Payload json.RawMessage `json:"payload"`
+			}
+			if err := json.Unmarshal(raw, &envelope); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			publishRSIFile(t, path, tc.mutate(t, envelope.Payload, rsiTestPrivateKey("evaluator-test-key")))
+			if _, err := resolver(context.Background(), request); err == nil {
+				t.Fatal("adversarial envelope was accepted")
+			}
+		})
+	}
+	store, gate := createRSIGateInputs(t, false)
+	request := rsiRequestFromStore(t, store, gate)
+	cityPath := t.TempDir()
+	resolver := writeSignedRSIEvaluation(t, cityPath, request, testBundlePair(), true, nil)
+	path := filepath.Join(rsiGateEvidenceDir(cityPath, gate.ID), "evaluation.json")
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolver(context.Background(), request); err == nil || errors.Is(err, rsipolicy.ErrTrustedEvaluationPending) {
+		t.Fatalf("writable non-atomically-published evaluation error = %v, want terminal invalid evidence", err)
+	}
+
+	store, gate = createRSIGateInputs(t, false)
+	request = rsiRequestFromStore(t, store, gate)
+	cityPath = t.TempDir()
+	resolver = writeSignedRSIEvaluation(t, cityPath, request, testBundlePair(), true, nil)
+	approvalPath := filepath.Join(rsiGateEvidenceDir(cityPath, gate.ID), "approval.json")
+	approvalRaw, err := os.ReadFile(approvalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var approvalEnvelope struct {
+		Payload json.RawMessage `json:"payload"`
+	}
+	if err := json.Unmarshal(approvalRaw, &approvalEnvelope); err != nil {
+		t.Fatal(err)
+	}
+	var approval rsipolicy.HumanApprovalManifest
+	if err := json.Unmarshal(approvalEnvelope.Payload, &approval); err != nil {
+		t.Fatal(err)
+	}
+	approval.CityID = "replayed-city"
+	if err := os.Remove(approvalPath); err != nil {
+		t.Fatal(err)
+	}
+	publishRSIFile(t, approvalPath, signRSIApproval(t, rsiTestPrivateKey("human-test-key"), approval))
+	if _, err := resolver(context.Background(), request); err == nil {
+		t.Fatal("human approval replayed across city identity was accepted")
 	}
 }
 
@@ -404,7 +565,9 @@ func createRSIGateInputs(t *testing.T, authorityEcho bool) (beads.Store, beads.B
 		setRSIWorkerEvidence(t, store, judge.ID, spec.actor, spec.session, output)
 		judges = append(judges, judge)
 	}
-	gate := mustCreate(t, store, beads.Bead{Title: "promotion gate", Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindRSIPromotionGate}})
+	gate := mustCreate(t, store, beads.Bead{Title: "promotion gate", Metadata: map[string]string{
+		beadmeta.KindMetadataKey: beadmeta.KindRSIPromotionGate, beadmeta.RootBeadIDMetadataKey: "workflow-root",
+	}})
 	mustDep(t, store, gate.ID, candidate.ID, "blocks")
 	for _, judge := range judges {
 		mustDep(t, store, gate.ID, judge.ID, "blocks")
@@ -418,39 +581,73 @@ func rsiRequestFromStore(t *testing.T, store beads.Store, gate beads.Bead) rsipo
 	if err != nil {
 		t.Fatalf("list gate dependencies: %v", err)
 	}
-	request := rsipolicy.ResolveRequest{}
+	request := rsipolicy.ResolveRequest{Context: rsiTestContext(gate)}
 	for _, dep := range deps {
-		worker, err := store.Get(dep.DependsOnID)
+		logical, err := store.Get(dep.DependsOnID)
 		if err != nil {
 			t.Fatalf("load worker: %v", err)
 		}
+		worker, err := resolveRSIWorkerExecution(store, logical)
+		if err != nil {
+			t.Fatalf("resolve worker execution: %v", err)
+		}
 		raw := worker.Metadata[beadmeta.OutputJSONMetadataKey]
-		switch worker.Metadata[beadmeta.RSIRoleMetadataKey] {
+		switch logical.Metadata[beadmeta.RSIRoleMetadataKey] {
 		case beadmeta.RSIRoleImprover:
 			var proposal rsipolicy.CandidateProposal
 			if err := json.Unmarshal([]byte(raw), &proposal); err != nil {
 				t.Fatal(err)
 			}
-			maxAttempts, _ := strconv.Atoi(worker.Metadata[beadmeta.MaxAttemptsMetadataKey])
-			request.Candidate = rsipolicy.CandidateRecord{BeadID: worker.ID, ControlBeadID: worker.ID, Attempt: beadmeta.RetryAttemptNumber(worker.Metadata), MaxAttempts: maxAttempts, ActorID: worker.Assignee, SessionID: worker.Metadata[beadmeta.SessionIDMetadataKey], Status: worker.Status, Outcome: worker.Metadata[beadmeta.OutcomeMetadataKey], RawOutput: raw, Proposal: proposal}
+			maxAttempts := retryMaxAttempts(logical)
+			if maxAttempts == 0 {
+				maxAttempts, _ = strconv.Atoi(worker.Metadata[beadmeta.MaxAttemptsMetadataKey])
+			}
+			request.Candidate = rsipolicy.CandidateRecord{BeadID: worker.ID, BeadRevision: worker.Revision, ControlBeadID: logical.ID, ControlRevision: logical.Revision, Attempt: beadmeta.RetryAttemptNumber(worker.Metadata), MaxAttempts: maxAttempts, ActorID: mustRSIBinding(t, worker).ActorID, SessionID: mustRSIBinding(t, worker).SessionID, Status: worker.Status, Outcome: worker.Metadata[beadmeta.OutcomeMetadataKey], RawOutput: raw, Proposal: proposal}
 		case beadmeta.RSIRoleJudge:
 			var lane reviewquorum.LaneOutput
 			if err := json.Unmarshal([]byte(raw), &lane); err != nil {
 				t.Fatal(err)
 			}
-			request.Judges = append(request.Judges, rsipolicy.JudgeRecord{BeadID: worker.ID, ControlBeadID: worker.ID, ActorID: worker.Assignee, SessionID: worker.Metadata[beadmeta.SessionIDMetadataKey], Status: worker.Status, Outcome: worker.Metadata[beadmeta.OutcomeMetadataKey], RawOutput: raw, Lane: lane})
+			binding := mustRSIBinding(t, worker)
+			request.Judges = append(request.Judges, rsipolicy.JudgeRecord{BeadID: worker.ID, BeadRevision: worker.Revision, ControlBeadID: logical.ID, ControlRevision: logical.Revision, ActorID: binding.ActorID, SessionID: binding.SessionID, Status: worker.Status, Outcome: worker.Metadata[beadmeta.OutcomeMetadataKey], RawOutput: raw, Lane: lane})
 		}
 	}
+	request.Context.InputSHA256 = rsipolicy.ResolveRequestInputSHA256(request)
 	return request
 }
 
 func setRSIWorkerEvidence(t *testing.T, store beads.Store, id, actor, session, output string) {
 	t.Helper()
+	binding, err := rsipolicy.MarshalExecutionBinding(actor, session)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := store.Update(id, beads.UpdateOpts{Status: stringPtr("closed"), Assignee: stringPtr(actor), Metadata: map[string]string{
-		beadmeta.SessionIDMetadataKey: session, beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass, beadmeta.OutputJSONMetadataKey: output,
+		beadmeta.SessionIDMetadataKey: session, beadmeta.RSIExecutionBindingMetadataKey: binding,
+		beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass, beadmeta.OutputJSONMetadataKey: output,
 	}}); err != nil {
 		t.Fatalf("update worker %s: %v", id, err)
 	}
+}
+
+func rsiTestContext(gate beads.Bead) rsipolicy.EvaluationContext {
+	return rsipolicy.EvaluationContext{
+		ProtocolVersion: rsipolicy.ProtocolVersionV1, CityID: "test-city", StoreRef: "city:test-city",
+		WorkflowRootID: gate.Metadata[beadmeta.RootBeadIDMetadataKey], GateID: gate.ID,
+	}
+}
+
+func mustRSIBinding(t *testing.T, bead beads.Bead) rsipolicy.ExecutionBinding {
+	t.Helper()
+	binding, err := rsipolicy.ParseExecutionBinding(bead.Metadata[beadmeta.RSIExecutionBindingMetadataKey])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return binding
+}
+
+func rsiProcessOptions(gate beads.Bead, resolver rsipolicy.ResolveTrustedEvaluationFunc) ProcessOptions {
+	return ProcessOptions{Context: context.Background(), ResolveRSIEvaluation: resolver, RSIEvaluationContext: rsiTestContext(gate)}
 }
 
 func setTransientRSIAttempt(t *testing.T, store beads.Store, attemptID, actorID, sessionID string) {
@@ -480,9 +677,14 @@ func processRSIRetryToSecondAttempt(t *testing.T, store beads.Store, controlID, 
 	if second.ID == "" || second.Metadata[beadmeta.RetryAttemptMetadataKey] != "2" {
 		t.Fatalf("second RSI retry attempt = %+v, want retry_attempt=2", second)
 	}
+	binding, bindErr := rsipolicy.MarshalExecutionBinding(actorID, sessionID)
+	if bindErr != nil {
+		t.Fatal(bindErr)
+	}
 	if err := store.Update(second.ID, beads.UpdateOpts{Status: stringPtr("closed"), Assignee: stringPtr(actorID), Metadata: map[string]string{
 		beadmeta.SessionIDMetadataKey: sessionID, beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass,
-		beadmeta.FailureClassMetadataKey: "", beadmeta.FailureReasonMetadataKey: "", beadmeta.OutputJSONMetadataKey: output,
+		beadmeta.RSIExecutionBindingMetadataKey: binding, beadmeta.FailureClassMetadataKey: "",
+		beadmeta.FailureReasonMetadataKey: "", beadmeta.OutputJSONMetadataKey: output,
 	}}); err != nil {
 		t.Fatalf("close second RSI retry attempt %s: %v", second.ID, err)
 	}
@@ -525,9 +727,9 @@ func forgedRSICandidateOutput(t *testing.T, pair struct{ Current, Candidate rsip
 	return fmt.Sprintf("{\"candidate\":%s,\"baseline\":{\"score\":999,\"safety_score\":0,\"latency_ms\":0,\"cost_usd\":-1,\"dependency_count\":-1},\"candidate_metrics\":{\"score\":0,\"safety_score\":0,\"latency_ms\":0,\"cost_usd\":0,\"dependency_count\":0},\"limits\":{\"min_safety_score\":0,\"max_latency_ms\":0,\"max_cost_usd\":0,\"max_dependencies\":0},\"attempts\":999,\"max_attempts\":999,\"authority_class\":\"deployment\",\"human_approval_verified\":true,\"judges\":[\"improver\"]}", bundle)
 }
 
-func writeSignedRSIEvaluation(t *testing.T, cityPath, candidateBeadID, candidateControlBeadID, candidateActor, candidateSession, candidateRaw string, judges []rsipolicy.JudgeRecord, pair struct{ Current, Candidate rsipolicy.Bundle }, approve bool, edit func(*rsipolicy.TrustedEvaluationManifest)) rsipolicy.ResolveTrustedEvaluationFunc {
+func writeSignedRSIEvaluation(t *testing.T, cityPath string, request rsipolicy.ResolveRequest, pair struct{ Current, Candidate rsipolicy.Bundle }, approve bool, edit func(*rsipolicy.TrustedEvaluationManifest)) rsipolicy.ResolveTrustedEvaluationFunc {
 	t.Helper()
-	evidenceDir := filepath.Join(cityPath, ".gc", "rsi")
+	evidenceDir := rsiGateEvidenceDir(cityPath, request.Context.GateID)
 	if err := os.MkdirAll(evidenceDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -546,52 +748,55 @@ func writeSignedRSIEvaluation(t *testing.T, cityPath, candidateBeadID, candidate
 	manifest := rsipolicy.TrustedEvaluationManifest{
 		SchemaVersion: rsipolicy.TrustedEvaluationSchemaV1, ID: "evaluation-1", PolicyVersion: rsipolicy.PolicyVersionV1,
 		EvaluatorKeyID: "evaluator-key", IssuedAt: time.Now().UTC().Add(-time.Minute).Format(time.RFC3339),
-		ExpiresAt: time.Now().UTC().Add(time.Hour).Format(time.RFC3339), CandidateBeadID: candidateBeadID, CandidateControlBeadID: candidateControlBeadID,
-		CandidateOutputSHA256: digestRSI([]byte(candidateRaw)), Objective: "improve discovery latency",
+		ProtocolVersion: request.Context.ProtocolVersion, CityID: request.Context.CityID, StoreRef: request.Context.StoreRef,
+		WorkflowRootID: request.Context.WorkflowRootID, GateID: request.Context.GateID, InputSHA256: request.Context.InputSHA256,
+		ExpiresAt: time.Now().UTC().Add(time.Hour).Format(time.RFC3339), CandidateBeadID: request.Candidate.BeadID, CandidateBeadRevision: request.Candidate.BeadRevision,
+		CandidateControlBeadID: request.Candidate.ControlBeadID, CandidateControlRevision: request.Candidate.ControlRevision,
+		CandidateOutputSHA256: digestRSI([]byte(request.Candidate.RawOutput)), Objective: "improve discovery latency",
 		Current: pair.Current, Candidate: pair.Candidate, EvalSuiteHash: suite,
 		Baseline:         rsipolicy.Metrics{Score: 0.8, SafetyScore: 0.96, LatencyMS: 100, CostUSD: 1, DependencyCount: 3},
 		CandidateMetrics: rsipolicy.Metrics{Score: 0.9, SafetyScore: 0.97, LatencyMS: 110, CostUSD: 1.1, DependencyCount: 3},
 		Limits:           rsipolicy.Limits{MinSafetyScore: 0.95, MaxLatencyMS: 200, MaxCostUSD: 2, MaxDependencies: 4},
 		AuthorityClass:   "optimization", Attempt: 1, MaxAttempts: 3, WorkAccounting: work,
-		CandidateExecution: rsipolicy.CandidateExecution{ActorID: candidateActor, SessionID: candidateSession, Permissions: rsipolicy.ExecutionPermissions{
+		CandidateExecution: rsipolicy.CandidateExecution{ActorID: request.Candidate.ActorID, SessionID: request.Candidate.SessionID, Permissions: rsipolicy.ExecutionPermissions{
 			CandidateRead: true, CandidateWrite: true, PolicyRead: true, OwnOutputWrite: true,
 		}},
 	}
-	for _, judge := range judges {
+	for _, judge := range request.Judges {
 		manifest.Judges = append(manifest.Judges, rsipolicy.JudgeAuthorization{
-			LaneID: judge.Lane.LaneID, BeadID: judge.BeadID, ControlBeadID: judge.ControlBeadID, ActorID: judge.ActorID, SessionID: judge.SessionID,
+			LaneID: judge.Lane.LaneID, BeadID: judge.BeadID, BeadRevision: judge.BeadRevision, ControlBeadID: judge.ControlBeadID, ControlRevision: judge.ControlRevision, ActorID: judge.ActorID, SessionID: judge.SessionID,
 			OutputSHA256: digestRSI([]byte(judge.RawOutput)), Permissions: rsipolicy.ExecutionPermissions{
 				CandidateRead: true, PolicyRead: true, OwnOutputWrite: true,
 			},
 		})
 	}
-	manifest.Evidence = writeRSIEvidence(t, evidenceDir, manifest.ID, suite, pair, work, candidateActor, candidateSession, judges)
+	manifest.Evidence = writeRSIEvidence(t, evidenceDir, manifest.ID, suite, pair, work, request.Candidate.ActorID, request.Candidate.SessionID, request.Judges)
 	if edit != nil {
 		edit(&manifest)
 	}
 	evaluationBytes := signRSIManifest(t, evaluatorPrivate, manifest)
-	if err := os.WriteFile(filepath.Join(evidenceDir, "evaluation.json"), evaluationBytes, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	publishRSIFile(t, filepath.Join(evidenceDir, "evaluation.json"), evaluationBytes)
 	cfg := rsipolicy.FileResolverConfig{
-		EvaluationFile: ".gc/rsi/evaluation.json", EvaluationKeyID: "evaluator-key",
+		EvaluationFile: ".gc/rsi/{gate_id}/evaluation.json", EvaluationKeyID: "evaluator-key",
 		EvaluationPublicKey: base64.RawURLEncoding.EncodeToString(evaluatorPrivate.Public().(ed25519.PublicKey)),
 	}
-	cfg.HumanApprovalFile = ".gc/rsi/approval.json"
+	cfg.HumanApprovalFile = ".gc/rsi/{gate_id}/approval.json"
 	cfg.HumanApprovalKeyID = "human-key"
 	cfg.HumanApprovalPubKey = base64.RawURLEncoding.EncodeToString(humanPrivate.Public().(ed25519.PublicKey))
 	if approve {
 		evalDigest := sha256.Sum256(evaluationBytes)
 		approval := rsipolicy.HumanApprovalManifest{
 			SchemaVersion: rsipolicy.HumanApprovalSchemaV1, Decision: "approve", PolicyVersion: rsipolicy.PolicyVersionV1,
+			ProtocolVersion: manifest.ProtocolVersion, CityID: manifest.CityID, StoreRef: manifest.StoreRef,
+			WorkflowRootID: manifest.WorkflowRootID, GateID: manifest.GateID, InputSHA256: manifest.InputSHA256,
 			ApprovalKeyID: "human-key", ApproverID: "human-key", EvaluationID: manifest.ID,
-			EvaluationManifestSHA256: hex.EncodeToString(evalDigest[:]), CandidateBeadID: candidateBeadID,
-			CandidateBundleID: pair.Candidate.ID, BaselineBundleID: pair.Current.ID, EvalSuiteHash: suite,
+			EvaluationManifestSHA256: hex.EncodeToString(evalDigest[:]), CandidateBeadID: request.Candidate.BeadID,
+			CandidateBeadRevision: request.Candidate.BeadRevision, CandidateControlBeadID: request.Candidate.ControlBeadID,
+			CandidateControlRevision: request.Candidate.ControlRevision,
+			CandidateBundleID:        pair.Candidate.ID, BaselineBundleID: pair.Current.ID, EvalSuiteHash: suite,
 			ApprovedAt: time.Now().UTC().Format(time.RFC3339),
 		}
-		if err := os.WriteFile(filepath.Join(evidenceDir, "approval.json"), signRSIManifest(t, humanPrivate, approval), 0o600); err != nil {
-			t.Fatal(err)
-		}
+		publishRSIFile(t, filepath.Join(evidenceDir, "approval.json"), signRSIApproval(t, humanPrivate, approval))
 	}
 	return rsipolicy.NewFileResolver(cityPath, cfg).Resolve
 }
@@ -605,9 +810,7 @@ func writeRSIEvidence(t *testing.T, dir, evalID, suite string, pair struct{ Curr
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(dir, filename), data, 0o600); err != nil {
-			t.Fatal(err)
-		}
+		publishRSIFile(t, filepath.Join(dir, filename), data)
 		refs = append(refs, rsipolicy.EvidenceReference{Kind: kind, Path: filename, SHA256: digestRSI(data), BundleID: bundleID, EvalSuiteHash: suite})
 	}
 	put("baseline-artifact", "baseline.json", pair.Current.ID, rsipolicy.ArtifactIdentityEvidence{SchemaVersion: "gc.rsi.artifact-identity.v1", EvaluationID: evalID, Bundle: pair.Current, EvalSuiteHash: suite})
@@ -634,6 +837,14 @@ func writeRSIEvidence(t *testing.T, dir, evalID, suite string, pair struct{ Curr
 }
 
 func signRSIManifest(t *testing.T, privateKey ed25519.PrivateKey, payload any) []byte {
+	return signRSIDomain(t, privateKey, "gascity:rsi:evaluator:v1\x00", payload)
+}
+
+func signRSIApproval(t *testing.T, privateKey ed25519.PrivateKey, payload any) []byte {
+	return signRSIDomain(t, privateKey, "gascity:rsi:human-approval:v1\x00", payload)
+}
+
+func signRSIDomain(t *testing.T, privateKey ed25519.PrivateKey, domain string, payload any) []byte {
 	t.Helper()
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
@@ -642,12 +853,31 @@ func signRSIManifest(t *testing.T, privateKey ed25519.PrivateKey, payload any) [
 	envelope := struct {
 		Payload   json.RawMessage "json:\"payload\""
 		Signature string          "json:\"signature\""
-	}{Payload: payloadBytes, Signature: base64.RawURLEncoding.EncodeToString(ed25519.Sign(privateKey, payloadBytes))}
+	}{Payload: payloadBytes, Signature: base64.RawURLEncoding.EncodeToString(ed25519.Sign(privateKey, append([]byte(domain), payloadBytes...)))}
 	data, err := json.Marshal(envelope)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return data
+}
+
+func rsiGateEvidenceDir(cityPath, gateID string) string {
+	digest := sha256.Sum256([]byte(gateID))
+	return filepath.Join(cityPath, ".gc", "rsi", hex.EncodeToString(digest[:]))
+}
+
+func publishRSIFile(t *testing.T, path string, data []byte) {
+	t.Helper()
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(tmp, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func rsiTestPrivateKey(label string) ed25519.PrivateKey {

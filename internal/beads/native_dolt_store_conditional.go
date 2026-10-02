@@ -2,10 +2,13 @@ package beads
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	beadslib "github.com/steveyegge/beads"
 )
 
@@ -155,6 +158,33 @@ func (s *NativeDoltStore) UpdateIfMatch(id string, expectedRevision int64, opts 
 	if err := protectAttemptEvidenceUpdate(current, opts); err != nil {
 		return err
 	}
+	if opts.ParentID != nil || len(opts.Labels) > 0 || len(opts.RemoveLabels) > 0 {
+		err = retryOnNativeDoltSerializationConflict(func() error {
+			return storage.RunInTransaction(ctx, fmt.Sprintf("gc: fenced update bead %s", id), func(tx beadslib.Transaction) error {
+				issue, err := tx.GetIssue(ctx, id)
+				if err != nil {
+					return nativeStoreError(id, err)
+				}
+				if issue == nil {
+					return fmt.Errorf("bead %q: %w", id, ErrNotFound)
+				}
+				if issue.RowVersion != expectedRevision {
+					return &PreconditionFailedError{ID: id, Expected: expectedRevision, Current: issue.RowVersion, Raw: "native row-version mismatch"}
+				}
+				if err := s.applyUpdateInTx(ctx, tx, id, opts); err != nil {
+					return err
+				}
+				// Labels and parent edges live outside the issue table in the
+				// pinned backend. Touch a genuinely changed row field in this same
+				// transaction; restating title/metadata is discarded as a no-op.
+				return s.advanceAuxiliaryRevisionInTx(ctx, tx, id)
+			})
+		})
+		if err != nil {
+			return nativeStoreError(id, err)
+		}
+		return nil
+	}
 
 	updates, err := s.nativeUpdates(ctx, storage, id, opts)
 	if err != nil {
@@ -174,6 +204,18 @@ func (s *NativeDoltStore) UpdateIfMatch(id string, expectedRevision int64, opts 
 		})
 	})
 	return s.conditionalWriteError(ctx, storage, id, expectedRevision, err)
+}
+
+// advanceAuxiliaryRevisionInTx fences changed dependency/label state through a
+// genuinely changed issue-row value, not a no-op restatement of public fields.
+func (s *NativeDoltStore) advanceAuxiliaryRevisionInTx(ctx context.Context, tx beadslib.Transaction, id string) error {
+	var nonce [16]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return fmt.Errorf("generate auxiliary revision: %w", err)
+	}
+	return s.applySetMetadataBatchInTx(ctx, tx, id, map[string]string{
+		beadmeta.NativeAuxRevisionMetadataKey: hex.EncodeToString(nonce[:]),
+	})
 }
 
 // CloseIfMatch closes id only while it still has expectedRevision.
@@ -264,6 +306,42 @@ func (s *NativeDoltStore) DeleteIfMatch(id string, expectedRevision int64) error
 			}
 			if err := ValidateLifecycleDelete(current); err != nil {
 				return err
+			}
+			if err := ValidateDecisionFrontierDelete(current); err != nil {
+				return err
+			}
+			incoming, err := tx.GetDependentRecordsForIssues(ctx, []string{id})
+			if err != nil {
+				return fmt.Errorf("read incoming deletion references for %s: %w", id, err)
+			}
+			owners := make(map[string]struct{})
+			for _, dep := range incoming[id] {
+				if dep == nil || dep.IssueID == id {
+					continue
+				}
+				source, err := tx.GetIssue(ctx, dep.IssueID)
+				if err != nil {
+					return nativeStoreError(dep.IssueID, err)
+				}
+				if source == nil {
+					continue
+				}
+				owner, err := beadFromNativeIssue(source)
+				if err != nil {
+					return err
+				}
+				if HasDecisionFrontierHold(owner) || IsDecisionFrontierRecord(owner) {
+					return ErrDecisionFrontierMutationBlocked
+				}
+				if err := validateTerminalDeleteReferenceOwner(current, owner); err != nil {
+					return err
+				}
+				owners[owner.ID] = struct{}{}
+			}
+			for owner := range owners {
+				if err := s.advanceAuxiliaryRevisionInTx(ctx, tx, owner); err != nil {
+					return err
+				}
 			}
 			if err := tx.DeleteIssue(ctx, id); err != nil {
 				return nativeStoreError(id, err)

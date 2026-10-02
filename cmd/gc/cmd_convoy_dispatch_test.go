@@ -7566,7 +7566,7 @@ prefix = "BL"
 	}
 }
 
-func TestDeleteWorkflowBeadsRemovesDepsBeforeDelete(t *testing.T) {
+func TestDeleteWorkflowBeadsRemovesDepsAtomicallyWithDelete(t *testing.T) {
 	store := beads.NewMemStore()
 	root, err := store.Create(beads.Bead{Title: "workflow root", Type: "task", Status: "closed"})
 	if err != nil {
@@ -7616,6 +7616,71 @@ func TestDeleteWorkflowBeadsRemovesDepsBeforeDelete(t *testing.T) {
 			t.Fatalf("DepList(%s, up): %v", id, err)
 		} else if len(up) != 0 {
 			t.Fatalf("up deps for %s = %#v, want none", id, up)
+		}
+	}
+}
+
+func TestDeleteWorkflowBeadsSQLiteKeepsSelectedRevisionFences(t *testing.T) {
+	store, err := beads.OpenSQLiteStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.(*beads.SQLiteStore).CloseStore() })
+	root, err := store.Create(beads.Bead{Title: "root"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := store.Create(beads.Bead{Title: "child", ParentID: root.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf, err := store.Create(beads.Bead{Title: "leaf", ParentID: child.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Actual close transitions mint revisions; already-closed create inputs
+	// would leave unversioned rows that cannot exercise checked deletion.
+	for _, id := range []string{leaf.ID, child.ID, root.ID} {
+		if err := store.Close(id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	deleted, errs := deleteWorkflowBeads(store, []string{root.ID, child.ID, leaf.ID})
+	if deleted != 3 || len(errs) != 0 {
+		t.Fatalf("SQLite reference cleanup invalidated selected snapshots: deleted=%d errors=%v", deleted, errs)
+	}
+}
+
+func TestWorkflowPurgeDependencyCycleRefusesBeforeClose(t *testing.T) {
+	store := beads.NewMemStore()
+	a, err := store.Create(beads.Bead{Title: "a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := store.Create(beads.Bead{Title: "b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DepAdd(a.ID, b.ID, "relates-to"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DepAdd(b.ID, a.ID, "relates-to"); err != nil {
+		t.Fatal(err)
+	}
+	a, _ = store.Get(a.ID)
+	b, _ = store.Get(b.ID)
+	deleted, err := purgeWorkflowBeads(store, []string{a.ID, b.ID})
+	if err == nil || deleted != 0 {
+		t.Fatalf("cyclic per-row purge accepted: deleted=%d error=%v", deleted, err)
+	}
+	for _, before := range []beads.Bead{a, b} {
+		after, getErr := store.Get(before.ID)
+		if getErr != nil || !reflect.DeepEqual(after, before) {
+			t.Fatalf("cycle refusal changed row: before=%+v after=%+v error=%v", before, after, getErr)
+		}
+		deps, depErr := store.DepList(before.ID, "down")
+		if depErr != nil || len(deps) != 1 {
+			t.Fatalf("cycle refusal changed edges: %+v %v", deps, depErr)
 		}
 	}
 }
@@ -7925,11 +7990,157 @@ type failingDeleteStore struct {
 	restoreCalls int
 }
 
+type workflowPurgeRaceStore struct {
+	*beads.MemStore
+	beforeFence  func()
+	afterClose   func()
+	beforeDelete func()
+}
+
+func (s *workflowPurgeRaceStore) UpdateIfMatch(id string, revision int64, opts beads.UpdateOpts) error {
+	if _, fencing := opts.Metadata[beadmeta.SessionRequestPurgeFenceMetadataKey]; fencing && s.beforeFence != nil {
+		before := s.beforeFence
+		s.beforeFence = nil
+		before()
+	}
+	return s.MemStore.UpdateIfMatch(id, revision, opts)
+}
+
+func (s *workflowPurgeRaceStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	n, err := s.MemStore.CloseAll(ids, metadata)
+	if err == nil && s.afterClose != nil {
+		after := s.afterClose
+		s.afterClose = nil
+		after()
+	}
+	return n, err
+}
+
+func (s *workflowPurgeRaceStore) DeleteIfMatch(id string, revision int64) error {
+	if s.beforeDelete != nil {
+		before := s.beforeDelete
+		s.beforeDelete = nil
+		before()
+	}
+	return s.MemStore.DeleteIfMatch(id, revision)
+}
+
+func newWorkflowPurgeRaceSession(t *testing.T) (*workflowPurgeRaceStore, string) {
+	t.Helper()
+	mem := &beads.MemStore{HonorExplicitIDs: true}
+	b, err := mem.Create(beads.Bead{
+		ID: "session-1", Type: session.BeadType, Status: "closed", Labels: []string{session.LabelSession},
+		Metadata: map[string]string{"generation": "1", "instance_token": "secret"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &workflowPurgeRaceStore{MemStore: mem}, b.ID
+}
+
+func TestCLIWorkflowPurgeRetainsInitialRequestEvidence(t *testing.T) {
+	store, id := newWorkflowPurgeRaceSession(t)
+	if err := store.Update(id, beads.UpdateOpts{Metadata: map[string]string{
+		beadmeta.SessionRequestReceiptPrefix + "existing": "{}",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	deleted, errs := deleteWorkflowBeads(store, []string{id})
+	if deleted != 0 || len(errs) != 1 || !errors.Is(errs[0], session.ErrRequestEvidenceRetained) {
+		t.Fatalf("deleteWorkflowBeads = (%d, %v), want retained-evidence refusal", deleted, errs)
+	}
+	b, err := store.Get(id)
+	if err != nil || session.IsRequestPurgeFenced(b) {
+		t.Fatalf("initial-evidence refusal mutated row: %+v, %v", b, err)
+	}
+}
+
+func TestCLIWorkflowPurgeReceiptWinsBeforeFence(t *testing.T) {
+	store, id := newWorkflowPurgeRaceSession(t)
+	store.beforeFence = func() {
+		if err := store.Update(id, beads.UpdateOpts{Metadata: map[string]string{
+			beadmeta.SessionRequestReceiptPrefix + "winner": "{}",
+		}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	deleted, errs := deleteWorkflowBeads(store, []string{id})
+	if deleted != 0 || len(errs) != 1 {
+		t.Fatalf("deleteWorkflowBeads = (%d, %v), want fence conflict", deleted, errs)
+	}
+	b, err := store.Get(id)
+	if err != nil || !session.HasRequestEvidence(b) || session.IsRequestPurgeFenced(b) {
+		t.Fatalf("winning receipt was not retained cleanly: %+v, %v", b, err)
+	}
+}
+
+func TestCLIWorkflowPurgeReceiptAfterFenceAbortsBeforeCleanup(t *testing.T) {
+	store, id := newWorkflowPurgeRaceSession(t)
+	store.afterClose = func() {
+		if err := store.Update(id, beads.UpdateOpts{Metadata: map[string]string{
+			beadmeta.SessionRequestReceiptPrefix + "late": "{}",
+		}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	deleted, errs := deleteWorkflowBeads(store, []string{id})
+	if deleted != 0 || len(errs) != 1 || !errors.Is(errs[0], session.ErrRequestEvidenceRetained) {
+		t.Fatalf("deleteWorkflowBeads = (%d, %v), want post-fence evidence refusal", deleted, errs)
+	}
+	b, err := store.Get(id)
+	if err != nil || !session.HasRequestEvidence(b) || session.IsRequestPurgeFenced(b) {
+		t.Fatalf("post-fence evidence result = %+v, %v", b, err)
+	}
+}
+
+func TestCLIWorkflowPurgeRevisionDriftPreservesRow(t *testing.T) {
+	store, id := newWorkflowPurgeRaceSession(t)
+	store.beforeDelete = func() {
+		description := "concurrent mutation"
+		if err := store.Update(id, beads.UpdateOpts{Description: &description}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	deleted, errs := deleteWorkflowBeads(store, []string{id})
+	if deleted != 0 || len(errs) != 1 {
+		t.Fatalf("deleteWorkflowBeads = (%d, %v), want stale-revision refusal", deleted, errs)
+	}
+	if _, err := store.Get(id); err != nil {
+		t.Fatalf("revision drift row was deleted: %v", err)
+	}
+}
+
+func TestCLIWorkflowPurgeRejectsReopenedVerification(t *testing.T) {
+	store := &workflowPurgeRaceStore{MemStore: beads.NewMemStore()}
+	row, err := store.Create(beads.Bead{Title: "ordinary purge target"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.afterClose = func() {
+		if err := store.Reopen(row.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if deleted, err := purgeWorkflowBeads(store, []string{row.ID}); err == nil || deleted != 0 {
+		t.Fatalf("reopened snapshot authorized purge: deleted=%d error=%v", deleted, err)
+	}
+	if current, err := store.Get(row.ID); err != nil || current.Status != "open" {
+		t.Fatalf("reopened row not preserved: %+v %v", current, err)
+	}
+}
+
 func (s *failingDeleteStore) Delete(id string) error {
 	if id == s.failID {
 		return fmt.Errorf("delete failed")
 	}
 	return s.MemStore.Delete(id)
+}
+
+func (s *failingDeleteStore) DeleteIfMatch(id string, revision int64) error {
+	if id == s.failID {
+		return fmt.Errorf("delete failed")
+	}
+	return s.MemStore.DeleteIfMatch(id, revision)
 }
 
 func (s *failingDeleteStore) DepAdd(issueID, dependsOnID, depType string) error {
@@ -7983,7 +8194,7 @@ func TestDeleteWorkflowBeadsRestoresDepsOnDeleteFailure(t *testing.T) {
 	}
 }
 
-func TestDeleteWorkflowBeadsReportsRollbackFailure(t *testing.T) {
+func TestDeleteWorkflowBeadsFailureDoesNotNeedDependencyRollback(t *testing.T) {
 	base := beads.NewMemStore()
 	root, err := base.Create(beads.Bead{Title: "workflow root", Type: "task", Status: "closed"})
 	if err != nil {
@@ -8014,16 +8225,13 @@ func TestDeleteWorkflowBeadsReportsRollbackFailure(t *testing.T) {
 	if !strings.Contains(errs[0].Error(), "delete failed") {
 		t.Fatalf("error = %v, want delete failure", errs[0])
 	}
-	if !strings.Contains(errs[0].Error(), "rollback failed") {
-		t.Fatalf("error = %v, want rollback failure surfaced", errs[0])
-	}
-	if store.restoreCalls == 0 {
-		t.Fatal("expected rollback DepAdd to be attempted")
+	if store.restoreCalls != 0 {
+		t.Fatal("failed conditional deletion should not mutate or restore dependencies")
 	}
 	if down, err := store.DepList(child.ID, "down"); err != nil {
 		t.Fatalf("DepList(child, down): %v", err)
-	} else if len(down) != 0 {
-		t.Fatalf("child down deps = %#v, want none after failed rollback", down)
+	} else if len(down) != 1 || down[0].DependsOnID != root.ID {
+		t.Fatalf("child down deps = %#v, want original dependency retained", down)
 	}
 }
 

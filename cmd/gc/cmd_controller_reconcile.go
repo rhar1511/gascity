@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"io"
-	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -23,7 +22,7 @@ func newControllerCmd(stdout, _ io.Writer) *cobra.Command {
 	}
 	cmd.AddCommand(newControllerReconcileCmd(stdout, resolveCommandCity,
 		func(cityPath, command string) ([]byte, error) {
-			return sendControllerCommandWithReadTimeout(cityPath, command, 5*time.Second)
+			return sendControllerCommandLineWithReadTimeout(cityPath, command, 5*time.Second)
 		}))
 	return cmd
 }
@@ -51,7 +50,7 @@ Requests may be coalesced with a pending tick.`,
 			if err != nil {
 				return fmt.Errorf("gc controller reconcile: requesting tick: %w", err)
 			}
-			if strings.TrimSpace(string(reply)) != "ok" {
+			if string(reply) != "ok" {
 				return fmt.Errorf("gc controller reconcile: unexpected controller acknowledgement %q", reply)
 			}
 			if jsonOut {

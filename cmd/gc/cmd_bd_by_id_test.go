@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/storebinding"
 	"github.com/gastownhall/gascity/internal/storebinding/beadsworkspace"
 	sqlitebinding "github.com/gastownhall/gascity/internal/storebinding/sqlite"
@@ -299,7 +300,9 @@ func mustCreateClassBead(t *testing.T, store beads.Store, b beads.Bead) beads.Be
 // not hold the bead and cannot say so.
 func TestBdByIDServesAClassBeadFromANonBuiltInProviderBinding(t *testing.T) {
 	cityPath, classStore := foreignProviderCity(t)
-	bead := mustCreateClassBead(t, classStore, beads.Bead{Title: "lives in the binding", Type: "task"})
+	bead := mustCreateClassBead(t, classStore, beads.Bead{Title: "lives in the binding", Type: "task", Metadata: map[string]string{
+		"generation": "4", "instance_token": "must-not-leak",
+	}})
 
 	var stdout, stderr bytes.Buffer
 	code, handled := maybeRouteBdByID(cityPath, "", []string{"show", bead.ID, "--json"}, &stdout, &stderr)
@@ -318,6 +321,9 @@ func TestBdByIDServesAClassBeadFromANonBuiltInProviderBinding(t *testing.T) {
 	}
 	if shown[0].Title != bead.Title {
 		t.Errorf("the routed show printed title %q, want %q", shown[0].Title, bead.Title)
+	}
+	if shown[0].Metadata["instance_token"] != "" || shown[0].Metadata["generation"] != "4" || strings.Contains(stdout.String(), "must-not-leak") {
+		t.Fatalf("routed show credential redaction = %s", stdout.String())
 	}
 }
 
@@ -716,6 +722,258 @@ func TestBdByIDRefusesAnUnservedVerbOnAClassOwnedBead(t *testing.T) {
 		t.Fatalf("re-reading the refused bead: %v", err)
 	} else if got.Status == "closed" {
 		t.Error("the refused delete reached the class binding anyway")
+	}
+}
+
+func TestBdByIDDeleteSessionUsesProtectedDeletion(t *testing.T) {
+	cityPath, classStore := foreignProviderCity(t)
+	bead := mustCreateClassBead(t, classStore, beads.Bead{
+		Title: "session", Type: session.BeadType, Labels: []string{session.LabelSession},
+		Metadata: map[string]string{"generation": "1", "instance_token": "secret"},
+	})
+	if err := classStore.Close(bead.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code, handled := maybeRouteBdByID(cityPath, "", []string{"delete", "--force", bead.ID}, &stdout, &stderr)
+	if !handled || code != 0 {
+		t.Fatalf("protected session delete = (%d, %v): %s", code, handled, stderr.String())
+	}
+	if _, err := classStore.Get(bead.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("closed evidence-free session survived protected delete: %v", err)
+	}
+}
+
+func TestBdByIDDeleteRetainsSessionRequestEvidence(t *testing.T) {
+	cityPath, classStore := foreignProviderCity(t)
+	bead := mustCreateClassBead(t, classStore, beads.Bead{
+		Title: "session", Type: session.BeadType, Labels: []string{session.LabelSession},
+		Metadata: map[string]string{beadmeta.SessionRequestReceiptPrefix + "evidence": "{}"},
+	})
+	if err := classStore.Close(bead.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code, handled := maybeRouteBdByID(cityPath, "", []string{"delete", bead.ID}, &stdout, &stderr)
+	if !handled || code == 0 || !strings.Contains(stderr.String(), session.ErrRequestEvidenceRetained.Error()) {
+		t.Fatalf("evidence-bearing session delete = (%d, %v): %s", code, handled, stderr.String())
+	}
+	if _, err := classStore.Get(bead.ID); err != nil {
+		t.Fatalf("evidence-bearing session was deleted: %v", err)
+	}
+}
+
+type receiptBeforeDeleteStore struct {
+	*beads.MemStore
+	once bool
+}
+
+type fenceBeforeCLIUpdateStore struct {
+	*beads.MemStore
+	beforeUpdate func()
+}
+
+func (s *fenceBeforeCLIUpdateStore) UpdateIfMatch(id string, revision int64, opts beads.UpdateOpts) error {
+	if s.beforeUpdate != nil {
+		before := s.beforeUpdate
+		s.beforeUpdate = nil
+		before()
+	}
+	return s.MemStore.UpdateIfMatch(id, revision, opts)
+}
+
+func TestBdByIDUpdateRejectsTypeChangeWithRequestEvidence(t *testing.T) {
+	store := &beads.MemStore{HonorExplicitIDs: true}
+	b, err := store.Create(beads.Bead{ID: "gc-history", Title: "history", Type: "task", Metadata: map[string]string{
+		beadmeta.SessionRequestReceiptPrefix + "history": `{}`,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	nextType := "bug"
+	graph, err := storebinding.NewBeadsGraphStore(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := doBdByIDUpdate(graph, bdByIDOp{Verb: bdByIDUpdate, ID: b.ID, Update: beads.UpdateOpts{Type: &nextType}}, "test", &stdout, &stderr); code == 0 {
+		t.Fatalf("receipt-bearing type change succeeded: %s", stdout.String())
+	}
+	got, err := store.Get(b.ID)
+	if err != nil || got.Type != "task" || !session.HasRequestEvidence(got) {
+		t.Fatalf("historical evidence row changed: %+v, %v", got, err)
+	}
+}
+
+func TestBdByIDUpdateRejectsSessionLabelRemovalWithRequestEvidence(t *testing.T) {
+	store := &beads.MemStore{HonorExplicitIDs: true}
+	b, err := store.Create(beads.Bead{
+		ID: "gc-history-label", Title: "history", Type: session.BeadType, Labels: []string{session.LabelSession, "worker"},
+		Metadata: map[string]string{beadmeta.SessionRequestReceiptPrefix + "history": `{}`},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	graph, err := storebinding.NewBeadsGraphStore(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	op := bdByIDOp{Verb: bdByIDUpdate, ID: b.ID, Update: beads.UpdateOpts{RemoveLabels: []string{session.LabelSession}}}
+	if code := doBdByIDUpdate(graph, op, "test", &stdout, &stderr); code == 0 {
+		t.Fatalf("receipt-bearing label removal succeeded: %s", stdout.String())
+	}
+	got, err := store.Get(b.ID)
+	if err != nil || !slices.Contains(got.Labels, session.LabelSession) || !session.HasRequestEvidence(got) {
+		t.Fatalf("historical session identity changed: %+v, %v", got, err)
+	}
+	replaceWithoutIdentity := []string{"worker"}
+	stdout.Reset()
+	stderr.Reset()
+	op = bdByIDOp{Verb: bdByIDUpdate, ID: b.ID, ReplaceLabels: &replaceWithoutIdentity}
+	if code := doBdByIDUpdate(graph, op, "test", &stdout, &stderr); code == 0 {
+		t.Fatalf("receipt-bearing replace-all label removal succeeded: %s", stdout.String())
+	}
+	replaceWithIdentity := []string{session.LabelSession, "verified"}
+	stdout.Reset()
+	stderr.Reset()
+	op = bdByIDOp{Verb: bdByIDUpdate, ID: b.ID, ReplaceLabels: &replaceWithIdentity}
+	if code := doBdByIDUpdate(graph, op, "test", &stdout, &stderr); code != 0 {
+		t.Fatalf("safe replace-all label update failed: %s", stderr.String())
+	}
+	got, err = store.Get(b.ID)
+	if err != nil || !slices.Equal(got.Labels, replaceWithIdentity) {
+		t.Fatalf("safe replace-all labels = %v, %v; want %v", got.Labels, err, replaceWithIdentity)
+	}
+}
+
+func TestBdByIDLabelRemovalLosesRaceToRequestEvidence(t *testing.T) {
+	base := &beads.MemStore{HonorExplicitIDs: true}
+	store := &fenceBeforeCLIUpdateStore{MemStore: base}
+	b, err := store.Create(beads.Bead{ID: "gc-label-race", Title: "session", Type: session.BeadType, Labels: []string{session.LabelSession}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.beforeUpdate = func() {
+		if err := base.SetMetadata(b.ID, beadmeta.SessionRequestReceiptPrefix+"racing", `{}`); err != nil {
+			t.Fatalf("install racing receipt = %v", err)
+		}
+	}
+	graph, err := storebinding.NewBeadsGraphStore(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	op := bdByIDOp{Verb: bdByIDUpdate, ID: b.ID, Update: beads.UpdateOpts{RemoveLabels: []string{session.LabelSession}}}
+	if code := doBdByIDUpdate(graph, op, "test", &stdout, &stderr); code == 0 {
+		t.Fatalf("label removal crossed racing receipt: %s", stdout.String())
+	}
+	got, err := base.Get(b.ID)
+	if err != nil || !slices.Contains(got.Labels, session.LabelSession) || !session.HasRequestEvidence(got) {
+		t.Fatalf("racing receipt lost session identity: %+v, %v", got, err)
+	}
+}
+
+func TestBdByIDParentUpdatesLoseRevisionRace(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		combined bool
+	}{
+		{name: "parent_only"},
+		{name: "combined", combined: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := &beads.MemStore{HonorExplicitIDs: true}
+			store := &fenceBeforeCLIUpdateStore{MemStore: base}
+			b, err := store.Create(beads.Bead{ID: "gc-parent-race", Title: "before", Type: "task"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			store.beforeUpdate = func() {
+				if err := base.SetMetadata(b.ID, "racing", "winner"); err != nil {
+					t.Fatalf("install racing update: %v", err)
+				}
+			}
+			parent := "gc-new-parent"
+			opts := beads.UpdateOpts{ParentID: &parent}
+			if tc.combined {
+				title := "after"
+				opts.Title = &title
+			}
+			graph, err := storebinding.NewBeadsGraphStore(store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var stdout, stderr bytes.Buffer
+			if code := doBdByIDUpdate(graph, bdByIDOp{Verb: bdByIDUpdate, ID: b.ID, Update: opts}, "test", &stdout, &stderr); code == 0 {
+				t.Fatalf("parent update crossed revision race: %s", stdout.String())
+			}
+			got, err := base.Get(b.ID)
+			if err != nil || got.ParentID != "" || got.Title != "before" || got.Metadata["racing"] != "winner" {
+				t.Fatalf("racing parent update partially committed: %+v, %v", got, err)
+			}
+		})
+	}
+}
+
+func TestBdByIDUpdateFailsClosedWhenPurgeFenceRaces(t *testing.T) {
+	base := &beads.MemStore{HonorExplicitIDs: true}
+	store := &fenceBeforeCLIUpdateStore{MemStore: base}
+	b, err := store.Create(beads.Bead{ID: "gc-race", Title: "before", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.beforeUpdate = func() {
+		if ok, err := base.CompareAndSetMetadataKey(b.ID, beadmeta.SessionRequestPurgeFenceMetadataKey, "", "purge-owner"); err != nil || !ok {
+			t.Fatalf("install racing fence = (%v, %v)", ok, err)
+		}
+	}
+	graph, err := storebinding.NewBeadsGraphStore(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after := "after"
+	var stdout, stderr bytes.Buffer
+	if code := doBdByIDUpdate(graph, bdByIDOp{Verb: bdByIDUpdate, ID: b.ID, Update: beads.UpdateOpts{Title: &after}}, "test", &stdout, &stderr); code == 0 {
+		t.Fatalf("update crossed racing fence: %s", stdout.String())
+	}
+	got, err := base.Get(b.ID)
+	if err != nil || got.Title != "before" || !session.IsRequestPurgeFenced(got) {
+		t.Fatalf("racing update result: %+v, %v", got, err)
+	}
+}
+
+func (s *receiptBeforeDeleteStore) DeleteIfMatch(id string, revision int64) error {
+	if !s.once {
+		s.once = true
+		if err := s.SetMetadata(id, beadmeta.SessionRequestReceiptPrefix+"racing", `{}`); err != nil {
+			return err
+		}
+	}
+	return s.MemStore.DeleteIfMatch(id, revision)
+}
+
+func TestBdByIDDeleteLosesRaceToRequestEvidence(t *testing.T) {
+	store := &receiptBeforeDeleteStore{MemStore: &beads.MemStore{HonorExplicitIDs: true}}
+	created, err := store.Create(beads.Bead{ID: "gc-session", Title: "session", Type: session.BeadType, Labels: []string{session.LabelSession}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(created.ID); err != nil {
+		t.Fatal(err)
+	}
+	closed, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := deleteBdBeadProtected(store, closed); err == nil {
+		t.Fatal("delete won a race against newly accepted request evidence")
+	}
+	retained, err := store.Get(created.ID)
+	if err != nil || !session.HasRequestEvidence(retained) {
+		t.Fatalf("racing request evidence was not retained: %+v, %v", retained, err)
 	}
 }
 
@@ -1335,6 +1593,7 @@ func TestBdByIDSurfaceServesAClosedVerbSet(t *testing.T) {
 		bdByIDUpdate:  true,
 		bdByIDClose:   true,
 		bdByIDReopen:  true,
+		bdByIDDelete:  true,
 	}
 	for _, args := range [][]string{
 		{"show", "gcg-1"},
@@ -1348,11 +1607,13 @@ func TestBdByIDSurfaceServesAClosedVerbSet(t *testing.T) {
 		{"dep", "tree", "gcg-1", "--reverse"},
 		{"dep", "tree", "gcg-1", "--direction=up", "--max-depth", "3"},
 		{"update", "gcg-1", "--status", "closed"},
+		{"update", "gcg-1", "--set-labels", "gc:session,verified"},
 		{"update", "gcg-1", "--set-metadata", "gc.outcome=pass", "--status=closed"},
 		{"close", "gcg-1"},
 		{"close", "gcg-1", "--json"},
 		{"reopen", "gcg-1"},
 		{"reopen", "gcg-1", "--json"},
+		{"delete", "gcg-1"},
 	} {
 		op, ok := parseBdByIDOp(args)
 		if !ok {
@@ -1390,7 +1651,6 @@ func TestBdByIDSurfaceServesAClosedVerbSet(t *testing.T) {
 		{"close", "gcg-1", "--reason", "done"},
 		{"close", "gcg-1", "--force"},
 		{"reopen", "gcg-1", "-r", "wrong call"},
-		{"delete", "gcg-1"},
 		{"list"},
 	} {
 		if op, ok := parseBdByIDOp(args); ok {
@@ -2340,6 +2600,14 @@ type getOnlyClassStore struct {
 func (s getOnlyClassStore) Update(string, beads.UpdateOpts) error { return s.writeErr }
 func (s getOnlyClassStore) Close(string) error                    { return s.writeErr }
 func (s getOnlyClassStore) Reopen(string) error                   { return s.writeErr }
+func (s getOnlyClassStore) UpdateIfMatch(string, int64, beads.UpdateOpts) error {
+	return s.writeErr
+}
+func (s getOnlyClassStore) CloseIfMatch(string, int64) error  { return s.writeErr }
+func (s getOnlyClassStore) DeleteIfMatch(string, int64) error { return s.writeErr }
+func (s getOnlyClassStore) CompareAndSetMetadataKey(string, string, string, string) (bool, error) {
+	return false, s.writeErr
+}
 
 // stubClassBindingStore replaces this city's resolved class stores with store,
 // for the whole of one test.

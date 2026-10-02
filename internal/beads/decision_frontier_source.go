@@ -162,7 +162,7 @@ func (s *SQLiteStore) depAddForCreatedBeadTx(ctx context.Context, tx *sql.Tx, cr
 // incoming edge from a surviving source. Source rows deleted by this same
 // operation need no version bump; every other changed owner is hold-checked
 // and revision-fenced in this transaction.
-func (s *SQLiteStore) guardAndFenceIncomingDependenciesTx(ctx context.Context, tx *sql.Tx, targetIDs, deletedIDs []string) error {
+func (s *SQLiteStore) guardAndFenceIncomingDependenciesTx(ctx context.Context, tx *sql.Tx, targetIDs, deletedIDs []string, terminalTarget *Bead) error {
 	if len(targetIDs) == 0 {
 		return nil
 	}
@@ -176,9 +176,12 @@ func (s *SQLiteStore) guardAndFenceIncomingDependenciesTx(ctx context.Context, t
 	for _, id := range deletedIDs {
 		deleted[id] = struct{}{}
 	}
-	rows, err := tx.QueryContext(ctx,
-		`SELECT DISTINCT issue_id FROM deps WHERE depends_on_id IN (`+strings.Join(targetMarks, ",")+")",
-		targetArgs...)
+	ownerQuery := `SELECT DISTINCT issue_id FROM deps WHERE depends_on_id IN (` + strings.Join(targetMarks, ",") + ")"
+	if terminalTarget != nil {
+		ownerQuery += ` UNION SELECT id FROM beads WHERE parent_id IN (` + strings.Join(targetMarks, ",") + ")"
+		targetArgs = append(targetArgs, targetArgs...)
+	}
+	rows, err := tx.QueryContext(ctx, ownerQuery, targetArgs...)
 	if err != nil {
 		return fmt.Errorf("listing dependency owners affected by delete: %w", err)
 	}
@@ -199,9 +202,33 @@ func (s *SQLiteStore) guardAndFenceIncomingDependenciesTx(ctx context.Context, t
 		return fmt.Errorf("reading dependency owners affected by delete: %w", rowsErr)
 	}
 	for _, owner := range owners {
+		var parentOwner *Bead
+		if terminalTarget != nil {
+			row, err := s.getTx(ctx, tx, owner)
+			if err != nil && !errors.Is(err, ErrNotFound) {
+				return err
+			}
+			if err == nil {
+				if err := validateTerminalDeleteReferenceOwner(*terminalTarget, row); err != nil {
+					return err
+				}
+				if row.ParentID == terminalTarget.ID {
+					parentOwner = &row
+				}
+			}
+		}
 		exists, err := s.guardDependencySourceMutationTx(ctx, tx, owner)
 		if err != nil {
 			return fmt.Errorf("deleting dependency target: source %q: %w", owner, err)
+		}
+		if parentOwner != nil {
+			parentOwner.ParentID = ""
+			// Upsert updates the physical column, retained JSON and revision
+			// together, without an additional version bump for the same owner.
+			if err := s.upsertBeadTx(ctx, tx, *parentOwner); err != nil {
+				return err
+			}
+			continue
 		}
 		if err := s.bumpDependencySourceRevisionTx(ctx, tx, owner, exists); err != nil {
 			return err

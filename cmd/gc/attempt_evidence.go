@@ -42,6 +42,13 @@ func captureWorkbenchCloseTargets(ctx context.Context, store beads.Store, ids []
 		if err := captureWorkbenchAttemptEvidence(ctx, store, bead, dirs, cityPath, cfg); err != nil {
 			return fmt.Errorf("capture workbench execution %s: %w", bead.ID, err)
 		}
+		current, err := attemptevidence.RefreshOwnerAfterCapture(store, bead)
+		if err != nil {
+			return err
+		}
+		if preFetched != nil {
+			preFetched[id] = current
+		}
 	}
 	return nil
 }

@@ -21,6 +21,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/executionevent"
 	"github.com/gastownhall/gascity/internal/git"
+	"github.com/gastownhall/gascity/internal/rsipolicy"
 	"github.com/gastownhall/gascity/internal/worklifecycle"
 )
 
@@ -2440,6 +2441,14 @@ func hookClaimIdentityPatch(bead beads.Bead, opts hookClaimOptions, ops hookClai
 		if sessionName := hookClaimSessionName(opts.Env); sessionName != "" &&
 			strings.TrimSpace(bead.Metadata[beadmeta.SessionNameMetadataKey]) != sessionName {
 			patch[beadmeta.SessionNameMetadataKey] = sessionName
+		}
+		// The first claim replaces any formula-supplied value, so only the claim
+		// authority can originate this binding. Later claim ticks preserve it.
+		if strings.TrimSpace(bead.Metadata[beadmeta.RSIRoleMetadataKey]) != "" &&
+			strings.TrimSpace(bead.Metadata[beadmeta.ClaimedAtMetadataKey]) == "" {
+			if binding, err := rsipolicy.MarshalExecutionBinding(opts.Assignee, sessionID); err == nil {
+				patch[beadmeta.RSIExecutionBindingMetadataKey] = binding
+			}
 		}
 	}
 	if strings.TrimSpace(bead.Metadata[beadmeta.ClaimedAtMetadataKey]) == "" {

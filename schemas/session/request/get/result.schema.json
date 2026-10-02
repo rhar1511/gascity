@@ -91,6 +91,9 @@
         "identity"
       ],
       "type": "object"
+    },
+    "ledger": {
+      "$ref": "#/$defs/RequestLedger"
     }
   },
   "required": [
@@ -105,5 +108,207 @@
     "ok"
   ],
   "type": "object",
-  "$schema": "https://json-schema.org/draft/2020-12/schema"
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "RequestLedger": {
+      "additionalProperties": false,
+      "properties": {
+        "attempt_attribution": {
+          "$ref": "#/$defs/RequestAttemptAttribution"
+        },
+        "digest": {
+          "type": "string"
+        },
+        "events": {
+          "items": {
+            "$ref": "#/$defs/RequestEvent"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "status": {
+          "type": "string"
+        },
+        "transcript_evidence": {
+          "$ref": "#/$defs/RequestTranscriptEvidence"
+        },
+        "unavailable_reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "type": "object"
+    },
+    "RequestAttemptAttribution": {
+      "additionalProperties": false,
+      "properties": {
+        "reason": {
+          "type": "string"
+        },
+        "reference": {
+          "$ref": "#/$defs/RequestAttemptReference"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "type": "object"
+    },
+    "RequestAttemptReference": {
+      "additionalProperties": false,
+      "properties": {
+        "attempt_id": {
+          "type": "string"
+        },
+        "store_ref": {
+          "type": "string"
+        },
+        "work_id": {
+          "type": "string"
+        },
+        "work_revision": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "store_ref",
+        "work_id",
+        "attempt_id",
+        "work_revision"
+      ],
+      "type": "object"
+    },
+    "RequestEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "attempt_attribution": {
+          "$ref": "#/$defs/RequestAttemptAttribution"
+        },
+        "delivery": {
+          "type": "string"
+        },
+        "generation": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "message_digest": {
+          "type": "string"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "sequence": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "transcript_evidence": {
+          "$ref": "#/$defs/RequestTranscriptEvidence"
+        }
+      },
+      "required": [
+        "sequence",
+        "kind",
+        "session_id",
+        "generation",
+        "request_id",
+        "message_digest",
+        "at"
+      ],
+      "type": "object"
+    },
+    "RequestTranscriptEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "references": {
+          "items": {
+            "$ref": "#/$defs/RequestTranscriptReference"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "status": {
+          "type": "string"
+        },
+        "tool_status": {
+          "type": "string"
+        },
+        "tool_unavailable_reason": {
+          "type": "string"
+        },
+        "transcript_generation_id": {
+          "type": "string"
+        },
+        "transcript_stream_id": {
+          "type": "string"
+        },
+        "unavailable_reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "tool_status"
+      ],
+      "type": "object"
+    },
+    "RequestTranscriptReference": {
+      "additionalProperties": false,
+      "properties": {
+        "entry_id": {
+          "type": "string"
+        },
+        "generation": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "tool_id": {
+          "type": "string"
+        },
+        "transcript_generation_id": {
+          "type": "string"
+        },
+        "transcript_stream_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id",
+        "generation",
+        "request_id",
+        "transcript_stream_id",
+        "transcript_generation_id",
+        "entry_id",
+        "kind"
+      ],
+      "type": "object"
+    }
+  }
 }

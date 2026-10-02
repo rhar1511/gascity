@@ -68,29 +68,13 @@ var workRecordCommitReachable = workrecord.CommitReachableOnBranchContext
 // coverage on the stored row and then projects metadata only; moving it belongs
 // in internal/workrecord so both doors move together rather than asking
 // different questions of different populations.
-//
-// ctx is the request's, and it reaches the reachability clause because that
-// clause shells out to git: a client that hangs up has to be able to stop the
-// subprocess, or a wedged repository leaves one blocking call per retry.
-//
-// Known limit — the check and the write are not atomic. The row validated here
-// is the one resolveBeadOwner read, and the caller applies its close or update
-// afterwards without re-reading it, so a concurrent write landing in that window
-// is neither seen by the gate nor refused by the write. A close that races an
-// edit stripping gc.work_outcome can therefore pass a check the final row would
-// have failed. The CLI door has the same shape at evaluateWorkRecordCloseGate in
-// cmd/gc/work_record_gate.go, which validates a stored (or pre-fetched) bead and
-// then lets the bd invocation write.
-//
-// The remedy is to fence the write on the revision the gate read —
-// beads.ConditionalWriter already spells it (CloseIfMatch/UpdateIfMatch, via
-// beads.ResolveConditionalWriter) — so this is a change to the close paths, not
-// to the store contract. It is left for a follow-up because the fence has to be
-// threaded through both doors together and only capable stores carry it: a store
-// that resolves as legacy has no revision to fence on, so the gate would need a
-// degraded path there rather than a refusal. The window is small and the losing
-// outcome is a close that recorded slightly less than it should, not a corrupted
-// row.
+// The closing handlers carry the inspected revision through UpdateIfMatch or
+// CloseIfMatch. Attempt capture may advance only its private index metadata;
+// refreshAfterAttemptCapture rejects any concurrent public or claim mutation
+// before using that new revision. A later competing write is refused by CAS.
+// The CLI close paths likewise carry the revision through the store bridge.
+// Stores without conditional mutation support refuse this transition.
+
 func (s *Server) gateWorkRecordClose(ctx context.Context, id string, store beads.Store, stored beads.Bead, submitted map[string]string) error {
 	if err := s.captureWorkbenchAttempt(ctx, store, stored); err != nil {
 		return apierr.ServiceUnavailable.Msg("attempt evidence capture is pending: " + err.Error())
@@ -198,6 +182,17 @@ func (s *Server) captureWorkbenchAttempt(ctx context.Context, store beads.Store,
 		return fmt.Errorf("capturing work bead %s: %w", stored.ID, err)
 	}
 	return nil
+}
+
+// refreshAfterAttemptCapture permits only the private evidence index written
+// by capture to advance the owner's revision. Any concurrent change to the
+// inspected public fields, claim, or authority still refuses the close.
+func refreshAfterAttemptCapture(store beads.Store, inspected beads.Bead) (beads.Bead, error) {
+	current, err := attemptevidence.RefreshOwnerAfterCapture(store, inspected)
+	if err != nil {
+		return beads.Bead{}, apierr.ConflictConcurrentModify.Msg("bead changed during attempt capture")
+	}
+	return current, nil
 }
 
 // closesStatus reports whether an update's status field closes the bead. It

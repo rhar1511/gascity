@@ -29,6 +29,11 @@
 // engdocs/design/beads-dolt-contract-redesign.md for the storage contract.
 package beadmeta
 
+import (
+	"fmt"
+	"strings"
+)
+
 // Namespace is the reserved prefix for every engine-minted bead-metadata key.
 // Runtime guards that reserve the namespace (e.g. rejecting caller-supplied
 // "gc."-prefixed keys) compare against this single source of truth.
@@ -48,6 +53,9 @@ const (
 	AttemptEvidencePayloadDigestMetadataKey    = "gc.attempt_evidence.content_digest"
 	AttemptEvidenceReferenceMetadataKey        = "gc.attempt_evidence.reference.v1"
 	AttemptMetadataKey                         = "gc.attempt"
+	AuthorityAuthorizationMetadataKey          = "gc.authority_authorization.v1"
+	AuthorityProfileMetadataKey                = "gc.authority_profile"
+	AuthorityTransitionsMetadataKey            = "gc.authority_transitions.v1"
 	BondMetadataKey                            = "gc.bond"
 	BondVarsMetadataKey                        = "gc.bond_vars"
 	BoundStepIDMetadataKey                     = "gc.bound_step_id"
@@ -90,6 +98,7 @@ const (
 	ControlDispatcherFallbackMetadataKey = "gc.control_dispatcher_fallback"
 	ControlEpochMetadataKey              = "gc.control_epoch"
 	ControlForMetadataKey                = "gc.control_for"
+	ControlGrantLedgerMetadataKey        = "gc.workflow_control_ledger.v2"
 	ControlQuarantineReasonMetadataKey   = "gc.control_quarantine_reason"
 	ControlQuarantinedAtMetadataKey      = "gc.control_quarantined_at"
 	ControlQuarantinedMetadataKey        = "gc.control_quarantined"
@@ -237,6 +246,7 @@ const (
 	RalphStepIDMetadataKey                = "gc.ralph_step_id"
 	RSIRoleMetadataKey                    = "gc.rsi_role"
 	RSIAuthorityClassMetadataKey          = "gc.rsi_authority_class"
+	RSIExecutionBindingMetadataKey        = "gc.rsi_execution_binding"
 	RSICandidateInputMetadataKey          = "gc.rsi_candidate_input"
 	RSIPromoteMetadataKey                 = "gc.rsi_promote"
 	RSIReasonMetadataKey                  = "gc.rsi_reason"
@@ -402,6 +412,90 @@ const IdemPrefix = Namespace + "idem."
 // copied to a separate durable archive bead before a capture operation returns.
 const AttemptEvidenceIndexPrefix = Namespace + "attempt_evidence.index."
 
+// SessionRequestPurgeFenceMetadataKey blocks new request acceptance and reopen
+// while a workflow hard purge is closing and validating selected sessions.
+const SessionRequestPurgeFenceMetadataKey = Namespace + "session_request_purge_fence"
+
+// NativeAuxRevisionMetadataKey makes a native label/parent transaction also
+// change the issue row. The pinned backend's auxiliary tables do not advance
+// its issue row lock; an unchanged scalar update would be discarded as a no-op.
+const NativeAuxRevisionMetadataKey = Namespace + "native_aux_revision"
+
+// SessionInstanceTokenMetadataKey is the raw execution-incarnation credential.
+// It is deliberately bare for compatibility with the persisted session schema.
+const SessionInstanceTokenMetadataKey = "instance_token"
+
+var executionCredentialMetadataKeys = map[string]struct{}{
+	SessionInstanceTokenMetadataKey: {},
+	"execution_token":               {},
+	Namespace + "instance_token":    {},
+	Namespace + "execution_token":   {},
+}
+
+var executionIdentityMetadataKeys = map[string]struct{}{
+	"session_name":                  {},
+	"sessionName":                   {},
+	SessionNameMetadataKey:          {},
+	SessionNameCamelMetadataKey:     {},
+	"generation":                    {},
+	Namespace + "generation":        {},
+	SessionInstanceTokenMetadataKey: {},
+	"execution_token":               {},
+	Namespace + "instance_token":    {},
+	Namespace + "execution_token":   {},
+}
+
+// IsExecutionCredentialMetadataKey reports metadata that grants execution
+// identity and therefore must never cross a generic bead boundary.
+func IsExecutionCredentialMetadataKey(key string) bool {
+	_, ok := executionCredentialMetadataKeys[key]
+	return ok
+}
+
+// IsExecutionIdentityMetadataKey identifies the session lifecycle fields that
+// the trusted backend transport carries but generic bead mutations must refuse.
+func IsExecutionIdentityMetadataKey(key string) bool {
+	_, ok := executionIdentityMetadataKeys[key]
+	return ok
+}
+
+// IsGenericMutationReservedKey reports metadata owned by a privileged session
+// protocol rather than generic bead create/update tooling.
+func IsGenericMutationReservedKey(key string) bool {
+	_, executionIdentity := executionIdentityMetadataKeys[key]
+	return executionIdentity ||
+		key == ClaimedAtMetadataKey ||
+		key == NativeAuxRevisionMetadataKey ||
+		key == RSIExecutionBindingMetadataKey ||
+		strings.HasPrefix(key, SessionRequestReceiptPrefix) ||
+		key == SessionRequestPurgeFenceMetadataKey
+}
+
+// ValidateGenericMetadata rejects authority-bearing metadata on generic writes.
+func ValidateGenericMetadata(metadata map[string]string) error {
+	for key := range metadata {
+		if IsGenericMutationReservedKey(key) {
+			return fmt.Errorf("metadata key %q is reserved for the session lifecycle", key)
+		}
+	}
+	return nil
+}
+
+// RedactGenericMetadata returns a copy without execution credentials. Protocol
+// evidence remains visible; only credential material is removed.
+func RedactGenericMetadata(metadata map[string]string) map[string]string {
+	if metadata == nil {
+		return nil
+	}
+	out := make(map[string]string, len(metadata))
+	for key, value := range metadata {
+		if !IsExecutionCredentialMetadataKey(key) {
+			out[key] = value
+		}
+	}
+	return out
+}
+
 // Directory keys: a deliberate non-"gc."-prefixed sibling family on bead
 // metadata, declared here so the vocabulary has one home. Their read/write
 // fallback semantics (canonical-then-legacy) live with their owner in
@@ -534,6 +628,9 @@ var KnownMetadataKeys = []string{
 	AttemptEvidencePayloadDigestMetadataKey,
 	AttemptEvidenceReferenceMetadataKey,
 	AttemptMetadataKey,
+	AuthorityAuthorizationMetadataKey,
+	AuthorityProfileMetadataKey,
+	AuthorityTransitionsMetadataKey,
 	BondMetadataKey,
 	BondVarsMetadataKey,
 	BoundStepIDMetadataKey,
@@ -546,11 +643,13 @@ var KnownMetadataKeys = []string{
 	CheckTimeoutMetadataKey,
 	CityPathMetadataKey,
 	ClaimedAtMetadataKey,
+	NativeAuxRevisionMetadataKey,
 	ClaimGenerationMetadataKey,
 	ClosedByAttemptMetadataKey,
 	ContinuationGroupMetadataKey,
 	ControlEpochMetadataKey,
 	ControlForMetadataKey,
+	ControlGrantLedgerMetadataKey,
 	ControlQuarantineReasonMetadataKey,
 	ControlQuarantinedAtMetadataKey,
 	ControlQuarantinedMetadataKey,
@@ -663,9 +762,10 @@ var KnownMetadataKeys = []string{
 	RSIRoleMetadataKey,
 	RSIAuthorityClassMetadataKey,
 	RSICandidateInputMetadataKey,
+	RSIExecutionBindingMetadataKey,
+	RSIManualApprovalMetadataKey,
 	RSIPromoteMetadataKey,
 	RSIReasonMetadataKey,
-	RSIManualApprovalMetadataKey,
 	ReasoningMetadataKey,
 	RequiredArtifactMetadataKey,
 	RequiredArtifactsMetadataKey,
@@ -694,6 +794,7 @@ var KnownMetadataKeys = []string{
 	SessionIDCamelMetadataKey,
 	SessionNameMetadataKey,
 	SessionNameCamelMetadataKey,
+	SessionRequestPurgeFenceMetadataKey,
 	SourceBeadIDMetadataKey,
 	SourceStepSpecMetadataKey,
 	SourceStoreRefMetadataKey,

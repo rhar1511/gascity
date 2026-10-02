@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"log"
 	"strings"
@@ -10,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
@@ -120,6 +123,7 @@ func (s *Server) humaHandleConvoyList(ctx context.Context, input *ConvoyListInpu
 	if page == nil {
 		page = []beads.Bead{}
 	}
+	page = redactGenericBeads(page)
 	return &ListOutput[beads.Bead]{
 		Index:     index,
 		CacheAgeS: cacheAge,
@@ -252,7 +256,7 @@ func (s *Server) humaHandleConvoyCreate(_ context.Context, input *ConvoyCreateIn
 
 	return &IndexOutput[beads.Bead]{
 		Index: s.latestIndex(),
-		Body:  convoy,
+		Body:  redactGenericBead(convoy),
 	}, nil
 }
 
@@ -647,6 +651,20 @@ func (s *Server) humaHandleWorkflowDelete(_ context.Context, input *WorkflowDele
 	deleted := 0
 	found := false
 	var pa partialAggregator
+	type deletionPlan struct {
+		info   workflowStoreInfo
+		ids    []string
+		writer beads.ConditionalWriter
+	}
+	var plans []deletionPlan
+	type purgeFenceCandidate struct {
+		store     beads.Store
+		writer    beads.ConditionalWriter
+		id        string
+		revision  int64
+		planIndex int
+	}
+	var fenceCandidates []purgeFenceCandidate
 
 	for _, info := range stores {
 		if info.store == nil {
@@ -719,49 +737,183 @@ func (s *Server) humaHandleWorkflowDelete(_ context.Context, input *WorkflowDele
 			continue
 		}
 		found = true
+		plans = append(plans, deletionPlan{info: info, ids: ids})
+	}
 
-		// Phase 1: Batch close all open beads.
+	if !found {
+		return nil, apierr.WorkflowNotFound.Msg("workflow " + workflowID + " not found")
+	}
+
+	// Permanent deletion is fail-closed: discover and inspect the complete set
+	// before closing a bead, removing a dependency, or deleting a row.
+	if deleteFromStore {
+		if pa.partial() {
+			return nil, apierr.Internal.Msg("workflow deletion preflight failed")
+		}
+		for planIndex := range plans {
+			plan := &plans[planIndex]
+			writer, ok := beads.ConditionalWriterFor(plan.info.store)
+			if !ok || !beads.InspectConditionalWrites(plan.info.store).Capable {
+				return nil, apierr.Internal.Msg("workflow deletion requires conditional-write protection")
+			}
+			plan.writer = writer
+			ordered, err := beads.DependencySafeDeleteOrder(plan.info.store, plan.ids)
+			if err != nil {
+				return nil, apierr.ConflictConcurrentDelete.Msg("workflow deletion dependency plan failed")
+			}
+			plan.ids = ordered
+			for _, id := range plan.ids {
+				b, err := plan.info.store.Get(id)
+				if err != nil {
+					if errors.Is(err, beads.ErrNotFound) {
+						return nil, apierr.ConflictConcurrentDelete.Msg("workflow changed during deletion preflight")
+					}
+					return nil, apierr.Internal.Msg("workflow deletion preflight failed")
+				}
+				if session.HasRequestEvidence(b) {
+					return nil, apierr.SessionConflict.Msg(session.ErrRequestEvidenceRetained.Error())
+				}
+				if !session.IsSessionBeadOrRepairable(b) {
+					continue
+				}
+				if session.IsRequestPurgeFenced(b) {
+					return nil, apierr.SessionConflict.Msg("session request purge is already in progress")
+				}
+				writer, ok := beads.ConditionalWriterFor(plan.info.store)
+				if !ok || !beads.InspectConditionalWrites(plan.info.store).Capable || b.Revision == 0 {
+					return nil, apierr.SessionConflict.Msg("session request purge requires conditional-write protection")
+				}
+				fenceCandidates = append(fenceCandidates, purgeFenceCandidate{
+					store: plan.info.store, writer: writer, id: id, revision: b.Revision, planIndex: planIndex,
+				})
+			}
+		}
+	}
+
+	var fenceToken string
+	var acquiredFences []purgeFenceCandidate
+	acquiredFenceIDs := make(map[int]map[string]struct{})
+	rollbackFences := func() {
+		for i := len(acquiredFences) - 1; i >= 0; i-- {
+			fence := acquiredFences[i]
+			released, err := fence.writer.CompareAndSetMetadataKey(
+				fence.id, beadmeta.SessionRequestPurgeFenceMetadataKey, fenceToken, "",
+			)
+			if err != nil {
+				log.Printf("api: workflow purge fence rollback failed for %s: %v", fence.id, err)
+			} else if !released {
+				log.Printf("api: workflow purge fence rollback lost ownership for %s; leaving current fence intact", fence.id)
+			}
+		}
+	}
+	if deleteFromStore && len(fenceCandidates) > 0 {
+		var tokenBytes [16]byte
+		if _, err := rand.Read(tokenBytes[:]); err != nil {
+			return nil, apierr.Internal.Msg("workflow deletion fence token generation failed")
+		}
+		fenceToken = hex.EncodeToString(tokenBytes[:])
+		for _, fence := range fenceCandidates {
+			err := fence.writer.UpdateIfMatch(fence.id, fence.revision, beads.UpdateOpts{Metadata: map[string]string{
+				beadmeta.SessionRequestPurgeFenceMetadataKey: fenceToken,
+			}})
+			if err == nil {
+				acquiredFences = append(acquiredFences, fence)
+				if acquiredFenceIDs[fence.planIndex] == nil {
+					acquiredFenceIDs[fence.planIndex] = make(map[string]struct{})
+				}
+				acquiredFenceIDs[fence.planIndex][fence.id] = struct{}{}
+				continue
+			}
+			// A transport error may be commit-ambiguous. Conditional rollback only
+			// clears our exact token, so include this candidate before aborting.
+			acquiredFences = append(acquiredFences, fence)
+			rollbackFences()
+			var stale *beads.PreconditionFailedError
+			if errors.As(err, &stale) {
+				return nil, apierr.ConflictConcurrentModify.Msg("session changed during workflow purge fence acquisition")
+			}
+			return nil, apierr.Internal.Msg("workflow deletion fence acquisition failed")
+		}
+	}
+
+	closeFailed := false
+	for _, plan := range plans {
+		info := plan.info
+		ids := plan.ids
+
+		// Phase 1: Close all selected rows. For sessions this is also the write
+		// fence: AcceptRequest rejects closed rows, and closing bumps the revision
+		// so an acceptance CAS based on an earlier open snapshot cannot commit.
 		n, closeErr := info.store.CloseAll(ids, map[string]string{
 			beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
 			"close_reason":              sourceworkflow.WorkflowSkippedCloseReason,
 		})
 		closed += n
 		if closeErr != nil {
+			closeFailed = true
 			pa.record("store "+info.scopeRef+" close", closeErr)
-		}
-
-		// Phase 2: Delete if requested.
-		if deleteFromStore {
-			for _, id := range ids {
-				if deps, err := info.store.DepList(id, "down"); err == nil {
-					for _, dep := range deps {
-						if err := info.store.DepRemove(id, dep.DependsOnID); err != nil {
-							pa.record("store "+info.scopeRef+" dep-remove "+id+"→"+dep.DependsOnID, err)
-						}
-					}
-				} else {
-					pa.record("store "+info.scopeRef+" dep-list down "+id, err)
-				}
-				if deps, err := info.store.DepList(id, "up"); err == nil {
-					for _, dep := range deps {
-						if err := info.store.DepRemove(dep.IssueID, id); err != nil {
-							pa.record("store "+info.scopeRef+" dep-remove "+dep.IssueID+"→"+id, err)
-						}
-					}
-				} else {
-					pa.record("store "+info.scopeRef+" dep-list up "+id, err)
-				}
-				if err := info.store.Delete(id); err != nil {
-					pa.record("store "+info.scopeRef+" delete "+id, err)
-					continue
-				}
-				deleted++
-			}
 		}
 	}
 
-	if !found {
-		return nil, apierr.WorkflowNotFound.Msg("workflow " + workflowID + " not found")
+	if deleteFromStore {
+		if closeFailed {
+			rollbackFences()
+			return nil, apierr.Internal.Msg("workflow deletion fence failed; selected rows may be closed but were not deleted")
+		}
+		// Phase 2: Re-read the complete set after every session has been fenced.
+		// A receipt that won before its close fence is retained and aborts the
+		// purge. Current stores cannot atomically roll back the safe closures.
+		type verifiedDeletion struct {
+			info     workflowStoreInfo
+			writer   beads.ConditionalWriter
+			id       string
+			revision int64
+		}
+		verified := make([]verifiedDeletion, 0)
+		for planIndex, plan := range plans {
+			for _, id := range plan.ids {
+				b, err := plan.info.store.Get(id)
+				if err != nil {
+					rollbackFences()
+					if errors.Is(err, beads.ErrNotFound) {
+						return nil, apierr.ConflictConcurrentDelete.Msg("workflow changed after deletion fence")
+					}
+					return nil, apierr.Internal.Msg("workflow deletion evidence check failed; selected rows may be closed but were not deleted")
+				}
+				if session.HasRequestEvidence(b) {
+					rollbackFences()
+					return nil, apierr.SessionConflict.Msg(session.ErrRequestEvidenceRetained.Error())
+				}
+				if b.Status != "closed" {
+					rollbackFences()
+					return nil, apierr.ConflictConcurrentDelete.Msg("workflow row reopened after deletion fence")
+				}
+				_, acquired := acquiredFenceIDs[planIndex][id]
+				if acquired && (b.Status != "closed" || session.RequestPurgeFence(b) != fenceToken) {
+					rollbackFences()
+					return nil, apierr.SessionConflict.Msg("session purge fence was not preserved; selected rows were not deleted")
+				}
+				if b.Revision == 0 {
+					rollbackFences()
+					return nil, apierr.Internal.Msg("workflow deletion verification returned an unversioned row")
+				}
+				verified = append(verified, verifiedDeletion{info: plan.info, writer: plan.writer, id: id, revision: b.Revision})
+			}
+		}
+
+		// Phase 3: The conditional delete atomically removes the row and its
+		// references. Never remove dependencies before checking its revision.
+		for _, row := range verified {
+			info := row.info
+			id := row.id
+			if err := row.writer.DeleteIfMatch(id, row.revision); err != nil {
+				pa.record("store "+info.scopeRef+" delete "+id, err)
+				// Remaining rows may own references from this surviving dependent.
+				// Do not cascade those references after a revision refusal.
+				break
+			}
+			deleted++
+		}
 	}
 
 	return &struct {

@@ -546,6 +546,18 @@ func sendControllerCommandWithReadTimeout(cityPath, command string, readTimeout 
 }
 
 func sendControllerCommandWithTimeouts(cityPath, command string, dialTimeout, writeTimeout, readTimeout time.Duration) ([]byte, error) {
+	resp, err := sendControllerCommandLineWithTimeouts(cityPath, command, dialTimeout, writeTimeout, readTimeout)
+	if err != nil {
+		return nil, err
+	}
+	return []byte(strings.TrimSpace(string(resp))), nil
+}
+
+func sendControllerCommandLineWithReadTimeout(cityPath, command string, readTimeout time.Duration) ([]byte, error) {
+	return sendControllerCommandLineWithTimeouts(cityPath, command, 2*time.Second, 5*time.Second, readTimeout)
+}
+
+func sendControllerCommandLineWithTimeouts(cityPath, command string, dialTimeout, writeTimeout, readTimeout time.Duration) ([]byte, error) {
 	sockPath := controllerSocketPath(cityPath)
 	conn, err := net.DialTimeout("unix", sockPath, dialTimeout)
 	if err != nil {
@@ -577,7 +589,7 @@ func sendControllerCommandWithTimeouts(cityPath, command string, dialTimeout, wr
 			unresponsive: true,
 		}
 	}
-	return []byte(strings.TrimSpace(scanner.Text())), nil
+	return []byte(scanner.Text()), nil
 }
 
 // controllerAlive checks whether a controller is running by connecting

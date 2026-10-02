@@ -1437,3 +1437,30 @@ func TestBdIssueDecodesNullRevisionAsZero(t *testing.T) {
 		t.Fatalf("Bead.Revision = %d, want 0 for a null revision column", got)
 	}
 }
+
+func TestUpdateIfMatchLabelsCarryRevisionFence(t *testing.T) {
+	w := &scriptedBd{id: "ga-1", revision: 1, status: "open"}
+	s := NewBdStore("/city", w.runner)
+	if err := s.UpdateIfMatch("ga-1", 1, UpdateOpts{Labels: []string{"added"}, RemoveLabels: []string{"gc:session"}}); err != nil {
+		t.Fatalf("UpdateIfMatch labels: %v", err)
+	}
+	if !argvContains(w.writeArgv, "update", "--json", "ga-1", "--add-label", "added", "--remove-label", "gc:session", conditionalWriteFlag, "1") {
+		t.Fatalf("fenced label update argv missing expected flags: %v", w.writeArgv)
+	}
+}
+
+func TestUpdateIfMatchParentAndFieldsCarryOneRevisionFence(t *testing.T) {
+	w := &scriptedBd{id: "ga-1", revision: 1, status: "open"}
+	s := NewBdStore("/city", w.runner)
+	parent := "ga-parent"
+	title := "renamed"
+	if err := s.UpdateIfMatch("ga-1", 1, UpdateOpts{ParentID: &parent, Title: &title}); err != nil {
+		t.Fatalf("UpdateIfMatch parent and title: %v", err)
+	}
+	if w.writeCalls != 1 {
+		t.Fatalf("combined parent update issued %d writes, want one", w.writeCalls)
+	}
+	if !argvContains(w.writeArgv, "update", "--json", "ga-1", "--title", "renamed", "--parent", "ga-parent", conditionalWriteFlag, "1") {
+		t.Fatalf("combined parent update argv missing one fence: %v", w.writeArgv)
+	}
+}

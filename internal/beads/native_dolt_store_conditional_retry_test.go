@@ -2,12 +2,49 @@ package beads
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync/atomic"
 	"testing"
 
 	beadslib "github.com/steveyegge/beads"
 )
+
+// The pinned native backend stores labels in a separate table without touching
+// the issue's row version. The fixture must not borrow MemStore's stronger
+// label semantics and conceal a reusable conditional-write revision.
+func TestNativeDoltStoreAuxiliaryConditionalWriteAdvancesIssueVersion(t *testing.T) {
+	issue := openIssueForConditionalTest("gc-aux")
+	issue.RowVersion = 7
+	rowWrites := 0
+	spy := &nativeDoltStorageSpy{
+		getIssue: func(context.Context, string) (*beadslib.Issue, error) {
+			row := *issue
+			return &row, nil
+		},
+		addLabel: func(context.Context, string, string, string) error { return nil },
+		updateIssue: func(_ context.Context, _ string, updates map[string]interface{}, _ string) error {
+			raw, ok := updates["metadata"].(json.RawMessage)
+			if !ok || string(raw) == string(issue.Metadata) {
+				t.Fatal("auxiliary write did not change an issue-row field")
+			}
+			issue.Metadata = raw
+			issue.RowVersion++
+			rowWrites++
+			return nil
+		},
+	}
+	store := newNativeDoltStoreForTest(spy)
+	if err := store.UpdateIfMatch(issue.ID, 7, UpdateOpts{Labels: []string{"verified"}}); err != nil {
+		t.Fatal(err)
+	}
+	if rowWrites != 1 || issue.RowVersion == 7 {
+		t.Fatalf("auxiliary CAS left the issue version reusable: writes=%d version=%d", rowWrites, issue.RowVersion)
+	}
+	if err := store.UpdateIfMatch(issue.ID, 7, UpdateOpts{Labels: []string{"stale"}}); !IsPreconditionFailed(err) {
+		t.Fatalf("stale auxiliary revision was accepted: %v", err)
+	}
+}
 
 // openIssueForConditionalTest is a minimal well-formed open issue the
 // conditional-write spies serve from GetIssue, so nativeCloseReasonFromIssue and

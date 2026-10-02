@@ -35,7 +35,9 @@ go_library(
         "provider_resolution.go",
         "request_attempt.go",
         "request_delivery.go",
+        "request_ledger.go",
         "request_receipt.go",
+        "request_transcript_evidence.go",
         "resolve.go",
         "sleep_reason.go",
         "startup_health.go",
@@ -184,7 +186,7 @@ go_test(
         "//internal/storebinding/sqlite",
         "//internal/testenv",
         "//internal/testutil",
-        "@org_modernc_sqlite//:sqlite",
+        "@org_modernc_sqlite//:go_default_library",
     ] + select({
         "@rules_go//go/platform:android": [
             "//internal/runtime/proctable",

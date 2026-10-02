@@ -37,6 +37,7 @@ go_library(
         "pricing.go",
         "private_evidence.go",
         "provenance.go",
+        "rsi.go",
         "provider.go",
         "provider_refs.go",
         "public_packs.go",

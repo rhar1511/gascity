@@ -2740,7 +2740,8 @@
     "RSIConfig": {
       "properties": {
         "evaluation_file": {
-          "type": "string"
+          "type": "string",
+          "description": "Per-gate evaluation path template containing exactly one {gate_id} token."
         },
         "evaluation_key_id": {
           "type": "string"
@@ -2749,7 +2750,8 @@
           "type": "string"
         },
         "human_approval_file": {
-          "type": "string"
+          "type": "string",
+          "description": "Per-gate approval path template containing exactly one {gate_id} token."
         },
         "human_approval_key_id": {
           "type": "string"

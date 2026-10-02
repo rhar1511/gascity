@@ -76,6 +76,9 @@ func TestSessionRequestAttemptBindingSeparatesWorkWithinOneGeneration(t *testing
 		if err != nil || accepted.Attempt == nil || *accepted.Attempt != binding {
 			t.Fatalf("acceptance=%+v error=%v", accepted, err)
 		}
+		if _, err := store.RecordRequestDelivery("gc-session", id, 2, RequestDeliveryAccepted, now); err != nil {
+			t.Fatal(err)
+		}
 		if _, err := store.AcknowledgeRequest("gc-session", id, 2, "execution-token", now); err != nil {
 			t.Fatal(err)
 		}
@@ -155,5 +158,35 @@ func TestSessionRequestAttemptBindingIsNotRetrofittedOrChangedByReplay(t *testin
 	plain, err := front.AcceptRequest("gc-session", "bound-request", 2, "report", now)
 	if err != nil || plain.Attempt == nil || plain.Attempt.WorkRevision != "7" {
 		t.Fatalf("delivery stripped attempt binding: %+v %v", plain, err)
+	}
+}
+
+func TestSessionRequestBoundReplayRejectsClearedClaim(t *testing.T) {
+	backing, front, now := requestReceiptFixture(t)
+	binding := requestAttemptFixture(t, "gc-work-1", "claim-1")
+	if _, err := front.SetCurrentClaimForGeneration("gc-session", "gc-work-1", "claim-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := front.AcceptRequestForAttempt("gc-session", "bound-cleared", 2, "report", binding, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := backing.SetMetadataBatch("gc-session", map[string]string{
+		beadmeta.CurrentClaimBeadIDMetadataKey: "", beadmeta.CurrentClaimGenerationMetadataKey: "",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := backing.Get("gc-session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := front.AcceptRequest("gc-session", "bound-cleared", 2, "report", now); !errors.Is(err, ErrRequestConflict) {
+		t.Fatalf("generic replay bypassed retained attempt binding: %v", err)
+	}
+	after, err := backing.Get("gc-session")
+	if err != nil || after.Revision != before.Revision {
+		t.Fatalf("rejected replay changed the session row: %+v, %v", after, err)
+	}
+	if historical, err := front.GetRequest("gc-session", "bound-cleared"); err != nil || historical.Attempt == nil || *historical.Attempt != binding {
+		t.Fatalf("claim clearing lost historical attribution: %+v, %v", historical, err)
 	}
 }
