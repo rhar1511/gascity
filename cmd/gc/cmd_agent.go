@@ -58,8 +58,9 @@ func loadSessionAuthorityCityConfig(cityPath string, warningWriter ...io.Writer)
 	if err := ensureBuiltinPacksForConfigLoad(fs, tomlPath, warnings); err != nil {
 		return nil, err
 	}
-	loadOptions := skipRevisionSnapshot
-	loadOptions.CaptureQualificationInputs = true
+	// Qualification needs the exact loader inputs, but this CLI discards the
+	// full revision snapshot. Keep those independent choices explicit.
+	loadOptions := config.LoadOptions{SkipRevisionSnapshot: true, CaptureQualificationInputs: true}
 	cfg, prov, err := config.LoadWithIncludesOptions(fs, tomlPath, loadOptions)
 	if err != nil {
 		return nil, err

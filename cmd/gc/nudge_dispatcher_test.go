@@ -227,7 +227,7 @@ func TestDispatchAllQueuedNudgesDeliversAndAcks(t *testing.T) {
 
 	// Set up a running session via the same fake-provider harness used by
 	// the per-session poller test, then enqueue a nudge for it.
-	store := openNudgeBeadStore(dir)
+	store := openNudgeFixtureStore(t, dir)
 	fake := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(dir, store.Store, fake, nil)
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: dir, Provider: "codex", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
@@ -355,7 +355,7 @@ func TestDispatchAllQueuedNudgesDeliversToIdleACPSession(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 
 	dir := t.TempDir()
-	store := openNudgeBeadStore(dir)
+	store := openNudgeFixtureStore(t, dir)
 	if store.Store == nil {
 		t.Fatal("openNudgeBeadStore returned nil")
 	}

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -19,18 +20,70 @@ import (
 // jq) into the fixture. The recorded argv is the assertion surface: a claim is a
 // `bd update <id> --claim`, so its presence or absence in the log is direct
 // evidence of whether a mutation ran, which an exit code alone cannot give.
-func installNonTurnDemandProbe(t *testing.T) (argvLog string) {
+func installNonTurnDemandProbe(t *testing.T, cityDir, sessionID string) (argvLog string) {
 	t.Helper()
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seeded, err := store.Get(sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(struct {
+		beads.Bead
+		Revision int64 `json:"revision"`
+	}{Bead: seeded, Revision: seeded.Revision})
+	if err != nil {
+		t.Fatal(err)
+	}
 	fakeBin := t.TempDir()
-	argvLog = filepath.Join(t.TempDir(), "bd-argv.log")
+	stateDir := t.TempDir()
+	argvLog = filepath.Join(stateDir, "bd-argv.log")
+	if err := os.WriteFile(filepath.Join(stateDir, "session.json"), encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "owner"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	script := `#!/bin/sh
 printf '%s\n' "$*" >> "$BD_ARGV_LOG"
-for a in "$@"; do
-  if [ "$a" = "--metadata-field" ]; then
-    printf '[{"id":"demand-1","status":"open","issue_type":"task","metadata":{"gc.routed_to":"worker"}}]'
-    exit 0
+owner=$(cat "$BD_PROBE_STATE/owner")
+status=open; revision=1
+[ -n "$owner" ] && status=in_progress && revision=2
+render_demand() {
+  printf '[{"id":"demand-1","status":"%s","assignee":"%s","revision":%s,"issue_type":"task","source_store_ref":"city:test-city","metadata":{"gc.routed_to":"worker"}}]' "$status" "$owner" "$revision"
+}
+case "$1" in
+show)
+  if [ "$3" = "demand-1" ]; then
+    render_demand
+  elif [ "$3" = "$BD_PROBE_SESSION" ]; then
+    printf '['; cat "$BD_PROBE_STATE/session.json"; printf ']'
+  else
+    printf '[]'
   fi
-done
+  exit 0 ;;
+ready)
+  for argument in "$@"; do
+    case "$argument" in --assignee=*) printf '[]'; exit 0 ;; esac
+  done
+  if [ "$status" = "open" ]; then render_demand; else printf '[]'; fi
+  exit 0 ;;
+update)
+  if [ "$2" = "demand-1" ]; then
+    for argument in "$@"; do
+      if [ "$argument" = "--claim" ]; then
+        if [ -n "$owner" ] && [ "$owner" != "$BEADS_ACTOR" ]; then exit 13; fi
+        printf '%s' "$BEADS_ACTOR" > "$BD_PROBE_STATE/owner"
+        owner="$BEADS_ACTOR"; status=in_progress; revision=2
+        render_demand
+        exit 0
+      fi
+    done
+  fi
+  ;;
+esac
 printf '[]'
 `
 	if err := os.WriteFile(filepath.Join(fakeBin, "bd"), []byte(script), 0o755); err != nil {
@@ -38,6 +91,11 @@ printf '[]'
 	}
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("BD_ARGV_LOG", argvLog)
+	t.Setenv("BD_PROBE_STATE", stateDir)
+	t.Setenv("BD_PROBE_SESSION", sessionID)
+	// The same fake bd serves query projections, exact authoritative reads and
+	// the claim write. The seeded session remains available for identity checks.
+	t.Setenv("GC_BEADS", "bd")
 	return argvLog
 }
 
@@ -101,7 +159,7 @@ func TestNonTurnHookInvocationCannotMintExecution(t *testing.T) {
 			t.Setenv("GC_BEADS", "file")
 			cityDir := writeFenceTestCity(t)
 			sessionID := newFenceSessionBead(t, cityDir, session.StateActive, "live-token")
-			argvLog := installNonTurnDemandProbe(t)
+			argvLog := installNonTurnDemandProbe(t, cityDir, sessionID)
 			setFenceClaimEnv(t, cityDir, sessionID, "live-token")
 			t.Setenv(marker.key, marker.value)
 
@@ -149,15 +207,25 @@ func TestTurnHookInvocationMintsTheClaim(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	cityDir := writeFenceTestCity(t)
 	sessionID := newFenceSessionBead(t, cityDir, session.StateActive, "live-token")
-	argvLog := installNonTurnDemandProbe(t)
+	argvLog := installNonTurnDemandProbe(t, cityDir, sessionID)
 	setFenceClaimEnv(t, cityDir, sessionID, "live-token")
 
 	var stdout, stderr bytes.Buffer
-	cmdHookWithOptions(nil, hookCommandOptions{Claim: true, JSON: true}, &stdout, &stderr)
+	code := cmdHookWithOptions(nil, hookCommandOptions{Claim: true, JSON: true}, &stdout, &stderr)
 
 	if !nonTurnProbeClaimed(t, argvLog) {
 		t.Fatalf("a real turn did not reach the claim mutation; stdout=%q stderr=%s\nbd argv log:\n%s",
 			stdout.String(), stderr.String(), readFileForTest(t, argvLog))
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("claim result: %v; stdout=%q stderr=%s", err, stdout.String(), stderr.String())
+	}
+	if code != 0 || result.Action != "work" || result.BeadID != "demand-1" {
+		t.Fatalf("claim result = %+v, code=%d; stderr=%s", result, code, stderr.String())
+	}
+	if owner := strings.TrimSpace(readFileForTest(t, filepath.Join(os.Getenv("BD_PROBE_STATE"), "owner"))); owner == "" || owner != result.Assignee {
+		t.Fatalf("persisted claim owner = %q, want result assignee %q", owner, result.Assignee)
 	}
 }
 

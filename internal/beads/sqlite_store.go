@@ -22,13 +22,14 @@ import (
 )
 
 const (
-	sqliteStoreFilename               = "beads.sqlite"
-	sqliteDefaultPrefix               = "gc"
-	sqliteGraphPrefix                 = "gcg"
-	sqliteGraphSequenceFloorFilename  = "graph.seqfloor"
-	sqliteClaimFenceKVPrefix          = "gascity.claim-fence.v1/"
-	sqliteDefaultRetentionPeriod      = 4 * time.Hour
-	sqliteDefaultRetentionSweepPeriod = 30 * time.Second
+	sqliteStoreFilename                     = "beads.sqlite"
+	sqliteDefaultPrefix                     = "gc"
+	sqliteGraphPrefix                       = "gcg"
+	sqliteGraphSequenceFloorFilename        = "graph.seqfloor"
+	sqliteClaimFenceKVPrefix                = "gascity.claim-fence.v1/"
+	sqliteDefaultRetentionPeriod            = 4 * time.Hour
+	sqliteDefaultRetentionSweepPeriod       = 30 * time.Second
+	sqliteInitialRevision             int64 = 1
 
 	// sqliteBusyRetryAttempts is the number of application-level retries after
 	// the per-connection busy_timeout is exhausted. Retry n sleeps a jittered
@@ -836,6 +837,12 @@ func (s *SQLiteStore) checkPinnedIDNamespace(id string) error {
 
 func (s *SQLiteStore) normalizeCreate(b Bead) Bead {
 	b = cloneBead(b)
+	// A revision belongs to the destination row, not the caller or a migrated
+	// source. Legacy layouts without the column remain explicitly unversioned.
+	b.Revision = 0
+	if s.hasRevisionColumn {
+		b.Revision = sqliteInitialRevision
+	}
 	if b.ID == "" {
 		b.ID = s.nextID()
 	} else if n, ok := s.sequenceOfID(b.ID); ok {
@@ -1148,15 +1155,22 @@ func (s *SQLiteStore) upsertBeadTx(ctx context.Context, tx *sql.Tx, b Bead) erro
 			 ref=excluded.ref,
 			 description=excluded.description,
 			 bead_json=excluded.bead_json`
+	columns := "id,tier,title,status,issue_type,priority,created_at,updated_at,assignee,from_agent,parent_id,ref,description,bead_json"
+	placeholders := "?,?,?,?,?,?,?,?,?,?,?,?,?,?"
+	args := []any{
+		b.ID, tier, b.Title, b.Status, b.Type, priority, b.CreatedAt.UnixNano(), sqliteUnixNanoOrZero(b.UpdatedAt),
+		b.Assignee, b.From, b.ParentID, b.Ref, b.Description, string(payload),
+	}
 	if s.hasRevisionColumn {
+		columns += ",revision"
+		placeholders += ",?"
+		args = append(args, sqliteInitialRevision)
 		update += `, revision=beads.revision+1`
 	}
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO beads(id,tier,title,status,issue_type,priority,created_at,updated_at,assignee,from_agent,parent_id,ref,description,bead_json)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-		ON CONFLICT(id) DO UPDATE SET `+update,
-		b.ID, tier, b.Title, b.Status, b.Type, priority, b.CreatedAt.UnixNano(), sqliteUnixNanoOrZero(b.UpdatedAt),
-		b.Assignee, b.From, b.ParentID, b.Ref, b.Description, string(payload))
+		INSERT INTO beads(`+columns+`)
+		VALUES(`+placeholders+`)
+		ON CONFLICT(id) DO UPDATE SET `+update, args...)
 	if err != nil {
 		return fmt.Errorf("sqlite upsert bead %q: %w", b.ID, err)
 	}

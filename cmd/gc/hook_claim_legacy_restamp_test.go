@@ -76,7 +76,20 @@ owner=$(cat %[1]q)
 status=$(cat %[2]q)
 case "$1" in
 show)
-  printf '[{"id":"%[3]s","status":"%%s","assignee":"%%s"}]' "$status" "$owner"
+  if [ "$3" = "%[3]s" ]; then
+    printf '[{"id":"%[3]s","status":"%%s","assignee":"%%s","revision":1,"metadata":{"gc.routed_to":"builder"}}]' "$status" "$owner"
+  elif [ -n "$GC_SESSION_ID" ] && [ "$3" = "$GC_SESSION_ID" ]; then
+    printf '[{"id":"%%s","status":"open","issue_type":"session","revision":1,"labels":["gc:session"],"metadata":{"session_name":"%%s","template":"builder","state":"active","instance_token":"%%s"}}]' "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_INSTANCE_TOKEN"
+  else
+    printf '[]'
+  fi
+  exit 0 ;;
+ready)
+  if [ "$status" = "open" ]; then
+    printf '[{"id":"%[3]s","status":"open","assignee":"%%s","revision":1,"metadata":{"gc.routed_to":"builder"}}]' "$owner"
+  else
+    printf '[]'
+  fi
   exit 0 ;;
 close)
   if [ "$BEADS_ACTOR" != "$owner" ]; then

@@ -5226,6 +5226,7 @@ func TestListQueuedNudges_CategorizesPendingAndDead(t *testing.T) {
 func TestCmdNudgeDropDeadLettersPendingNudge(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
+	writeCityTOML(t, dir, "nudge-drop")
 	t.Setenv("GC_CITY", dir)
 
 	item := newQueuedNudgeWithOptions("worker", "stale reminder", "session", time.Now(), queuedNudgeOptions{ID: "n-drop-1"})
@@ -5278,6 +5279,7 @@ func TestCmdNudgeDropDeadLettersPendingNudge(t *testing.T) {
 func TestCmdNudgeDropDeadLettersInFlightNudge(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
+	writeCityTOML(t, dir, "nudge-drop")
 	t.Setenv("GC_CITY", dir)
 	now := time.Now()
 
@@ -5378,6 +5380,7 @@ func TestCmdNudgeDropAlreadyDeadReportsError(t *testing.T) {
 func TestCmdNudgeDropMixedValidAndInvalidIDsProcessesValidOnes(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
+	writeCityTOML(t, dir, "nudge-drop")
 	t.Setenv("GC_CITY", dir)
 
 	item := newQueuedNudgeWithOptions("worker", "reminder", "session", time.Now(), queuedNudgeOptions{ID: "n-valid"})
@@ -5409,6 +5412,7 @@ func TestCmdNudgeDropMixedValidAndInvalidIDsProcessesValidOnes(t *testing.T) {
 func TestCmdNudgeDropJSON(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
+	writeCityTOML(t, dir, "nudge-drop")
 	t.Setenv("GC_CITY", dir)
 
 	item := newQueuedNudgeWithOptions("worker", "reminder", "session", time.Now(), queuedNudgeOptions{ID: "n-json"})

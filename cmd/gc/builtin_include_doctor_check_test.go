@@ -956,6 +956,7 @@ func TestEnsureBundledImportBindingSemanticEquivalence(t *testing.T) {
 func TestDoDoctorFixConvergesWave1CityRootImportsThroughImportState(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_HOME", t.TempDir())
 	coreSource, ok := builtinpacks.CanonicalImportSource("core")
 	if !ok {
 		t.Fatal("core builtin source missing")
@@ -1005,7 +1006,8 @@ schema = 2
 	})
 	cityFlag = dir
 	t.Setenv("GC_CITY_PATH", dir)
-	prependDoctorJSONStubBinaries(t, "tmux", "git", "jq", "pgrep", "lsof")
+	prependDoctorJSONStubBinaries(t, "tmux", "jq", "pgrep", "lsof")
+	stubCmdCachedPackGit(t)
 
 	targets := map[string]wave1PublicPackImportTarget{
 		"gastown": {
@@ -1024,12 +1026,33 @@ schema = 2
 			if source == "" {
 				continue
 			}
-			packs[source] = packman.LockedPack{Version: "1.2.3", Commit: "abc123"}
+			if source == coreSource {
+				// Keep the builtin at its real embedded pin. A fabricated commit
+				// would make the later store opener correctly refuse this city.
+				packs[source] = packman.LockedPack{Version: coreVersion, Commit: strings.TrimPrefix(coreVersion, "sha:")}
+			} else {
+				packs[source] = packman.LockedPack{Version: "1.2.3", Commit: "abc123"}
+			}
 		}
 		return &packman.Lockfile{Schema: packman.LockfileSchema, Packs: packs}, nil
 	}
 	installLockedImports = func(cityRoot string) (*packman.Lockfile, error) {
-		return packman.ReadLockfile(fsys.OSFS{}, cityRoot)
+		lock, err := packman.ReadLockfile(fsys.OSFS{}, cityRoot)
+		if err != nil {
+			return nil, err
+		}
+		for source, entry := range lock.Packs {
+			if source == coreSource {
+				if _, err := packman.EnsureRepoInCache(cityRoot, source, entry.Commit); err != nil {
+					return nil, err
+				}
+			} else {
+				// This is the fixture's external-install boundary, not a real
+				// network install. Subsequent public reads see the installed pack.
+				stageCmdCachedPack(t, source, entry.Commit, "[pack]\nname = \"gastown\"\nschema = 2\n")
+			}
+		}
+		return lock, nil
 	}
 	checkInstalledImports = func(_ string, _ map[string]config.Import) (*packman.CheckReport, error) {
 		return &packman.CheckReport{CheckedSources: 1}, nil

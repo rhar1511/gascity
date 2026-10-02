@@ -94,6 +94,7 @@ func TestServiceRuntimeBeadStoreUsesProviderAwareRigStore(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 
 	cityDir := t.TempDir()
+	writeSchema2RigCity(t, cityDir, "demo", "[workspace]\n[beads]\nprovider = \"file\"\n[[rigs]]\nname = \"frontend\"\n", "workspace_name = \"demo\"\n[rigs.frontend]\npath = \"frontend\"\n")
 	rigDir := filepath.Join(cityDir, "frontend")
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
 		t.Fatal(err)

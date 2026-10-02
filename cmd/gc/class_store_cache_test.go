@@ -90,6 +90,31 @@ func beadEventsFor(ep *events.Fake, id string) []string {
 // structurally on every CachingStore would advertise them over backings that
 // lack them — a cached bd store would type-assert as a claimer.
 var cacheOmittedCapabilities = map[string]func(beads.Store) bool{
+	"CreateDecisionFrontierRecord": func(store beads.Store) bool {
+		_, ok := beads.DecisionFrontierRecordWriterFor(store)
+		return ok
+	},
+	"CompareAndSetDecisionFrontierRecordMetadataKey": func(store beads.Store) bool {
+		_, ok := beads.DecisionFrontierRecordWriterFor(store)
+		return ok
+	},
+	"EnsureDecisionFrontierLink": func(store beads.Store) bool {
+		_, ok := beads.DecisionFrontierRecordWriterFor(store)
+		return ok
+	},
+	"DecisionFrontierSourceSnapshot": func(store beads.Store) bool {
+		_, ok := beads.DecisionFrontierSourceReaderFor(store)
+		return ok
+	},
+	"CompareAndSetMetadataKeyWithReceipt": func(store beads.Store) bool {
+		_, ok := beads.RevisionTransitionWriterFor(store)
+		return ok
+	},
+	"DecisionFrontierRevisionTransitionReceipt": func(store beads.Store) bool {
+		_, ok := beads.RevisionTransitionReceiptReaderFor(store)
+		return ok
+	},
+	"CreatePrivatePayloadValue": beads.SupportsPrivatePayloadValues,
 	"ApplyGraphPlan": func(store beads.Store) bool {
 		_, ok := beads.GraphApplyFor(store)
 		return ok

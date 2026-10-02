@@ -7122,6 +7122,7 @@ func TestBuildOrderDispatcherRigOrderUsesRigFileStore(t *testing.T) {
 	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
 
 	cityDir := t.TempDir()
+	writeSchema2RigCity(t, cityDir, "demo", "[workspace]\n[beads]\nprovider = \"file\"\n[[rigs]]\nname = \"frontend\"\nprefix = \"fe\"\n", "workspace_name = \"demo\"\nworkspace_prefix = \"ct\"\n[rigs.frontend]\npath = \"frontend\"\n")
 	rigDir := filepath.Join(cityDir, "frontend")
 	cityLayer := filepath.Join(cityDir, "formulas")
 	rigLayer := filepath.Join(rigDir, "formulas")
@@ -7200,6 +7201,7 @@ func TestBuildOrderDispatcherRigOrderCityPoolUsesCityFileStore(t *testing.T) {
 	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
 
 	cityDir := t.TempDir()
+	writeSchema2RigCity(t, cityDir, "demo", "[workspace]\n[beads]\nprovider = \"file\"\n[[rigs]]\nname = \"frontend\"\nprefix = \"fe\"\n", "workspace_name = \"demo\"\nworkspace_prefix = \"ct\"\n[rigs.frontend]\npath = \"frontend\"\n")
 	rigDir := filepath.Join(cityDir, "frontend")
 	cityLayer := filepath.Join(cityDir, "formulas")
 	rigLayer := filepath.Join(rigDir, "formulas")
@@ -7282,6 +7284,7 @@ func TestBuildOrderDispatcherRigOrderHonorsLegacyCityRunHistory(t *testing.T) {
 	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
 
 	cityDir := t.TempDir()
+	writeSchema2RigCity(t, cityDir, "demo", "[workspace]\n[beads]\nprovider = \"file\"\n[[rigs]]\nname = \"frontend\"\nprefix = \"fe\"\n", "workspace_name = \"demo\"\nworkspace_prefix = \"ct\"\n[rigs.frontend]\npath = \"frontend\"\n")
 	rigDir := filepath.Join(cityDir, "frontend")
 	cityLayer := filepath.Join(cityDir, "formulas")
 	rigLayer := filepath.Join(rigDir, "formulas")
@@ -7590,6 +7593,7 @@ func TestBuildOrderDispatcherReopensStoreForScopedFileReads(t *testing.T) {
 	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
 
 	cityDir := t.TempDir()
+	writeCityTOML(t, cityDir, "order-file-test")
 	layerDir := filepath.Join(cityDir, "formulas")
 	orderDir := filepath.Join(cityDir, "orders")
 	for _, dir := range []string{layerDir, orderDir} {

@@ -2128,8 +2128,11 @@ func (cs *controllerState) DecisionFrontierService() decisionfrontier.Service {
 		return decisionfrontier.Service{}
 	}
 
-	manager := session.NewManagerWithOptions(store, sp)
-	delivery, err := decisionfrontier.NewSessionPromptDelivery(spec.Identity, manager.PersistedStore(), manager)
+	factory, err := workerFactoryWithConfig(cs.cityPath, store, sp, cfg)
+	if err != nil {
+		return decisionfrontier.Service{}
+	}
+	delivery, err := decisionfrontier.NewSessionPromptDelivery(spec.Identity, factory, factory)
 	if err != nil {
 		return decisionfrontier.Service{}
 	}

@@ -163,21 +163,11 @@ func (e *closeOrphanEnv) get(t *testing.T, id string) beads.Bead {
 	return got
 }
 
-// TestSessionReconcilerOrphanCloseReleasesHeldWorkThenCloses pins the repair for
-// the three-way deadlock in ga-jrnou.
-//
-// A confirmed-orphaned seat that still holds open assigned work could not be
-// resolved by any lane: the close guard refuses while work is assigned
-// (session_work_guard.go), the wake path is blocked because an orphaned base
-// state raises BlockerMissingConfig, and releaseOrphanedPoolAssignments skips
-// the work because the seat's session bead is still open
-// (liveOpenSessionAssignmentExists tests bead status, not runtime liveness).
-// Each lane correctly deferred to the others and the seat wedged indefinitely —
-// 86 hours, in the maintainer-city case that surfaced it.
-//
-// The orphan close is the one site that has already confirmed the runtime is
-// observably dead, so it owns the tie-break: release the held work, then close.
-func TestSessionReconcilerOrphanCloseReleasesHeldWorkThenCloses(t *testing.T) {
+// TestSessionReconcilerOrphanCloseHoldsOpenAssignedWork pins the safe Q56
+// disposition of ga-jrnou: runtime absence is not signed recovery authority,
+// and an open assigned row is outside ReleaseIfCurrent's in-progress contract.
+// Preserve both the assignment and the session record until authorized recovery.
+func TestSessionReconcilerOrphanCloseHoldsOpenAssignedWork(t *testing.T) {
 	env := newCloseOrphanEnv(t)
 
 	// Empty desired state and a never-started provider: the seat is a confirmed
@@ -185,16 +175,16 @@ func TestSessionReconcilerOrphanCloseReleasesHeldWorkThenCloses(t *testing.T) {
 	env.tick(t, nil)
 
 	work := env.get(t, env.work.ID)
-	if work.Assignee != "" {
-		t.Fatalf("work assignee = %q, want empty — a confirmed-orphaned seat must not keep holding work", work.Assignee)
+	if work.Assignee != env.work.Assignee {
+		t.Fatalf("work assignee = %q, want original %q without recovery authority", work.Assignee, env.work.Assignee)
 	}
 	if work.Status != "open" {
-		t.Fatalf("work status = %q, want open — released work must return to open so pool demand can re-route it", work.Status)
+		t.Fatalf("work status = %q, want original open state", work.Status)
 	}
 
 	session := env.get(t, env.session.ID)
-	if session.Status != "closed" {
-		t.Fatalf("session bead status = %q, want closed — once the held work is released the close guard no longer refuses, so the orphan must close in the same tick", session.Status)
+	if session.Status != env.session.Status {
+		t.Fatalf("session bead status = %q, want original %q while it owns held work", session.Status, env.session.Status)
 	}
 }
 
@@ -206,9 +196,8 @@ func TestSessionReconcilerOrphanCloseReleasesHeldWorkThenCloses(t *testing.T) {
 // (engdocs/contributors/reconciler-debugging.md), so that misreport actively
 // misdirected the investigation for as long as the seat stayed wedged.
 //
-// Here the close DOES happen (the release above unblocks it), so the record
-// must say closed — and it must say so because the bead closed, not because the
-// site was reached.
+// A Q56-held assignment keeps the session open. The trace must report the
+// actual refusal, not claim completion merely because the close site ran.
 func TestSessionReconcilerOrphanCloseRecordsClosedOnlyWhenClosed(t *testing.T) {
 	env := newCloseOrphanEnv(t)
 	records := env.tick(t, nil)

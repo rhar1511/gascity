@@ -2903,6 +2903,7 @@ func TestControllerStateBuildStoresFileStoresUseLockFiles(t *testing.T) {
 
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(t.TempDir(), "rig1")
+	writeSchema2RigCity(t, cityDir, "test-city", "[workspace]\n[beads]\nprovider = \"file\"\n[[rigs]]\nname = \"rig1\"\n", fmt.Sprintf("workspace_name = \"test-city\"\n[rigs.rig1]\npath = %q\n", rigDir))
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -2951,6 +2952,7 @@ func TestControllerStateFileRigStoreReloadsAcrossConcurrentHandles(t *testing.T)
 
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(t.TempDir(), "rig1")
+	writeSchema2RigCity(t, cityDir, "test-city", "[workspace]\n[beads]\nprovider = \"file\"\n[[rigs]]\nname = \"rig1\"\n", fmt.Sprintf("workspace_name = \"test-city\"\n[rigs.rig1]\npath = %q\n", rigDir))
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -3016,6 +3018,7 @@ func TestControllerStateLegacyFileProviderUsesSharedCityStoreWithoutCreatingRigS
 
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(t.TempDir(), "rig1")
+	writeSchema2RigCity(t, cityDir, "test-city", "[workspace]\n[beads]\nprovider = \"file\"\n[[rigs]]\nname = \"rig1\"\n", fmt.Sprintf("workspace_name = \"test-city\"\n[rigs.rig1]\npath = %q\n", rigDir))
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
 		t.Fatal(err)
 	}

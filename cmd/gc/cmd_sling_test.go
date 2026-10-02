@@ -6052,13 +6052,33 @@ func TestOnFormulaOutput(t *testing.T) {
 		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
 	}
 	out := stdout.String()
-	// MemStore generates IDs like "gc-1".
-	if !strings.Contains(out, "Attached wisp gc-1 (formula \"code-review\") to BL-42") {
-		t.Errorf("stdout = %q, want attach message", out)
+	root := slingAttachedWispForTest(t, deps.Store, "BL-42", "code-review")
+	if want := fmt.Sprintf("Attached wisp %s (formula \"code-review\") to BL-42", root.ID); !strings.Contains(out, want) {
+		t.Errorf("stdout = %q, want persisted attachment %q", out, want)
 	}
 	if !strings.Contains(out, "Slung BL-42 (with formula \"code-review\")") {
 		t.Errorf("stdout = %q, want slung with formula message", out)
 	}
+}
+
+func slingAttachedWispForTest(t *testing.T, store beads.Store, workID, formula string) beads.Bead {
+	t.Helper()
+	work, err := store.Get(workID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", workID, err)
+	}
+	rootID := work.Metadata[beadmeta.MoleculeIDMetadataKey]
+	if rootID == "" {
+		t.Fatalf("work %s has no persisted molecule binding: %+v", workID, work)
+	}
+	root, err := store.Get(rootID)
+	if err != nil {
+		t.Fatalf("Get(%s) for work %s: %v", rootID, workID, err)
+	}
+	if !sling.IsAttachedRoot(root) || root.Status != "open" || root.Metadata[beadmeta.FormulaNameMetadataKey] != formula {
+		t.Fatalf("attachment for %s = %+v, want open %s formula root", workID, root, formula)
+	}
+	return root
 }
 
 func TestOnFormulaTitleOverrideBypassesRootTitlePlaceholder(t *testing.T) {
@@ -6124,7 +6144,10 @@ func TestBatchOnConvoy(t *testing.T) {
 		t.Fatalf("doSlingBatch returned %d, want 0; stderr: %s", code, stderr.String())
 	}
 	// MolCookOn goes through the store, verify 3 wisps were created.
-	all, _ := deps.Store.ListOpen()
+	all, err := deps.Store.ListOpen()
+	if err != nil {
+		t.Fatalf("ListOpen: %v", err)
+	}
 	molCount := 0
 	for _, b := range all {
 		if b.Type == "molecule" {
@@ -6135,16 +6158,13 @@ func TestBatchOnConvoy(t *testing.T) {
 		t.Errorf("got %d molecule beads in store, want 3", molCount)
 	}
 	out := stdout.String()
-	// MemStore generates IDs gc-1, gc-2, ... Each molecule.Cook creates
-	// 2 beads (root + step), so wisp root IDs are gc-1, gc-3, gc-5.
-	if !strings.Contains(out, "Attached wisp gc-1") {
-		t.Errorf("stdout = %q, want gc-1 attach", out)
-	}
-	if !strings.Contains(out, "Attached wisp gc-3") {
-		t.Errorf("stdout = %q, want gc-3 attach", out)
-	}
-	if !strings.Contains(out, "Attached wisp gc-5") {
-		t.Errorf("stdout = %q, want gc-5 attach", out)
+	// Source rows occupy IDs too. Verify the reported IDs against the persisted
+	// parent/formula bindings instead of assuming an allocator starting point.
+	for _, child := range q.childrenOf["CVY-1"] {
+		root := slingAttachedWispForTest(t, deps.Store, child.ID, "code-review")
+		if want := fmt.Sprintf("Attached wisp %s (formula \"code-review\") → %s", root.ID, child.ID); !strings.Contains(out, want) {
+			t.Errorf("stdout = %q, want persisted attachment %q", out, want)
+		}
 	}
 	if !strings.Contains(out, "Slung 3/3 children") {
 		t.Errorf("stdout = %q, want summary", out)
@@ -6258,6 +6278,11 @@ func TestBatchOnConvoyCopiesChildPriorityToCreatedBeads(t *testing.T) {
 	}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	// The query and authoritative store describe the same existing source rows.
+	// Only the new molecule and its step inherit the child's priority.
+	deps.Store = versionedSlingStore(0, []beads.Bead{
+		q.beadsByID["CVY-1"], q.childrenOf["CVY-1"][0],
+	}, nil)
 	opts := testOpts(a, "CVY-1")
 	opts.OnFormula = "code-review"
 	code := doSlingBatch(opts, deps, q, stdout, stderr)
@@ -6270,10 +6295,22 @@ func TestBatchOnConvoyCopiesChildPriorityToCreatedBeads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
+	created := 0
 	for _, bead := range all {
+		if bead.ID == "CVY-1" || bead.ID == "BL-1" {
+			continue
+		}
+		created++
 		if bead.Priority == nil || *bead.Priority != 3 {
 			t.Fatalf("created bead %s priority = %v, want 3", bead.ID, bead.Priority)
 		}
+	}
+	if created != 2 {
+		t.Fatalf("created %d beads, want the molecule and its step", created)
+	}
+	convoy, err := deps.Store.Get("CVY-1")
+	if err != nil || convoy.Priority != nil {
+		t.Fatalf("source convoy priority changed: %+v, err=%v", convoy, err)
 	}
 }
 
@@ -6570,9 +6607,9 @@ func TestBatchOnRegularPassthrough(t *testing.T) {
 		t.Fatalf("doSlingBatch returned %d, want 0; stderr: %s", code, stderr.String())
 	}
 	out := stdout.String()
-	// MemStore generates IDs like "gc-1".
-	if !strings.Contains(out, "Attached wisp gc-1") {
-		t.Errorf("stdout = %q, want attach message", out)
+	root := slingAttachedWispForTest(t, deps.Store, "BL-42", "code-review")
+	if want := fmt.Sprintf("Attached wisp %s (formula \"code-review\") to BL-42", root.ID); !strings.Contains(out, want) {
+		t.Errorf("stdout = %q, want persisted attachment %q", out, want)
 	}
 	if !strings.Contains(out, "Slung BL-42 (with formula") {
 		t.Errorf("stdout = %q, want slung with formula", out)
@@ -8569,13 +8606,7 @@ func TestDefaultFormulaExplicitOnOverrides(t *testing.T) {
 		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
 	}
 	// MolCookOn goes through the store; verify the explicit formula was used.
-	b, err := deps.Store.Get("gc-1")
-	if err != nil {
-		t.Fatalf("store.Get(gc-1): %v", err)
-	}
-	if b.Ref != "custom-formula" {
-		t.Errorf("bead Ref = %q, want explicit custom-formula", b.Ref)
-	}
+	_ = slingAttachedWispForTest(t, deps.Store, "HW-42", "custom-formula")
 	// Output should mention explicit formula, not default.
 	if strings.Contains(stdout.String(), "default formula") {
 		t.Errorf("stdout should not mention default formula when --on is explicit: %q", stdout.String())
