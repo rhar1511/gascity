@@ -39,7 +39,7 @@ func bdPresentationCommand(args []string) (project bool, err error) {
 		return false, fmt.Errorf("bd command has no private-safe presentation")
 	}
 	switch verb {
-	case "show", "list", "ready", "search", "blocked", "children", "create", "update", "close", "reopen", "label", "set-state":
+	case "show", "view", "list", "ready", "search", "blocked", "children", "create", "update", "close", "reopen", "label", "set-state":
 		return true, nil
 	case "dep":
 		if len(verbArgs) > 0 {
@@ -111,11 +111,30 @@ func projectBdProviderJSON(data []byte) ([]byte, error) {
 
 func bdPresentationJSONRequested(args []string) bool {
 	for _, arg := range args {
+		if arg == "--" {
+			break
+		}
 		if arg == "--json" || arg == "--format=json" {
 			return true
 		}
 	}
 	return false
+}
+
+// bdJSONProviderArgs keeps --json on the flag side of a positional terminator.
+// Appending it after -- would turn the presentation flag into another bead ID.
+func bdJSONProviderArgs(args []string) []string {
+	if bdPresentationJSONRequested(args) {
+		return append([]string(nil), args...)
+	}
+	for i, arg := range args {
+		if arg == "--" {
+			out := append([]string(nil), args[:i]...)
+			out = append(out, "--json")
+			return append(out, args[i:]...)
+		}
+	}
+	return append(append([]string(nil), args...), "--json")
 }
 
 func writeBdProviderPresentation(data []byte, jsonOut bool, stdout, stderr io.Writer) int {

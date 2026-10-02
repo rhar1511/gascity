@@ -50,6 +50,9 @@ func mainExitCode(args []string, stdout, stderr io.Writer) int {
 	// command can handle, not as a signal that kills gc mid-write. The claim
 	// path's delivery unwind depends on surviving that write.
 	ignoreSIGPIPE()
+	// Also before dispatch: every MySQL connection config copies the driver
+	// logger when it is built (mysql_driver_log.go).
+	installMySQLDriverLogger()
 	if handled, code := privateProductMetricsEntrypoint(args); handled {
 		return code
 	}
@@ -1520,14 +1523,82 @@ func ensureScopedFileStoreLayout(cityPath string) error {
 	return os.WriteFile(fileStoreLayoutMarkerPath(cityPath), []byte(fileStoreLayoutScopedV1+"\n"), 0o644)
 }
 
+// openScopeLocalFileStore opens the file store at scopeRoot without a known
+// city, resolving the owning city from ambient context. Callers that already
+// hold the city path must use openScopeLocalFileStoreForCity instead: ambient
+// resolution misses whenever the process is not pointed at that city (a
+// supervisor serving several cities, --city-url/--context, an unrelated cwd),
+// and a miss silently falls back to the default "gc" prefix.
 func openScopeLocalFileStore(scopeRoot string) (*beads.FileStore, error) {
+	return openScopeLocalFileStoreForCity(scopeRoot, "")
+}
+
+// openScopeLocalFileStoreForCity opens the file store at scopeRoot as a scope
+// of cityPath, so the store mints ids under that scope's configured prefix. A
+// blank cityPath falls back to ambient city resolution.
+func openScopeLocalFileStoreForCity(scopeRoot, cityPath string) (*beads.FileStore, error) {
 	beadsPath := filepath.Join(scopeRoot, ".gc", "beads.json")
-	store, err := beads.OpenFileStore(fsys.OSFS{}, beadsPath)
+	opts, err := fileStoreIDPrefixOpts(scopeRoot, cityPath)
+	if err != nil {
+		return nil, err
+	}
+	store, err := beads.OpenFileStore(fsys.OSFS{}, beadsPath, opts...)
 	if err != nil {
 		return nil, err
 	}
 	store.SetLocker(beads.NewFileFlock(beadsPath + ".lock"))
 	return store, nil
+}
+
+// fileStoreIDPrefixOpts resolves the bead-ID prefix a file store at scopeRoot
+// should mint under, so a multi-rig file-backed city does not collide on gc-N
+// across stores (bd/dolt/exec stores already carry their scope's prefix; the
+// file store was the only path that didn't). A standalone scope with no city
+// context keeps the default "gc"; an identified city's config errors propagate.
+func fileStoreIDPrefixOpts(scopeRoot, cityPath string) ([]beads.FileStoreOption, error) {
+	prefix, err := effectiveFileStorePrefix(scopeRoot, cityPath)
+	if err != nil {
+		return nil, err
+	}
+	if prefix != "" {
+		return []beads.FileStoreOption{beads.WithFileStoreIDPrefix(prefix)}, nil
+	}
+	return nil, nil
+}
+
+// effectiveFileStorePrefix maps a store scope root to its configured prefix:
+// the owning rig's EffectivePrefix, or the city HQ prefix for the city store.
+// cityPath names the city that owns the scope; a blank one is resolved from
+// ambient context. No discovered city leaves a standalone scope unprefixed;
+// a selected city's unreadable or malformed config is an error, not permission
+// to mint ids in the default namespace.
+func effectiveFileStorePrefix(scopeRoot, cityPath string) (string, error) {
+	if strings.TrimSpace(cityPath) == "" {
+		var err error
+		if cityPath, err = resolveCity(); err != nil {
+			if cityFlag == "" && isCityDiscoveryNotFound(err) {
+				return "", nil
+			}
+			return "", fmt.Errorf("resolving file store city: %w", err)
+		}
+	}
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		return "", fmt.Errorf("loading file store city config %q: %w", filepath.Join(cityPath, "city.toml"), err)
+	}
+	for i := range cfg.Rigs {
+		rig := cfg.Rigs[i]
+		if strings.TrimSpace(rig.Path) == "" {
+			continue
+		}
+		if samePath(resolveStoreScopeRoot(cityPath, rig.Path), scopeRoot) {
+			return rig.EffectivePrefix(), nil
+		}
+	}
+	if samePath(resolveStoreScopeRoot(cityPath, cityPath), scopeRoot) {
+		return config.EffectiveHQPrefix(cfg), nil
+	}
+	return "", nil
 }
 
 func ensurePersistedScopeLocalFileStore(scopeRoot string) error {
@@ -1543,23 +1614,23 @@ func ensurePersistedScopeLocalFileStore(scopeRoot string) error {
 	return os.WriteFile(beadsPath, []byte("{\"seq\":0,\"beads\":[]}\n"), 0o644)
 }
 
-func openExistingScopeLocalFileStore(scopeRoot string) (*beads.FileStore, error) {
+func openExistingScopeLocalFileStore(scopeRoot, cityPath string) (*beads.FileStore, error) {
 	beadsPath := filepath.Join(scopeRoot, ".gc", "beads.json")
 	if _, err := os.Stat(beadsPath); err != nil {
 		return nil, err
 	}
-	return openScopeLocalFileStore(scopeRoot)
+	return openScopeLocalFileStoreForCity(scopeRoot, cityPath)
 }
 
 func openCompatibleFileStore(scopeRoot, cityPath string) (*beads.FileStore, error) {
 	scopeRoot = resolveStoreScopeRoot(cityPath, scopeRoot)
 	if !samePath(scopeRoot, cityPath) && scopeUsesFileStoreContract(scopeRoot) {
-		return openExistingScopeLocalFileStore(scopeRoot)
+		return openExistingScopeLocalFileStore(scopeRoot, cityPath)
 	}
 	if fileStoreUsesScopedRoots(cityPath) {
-		return openExistingScopeLocalFileStore(scopeRoot)
+		return openExistingScopeLocalFileStore(scopeRoot, cityPath)
 	}
-	return openScopeLocalFileStore(cityPath)
+	return openScopeLocalFileStoreForCity(cityPath, cityPath)
 }
 
 func openStoreAtForCity(storePath, cityPath string) (beads.Store, error) {
@@ -1657,6 +1728,7 @@ func openOneShotStoreAtForCityWithConfig(storePath, cityPath string, cfg *config
 // reports that cfg is this one-shot invocation's own fresh load, which lets
 // the bd city-scope open reuse it; see openOneShotStoreAtForCityWithConfig.
 func openStoreResultAtForCityScoped(storePath, cityPath string, cfg *config.City, modeOverride gate.Mode, haveMode, authoritative, longLived, oneShotConfig bool) (beads.StoreOpenResult, error) {
+	haveCityContext := strings.TrimSpace(cityPath) != "" || cfg != nil
 	runtimeCityPath := cityPath
 	if runtimeCityPath == "" {
 		runtimeCityPath = cityForStoreDir(storePath)
@@ -1711,6 +1783,17 @@ func openStoreResultAtForCityScoped(storePath, cityPath string, cfg *config.City
 				runtimeCityPath, conditionalWritesStoreID(scopeRoot, runtimeCityPath), flags, resolved)
 		}(),
 		OpenFileStore: func() (beads.Store, error) {
+			// cityForStoreDir falls back to the scope itself when no city owns
+			// it. Do not promote that inference into an explicit city context
+			// for a legitimate standalone file store. An explicit selector or
+			// an existing (even malformed) config must still fail closed.
+			if !haveCityContext && cityFlag == "" {
+				_, explicitCityEnv := resolveExplicitCityPathEnv()
+				_, configErr := os.Stat(filepath.Join(runtimeCityPath, "city.toml"))
+				if !explicitCityEnv && os.IsNotExist(configErr) {
+					return openScopeLocalFileStore(scopeRoot)
+				}
+			}
 			return openCompatibleFileStore(scopeRoot, runtimeCityPath)
 		},
 		OpenBdStore: openBd,

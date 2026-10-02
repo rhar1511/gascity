@@ -132,8 +132,8 @@ func (r *hostBeadsPermitResolver) close() error {
 // controller-only variables empty to override inherited values. Any nonempty
 // configured value is authoritative and invalid input fails startup.
 func loadHostBeadsPermitResolverFromEnv() (*hostBeadsPermitResolver, error) {
-	directory, configured := os.LookupEnv(hostBeadsPermitAuthorityDirEnv)
-	if !configured || directory == "" {
+	directory := os.Getenv(hostBeadsPermitAuthorityDirEnv)
+	if directory == "" {
 		return nil, nil
 	}
 	if err := hostBeadsPermitLockProcessMemory(); err != nil {

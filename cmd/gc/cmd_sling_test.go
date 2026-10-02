@@ -1794,7 +1794,7 @@ func TestBuiltInSlingPoolRouteContractUsesMetadataOnly(t *testing.T) {
 		},
 	}
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
-	store := newSlingTestStore()
+	store := beads.NewMemStore()
 	deps.Store = store
 	// The bead lives in the saitoc rig store (single physical store reused
 	// below as both source and rig store for the scale_check probe), so

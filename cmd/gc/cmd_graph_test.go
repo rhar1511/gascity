@@ -492,10 +492,8 @@ func TestOpenRigAwareStoreLegacyFileCityUsesSharedCityStore(t *testing.T) {
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	toml := "[workspace]\nname = \"graph-city\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"frontend\"\nprefix = \"fe\"\npath = \"" + rigDir + "\"\n"
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(toml), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	toml := "[workspace]\nname = \"graph-city\"\n\n[[rigs]]\nname = \"frontend\"\nprefix = \"fe\"\npath = \"" + rigDir + "\"\n"
+	writeRigAnywhereCityToml(t, cityDir, toml)
 	writeGraphFileStoreFixture(t, cityDir, beads.Bead{ID: "fe-1", Title: "legacy shared bead", Status: "open", Type: "task"})
 
 	setCwd(t, cityDir)

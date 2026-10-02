@@ -118,10 +118,14 @@ rest_smoke_tests=(
 # integration tag. Keep this manifest exact; scripts tests compare it with the
 # canonical linux/amd64 shard's tagged source declarations.
 cmd_gc_integration_tests=(
+  TestBdStoreConstructorsSelectPrivateEvidenceByExactCityAndRigScope
   TestCapstoneIntegrationRealMinter
   TestControllerDiscoversAddedCronOrderWithoutRestart
   TestManagedBdRigProviderStoreRecoversAfterHardKillPortRebind
   TestManagedBeadsNativeCLICompatibility
+  TestPhase2RealTransportBoundsStayAHangDetector
+  TestPhase2RealTransportResultStillFailsWhenGenuinelyBroken
+  TestPhase2RealTransportResultToleratesASlowButCorrectStart
   TestPhase2WorkerCoreRealTransportProof
   TestRigAddIncludeResolvesScopedRegistryPackName
   TestStorageGateServesACityFromItsBeadsWorkspace

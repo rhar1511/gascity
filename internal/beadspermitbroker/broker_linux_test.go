@@ -10,12 +10,13 @@ import (
 	"encoding/json"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
-	"time"
 
+	"github.com/gastownhall/gascity/internal/testutil"
 	"golang.org/x/sys/unix"
 )
 
@@ -274,7 +275,7 @@ func TestReadControllerEnvironmentFileRejectsUnsafeFile(t *testing.T) {
 }
 
 func TestExitedPidfdCannotAuthorizeKey(t *testing.T) {
-	command := exec.Command(os.Args[0], "-test.run=^TestPidfdChildSleeps$")
+	command := exec.Command(os.Args[0], "-test.run=^TestPidfdChildWaitsForTermination$")
 	command.Env = []string{"GC_TEST_PIDFD_CHILD=1"}
 	if err := command.Start(); err != nil {
 		t.Fatal(err)
@@ -308,7 +309,7 @@ func TestExitedPidfdCannotAuthorizeKey(t *testing.T) {
 }
 
 func TestBrokerRejectsUnregisteredKernelPeer(t *testing.T) {
-	directory := t.TempDir()
+	directory := testutil.ShortTempDir(t, "gc-broker-")
 	socketPath := directory + "/broker.sock"
 	listener, err := unix.Socket(unix.AF_UNIX, unix.SOCK_SEQPACKET|unix.SOCK_CLOEXEC|unix.SOCK_NONBLOCK, 0)
 	if err != nil {
@@ -390,9 +391,11 @@ func currentProcessCommand(t *testing.T) (string, []string) {
 	return executable, arguments
 }
 
-func TestPidfdChildSleeps(t *testing.T) {
+func TestPidfdChildWaitsForTermination(_ *testing.T) {
 	if os.Getenv("GC_TEST_PIDFD_CHILD") == "1" {
-		time.Sleep(10 * time.Minute)
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, unix.SIGTERM)
+		defer stop()
+		<-ctx.Done()
 	}
 }
 

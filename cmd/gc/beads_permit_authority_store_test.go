@@ -18,12 +18,12 @@ import (
 func TestControllerBdStoresInstallWriterForExactCityAndRigScopes(t *testing.T) {
 	t.Run("city scope", func(t *testing.T) {
 		cityDir := t.TempDir()
-		server, transport := controllerPermitTestTransport(t, "project-alpha", "db-alpha")
+		server, transport := controllerPermitTestTransport(t)
 		defer server.Close()
 		entry, key := hostBeadsPermitTestEntry(t, "alpha", "city:alpha", "city-key", "city-key.pem")
 		entry.ProjectID, entry.Database = "project-alpha", "db-alpha"
 		resolver := controllerPermitTestResolver(t, entry, key)
-		cfg := controllerPermitTestConfig("alpha", transport)
+		cfg := controllerPermitTestConfig(transport)
 
 		leaf := controllerPermitTestBdStore(cityDir, "city:alpha", transport)
 		store := beads.NewCachingStore(leaf, nil)
@@ -37,12 +37,12 @@ func TestControllerBdStoresInstallWriterForExactCityAndRigScopes(t *testing.T) {
 	t.Run("rig scope", func(t *testing.T) {
 		cityDir := t.TempDir()
 		rigDir := filepath.Join(cityDir, "repo")
-		server, transport := controllerPermitTestTransport(t, "project-alpha", "db-alpha")
+		server, transport := controllerPermitTestTransport(t)
 		defer server.Close()
 		entry, key := hostBeadsPermitTestEntry(t, "alpha", "rig:repo", "rig-key", "rig-key.pem")
 		entry.ProjectID, entry.Database = "project-alpha", "db-alpha"
 		resolver := controllerPermitTestResolver(t, entry, key)
-		cfg := controllerPermitTestConfig("alpha", transport)
+		cfg := controllerPermitTestConfig(transport)
 		cfg.Beads.PrivateEvidence["rig:repo"] = transport
 		cfg.Rigs = []config.Rig{{Name: "repo", Path: rigDir, Prefix: "rp"}}
 
@@ -58,7 +58,7 @@ func TestControllerBdStoresInstallWriterForExactCityAndRigScopes(t *testing.T) {
 
 func TestControllerBdStoreRefusesBrokenMatchingAuthorityAndOmitsUnmatchedAuthority(t *testing.T) {
 	cityDir := t.TempDir()
-	server, validTransport := controllerPermitTestTransport(t, "project-alpha", "db-alpha")
+	server, validTransport := controllerPermitTestTransport(t)
 	defer server.Close()
 	entry, key := hostBeadsPermitTestEntry(t, "alpha", "city:alpha", "city-key", "city-key.pem")
 	entry.ProjectID, entry.Database = "project-alpha", "db-alpha"
@@ -94,7 +94,7 @@ func TestControllerBdStoreRefusesBrokenMatchingAuthorityAndOmitsUnmatchedAuthori
 
 	unmatchedEntry, unmatchedKey := hostBeadsPermitTestEntry(t, "other-city", "city:other-city", "other-key", "other-key.pem")
 	unmatchedResolver := controllerPermitTestResolver(t, unmatchedEntry, unmatchedKey)
-	cfg := controllerPermitTestConfig("alpha", validTransport)
+	cfg := controllerPermitTestConfig(validTransport)
 	store := controllerPermitTestBdStore(cityDir, "city:alpha", validTransport)
 	cs := &controllerState{cityName: "alpha", cityPath: cityDir, cityBeadStore: store}
 	if err := configureControllerProtectedDecisionFrontierStores(cs, cfg, unmatchedResolver); err != nil {
@@ -116,11 +116,11 @@ func controllerPermitTestBdStore(dir, storeRef string, transport config.PrivateE
 
 func TestOneShotBdStoreDoesNotInstallHostProtectedWriter(t *testing.T) {
 	cityDir := t.TempDir()
-	server, transport := controllerPermitTestTransport(t, "project-alpha", "db-alpha")
+	server, transport := controllerPermitTestTransport(t)
 	defer server.Close()
 	_, key := hostBeadsPermitTestEntry(t, "alpha", "city:alpha", "city-key", "city-key.pem")
 	_ = key // The one-shot open receives no host resolver or permit issuer.
-	cfg := controllerPermitTestConfig("alpha", transport)
+	cfg := controllerPermitTestConfig(transport)
 	store, err := openBdStoreAtWithConfig(cityDir, cityDir, cfg)
 	if err != nil {
 		t.Fatalf("open one-shot BdStore: %v", err)
@@ -132,12 +132,12 @@ func TestOneShotBdStoreDoesNotInstallHostProtectedWriter(t *testing.T) {
 
 func TestControllerBdStoreReloadRevalidatesProtectedAuthorityBeforePublish(t *testing.T) {
 	cityDir := t.TempDir()
-	server, transport := controllerPermitTestTransport(t, "project-alpha", "db-alpha")
+	server, transport := controllerPermitTestTransport(t)
 	defer server.Close()
 	entry, key := hostBeadsPermitTestEntry(t, "alpha", "city:alpha", "city-key", "city-key.pem")
 	entry.ProjectID, entry.Database = transport.ProjectID, transport.Database
 	resolver := controllerPermitTestResolver(t, entry, key)
-	current := controllerPermitTestConfig("alpha", transport)
+	current := controllerPermitTestConfig(transport)
 	oldLeaf := controllerPermitTestBdStore(cityDir, "city:alpha", transport)
 	oldStore := beads.NewCachingStore(oldLeaf, nil)
 	cs := &controllerState{
@@ -157,7 +157,7 @@ func TestControllerBdStoreReloadRevalidatesProtectedAuthorityBeforePublish(t *te
 	}
 
 	t.Run("valid replacement advertises writer", func(t *testing.T) {
-		next := controllerPermitTestConfig("alpha", transport)
+		next := controllerPermitTestConfig(transport)
 		nextTransport := next.Beads.PrivateEvidence["city:alpha"]
 		nextTransport.TokenFile = filepath.Join(t.TempDir(), "next-token")
 		if err := os.WriteFile(nextTransport.TokenFile, []byte("test-token\n"), 0o600); err != nil {
@@ -166,7 +166,7 @@ func TestControllerBdStoreReloadRevalidatesProtectedAuthorityBeforePublish(t *te
 		next.Beads.PrivateEvidence["city:alpha"] = nextTransport
 		replacement = controllerPermitTestBdStore(cityDir, "city:alpha", nextTransport)
 
-		if err := cs.updateFromRuntime(next, runtime.NewFake(), ""); err != nil {
+		if _, err := cs.updateFromRuntime(next, runtime.NewFake(), ""); err != nil {
 			t.Fatalf("valid protected-authority reload: %v", err)
 		}
 
@@ -183,13 +183,13 @@ func TestControllerBdStoreReloadRevalidatesProtectedAuthorityBeforePublish(t *te
 	t.Run("mismatched replacement retains live snapshot", func(t *testing.T) {
 		liveConfig := cs.Config()
 		liveStore := cs.CityBeadStore()
-		invalid := controllerPermitTestConfig("alpha", transport)
+		invalid := controllerPermitTestConfig(transport)
 		invalidTransport := invalid.Beads.PrivateEvidence["city:alpha"]
 		invalidTransport.Database = "wrong-database"
 		invalid.Beads.PrivateEvidence["city:alpha"] = invalidTransport
 		replacement = controllerPermitTestBdStore(cityDir, "city:alpha", invalidTransport)
 
-		if err := cs.updateFromRuntime(invalid, runtime.NewFake(), ""); err == nil {
+		if _, err := cs.updateFromRuntime(invalid, runtime.NewFake(), ""); err == nil {
 			t.Fatal("mismatched protected-authority reload returned success")
 		}
 
@@ -224,8 +224,10 @@ func controllerPermitTestResolver(t *testing.T, entry hostBeadsPermitAuthorityEn
 	return resolver
 }
 
-func controllerPermitTestTransport(t *testing.T, projectID, database string) (*httptest.Server, config.PrivateEvidenceTransportConfig) {
+func controllerPermitTestTransport(t *testing.T) (*httptest.Server, config.PrivateEvidenceTransportConfig) {
 	t.Helper()
+	const projectID = "project-alpha"
+	const database = "db-alpha"
 	capabilities := []string{
 		"issues.batchApply", "issues.batchApplyReceipt", "issues.casMetadata", "issues.create", "issues.get",
 		"issues.protectedMutation", "issues.sourceSnapshot", "issues.transitionMetadata", "issues.transitionReceipt.get", "project.enforce",
@@ -265,7 +267,8 @@ func controllerPermitTestTransportConfigWithIdentity(endpoint config.PrivateEvid
 	return map[string]config.PrivateEvidenceTransportConfig{"city:alpha": endpoint}
 }
 
-func controllerPermitTestConfig(cityName string, transport config.PrivateEvidenceTransportConfig) *config.City {
+func controllerPermitTestConfig(transport config.PrivateEvidenceTransportConfig) *config.City {
+	const cityName = "alpha"
 	return &config.City{
 		Workspace: config.Workspace{Name: cityName},
 		Beads:     config.BeadsConfig{PrivateEvidence: map[string]config.PrivateEvidenceTransportConfig{"city:" + cityName: transport}},

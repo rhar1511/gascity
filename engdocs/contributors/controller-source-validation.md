@@ -427,3 +427,100 @@ standards and spec reviewers found no remaining hard violations or P0-P2
 findings in these four fixture/comment deltas. Unsupported fake-writer,
 socket-length and pool-capability cases remain outstanding before combined
 publication, alongside the unchanged resource-census gate.
+
+### Upstream-combined reconciliation — 2026-10-02
+
+The next source merge preserves controller parent
+`9a015939f1f22f649636353533bd1caa76ce3f46` and reviewed upstream-baseline
+parent `f52f37d6b1c67db0d37ef3a2096eedae3b3a3408`. It is an isolated source
+candidate, not a deployed controller, accepted PR, or retirement approval.
+
+`/var/tmp/controller-upstream-safety-and-census-v4.log` passed the complete
+session package (8.555s), test utilities (0.003s), and the focused CLI safety
+suite (1.038s). The suite retains private-safe native/proxied watch output,
+positional argument terminators, batch transport refusal, provider-publication
+fences, and exact dead-runtime Stop/atomic-close fencing. Its census failed;
+that failure is preserved rather than treated as a complete gate pass.
+
+The resource correction retains incoming Large process inventory and explicitly
+accounts for the seven additional tagged call sites. Untagged/Small HTTP debt
+is lowered to 319 calls in 67 files, with the two expired Medium waivers removed.
+Their actual authenticated constructor/wrapper tests and the credential-redirect
+test remain in required integration routing. Broker cleanup uses a pipe wakeup,
+the PIDFD child waits for termination, and Dolt readiness no longer adds a fixed
+post-success sleep. The strict census passed (5.305s) in
+`/var/tmp/controller-upstream-resource-boundaries-v5.log`; that command then
+failed on an unused test import, so it is not an overall boundary-suite pass.
+
+`/var/tmp/controller-upstream-boundary-and-api-gates-v7.log` passed the complete
+broker package (0.210s) after correcting its test-owned Unix socket directory
+length. It then exposed an inherited stale wrapper-proof expectation. The
+corrected integration test preserves real authenticated HTTP readiness and
+outer private handles but requires unavailable qualification: BdStore archive
+transport does not establish the separate durable content-payload contract.
+The production allowlist remains unchanged.
+
+`/var/tmp/controller-upstream-boundary-and-api-gates-v9.log` passed that
+configured-wrapper integration proof (0.015s), the real two-host credential
+redirect proof (0.041s), and complete decision-frontier (2.705s), retirement
+(0.192s), and API (101.955s) packages. The following tagged CLI compile exposed
+another unused test import; no complete CLI baseline is claimed from this run.
+
+The pinned Gazelle 0.53.0 standalone tool was copied into owned scratch, never
+edited in the shared module cache. Its provided standard-library generator used
+the installed Go 1.26.6 SDK, including `testing/synctest`. Static external
+resolution preserves the reviewed module aliases, and `repo_tree.py` restores
+the cross-package embed labels. Repeating both generators left the complete
+BUILD-file hash unchanged; the repository-source helper regression passed.
+Expected cross-package embed/glob warnings remain documented. Bazel itself is
+not installed, so these results are not a Bazel execution pass.
+
+Parallel read-only standards and spec follow-ups reported no remaining hard
+violations or P0-P2 findings in the resource migration and capability-test
+correction. Broader CLI/integration, normal hooks, exact-head remote CI, durable
+backend composition, private-pack qualification, and the separate measured
+trial/retirement gates remain required. WIP dispatch stays enabled.
+
+`/var/tmp/controller-upstream-tagged-config-and-policy-v10.log` completed with
+exit 0: tagged controller/config/broker-boundary cases (0.476s), exact integration
+manifest checks (1.276s), complete CI execution-policy tests (0.427s), and the
+complete strict resource-census package (6.293s) all passed. This supersedes the
+unused-import compile failures above without erasing their history.
+
+The first normal upstream-merge commit attempt ran the required formatter and
+lint hook, then refused 19 lint findings; see
+`/var/tmp/controller-upstream-merge-normal-hooks-v1.log`. No hook was bypassed
+and no commit was produced. The corrections check update errors and runtime
+acceptance, remove dead assignments/constant helper arguments, and retain the
+watch helper's notification boundary. Lint's De Morgan/switch rewrites preserve
+the production predicates. The focused check first found one missed cross-file
+helper caller, then a stale fixture with no city config; both failed records
+remain. The repaired fixture uses real schema-2 rig bindings and preserves
+initial/reloaded store-count checks and provider replacement. Its raw-config
+fixture names the required builtin provider alias instead of relying on an
+invalid catalog.
+
+`/var/tmp/controller-upstream-hook-findings-regressions-v3.log` completed with
+exit 0: controller/config/store/watch cases (2.066s) and the complete selected
+broker/PIDFD cases (0.209s). Read-only review found no weakened assertions in the
+lint corrections. The normal merge commit still requires successful hooks;
+this focused run does not replace the full push-time baseline or exact-head CI.
+
+The second normal hook attempt refused one remaining constant transport-helper
+argument (`database` was always `db-alpha`), recorded in
+`/var/tmp/controller-upstream-merge-normal-hooks-v2.log`. The fixture now names
+that constant internally; all six callers and the independent identity-mismatch
+cases retain their behavior. The focused controller/one-shot/host-authority
+regressions passed (0.475s), log
+`/var/tmp/controller-upstream-hook-final-helper-regressions.log`. Neither failed
+hook attempt produced a commit or bypassed any check.
+
+The third normal attempt passed lint with zero issues, regenerated the API and
+configuration artifacts, then failed vet because the stale-reader PR-action
+test copied the incoming fake state's new mutex. The second service now uses a
+fresh existing fixture with the same city/configuration and the same blocked
+ledger, preserving its unknown-reservation and no-second-merge assertions.
+The selected PR-action interruption/stale-reader regressions passed (0.032s),
+log `/var/tmp/controller-upstream-fresh-state-fixture-regressions.log`.
+`/var/tmp/controller-upstream-merge-normal-hooks-v3.log` remains a failed hook
+record; full successful hooks, push-time tests and remote CI are still required.

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -252,6 +253,12 @@ func TestStart(t *testing.T) {
 // stop call to stopFile. This is the shape of the sandbox leak: the box exists
 // by the time start reports failure.
 func startFailureScript(createFile, stopFile, startStderr string) string {
+	return startExitScript(createFile, stopFile, startStderr, 1)
+}
+
+// startExitScript is startFailureScript with the start op's exit code chosen by
+// the caller.
+func startExitScript(createFile, stopFile, startStderr string, code int) string {
 	return `
 op="$1"
 name="$2"
@@ -261,7 +268,7 @@ case "$op" in
     cat > /dev/null
     echo "$name" >> "` + createFile + `"
     echo "` + startStderr + `" >&2
-    exit 1
+    exit ` + strconv.Itoa(code) + `
     ;;
   stop) echo "stop $name" >> "` + stopFile + `" ;;
   *) exit 2 ;;

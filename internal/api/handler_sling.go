@@ -23,6 +23,7 @@ import (
 	gitpkg "github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/qualification"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 	"github.com/gastownhall/gascity/internal/storeref"
@@ -693,12 +694,18 @@ type apiNotifier struct {
 	state State
 }
 
+// PokeController enqueues the allocator: sling routed work to a template,
+// and demand for a template is the allocator's to turn into wakes.
 func (n *apiNotifier) PokeController(_ string) {
-	n.state.Poke()
+	n.state.Enqueue(reconcilekey.Allocator())
 }
 
+// PokeControlDispatch enqueues the control-dispatch key, matching the CLI's
+// "control-dispatcher" socket command. It used to call the generic poke,
+// so API workflow launches never ran the targeted control-dispatcher
+// reconcile (OQ-6).
 func (n *apiNotifier) PokeControlDispatch(_ string) {
-	n.state.Poke()
+	n.state.Enqueue(reconcilekey.ControlDispatch())
 }
 
 type apiBeadRouter struct {
@@ -717,7 +724,7 @@ func (r apiBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 	}
 	current, err := r.store.Get(req.BeadID)
 	if err != nil {
-		if !(req.Force && errors.Is(err, beads.ErrNotFound)) {
+		if !req.Force || !errors.Is(err, beads.ErrNotFound) {
 			return fmt.Errorf("reading bead %s before routing: %w", req.BeadID, err)
 		}
 	} else {

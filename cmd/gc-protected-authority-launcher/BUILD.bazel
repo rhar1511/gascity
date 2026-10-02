@@ -8,22 +8,20 @@ go_library(
     ],
     importpath = "github.com/gastownhall/gascity/cmd/gc-protected-authority-launcher",
     visibility = ["//visibility:private"],
-    deps = ["//internal/beadspermitbroker"],
+    deps = select({
+        "@rules_go//go/platform:android": [
+            "//internal/beadspermitbroker",
+        ],
+        "@rules_go//go/platform:linux": [
+            "//internal/beadspermitbroker",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 go_binary(
     name = "gc-protected-authority-launcher",
     embed = [":gc-protected-authority-launcher_lib"],
-    visibility = ["//visibility:public"],
-)
-
-filegroup(
-    name = "bazel_repo_srcs",
-    srcs = glob(
-        ["**"],
-        allow_empty = True,
-        exclude = ["BUILD.bazel"],
-    ),
     visibility = ["//visibility:public"],
 )
 

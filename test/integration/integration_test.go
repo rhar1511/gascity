@@ -36,6 +36,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/bazeltest"
+
 	"github.com/cenkalti/backoff/v4"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -46,6 +48,7 @@ import (
 	"github.com/gastownhall/gascity/test/integration/runisolation"
 	"github.com/gastownhall/gascity/test/integration/subprocesssweep"
 	"github.com/gastownhall/gascity/test/tmuxtest"
+	"github.com/gastownhall/gascity/test/toolhome"
 )
 
 // gcBinary is the path to the built gc binary, set by TestMain.
@@ -190,6 +193,14 @@ func TestMain(m *testing.M) {
 
 	if os.Getenv("GC_INTEGRATION_SUPERVISOR_STOP_HELPER") == "1" {
 		select {}
+	}
+
+	// Every env this suite builds starts from os.Environ(); drop the shell's
+	// XDG base directories and BEADS_*/BD_* first so only explicit values reach
+	// bd, and pin bd's shared-server mode off. gc keeps the real HOME (see
+	// pinRealHomeEnv); bd is re-homed by the wrapper around realBDBinary below.
+	if err := toolhome.ScrubProcessEnv(); err != nil {
+		panic("integration: scrubbing host bd env: " + err.Error())
 	}
 
 	subprocess := os.Getenv("GC_SESSION") == "subprocess"
@@ -350,14 +361,30 @@ func TestMain(m *testing.M) {
 		}
 	} else {
 		gcBinary = filepath.Join(integrationToolBinDir, "gc")
-		buildCmd := exec.Command("go", "build", "-o", gcBinary, "./cmd/gc")
-		buildCmd.Dir = findModuleRoot()
-		buildCmd.Env, err = integrationModuleBuildEnv(os.Environ())
-		if err != nil {
-			panic("integration: preparing gc build environment: " + err.Error())
+		// Under bazel the pre-built gc binary ships in runfiles (declared as
+		// a data dep); use it instead of shelling out to `go build`.
+		runfilesGC := ""
+		for _, rf := range []string{os.Getenv("RUNFILES_DIR"), os.Getenv("TEST_SRCDIR")} {
+			if rf == "" {
+				continue
+			}
+			if bin := filepath.Join(rf, "_main", "cmd", "gc", "gc_", "gc"); statOK(bin) {
+				runfilesGC = bin
+				break
+			}
 		}
-		if out, err := buildCmd.CombinedOutput(); err != nil {
-			panic("integration: building gc binary: " + err.Error() + "\n" + string(out))
+		if runfilesGC != "" {
+			gcBinary = runfilesGC
+		} else {
+			buildCmd := exec.Command("go", "build", "-o", gcBinary, "./cmd/gc")
+			buildCmd.Dir = findModuleRoot()
+			buildCmd.Env, err = integrationModuleBuildEnv(os.Environ())
+			if err != nil {
+				panic("integration: preparing gc build environment: " + err.Error())
+			}
+			if out, err := buildCmd.CombinedOutput(); err != nil {
+				panic("integration: building gc binary: " + err.Error() + "\n" + string(out))
+			}
 		}
 	}
 
@@ -365,6 +392,12 @@ func TestMain(m *testing.M) {
 		panic("integration: resolving bd override: " + err.Error())
 	} else if ok {
 		realBDBinary = override
+	} else if bazeltest.IsBazel() {
+		// Under bazel the pinned bd ships prebuilt in runfiles as a data dep
+		// (http_archive of the same release the go-test CI installs).
+		if bd := runfilesBinaryAt("bd_bin_v1_3_1_rc_2", "bd"); bd != "" {
+			realBDBinary = bd
+		}
 	} else {
 		var err error
 		realBDBinary, err = buildPinnedIntegrationBDBinary(tmpDir)
@@ -372,15 +405,33 @@ func TestMain(m *testing.M) {
 			panic("integration: building pinned bd binary: " + err.Error())
 		}
 	}
-	bdBinary = filepath.Join(integrationToolBinDir, "bd")
-	shimCmd := exec.Command("go", "build", "-o", bdBinary, "./test/integration/filebdshim")
-	shimCmd.Dir = findModuleRoot()
-	shimCmd.Env, err = integrationModuleBuildEnv(os.Environ())
-	if err != nil {
-		panic("integration: preparing bd shim build environment: " + err.Error())
+	// Every real bd this suite runs — directly, through the file-store shim, or
+	// forked by gc — goes through this wrapper, which re-homes bd under the run's
+	// temp dir: gc runs with the real HOME, and bd must never resolve the
+	// operator's ~/.beads (a user-level dolt.shared-server: true starts the
+	// host-wide shared Dolt server).
+	wrappedRealBD := filepath.Join(tmpDir, "bd-real", "bd")
+	if err := toolhome.WriteWrapper(wrappedRealBD, filepath.Join(tmpDir, "bd-tool-home"), realBDBinary); err != nil {
+		panic("integration: wrapping real bd: " + err.Error())
 	}
-	if out, err := shimCmd.CombinedOutput(); err != nil {
-		panic("integration: building bd shim: " + err.Error() + "\n" + string(out))
+	realBDBinary = wrappedRealBD
+	bdBinary = filepath.Join(integrationToolBinDir, "bd")
+	if bazeltest.IsBazel() {
+		// The shim is a bazel-built go_binary shipped in runfiles as a data
+		// dep; no on-worker `go build` (which needs a module cache) required.
+		if shim := runfilesBinary("test/integration/filebdshim/filebdshim_/filebdshim"); shim != "" {
+			bdBinary = shim
+		}
+	} else {
+		shimCmd := exec.Command("go", "build", "-o", bdBinary, "./test/integration/filebdshim")
+		shimCmd.Dir = findModuleRoot()
+		shimCmd.Env, err = integrationModuleBuildEnv(os.Environ())
+		if err != nil {
+			panic("integration: preparing bd shim build environment: " + err.Error())
+		}
+		if out, err := shimCmd.CombinedOutput(); err != nil {
+			panic("integration: building bd shim: " + err.Error() + "\n" + string(out))
+		}
 	}
 	// These values authorize VCS discovery only for module-local Go builds.
 	// Remove them before any test or fixture subprocess can inherit them.
@@ -390,8 +441,10 @@ func TestMain(m *testing.M) {
 	if err := os.Unsetenv(integrationBuildGitTreeEnv); err != nil {
 		panic("integration: clearing build-only Git work-tree override: " + err.Error())
 	}
-	if err := os.Setenv(integrationRealBDBinaryEnv, realBDBinary); err != nil {
-		panic("integration: setting GC_INTEGRATION_REAL_BD: " + err.Error())
+	if realBDBinary != "" {
+		if err := os.Setenv(integrationRealBDBinaryEnv, realBDBinary); err != nil {
+			panic("integration: setting GC_INTEGRATION_REAL_BD: " + err.Error())
+		}
 	}
 
 	if override, ok, err := binaryOverride(integrationDoltBinaryEnv); err != nil {
@@ -401,10 +454,45 @@ func TestMain(m *testing.M) {
 		if err := writeExecShim(doltBinary, override); err != nil {
 			panic("integration: writing dolt shim: " + err.Error())
 		}
+	} else if resolved := runfilesBinaryAt("dolt_bin_v2_1_7", "dolt-linux-amd64/bin/dolt"); resolved != "" {
+		// Prebuilt pinned dolt from runfiles (bazel http_archive data dep);
+		// preferred over PATH so remote workers without a system dolt run the
+		// dolt-backed shapes.
+		doltBinary = filepath.Join(integrationToolBinDir, "dolt")
+		if err := writeExecShim(doltBinary, resolved); err != nil {
+			panic("integration: writing dolt shim: " + err.Error())
+		}
 	} else if resolved, err := exec.LookPath("dolt"); err == nil {
 		doltBinary = filepath.Join(integrationToolBinDir, "dolt")
 		if err := writeExecShim(doltBinary, resolved); err != nil {
 			panic("integration: writing dolt shim: " + err.Error())
+		}
+	}
+
+	// Agents resolve gc/bd/dolt from PATH (their scripts cannot see runfiles
+	// paths), and integrationEnvFor prepends integrationToolBinDir to PATH.
+	// Under bazel gcBinary/bdBinary point directly at runfiles binaries, so
+	// link them into the tool bin dir the way the go-build path materializes
+	// them there. Symlinks keep the 100MB+ gc binary out of every test's
+	// sandbox copy; copy is the fallback when linking fails.
+	for name, bin := range map[string]string{
+		"gc":   gcBinary,
+		"bd":   bdBinary,
+		"dolt": doltBinary,
+	} {
+		if bin == "" || filepath.Dir(bin) == integrationToolBinDir {
+			continue
+		}
+		dst := filepath.Join(integrationToolBinDir, name)
+		_ = os.Remove(dst)
+		if err := os.Symlink(bin, dst); err != nil {
+			data, readErr := os.ReadFile(bin)
+			if readErr != nil {
+				panic("integration: staging " + name + " into tool bin dir: " + readErr.Error())
+			}
+			if err := os.WriteFile(dst, data, 0o755); err != nil {
+				panic("integration: staging " + name + " into tool bin dir: " + err.Error())
+			}
 		}
 	}
 
@@ -752,7 +840,7 @@ func integrationPinnedBdBuildEnv(base []string) []string {
 // go.mod to pin. TestBDVersionPins in scripts/bd_version_pin_test.go reads it
 // by name out of this file and asserts it matches go.mod — see
 // TestPinnedIntegrationBeadsModuleVersion for why it is a literal.
-const wantPinnedBeadsModuleVersion = "v1.3.0"
+const wantPinnedBeadsModuleVersion = "v1.3.1-rc.2"
 
 func TestPinnedIntegrationBeadsModuleVersion(t *testing.T) {
 	version, err := pinnedIntegrationBeadsModuleVersion()
@@ -1466,6 +1554,9 @@ func renderFileStoreBeadList(items []beads.Bead) string {
 
 // findModuleRoot walks up from the current directory to find go.mod.
 func findModuleRoot() string {
+	if root := bazeltest.OverrideRoot(); root != "" {
+		return root
+	}
 	dir, err := os.Getwd()
 	if err != nil {
 		panic("integration: getting cwd: " + err.Error())
@@ -1584,6 +1675,14 @@ func integrationRuntimeEnv(base []string, gcHome, runtimeDir string, useDolt boo
 	// reliable kill-switch. Mirrors bdRuntimeEnv in cmd/gc/bd_env.go.
 	env = append(env, "BEADS_DOLT_AUTO_START=0")
 	env = pinRealHomeEnv(env)
+	// Seed a global gitconfig under the isolated GC_HOME and point children at
+	// it. The Makefile's TEST_ENV does this via scripts/test-gitconfig-path
+	// (user.name, user.email, beads.role=maintainer); under bazel the ambient
+	// variable is unset and gc subprocesses would read the executing worker's
+	// real global config, which has no beads.role — `gc doctor`'s beads-role
+	// check fails on any machine that never opted in. Writing it per-GC_HOME
+	// keeps every isolated root self-contained.
+	env = replaceEnv(env, "GIT_CONFIG_GLOBAL", ensureIntegrationGitConfig(gcHome))
 	return env
 }
 
@@ -1635,6 +1734,21 @@ func integrationFixtureAuthorityArg(cityDir string, identity graphBeadsIdentity)
 		return "", fmt.Errorf("encode fixture launcher authority: %w", err)
 	}
 	return integrationFixtureAuthorityFlag + base64.RawURLEncoding.EncodeToString(data), nil
+}
+
+// ensureIntegrationGitConfig writes the isolated global gitconfig mirrors of
+// scripts/test-gitconfig-path into gcHome and returns its path. Panics on
+// failure: a missing beads.role silently breaks agent flows mid-test.
+func ensureIntegrationGitConfig(gcHome string) string {
+	if err := os.MkdirAll(gcHome, 0o755); err != nil {
+		panic("integration: creating GC_HOME for gitconfig: " + err.Error())
+	}
+	path := filepath.Join(gcHome, "gitconfig-global")
+	content := "[user]\n\tname = Gas City Integration Test\n\temail = integration-test@gascity.invalid\n[beads]\n\trole = maintainer\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		panic("integration: writing isolated gitconfig: " + err.Error())
+	}
+	return path
 }
 
 // pinRealHomeEnv pins HOME to the real passwd-db home for the current uid.
@@ -3038,3 +3152,60 @@ type mainTB struct{ testing.TB }
 
 func (mainTB) Helper()                         {}
 func (mainTB) Logf(format string, args ...any) {}
+
+func statOK(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// runfilesBinaryAt resolves a file inside an external repository (e.g. a
+// prebuilt release binary fetched via http_archive) in the test's runfiles
+// tree, returning "" when absent. Bazel materializes external repos under
+// their canonical name (+http_archive+repo); _repo_mapping maps the apparent
+// name used in BUILD labels to the canonical runfiles path.
+func runfilesBinaryAt(repo, rel string) string {
+	for _, rf := range []string{os.Getenv("RUNFILES_DIR"), os.Getenv("TEST_SRCDIR")} {
+		if rf == "" {
+			continue
+		}
+		for _, cand := range []string{repo, canonicalRunfilesRepo(rf, repo)} {
+			if cand == "" {
+				continue
+			}
+			if bin := filepath.Join(rf, cand, rel); statOK(bin) {
+				return bin
+			}
+		}
+	}
+	return ""
+}
+
+// canonicalRunfilesRepo reads _repo_mapping in the runfiles root and returns
+// the canonical repository name for an apparent one ("" when unmapped).
+func canonicalRunfilesRepo(rf, apparent string) string {
+	data, err := os.ReadFile(filepath.Join(rf, "_repo_mapping"))
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		parts := strings.Split(line, ",")
+		if len(parts) == 3 && parts[1] == apparent {
+			return parts[2]
+		}
+	}
+	return ""
+}
+
+// runfilesBinary resolves a bazel-built binary from the test's runfiles tree
+// (workspace-relative path) and returns "" when absent.
+func runfilesBinary(rel string) string {
+	for _, rf := range []string{os.Getenv("RUNFILES_DIR"), os.Getenv("TEST_SRCDIR")} {
+		if rf == "" {
+			continue
+		}
+		if bin := filepath.Join(rf, "_main", rel); statOK(bin) {
+			return bin
+		}
+	}
+	return ""
+}

@@ -721,7 +721,6 @@ func bdSourceSnapshotIntegrationWaitForDolt(t *testing.T, ctx context.Context, p
 		}
 		cancel()
 		if err == nil && strings.TrimSpace(version) != "" {
-			time.Sleep(100 * time.Millisecond)
 			if exited, waitErr := process.exited(); exited {
 				t.Fatalf("private Dolt SQL server exited during readiness check: %v\noutput:\n%s", waitErr, process.output.String())
 			}

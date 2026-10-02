@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -11,6 +12,20 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/rogpeppe/go-internal/testscript"
 )
+
+func TestBdJSONProviderArgsPreservesPositionalTerminator(t *testing.T) {
+	args := []string{"show", "--", "--metadata=not-json"}
+	want := []string{"show", "--json", "--", "--metadata=not-json"}
+	if got := bdJSONProviderArgs(args); !reflect.DeepEqual(got, want) {
+		t.Fatalf("provider arguments=%q, want %q", got, want)
+	}
+	if !reflect.DeepEqual(args, []string{"show", "--", "--metadata=not-json"}) {
+		t.Fatal("operator arguments changed")
+	}
+	if got := bdJSONProviderArgs([]string{"show", "--", "--json"}); !reflect.DeepEqual(got, []string{"show", "--json", "--", "--json"}) {
+		t.Fatalf("positional --json mistaken for presentation flag: %q", got)
+	}
+}
 
 func TestPrivateProjectionExecutable(t *testing.T) {
 	testscript.Run(t, newTestscriptParams(t, filepath.Join("testdata", "private-projection.txtar")))

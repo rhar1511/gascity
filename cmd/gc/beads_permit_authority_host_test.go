@@ -18,7 +18,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"golang.org/x/sys/unix"
@@ -210,22 +209,8 @@ func TestHostBeadsPermitResolverEnvironmentSelection(t *testing.T) {
 	previousLock := hostBeadsPermitLockProcessMemory
 	hostBeadsPermitLockProcessMemory = func() error { return nil }
 	t.Cleanup(func() { hostBeadsPermitLockProcessMemory = previousLock })
-	oldValue, wasSet := os.LookupEnv(hostBeadsPermitAuthorityDirEnv)
-	if err := os.Unsetenv(hostBeadsPermitAuthorityDirEnv); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if wasSet {
-			_ = os.Setenv(hostBeadsPermitAuthorityDirEnv, oldValue)
-		} else {
-			_ = os.Unsetenv(hostBeadsPermitAuthorityDirEnv)
-		}
-	})
-	resolver, err := loadHostBeadsPermitResolverFromEnv()
-	if err != nil || resolver != nil {
-		t.Fatalf("absent env = (%v, %v), want (nil, nil)", resolver, err)
-	}
-
+	// Getenv deliberately makes absent and empty-masked authority equivalent.
+	// Setenv owns restoration without hand-written process-environment cleanup.
 	t.Setenv(hostBeadsPermitAuthorityDirEnv, "")
 	if resolver, err := loadHostBeadsPermitResolverFromEnv(); err != nil || resolver != nil {
 		t.Fatalf("empty masked env = (%v, %v), want absent authority", resolver, err)
@@ -483,7 +468,7 @@ func TestHostBeadsPermitResolverRejectsNonStrictDocumentsAndUnsafePaths(t *testi
 
 	t.Run("wrong private key type", func(t *testing.T) {
 		directory := t.TempDir()
-		entry, key := hostBeadsPermitTestEntry(t, "alpha", "city:alpha", "key-alpha", "signing-key.pem")
+		entry, _ := hostBeadsPermitTestEntry(t, "alpha", "city:alpha", "key-alpha", "signing-key.pem")
 		wrongKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 		if err != nil {
 			t.Fatal(err)
@@ -492,7 +477,7 @@ func TestHostBeadsPermitResolverRejectsNonStrictDocumentsAndUnsafePaths(t *testi
 		if err != nil {
 			t.Fatal(err)
 		}
-		key = pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: wrongPKCS8})
+		key := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: wrongPKCS8})
 		replaceHostBeadsPermitTestKey(t, &entry, key, true)
 		writeHostBeadsPermitAuthority(t, directory, []hostBeadsPermitAuthorityEntry{entry})
 		if _, err := loadHostBeadsPermitResolver(directory); err == nil {
@@ -632,31 +617,45 @@ func startHostBeadsPermitTestBroker(t *testing.T, socketPath string, document []
 		_ = unix.Close(listener)
 		t.Fatal(err)
 	}
+	stopReader, stopWriter, err := os.Pipe()
+	if err != nil {
+		_ = unix.Close(listener)
+		t.Fatal(err)
+	}
 	digest := sha256.Sum256(document)
 	keys := make(map[string]int, len(entries))
 	for _, entry := range entries {
 		keys[entry.PrivateKeyHandle] = entry.privateKeyFD
 	}
 	done := make(chan struct{})
-	stop := make(chan struct{})
 	t.Cleanup(func() {
-		close(stop)
-		_ = unix.Close(listener)
+		// Closing the pipe wakes Poll immediately, without elapsed-time polling
+		// or closing a descriptor underneath an active accept operation.
+		_ = stopWriter.Close()
 		<-done
+		_ = stopReader.Close()
+		_ = unix.Close(listener)
 		_ = os.Remove(socketPath)
 	})
 	go func() {
 		defer close(done)
+		poll := []unix.PollFd{
+			{Fd: int32(listener), Events: unix.POLLIN},
+			{Fd: int32(stopReader.Fd()), Events: unix.POLLIN},
+		}
 		for {
+			if _, err := unix.Poll(poll, -1); err != nil {
+				if err == unix.EINTR {
+					continue
+				}
+				return
+			}
+			if poll[1].Revents != 0 {
+				return
+			}
 			connection, _, acceptErr := unix.Accept4(listener, unix.SOCK_CLOEXEC)
 			if acceptErr != nil {
-				select {
-				case <-stop:
-					return
-				default:
-				}
 				if acceptErr == unix.EAGAIN || acceptErr == unix.EWOULDBLOCK || acceptErr == unix.EINTR {
-					time.Sleep(time.Millisecond)
 					continue
 				}
 				return

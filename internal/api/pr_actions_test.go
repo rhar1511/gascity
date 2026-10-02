@@ -836,10 +836,14 @@ func TestPRActionMergeClaimRejectsStalePendingReadAfterUnknownReservation(t *tes
 		Store: fx.store, target: fx.store, idempotencyKey: request.IdempotencyKey,
 		read: make(chan struct{}), release: make(chan struct{}),
 	}
-	stateB := *fx.state
+	// Share the exact city and ledger, not fakeState's synchronization fields.
+	stateB := newFakeState(t)
+	stateB.cfg = fx.state.cfg
+	stateB.cityName = fx.state.cityName
+	stateB.cityPath = fx.state.cityPath
 	stateB.stores = map[string]beads.Store{"myrig": blockedStore}
 	serviceB := NewPRActionService(PRActionServiceOptions{
-		State: &stateB, Forge: fx.forge, Evidence: fx.evidence, HumanVerifier: fx.verifier,
+		State: stateB, Forge: fx.forge, Evidence: fx.evidence, HumanVerifier: fx.verifier,
 		Policy: fx.policy, Now: func() time.Time { return fx.now },
 	})
 	resultB := make(chan PRActionResult, 1)

@@ -22,6 +22,7 @@ go_test(
         "frontier_test.go",
         "human_domain_test.go",
         "session_delivery_test.go",
+        "source_issue_test.go",
         "testenv_import_test.go",
         "transition_test.go",
     ],

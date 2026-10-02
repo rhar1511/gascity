@@ -5,8 +5,11 @@ go_library(
     srcs = [
         "admission_attachment.go",
         "admission_policy_v2.go",
+        "admission_proof_evaluation.go",
+        "claim_transition.go",
         "receipt.go",
         "recovery.go",
+        "recovery_escalation_request.go",
         "recovery_request.go",
         "scope.go",
         "transition_chain.go",
@@ -31,6 +34,8 @@ go_test(
     srcs = [
         "admission_attachment_test.go",
         "admission_policy_v2_test.go",
+        "admission_proof_evaluation_test.go",
+        "claim_transition_test.go",
         "receipt_test.go",
         "recovery_request_test.go",
         "recovery_test.go",
@@ -39,10 +44,10 @@ go_test(
     ],
     embed = [":worklifecycle"],
     deps = [
-        "//internal/formula",
         "//internal/beadmeta",
         "//internal/beads",
         "//internal/config",
+        "//internal/formula",
         "//internal/fsys",
         "//internal/storebinding",
         "//internal/testenv",

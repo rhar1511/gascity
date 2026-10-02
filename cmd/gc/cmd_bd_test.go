@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/storebinding"
 )
 
 func TestExtractRigFlag(t *testing.T) {
@@ -1857,20 +1858,15 @@ printf 'called' > "$BD_CAPTURE"
 	}
 }
 
-func TestGcBdAllowsRegisteredAndLegacyMetadataActors(t *testing.T) {
+func TestGcBdCompatibleMetadataActorsPreserveConditionalWriteGuards(t *testing.T) {
 	disableManagedDoltRecoveryForTest(t)
 
 	cityDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
-name = "demo"
-
+	writeSchema2RigCity(t, cityDir, "demo", `[workspace]
 [[rigs]]
 name = "saitoc"
-path = "saitoc"
 prefix = "sa"
-`), 0o644); err != nil {
-		t.Fatal(err)
-	}
+`, "workspace_name = \"demo\"\n[rigs.saitoc]\npath = \"saitoc\"\n")
 	binDir := t.TempDir()
 	capture := filepath.Join(t.TempDir(), "bd-ran")
 	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(`#!/bin/sh
@@ -1895,7 +1891,7 @@ esac
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("BD_CAPTURE", capture)
 
-	for _, tc := range []struct {
+	for i, tc := range []struct {
 		name string
 		args []string
 	}{
@@ -1909,12 +1905,60 @@ esac
 		{"metadata-looking positional after terminator", []string{"update", "scratch-1", "--", "--metadata=not-json"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.City{Rigs: []config.Rig{{Name: "saitoc"}}}
+			if message, refused := bdRigQualifiedMetadataRefusal(cfg, tc.args); refused {
+				t.Fatalf("compatible actor refused by routing preflight: %s", message)
+			}
+			if i < 4 {
+				// Prove compatible string metadata persists through the real CAS
+				// seam, not a fake `bd update` that cannot enforce revisions.
+				store := beads.NewMemStore()
+				created, err := store.Create(beads.Bead{Title: "Normal work", Type: "task"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				op, rejected, ok := parseBdByIDUpdateArgs(tc.args[1:])
+				if !ok {
+					t.Fatalf("compatible metadata parser rejected %q", rejected)
+				}
+				op.ID = created.ID
+				graph, err := storebinding.NewBeadsGraphStore(store)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var out, stderr bytes.Buffer
+				if code := doBdByIDUpdate(graph, op, "test", &out, &stderr); code != 0 {
+					t.Fatalf("CAS write=%d: %s", code, &stderr)
+				}
+				after, err := store.Get(created.ID)
+				if err != nil || after.Revision <= created.Revision {
+					t.Fatalf("CAS write did not advance revision: %+v %v", after, err)
+				}
+				for key, value := range op.Update.Metadata {
+					if after.Metadata[key] != value {
+						t.Fatalf("metadata did not persist: %+v", after)
+					}
+				}
+			}
 			if err := os.Remove(capture); err != nil && !os.IsNotExist(err) {
 				t.Fatal(err)
 			}
 			args := append([]string{"--city", cityDir}, tc.args...)
 			var stdout, stderr bytes.Buffer
-			if got := doBd(args, &stdout, &stderr); got != 0 {
+			got := doBd(args, &stdout, &stderr)
+			if i < 6 || i == 7 {
+				// The public command must not bypass CAS on a legacy backend,
+				// forward unrepresentable whole metadata, or bypass an exact batch
+				// read failure for positional IDs following --.
+				if got == 0 || stdout.Len() != 0 {
+					t.Fatalf("unsafe backend write accepted: exit=%d stdout=%q stderr=%q", got, &stdout, &stderr)
+				}
+				if _, err := os.Stat(capture); !os.IsNotExist(err) {
+					t.Fatalf("refused write reached provider: %v", err)
+				}
+				return
+			}
+			if got != 0 {
 				t.Fatalf("doBd() = %d, want success; stdout=%q stderr=%q", got, stdout.String(), stderr.String())
 			}
 			data, err := os.ReadFile(capture)

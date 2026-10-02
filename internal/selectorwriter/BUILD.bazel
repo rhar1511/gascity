@@ -2,23 +2,36 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "selectorwriter",
-    srcs = ["collector.go", "linux_identity_linux.go"],
+    srcs = [
+        "collector.go",
+        "linux_identity_linux.go",
+    ],
     importpath = "github.com/gastownhall/gascity/internal/selectorwriter",
+    visibility = ["//:__subpackages__"],
     deps = [
         "//internal/selectorinventory",
-        "@org_golang_x_sys//unix",
-    ],
-    visibility = ["//:__subpackages__"],
+    ] + select({
+        "@rules_go//go/platform:android": [
+            "@org_golang_x_sys//unix",
+        ],
+        "@rules_go//go/platform:linux": [
+            "@org_golang_x_sys//unix",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 go_test(
     name = "selectorwriter_test",
-    srcs = ["collector_test.go", "linux_identity_test.go"],
+    srcs = [
+        "collector_test.go",
+        "linux_identity_test.go",
+    ],
+    embed = [":selectorwriter"],
     deps = [
         "//internal/selectorattestation",
         "//internal/selectorinventory",
     ],
-    embed = [":selectorwriter"],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

@@ -121,7 +121,13 @@ A "list" that filters on the wisps (ephemeral) tier —
 filters would otherwise return [] and exit 0 on a ledger full of live
 molecules. Query filters retain their meaning. "heartbeat
 <issue-id>" forwards to bd's native heartbeat, which refreshes the claim's
-lease and fails loudly when the caller no longer owns it. gc adds one
+lease and fails loudly when the caller no longer owns it. "show <id>
+--watch" (or "show --current --watch", or the "view" alias) on a scope that
+uses bd's proxied-server transport (the default for a new city), where bd
+refuses watch mode, is served by gc instead: it re-runs "bd show" every 2
+seconds and redraws when the bead's status or update time changes, until
+Ctrl+C. Like bd's own watch, it renders the plain form and ignores show's
+display flags (--json, --short, --long, --refs, --children). gc adds one
 subcommand of its own: "release-if-current <issue-id> <assignee>", which
 conditionally resets an in-progress assignment only when the bead still has
 that assignee.
@@ -807,8 +813,26 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 			}
 			guardStore = store
 			guardBeads = make(map[string]beads.Bead, len(writeIDs))
+			// Bulk exact reads are an optimization, never a substitute for
+			// checking every target and its lifecycle admission below.
+			var batch map[string]beads.Bead
+			if getter, ok := store.(beads.ExactBatchGetter); ok && len(writeIDs) > 1 {
+				found, _, batchErr := getter.GetExactBatch(writeIDs)
+				if batchErr == nil {
+					batch = found
+				} else if !errors.Is(batchErr, beads.ErrExactBatchGetUnsupported) {
+					fmt.Fprintf(stderr, "gc bd: cannot verify lifecycle enrollment for batch: %v; refusing mutation\n", batchErr) //nolint:errcheck
+					return 1
+				}
+			}
 			for _, id := range writeIDs {
-				bead, getErr := store.Get(id)
+				bead, found := batch[id]
+				var getErr error
+				if !found {
+					bead, getErr = store.Get(id)
+				} else if bead.ID != id {
+					getErr = beads.ErrIDCollision
+				}
 				if errors.Is(getErr, beads.ErrIDCollision) {
 					// bd resolved a different bead — block the write to prevent
 					// mutating the wrong bead via substring resolution.
@@ -851,6 +875,24 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// config the caller already loaded.
 	if gateExitCode := runWorkRecordCloseGate(bdArgs, target.ScopeRoot, cityPath, cfg, guardStore, guardBeads, stderr); gateExitCode != 0 {
 		return gateExitCode
+	}
+	if ids, reason, jsonOutput, ok := parseFencedBatchClose(bdArgs); ok {
+		written, err := closeBdBatchAtRevisions(guardStore, guardBeads, ids, reason)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc bd: batch close: %v\n", err) //nolint:errcheck
+			return 1
+		}
+		if jsonOutput {
+			if err := writeJSON(stdout, bridgeBeads(written)); err != nil {
+				fmt.Fprintln(stderr, err) //nolint:errcheck
+				return 1
+			}
+		} else {
+			for _, b := range written {
+				fmt.Fprintf(stdout, "Closed %s\n", b.ID) //nolint:errcheck
+			}
+		}
+		return 0
 	}
 	if op, ok := parseBdByIDOp(bdArgs); ok && (op.Verb == bdByIDUpdate || op.Verb == bdByIDClose || op.Verb == bdByIDReopen) {
 		store := guardStore
@@ -933,7 +975,7 @@ protectedChecks:
 	jsonOutput := bdPresentationJSONRequested(bdArgs)
 	providerArgs := append([]string(nil), bdArgs...)
 	if projectOutput && !jsonOutput {
-		providerArgs = append(providerArgs, "--json")
+		providerArgs = bdJSONProviderArgs(bdArgs)
 	}
 	cmd := exec.Command(bdPath, providerArgs...)
 	cmd.Dir = target.ScopeRoot
@@ -962,6 +1004,17 @@ protectedChecks:
 		return 1
 	}
 	cmd.Env = workQueryEnvForDir(env, cmd.Dir)
+
+	// GC serves every recognized watch using bounded JSON reads. Native bd
+	// watch rendering cannot apply the private-record projection, while proxied
+	// bd refuses watch mode altogether. Both scopes retain change polling,
+	// cancellation, tracing and managed-store diagnostics without raw egress.
+	if req, ok := parseBdShowWatchArgs(bdArgs); ok {
+		return serveBdShowWatch(req, &bdWatchRunner{
+			bdPath: bdPath, dir: cmd.Dir, env: cmd.Env,
+			cityPath: cityPath, scopeRoot: target.ScopeRoot, stderr: stderr,
+		}, stdout, stderr)
+	}
 
 	traceStart := time.Now()
 	runErr := cmd.Run()
@@ -1263,7 +1316,7 @@ func bdMutationWriteIDs(args []string) (ids []string, ok bool, ambiguous bool) {
 
 	// valueFlags is the complete set of flags that consume the next argument as
 	// their value for this subcommand, in both long and short form.
-	// Sourced from `bd <sub> --help` (bd 1.3.0-rc.2, 2026-09-10).
+	// Sourced from `bd <sub> --help` (bd 1.3.1-rc.2, 2026-09-29).
 	valueFlags := bdSubcmdValueFlags(sub)
 
 	// boolFlags is the complete set of boolean (no-value) flags. Unknown flags

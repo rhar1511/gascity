@@ -684,7 +684,7 @@ func TestSessionReapPathsCaptureBeforeClosingAssignedWorkbenchAttempts(t *testin
 				case "stale-creating":
 					sp := runtime.NewFake()
 					now := fixture.session.CreatedAt.Add(staleCreatingStateTimeout + time.Second)
-					reaped = reapStaleSessionBeads(fixture.cityPath, fixture.cfg, fixture.store, nil, sp, nil, &clock.Fake{Time: now}, &stderr)
+					reaped = reapStaleSessionBeads(fixture.cityPath, fixture.cfg, fixture.store, nil, sp, nil, nil, &clock.Fake{Time: now}, &stderr)
 				case "preboot":
 					boot := fixture.session.CreatedAt.Add(time.Hour)
 					withHostBootTime(t, boot, nil)
@@ -794,7 +794,7 @@ func TestStaleCreatingPoolReapCapturesBeforeRuntimeStop(t *testing.T) {
 			}
 			now := fixture.session.CreatedAt.Add(staleCreatingStateTimeout + time.Minute)
 			var stderr strings.Builder
-			got := reapStaleSessionBeads(fixture.cityPath, fixture.cfg, fixture.store, nil, sp, nil, &clock.Fake{Time: now}, &stderr)
+			got := reapStaleSessionBeads(fixture.cityPath, fixture.cfg, fixture.store, nil, sp, nil, nil, &clock.Fake{Time: now}, &stderr)
 			if durable {
 				if got != 1 {
 					t.Fatalf("reaped = %d, want 1 after archive and teardown; stderr=%s", got, stderr.String())
