@@ -159,6 +159,7 @@ case "$1" in
       GOMODCACHE) echo "$fake_go_root/gomodcache" ;;
       GOTMPDIR) echo "" ;;
       GOROOT) echo "$fake_go_root/goroot" ;;
+      CGO_ENABLED) echo "${CGO_ENABLED:-0}" ;;
       *) echo "unexpected go env key: $2" >&2; exit 1 ;;
     esac
     ;;

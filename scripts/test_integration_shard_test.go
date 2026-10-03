@@ -99,92 +99,142 @@ func TestNestedIntegrationShardPreservesQualifiedBeadsExecutables(t *testing.T) 
 	}
 }
 
+func TestNestedIntegrationShardPreservesCGOMode(t *testing.T) {
+	for _, mode := range []string{"0", "1", ""} {
+		t.Run(mode, func(t *testing.T) {
+			fixture := newIntegrationShardFixture(t)
+			out, err := fixture.runShardWithEnv(t, "packages-cmd-gc-1-of-2",
+				"CGO_ENABLED="+mode,
+				"GC_DOLT_PORT=3329",
+				"BEADS_DOLT_SERVER_PORT=3329",
+			)
+			if err != nil {
+				t.Fatalf("nested integration shard failed: %v\n%s", err, out)
+			}
+			got := readCapturedGoEnv(t, fixture.envCapturePath)
+			wantMode := mode
+			if wantMode == "" {
+				wantMode = "0" // The recording Go tool models this resolved default.
+			}
+			for key, want := range map[string]string{
+				"CGO_ENABLED":            wantMode,
+				"GC_DOLT_PORT":           "unset",
+				"BEADS_DOLT_SERVER_PORT": "unset",
+			} {
+				if got[key] != want {
+					t.Errorf("nested child %s = %q, want %q", key, got[key], want)
+				}
+			}
+		})
+	}
+}
+
 func TestMakefileIntegrationShardPreservesQualifiedBeadsExecutables(t *testing.T) {
-	fixture := newIntegrationShardFixture(t)
-	bdPath := filepath.Join(fixture.binDir, "qualified-bd")
-	doltPath := filepath.Join(fixture.binDir, "qualified-dolt")
-	makefile := filepath.Join(t.TempDir(), "qualified-beads.mk")
-	writeTestFile(t, makefile, `
+	for _, mode := range []string{"0", "1", ""} {
+		t.Run(mode, func(t *testing.T) {
+			fixture := newIntegrationShardFixture(t)
+			bdPath := filepath.Join(fixture.binDir, "qualified-bd")
+			doltPath := filepath.Join(fixture.binDir, "qualified-dolt")
+			makefile := filepath.Join(t.TempDir(), "qualified-beads.mk")
+			writeTestFile(t, makefile, `
 .PHONY: qualified-beads-shard
 qualified-beads-shard:
 	@$(TEST_ENV) scripts/test-integration-shard bdstore
 `)
-	cmd := makeCommand("--no-print-directory", "-f", "Makefile", "-f", makefile, "qualified-beads-shard")
-	cmd.Dir = repoRoot(t)
-	cmd.Env = []string{
-		"PATH=" + fixture.binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
-		"HOME=" + fixture.homeDir,
-		"SHELL=/bin/sh",
-		"GC_TEST_NO_SLICE=1",
-		"SYS_USR_CGO_FALLBACK=0",
-		"BEADS_TEST_BD_BINARY=" + bdPath,
-		"BEADS_TEST_DOLT_BINARY=" + doltPath,
-		"GC_DOLT_PORT=3329",
-		"BEADS_DOLT_SERVER_PORT=3329",
-	}
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("make integration shard failed: %v\n%s", err, out)
-	}
-	got := readCapturedGoEnv(t, fixture.envCapturePath)
-	for key, want := range map[string]string{
-		"BEADS_TEST_BD_BINARY":   bdPath,
-		"BEADS_TEST_DOLT_BINARY": doltPath,
-		"GC_DOLT_PORT":           "unset",
-		"BEADS_DOLT_SERVER_PORT": "unset",
-	} {
-		if got[key] != want {
-			t.Errorf("make child %s = %q, want %q", key, got[key], want)
-		}
+			cmd := makeCommand("--no-print-directory", "-f", "Makefile", "-f", makefile, "qualified-beads-shard")
+			cmd.Dir = repoRoot(t)
+			cmd.Env = []string{
+				"PATH=" + fixture.binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+				"HOME=" + fixture.homeDir,
+				"SHELL=/bin/sh",
+				"GC_TEST_NO_SLICE=1",
+				"SYS_USR_CGO_FALLBACK=0",
+				"CGO_ENABLED=" + mode,
+				"BEADS_TEST_BD_BINARY=" + bdPath,
+				"BEADS_TEST_DOLT_BINARY=" + doltPath,
+				"GC_DOLT_PORT=3329",
+				"BEADS_DOLT_SERVER_PORT=3329",
+			}
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("make integration shard failed: %v\n%s", err, out)
+			}
+			got := readCapturedGoEnv(t, fixture.envCapturePath)
+			wantMode := mode
+			if wantMode == "" {
+				wantMode = "0" // The recording Go tool models this resolved default.
+			}
+			for key, want := range map[string]string{
+				"CGO_ENABLED":            wantMode,
+				"BEADS_TEST_BD_BINARY":   bdPath,
+				"BEADS_TEST_DOLT_BINARY": doltPath,
+				"GC_DOLT_PORT":           "unset",
+				"BEADS_DOLT_SERVER_PORT": "unset",
+			} {
+				if got[key] != want {
+					t.Errorf("make child %s = %q, want %q", key, got[key], want)
+				}
+			}
+		})
 	}
 }
 
 func TestLocalParallelPreservesQualifiedBeadsExecutables(t *testing.T) {
-	fixture := newIntegrationShardFixture(t)
-	bdPath := filepath.Join(fixture.binDir, "qualified-bd")
-	doltPath := filepath.Join(fixture.binDir, "qualified-dolt")
-	cityDir := t.TempDir()
-	writeTestFile(t, filepath.Join(cityDir, "city.toml"), "# Disposable runner coordination root.\n")
-	logDir := filepath.Join(cityDir, "logs")
-	if err := os.Mkdir(logDir, 0o755); err != nil {
-		t.Fatalf("create runner log directory: %v", err)
-	}
-	cmd := shardTestCommand(filepath.Join(repoRoot(t), "scripts", "test-local-parallel"), "cmd-gc-process")
-	cmd.Dir = repoRoot(t)
-	cmd.Env = []string{
-		"PATH=" + fixture.binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
-		"HOME=" + fixture.homeDir,
-		"SHELL=/bin/sh",
-		"TMPDIR=" + cityDir,
-		"GC_CITY_PATH=" + cityDir,
-		"GC_TEST_NO_SLICE=1",
-		// Recording-tool plumbing does not exercise host orphan cleanup.
-		"GC_TEST_NO_ORPHAN_SWEEP=1",
-		"SYS_USR_CGO_FALLBACK=0",
-		"LOCAL_TEST_JOBS=1",
-		"GC_TEST_INNER_P=1",
-		"CMD_GC_PROCESS_TOTAL=1",
-		"GO_TEST_TIMEOUT=17s",
-		"LOCAL_TEST_LOG_DIR=" + logDir,
-		"BEADS_TEST_BD_BINARY=" + bdPath,
-		"BEADS_TEST_DOLT_BINARY=" + doltPath,
-		"GC_DOLT_PORT=3329",
-		"BEADS_DOLT_SERVER_PORT=3329",
-	}
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("local parallel runner failed: %v\n%s", err, out)
-	}
-	got := readCapturedGoEnv(t, fixture.envCapturePath)
-	for key, want := range map[string]string{
-		"BEADS_TEST_BD_BINARY":   bdPath,
-		"BEADS_TEST_DOLT_BINARY": doltPath,
-		"GC_DOLT_PORT":           "unset",
-		"BEADS_DOLT_SERVER_PORT": "unset",
-	} {
-		if got[key] != want {
-			t.Errorf("outer runner child %s = %q, want %q", key, got[key], want)
-		}
+	for _, mode := range []string{"0", "1", ""} {
+		t.Run(mode, func(t *testing.T) {
+			fixture := newIntegrationShardFixture(t)
+			bdPath := filepath.Join(fixture.binDir, "qualified-bd")
+			doltPath := filepath.Join(fixture.binDir, "qualified-dolt")
+			cityDir := t.TempDir()
+			writeTestFile(t, filepath.Join(cityDir, "city.toml"), "# Disposable runner coordination root.\n")
+			logDir := filepath.Join(cityDir, "logs")
+			if err := os.Mkdir(logDir, 0o755); err != nil {
+				t.Fatalf("create runner log directory: %v", err)
+			}
+			cmd := shardTestCommand(filepath.Join(repoRoot(t), "scripts", "test-local-parallel"), "cmd-gc-process")
+			cmd.Dir = repoRoot(t)
+			cmd.Env = []string{
+				"PATH=" + fixture.binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+				"HOME=" + fixture.homeDir,
+				"SHELL=/bin/sh",
+				"TMPDIR=" + cityDir,
+				"GC_CITY_PATH=" + cityDir,
+				"GC_TEST_NO_SLICE=1",
+				// Recording-tool plumbing does not exercise host orphan cleanup.
+				"GC_TEST_NO_ORPHAN_SWEEP=1",
+				"SYS_USR_CGO_FALLBACK=0",
+				"CGO_ENABLED=" + mode,
+				"LOCAL_TEST_JOBS=1",
+				"GC_TEST_INNER_P=1",
+				"CMD_GC_PROCESS_TOTAL=1",
+				"GO_TEST_TIMEOUT=17s",
+				"LOCAL_TEST_LOG_DIR=" + logDir,
+				"BEADS_TEST_BD_BINARY=" + bdPath,
+				"BEADS_TEST_DOLT_BINARY=" + doltPath,
+				"GC_DOLT_PORT=3329",
+				"BEADS_DOLT_SERVER_PORT=3329",
+			}
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("local parallel runner failed: %v\n%s", err, out)
+			}
+			got := readCapturedGoEnv(t, fixture.envCapturePath)
+			wantMode := mode
+			if wantMode == "" {
+				wantMode = "0" // The recording Go tool models this resolved default.
+			}
+			for key, want := range map[string]string{
+				"CGO_ENABLED":            wantMode,
+				"BEADS_TEST_BD_BINARY":   bdPath,
+				"BEADS_TEST_DOLT_BINARY": doltPath,
+				"GC_DOLT_PORT":           "unset",
+				"BEADS_DOLT_SERVER_PORT": "unset",
+			} {
+				if got[key] != want {
+					t.Errorf("outer runner child %s = %q, want %q", key, got[key], want)
+				}
+			}
+		})
 	}
 }
 
@@ -619,6 +669,7 @@ case "$1" in
       GOMODCACHE) echo /tmp/fake-gomodcache ;;
       GOTMPDIR) echo "" ;;
       GOROOT) echo /tmp/fake-goroot ;;
+      CGO_ENABLED) echo "${CGO_ENABLED:-0}" ;;
       GOOS) echo "${GOOS:-$modeled_goos}" ;;
       GOARCH) echo "${GOARCH:-$modeled_goarch}" ;;
       *) echo "unexpected go env key: $2" >&2; exit 1 ;;
@@ -626,6 +677,7 @@ case "$1" in
     ;;
   test)
     {
+      printf 'CGO_ENABLED=%s\n' "${CGO_ENABLED-unset}"
       printf 'BEADS_TEST_BD_BINARY=%s\n' "${BEADS_TEST_BD_BINARY-unset}"
       printf 'BEADS_TEST_DOLT_BINARY=%s\n' "${BEADS_TEST_DOLT_BINARY-unset}"
       printf 'GC_DOLT_PORT=%s\n' "${GC_DOLT_PORT-unset}"

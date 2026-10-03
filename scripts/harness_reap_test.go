@@ -74,6 +74,7 @@ set -eu
 case "${1:-}" in
   env)
     case "${2:-}" in
+      CGO_ENABLED) printf '%%s\n' "${CGO_ENABLED:-0}" ;;
       GOPATH|GOCACHE|GOMODCACHE|GOTMPDIR|GOROOT) printf '%%s\n' %q ;;
       *) exit 99 ;;
     esac

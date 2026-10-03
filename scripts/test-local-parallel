@@ -120,6 +120,7 @@ gocache_val="$(go env GOCACHE)"
 gomodcache_val="$(go env GOMODCACHE)"
 gotmpdir_val="$(go env GOTMPDIR)"
 goroot_val="$(go env GOROOT)"
+cgo_enabled_val="$(go env CGO_ENABLED)"
 
 jobspecs=()
 
@@ -263,6 +264,7 @@ export TEST_LOCAL_GOCACHE="$gocache_val"
 export TEST_LOCAL_GOMODCACHE="$gomodcache_val"
 export TEST_LOCAL_GOTMPDIR="$gotmpdir_val"
 export TEST_LOCAL_GOROOT="${GOROOT:-$goroot_val}"
+export TEST_LOCAL_CGO_ENABLED="$cgo_enabled_val"
 
 # Lower each shard's CPU and I/O priority (best-effort) so the parallel fan-out
 # yields to interactive work and does not livelock constrained hosts during the
@@ -334,6 +336,7 @@ run_fan_out() {
     GOTMPDIR="${TEST_LOCAL_GOTMPDIR}" \
     GOROOT="${TEST_LOCAL_GOROOT}" \
     GOENV="${GOENV-}" \
+    CGO_ENABLED="${TEST_LOCAL_CGO_ENABLED}" \
     CGO_CPPFLAGS="${CGO_CPPFLAGS-}" \
     CGO_LDFLAGS="${CGO_LDFLAGS-}" \
     GOFLAGS="${GOFLAGS-}" \

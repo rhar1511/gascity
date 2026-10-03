@@ -54,6 +54,7 @@ case "${1:-}" in
       GOMODCACHE) printf '%%s\n' %q ;;
       GOTMPDIR) printf '%%s\n' %q ;;
       GOROOT) printf '%%s\n' %q ;;
+      CGO_ENABLED) printf '%%s\n' "${CGO_ENABLED:-0}" ;;
       *) exit 99 ;;
     esac
     ;;
@@ -377,7 +378,7 @@ func TestGoTestShardWithoutTimingPreservesDirectProductContract(t *testing.T) {
 		"GOROOT": filepath.Join(fixture.tmpDir, "goroot"), "GOENV": "", "GOFLAGS": "", "GO111MODULE": "",
 		"GOEXPERIMENT": "", "GOPROXY": "", "GOPRIVATE": "", "GONOPROXY": "", "GONOSUMDB": "",
 		"GOSUMDB": "", "GOINSECURE": "", "GOVCS": "", "GOWORK": "", "GC_FAST_UNIT": "0",
-		"CGO_CPPFLAGS": "", "CGO_LDFLAGS": "", "GC_TEST_SHARD_INDEX": "1", "GC_TEST_SHARD_TOTAL": "2",
+		"CGO_ENABLED": "0", "CGO_CPPFLAGS": "", "CGO_LDFLAGS": "", "GC_TEST_SHARD_INDEX": "1", "GC_TEST_SHARD_TOTAL": "2",
 		"BEADS_TEST_BD_BINARY": "", "BEADS_TEST_DOLT_BINARY": "",
 	}
 	got := fixtureEnvironment(t, readFixtureFile(t, fixture.productEnvFile))
