@@ -173,6 +173,7 @@ func TestFanOutWorkerReceivesExportedGitConfigGlobal(t *testing.T) {
 		"export TEST_LOCAL_GOMODCACHE=" + shellQuote(goEnvValue(t, "GOMODCACHE")),
 		"export TEST_LOCAL_GOTMPDIR=" + shellQuote(goEnvValue(t, "GOTMPDIR")),
 		"export TEST_LOCAL_GOROOT=" + shellQuote(goEnvValue(t, "GOROOT")),
+		"export TEST_LOCAL_CGO_ENABLED=" + shellQuote(goEnvValue(t, "CGO_ENABLED")),
 		"set +e",
 		"run_fan_out",
 		"status=$?",

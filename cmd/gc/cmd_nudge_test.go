@@ -5082,6 +5082,10 @@ func TestEnqueueSupersedes_SameAgentSourceReference(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
 	now := time.Now()
+	store := openNudgeFixtureStore(t, dir)
+	if store.Store == nil {
+		t.Fatal("expected configured nudge shadow store before enqueue")
+	}
 
 	first := newQueuedNudgeWithOptions("worker", "first reminder", "sling", now, queuedNudgeOptions{
 		ID:        "n-first",
@@ -5089,6 +5093,9 @@ func TestEnqueueSupersedes_SameAgentSourceReference(t *testing.T) {
 	})
 	if err := enqueueQueuedNudge(dir, first); err != nil {
 		t.Fatalf("enqueueQueuedNudge(first): %v", err)
+	}
+	if record, ok, err := nudgeFrontDoor(store).FindIncludingTerminal("n-first"); err != nil || !ok || record.State != "queued" {
+		t.Fatalf("first queued shadow = %+v, found=%v, err=%v", record, ok, err)
 	}
 
 	second := newQueuedNudgeWithOptions("worker", "second reminder", "sling", now.Add(time.Second), queuedNudgeOptions{
@@ -5117,7 +5124,7 @@ func TestEnqueueSupersedes_SameAgentSourceReference(t *testing.T) {
 	}
 
 	// Verify the superseded nudge has a terminal bead record with state "superseded".
-	store := openNudgeFixtureStore(t, dir)
+	store = openNudgeFixtureStore(t, dir)
 	if store.Store != nil {
 		b, ok, err := nudgeFrontDoor(store).FindIncludingTerminal("n-first")
 		if err != nil {

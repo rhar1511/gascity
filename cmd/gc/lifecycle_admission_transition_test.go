@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
@@ -10,11 +11,13 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/sling"
+	"github.com/gastownhall/gascity/internal/sourceworkflow"
 	"github.com/gastownhall/gascity/internal/worklifecycle"
 )
 
@@ -167,6 +170,65 @@ func TestLifecycleAdmissionTransitionConcurrentPassSharesExactReceipts(t *testin
 	}
 }
 
+// Admission must acquire its per-source admission lock before the Q43 source
+// reread, not only while creating the graph. Otherwise another admission can
+// publish a reservation or attachment between that snapshot and CurrentHead.
+func TestLifecycleAdmissionTransitionLocksBeforeSourceSnapshot(t *testing.T) {
+	for _, reserved := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reserved=%v", reserved), func(t *testing.T) {
+			setup := newLifecycleAdmissionTransitionSetup(t)
+			if reserved {
+				leaveLifecycleAdmissionReservation(t, setup)
+			}
+			snapshots := make(chan struct{}, 1)
+			setup.store.afterSourceSnapshot = func() {
+				select {
+				case snapshots <- struct{}{}:
+				default:
+				}
+			}
+			synctest.Test(t, func(t *testing.T) {
+				locked := make(chan struct{})
+				release := make(chan struct{})
+				holderDone := make(chan error, 1)
+				go func() {
+					holderDone <- sourceworkflow.WithLock(context.Background(), setup.fixture.cityPath, "lifecycle-admission:rig:pilot", setup.source.ID, func() error {
+						close(locked)
+						<-release
+						return nil
+					})
+				}()
+				<-locked
+				var stderr strings.Builder
+				admissionDone := make(chan struct{})
+				go func() {
+					reconcileLifecycleAdmissionWithPermitResolver("pilot", setup.fixture.cityPath, setup.fixture.cfg, setup.cityStore, setup.rigStores, nil, &stderr, setup.permitResolver)
+					close(admissionDone)
+				}()
+				synctest.Wait()
+				select {
+				case <-snapshots:
+					t.Error("admission read authoritative source while a peer held its per-source lock")
+				default:
+				}
+				close(release)
+				if err := <-holderDone; err != nil {
+					t.Fatalf("source lock holder: %v", err)
+				}
+				<-admissionDone
+				if stderr.Len() != 0 {
+					t.Fatalf("admission after peer release reported held work: %s", stderr.String())
+				}
+			})
+			attached, err := setup.store.Get(setup.source.ID)
+			marker, ok := lifecycleMaterializationFor(attached)
+			if err != nil || !ok || marker.State != "attached" || marker.WorkflowID == "" || len(setup.store.patchReceipts) != 2 || setup.store.sourceGenericWrites != 0 {
+				t.Fatalf("serialized admission = marker %+v receipts=%d generic writes=%d err=%v", marker, len(setup.store.patchReceipts), setup.store.sourceGenericWrites, err)
+			}
+		})
+	}
+}
+
 func assertLifecycleAdmissionStillOnlyQ43(t *testing.T, store *lifecycleAdmissionTransitionTestStore) {
 	t.Helper()
 	if len(store.patchRequests) != 0 || len(store.patchReceipts) != 0 {
@@ -200,6 +262,98 @@ func TestLifecycleAdmissionTransitionRecoversLostAttachResponse(t *testing.T) {
 	}
 	if len(store.patchRequests) != 2 || store.sourceGenericWrites != 0 {
 		t.Fatalf("patch calls=%d generic source writes=%d, want two typed receipts and zero generic writes", len(store.patchRequests), store.sourceGenericWrites)
+	}
+}
+
+func TestLifecycleAdmissionTransitionHoldsReopenedBlockerBeforeAttachment(t *testing.T) {
+	for _, recovered := range []bool{false, true} {
+		t.Run(fmt.Sprintf("recovered=%v", recovered), func(t *testing.T) {
+			const blockerID = "pilot-rig-blocker"
+			setup := newLifecycleAdmissionTransitionSetupWithCompletion(t, false, blockerID)
+			var stderr strings.Builder
+			if recovered {
+				setup.store.failNextPatchKind = "lifecycle_source_materialization_v1"
+				reconcileLifecycleAdmissionWithPermitResolver("pilot", setup.fixture.cityPath, setup.fixture.cfg, setup.cityStore, setup.rigStores, nil, &stderr, setup.permitResolver)
+				current, err := setup.store.Get(setup.source.ID)
+				marker, ok := lifecycleMaterializationFor(current)
+				if err != nil || !ok || marker.State != "reserved" || len(setup.store.patchReceipts) != 1 {
+					t.Fatalf("recovery fixture did not retain its exact reservation: marker=%+v err=%v stderr=%s", marker, err, stderr.String())
+				}
+				stderr.Reset()
+			}
+			digest, err := worklifecycle.AdmissionDigestV2(setup.receipt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			identity := map[string]string{beadmeta.IdempotencyKeyMetadataKey: lifecycleMaterializationID(setup.source.ID, setup.receipt.Scope, digest)}
+			reopened := false
+			reopenAfterGraph := func() {
+				if reopened {
+					return
+				}
+				roots, err := setup.store.MemStore.ListByMetadata(identity, 0, beads.WithBothTiers)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(roots) == 0 {
+					return
+				}
+				before, err := setup.store.Get(setup.source.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				open := "open"
+				if err := setup.store.Update(blockerID, beads.UpdateOpts{Status: &open}); err != nil {
+					t.Fatal(err)
+				}
+				after, err := setup.store.Get(setup.source.ID)
+				if err != nil || before.Revision != after.Revision || before.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey] != after.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey] {
+					t.Fatalf("fixture blocker reopen unexpectedly changed source token/head: before=%d after=%d err=%v", before.Revision, after.Revision, err)
+				}
+				t.Logf("blocker reopened: source revision before=%d after=%d; exact transition head unchanged", before.Revision, after.Revision)
+				ready, err := setup.store.Ready()
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, row := range ready {
+					if row.ID == setup.source.ID {
+						t.Fatal("reopened blocking dependency left source ready")
+					}
+				}
+				reopened = true
+			}
+			if recovered {
+				setup.store.afterWorkflowRead = reopenAfterGraph
+			} else {
+				setup.store.afterSourceSnapshot = reopenAfterGraph
+			}
+			reconcileLifecycleAdmissionWithPermitResolver("pilot", setup.fixture.cityPath, setup.fixture.cfg, setup.cityStore, setup.rigStores, nil, &stderr, setup.permitResolver)
+			current, err := setup.store.Get(setup.source.ID)
+			marker, ok := lifecycleMaterializationFor(current)
+			if err != nil || !reopened || !ok || marker.State != "reserved" || len(setup.store.patchReceipts) != 1 || len(controllerDemandRouteCandidates(current)) != 0 || stderr.Len() == 0 {
+				t.Fatalf("reopened blocker progressed attachment: reopened=%v marker=%+v receipts=%d err=%v stderr=%s", reopened, marker, len(setup.store.patchReceipts), err, stderr.String())
+			}
+			setup.store.afterSourceSnapshot = nil
+			setup.store.afterWorkflowRead = nil
+			closed := "closed"
+			if err := setup.store.Update(blockerID, beads.UpdateOpts{Status: &closed}); err != nil {
+				t.Fatal(err)
+			}
+			stderr.Reset()
+			reconcileLifecycleAdmissionWithPermitResolver("pilot", setup.fixture.cityPath, setup.fixture.cfg, setup.cityStore, setup.rigStores, nil, &stderr, setup.permitResolver)
+			current, err = setup.store.Get(setup.source.ID)
+			marker, ok = lifecycleMaterializationFor(current)
+			roots, rootsErr := setup.store.MemStore.ListByMetadata(identity, 0, beads.WithBothTiers)
+			var workflowRoots []beads.Bead
+			for _, root := range roots {
+				if root.ParentID == "" {
+					workflowRoots = append(workflowRoots, root)
+				}
+			}
+			if err != nil || rootsErr != nil || !ok || marker.State != "attached" || len(workflowRoots) != 1 || workflowRoots[0].ID != marker.WorkflowID || len(setup.store.patchReceipts) != 2 || setup.store.sourceGenericWrites != 0 || stderr.Len() != 0 {
+				t.Fatalf("ready recovery did not reuse one graph/two receipts: marker=%+v roots=%d receipts=%d generic=%d err=%v stderr=%s", marker, len(roots), len(setup.store.patchReceipts), setup.store.sourceGenericWrites, errors.Join(err, rootsErr), stderr.String())
+			}
+		})
 	}
 }
 
@@ -481,7 +635,7 @@ func newLifecycleAdmissionTransitionSetup(t *testing.T) lifecycleAdmissionTransi
 	return newLifecycleAdmissionTransitionSetupWithCompletion(t, false)
 }
 
-func newLifecycleAdmissionTransitionSetupWithCompletion(t *testing.T, withCompletion bool) lifecycleAdmissionTransitionSetup {
+func newLifecycleAdmissionTransitionSetupWithCompletion(t *testing.T, withCompletion bool, closedBlockerIDs ...string) lifecycleAdmissionTransitionSetup {
 	t.Helper()
 	fixture := newLifecycleAdmissionPolicyFixture(t, "formula = \"review\"\nversion = 1\n\n[[steps]]\nid = \"work\"\ntitle = \"Review work\"\n")
 	base := &beads.MemStore{IDPrefix: "pilot-rig", HonorExplicitIDs: true}
@@ -490,6 +644,22 @@ func newLifecycleAdmissionTransitionSetupWithCompletion(t *testing.T, withComple
 		Labels:   []string{worklifecycle.AdmissionIntentLabel},
 		Metadata: map[string]string{beadmeta.RootStoreRefMetadataKey: "rig:pilot"},
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, blockerID := range closedBlockerIDs {
+		if _, err := base.Create(beads.Bead{ID: blockerID, Title: "prerequisite", Type: "task"}); err != nil {
+			t.Fatal(err)
+		}
+		closed := "closed"
+		if err := base.Update(blockerID, beads.UpdateOpts{Status: &closed}); err != nil {
+			t.Fatal(err)
+		}
+		if err := base.DepAdd(source.ID, blockerID, "blocks"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	source, err = base.Get(source.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -625,6 +795,8 @@ type lifecycleAdmissionTransitionTestStore struct {
 	rejectNextPatchKind   string
 	failNextPatchKind     string
 	afterNextPatch        func(kind string)
+	afterSourceSnapshot   func()
+	afterWorkflowRead     func()
 }
 
 var (
@@ -658,6 +830,14 @@ func (s *lifecycleAdmissionTransitionTestStore) List(query beads.ListQuery) ([]b
 		return nil, err
 	}
 	return s.overlayLifecycleAdmissionRowsForQuery(rows, query), nil
+}
+
+func (s *lifecycleAdmissionTransitionTestStore) ListByMetadata(filters map[string]string, limit int, tiers ...beads.QueryOpt) ([]beads.Bead, error) {
+	rows, err := s.MemStore.ListByMetadata(filters, limit, tiers...)
+	if err == nil && len(rows) != 0 && s.afterWorkflowRead != nil {
+		s.afterWorkflowRead()
+	}
+	return rows, err
 }
 
 func (s *lifecycleAdmissionTransitionTestStore) Ready(queries ...beads.ReadyQuery) ([]beads.Bead, error) {
@@ -711,7 +891,11 @@ func (s *lifecycleAdmissionTransitionTestStore) DecisionFrontierSourceReaderHand
 }
 
 func (s *lifecycleAdmissionTransitionTestStore) DecisionFrontierSourceSnapshot(id string) (beads.Bead, error) {
-	return s.Get(id)
+	row, err := s.Get(id)
+	if err == nil && s.afterSourceSnapshot != nil {
+		s.afterSourceSnapshot()
+	}
+	return row, err
 }
 
 func (s *lifecycleAdmissionTransitionTestStore) ControllerMetadataTransitionWriterHandle() (beads.ControllerMetadataTransitionWriter, bool) {

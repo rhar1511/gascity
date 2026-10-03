@@ -61,8 +61,14 @@ func TestFormulaActionLeasePinsControllerPublication(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CompatibilityRuntimeIdentity(): %v", err)
 	}
-	if initial.GraphStore != graphStore || initial.GraphStoreRef != "class:g" || initial.GraphStoreGeneration == 0 {
+	if initial.GraphStore != cs.GraphBeadStore().Store || bindingEngine(initial.GraphStore) != graphStore || initial.GraphStoreRef != "class:g" || initial.GraphStoreGeneration == 0 {
 		t.Fatalf("initial graph route = (%v, %q, %d), want exact graph binding/class:g/nonzero generation", initial.GraphStore, initial.GraphStoreRef, initial.GraphStoreGeneration)
+	}
+	if release, err := cs.AcquireFormulaActionLease(graphStore, initial.GraphStoreRef, initial.GraphStoreGeneration); !errors.Is(err, qualification.ErrUnavailable) {
+		if release != nil {
+			release()
+		}
+		t.Fatalf("raw graph engine lease error = %v, want unavailable", err)
 	}
 	release, err := cs.AcquireFormulaActionLease(initial.GraphStore, initial.GraphStoreRef, initial.GraphStoreGeneration)
 	if err != nil {

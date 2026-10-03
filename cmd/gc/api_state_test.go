@@ -202,17 +202,20 @@ func (f *failAgentTomlRenameOSFS) Rename(oldpath, newpath string) error {
 
 func TestControllerStateReadAccess(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
+	cityDir := t.TempDir()
+	rigDir := t.TempDir()
+	writeSchema2RigCity(t, cityDir, "test-city", "[workspace]\n[beads]\nprovider = \"file\"\n[[rigs]]\nname = \"rig1\"\n", fmt.Sprintf("workspace_name = \"test-city\"\n[rigs.rig1]\npath = %q\n", rigDir))
 
 	sp := runtime.NewFake()
 	ep := events.NewFake()
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Rigs: []config.Rig{
-			{Name: "rig1", Path: t.TempDir()},
+			{Name: "rig1", Path: rigDir},
 		},
 	}
 
-	cs := newControllerState(context.Background(), cfg, sp, ep, "test-city", t.TempDir())
+	cs := newControllerState(context.Background(), cfg, sp, ep, "test-city", cityDir)
 
 	if got := cs.CityName(); got != "test-city" {
 		t.Errorf("CityName() = %q, want %q", got, "test-city")
@@ -3066,6 +3069,7 @@ func TestControllerStateLegacyFileProviderSharesRigStoreHandle(t *testing.T) {
 	if err := os.MkdirAll(rigTwo, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	writeSchema2RigCity(t, cityDir, "test-city", "[workspace]\n[beads]\nprovider = \"file\"\n[[rigs]]\nname = \"rig1\"\n[[rigs]]\nname = \"rig2\"\n", fmt.Sprintf("workspace_name = \"test-city\"\n[rigs.rig1]\npath = %q\n[rigs.rig2]\npath = %q\n", rigOne, rigTwo))
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Rigs: []config.Rig{
@@ -3074,6 +3078,9 @@ func TestControllerStateLegacyFileProviderSharesRigStoreHandle(t *testing.T) {
 		},
 	}
 	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "test-city", cityDir)
+	if fileStoreUsesScopedRoots(cityDir) {
+		t.Fatal("legacy sharing fixture unexpectedly enabled scope-local file stores")
+	}
 
 	rigStoreOne := cs.BeadStore("rig1")
 	rigStoreTwo := cs.BeadStore("rig2")

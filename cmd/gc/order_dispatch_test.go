@@ -7073,6 +7073,7 @@ func TestBuildOrderDispatcherUsesProviderAwareFileStore(t *testing.T) {
 	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
 
 	cityDir := t.TempDir()
+	writeCityTOML(t, cityDir, "test-city")
 	layerDir := filepath.Join(cityDir, "formulas")
 	orderDir := filepath.Join(cityDir, "orders")
 	for _, dir := range []string{layerDir, orderDir} {
@@ -7093,6 +7094,7 @@ pool = "worker"
 	writeFile(t, filepath.Join(layerDir, "test-formula.toml"), string(formulaText))
 
 	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
 		FormulaLayers: config.FormulaLayers{
 			City: []string{layerDir},
 		},
