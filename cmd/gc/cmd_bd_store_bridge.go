@@ -10,7 +10,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/spf13/cobra"
 )
 
@@ -56,6 +58,7 @@ type bdStoreBridgeBead struct {
 	Description string            `json:"description,omitempty"`
 	Labels      []string          `json:"labels,omitempty"`
 	Metadata    map[string]string `json:"metadata,omitempty"`
+	Revision    int64             `json:"revision"`
 }
 
 func newBdStoreBridgeCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -138,6 +141,18 @@ func runBdStoreBridge(op string, args []string, dir, host, port, user string, st
 	if strings.TrimSpace(port) == "" {
 		return fmt.Errorf("missing --port")
 	}
+	privateRead := strings.HasPrefix(op, "private-")
+	if privateRead {
+		if os.Getenv("GC_BD_STORE_BRIDGE_PRIVATE") != "1" {
+			return fmt.Errorf("private bridge read requires internal exec-store mode")
+		}
+		op = strings.TrimPrefix(op, "private-")
+		switch op {
+		case "get", "list", "ready", "children", "list-by-label":
+		default:
+			return fmt.Errorf("unsupported private bridge operation %q", op)
+		}
+	}
 	password := bdStoreBridgePassword()
 	env := bdStoreBridgeEnv(dir, host, port, user, password)
 	// Bridge operations can trigger bd hooks that recursively invoke gc. Pin
@@ -152,6 +167,9 @@ func runBdStoreBridge(op string, args []string, dir, host, port, user string, st
 		var req bdStoreBridgeCreateRequest
 		if err := decodeJSON(stdin, &req); err != nil {
 			return err
+		}
+		if err := session.ValidateUnownedRequestMetadata(req.Metadata); err != nil {
+			return fmt.Errorf("protected session request metadata: %w", err)
 		}
 		created, err := store.Create(beads.Bead{
 			Title:       req.Title,
@@ -178,7 +196,7 @@ func runBdStoreBridge(op string, args []string, dir, host, port, user string, st
 		if err != nil {
 			return err
 		}
-		return writeJSON(stdout, bridgeBead(bead))
+		return writeJSON(stdout, bridgeReadBead(bead, privateRead))
 	case "update":
 		if len(args) < 1 {
 			return fmt.Errorf("usage: update <id>")
@@ -187,7 +205,10 @@ func runBdStoreBridge(op string, args []string, dir, host, port, user string, st
 		if err := decodeJSON(stdin, &req); err != nil {
 			return err
 		}
-		return store.Update(args[0], beads.UpdateOpts{
+		if err := session.ValidateUnownedRequestMetadata(req.Metadata); err != nil {
+			return fmt.Errorf("protected session request metadata: %w", err)
+		}
+		opts := beads.UpdateOpts{
 			Title:        req.Title,
 			Status:       req.Status,
 			Type:         req.Type,
@@ -198,17 +219,20 @@ func runBdStoreBridge(op string, args []string, dir, host, port, user string, st
 			Labels:       req.Labels,
 			RemoveLabels: req.RemoveLabels,
 			Metadata:     req.Metadata,
-		})
+		}
+		return updateBdStoreBridge(store, args[0], opts)
 	case "close":
 		if len(args) < 1 {
 			return fmt.Errorf("usage: close <id>")
 		}
-		return store.Close(args[0])
+		closed := "closed"
+		return updateBdStoreBridge(store, args[0], beads.UpdateOpts{Status: &closed})
 	case "reopen":
 		if len(args) < 1 {
 			return fmt.Errorf("usage: reopen <id>")
 		}
-		return store.Reopen(args[0])
+		open := "open"
+		return updateBdStoreBridge(store, args[0], beads.UpdateOpts{Status: &open})
 	case "list":
 		query := beads.ListQuery{AllowScan: true}
 		for _, arg := range args {
@@ -231,13 +255,13 @@ func runBdStoreBridge(op string, args []string, dir, host, port, user string, st
 		if err != nil {
 			return err
 		}
-		return writeJSON(stdout, bridgeBeads(items))
+		return writeJSON(stdout, bridgeReadBeads(items, privateRead))
 	case "ready":
 		items, err := beads.HandlesFor(store).Live.Ready()
 		if err != nil {
 			return err
 		}
-		return writeJSON(stdout, bridgeBeads(items))
+		return writeJSON(stdout, bridgeReadBeads(items, privateRead))
 	case "children":
 		if len(args) < 1 {
 			return fmt.Errorf("usage: children <parent-id>")
@@ -246,7 +270,7 @@ func runBdStoreBridge(op string, args []string, dir, host, port, user string, st
 		if err != nil {
 			return err
 		}
-		return writeJSON(stdout, bridgeBeads(items))
+		return writeJSON(stdout, bridgeReadBeads(items, privateRead))
 	case "list-by-label":
 		if len(args) < 1 {
 			return fmt.Errorf("usage: list-by-label <label> [limit]")
@@ -263,21 +287,21 @@ func runBdStoreBridge(op string, args []string, dir, host, port, user string, st
 		if err != nil {
 			return err
 		}
-		return writeJSON(stdout, bridgeBeads(items))
+		return writeJSON(stdout, bridgeReadBeads(items, privateRead))
 	case "set-metadata":
 		if len(args) < 2 {
 			return fmt.Errorf("usage: set-metadata <id> <key>")
+		}
+		if beadmeta.IsGenericMutationReservedKey(args[1]) {
+			return fmt.Errorf("protected session lifecycle metadata: %w", session.ErrRequestConflict)
 		}
 		value, err := io.ReadAll(stdin)
 		if err != nil {
 			return fmt.Errorf("read stdin: %w", err)
 		}
-		return store.SetMetadata(args[0], args[1], string(value))
+		return updateBdStoreBridge(store, args[0], beads.UpdateOpts{Metadata: map[string]string{args[1]: string(value)}})
 	case "delete":
-		if len(args) < 1 {
-			return fmt.Errorf("usage: delete <id>")
-		}
-		return store.Delete(args[len(args)-1])
+		return deleteBdStoreBridge(store, args)
 	case "dep-add":
 		if len(args) < 3 {
 			return fmt.Errorf("usage: dep-add <issue-id> <depends-on-id> <type>")
@@ -304,6 +328,54 @@ func runBdStoreBridge(op string, args []string, dir, host, port, user string, st
 	default:
 		return fmt.Errorf("unsupported operation %q", op)
 	}
+}
+
+func updateBdStoreBridge(store beads.Store, id string, opts beads.UpdateOpts) error {
+	current, err := store.Get(id)
+	if err != nil {
+		return err
+	}
+	return updateBdStoreBridgeAtRevision(store, current, opts)
+}
+
+func updateBdStoreBridgeAtRevision(store beads.Store, current beads.Bead, opts beads.UpdateOpts) error {
+	if opts.Title == nil && opts.Status == nil && opts.Type == nil && opts.Priority == nil &&
+		opts.Description == nil && opts.ParentID == nil && opts.Assignee == nil && len(opts.Labels) == 0 && len(opts.RemoveLabels) == 0 && len(opts.Metadata) == 0 {
+		return store.Update(current.ID, opts)
+	}
+	if err := session.GuardGenericMutation(current, opts); err != nil {
+		return err
+	}
+	writer, ok := beads.ConditionalWriterFor(store)
+	if !ok || !beads.InspectConditionalWrites(store).Capable || current.Revision == 0 {
+		return beads.ErrConditionalWriteUnsupported
+	}
+	return writer.UpdateIfMatch(current.ID, current.Revision, opts)
+}
+
+func deleteBdStoreBridge(store beads.Store, args []string) error {
+	if len(args) != 2 {
+		return fmt.Errorf("usage: delete <id> <revision>")
+	}
+	revision, err := strconv.ParseInt(args[1], 10, 64)
+	if err != nil || revision < 0 {
+		return fmt.Errorf("invalid delete revision %q", args[1])
+	}
+	writer, ok := beads.ConditionalWriterFor(store)
+	if !ok || !beads.InspectConditionalWrites(store).Capable {
+		return beads.ErrConditionalWriteUnsupported
+	}
+	b, err := store.Get(args[0])
+	if err != nil {
+		return err
+	}
+	if b.Revision != revision {
+		return &beads.PreconditionFailedError{ID: args[0], Expected: revision, Current: b.Revision}
+	}
+	if session.HasRequestEvidence(b) {
+		return session.ErrRequestEvidenceRetained
+	}
+	return writer.DeleteIfMatch(args[0], revision)
 }
 
 func bdStoreBridgeEnv(dir, host, port, user, password string) map[string]string {
@@ -397,14 +469,26 @@ func writeJSON(w io.Writer, value any) error {
 }
 
 func bridgeBeads(items []beads.Bead) []bdStoreBridgeBead {
+	return bridgeReadBeads(items, false)
+}
+
+func bridgeReadBeads(items []beads.Bead, private bool) []bdStoreBridgeBead {
 	out := make([]bdStoreBridgeBead, 0, len(items))
 	for _, item := range items {
-		out = append(out, bridgeBead(item))
+		out = append(out, bridgeReadBead(item, private))
 	}
 	return out
 }
 
 func bridgeBead(item beads.Bead) bdStoreBridgeBead {
+	return bridgeReadBead(item, false)
+}
+
+func bridgeReadBead(item beads.Bead, private bool) bdStoreBridgeBead {
+	metadata := beadmeta.RedactGenericMetadata(item.Metadata)
+	if private {
+		metadata = item.Metadata
+	}
 	return bdStoreBridgeBead{
 		ID:          item.ID,
 		Title:       item.Title,
@@ -419,6 +503,7 @@ func bridgeBead(item beads.Bead) bdStoreBridgeBead {
 		Needs:       item.Needs,
 		Description: item.Description,
 		Labels:      item.Labels,
-		Metadata:    item.Metadata,
+		Metadata:    metadata,
+		Revision:    item.Revision,
 	}
 }

@@ -14,6 +14,7 @@ import (
 // Idempotency-Key header. This set grows as each wiring slice (audit P0 #4)
 // lands; a regression that drops the header fails TestCreateEndpointsAreTriagedForIdempotency.
 var requireIdempotency = map[string]bool{
+	"execute-pr-action":       true,
 	"create-bead":             true,
 	"send-mail":               true,
 	"create-agent":            true,
@@ -25,7 +26,7 @@ var requireIdempotency = map[string]bool{
 	"register-extmsg-adapter": true,
 	"emit-event":              true,
 	"post-v0-city":            true,
-	"execute-pr-action":       true,
+	"post-v0-city-by-city-name-session-by-id-requests": true,
 }
 
 // pendingIdempotency lists known create operations that are deliberately NOT
@@ -83,12 +84,11 @@ var exemptFromIdempotency = map[string]bool{
 	"post-v0-city-by-city-name-session-by-id-close":                      true,
 	"post-v0-city-by-city-name-session-by-id-kill":                       true,
 	"post-v0-city-by-city-name-session-by-id-permission-mode":            true,
-	"post-v0-city-by-city-name-session-by-id-requests":                   true, // The durable request_id in the body is the idempotency key; conflicting reuse is rejected by the session store.
-	"post-v0-city-by-city-name-session-by-id-requests-by-request-id-ack": true, // Acknowledges an existing receipt identified by request_id.
 	"post-v0-city-by-city-name-session-by-id-rename":                     true,
 	"post-v0-city-by-city-name-session-by-id-stop":                       true,
 	"post-v0-city-by-city-name-session-by-id-suspend":                    true,
 	"post-v0-city-by-city-name-session-by-id-wake":                       true,
+	"post-v0-city-by-city-name-session-by-id-requests-by-request-id-ack": true,
 	"post-v0-city-by-city-name-sling":                                    true,
 	"post-v0-city-by-city-name-unregister":                               true,
 	"rotate-events":                                                      true,

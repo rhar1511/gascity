@@ -1649,6 +1649,25 @@ func (s deleteMissingStore) Delete(id string) error {
 	return fmt.Errorf("deleting bead %q: %w", id, beads.ErrNotFound)
 }
 
+func (s deleteMissingStore) UpdateIfMatch(id string, revision int64, opts beads.UpdateOpts) error {
+	writer, _ := beads.ConditionalWriterFor(s.Store)
+	return writer.UpdateIfMatch(id, revision, opts)
+}
+
+func (s deleteMissingStore) CloseIfMatch(id string, revision int64) error {
+	writer, _ := beads.ConditionalWriterFor(s.Store)
+	return writer.CloseIfMatch(id, revision)
+}
+
+func (s deleteMissingStore) CompareAndSetMetadataKey(id, key, expected, next string) (bool, error) {
+	writer, _ := beads.ConditionalWriterFor(s.Store)
+	return writer.CompareAndSetMetadataKey(id, key, expected, next)
+}
+
+func (s deleteMissingStore) DeleteIfMatch(id string, _ int64) error {
+	return fmt.Errorf("deleting bead %q: %w", id, beads.ErrNotFound)
+}
+
 type transientDeleteConflictStore struct {
 	beads.Store
 	deleteCalls int
@@ -1662,12 +1681,56 @@ func (s *transientDeleteConflictStore) Delete(id string) error {
 	return s.Store.Delete(id)
 }
 
+func (s *transientDeleteConflictStore) UpdateIfMatch(id string, revision int64, opts beads.UpdateOpts) error {
+	writer, _ := beads.ConditionalWriterFor(s.Store)
+	return writer.UpdateIfMatch(id, revision, opts)
+}
+
+func (s *transientDeleteConflictStore) CloseIfMatch(id string, revision int64) error {
+	writer, _ := beads.ConditionalWriterFor(s.Store)
+	return writer.CloseIfMatch(id, revision)
+}
+
+func (s *transientDeleteConflictStore) CompareAndSetMetadataKey(id, key, expected, next string) (bool, error) {
+	writer, _ := beads.ConditionalWriterFor(s.Store)
+	return writer.CompareAndSetMetadataKey(id, key, expected, next)
+}
+
+func (s *transientDeleteConflictStore) DeleteIfMatch(id string, revision int64) error {
+	s.deleteCalls++
+	if s.deleteCalls == 1 {
+		return fmt.Errorf("deleting bead %q: sql commit: Error 1213 (40001): serialization failure: this transaction conflicts with a committed transaction from another client, try restarting transaction", id)
+	}
+	writer, _ := beads.ConditionalWriterFor(s.Store)
+	return writer.DeleteIfMatch(id, revision)
+}
+
 type alwaysTransientDeleteConflictStore struct {
 	beads.Store
 	deleteCalls int
 }
 
 func (s *alwaysTransientDeleteConflictStore) Delete(id string) error {
+	s.deleteCalls++
+	return fmt.Errorf("deleting bead %q: sql commit: Error 1213 (40001): serialization failure: conflict attempt %d", id, s.deleteCalls)
+}
+
+func (s *alwaysTransientDeleteConflictStore) UpdateIfMatch(id string, revision int64, opts beads.UpdateOpts) error {
+	writer, _ := beads.ConditionalWriterFor(s.Store)
+	return writer.UpdateIfMatch(id, revision, opts)
+}
+
+func (s *alwaysTransientDeleteConflictStore) CloseIfMatch(id string, revision int64) error {
+	writer, _ := beads.ConditionalWriterFor(s.Store)
+	return writer.CloseIfMatch(id, revision)
+}
+
+func (s *alwaysTransientDeleteConflictStore) CompareAndSetMetadataKey(id, key, expected, next string) (bool, error) {
+	writer, _ := beads.ConditionalWriterFor(s.Store)
+	return writer.CompareAndSetMetadataKey(id, key, expected, next)
+}
+
+func (s *alwaysTransientDeleteConflictStore) DeleteIfMatch(id string, _ int64) error {
 	s.deleteCalls++
 	return fmt.Errorf("deleting bead %q: sql commit: Error 1213 (40001): serialization failure: conflict attempt %d", id, s.deleteCalls)
 }
@@ -1679,6 +1742,26 @@ type nonTransientDeleteErrorStore struct {
 }
 
 func (s *nonTransientDeleteErrorStore) Delete(string) error {
+	s.deleteCalls++
+	return s.err
+}
+
+func (s *nonTransientDeleteErrorStore) UpdateIfMatch(id string, revision int64, opts beads.UpdateOpts) error {
+	writer, _ := beads.ConditionalWriterFor(s.Store)
+	return writer.UpdateIfMatch(id, revision, opts)
+}
+
+func (s *nonTransientDeleteErrorStore) CloseIfMatch(id string, revision int64) error {
+	writer, _ := beads.ConditionalWriterFor(s.Store)
+	return writer.CloseIfMatch(id, revision)
+}
+
+func (s *nonTransientDeleteErrorStore) CompareAndSetMetadataKey(id, key, expected, next string) (bool, error) {
+	writer, _ := beads.ConditionalWriterFor(s.Store)
+	return writer.CompareAndSetMetadataKey(id, key, expected, next)
+}
+
+func (s *nonTransientDeleteErrorStore) DeleteIfMatch(string, int64) error {
 	s.deleteCalls++
 	return s.err
 }

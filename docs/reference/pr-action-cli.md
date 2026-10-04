@@ -40,7 +40,9 @@ The verified result is `work_prepared`. Admission and worker dispatch have their
 own requirements; a prepared record does not establish that execution began.
 Prepared work waits on its triage hold until an authorized actor supplies the
 acceptance contract and readiness intent. Its proposed route grants no worker
-assignment.
+assignment. This component recognizes only held triage work; a routed row or
+receipt string alone is never admission proof. Unsupported admission remains
+unavailable.
 
 ## Submit an exact attempt for review
 
@@ -59,7 +61,9 @@ gc github pr action queue_review \
   --idempotency-key "$request_key"
 ```
 
-The server revalidates the revisions, policy and evidence. The command rejects
+The server revalidates the revisions, policy and evidence. Review is unavailable
+for conflicted, missing, or unrecognized merge states, including a state change
+between admission and execution. The command rejects
 unverified or mismatched receipts. It does not refresh the arguments and silently
 submit a different revision after a stale-response error.
 

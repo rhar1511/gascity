@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -23,10 +24,17 @@ type SessionRequestInput struct {
 // SessionRequestAcknowledgementInput binds acknowledgement to an execution credential.
 type SessionRequestAcknowledgementInput struct {
 	SessionRequestInput
-	Token string `header:"X-GC-Session-Token" doc:"Credential of the intended session execution."`
+	Token string `header:"X-GC-Session-Token" required:"true" doc:"Credential of the intended session execution."`
 	Body  struct {
 		Generation int `json:"generation" minimum:"1" doc:"Intended session execution generation."`
 	}
+}
+
+func validateGenericBeadMetadata(metadata map[string]string) error {
+	if err := session.ValidateUnownedRequestMetadata(metadata); err != nil {
+		return apierr.Forbidden.Msg("session lifecycle metadata requires a privileged protocol")
+	}
+	return nil
 }
 
 // SessionRequestOutput exposes the credential-free receipt.
@@ -74,8 +82,9 @@ func sessionRequestError(err error) error {
 // SessionRequestSubmitInput names the exact intended execution and request content.
 type SessionRequestSubmitInput struct {
 	CityScope
-	ID   string `path:"id" doc:"Exact durable session ID."`
-	Body struct {
+	ID             string `path:"id" doc:"Exact durable session ID."`
+	IdempotencyKey string `header:"Idempotency-Key" required:"false" doc:"Idempotency key for exact request replay."`
+	Body           struct {
 		RequestID  string `json:"request_id" minLength:"1" maxLength:"200" doc:"Durable idempotency identity for this request."`
 		Generation int    `json:"generation" minimum:"1" doc:"Exact intended execution generation."`
 		Message    string `json:"message" minLength:"1" doc:"Message delivered with its request identity."`
@@ -89,17 +98,29 @@ func (s *Server) humaHandleSessionRequestSubmit(_ context.Context, input *Sessio
 	if store.Store == nil {
 		return nil, apierr.ServiceUnavailable.Msg("session request storage unavailable")
 	}
-	handle, err := s.workerHandleForSession(store.Store, input.ID)
-	if err != nil {
-		return nil, humaResolveError(err)
-	}
-	accepted, err := session.NewStore(store).AcceptRequest(input.ID, input.Body.RequestID, input.Body.Generation, input.Body.Message, time.Now())
-	if err != nil {
-		return nil, sessionRequestError(err)
-	}
+	sessionID := input.ID
 	requestID, generation, message := input.Body.RequestID, input.Body.Generation, input.Body.Message
+	accepted, err := withIdempotency(s.idem, "/v0/session/"+url.PathEscape(sessionID)+"/requests", input.IdempotencyKey, input.Body, func() (session.RequestReceipt, error) {
+		acceptance, err := session.NewStore(store).AcceptRequest(sessionID, requestID, generation, message, time.Now())
+		if err != nil {
+			return session.RequestReceipt{}, sessionRequestError(err)
+		}
+		return acceptance.RequestReceipt, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	// Every HTTP attempt may resume a durable pending receipt. The session CAS
+	// reserves provider delivery once, so replays after reservation cannot send.
+	// Resolution belongs here too: once acceptance commits, a worker/config
+	// failure must not replace the durable 202 response.
 	go func() {
 		defer s.recoverAsRequestFailed(requestID, RequestOperationSessionSubmit)
+		handle, err := s.workerHandleForSession(store.Store, sessionID)
+		if err != nil {
+			s.emitSessionSubmitFailed(requestID, "tracked_submit_resolution_failed", err.Error())
+			return
+		}
 		result, err := handle.Message(context.Background(), worker.MessageRequest{RequestID: requestID, Generation: generation, Text: message})
 		if err != nil {
 			s.emitSessionSubmitFailed(requestID, "tracked_submit_failed", err.Error())
@@ -109,9 +130,8 @@ func (s *Server) humaHandleSessionRequestSubmit(_ context.Context, input *Sessio
 			s.emitSessionSubmitFailed(requestID, "delivery_unknown", "provider delivery has not been established; inspect the durable receipt")
 			return
 		}
-		// This event denotes provider submission only. The persisted receipt is
-		// authoritative for session acknowledgement and effect evidence.
-		s.emitSessionSubmitSucceeded(requestID, input.ID, false, string(session.SubmitIntentDefault))
+		// Provider submission does not establish acknowledgement or effect.
+		s.emitSessionSubmitSucceeded(requestID, sessionID, false, string(session.SubmitIntentDefault))
 	}()
-	return &SessionRequestOutput{Body: accepted.RequestReceipt}, nil
+	return &SessionRequestOutput{Body: accepted}, nil
 }

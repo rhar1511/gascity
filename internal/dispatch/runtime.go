@@ -49,6 +49,7 @@ type ProcessOptions struct {
 	// human-approval evidence for the RSI promotion gate. When nil, the gate
 	// fails closed.
 	ResolveRSIEvaluation rsipolicy.ResolveTrustedEvaluationFunc
+	RSIEvaluationContext rsipolicy.EvaluationContext
 	// RequiredArtifactStat checks required-artifact files. When nil, the
 	// dispatcher uses os.Stat.
 	RequiredArtifactStat func(path string) (os.FileInfo, error)

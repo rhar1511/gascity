@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -1026,21 +1027,10 @@ func TestResolveSessionBeadByExactID_NormalizesEmptyTypeInMemory(t *testing.T) {
 	}
 }
 
-// failingUpdateStore rejects all Update calls so tests can exercise the
-// persistence-failure path of RepairEmptyType.
-type failingUpdateStore struct {
-	beads.Store
-	updateErr error
-}
-
-func (s *failingUpdateStore) Update(string, beads.UpdateOpts) error {
-	return s.updateErr
-}
-
-func TestRepairEmptyType_StoreFailureIsLoggedAndPatchesInMemory(t *testing.T) {
+func TestRepairEmptyType_StoreFailureDoesNotPatchInMemory(t *testing.T) {
 	inner := beads.NewMemStore()
 	b := newEmptyTypeSessionBead(t, inner, nil)
-	store := &failingUpdateStore{Store: inner, updateErr: errors.New("update rejected")}
+	store := struct{ beads.Store }{inner}
 
 	var buf bytes.Buffer
 	prev := log.Writer()
@@ -1049,11 +1039,31 @@ func TestRepairEmptyType_StoreFailureIsLoggedAndPatchesInMemory(t *testing.T) {
 
 	session.RepairEmptyType(store, &b)
 
-	if b.Type != session.BeadType {
-		t.Errorf("in-memory type = %q, want %q", b.Type, session.BeadType)
+	if b.Type != "" {
+		t.Errorf("in-memory type = %q, want empty after rejected repair", b.Type)
 	}
 	logged := buf.String()
-	if !strings.Contains(logged, b.ID) || !strings.Contains(logged, "update rejected") {
+	if !strings.Contains(logged, b.ID) || !strings.Contains(logged, beads.ErrConditionalWriteUnsupported.Error()) {
 		t.Errorf("expected repair failure log mentioning %q and the error, got %q", b.ID, logged)
+	}
+}
+
+func TestRepairEmptyType_FencedLegacyRowRemainsUnrepaired(t *testing.T) {
+	store := beads.NewMemStore()
+	b := newEmptyTypeSessionBead(t, store, map[string]string{
+		beadmeta.SessionRequestPurgeFenceMetadataKey: "purge-owner",
+	})
+
+	session.RepairEmptyType(store, &b)
+
+	if b.Type != "" {
+		t.Fatalf("in-memory fenced type = %q, want empty", b.Type)
+	}
+	stored, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Type != "" || session.RequestPurgeFence(stored) != "purge-owner" {
+		t.Fatalf("fenced legacy row changed: %+v", stored)
 	}
 }

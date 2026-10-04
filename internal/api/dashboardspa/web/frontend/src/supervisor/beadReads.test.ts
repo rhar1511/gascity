@@ -43,6 +43,8 @@ const baseApi: SupervisorApi = {
   sessionTranscript: vi.fn(),
   workflowRun: vi.fn(),
   formulaDetail: vi.fn(),
+  prActionQueue: vi.fn(),
+  executePRAction: vi.fn(),
   mutationHeaders: () => ({ ...GC_MUTATION_HEADERS }),
 };
 

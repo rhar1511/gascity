@@ -3,10 +3,18 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 func withTestStdin(t *testing.T, input string, fn func()) {
@@ -28,6 +36,227 @@ func withTestStdin(t *testing.T, input string, fn func()) {
 		_ = r.Close()
 	}()
 	fn()
+}
+
+func TestBdStoreBridgeGenericReadProjectionRedactsExecutionCredentials(t *testing.T) {
+	source := beads.Bead{ID: "BD-session", Metadata: map[string]string{
+		beadmeta.SessionInstanceTokenMetadataKey: "bridge-secret",
+		"generation":                             "7",
+	}}
+	for name, got := range map[string][]bdStoreBridgeBead{
+		"get":           {bridgeBead(source)},
+		"list_variants": bridgeBeads([]beads.Bead{source}),
+	} {
+		if len(got) != 1 {
+			t.Fatalf("%s projection length = %d", name, len(got))
+		}
+		if _, ok := got[0].Metadata[beadmeta.SessionInstanceTokenMetadataKey]; ok {
+			t.Fatalf("%s projection leaked execution credential: %#v", name, got[0].Metadata)
+		}
+		if got[0].Metadata["generation"] != "7" {
+			t.Fatalf("%s projection lost safe metadata: %#v", name, got[0].Metadata)
+		}
+	}
+	if source.Metadata[beadmeta.SessionInstanceTokenMetadataKey] != "bridge-secret" {
+		t.Fatalf("bridge projection mutated source metadata: %#v", source.Metadata)
+	}
+	private := bridgeReadBead(source, true)
+	if private.Metadata[beadmeta.SessionInstanceTokenMetadataKey] != "bridge-secret" {
+		t.Fatalf("private exec-store projection lost lifecycle credential: %#v", private.Metadata)
+	}
+}
+
+func TestBdStoreBridgePrivateReadRequiresExplicitInternalMode(t *testing.T) {
+	t.Setenv("GC_BD_STORE_BRIDGE_PRIVATE", "")
+	err := runBdStoreBridge("private-get", []string{"BD-session"}, t.TempDir(), "127.0.0.1", "3306", "root", strings.NewReader(""), io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "internal exec-store mode") {
+		t.Fatalf("private read without marker = %v, want refusal", err)
+	}
+}
+
+func TestBdStoreBridgeDeleteRequiresMatchingRevision(t *testing.T) {
+	store := &beads.MemStore{HonorExplicitIDs: true}
+	created, err := store.Create(beads.Bead{ID: "BD-1", Title: "closed", Status: "closed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	description := "concurrent"
+	if err := store.Update(created.ID, beads.UpdateOpts{Description: &description}); err != nil {
+		t.Fatal(err)
+	}
+	if err := deleteBdStoreBridge(store, []string{created.ID, strconv.FormatInt(created.Revision, 10)}); err == nil {
+		t.Fatal("stale bridge delete succeeded")
+	} else {
+		var stale *beads.PreconditionFailedError
+		if !errors.As(err, &stale) {
+			t.Fatalf("stale bridge delete = %v, want precondition failure", err)
+		}
+	}
+	if _, err := store.Get(created.ID); err != nil {
+		t.Fatalf("stale bridge delete removed row: %v", err)
+	}
+	if err := deleteBdStoreBridge(store, []string{created.ID}); err == nil || !strings.Contains(err.Error(), "usage: delete") {
+		t.Fatalf("revision-less bridge delete = %v, want usage refusal", err)
+	}
+}
+
+func TestBdStoreBridgeDeleteRetainsRequestEvidence(t *testing.T) {
+	store := &beads.MemStore{HonorExplicitIDs: true}
+	created, err := store.Create(beads.Bead{ID: "BD-session", Title: "closed", Type: session.BeadType, Status: "closed", Metadata: map[string]string{
+		beadmeta.SessionRequestReceiptPrefix + "evidence": "{}",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := deleteBdStoreBridge(store, []string{created.ID, strconv.FormatInt(created.Revision, 10)}); !errors.Is(err, session.ErrRequestEvidenceRetained) {
+		t.Fatalf("deleteBdStoreBridge = %v, want retained-evidence refusal", err)
+	}
+	if _, err := store.Get(created.ID); err != nil {
+		t.Fatalf("evidence-bearing row was deleted: %v", err)
+	}
+}
+
+func TestBdStoreBridgeRejectsProtocolOwnedMetadata(t *testing.T) {
+	dir := t.TempDir()
+	for _, tc := range []struct {
+		name  string
+		op    string
+		args  []string
+		stdin string
+	}{
+		{"create receipt", "create", nil, `{"title":"forged","metadata":{"` + beadmeta.SessionRequestReceiptPrefix + `forged":"{}"}}`},
+		{"update fence", "update", []string{"BD-1"}, `{"metadata":{"` + beadmeta.SessionRequestPurgeFenceMetadataKey + `":"forged"}}`},
+		{"set receipt", "set-metadata", []string{"BD-1", beadmeta.SessionRequestReceiptPrefix + "forged"}, `{}`},
+		{"set fence", "set-metadata", []string{"BD-1", beadmeta.SessionRequestPurgeFenceMetadataKey}, `forged`},
+		{"set credential", "set-metadata", []string{"BD-1", beadmeta.SessionInstanceTokenMetadataKey}, `forged`},
+		{"set session name", "set-metadata", []string{"BD-1", "session_name"}, `retargeted`},
+		{"set generation", "set-metadata", []string{"BD-1", "generation"}, `2`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := runBdStoreBridge(tc.op, tc.args, dir, "127.0.0.1", "1", "root", strings.NewReader(tc.stdin), io.Discard)
+			if !errors.Is(err, session.ErrRequestConflict) {
+				t.Fatalf("runBdStoreBridge = %v, want protected-metadata conflict", err)
+			}
+		})
+	}
+}
+
+func TestBdStoreBridgeRejectsTypeChangeWithRequestEvidence(t *testing.T) {
+	store := &beads.MemStore{HonorExplicitIDs: true}
+	b, err := store.Create(beads.Bead{ID: "BD-history", Title: "history", Type: "task", Metadata: map[string]string{
+		beadmeta.SessionRequestReceiptPrefix + "history": `{}`,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	nextType := "bug"
+	if err := updateBdStoreBridge(store, b.ID, beads.UpdateOpts{Type: &nextType}); !errors.Is(err, session.ErrRequestConflict) {
+		t.Fatalf("type change = %v, want request conflict", err)
+	}
+	got, err := store.Get(b.ID)
+	if err != nil || got.Type != "task" || !session.HasRequestEvidence(got) {
+		t.Fatalf("historical evidence row changed: %+v, %v", got, err)
+	}
+}
+
+func TestBdStoreBridgeRejectsSessionLabelRemovalWithRequestEvidence(t *testing.T) {
+	store := &beads.MemStore{HonorExplicitIDs: true}
+	b, err := store.Create(beads.Bead{
+		ID: "BD-history-label", Title: "history", Type: session.BeadType, Labels: []string{session.LabelSession, "worker"},
+		Metadata: map[string]string{beadmeta.SessionRequestReceiptPrefix + "history": `{}`},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := updateBdStoreBridge(store, b.ID, beads.UpdateOpts{RemoveLabels: []string{session.LabelSession}}); !errors.Is(err, session.ErrRequestConflict) {
+		t.Fatalf("session label removal = %v, want request conflict", err)
+	}
+	got, err := store.Get(b.ID)
+	if err != nil || !slices.Contains(got.Labels, session.LabelSession) || !session.HasRequestEvidence(got) {
+		t.Fatalf("historical session identity changed: %+v, %v", got, err)
+	}
+}
+
+func TestBdStoreBridgeLabelRemovalLosesRaceToRequestEvidence(t *testing.T) {
+	base := &beads.MemStore{HonorExplicitIDs: true}
+	store := &fenceBeforeCLIUpdateStore{MemStore: base}
+	b, err := store.Create(beads.Bead{
+		ID: "BD-label-race", Title: "session", Type: session.BeadType, Labels: []string{session.LabelSession},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.beforeUpdate = func() {
+		if err := base.SetMetadata(b.ID, beadmeta.SessionRequestReceiptPrefix+"racing", `{}`); err != nil {
+			t.Fatalf("install racing receipt = %v", err)
+		}
+	}
+	if err := updateBdStoreBridge(store, b.ID, beads.UpdateOpts{RemoveLabels: []string{session.LabelSession}}); !beads.IsPreconditionFailed(err) {
+		t.Fatalf("label removal across racing receipt = %v, want revision conflict", err)
+	}
+	got, err := base.Get(b.ID)
+	if err != nil || !slices.Contains(got.Labels, session.LabelSession) || !session.HasRequestEvidence(got) {
+		t.Fatalf("racing receipt lost session identity: %+v, %v", got, err)
+	}
+}
+
+func TestBdStoreBridgeParentUpdatesLoseRevisionRace(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		combined bool
+	}{
+		{name: "parent_only"},
+		{name: "combined", combined: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := &beads.MemStore{HonorExplicitIDs: true}
+			store := &fenceBeforeCLIUpdateStore{MemStore: base}
+			b, err := store.Create(beads.Bead{ID: "BD-parent-race", Title: "before", Type: "task"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			store.beforeUpdate = func() {
+				if err := base.SetMetadata(b.ID, "racing", "winner"); err != nil {
+					t.Fatalf("install racing update: %v", err)
+				}
+			}
+			parent := "BD-new-parent"
+			opts := beads.UpdateOpts{ParentID: &parent}
+			if tc.combined {
+				title := "after"
+				opts.Title = &title
+			}
+			if err := updateBdStoreBridge(store, b.ID, opts); !beads.IsPreconditionFailed(err) {
+				t.Fatalf("racing parent update = %v, want precondition failure", err)
+			}
+			got, err := base.Get(b.ID)
+			if err != nil || got.ParentID != "" || got.Title != "before" || got.Metadata["racing"] != "winner" {
+				t.Fatalf("racing parent update partially committed: %+v, %v", got, err)
+			}
+		})
+	}
+}
+
+func TestBdStoreBridgeFailsClosedWhenPurgeFenceRacesUpdate(t *testing.T) {
+	base := &beads.MemStore{HonorExplicitIDs: true}
+	store := &fenceBeforeCLIUpdateStore{MemStore: base}
+	b, err := store.Create(beads.Bead{ID: "BD-race", Title: "before", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.beforeUpdate = func() {
+		if ok, err := base.CompareAndSetMetadataKey(b.ID, beadmeta.SessionRequestPurgeFenceMetadataKey, "", "purge-owner"); err != nil || !ok {
+			t.Fatalf("install racing fence = (%v, %v)", ok, err)
+		}
+	}
+	after := "after"
+	if err := updateBdStoreBridge(store, b.ID, beads.UpdateOpts{Title: &after}); err == nil {
+		t.Fatal("bridge update crossed racing purge fence")
+	}
+	got, err := base.Get(b.ID)
+	if err != nil || got.Title != "before" || !session.IsRequestPurgeFenced(got) {
+		t.Fatalf("racing bridge update result: %+v, %v", got, err)
+	}
 }
 
 func writeFakeBdBridgeScript(t *testing.T, binDir, envFile, argsFile string) {
@@ -62,6 +291,10 @@ printf '%s
 if [ "${1:-}" = "--dolt-auto-commit" ]; then
   shift 2
 fi
+if [ "${2:-}" = "--help" ]; then
+  printf '%s\n' '      --if-revision int'
+  exit 0
+fi
 case "${1:-}" in
   create)
     cat <<'JSON'
@@ -70,7 +303,7 @@ JSON
     ;;
   show)
     cat <<'JSON'
-[{"id":"BD-1","title":"captured","status":"open","issue_type":"task","created_at":"2026-02-27T10:00:00Z"}]
+    [{"id":"BD-1","title":"captured","status":"open","issue_type":"task","revision":1,"created_at":"2026-02-27T10:00:00Z"}]
 JSON
     ;;
   list)
@@ -79,6 +312,9 @@ JSON
 JSON
     ;;
   update)
+    cat <<'JSON'
+{"id":"BD-1","title":"captured","status":"open","issue_type":"bug","revision":2,"created_at":"2026-02-27T10:00:00Z"}
+JSON
     exit 0
     ;;
   dep)

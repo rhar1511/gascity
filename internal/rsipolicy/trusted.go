@@ -31,7 +31,16 @@ const HumanApprovalSchemaV1 = "gc.rsi.human-approval.v1"
 
 // PolicyVersionV1 identifies the promotion-policy contract bound into signed
 // evaluation and approval records.
-const PolicyVersionV1 = "gc.rsipolicy.v1"
+const PolicyVersionV1 = "gc." + "rsipolicy.v1"
+
+// ProtocolVersionV1 identifies the complete resolver and signed-envelope
+// context contract. It is separate from the promotion policy version.
+const ProtocolVersionV1 = "gc." + "rsi.protocol.v1"
+
+const (
+	evaluatorSignatureDomain = "gascity:rsi:evaluator:v1\x00"
+	approvalSignatureDomain  = "gascity:rsi:human-approval:v1\x00"
+)
 
 const maxTrustedFileSize = 4 << 20
 
@@ -54,18 +63,50 @@ type FileResolverConfig struct {
 }
 
 // CandidateRecord contains the candidate bead as read by the controller. The
-// actor and session come from durable assignment metadata, not candidate JSON.
+// actor and session come from the protected claim binding, not candidate JSON
+// or mutable assignment metadata.
 type CandidateRecord struct {
-	BeadID        string
-	ControlBeadID string
-	Attempt       int
-	MaxAttempts   int
-	ActorID       string
-	SessionID     string
-	Status        string
-	Outcome       string
-	RawOutput     string
-	Proposal      CandidateProposal
+	BeadID          string
+	BeadRevision    int64
+	ControlBeadID   string
+	ControlRevision int64
+	Attempt         int
+	MaxAttempts     int
+	ActorID         string
+	SessionID       string
+	Status          string
+	Outcome         string
+	RawOutput       string
+	Proposal        CandidateProposal
+}
+
+// ExecutionBinding is stamped once by the engine claim path and is reserved
+// from generic mutation. Mutable bead assignment/session fields are not trusted.
+type ExecutionBinding struct {
+	ActorID   string `json:"actor_id"`
+	SessionID string `json:"session_id"`
+}
+
+// MarshalExecutionBinding returns the strict protected binding representation.
+func MarshalExecutionBinding(actorID, sessionID string) (string, error) {
+	binding := ExecutionBinding{ActorID: strings.TrimSpace(actorID), SessionID: strings.TrimSpace(sessionID)}
+	if binding.ActorID == "" || binding.SessionID == "" {
+		return "", errors.New("RSI execution binding requires actor and session identities")
+	}
+	raw, err := json.Marshal(binding)
+	return string(raw), err
+}
+
+// ParseExecutionBinding decodes the protected engine-authored binding.
+func ParseExecutionBinding(raw string) (ExecutionBinding, error) {
+	var binding ExecutionBinding
+	if err := decodeStrictJSON([]byte(raw), &binding); err != nil {
+		return ExecutionBinding{}, err
+	}
+	if strings.TrimSpace(binding.ActorID) == "" || strings.TrimSpace(binding.SessionID) == "" {
+		return ExecutionBinding{}, errors.New("RSI execution binding requires actor and session identities")
+	}
+	return binding, nil
 }
 
 // CandidateProposal contains only the exact candidate revision the worker
@@ -83,20 +124,58 @@ type CandidateEvidence = CandidateProposal
 // identity. LaneOutput itself is worker-produced and is trusted only when its
 // exact bytes match the signed evaluation record.
 type JudgeRecord struct {
-	BeadID        string
-	ControlBeadID string
-	ActorID       string
-	SessionID     string
-	Status        string
-	Outcome       string
-	RawOutput     string
-	Lane          reviewquorum.LaneOutput
+	BeadID          string
+	BeadRevision    int64
+	ControlBeadID   string
+	ControlRevision int64
+	ActorID         string
+	SessionID       string
+	Status          string
+	Outcome         string
+	RawOutput       string
+	Lane            reviewquorum.LaneOutput
 }
 
 // ResolveRequest contains controller-resolved candidate and judge executions.
 type ResolveRequest struct {
+	Context   EvaluationContext
 	Candidate CandidateRecord
 	Judges    []JudgeRecord
+}
+
+// ResolveRequestInputSHA256 binds all pre-existing gate inputs independently
+// of the evaluator. Judge order is normalized by bead identity.
+func ResolveRequestInputSHA256(request ResolveRequest) string {
+	judges := append([]JudgeRecord(nil), request.Judges...)
+	sort.Slice(judges, func(i, j int) bool {
+		if judges[i].BeadID != judges[j].BeadID {
+			return judges[i].BeadID < judges[j].BeadID
+		}
+		return judges[i].ControlBeadID < judges[j].ControlBeadID
+	})
+	bound := struct {
+		ProtocolVersion string          `json:"protocol_version"`
+		CityID          string          `json:"city_id"`
+		StoreRef        string          `json:"store_ref"`
+		WorkflowRootID  string          `json:"workflow_root_id"`
+		GateID          string          `json:"gate_id"`
+		Candidate       CandidateRecord `json:"candidate"`
+		Judges          []JudgeRecord   `json:"judges"`
+	}{request.Context.ProtocolVersion, request.Context.CityID, request.Context.StoreRef, request.Context.WorkflowRootID, request.Context.GateID, request.Candidate, judges}
+	raw, _ := json.Marshal(bound)
+	digest := sha256.Sum256(raw)
+	return hex.EncodeToString(digest[:])
+}
+
+// EvaluationContext prevents evidence replay across protocol, city, store,
+// workflow, and gate boundaries.
+type EvaluationContext struct {
+	ProtocolVersion string `json:"protocol_version"`
+	CityID          string `json:"city_id"`
+	StoreRef        string `json:"store_ref"`
+	WorkflowRootID  string `json:"workflow_root_id"`
+	GateID          string `json:"gate_id"`
+	InputSHA256     string `json:"input_sha256"`
 }
 
 // ResolveTrustedEvaluationFunc reads trusted evidence for one RSI candidate.
@@ -134,13 +213,15 @@ type CandidateExecution struct {
 
 // JudgeAuthorization binds one judge lane to its controller-stamped execution.
 type JudgeAuthorization struct {
-	LaneID        string               `json:"lane_id"`
-	BeadID        string               `json:"bead_id"`
-	ControlBeadID string               `json:"control_bead_id"`
-	ActorID       string               `json:"actor_id"`
-	SessionID     string               `json:"session_id"`
-	OutputSHA256  string               `json:"output_sha256"`
-	Permissions   ExecutionPermissions `json:"permissions"`
+	LaneID          string               `json:"lane_id"`
+	BeadID          string               `json:"bead_id"`
+	BeadRevision    int64                `json:"bead_revision"`
+	ControlBeadID   string               `json:"control_bead_id"`
+	ControlRevision int64                `json:"control_revision"`
+	ActorID         string               `json:"actor_id"`
+	SessionID       string               `json:"session_id"`
+	OutputSHA256    string               `json:"output_sha256"`
+	Permissions     ExecutionPermissions `json:"permissions"`
 }
 
 // EvidenceReference binds one evaluator evidence file by kind, digest, bundle,
@@ -195,29 +276,37 @@ type WorkerTimeLedgerEvidence struct {
 // binds one candidate bead, exact source bundles, frozen suite, measured work,
 // judge executions, and immutable evidence files.
 type TrustedEvaluationManifest struct {
-	SchemaVersion          string               `json:"schema_version"`
-	ID                     string               `json:"id"`
-	PolicyVersion          string               `json:"policy_version"`
-	EvaluatorKeyID         string               `json:"evaluator_key_id"`
-	IssuedAt               string               `json:"issued_at"`
-	ExpiresAt              string               `json:"expires_at"`
-	CandidateBeadID        string               `json:"candidate_bead_id"`
-	CandidateControlBeadID string               `json:"candidate_control_bead_id"`
-	CandidateOutputSHA256  string               `json:"candidate_output_sha256"`
-	Objective              string               `json:"objective"`
-	Current                Bundle               `json:"current"`
-	Candidate              Bundle               `json:"candidate"`
-	EvalSuiteHash          string               `json:"eval_suite_hash"`
-	Baseline               Metrics              `json:"baseline"`
-	CandidateMetrics       Metrics              `json:"candidate_metrics"`
-	Limits                 Limits               `json:"limits"`
-	AuthorityClass         string               `json:"authority_class"`
-	Attempt                int                  `json:"attempt"`
-	MaxAttempts            int                  `json:"max_attempts"`
-	WorkAccounting         WorkAccounting       `json:"work_accounting"`
-	CandidateExecution     CandidateExecution   `json:"candidate_execution"`
-	Judges                 []JudgeAuthorization `json:"judges"`
-	Evidence               []EvidenceReference  `json:"evidence"`
+	SchemaVersion            string               `json:"schema_version"`
+	ProtocolVersion          string               `json:"protocol_version"`
+	CityID                   string               `json:"city_id"`
+	StoreRef                 string               `json:"store_ref"`
+	WorkflowRootID           string               `json:"workflow_root_id"`
+	GateID                   string               `json:"gate_id"`
+	InputSHA256              string               `json:"input_sha256"`
+	ID                       string               `json:"id"`
+	PolicyVersion            string               `json:"policy_version"`
+	EvaluatorKeyID           string               `json:"evaluator_key_id"`
+	IssuedAt                 string               `json:"issued_at"`
+	ExpiresAt                string               `json:"expires_at"`
+	CandidateBeadID          string               `json:"candidate_bead_id"`
+	CandidateBeadRevision    int64                `json:"candidate_bead_revision"`
+	CandidateControlBeadID   string               `json:"candidate_control_bead_id"`
+	CandidateControlRevision int64                `json:"candidate_control_revision"`
+	CandidateOutputSHA256    string               `json:"candidate_output_sha256"`
+	Objective                string               `json:"objective"`
+	Current                  Bundle               `json:"current"`
+	Candidate                Bundle               `json:"candidate"`
+	EvalSuiteHash            string               `json:"eval_suite_hash"`
+	Baseline                 Metrics              `json:"baseline"`
+	CandidateMetrics         Metrics              `json:"candidate_metrics"`
+	Limits                   Limits               `json:"limits"`
+	AuthorityClass           string               `json:"authority_class"`
+	Attempt                  int                  `json:"attempt"`
+	MaxAttempts              int                  `json:"max_attempts"`
+	WorkAccounting           WorkAccounting       `json:"work_accounting"`
+	CandidateExecution       CandidateExecution   `json:"candidate_execution"`
+	Judges                   []JudgeAuthorization `json:"judges"`
+	Evidence                 []EvidenceReference  `json:"evidence"`
 }
 
 // HumanApprovalManifest is signed by a separate human key. Approval is bound
@@ -225,6 +314,12 @@ type TrustedEvaluationManifest struct {
 // policy version; it is not a reusable "promote=true" flag.
 type HumanApprovalManifest struct {
 	SchemaVersion            string `json:"schema_version"`
+	ProtocolVersion          string `json:"protocol_version"`
+	CityID                   string `json:"city_id"`
+	StoreRef                 string `json:"store_ref"`
+	WorkflowRootID           string `json:"workflow_root_id"`
+	GateID                   string `json:"gate_id"`
+	InputSHA256              string `json:"input_sha256"`
 	Decision                 string `json:"decision"`
 	PolicyVersion            string `json:"policy_version"`
 	ApprovalKeyID            string `json:"approval_key_id"`
@@ -232,6 +327,9 @@ type HumanApprovalManifest struct {
 	EvaluationID             string `json:"evaluation_id"`
 	EvaluationManifestSHA256 string `json:"evaluation_manifest_sha256"`
 	CandidateBeadID          string `json:"candidate_bead_id"`
+	CandidateBeadRevision    int64  `json:"candidate_bead_revision"`
+	CandidateControlBeadID   string `json:"candidate_control_bead_id"`
+	CandidateControlRevision int64  `json:"candidate_control_revision"`
 	CandidateBundleID        string `json:"candidate_bundle_id"`
 	BaselineBundleID         string `json:"baseline_bundle_id"`
 	EvalSuiteHash            string `json:"eval_suite_hash"`
@@ -262,10 +360,13 @@ func (r FileResolver) Resolve(ctx context.Context, request ResolveRequest) (Trus
 			return TrustedEvaluation{}, err
 		}
 	}
+	if !equalEvaluationContext(request.Context, request.Context) || request.Context.InputSHA256 != ResolveRequestInputSHA256(request) {
+		return TrustedEvaluation{}, errors.New("trusted RSI resolve request context or input digest is invalid")
+	}
 	if strings.TrimSpace(r.config.EvaluationFile) == "" || strings.TrimSpace(r.config.EvaluationKeyID) == "" || strings.TrimSpace(r.config.EvaluationPublicKey) == "" {
 		return TrustedEvaluation{}, errors.New("trusted RSI evaluation is not configured")
 	}
-	evaluationPath, err := controllerOwnedPath(r.cityPath, r.config.EvaluationFile)
+	evaluationPath, err := controllerOwnedPath(r.cityPath, gateArtifactPath(r.config.EvaluationFile, request.Context.GateID))
 	if err != nil {
 		return TrustedEvaluation{}, fmt.Errorf("evaluation file path: %w", err)
 	}
@@ -281,7 +382,7 @@ func (r FileResolver) Resolve(ctx context.Context, request ResolveRequest) (Trus
 		return TrustedEvaluation{}, fmt.Errorf("read trusted evaluation: %w", err)
 	}
 	var manifest TrustedEvaluationManifest
-	if err := verifySignedPayload(manifestBytes, publicKey, &manifest); err != nil {
+	if err := verifySignedPayload(manifestBytes, publicKey, evaluatorSignatureDomain, &manifest); err != nil {
 		return TrustedEvaluation{}, fmt.Errorf("verify trusted evaluation: %w", err)
 	}
 	if err := validateManifest(manifest, r.config.EvaluationKeyID, evaluationPath, request); err != nil {
@@ -290,7 +391,7 @@ func (r FileResolver) Resolve(ctx context.Context, request ResolveRequest) (Trus
 
 	evaluationDigest := sha256.Sum256(manifestBytes)
 	input := manifest.input(request)
-	approvalID, approvalVerified, err := r.resolveApproval(manifest, evaluationDigest, publicKey)
+	approvalID, approvalVerified, err := r.resolveApproval(manifest, request, evaluationDigest, publicKey)
 	if err != nil {
 		return TrustedEvaluation{}, err
 	}
@@ -304,7 +405,7 @@ func (r FileResolver) Resolve(ctx context.Context, request ResolveRequest) (Trus
 	}, nil
 }
 
-func (r FileResolver) resolveApproval(manifest TrustedEvaluationManifest, evaluationDigest [32]byte, evaluatorKey ed25519.PublicKey) (string, bool, error) {
+func (r FileResolver) resolveApproval(manifest TrustedEvaluationManifest, request ResolveRequest, evaluationDigest [32]byte, evaluatorKey ed25519.PublicKey) (string, bool, error) {
 	approvalPathText := strings.TrimSpace(r.config.HumanApprovalFile)
 	approvalKeyID := strings.TrimSpace(r.config.HumanApprovalKeyID)
 	approvalKeyText := strings.TrimSpace(r.config.HumanApprovalPubKey)
@@ -321,7 +422,7 @@ func (r FileResolver) resolveApproval(manifest TrustedEvaluationManifest, evalua
 	if bytes.Equal(approvalKey, evaluatorKey) {
 		return "", false, errors.New("human approval key must differ from evaluator key")
 	}
-	approvalPath, err := controllerOwnedPath(r.cityPath, approvalPathText)
+	approvalPath, err := controllerOwnedPath(r.cityPath, gateArtifactPath(approvalPathText, request.Context.GateID))
 	if err != nil {
 		return "", false, fmt.Errorf("human approval file path: %w", err)
 	}
@@ -333,7 +434,7 @@ func (r FileResolver) resolveApproval(manifest TrustedEvaluationManifest, evalua
 		return "", false, fmt.Errorf("read human approval: %w", err)
 	}
 	var approval HumanApprovalManifest
-	if err := verifySignedPayload(approvalBytes, approvalKey, &approval); err != nil {
+	if err := verifySignedPayload(approvalBytes, approvalKey, approvalSignatureDomain, &approval); err != nil {
 		return "", false, fmt.Errorf("verify human approval: %w", err)
 	}
 	if err := validateApproval(approval, manifest, r.config.HumanApprovalKeyID, evaluationDigest); err != nil {
@@ -383,6 +484,12 @@ func validateManifest(manifest TrustedEvaluationManifest, expectedKeyID string, 
 	if manifest.SchemaVersion != TrustedEvaluationSchemaV1 || manifest.PolicyVersion != PolicyVersionV1 {
 		return errors.New("trusted evaluation schema or policy version is unsupported")
 	}
+	if !equalEvaluationContext(request.Context, EvaluationContext{
+		ProtocolVersion: manifest.ProtocolVersion, CityID: manifest.CityID, StoreRef: manifest.StoreRef,
+		WorkflowRootID: manifest.WorkflowRootID, GateID: manifest.GateID, InputSHA256: manifest.InputSHA256,
+	}) {
+		return errors.New("trusted evaluation context does not match this protocol, city, store, workflow, gate, and input")
+	}
 	if strings.TrimSpace(manifest.ID) == "" || manifest.EvaluatorKeyID != expectedKeyID {
 		return errors.New("trusted evaluation identity does not match controller configuration")
 	}
@@ -391,7 +498,9 @@ func validateManifest(manifest TrustedEvaluationManifest, expectedKeyID string, 
 	}
 	if strings.TrimSpace(manifest.Objective) == "" || strings.TrimSpace(manifest.AuthorityClass) == "" ||
 		strings.TrimSpace(manifest.CandidateBeadID) == "" || manifest.CandidateBeadID != request.Candidate.BeadID ||
-		strings.TrimSpace(manifest.CandidateControlBeadID) == "" || manifest.CandidateControlBeadID != request.Candidate.ControlBeadID {
+		manifest.CandidateBeadRevision != request.Candidate.BeadRevision ||
+		strings.TrimSpace(manifest.CandidateControlBeadID) == "" || manifest.CandidateControlBeadID != request.Candidate.ControlBeadID ||
+		manifest.CandidateControlRevision != request.Candidate.ControlRevision {
 		return errors.New("trusted evaluation does not identify the candidate bead and objective")
 	}
 	if request.Candidate.Status != "closed" || request.Candidate.Outcome != "pass" {
@@ -466,7 +575,8 @@ func validateJudgeBindings(manifest TrustedEvaluationManifest, request ResolveRe
 		seenBeads[expected.BeadID] = struct{}{}
 		seenLanes[expected.LaneID] = struct{}{}
 		record, ok := actualByBead[expected.BeadID]
-		if !ok || record.ControlBeadID != expected.ControlBeadID || record.Status != "closed" || record.Outcome != "pass" ||
+		if !ok || record.BeadRevision != expected.BeadRevision || record.ControlBeadID != expected.ControlBeadID || record.ControlRevision != expected.ControlRevision ||
+			record.Status != "closed" || record.Outcome != "pass" ||
 			record.ActorID != expected.ActorID || record.SessionID != expected.SessionID ||
 			record.ActorID == "" || record.SessionID == "" {
 			return errors.New("judge execution identity or outcome does not match trusted evaluation")
@@ -750,7 +860,11 @@ func validateApproval(approval HumanApprovalManifest, manifest TrustedEvaluation
 		return errors.New("human approver identity does not match controller configuration")
 	}
 	if approval.EvaluationID != manifest.ID || approval.EvaluationManifestSHA256 != hex.EncodeToString(evaluationDigest[:]) ||
-		approval.CandidateBeadID != manifest.CandidateBeadID || approval.CandidateBundleID != manifest.Candidate.ID ||
+		approval.ProtocolVersion != manifest.ProtocolVersion || approval.CityID != manifest.CityID || approval.StoreRef != manifest.StoreRef ||
+		approval.WorkflowRootID != manifest.WorkflowRootID || approval.GateID != manifest.GateID || approval.InputSHA256 != manifest.InputSHA256 ||
+		approval.CandidateBeadID != manifest.CandidateBeadID || approval.CandidateBeadRevision != manifest.CandidateBeadRevision ||
+		approval.CandidateControlBeadID != manifest.CandidateControlBeadID || approval.CandidateControlRevision != manifest.CandidateControlRevision ||
+		approval.CandidateBundleID != manifest.Candidate.ID ||
 		approval.BaselineBundleID != manifest.Current.ID || approval.EvalSuiteHash != manifest.EvalSuiteHash {
 		return errors.New("human approval is not bound to this exact candidate evaluation")
 	}
@@ -791,7 +905,7 @@ func decodePublicKey(text string) (ed25519.PublicKey, error) {
 	return ed25519.PublicKey(decoded), nil
 }
 
-func verifySignedPayload(file []byte, publicKey ed25519.PublicKey, dst any) error {
+func verifySignedPayload(file []byte, publicKey ed25519.PublicKey, domain string, dst any) error {
 	var envelope signedEnvelope
 	if err := decodeStrictJSON(file, &envelope); err != nil {
 		return err
@@ -803,13 +917,17 @@ func verifySignedPayload(file []byte, publicKey ed25519.PublicKey, dst any) erro
 	if err != nil || len(signature) != ed25519.SignatureSize || base64.RawURLEncoding.EncodeToString(signature) != envelope.Signature {
 		return errors.New("signature is not canonical base64url Ed25519 data")
 	}
-	if !ed25519.Verify(publicKey, envelope.Payload, signature) {
+	signed := append([]byte(domain), envelope.Payload...)
+	if !ed25519.Verify(publicKey, signed, signature) {
 		return errors.New("signature verification failed")
 	}
 	return decodeStrictJSON(envelope.Payload, dst)
 }
 
 func decodeStrictJSON(data []byte, dst any) error {
+	if err := validateNoDuplicateJSONKeys(data); err != nil {
+		return err
+	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(dst); err != nil {
@@ -823,6 +941,74 @@ func decodeStrictJSON(data []byte, dst any) error {
 		return err
 	}
 	return nil
+}
+
+func validateNoDuplicateJSONKeys(data []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	var value func() error
+	value = func() error {
+		token, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		delim, ok := token.(json.Delim)
+		if !ok {
+			return nil
+		}
+		switch delim {
+		case '{':
+			seen := map[string]struct{}{}
+			for decoder.More() {
+				keyToken, err := decoder.Token()
+				if err != nil {
+					return err
+				}
+				key, ok := keyToken.(string)
+				if !ok {
+					return errors.New("JSON object key is not a string")
+				}
+				if _, duplicate := seen[key]; duplicate {
+					return fmt.Errorf("duplicate JSON object key %q", key)
+				}
+				seen[key] = struct{}{}
+				if err := value(); err != nil {
+					return err
+				}
+			}
+			_, err = decoder.Token()
+			return err
+		case '[':
+			for decoder.More() {
+				if err := value(); err != nil {
+					return err
+				}
+			}
+			_, err = decoder.Token()
+			return err
+		default:
+			return errors.New("unexpected JSON delimiter")
+		}
+	}
+	if err := value(); err != nil {
+		return err
+	}
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("multiple JSON values are not allowed")
+		}
+		return err
+	}
+	return nil
+}
+
+func equalEvaluationContext(a, b EvaluationContext) bool {
+	return a.ProtocolVersion == ProtocolVersionV1 && a == b && a.CityID != "" && a.StoreRef != "" &&
+		a.WorkflowRootID != "" && a.GateID != "" && validSHA256(a.InputSHA256)
+}
+
+func gateArtifactPath(template, gateID string) string {
+	digest := sha256.Sum256([]byte(gateID))
+	return strings.ReplaceAll(strings.TrimSpace(template), "{gate_id}", hex.EncodeToString(digest[:]))
 }
 
 func controllerOwnedPath(cityPath, configured string) (string, error) {
@@ -863,14 +1049,27 @@ func controllerOwnedPath(cityPath, configured string) (string, error) {
 }
 
 func readRegularFile(path string) ([]byte, error) {
-	info, err := os.Lstat(path)
+	file, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
-	if !info.Mode().IsRegular() || info.Size() > maxTrustedFileSize {
-		return nil, errors.New("trusted evidence must be a regular file within the size limit")
+	defer func() { _ = file.Close() }()
+	before, err := file.Stat()
+	if err != nil {
+		return nil, err
 	}
-	return os.ReadFile(path)
+	if !before.Mode().IsRegular() || before.Size() > maxTrustedFileSize || before.Mode().Perm()&0o222 != 0 {
+		return nil, errors.New("trusted evidence must be an atomically published read-only regular file within the size limit")
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maxTrustedFileSize+1))
+	if err != nil {
+		return nil, err
+	}
+	after, err := file.Stat()
+	if err != nil || len(data) > maxTrustedFileSize || !os.SameFile(before, after) || before.Size() != after.Size() {
+		return nil, errors.New("trusted evidence changed while being read")
+	}
+	return data, nil
 }
 
 func readEvidenceFile(baseDir, relativePath string) ([]byte, error) {

@@ -1928,6 +1928,18 @@ func (s *gcTestStore) Delete(id string) error {
 	return nil
 }
 
+func (s *gcTestStore) DeleteIfMatch(id string, revision int64) error {
+	s.deleteAttempts = append(s.deleteAttempts, id)
+	if err := s.deleteErrors[id]; err != nil {
+		return err
+	}
+	if err := s.MemStore.DeleteIfMatch(id, revision); err != nil {
+		return err
+	}
+	s.deletedIDs = append(s.deletedIDs, id)
+	return nil
+}
+
 //nolint:unparam // helper mirrors makeGCBeadWithLabels signature for readability
 func makeGCBead(id string, createdAt time.Time, status, beadType string) beads.Bead {
 	return makeGCBeadWithLabels(id, createdAt, status, beadType)

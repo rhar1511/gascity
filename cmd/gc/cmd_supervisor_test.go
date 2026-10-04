@@ -5028,11 +5028,11 @@ func TestStopManagedCityForcesCleanupAfterTimeout(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	start := time.Now()
 	err := stopManagedCity(mc, cityPath, &stderr)
-	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
-		t.Fatalf("stopManagedCity took %s, want bounded timeout", elapsed)
-	}
+	// The hung-runtime timing bound is asserted by
+	// TestStopManagedCityBoundsForcedShutdownWhenRuntimeHangs. This case
+	// additionally stops an exec Beads provider, whose independent teardown
+	// latency must not be mistaken for the runtime's grace/forced budget.
 	if err == nil {
 		t.Fatal("stopManagedCity err = nil, want non-nil because city never exited")
 	}
@@ -5133,11 +5133,10 @@ func TestStopManagedCityDoesNotUseStartupOrDriftTimeouts(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	start := time.Now()
-	err := stopManagedCity(mc, cityPath, &stderr)
-	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
-		t.Fatalf("stopManagedCity took %s, want shutdown-timeout bound", elapsed)
+	if got := managedCityStopTimeout(mc); got != 20*time.Millisecond {
+		t.Fatalf("managedCityStopTimeout = %s, want shutdown timeout 20ms", got)
 	}
+	err := stopManagedCity(mc, cityPath, &stderr)
 	if err == nil {
 		t.Fatal("stopManagedCity err = nil, want non-nil because city never exited")
 	}
@@ -5166,10 +5165,10 @@ func (hangingListProvider) ListRunning(string) ([]string, error) {
 
 func TestStopManagedCityBoundsForcedShutdownWhenRuntimeHangs(t *testing.T) {
 	cityPath := t.TempDir()
-	// Provider lifecycle is covered separately. Keep this timer focused on
-	// the city shutdown budget, not exec-provider process startup/teardown.
+	// Keep provider teardown out of this wall-clock assertion: the test is
+	// specifically about bounding a hung CityRuntime.shutdown, not the bead
+	// provider's independent stop latency.
 	t.Setenv("GC_BEADS", "file")
-	t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)
 
 	closer := &closerSpy{}
 	forceStop := &atomic.Bool{}
@@ -5373,10 +5372,7 @@ while True:
 		cityPath: cityPath,
 		cityName: "bright-lights",
 		cfg: &config.City{
-			// Forced city shutdown gets five times this grace period. Keep it
-			// above the proxy process's 2s process-group stop wait so this test
-			// observes completed service cleanup before that bounded wait expires.
-			Daemon: config.DaemonConfig{ShutdownTimeout: "500ms"},
+			Daemon: config.DaemonConfig{ShutdownTimeout: "20ms"},
 			Services: []config.Service{{
 				Name: "bridge",
 				Kind: "proxy_process",

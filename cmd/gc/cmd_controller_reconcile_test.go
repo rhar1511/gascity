@@ -1,10 +1,14 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -20,6 +24,7 @@ func TestControllerReconcileAcknowledgement(t *testing.T) {
 		{name: "acknowledged", reply: "ok"},
 		{name: "unavailable", err: errors.New("controller unavailable"), wantErr: true},
 		{name: "empty reply", wantErr: true},
+		{name: "whitespace reply", reply: "ok\n", wantErr: true},
 		{name: "error reply", reply: "error: unavailable", wantErr: true},
 		{name: "unrecognized success", reply: `{"ok":true}`, wantErr: true},
 	} {
@@ -87,6 +92,61 @@ func TestControllerReconcileResolutionFailureDoesNotSend(t *testing.T) {
 	if err := cmd.Execute(); !errors.Is(err, want) {
 		t.Fatalf("resolution error = %v, want %v", err, want)
 	}
+}
+
+func TestControllerReconcileProductionTransportRejectsWhitespaceAcknowledgement(t *testing.T) {
+	cityPath := shortSocketTempDir(t, "gc-controller-reconcile-")
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"test\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	socketPath := controllerSocketPath(cityPath)
+	if err := os.MkdirAll(filepath.Dir(socketPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() {
+		listener.Close()      //nolint:errcheck
+		os.Remove(socketPath) //nolint:errcheck
+	})
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close() //nolint:errcheck
+		command, err := bufio.NewReader(conn).ReadString('\n')
+		if err != nil {
+			t.Errorf("read command: %v", err)
+			return
+		}
+		if command != "poke\n" {
+			t.Errorf("command = %q, want poke newline", command)
+			return
+		}
+		if _, err := conn.Write([]byte(" ok \n")); err != nil {
+			t.Errorf("write response: %v", err)
+		}
+	}()
+
+	previousCityFlag := cityFlag
+	cityFlag = cityPath
+	t.Cleanup(func() { cityFlag = previousCityFlag })
+	var stdout bytes.Buffer
+	cmd := newControllerCmd(&stdout, io.Discard)
+	cmd.SetArgs([]string{"reconcile", "--json"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("whitespace-wrapped acknowledgement was accepted")
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("malformed acknowledgement emitted success output: %s", stdout.String())
+	}
+	<-done
 }
 
 func TestControllerReconcileJSONProductionContract(t *testing.T) {

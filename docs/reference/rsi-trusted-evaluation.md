@@ -14,15 +14,18 @@ of city configuration, candidate worktrees, judge worktrees, and bead metadata.
 
 ```toml
 [rsi]
-evaluation_file = ".gc/rsi/evaluation.json"
+evaluation_file = ".gc/rsi/{gate_id}/evaluation.json"
 evaluation_key_id = "trusted-evaluator-2026"
 evaluation_public_key = "<base64url-ed25519-public-key>"
-human_approval_file = ".gc/rsi/approval.json"
+human_approval_file = ".gc/rsi/{gate_id}/approval.json"
 human_approval_key_id = "release-approver"
 human_approval_public_key = "<different-base64url-ed25519-public-key>"
 ```
 
-The evaluator fields must be set together. Human-approval fields are optional
+Each path must contain exactly one `{gate_id}` token. The controller replaces
+it with the lowercase SHA-256 of the exact gate ID, so concurrent gates never
+share an artifact name and stale evidence for another gate remains absent and
+pending. The evaluator fields must be set together. Human-approval fields are optional
 as a configuration group, but without them the gate remains pending and cannot
 promote. An absent evaluator configuration is a rejection. A configured but
 not-yet-created evaluation file, referenced evidence file, or human approval
@@ -54,13 +57,21 @@ to the assigned judge bead, actor, session, and lane.
 
 ## Evaluation record and evidence
 
-Each signed JSON envelope has `payload` and `signature` fields. The signature
-is unpadded base64url Ed25519 over the exact UTF-8 bytes inside `payload`.
-Unknown JSON fields are rejected. The evaluation payload uses schema
+Each signed JSON envelope has exactly `payload` and `signature` fields. The
+payload is signed as its exact JSON bytes; no parsing, whitespace rewriting,
+or canonicalization occurs before verification. Evaluator signatures cover
+the ASCII domain prefix `gascity:rsi:evaluator:v1` followed by one NUL byte and
+the payload bytes. Human signatures use the distinct prefix
+`gascity:rsi:human-approval:v1`, one NUL byte, then their payload bytes. A
+signature from one domain is invalid in the other. Signatures are unpadded
+base64url Ed25519. Unknown fields and duplicate object keys at any nesting
+depth are rejected. The evaluation payload uses schema
 `gc.rsi.trusted-evaluation.v1` and policy version `gc.rsipolicy.v1`. It binds:
 
-- an evaluation ID, issue/expiry times, evaluator key ID, candidate bead ID,
-  and candidate output digest;
+- protocol version, city identity, exact store reference, workflow root, gate
+  ID, and a controller-recomputed digest of all existing candidate/judge inputs;
+- an evaluation ID, issue/expiry times, evaluator key ID, candidate/control
+  bead IDs and store revisions, and candidate output digest;
 - the exact baseline and candidate revision bundles, parent link, and frozen
   evaluation-suite SHA-256;
 - measured baseline/candidate metrics, all required safety/resource limits,
@@ -82,7 +93,8 @@ and sum to the signed worker-hour totals. The policy recomputes score as useful
 accepted units divided by total worker-hours; it does not trust a supplied
 score that disagrees with those ledgers.
 
-The human-approval payload uses schema `gc.rsi.human-approval.v1`. It must be
+The human-approval payload uses schema `gc.rsi.human-approval.v1`. It repeats
+the protocol/city/store/workflow/gate/input bindings and must be
 signed by a key different from the evaluator key and bind the SHA-256 digest of
 the complete evaluation envelope, evaluation ID, candidate bead, baseline and
 candidate bundle IDs, suite hash, and policy version. A reusable `promote=true`
@@ -100,6 +112,18 @@ root `city.toml`, evaluator/approval records, held-out data, or signing keys;
 judges may read public policy and criteria but may not alter them. The human
 approval key must be held by an authorized person or service outside the
 candidate, judge, and evaluator processes.
+
+Publish every envelope and referenced evidence artifact by writing and syncing
+a temporary file in the destination directory, changing it to read-only, and
+atomically renaming it to the final path. The controller accepts only read-only
+regular files and reads one stable inode. A missing final name is pending; a
+writable or changing final file is invalid evidence. Once published, replace a
+record only with another complete atomic rename.
+
+The engine claim path also stamps a write-once `gc.rsi_execution_binding` from
+the selected actor and session. Generic mutation APIs reserve this key. The
+gate uses this protected binding, never mutable `Assignee` or `gc.session_id`,
+when checking improver/judge independence and evaluator claims.
 
 Permission fields in the signed record are evaluator assertions, not OS-level
 enforcement. Do not configure an evaluator key until its runner can make those

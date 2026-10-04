@@ -3,12 +3,11 @@ package api
 import (
 	"context"
 	"errors"
-	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api/apierr"
-	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // humaHandleBeadList is the Huma-typed handler for GET /v0/beads.
@@ -244,6 +243,7 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 	if page == nil {
 		page = []beads.Bead{}
 	}
+	page = redactGenericBeads(page)
 	body := ListBody[beads.Bead]{
 		Items:         page,
 		Total:         total,
@@ -600,6 +600,7 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 	if all == nil {
 		all = []beads.Bead{}
 	}
+	all = redactGenericBeads(all)
 
 	index := s.latestIndex()
 	return &ListOutput[beads.Bead]{
@@ -646,8 +647,8 @@ func (s *Server) humaHandleBeadGraph(_ context.Context, input *BeadGraphInput) (
 	return &IndexOutput[BeadGraphResponse]{
 		Index: s.latestIndex(),
 		Body: BeadGraphResponse{
-			Root:       root,
-			Beads:      graphBeads,
+			Root:       redactGenericBead(root),
+			Beads:      redactGenericBeads(graphBeads),
 			Deps:       deps,
 			Membership: membership,
 		},
@@ -670,7 +671,7 @@ func (s *Server) humaHandleBeadGet(_ context.Context, input *BeadGetInput) (*Ind
 	return &IndexOutput[beads.Bead]{
 		Index:     s.latestIndex(),
 		CacheAgeS: cacheAgeSeconds(cityStore),
-		Body:      b,
+		Body:      redactGenericBead(b),
 	}, nil
 }
 
@@ -692,6 +693,7 @@ func (s *Server) humaHandleBeadDeps(_ context.Context, input *BeadDepsInput) (*I
 	if children == nil {
 		children = []beads.Bead{}
 	}
+	children = redactGenericBeads(children)
 	return &IndexOutput[BeadDepsResponse]{
 		Index: s.latestIndex(),
 		Body:  BeadDepsResponse{Children: children},
@@ -706,10 +708,11 @@ type BeadDepsResponse struct {
 // humaHandleBeadCreate is the Huma-typed handler for POST /v0/beads.
 // Title required via struct tag on BeadCreateInput.
 func (s *Server) humaHandleBeadCreate(ctx context.Context, input *BeadCreateInput) (*IndexOutput[beads.Bead], error) {
-	for key := range input.Body.Metadata {
-		if strings.HasPrefix(key, beadmeta.PRActionMetadataPrefix) {
-			return nil, apierr.Forbidden.Msg("PR action ledger metadata is reserved for the controller")
-		}
+	if err := validatePRActionMetadata(input.Body.Metadata); err != nil {
+		return nil, err
+	}
+	if err := validateGenericBeadMetadata(input.Body.Metadata); err != nil {
+		return nil, err
 	}
 	// Idempotency: run the create at most once per Idempotency-Key. The helper
 	// owns reserve/replay/mismatch/in-flight and guarantees the reservation is
@@ -754,7 +757,7 @@ func (s *Server) humaHandleBeadCreate(ctx context.Context, input *BeadCreateInpu
 
 	return &IndexOutput[beads.Bead]{
 		Index: s.latestIndex(),
-		Body:  b,
+		Body:  redactGenericBead(b),
 	}, nil
 }
 
@@ -771,7 +774,16 @@ func (s *Server) humaHandleBeadClose(ctx context.Context, input *BeadCloseInput)
 	if err := s.gateWorkRecordClose(ctx, id, store, current, nil); err != nil {
 		return nil, err
 	}
-	if err := store.Close(id); err != nil {
+	writer, ok := beads.ConditionalWriterFor(store)
+	if !ok || !beads.InspectConditionalWrites(store).Capable || current.Revision == 0 {
+		return nil, apierr.SessionConflict.Msg("bead cannot be closed without conditional-write protection")
+	}
+	closed := "closed"
+	if err := writer.UpdateIfMatch(id, current.Revision, beads.UpdateOpts{Status: &closed}); err != nil {
+		var stale *beads.PreconditionFailedError
+		if errors.As(err, &stale) {
+			return nil, apierr.ConflictConcurrentModify.Msg("conflict: bead " + id + " changed before close")
+		}
 		if errors.Is(err, beads.ErrNotFound) {
 			return nil, apierr.ConflictConcurrentDelete.Msg("conflict: bead " + id + " was deleted concurrently")
 		}
@@ -793,11 +805,25 @@ func (s *Server) humaHandleBeadReopen(_ context.Context, input *BeadReopenInput)
 	if err := rejectPRActionLedgerMutation(b); err != nil {
 		return nil, err
 	}
+	open := "open"
+	opts := beads.UpdateOpts{Status: &open}
+	if err := session.GuardGenericMutation(b, opts); err != nil {
+		return nil, apierr.SessionConflict.Msg("session request purge is in progress")
+	}
 	if b.Status != "closed" {
 		return nil, apierr.ConflictWrongState.Msg("conflict: bead " + id + " is not closed (status: " + b.Status + ")")
 	}
-	if err := store.Reopen(id); err != nil {
-		return nil, apierr.Internal.Msg(err.Error())
+	writer, ok := beads.ConditionalWriterFor(store)
+	if !ok || !beads.InspectConditionalWrites(store).Capable || b.Revision == 0 {
+		return nil, apierr.SessionConflict.Msg("bead cannot be reopened without conditional-write protection")
+	}
+	reopenErr := writer.UpdateIfMatch(id, b.Revision, opts)
+	if reopenErr != nil {
+		var stale *beads.PreconditionFailedError
+		if errors.As(reopenErr, &stale) {
+			return nil, apierr.ConflictConcurrentModify.Msg("conflict: bead " + id + " changed before reopen")
+		}
+		return nil, apierr.Internal.Msg(reopenErr.Error())
 	}
 	resp := &OKResponse{}
 	resp.Body.Status = "reopened"
@@ -818,13 +844,21 @@ func (s *Server) humaHandleBeadAssign(ctx context.Context, input *BeadAssignInpu
 	if err != nil {
 		return nil, apierr.InvalidRequest.Msg(err.Error())
 	}
-	// Once Get succeeded in the resolved store, treat Update-ErrNotFound as a
-	// concurrent-delete race rather than resolving again — the bead was just
-	// there, and a second resolution could land on a different store that
-	// happens to share the ID prefix.
-	if err := store.Update(id, beads.UpdateOpts{Assignee: &assignee}); err != nil {
+	opts := beads.UpdateOpts{Assignee: &assignee}
+	if err := session.GuardGenericMutation(current, opts); err != nil {
+		return nil, apierr.SessionConflict.Msg("session request lifecycle metadata is protected")
+	}
+	writer, ok := beads.ConditionalWriterFor(store)
+	if !ok || !beads.InspectConditionalWrites(store).Capable || current.Revision == 0 {
+		return nil, apierr.SessionConflict.Msg("bead cannot be assigned without conditional-write protection")
+	}
+	if err := writer.UpdateIfMatch(id, current.Revision, opts); err != nil {
 		if errors.Is(err, beads.ErrNotFound) {
 			return nil, apierr.ConflictConcurrentDelete.Msg("conflict: bead " + id + " was deleted concurrently")
+		}
+		var stale *beads.PreconditionFailedError
+		if errors.As(err, &stale) {
+			return nil, apierr.ConflictConcurrentModify.Msg("conflict: bead " + id + " changed before assignment")
 		}
 		return nil, apierr.Internal.Msg(err.Error())
 	}
@@ -848,6 +882,12 @@ func (s *Server) humaHandleBeadAssign(ctx context.Context, input *BeadAssignInpu
 func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInput) (*OKResponse, error) {
 	id := input.ID
 	body := input.Body
+	if err := validatePRActionMetadata(body.Metadata); err != nil {
+		return nil, err
+	}
+	if err := validateGenericBeadMetadata(body.Metadata); err != nil {
+		return nil, err
+	}
 
 	opts := beads.UpdateOpts{
 		Title:        body.Title,
@@ -897,11 +937,30 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 	// concurrent-delete race (409) rather than resolving again — otherwise a
 	// delete racing with update silently applies the mutation to a different
 	// store that happens to share the ID.
-	if err := store.Update(id, opts); err != nil {
-		if errors.Is(err, beads.ErrNotFound) {
+	protectedSensitive := opts.Title != nil || opts.Status != nil || opts.Type != nil || opts.Priority != nil ||
+		opts.Description != nil || opts.ParentID != nil || opts.Assignee != nil || len(opts.Labels) > 0 || len(opts.RemoveLabels) > 0 || len(opts.Metadata) > 0
+	var updateErr error
+	if protectedSensitive {
+		if err := session.GuardGenericMutation(current, opts); err != nil {
+			return nil, apierr.SessionConflict.Msg("session request lifecycle metadata is protected")
+		}
+		writer, ok := beads.ConditionalWriterFor(store)
+		if !ok || !beads.InspectConditionalWrites(store).Capable || current.Revision == 0 {
+			return nil, apierr.SessionConflict.Msg("bead cannot be updated without conditional-write protection")
+		}
+		updateErr = writer.UpdateIfMatch(id, current.Revision, opts)
+	} else {
+		updateErr = store.Update(id, opts)
+	}
+	if updateErr != nil {
+		var stale *beads.PreconditionFailedError
+		if errors.As(updateErr, &stale) {
+			return nil, apierr.ConflictConcurrentModify.Msg("conflict: bead " + id + " changed before update")
+		}
+		if errors.Is(updateErr, beads.ErrNotFound) {
 			return nil, apierr.ConflictConcurrentDelete.Msg("conflict: bead " + id + " was deleted concurrently")
 		}
-		return nil, apierr.Internal.Msg(err.Error())
+		return nil, apierr.Internal.Msg(updateErr.Error())
 	}
 	if opts.ParentID != nil && current.ParentID != *opts.ParentID && waitStatus != "closed" {
 		if waiter, ok := store.(beads.ParentProjectionWaiter); ok {
@@ -950,7 +1009,19 @@ func (s *Server) humaHandleBeadDelete(_ context.Context, input *BeadDeleteInput)
 	if err := rejectPRActionLedgerMutation(current); err != nil {
 		return nil, err
 	}
-	if err := store.Close(id); err != nil {
+	closed := "closed"
+	if err := session.GuardGenericMutation(current, beads.UpdateOpts{Status: &closed}); err != nil {
+		return nil, apierr.SessionConflict.Msg("session request lifecycle metadata is protected")
+	}
+	writer, ok := beads.ConditionalWriterFor(store)
+	if !ok || !beads.InspectConditionalWrites(store).Capable || current.Revision == 0 {
+		return nil, apierr.SessionConflict.Msg("bead cannot be deleted without conditional-write protection")
+	}
+	if err := writer.UpdateIfMatch(id, current.Revision, beads.UpdateOpts{Status: &closed}); err != nil {
+		var stale *beads.PreconditionFailedError
+		if errors.As(err, &stale) {
+			return nil, apierr.ConflictConcurrentModify.Msg("conflict: bead " + id + " changed before delete")
+		}
 		if errors.Is(err, beads.ErrNotFound) {
 			return nil, apierr.ConflictConcurrentDelete.Msg("conflict: bead " + id + " was deleted concurrently")
 		}

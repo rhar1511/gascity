@@ -79,6 +79,7 @@ import {
   resolveSupervisorBaseUrl,
   supervisorUrl,
 } from './url';
+import type { ExecutePRActionRequest, PRActionQueue, PRActionResult } from './prActions';
 
 export const SUPERVISOR_REQUEST_TIMEOUT_MS = 60_000;
 export const GC_MUTATION_HEADERS = {
@@ -176,6 +177,8 @@ export interface SupervisorApi {
     name: string,
     query: GetV0CityByCityNameFormulasByNameData['query'],
   ): Promise<FormulaDetailResponse>;
+  prActionQueue(cityName: string, signal?: AbortSignal): Promise<PRActionQueue>;
+  executePRAction(cityName: string, body: ExecutePRActionRequest): Promise<PRActionResult>;
   mutationHeaders(): Record<keyof typeof GC_MUTATION_HEADERS, string>;
 }
 
@@ -199,15 +202,33 @@ export function createSupervisorApi(options: CreateSupervisorApiOptions = {}): S
     responseStyle: 'fields' as const,
     throwOnError: false,
   };
+  const requestFetch = withSupervisorTimeout(
+    options.fetch ?? globalThis.fetch,
+    supervisorTimeoutMs(options.timeoutMs),
+  );
   const client =
     options.client ??
     createClient({
       ...clientOptions,
-      fetch: withSupervisorTimeout(
-        options.fetch ?? globalThis.fetch,
-        supervisorTimeoutMs(options.timeoutMs),
-      ),
+      fetch: requestFetch,
     });
+
+  const requestJSON = async <T>(
+    path: string,
+    init: RequestInit,
+    emptyMessage: string,
+  ): Promise<T> => {
+    const response = await requestFetch(supervisorUrl(baseUrl, path), init);
+    let result: SupervisorResult<T> = { response };
+    try {
+      const body: unknown = await response.json();
+      if (response.ok) result = { response, data: body as T };
+      else result = { response, error: body };
+    } catch (error) {
+      if (response.ok) result = { response, error };
+    }
+    return unwrapSupervisorResult(Promise.resolve(result), emptyMessage);
+  };
 
   return {
     baseUrl,
@@ -538,6 +559,33 @@ export function createSupervisorApi(options: CreateSupervisorApiOptions = {}): S
           query,
         }) as Promise<SupervisorResult<FormulaDetailResponse>>,
         'gc supervisor formula detail response was empty',
+      );
+    },
+    prActionQueue(cityName, signal) {
+      return requestJSON<PRActionQueue>(
+        `/v0/city/${encodeURIComponent(cityName)}/pr-actions/queue`,
+        {
+          headers: { Accept: 'application/json' },
+          ...(signal === undefined ? {} : { signal }),
+        },
+        'gc supervisor PR action queue response was empty',
+      );
+    },
+    executePRAction(cityName, body) {
+      const { idempotency_key: idempotencyKey, ...requestBody } = body;
+      return requestJSON<PRActionResult>(
+        `/v0/city/${encodeURIComponent(cityName)}/pr-actions`,
+        {
+          method: 'POST',
+          headers: {
+            Accept: 'application/json',
+            'Content-Type': 'application/json',
+            ...GC_MUTATION_HEADERS,
+            'Idempotency-Key': idempotencyKey,
+          },
+          body: JSON.stringify(requestBody),
+        },
+        'gc supervisor PR action response was empty',
       );
     },
     mutationHeaders() {

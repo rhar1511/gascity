@@ -481,8 +481,13 @@ func TestReleaseOrphanedPoolAssignments_DetachedProbeAliveSkipsRelease(t *testin
 	if got.Metadata[detachedProbeMetadataKey] != testDetachedPoolProbeSpec {
 		t.Fatalf("gc.detached = %q, want preserved", got.Metadata[detachedProbeMetadataKey])
 	}
-	if !strings.Contains(logs.String(), "detached probe alive") {
-		t.Fatalf("logs = %q, want detached probe alive diagnostic", logs.String())
+	// Under a saturated test runner even an `exit 0` fake tmux process can
+	// exceed the probe deadline. Both alive and timeout are safe outcomes:
+	// neither may release or clear the still-owned work. The probe's exit-zero
+	// classification is covered directly in detached_probe_test.go.
+	if !strings.Contains(logs.String(), "detached probe alive") &&
+		!strings.Contains(logs.String(), "detached probe timeout") {
+		t.Fatalf("logs = %q, want detached probe alive or safe timeout diagnostic", logs.String())
 	}
 }
 

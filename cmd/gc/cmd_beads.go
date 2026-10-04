@@ -7,6 +7,7 @@ import (
 	"sort"
 
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/spf13/cobra"
 )
@@ -187,6 +188,7 @@ func doBeadsListFallback(cityPath, format string, filters beadFilters, stdout, s
 		fmt.Fprintf(stderr, "gc beads list: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	redactGenericBeads(all)
 	sortBeadsForList(all)
 	if format == "json" {
 		writeBeadsJSON(all, stdout)
@@ -274,6 +276,7 @@ func doBeadsShowFallback(cityPath, beadID, format string, stdout, stderr io.Writ
 			fmt.Fprintf(stderr, "gc beads show: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
+		b.Metadata = beadmeta.RedactGenericMetadata(b.Metadata)
 		if format == "json" {
 			writeBeadJSON(b, stdout)
 		} else {
@@ -295,6 +298,7 @@ func doBeadsShowFallback(cityPath, beadID, format string, stdout, stderr io.Writ
 			fmt.Fprintf(stderr, "gc beads show: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
+		b.Metadata = beadmeta.RedactGenericMetadata(b.Metadata)
 		if format == "json" {
 			writeBeadJSON(b, stdout)
 		} else {
@@ -304,6 +308,12 @@ func doBeadsShowFallback(cityPath, beadID, format string, stdout, stderr io.Writ
 	}
 	fmt.Fprintf(stderr, "gc beads show: bead %s not found\n", beadID) //nolint:errcheck // best-effort stderr
 	return 1
+}
+
+func redactGenericBeads(rows []beads.Bead) {
+	for i := range rows {
+		rows[i].Metadata = beadmeta.RedactGenericMetadata(rows[i].Metadata)
+	}
 }
 
 // collectBeadsAcrossStores iterates every opened bead store, applies the

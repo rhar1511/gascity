@@ -40,3 +40,55 @@ func TestSessionRequestJSONSchemas(t *testing.T) {
 		})
 	}
 }
+
+func TestSessionRequestClientUsesSupervisorForAliveCityWithoutStandalonePort(t *testing.T) {
+	cityPath := writeBeadsTestCity(t)
+	t.Setenv("GC_CITY", cityPath)
+	t.Setenv("GC_NO_API", "")
+	oldAlive, oldSupervisor := apiRouteControllerAliveHook, apiRouteSupervisorClientHook
+	t.Cleanup(func() {
+		apiRouteControllerAliveHook, apiRouteSupervisorClientHook = oldAlive, oldSupervisor
+	})
+	want := api.NewCityScopedClient("http://127.0.0.1:1", "test-city")
+	apiRouteControllerAliveHook = func(string) int { return 1 }
+	apiRouteSupervisorClientHook = func(string) *api.Client { return want }
+	got, err := sessionRequestClient()
+	if err != nil || got != want {
+		t.Fatalf("supervisor-managed session request client = %v, %v; want supervisor client", got, err)
+	}
+	t.Setenv("GC_NO_API", "1")
+	if got, err := sessionRequestClient(); err == nil || got != nil {
+		t.Fatal("disabled API must reject tracked request without a local fallback")
+	}
+}
+
+func TestSessionRequestFailuresReportDiagnosticsThroughRoot(t *testing.T) {
+	cityPath := writeBeadsTestCity(t)
+	t.Setenv("GC_NO_API", "1")
+	t.Setenv("GC_SESSION_ID", "")
+	t.Setenv("GC_RUNTIME_EPOCH", "2")
+	t.Setenv("GC_INSTANCE_TOKEN", "private-credential")
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"get", []string{"get", "gc-test", "req-test"}, "require the Gas City server"},
+		{"submit", []string{"submit", "gc-test", "req-test", "message"}, "positive --generation"},
+		{"ack", []string{"ack", "req-test"}, "requires this execution"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out, errOut bytes.Buffer
+			args := append([]string{"--city", cityPath, "session", "request"}, tc.args...)
+			if code := run(args, &out, &errOut); code == 0 {
+				t.Fatal("invalid request reported success")
+			}
+			if !strings.Contains(errOut.String(), tc.want) {
+				t.Fatalf("missing diagnostic: stdout=%s stderr=%s", &out, &errOut)
+			}
+			if strings.Contains(out.String()+errOut.String(), "private-credential") {
+				t.Fatal("execution credential leaked")
+			}
+		})
+	}
+}

@@ -111,7 +111,8 @@ The controller loads the candidate proposal and both durable judge outputs,
 then resolves a signed evaluation manifest from root city `[rsi]` config. The
 manifest is created by an evaluator that runs outside the improver and judges,
 uses a key they cannot access, and binds their actual assigned actors/sessions
-and permission profiles. It records independently measured baseline/candidate
+from the controller-reserved execution binding, not worker-mutable assignment
+metadata. It records independently measured baseline/candidate
 metrics, approved limits, the fixed acceptance-unit set and results, worker-time
 ledgers, the frozen suite, bundle lineage, and judge output digests. Candidate
 reported metrics, limits, attempts, and authority labels have no policy effect.

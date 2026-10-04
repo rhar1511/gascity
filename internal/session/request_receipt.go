@@ -41,7 +41,7 @@ var (
 	ErrRequestAcknowledgementRejected = errors.New("session request acknowledgement does not match the intended execution")
 )
 
-const requestReceiptPrefix = beadmeta.SessionRequestReceiptMetadataPrefix
+const requestReceiptPrefix = beadmeta.SessionRequestReceiptPrefix
 
 // RequestReceipt keeps acceptance, provider submission, session acknowledgement,
 // and effect evidence separate. An acknowledgement never verifies an effect.
@@ -63,38 +63,50 @@ type storedRequestReceipt struct {
 	Version int `json:"version"`
 	RequestReceipt
 	ExecutionTokenDigest string `json:"execution_token_digest"`
+	TargetSessionName    string `json:"target_session_name"`
 }
 
 // RequestAcceptance reports whether this call created the durable request.
 // Provider delivery needs the separate one-time reservation in SubmitRequest.
 type RequestAcceptance struct {
 	RequestReceipt
-	NewlyAccepted bool `json:"-"`
+	NewlyAccepted        bool `json:"-"`
+	targetSessionName    string
+	executionTokenDigest string
 }
 
 // AcceptRequest durably records a request for the exact current session
-// generation before provider delivery. Reusing the ID is idempotent only for
-// the same generation and message. Conditional storage is mandatory: there is
-// no legacy unconditional implementation of this protocol.
+// generation before provider delivery. An existing receipt is validated and
+// returned before current execution state is consulted, so exact replay remains
+// stable after generation churn or closure. Reusing the ID is idempotent only
+// for the same generation and message. Conditional storage is mandatory: there
+// is no legacy unconditional implementation of this protocol.
 func (s *Store) AcceptRequest(sessionID, requestID string, generation int, message string, now time.Time) (RequestAcceptance, error) {
 	if generation <= 0 || now.IsZero() || strings.TrimSpace(message) == "" {
 		return RequestAcceptance{}, ErrRequestConflict
 	}
 	created := false
+	targetSessionName := ""
+	executionTokenDigest := ""
 	receipt, err := s.mutateRequestReceipt(sessionID, requestID, func(b beads.Bead, record *storedRequestReceipt) (bool, error) {
 		created = false
+		digest := requestDigest(message)
+		if record.Version != 0 {
+			if record.Generation != generation || record.MessageDigest != digest {
+				return false, ErrRequestConflict
+			}
+			targetSessionName = record.TargetSessionName
+			executionTokenDigest = record.ExecutionTokenDigest
+			return false, nil
+		}
+		if IsRequestPurgeFenced(b) {
+			return false, ErrRequestConflict
+		}
 		info := infoFromPersistedBead(b)
 		if info.Closed || info.Generation != strconv.Itoa(generation) || info.InstanceToken == "" {
 			return false, ErrRequestConflict
 		}
-		digest := requestDigest(message)
 		tokenDigest := requestDigest(info.InstanceToken)
-		if record.Version != 0 {
-			if record.Generation != generation || record.MessageDigest != digest || record.ExecutionTokenDigest != tokenDigest {
-				return false, ErrRequestConflict
-			}
-			return false, nil
-		}
 		*record = storedRequestReceipt{
 			Version: 1,
 			RequestReceipt: RequestReceipt{
@@ -103,24 +115,33 @@ func (s *Store) AcceptRequest(sessionID, requestID string, generation int, messa
 				Delivery: RequestDeliveryPending, Effect: "unverified",
 			},
 			ExecutionTokenDigest: tokenDigest,
+			TargetSessionName:    info.SessionName,
 		}
+		targetSessionName = record.TargetSessionName
+		executionTokenDigest = record.ExecutionTokenDigest
 		created = true
 		return true, nil
 	})
-	return RequestAcceptance{RequestReceipt: receipt, NewlyAccepted: created && err == nil}, err
+	return RequestAcceptance{
+		RequestReceipt:       receipt,
+		NewlyAccepted:        created && err == nil,
+		targetSessionName:    targetSessionName,
+		executionTokenDigest: executionTokenDigest,
+	}, err
 }
 
 // GetRequest reads the selected request, including after session generation
 // changes or closure. A missing record is never reconstructed from a newer one.
 func (s *Store) GetRequest(sessionID, requestID string) (RequestReceipt, error) {
-	if err := validateReceiptRequestID(requestID); err != nil {
+	key, err := requestReceiptMetadataKey(requestID)
+	if err != nil {
 		return RequestReceipt{}, err
 	}
 	b, err := s.requestReceiptBead(sessionID)
 	if err != nil {
 		return RequestReceipt{}, err
 	}
-	record, err := decodeRequestReceipt(b.Metadata[requestReceiptPrefix+requestID], sessionID, requestID)
+	record, err := decodeRequestReceipt(b.Metadata[key], sessionID, requestID)
 	if err != nil {
 		return RequestReceipt{}, err
 	}
@@ -146,13 +167,13 @@ func (s *Store) ListRequests(sessionID string, generation int) ([]RequestReceipt
 		if !strings.HasPrefix(key, requestReceiptPrefix) {
 			continue
 		}
-		id := strings.TrimPrefix(key, requestReceiptPrefix)
-		if err := validateReceiptRequestID(id); err != nil {
-			return nil, err
-		}
-		record, err := decodeRequestReceipt(raw, sessionID, id)
+		record, err := decodeRequestReceipt(raw, sessionID, "")
 		if err != nil {
 			return nil, err
+		}
+		expectedKey, err := requestReceiptMetadataKey(record.RequestID)
+		if err != nil || key != expectedKey {
+			return nil, ErrRequestConflict
 		}
 		if record.Version == 0 {
 			return nil, ErrRequestConflict
@@ -167,6 +188,8 @@ func (s *Store) ListRequests(sessionID string, generation int) ([]RequestReceipt
 
 // DeleteClosedSession preserves request history when a caller asks to delete
 // a closed session. No archive/deletion policy is configured in this release.
+// The final delete is revision-fenced to the exact closed, evidence-free row
+// inspected here, so a concurrent reopen or receipt write cannot be erased.
 // Direct backend writes remain outside this domain boundary.
 func (s *Store) DeleteClosedSession(sessionID string) error {
 	b, err := s.requestReceiptBead(sessionID)
@@ -176,12 +199,102 @@ func (s *Store) DeleteClosedSession(sessionID string) error {
 	if b.Status != "closed" {
 		return ErrRequestConflict
 	}
+	if HasRequestEvidence(b) {
+		return ErrRequestEvidenceRetained
+	}
+	writer, ok := beads.ConditionalWriterFor(s.store.Store)
+	if !ok || !beads.InspectConditionalWrites(s.store.Store).Capable || b.Revision == 0 {
+		return beads.ErrConditionalWriteUnsupported
+	}
+	return writer.DeleteIfMatch(sessionID, b.Revision)
+}
+
+// HasRequestEvidence reports whether a bead contains durable session request
+// evidence that must be retained by destructive API paths.
+func HasRequestEvidence(b beads.Bead) bool {
 	for key := range b.Metadata {
 		if strings.HasPrefix(key, requestReceiptPrefix) {
-			return ErrRequestEvidenceRetained
+			return true
 		}
 	}
-	return s.store.Delete(sessionID)
+	return false
+}
+
+// IsOwnedRequestMetadataKey reports metadata that only the durable request
+// protocol and its destructive-purge protocol may write.
+func IsOwnedRequestMetadataKey(key string) bool {
+	return strings.HasPrefix(key, requestReceiptPrefix) || key == beadmeta.SessionRequestPurgeFenceMetadataKey
+}
+
+// ValidateUnownedRequestMetadata rejects generic mutation of protocol-owned
+// request metadata, regardless of the target bead's current classification.
+func ValidateUnownedRequestMetadata(metadata map[string]string) error {
+	if err := beadmeta.ValidateGenericMetadata(metadata); err != nil {
+		return ErrRequestConflict
+	}
+	return nil
+}
+
+// RequestPurgeFence returns the active workflow-purge owner token, or empty
+// when request acceptance and reopen are not fenced.
+func RequestPurgeFence(b beads.Bead) string {
+	return strings.TrimSpace(b.Metadata[beadmeta.SessionRequestPurgeFenceMetadataKey])
+}
+
+// IsRequestPurgeFenced reports whether destructive workflow cleanup currently
+// owns the session request/reopen fence.
+func IsRequestPurgeFenced(b beads.Bead) bool {
+	return RequestPurgeFence(b) != ""
+}
+
+// GuardRequestPurgeFenceMutation rejects writes that could change a fenced
+// row's identity or make it live. It intentionally does not classify the row:
+// type itself is mutable and therefore cannot be trusted ahead of this guard.
+func GuardRequestPurgeFenceMutation(b beads.Bead, opts beads.UpdateOpts) error {
+	if !IsRequestPurgeFenced(b) {
+		return nil
+	}
+	if opts.Type != nil || len(opts.Metadata) > 0 || opts.Status != nil && *opts.Status != "closed" {
+		return ErrRequestConflict
+	}
+	return nil
+}
+
+// GuardGenericMutation rejects generic writes that would cross request
+// lifecycle ownership. Receipt-bearing rows retain their historical type even
+// if a legacy or concurrent writer damaged the row's current classification.
+func GuardGenericMutation(b beads.Bead, opts beads.UpdateOpts) error {
+	if err := GuardRequestPurgeFenceMutation(b, opts); err != nil {
+		return err
+	}
+	if HasRequestEvidence(b) {
+		if opts.Type != nil && *opts.Type != b.Type {
+			return ErrRequestConflict
+		}
+		if len(opts.Labels) > 0 || len(opts.RemoveLabels) > 0 {
+			hasSessionLabel := false
+			for _, label := range b.Labels {
+				if label == LabelSession {
+					hasSessionLabel = true
+					break
+				}
+			}
+			for _, label := range opts.Labels {
+				if label == LabelSession {
+					hasSessionLabel = true
+				}
+			}
+			for _, label := range opts.RemoveLabels {
+				if label == LabelSession {
+					hasSessionLabel = false
+				}
+			}
+			if !hasSessionLabel {
+				return ErrRequestConflict
+			}
+		}
+	}
+	return nil
 }
 
 // RecordRequestDelivery records a trusted provider caller's result. Even a
@@ -231,6 +344,9 @@ func (s *Store) AcknowledgeRequest(sessionID, requestID string, generation int, 
 			subtle.ConstantTimeCompare([]byte(proof), []byte(requestDigest(info.InstanceToken))) != 1 {
 			return false, ErrRequestAcknowledgementRejected
 		}
+		if record.DeliveryAttemptedAt == nil || record.DeliveryAttemptedAt.IsZero() || record.Delivery == RequestDeliveryPending {
+			return false, ErrRequestAcknowledgementRejected
+		}
 		if record.AcknowledgedAt != nil {
 			return false, nil
 		}
@@ -255,7 +371,8 @@ func (s *Store) requestReceiptBead(id string) (beads.Bead, error) {
 }
 
 func (s *Store) mutateRequestReceipt(sessionID, requestID string, change func(beads.Bead, *storedRequestReceipt) (bool, error)) (RequestReceipt, error) {
-	if err := validateReceiptRequestID(requestID); err != nil {
+	key, err := requestReceiptMetadataKey(requestID)
+	if err != nil {
 		return RequestReceipt{}, err
 	}
 	if s == nil || s.store.Store == nil {
@@ -273,7 +390,7 @@ func (s *Store) mutateRequestReceipt(sessionID, requestID string, change func(be
 		if b.Revision == 0 {
 			return RequestReceipt{}, beads.ErrConditionalWriteUnsupported
 		}
-		record, err := decodeRequestReceipt(b.Metadata[requestReceiptPrefix+requestID], sessionID, requestID)
+		record, err := decodeRequestReceipt(b.Metadata[key], sessionID, requestID)
 		if err != nil {
 			return RequestReceipt{}, err
 		}
@@ -285,7 +402,7 @@ func (s *Store) mutateRequestReceipt(sessionID, requestID string, change func(be
 		if err != nil {
 			return RequestReceipt{}, err
 		}
-		err = writer.UpdateIfMatch(sessionID, b.Revision, beads.UpdateOpts{Metadata: map[string]string{requestReceiptPrefix + requestID: string(raw)}})
+		err = writer.UpdateIfMatch(sessionID, b.Revision, beads.UpdateOpts{Metadata: map[string]string{key: string(raw)}})
 		if err == nil {
 			return record.RequestReceipt, nil
 		}
@@ -305,7 +422,7 @@ func decodeRequestReceipt(raw, sessionID, requestID string) (storedRequestReceip
 	if err := json.Unmarshal([]byte(raw), &record); err != nil {
 		return record, fmt.Errorf("invalid stored session request: %w", err)
 	}
-	if record.Version != 1 || record.SessionID != sessionID || record.RequestID != requestID || record.Generation <= 0 || record.AcceptedAt.IsZero() || record.Effect != "unverified" || !validRequestDigest(record.MessageDigest) || !validRequestDigest(record.ExecutionTokenDigest) {
+	if record.Version != 1 || record.SessionID != sessionID || requestID != "" && record.RequestID != requestID || validateReceiptRequestID(record.RequestID) != nil || record.Generation <= 0 || record.AcceptedAt.IsZero() || record.Effect != "unverified" || !validRequestDigest(record.MessageDigest) || !validRequestDigest(record.ExecutionTokenDigest) || strings.TrimSpace(record.TargetSessionName) == "" {
 		return record, ErrRequestConflict
 	}
 	switch record.Delivery {
@@ -328,6 +445,13 @@ func decodeRequestReceipt(raw, sessionID, requestID string) (storedRequestReceip
 		return record, ErrRequestConflict
 	}
 	return record, nil
+}
+
+func requestReceiptMetadataKey(requestID string) (string, error) {
+	if err := validateReceiptRequestID(requestID); err != nil {
+		return "", err
+	}
+	return requestReceiptPrefix + requestDigest(requestID), nil
 }
 
 func validateReceiptRequestID(id string) error {

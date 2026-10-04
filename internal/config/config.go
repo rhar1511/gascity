@@ -274,9 +274,6 @@ type City struct {
 	Formulas FormulasConfig `toml:"formulas,omitempty"`
 	// Daemon configures controller daemon settings.
 	Daemon DaemonConfig `toml:"daemon,omitempty"`
-	// Lifecycle configures the opt-in, evidence-backed work admission and
-	// recovery contract. Both gates default to disabled; see LifecycleConfig.
-	Lifecycle LifecycleConfig `toml:"lifecycle,omitempty"`
 	// RSI points the controller at trusted signed evaluation and human
 	// approval records. An unset evaluator leaves promotion fail-closed.
 	RSI RSIConfig `toml:"rsi,omitempty"`
@@ -4750,9 +4747,6 @@ func Parse(data []byte) (*City, error) {
 		return nil, err
 	}
 	if err := validateGuardedRelease(cfg.Beads.GuardedRelease); err != nil {
-		return nil, err
-	}
-	if err := validateLifecycleConfig(cfg.Lifecycle); err != nil {
 		return nil, err
 	}
 	if err := validateRSIConfig(cfg.RSI); err != nil {

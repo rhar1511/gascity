@@ -57,6 +57,16 @@ func newSessionRequestCmd(stdout, stderr io.Writer) *cobra.Command {
 		return writeSessionRequestReceiptJSON(stdout, receipt)
 	}}
 	cmd.SetErr(stderr)
+	for _, child := range []*cobra.Command{get, submit, ack} {
+		execute := child.RunE
+		child.RunE = func(action *cobra.Command, args []string) error {
+			if err := execute(action, args); err != nil {
+				fmt.Fprintf(stderr, "gc session request %s: %v\n", action.Name(), err) //nolint:errcheck // best-effort diagnostic
+				return err
+			}
+			return nil
+		}
+	}
 	cmd.AddCommand(get, submit, ack)
 	return cmd
 }
@@ -68,7 +78,7 @@ func sessionRequestClient() (*api.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	client := apiClient(cityPath)
+	client, _ := supervisorFallthroughAPIClient(cityPath)
 	if client == nil {
 		return nil, fmt.Errorf("tracked session requests require the Gas City server")
 	}

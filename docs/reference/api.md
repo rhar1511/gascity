@@ -73,10 +73,15 @@ and does not repeat an effect.
 repository, PR, base SHA, and candidate SHA, even if concurrent callers use
 different idempotency keys. The repair bead is a held triage candidate with
 `hold:external`; its route is recorded only as a proposal. It is not runnable
-until the separate signed lifecycle-admission path removes that hold and
-installs a serving route. PR review or merge authority does not grant admission.
+until a separately qualified lifecycle-admission path removes that hold and
+installs a serving route. This component has no proof-aware admission verifier
+and recognizes only held triage records when recovering prepared work; a route
+or receipt string alone never establishes admission. PR review or merge authority
+does not grant admission.
 `queue_review` records that the exact revision is ready for review only when an
-immutable attempt reference matches its current head and base. `merge` also
+immutable attempt reference matches its current head and base, and its merge
+state is known and conflict-free. Conflict, missing, or unrecognized state
+remains unavailable and is rechecked before execution. `merge` also
 requires successful checks and a signed human grant. Queueing for review never
 authorizes a merge. The GitHub adapter currently advertises merge as unavailable
 and sends no merge request because GitHub's merge API cannot atomically require

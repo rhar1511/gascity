@@ -125,6 +125,25 @@ func TestDoEventEmitPayload(t *testing.T) {
 	}
 }
 
+func TestDoEventEmitRedactsBeadSnapshotCredentials(t *testing.T) {
+	ep := events.NewFake()
+	payload := `{"id":"gc-session","issue_type":"session","metadata":{"instance_token":"runtime-secret","generation":"6"}}`
+	var stderr bytes.Buffer
+	if !doEventEmit(ep, events.BeadUpdated, "gc-session", "", "gc", payload, &stderr) {
+		t.Fatalf("doEventEmit refused bead snapshot: %s", stderr.String())
+	}
+	evts, err := ep.List(events.Filter{})
+	if err != nil || len(evts) != 1 {
+		t.Fatalf("events = %+v, %v", evts, err)
+	}
+	if strings.Contains(string(evts[0].Payload), "runtime-secret") || strings.Contains(string(evts[0].Payload), `"instance_token"`) {
+		t.Fatalf("published bead snapshot leaked credential: %s", evts[0].Payload)
+	}
+	if !strings.Contains(string(evts[0].Payload), `"generation":"6"`) {
+		t.Fatalf("published bead snapshot lost safe metadata: %s", evts[0].Payload)
+	}
+}
+
 func TestDoEventEmitPayloadEmpty(t *testing.T) {
 	ep := events.NewFake()
 

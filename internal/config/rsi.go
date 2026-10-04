@@ -13,10 +13,10 @@ import (
 // human-approval records. Private keys are never stored in city.toml.
 // An unset evaluator record deliberately leaves RSI promotion fail-closed.
 type RSIConfig struct {
-	EvaluationFile         string `toml:"evaluation_file,omitempty"`
+	EvaluationFile         string `toml:"evaluation_file,omitempty" jsonschema:"description=Per-gate evaluation path template containing exactly one {gate_id} token."`
 	EvaluationKeyID        string `toml:"evaluation_key_id,omitempty"`
 	EvaluationPublicKey    string `toml:"evaluation_public_key,omitempty"`
-	HumanApprovalFile      string `toml:"human_approval_file,omitempty"`
+	HumanApprovalFile      string `toml:"human_approval_file,omitempty" jsonschema:"description=Per-gate approval path template containing exactly one {gate_id} token."`
 	HumanApprovalKeyID     string `toml:"human_approval_key_id,omitempty"`
 	HumanApprovalPublicKey string `toml:"human_approval_public_key,omitempty"`
 }
@@ -75,6 +75,9 @@ func countRSIConfigured(values []string) int {
 }
 
 func validateRSIRelativePath(name, value string) error {
+	if strings.Count(value, "{gate_id}") != 1 {
+		return fmt.Errorf("%s must contain exactly one {gate_id} scope token", name)
+	}
 	if filepath.IsAbs(value) {
 		return fmt.Errorf("%s must be relative to the controller city directory", name)
 	}

@@ -34,7 +34,6 @@ City is the top-level configuration for a Gas City instance.
 | `dolt` | DoltConfig |  |  | Dolt configures optional dolt server connection overrides. |
 | `formulas` | FormulasConfig |  |  | Formulas is the legacy [formulas] table; authored [formulas].dir is rejected at config load. Formulas live in the well-known formulas/ directory. |
 | `daemon` | DaemonConfig |  |  | Daemon configures controller daemon settings. |
-| `lifecycle` | LifecycleConfig |  |  | Lifecycle configures the opt-in, evidence-backed work admission and recovery contract. Both gates default to disabled; see LifecycleConfig. |
 | `rsi` | RSIConfig |  |  | RSI points the controller at trusted signed evaluation and human approval records. An unset evaluator leaves promotion fail-closed. |
 | `orders` | OrdersConfig |  |  | Orders configures order settings: skip list, max_timeout cap, and per-order overrides. |
 | `api` | APIConfig |  |  | API configures the optional HTTP API server. |
@@ -526,18 +525,6 @@ K8sConfig holds native K8s session provider settings.
 | `mem_limit` | string |  | `4Gi` | MemLimit is the pod memory limit. Default: "4Gi". |
 | `prebaked` | boolean |  |  | Prebaked skips init container staging and EmptyDir volumes when true. Use with images built by `gc build-image` that have city content baked in. |
 
-## LifecycleConfig
-
-LifecycleConfig controls controller-owned admission and recovery.
-
-| Field | Type | Required | Default | Description |
-|-------|------|----------|---------|-------------|
-| `admission_enabled` | boolean |  |  | AdmissionEnabled requires a signed admission receipt for work carrying explicit lifecycle admission intent. Defaults to false. |
-| `recovery_enabled` | boolean |  |  | RecoveryEnabled permits the controller lifecycle recovery policy. It is separately gated because an admission authority does not grant permission to recover work. Defaults to false. |
-| `admission_authorities` | map[string]string |  |  | AdmissionAuthorities maps trusted triage/contract authors to their Ed25519 public keys. Keys are base64-encoded 32-byte public keys. |
-| `acceptance_authorities` | map[string]string |  |  | AcceptanceAuthorities maps trusted completion authorities to their Ed25519 public keys. Keys are base64-encoded 32-byte public keys. |
-| `escalation_target` | string |  |  | EscalationTarget is the configured recipient for one exhaustion escalation per work item. Empty deliberately leaves recovery disabled. |
-
 ## LocalDoctorCheck
 
 LocalDoctorCheck is a city-local doctor check declared inline in city.toml via [[doctor.check]].
@@ -764,10 +751,10 @@ RSIConfig points the controller at signed, controller-owned evaluation and human
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `evaluation_file` | string |  |  |  |
+| `evaluation_file` | string |  |  | Per-gate evaluation path template containing exactly one &#123;gate_id&#125; token. |
 | `evaluation_key_id` | string |  |  |  |
 | `evaluation_public_key` | string |  |  |  |
-| `human_approval_file` | string |  |  |  |
+| `human_approval_file` | string |  |  | Per-gate approval path template containing exactly one &#123;gate_id&#125; token. |
 | `human_approval_key_id` | string |  |  |  |
 | `human_approval_public_key` | string |  |  |  |
 

@@ -342,10 +342,14 @@ func (s *PRActionService) Queue(ctx context.Context) (PRActionQueue, error) {
 				queue.Items = queue.Items[:sourceItemsStart]
 				break
 			}
+			mergeState := strings.ToUpper(strings.TrimSpace(pr.MergeStateStatus))
+			if mergeState == "" {
+				mergeState = "UNKNOWN"
+			}
 			item := PRActionQueueItem{
 				Monitor: source.Monitor, Owner: source.Owner, Repo: source.Repo, PullRequest: pr.Number,
 				Title: pr.Title, URL: pr.URL, BaseRefName: pr.BaseRefName, HeadRefName: pr.HeadRefName,
-				HeadSHA: pr.HeadSHA, BaseSHA: pr.BaseSHA, MergeState: strings.ToUpper(strings.TrimSpace(pr.MergeStateStatus)),
+				HeadSHA: pr.HeadSHA, BaseSHA: pr.BaseSHA, MergeState: mergeState,
 				IsDraft: pr.IsDraft, PolicyVersion: s.policy.Version, ObservedAt: observed,
 				FreshUntil: queue.FreshUntil, WorkRecords: []PRActionWorkRecord{}, AttemptEvidence: []PRActionAttemptReference{}, ActionReceipts: []PRActionResult{},
 				EvidenceState: PRActionEvidenceMissing, Actions: []PRActionOption{},
@@ -393,7 +397,7 @@ func (s *PRActionService) Queue(ctx context.Context) (PRActionQueue, error) {
 				item.Actions = append(item.Actions, PRActionOption{Action: PRActionPrepare, Available: true, Reason: "no durable repair work is recorded for this revision"})
 			}
 			if item.EvidenceState == PRActionEvidenceVerified && len(item.AttemptEvidence) > 0 && !pr.IsDraft {
-				item.Actions = append(item.Actions, PRActionOption{Action: PRActionQueueReview, Available: true, Reason: "server verified immutable evidence for the current revision"})
+				item.Actions = append(item.Actions, prActionQueueReviewVerdict(item.MergeState))
 				if prMergeReady(pr, monitor.RequiredChecks) {
 					merge := PRActionOption{Action: PRActionMerge, RequiresHumanApproval: true}
 					if s.forge.SupportsAtomicBaseBoundMerge() {
@@ -997,13 +1001,11 @@ func findPRActionRecord(store beads.Store, idempotencyKey string) (PRActionResul
 	if rows[0].ID != prActionRecordBeadID(idempotencyKey) || rows[0].Type != "gate" {
 		return PRActionResult{}, false, fmt.Errorf("PR action ledger lacks its unique non-runnable durable ID")
 	}
-	var result PRActionResult
-	if err := json.Unmarshal([]byte(rows[0].Metadata[prActionRecordMetadataKey]), &result); err != nil {
-		return PRActionResult{}, false, fmt.Errorf("decode durable action record %s: %w", rows[0].ID, err)
+	result, err := decodePRActionReceipt(rows[0])
+	if err != nil {
+		return PRActionResult{}, false, err
 	}
-	result.ID = rows[0].ID
-	result.Fingerprint = rows[0].Metadata[prActionFingerprintMetadataKey]
-	if result.IdempotencyKey != idempotencyKey || result.Fingerprint == "" || !validPRActionStatus(result.Status) || !validPRActionKind(result.Action) {
+	if result.IdempotencyKey != idempotencyKey {
 		return PRActionResult{}, false, fmt.Errorf("durable action record %s failed its request identity check", rows[0].ID)
 	}
 	return result, true, nil
@@ -1022,19 +1024,12 @@ func listPRActionReceipts(store beads.Store, monitor, owner, repo string, pullRe
 	}
 	receipts := make([]PRActionResult, 0, len(rows))
 	for _, row := range rows {
-		if row.Type != "gate" || row.Metadata[prActionSourceMetadataKey] != prActionRecordSource || row.Metadata[prActionQueueIndexMetadataKey] != index {
-			return nil, fmt.Errorf("action receipt %q failed its durable queue index check", row.ID)
+		receipt, err := decodePRActionReceipt(row)
+		if err != nil {
+			return nil, err
 		}
-		var receipt PRActionResult
-		if err := json.Unmarshal([]byte(row.Metadata[prActionRecordMetadataKey]), &receipt); err != nil {
-			return nil, fmt.Errorf("decode action receipt %q: %w", row.ID, err)
-		}
-		if receipt.ID != row.ID || receipt.ID != prActionRecordBeadID(receipt.IdempotencyKey) || receipt.Monitor != monitor || receipt.Owner != owner || receipt.Repo != repo || receipt.PullRequest != pullRequest || prActionQueueIndexKey(receipt.Monitor, receipt.Owner, receipt.Repo, receipt.PullRequest) != index {
+		if receipt.Monitor != monitor || receipt.Owner != owner || receipt.Repo != repo || receipt.PullRequest != pullRequest || row.Metadata[prActionQueueIndexMetadataKey] != index {
 			return nil, fmt.Errorf("action receipt %q does not match its durable queue index", row.ID)
-		}
-		receipt.Fingerprint = row.Metadata[prActionFingerprintMetadataKey]
-		if receipt.Fingerprint == "" || !validPRActionStatus(receipt.Status) || !validPRActionKind(receipt.Action) || receipt.IdempotencyKey != row.Metadata[prActionIdempotencyMetadataKey] {
-			return nil, fmt.Errorf("action receipt %q has incomplete authority or status", row.ID)
 		}
 		receipts = append(receipts, receipt)
 	}
@@ -1195,6 +1190,9 @@ func persistPRActionResultClaimed(store beads.Store, result *PRActionResult, tok
 	if err != nil {
 		return err
 	}
+	if stored.Metadata[prActionRecordMetadataKey] != string(encoded) {
+		return fmt.Errorf("durable PR action record readback mismatch")
+	}
 	var verified PRActionResult
 	if err := json.Unmarshal([]byte(stored.Metadata[prActionRecordMetadataKey]), &verified); err != nil {
 		return err
@@ -1263,7 +1261,7 @@ func findPRRepairWork(store beads.Store, monitor config.GitHubPRMonitor, item PR
 	}
 	row := rows[0]
 	if !validPRRepairWork(row, monitor, item) {
-		return beads.Bead{}, false, errors.New("stored repair work does not verify as held or lifecycle-admitted work for the requested revision")
+		return beads.Bead{}, false, errors.New("stored repair work does not verify as held triage work for the requested revision")
 	}
 	return row, true, nil
 }
@@ -1278,10 +1276,10 @@ func validPRRepairWork(row beads.Bead, monitor config.GitHubPRMonitor, item PRAc
 	if hasPRActionExternalHold(row.Labels) {
 		return row.Metadata[beadmeta.RoutedToMetadataKey] == ""
 	}
-	// After explicit lifecycle admission, the signed receipt and serving route
-	// are written by that separate authority. Prepare itself never removes the
-	// hold or installs a serving route.
-	return row.Metadata[beadmeta.RoutedToMetadataKey] == monitor.RepairRoute && row.Metadata[beadmeta.LifecycleAdmissionReceiptMetadataKey] != ""
+	// A v2 metadata value and serving route are not proof of the atomic Q43
+	// attachment or current route-policy check. This lookup path has no
+	// proof-aware verifier, so an unheld row remains unrecognized here.
+	return false
 }
 
 func hasPRActionExternalHold(labels []string) bool {
@@ -1308,4 +1306,43 @@ func validPRDiffSHA(value string) bool {
 	}
 	_, err := hex.DecodeString(value)
 	return err == nil
+}
+
+func prActionQueueReviewVerdict(mergeState string) PRActionOption {
+	option := PRActionOption{Action: PRActionQueueReview}
+	switch strings.ToUpper(strings.TrimSpace(mergeState)) {
+	case "DIRTY":
+		option.Reason = "merge conflicts are reported (merge state DIRTY); resolve conflicts before queueing review"
+	case "CLEAN", "BEHIND", "BLOCKED", "UNSTABLE", "HAS_HOOKS":
+		option.Available = true
+		option.Reason = "server verified immutable evidence for the current revision"
+	default:
+		state := strings.ToUpper(strings.TrimSpace(mergeState))
+		if state == "" {
+			state = "UNKNOWN"
+		}
+		option.Reason = fmt.Sprintf("merge state %s is unknown or unsupported; refresh PR state before queueing review", state)
+	}
+	return option
+}
+
+func decodePRActionReceipt(row beads.Bead) (PRActionResult, error) {
+	if row.Type != "gate" || row.Metadata[prActionSourceMetadataKey] != prActionRecordSource {
+		return PRActionResult{}, fmt.Errorf("action receipt %q failed its durable source check", row.ID)
+	}
+	var receipt PRActionResult
+	if err := json.Unmarshal([]byte(row.Metadata[prActionRecordMetadataKey]), &receipt); err != nil {
+		return PRActionResult{}, fmt.Errorf("decode action receipt %q: %w", row.ID, err)
+	}
+	if receipt.ID != row.ID || receipt.ID != prActionRecordBeadID(receipt.IdempotencyKey) || prActionQueueIndexKey(receipt.Monitor, receipt.Owner, receipt.Repo, receipt.PullRequest) != row.Metadata[prActionQueueIndexMetadataKey] {
+		return PRActionResult{}, fmt.Errorf("action receipt %q does not match its durable queue index", row.ID)
+	}
+	receipt.Fingerprint = row.Metadata[prActionFingerprintMetadataKey]
+	if receipt.Fingerprint == "" || !validPRActionStatus(receipt.Status) || !validPRActionKind(receipt.Action) || receipt.IdempotencyKey != row.Metadata[prActionIdempotencyMetadataKey] {
+		return PRActionResult{}, fmt.Errorf("action receipt %q has incomplete authority or status", row.ID)
+	}
+	if receipt.Action != PRActionPrepare && (strings.TrimSpace(receipt.WorkID) == "" || strings.TrimSpace(receipt.AttemptID) == "") {
+		return PRActionResult{}, fmt.Errorf("action receipt %q has incomplete work or attempt identity", row.ID)
+	}
+	return receipt, nil
 }

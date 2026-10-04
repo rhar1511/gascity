@@ -40,7 +40,6 @@ var allowedNonMetadata = map[string]string{
 	// owners; versioned independently of the metadata vocabulary).
 	"gc.dolt.cleanup.v1":       "dolt cleanup manifest schema version (cmd/gc/cmd_dolt_cleanup.go)",
 	"gc.healthz.v1":            "workspace healthz workflow contract (internal/workspacesvc)",
-	"gc.rsipolicy.v1":          "signed RSI promotion-policy version, not bead metadata (internal/rsipolicy)",
 	"gc.worker.conformance.v1": "worker conformance report schema version (internal/worker/workertest)",
 
 	// Cobra command-tree annotations (not bead metadata).
