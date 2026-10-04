@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -276,14 +277,8 @@ func TestSessionRequestSubmitHTTPReturnsAcceptanceBeforeResolutionAndReplayRecov
 	if second.Code != http.StatusAccepted || second.Body.String() != first.Body.String() {
 		t.Fatalf("same-key replay = %d %s, want exact %s", second.Code, second.Body.String(), first.Body.String())
 	}
-	deadline := time.Now().Add(testEventTimeout)
-	for time.Now().Before(deadline) {
-		receipt, err = session.NewStore(state.SessionsBeadStore()).GetRequest(info.ID, "resolution-http-1")
-		if err == nil && receipt.Delivery == session.RequestDeliveryAccepted {
-			break
-		}
-		time.Sleep(time.Millisecond)
-	}
+	waitForSessionRequestEventCount(t, state.eventProv, events.RequestResultSessionSubmit, "resolution-http-1", 1)
+	receipt, err = session.NewStore(state.SessionsBeadStore()).GetRequest(info.ID, "resolution-http-1")
 	if err != nil || receipt.Delivery != session.RequestDeliveryAccepted || state.sp.CountCalls("Nudge", info.SessionName) != 1 {
 		t.Fatalf("recovered receipt=%+v error=%v", receipt, err)
 	}
@@ -324,14 +319,8 @@ func TestSessionRequestSameKeyReplayResumesAfterPreReservationFailure(t *testing
 	if second.Code != http.StatusAccepted || second.Body.String() != first.Body.String() {
 		t.Fatalf("same-key replay = %d %s, want exact %s", second.Code, second.Body.String(), first.Body.String())
 	}
-	deadline := time.Now().Add(testEventTimeout)
-	for time.Now().Before(deadline) {
-		receipt, err = session.NewStore(state.SessionsBeadStore()).GetRequest(info.ID, "retry-http-1")
-		if err == nil && receipt.Delivery == session.RequestDeliveryAccepted {
-			break
-		}
-		time.Sleep(time.Millisecond)
-	}
+	waitForSessionRequestEventCount(t, state.eventProv, events.RequestResultSessionSubmit, "retry-http-1", 1)
+	receipt, err = session.NewStore(state.SessionsBeadStore()).GetRequest(info.ID, "retry-http-1")
 	if err != nil || receipt.Delivery != session.RequestDeliveryAccepted || state.sp.CountCalls("Nudge", info.SessionName) != 1 {
 		t.Fatalf("resumed receipt=%+v error=%v", receipt, err)
 	}
@@ -377,22 +366,47 @@ func TestSessionRequestSameKeyReplayDoesNotResendUnknownDelivery(t *testing.T) {
 
 func waitForSessionRequestFailures(t *testing.T, state *fakeState, requestID string, want int) {
 	t.Helper()
-	deadline := time.Now().Add(testEventTimeout)
-	for time.Now().Before(deadline) {
-		rows, _ := state.eventProv.List(events.Filter{Type: events.RequestFailed})
-		count := 0
-		for _, row := range rows {
+	waitForSessionRequestEventCount(t, state.eventProv, events.RequestFailed, requestID, want)
+}
+
+// waitForSessionRequestEventCount observes durable test events instead of
+// sampling elapsed time. Watch(0) includes results emitted before subscription.
+func waitForSessionRequestEventCount(t *testing.T, prov events.Provider, eventType, requestID string, want int) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), testEventTimeout)
+	defer cancel()
+	watcher, err := prov.Watch(ctx, 0)
+	if err != nil {
+		t.Fatalf("watch session request events: %v", err)
+	}
+	defer func() {
+		if err := watcher.Close(); err != nil {
+			t.Errorf("close session request watcher: %v", err)
+		}
+	}()
+	for count := 0; count < want; {
+		row, err := watcher.Next()
+		if err != nil {
+			t.Fatalf("waiting for %d %s events for %s: got %d: %v", want, eventType, requestID, count, err)
+		}
+		if row.Type != eventType {
+			continue
+		}
+		switch eventType {
+		case events.RequestResultSessionSubmit:
+			var payload SessionSubmitSucceededPayload
+			if json.Unmarshal(row.Payload, &payload) == nil && requestIDMatches(payload.RequestID, requestID) {
+				count++
+			}
+		case events.RequestFailed:
 			var payload RequestFailedPayload
 			if json.Unmarshal(row.Payload, &payload) == nil && payload.Operation == RequestOperationSessionSubmit && requestIDMatches(payload.RequestID, requestID) {
 				count++
 			}
+		default:
+			t.Fatalf("unsupported session request event type %q", eventType)
 		}
-		if count >= want {
-			return
-		}
-		time.Sleep(time.Millisecond)
 	}
-	t.Fatalf("timed out waiting for %d request failures", want)
 }
 
 func TestSessionRequestReceiptMetadataRejectsGenericMutation(t *testing.T) {
