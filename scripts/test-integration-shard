@@ -57,6 +57,8 @@ run_go() {
     GOROOT="${GOROOT:-$goroot_val}" \
     GOENV="${GOENV-}" \
     CGO_ENABLED="${cgo_enabled_val}" \
+    GOMEMLIMIT="${GOMEMLIMIT-}" \
+    GOMAXPROCS="${GOMAXPROCS-}" \
     GOFLAGS="${GOFLAGS-}" \
     GO111MODULE="${GO111MODULE-}" \
     GOEXPERIMENT="${GOEXPERIMENT-}" \

@@ -9,11 +9,11 @@ import type { ExecutionAttempt } from '../lib/workbenchAttempts';
 const MAX_ARCHIVED_DIFF_BYTES = 16 * 1024 * 1024;
 
 /** Return only archives bound to this exact Workbench session incarnation. */
-export function matchingWorkbenchEvidence(
-  rows: readonly Evidence[],
+export function matchingWorkbenchEvidence<T extends Pick<Evidence, 'identity'>>(
+  rows: readonly T[],
   workID: string,
   attempt: ExecutionAttempt,
-): Evidence[] {
+): T[] {
   const generation = attempt.executionGeneration;
   if (
     workID.trim() === '' ||
@@ -141,7 +141,9 @@ function isCanonicalNonzeroSignedInt64(value: string): boolean {
   if (!/^(0|[1-9][0-9]*)$/.test(magnitude) || magnitude === '0') return false;
 
   const limit = negative ? '9223372036854775808' : '9223372036854775807';
-  return magnitude.length < limit.length || (magnitude.length === limit.length && magnitude <= limit);
+  return (
+    magnitude.length < limit.length || (magnitude.length === limit.length && magnitude <= limit)
+  );
 }
 
 /**

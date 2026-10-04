@@ -18,6 +18,8 @@ import { resolvePreview } from '../lib/workbenchPreview';
 import { AttemptChatPanel } from '../workbench/AttemptChatPanel';
 import { CentralPRActionPanel } from '../workbench/CentralPRActionPanel';
 import { HistoricalAttemptEvidencePanel } from '../workbench/HistoricalAttemptEvidencePanel';
+import { WayfinderReviewWorkflow } from '../workbench/WayfinderReviewWorkflow';
+import { HistoricalAttemptArtifacts } from '../workbench/HistoricalAttemptArtifacts';
 
 // Gas City Workbench: Canvas/Kanban/Priority/Work Queue as views over the same
 // Beads data.
@@ -362,6 +364,20 @@ export function WorkbenchPage() {
                   cityKey={cityCacheKey}
                   cityName={cityName}
                 />
+                <details
+                  aria-label="Wayfinder review details"
+                  className="mt-4 border-t border-rule pt-3"
+                >
+                  <summary className="cursor-pointer text-label font-semibold text-fg focus-mark">
+                    Design review
+                    <span className="ml-2 font-normal text-fg-muted">
+                      Prototypes, document notes, and approvals
+                    </span>
+                  </summary>
+                  <div className="mt-3">
+                    <WayfinderReviewWorkflow bead={selectedBead} />
+                  </div>
+                </details>
               </>
             ) : hasLoadedQueue ? (
               <p className="text-body text-fg-muted">This bead was resolved or removed.</p>
@@ -616,12 +632,22 @@ function AttemptPanel({
             showCaption
           />
           {inspectingHistory ? (
-            <HistoricalAttemptEvidencePanel
-              key={`archive:${cityKey}:${bead.id}:${inspected.sessionId}:${inspected.executionGeneration ?? 'unavailable'}`}
-              cityName={cityName}
-              workID={bead.id}
-              attempt={inspected}
-            />
+            <>
+              <HistoricalAttemptEvidencePanel
+                key={`archive:${cityKey}:${bead.id}:${inspected.sessionId}:${inspected.executionGeneration ?? 'unavailable'}`}
+                cityName={cityName}
+                workID={bead.id}
+                attempt={inspected}
+              />
+              {inspected.executionGeneration === null && (
+                <HistoricalAttemptArtifacts
+                  key={`association:${cityKey}:${bead.id}:${inspected.sessionId}`}
+                  beadId={bead.id}
+                  sessionId={inspected.sessionId}
+                  sessionLabel={inspected.sessionName}
+                />
+              )}
+            </>
           ) : (
             <>
               <AttemptDiffPanel key={`diff:${inspected.sessionId}`} beadId={bead.id} />

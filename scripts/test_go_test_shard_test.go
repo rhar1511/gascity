@@ -358,6 +358,8 @@ func TestGoTestShardWithoutTimingPreservesDirectProductContract(t *testing.T) {
 		"GITHUB_SHA=ignored-control",
 		"RUNNER_OS=ignored-control",
 		"SHOULD_NOT_LEAK=ignored-control",
+		"GOMEMLIMIT=1GiB",
+		"GOMAXPROCS=2",
 	)
 	status, output := runShardCommand(t, cmd)
 	if status != 23 {
@@ -380,6 +382,7 @@ func TestGoTestShardWithoutTimingPreservesDirectProductContract(t *testing.T) {
 		"GOSUMDB": "", "GOINSECURE": "", "GOVCS": "", "GOWORK": "", "GC_FAST_UNIT": "0",
 		"CGO_ENABLED": "0", "CGO_CPPFLAGS": "", "CGO_LDFLAGS": "", "GC_TEST_SHARD_INDEX": "1", "GC_TEST_SHARD_TOTAL": "2",
 		"BEADS_TEST_BD_BINARY": "", "BEADS_TEST_DOLT_BINARY": "",
+		"GOMEMLIMIT": "1GiB", "GOMAXPROCS": "2",
 	}
 	got := fixtureEnvironment(t, readFixtureFile(t, fixture.productEnvFile))
 	fixture.assertSeededGitConfig(t, got)

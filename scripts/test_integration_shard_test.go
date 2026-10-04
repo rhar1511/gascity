@@ -105,6 +105,8 @@ func TestNestedIntegrationShardPreservesCGOMode(t *testing.T) {
 			fixture := newIntegrationShardFixture(t)
 			out, err := fixture.runShardWithEnv(t, "packages-cmd-gc-1-of-2",
 				"CGO_ENABLED="+mode,
+				"GOMEMLIMIT=1GiB",
+				"GOMAXPROCS=2",
 				"GC_DOLT_PORT=3329",
 				"BEADS_DOLT_SERVER_PORT=3329",
 			)
@@ -123,6 +125,11 @@ func TestNestedIntegrationShardPreservesCGOMode(t *testing.T) {
 			} {
 				if got[key] != want {
 					t.Errorf("nested child %s = %q, want %q", key, got[key], want)
+				}
+			}
+			for key, want := range map[string]string{"GOMEMLIMIT": "1GiB", "GOMAXPROCS": "2"} {
+				if got[key] != want {
+					t.Errorf("nested child %s = %q, want selected runtime limit %q", key, got[key], want)
 				}
 			}
 		})
@@ -150,6 +157,8 @@ qualified-beads-shard:
 				"GC_TEST_NO_SLICE=1",
 				"SYS_USR_CGO_FALLBACK=0",
 				"CGO_ENABLED=" + mode,
+				"GOMEMLIMIT=1GiB",
+				"GOMAXPROCS=2",
 				"BEADS_TEST_BD_BINARY=" + bdPath,
 				"BEADS_TEST_DOLT_BINARY=" + doltPath,
 				"GC_DOLT_PORT=3329",
@@ -175,14 +184,35 @@ qualified-beads-shard:
 					t.Errorf("make child %s = %q, want %q", key, got[key], want)
 				}
 			}
+			for key, want := range map[string]string{"GOMEMLIMIT": "1GiB", "GOMAXPROCS": "2"} {
+				if got[key] != want {
+					t.Errorf("make child %s = %q, want selected runtime limit %q", key, got[key], want)
+				}
+			}
 		})
 	}
 }
 
 func TestLocalParallelPreservesQualifiedBeadsExecutables(t *testing.T) {
-	for _, mode := range []string{"0", "1", ""} {
-		t.Run(mode, func(t *testing.T) {
+	for _, tc := range []struct {
+		name, mode, discovery string
+	}{
+		{"cgo-disabled", "0", ""},
+		{"cgo-enabled", "1", ""},
+		{"cgo-default", "", ""},
+		{"failed-discovery", "0", "failed"},
+		{"partial-failed-discovery", "0", "partial"},
+		{"empty-discovery", "0", "empty"},
+		{"valid-discovery", "0", "valid"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mode := tc.mode
 			fixture := newIntegrationShardFixture(t)
+			runnerMode := "cmd-gc-process"
+			if tc.discovery != "" {
+				runnerMode = "fast"
+				writeTestFile(t, filepath.Join(fixture.binDir, "discovery-mode"), tc.discovery)
+			}
 			bdPath := filepath.Join(fixture.binDir, "qualified-bd")
 			doltPath := filepath.Join(fixture.binDir, "qualified-dolt")
 			cityDir := t.TempDir()
@@ -191,13 +221,15 @@ func TestLocalParallelPreservesQualifiedBeadsExecutables(t *testing.T) {
 			if err := os.Mkdir(logDir, 0o755); err != nil {
 				t.Fatalf("create runner log directory: %v", err)
 			}
-			cmd := shardTestCommand(filepath.Join(repoRoot(t), "scripts", "test-local-parallel"), "cmd-gc-process")
+			cmd := shardTestCommand(filepath.Join(repoRoot(t), "scripts", "test-local-parallel"), runnerMode)
 			cmd.Dir = repoRoot(t)
 			cmd.Env = []string{
 				"PATH=" + fixture.binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 				"HOME=" + fixture.homeDir,
 				"SHELL=/bin/sh",
-				"TMPDIR=" + cityDir,
+				// Scratch must not sit beneath the coordination city's config:
+				// the runner's real self-tests exercise no-city Git repositories.
+				"TMPDIR=" + filepath.Dir(fixture.binDir),
 				"GC_CITY_PATH=" + cityDir,
 				"GC_TEST_NO_SLICE=1",
 				// Recording-tool plumbing does not exercise host orphan cleanup.
@@ -205,6 +237,8 @@ func TestLocalParallelPreservesQualifiedBeadsExecutables(t *testing.T) {
 				"SYS_USR_CGO_FALLBACK=0",
 				"CGO_ENABLED=" + mode,
 				"LOCAL_TEST_JOBS=1",
+				"GOMEMLIMIT=1GiB",
+				"GOMAXPROCS=2",
 				"GC_TEST_INNER_P=1",
 				"CMD_GC_PROCESS_TOTAL=1",
 				"GO_TEST_TIMEOUT=17s",
@@ -215,6 +249,25 @@ func TestLocalParallelPreservesQualifiedBeadsExecutables(t *testing.T) {
 				"BEADS_DOLT_SERVER_PORT=3329",
 			}
 			out, err := cmd.CombinedOutput()
+			if tc.discovery != "" {
+				captured, readErr := os.ReadFile(fixture.capturePath)
+				if readErr != nil {
+					t.Fatalf("read product commands: %v", readErr)
+				}
+				coreInvoked := strings.Contains(string(captured), "github.com/gastownhall/gascity/internal/config\x00")
+				if tc.discovery != "valid" {
+					if err == nil || !strings.Contains(string(out), "[unit-core] failed") {
+						t.Fatalf("invalid discovery reported success: %v\n%s", err, out)
+					}
+					if coreInvoked || strings.Contains(string(captured), "-timeout\x0017s\x00\x00") {
+						t.Fatalf("invalid discovery invoked partial or implicit-root tests: %q", captured)
+					}
+					return
+				}
+				if !coreInvoked || strings.Contains(string(captured), "github.com/gastownhall/gascity/cmd/gc\x00") {
+					t.Fatalf("core did not use the discovered non-CLI packages: %q", captured)
+				}
+			}
 			if err != nil {
 				t.Fatalf("local parallel runner failed: %v\n%s", err, out)
 			}
@@ -232,6 +285,11 @@ func TestLocalParallelPreservesQualifiedBeadsExecutables(t *testing.T) {
 			} {
 				if got[key] != want {
 					t.Errorf("outer runner child %s = %q, want %q", key, got[key], want)
+				}
+			}
+			for key, want := range map[string]string{"GOMEMLIMIT": "1GiB", "GOMAXPROCS": "2"} {
+				if got[key] != want {
+					t.Errorf("outer runner child %s = %q, want selected runtime limit %q", key, got[key], want)
 				}
 			}
 		})
@@ -662,6 +720,15 @@ modeled_goos=`+shellQuote(goos)+`
 modeled_goarch=`+shellQuote(goarch)+`
 
 case "$1" in
+  list)
+    case "$(cat "$(dirname "$0")/discovery-mode")" in
+      failed) echo 'fixture package discovery failed' >&2; exit 42 ;;
+      partial) echo github.com/gastownhall/gascity/internal/config; exit 42 ;;
+      empty) echo github.com/gastownhall/gascity/cmd/gc ;;
+      valid) printf '%s\n' github.com/gastownhall/gascity/internal/config github.com/gastownhall/gascity/cmd/gc ;;
+      *) exit 1 ;;
+    esac
+    ;;
   env)
     case "$2" in
       GOPATH) echo /tmp/fake-gopath ;;
@@ -678,6 +745,8 @@ case "$1" in
   test)
     {
       printf 'CGO_ENABLED=%s\n' "${CGO_ENABLED-unset}"
+      printf 'GOMEMLIMIT=%s\n' "${GOMEMLIMIT-unset}"
+      printf 'GOMAXPROCS=%s\n' "${GOMAXPROCS-unset}"
       printf 'BEADS_TEST_BD_BINARY=%s\n' "${BEADS_TEST_BD_BINARY-unset}"
       printf 'BEADS_TEST_DOLT_BINARY=%s\n' "${BEADS_TEST_DOLT_BINARY-unset}"
       printf 'GC_DOLT_PORT=%s\n' "${GC_DOLT_PORT-unset}"
