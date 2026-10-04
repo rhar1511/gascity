@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -739,7 +740,7 @@ func TestControllerStatusLine(t *testing.T) {
 	}
 }
 
-func startFakeControllerSocket(t *testing.T, cityPath, response string) <-chan struct{} {
+func startFakeControllerSocket(t *testing.T, cityPath, response string, onCommand ...func(string, error, error)) <-chan struct{} {
 	t.Helper()
 	sockPath := controllerSocketPath(cityPath)
 	if err := os.MkdirAll(filepath.Dir(sockPath), 0o755); err != nil {
@@ -768,9 +769,24 @@ func startFakeControllerSocket(t *testing.T, cityPath, response string) <-chan s
 			go func(conn net.Conn) {
 				defer conn.Close() //nolint:errcheck // test cleanup
 				_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
-				_, _ = conn.Read(make([]byte, 64))
+				var command string
+				var readErr error
+				if len(onCommand) == 0 {
+					_, _ = conn.Read(make([]byte, 64))
+				} else {
+					command, readErr = bufio.NewReader(conn).ReadString('\n')
+					if readErr != nil {
+						for _, observe := range onCommand {
+							observe(command, readErr, nil)
+						}
+						return
+					}
+				}
 				_ = conn.SetReadDeadline(time.Time{})
-				_, _ = conn.Write([]byte(response))
+				_, writeErr := conn.Write([]byte(response))
+				for _, observe := range onCommand {
+					observe(command, readErr, writeErr)
+				}
 			}(conn)
 		}
 	}()
