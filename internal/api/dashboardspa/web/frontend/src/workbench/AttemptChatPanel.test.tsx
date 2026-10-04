@@ -37,6 +37,45 @@ describe('AttemptChatPanel city scoping', () => {
     resetSupervisorApiForTests();
   });
 
+  it('holds messages when the selected work has no claim generation', () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    render(<AttemptChatPanel attempt={attempt} workId="work-1" claimGeneration={null} />);
+    expect(screen.getByLabelText('Message')).toHaveProperty('disabled', true);
+    expect(screen.getByRole('button', { name: /send/i })).toHaveProperty('disabled', true);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('does not accept a same-session receipt attributed to a different claim', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = input instanceof Request ? input : new Request(input, init);
+        const body = await request.clone().json();
+        return new Response(
+          JSON.stringify({
+            request_id: body.request_id,
+            session_id: attempt.sessionId,
+            generation: attempt.executionGeneration,
+            accepted_at: '2026-09-27T00:01:00Z',
+            delivery: 'pending',
+            effect: 'pending',
+            message_digest: 'sha256:abc',
+            attempt: { identity: { owner_bead_id: 'work-1', claim_generation: 'claim-8' } },
+          }),
+          { status: 202, headers: { 'Content-Type': 'application/json' } },
+        );
+      }),
+    );
+    render(<AttemptChatPanel attempt={attempt} workId="work-1" claimGeneration="claim-7" />);
+    fireEvent.change(screen.getByLabelText('Message'), { target: { value: 'continue work one' } });
+    fireEvent.click(screen.getByRole('button', { name: /send/i }));
+    await screen.findByText(/receipt for a different session request/i);
+    expect(screen.getByLabelText('Session request receipts').textContent).toContain(
+      'Server acceptance: not confirmed',
+    );
+  });
+
   it('does not show a delayed same-session receipt in a different city', async () => {
     const cityAResponse = deferred<Response>();
     const acceptedAt = '2026-09-27T00:01:00Z';
@@ -57,12 +96,20 @@ describe('AttemptChatPanel city scoping', () => {
 
     const chat = (city: string) => {
       setActiveCity(city);
-      return <AttemptChatPanel key={`${city}:${attempt.sessionId}`} attempt={attempt} />;
+      return (
+        <AttemptChatPanel
+          key={`${city}:${attempt.sessionId}`}
+          attempt={attempt}
+          workId="work-1"
+          claimGeneration="claim-7"
+        />
+      );
     };
     const { rerender } = render(chat('city-a'));
     fireEvent.change(screen.getByLabelText('Message'), { target: { value: 'finish the review' } });
     fireEvent.click(screen.getByRole('button', { name: /send/i }));
     await waitFor(() => expect(cityARequestBody?.message).toBe('finish the review'));
+    expect(cityARequestBody).toMatchObject({ work_id: 'work-1', claim_generation: 'claim-7' });
 
     rerender(chat('city-b'));
     const cityBReceipts = screen.getByLabelText('Session request receipts');
@@ -79,6 +126,18 @@ describe('AttemptChatPanel city scoping', () => {
             message_digest: 'sha256:abc',
             request_id: cityARequestBody?.request_id,
             session_id: 'session-same',
+            attempt: {
+              attempt_id: 'ae-1',
+              identity: {
+                kind: 'workbench',
+                owner_bead_id: 'work-1',
+                claim_generation: 'claim-7',
+                session_id: 'session-same',
+                session_generation: '7',
+              },
+              store_ref: 'rig:test',
+              work_revision: '1',
+            },
           }),
           { status: 202, headers: { 'Content-Type': 'application/json' } },
         ),

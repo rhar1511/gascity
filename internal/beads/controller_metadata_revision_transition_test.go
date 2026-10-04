@@ -140,12 +140,12 @@ func (f *controllerRevisionTransitionFixture) ControllerMetadataTransitionReceip
 
 func cloneControllerMetadataTransitionRequest(request ControllerMetadataTransitionRequest) ControllerMetadataTransitionRequest {
 	if request.Expected != nil {
-		copy := append(json.RawMessage(nil), (*request.Expected)...)
-		request.Expected = &copy
+		cloned := append(json.RawMessage(nil), (*request.Expected)...)
+		request.Expected = &cloned
 	}
 	if request.Value != nil {
-		copy := append(json.RawMessage(nil), (*request.Value)...)
-		request.Value = &copy
+		cloned := append(json.RawMessage(nil), (*request.Value)...)
+		request.Value = &cloned
 	}
 	request.Payload = append(json.RawMessage(nil), request.Payload...)
 	return request

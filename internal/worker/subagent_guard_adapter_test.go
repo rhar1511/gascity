@@ -24,11 +24,11 @@ func (a adapterBackedTranscript) AgentMappings(context.Context) ([]AgentMapping,
 func (a adapterBackedTranscript) Transcript(_ context.Context, req TranscriptRequest) (*TranscriptResult, error) {
 	req.TranscriptPath = a.path
 	req.Provider = "claude"
-	return testSessionLogAdapter().ReadTranscript(req)
+	return testSessionLogAdapter(a.path).ReadTranscript(req)
 }
 
 func (a adapterBackedTranscript) TranscriptRecords(context.Context) ([]json.RawMessage, error) {
-	return testSessionLogAdapter().TranscriptRecords(a.path)
+	return testSessionLogAdapter(a.path).TranscriptRecords(a.path)
 }
 
 func fixtureOnDisk(t *testing.T, fixture string) string {

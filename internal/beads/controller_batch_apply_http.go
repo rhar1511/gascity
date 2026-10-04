@@ -330,11 +330,11 @@ func (c *controllerBatchApplyHTTPClient) apply(ctx context.Context, wire control
 		response, status, requestErr := c.request(ctx, http.MethodPost, controllerBatchApplyPath, body)
 		if attempt == 1 {
 			if requestErr == nil && status == http.StatusOK {
-				if decodeErr := decode(response); decodeErr == nil {
+				decodeErr := decode(response)
+				if decodeErr == nil {
 					return nil
-				} else {
-					return controllerBatchApplyUnknownOutcome(decodeErr)
 				}
+				return controllerBatchApplyUnknownOutcome(decodeErr)
 			}
 			var recoveryErr error
 			switch {
@@ -362,11 +362,11 @@ func (c *controllerBatchApplyHTTPClient) apply(ctx context.Context, wire control
 			return controllerBatchApplyStatusError(status, response)
 		}
 		if ambiguousErr == nil && requestErr == nil && status == http.StatusOK {
-			if decodeErr := decode(response); decodeErr == nil {
+			decodeErr := decode(response)
+			if decodeErr == nil {
 				return nil
-			} else {
-				ambiguousErr = decodeErr
 			}
+			ambiguousErr = decodeErr
 		} else if ambiguousErr == nil {
 			ambiguousErr = requestErr
 		}

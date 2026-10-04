@@ -120,6 +120,7 @@ gocache_val="$(go env GOCACHE)"
 gomodcache_val="$(go env GOMODCACHE)"
 gotmpdir_val="$(go env GOTMPDIR)"
 goroot_val="$(go env GOROOT)"
+cgo_enabled_val="$(go env CGO_ENABLED)"
 
 jobspecs=()
 
@@ -139,8 +140,12 @@ add_fsys_compile_job() {
 # timeout budget. Package parallelism is bounded separately for every job by the
 # GOFLAGS -p export below (ga-04m84s), so it is not pinned on this command.
 add_unit_core_job() {
+  # A failed substitution must never turn this sweep into an implicit `go test`
+  # of only the repository root. Reject partial discovery and an empty selection
+  # before invoking tests; command substitution does not propagate failure into
+  # the old `go test $(go list ...)` form.
   add_job "unit-core" \
-    "GC_FAST_UNIT=1 go test -count=1 -timeout ${go_test_timeout} \$(go list ./... | grep -v '^github.com/gastownhall/gascity/cmd/gc$')"
+    "packages=\$(go list ./...) || exit \$?; packages=\$(printf '%s\\n' \"\$packages\" | grep -v '^github.com/gastownhall/gascity/cmd/gc$') || { echo 'unit-core: no packages selected' >&2; exit 1; }; [[ -n \"\$packages\" ]] || { echo 'unit-core: no packages selected' >&2; exit 1; }; GC_FAST_UNIT=1 go test -count=1 -timeout ${go_test_timeout} \$packages"
 }
 
 # Runs as a direct shell job rather than through a `go test` wrapper because a
@@ -263,6 +268,7 @@ export TEST_LOCAL_GOCACHE="$gocache_val"
 export TEST_LOCAL_GOMODCACHE="$gomodcache_val"
 export TEST_LOCAL_GOTMPDIR="$gotmpdir_val"
 export TEST_LOCAL_GOROOT="${GOROOT:-$goroot_val}"
+export TEST_LOCAL_CGO_ENABLED="$cgo_enabled_val"
 
 # Lower each shard's CPU and I/O priority (best-effort) so the parallel fan-out
 # yields to interactive work and does not livelock constrained hosts during the
@@ -334,6 +340,9 @@ run_fan_out() {
     GOTMPDIR="${TEST_LOCAL_GOTMPDIR}" \
     GOROOT="${TEST_LOCAL_GOROOT}" \
     GOENV="${GOENV-}" \
+    CGO_ENABLED="${TEST_LOCAL_CGO_ENABLED}" \
+    GOMEMLIMIT="${GOMEMLIMIT-}" \
+    GOMAXPROCS="${GOMAXPROCS-}" \
     CGO_CPPFLAGS="${CGO_CPPFLAGS-}" \
     CGO_LDFLAGS="${CGO_LDFLAGS-}" \
     GOFLAGS="${GOFLAGS-}" \
@@ -347,6 +356,8 @@ run_fan_out() {
     GOINSECURE="${GOINSECURE-}" \
     GOVCS="${GOVCS-}" \
     GOWORK="${GOWORK-}" \
+    BEADS_TEST_BD_BINARY="${BEADS_TEST_BD_BINARY-}" \
+    BEADS_TEST_DOLT_BINARY="${BEADS_TEST_DOLT_BINARY-}" \
     bash -lc "$command" >"$log" 2>&1; then
     echo "[$label] ok"
   else

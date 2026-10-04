@@ -5326,13 +5326,19 @@ func TestOpenControlStoreDisablesAutoExportWithoutSandboxingWrites(t *testing.T)
 				return nil, fmt.Errorf("unexpected command %q", name)
 			}
 			calls = append(calls, append([]string(nil), args...))
+			if len(args) == 2 && args[1] == "--help" && slices.Contains([]string{"update", "close", "assign", "delete"}, args[0]) {
+				return []byte("--if-revision"), nil
+			}
 			if len(args) >= 1 && args[0] == "show" {
 				if len(args) != 3 || args[1] != "--json" || args[2] != expectedID {
 					return nil, fmt.Errorf("unexpected bd show for control scope %q: %v", expectedID, args)
 				}
-				return []byte(fmt.Sprintf(`[{"id":%q,"title":"control","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`, expectedID)), nil
+				return []byte(fmt.Sprintf(`[{"id":%q,"title":"control","status":"open","issue_type":"task","revision":1,"created_at":"2025-01-15T10:30:00Z"}]`, expectedID)), nil
 			}
-			return []byte(`[]`), nil
+			if len(args) >= 4 && args[0] == "update" && args[1] == "--json" && args[2] == expectedID && args[len(args)-2] == "--if-revision" && args[len(args)-1] == "1" {
+				return []byte(`[]`), nil
+			}
+			return nil, fmt.Errorf("unexpected or unfenced control command: %v", args)
 		}
 	}
 	t.Cleanup(func() { beadsExecCommandRunnerWithEnv = prevRunner })
@@ -5353,13 +5359,16 @@ func TestOpenControlStoreDisablesAutoExportWithoutSandboxingWrites(t *testing.T)
 		t.Fatalf("rig control update: %v", err)
 	}
 
-	if len(calls) != 4 {
-		t.Fatalf("bd calls = %#v, want a show and update for each control store", calls)
+	if len(calls) != 12 {
+		t.Fatalf("bd calls = %#v, want four capability probes, a show and fenced update for each control store", calls)
 	}
 	if len(envs) != len(calls) {
 		t.Fatalf("bd envs = %#v, want one command environment per call", envs)
 	}
 	for _, call := range calls {
+		if len(call) == 2 && call[1] == "--help" {
+			continue
+		}
 		if len(call) < 1 || (call[0] != "show" && call[0] != "update") {
 			t.Fatalf("bd call = %#v, want show or update ...", call)
 		}
@@ -5463,10 +5472,16 @@ func TestOpenControlStoreAtForCityUsesControlRunnerForStaleBdScope(t *testing.T)
 				return nil, fmt.Errorf("unexpected command %q", name)
 			}
 			calls = append(calls, append([]string(nil), args...))
-			if len(args) == 3 && args[0] == "show" && args[1] == "--json" && args[2] == "ga-stale-control" {
-				return []byte(`[{"id":"ga-stale-control","title":"control","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
+			if len(args) == 2 && args[1] == "--help" && slices.Contains([]string{"update", "close", "assign", "delete"}, args[0]) {
+				return []byte("--if-revision"), nil
 			}
-			return []byte(`[]`), nil
+			if len(args) == 3 && args[0] == "show" && args[1] == "--json" && args[2] == "ga-stale-control" {
+				return []byte(`[{"id":"ga-stale-control","title":"control","status":"open","issue_type":"task","revision":1,"created_at":"2025-01-15T10:30:00Z"}]`), nil
+			}
+			if len(args) >= 4 && args[0] == "update" && args[1] == "--json" && args[2] == "ga-stale-control" && args[len(args)-2] == "--if-revision" && args[len(args)-1] == "1" {
+				return []byte(`[]`), nil
+			}
+			return nil, fmt.Errorf("unexpected or unfenced stale-scope command: %v", args)
 		}
 	}
 	t.Cleanup(func() { beadsExecCommandRunnerWithEnv = prevRunner })
@@ -5480,8 +5495,8 @@ func TestOpenControlStoreAtForCityUsesControlRunnerForStaleBdScope(t *testing.T)
 		t.Fatalf("stale rig control update: %v", err)
 	}
 
-	if len(calls) != 2 {
-		t.Fatalf("bd calls = %#v, want a show and update call", calls)
+	if len(calls) != 6 {
+		t.Fatalf("bd calls = %#v, want a show, four capability probes and fenced update call", calls)
 	}
 	if len(envs) != len(calls) {
 		t.Fatalf("bd envs = %#v, want one command environment per call", envs)
@@ -5489,11 +5504,11 @@ func TestOpenControlStoreAtForCityUsesControlRunnerForStaleBdScope(t *testing.T)
 	if call := calls[0]; len(call) != 3 || call[0] != "show" || call[1] != "--json" {
 		t.Fatalf("bd read call = %#v, want show --json <id>", calls[0])
 	}
-	if call := calls[1]; len(call) < 1 || call[0] != "update" {
-		t.Fatalf("bd write call = %#v, want update ...", calls[1])
+	if call := calls[len(calls)-1]; len(call) < 1 || call[0] != "update" {
+		t.Fatalf("bd write call = %#v, want update ...", call)
 	}
-	if slices.Contains(calls[1], "--sandbox") {
-		t.Fatalf("bd call = %#v, write-capable control stores must not use --sandbox", calls[1])
+	if call := calls[len(calls)-1]; slices.Contains(call, "--sandbox") {
+		t.Fatalf("bd call = %#v, write-capable control stores must not use --sandbox", call)
 	}
 	if got := envs[0]["BD_EXPORT_AUTO"]; got != "false" {
 		t.Fatalf("BD_EXPORT_AUTO = %q, want false", got)
@@ -8119,7 +8134,7 @@ func TestDeleteWorkflowBeadIgnoresTransientNotificationDescendants(t *testing.T)
 		}
 	}
 	store := beads.NewMemStoreFrom(100, []beads.Bead{
-		{ID: "wf-root", Title: "workflow root", Status: "closed", Type: "task"},
+		{ID: "wf-root", Title: "workflow root", Status: "closed", Type: "task", Revision: 1},
 		owned("wf-mail", "escalation mail", "message"),
 		owned("wf-nudge", "wake nudge", nudgeBeadType, nudgeBeadLabel),
 		owned("wf-step", "live step", "task"),
@@ -8148,61 +8163,90 @@ func TestDeleteWorkflowBeadIgnoresTransientNotificationDescendants(t *testing.T)
 }
 
 func TestApplySourceWorkflowMatchCleanupDeletesOnlyCollectedWorkflowBeads(t *testing.T) {
-	store := beads.NewMemStore()
-	first, err := store.Create(beads.Bead{Title: "workflow first", Type: "task"})
-	if err != nil {
-		t.Fatalf("Create(first): %v", err)
-	}
-	second, err := store.Create(beads.Bead{Title: "workflow second", Type: "task"})
-	if err != nil {
-		t.Fatalf("Create(second): %v", err)
-	}
-	outside, err := store.Create(beads.Bead{Title: "outside follow-up", Type: "task"})
-	if err != nil {
-		t.Fatalf("Create(outside): %v", err)
-	}
-	if err := store.DepAdd(first.ID, outside.ID, "blocks"); err != nil {
-		t.Fatalf("DepAdd(first->outside): %v", err)
-	}
-	if err := store.DepAdd(outside.ID, second.ID, "blocks"); err != nil {
-		t.Fatalf("DepAdd(outside->second): %v", err)
-	}
+	for _, outsideStatus := range []string{"closed", "open"} {
+		t.Run("outside_"+outsideStatus, func(t *testing.T) {
+			store := beads.NewMemStore()
+			first, err := store.Create(beads.Bead{Title: "workflow first", Type: "task"})
+			if err != nil {
+				t.Fatalf("Create(first): %v", err)
+			}
+			second, err := store.Create(beads.Bead{Title: "workflow second", Type: "task"})
+			if err != nil {
+				t.Fatalf("Create(second): %v", err)
+			}
+			outside, err := store.Create(beads.Bead{Title: "outside follow-up", Type: "task"})
+			if err != nil {
+				t.Fatalf("Create(outside): %v", err)
+			}
+			if outsideStatus == "closed" {
+				// Ordinary MemStore creates open rows. Establish terminal state via
+				// its public close operation rather than an ignored creation hint.
+				if err := store.Close(outside.ID); err != nil {
+					t.Fatalf("Close(outside): %v", err)
+				}
+			}
+			if err := store.DepAdd(first.ID, outside.ID, "blocks"); err != nil {
+				t.Fatalf("DepAdd(first->outside): %v", err)
+			}
+			if err := store.DepAdd(outside.ID, second.ID, "blocks"); err != nil {
+				t.Fatalf("DepAdd(outside->second): %v", err)
+			}
 
-	// The match carries no bd runner, which is the point: delete-source deletes
-	// exactly the ids it collected, in process. A `bd delete --cascade` would
-	// walk the dependency edges out of the workflow and take `outside` with it.
-	var stderr bytes.Buffer
-	closed, deleted, incomplete := applySourceWorkflowMatchCleanup(sourceWorkflowStoreMatch{
-		label: "rig:gascity",
-		store: store,
-		beads: []beads.Bead{first, second},
-		path:  "/repo",
-	}, true, &stderr)
-	if incomplete {
-		t.Fatalf("cleanup incomplete; stderr=%s", stderr.String())
-	}
-	if closed != 2 || deleted != 2 {
-		t.Fatalf("closed/deleted = %d/%d, want 2/2", closed, deleted)
-	}
-	for _, id := range []string{first.ID, second.ID} {
-		if _, err := store.Get(id); err == nil {
-			t.Fatalf("Get(%s) succeeded after delete", id)
-		}
-	}
-	if got, err := store.Get(outside.ID); err != nil {
-		t.Fatalf("Get(outside): %v", err)
-	} else if got.Status != "open" {
-		t.Fatalf("outside status = %q, want open", got.Status)
-	}
-	if down, err := store.DepList(outside.ID, "down"); err != nil {
-		t.Fatalf("DepList(outside, down): %v", err)
-	} else if len(down) != 0 {
-		t.Fatalf("outside down deps = %#v, want none after collected bead deletion", down)
-	}
-	if up, err := store.DepList(outside.ID, "up"); err != nil {
-		t.Fatalf("DepList(outside, up): %v", err)
-	} else if len(up) != 0 {
-		t.Fatalf("outside up deps = %#v, want none after collected bead deletion", up)
+			// The match carries no bd runner, which is the point: delete-source deletes
+			// exactly the ids it collected, in process. A `bd delete --cascade` would
+			// walk the dependency edges out of the workflow and take `outside` with it.
+			var stderr bytes.Buffer
+			closed, deleted, incomplete := applySourceWorkflowMatchCleanup(sourceWorkflowStoreMatch{
+				label: "rig:gascity",
+				store: store,
+				beads: []beads.Bead{first, second},
+				path:  "/repo",
+			}, true, &stderr)
+			wantDeleted := 2
+			if outsideStatus == "open" {
+				// An active outside owner still references second. Exact collection is
+				// not authority to erase that live edge or cascade into outside work.
+				wantDeleted = 1
+				if !incomplete || !strings.Contains(stderr.String(), "active_reference_owner") {
+					t.Fatalf("active reference refusal missing: incomplete=%v stderr=%s", incomplete, stderr.String())
+				}
+				if got, err := store.Get(second.ID); err != nil || got.Status != "closed" {
+					t.Fatalf("referenced workflow row = %+v, err=%v; want retained closed row", got, err)
+				}
+			} else if incomplete {
+				t.Fatalf("terminal outside owner prevented cleanup: %s", stderr.String())
+			}
+			if closed != 2 || deleted != wantDeleted {
+				t.Fatalf("closed/deleted = %d/%d, want 2/%d", closed, deleted, wantDeleted)
+			}
+			if _, err := store.Get(first.ID); !errors.Is(err, beads.ErrNotFound) {
+				t.Fatalf("Get(first) = %v, want deleted", err)
+			}
+			if outsideStatus == "closed" {
+				if _, err := store.Get(second.ID); !errors.Is(err, beads.ErrNotFound) {
+					t.Fatalf("Get(second) = %v, want deleted", err)
+				}
+			}
+			if got, err := store.Get(outside.ID); err != nil {
+				t.Fatalf("Get(outside): %v", err)
+			} else if got.Status != outsideStatus {
+				t.Fatalf("outside status = %q, want %q", got.Status, outsideStatus)
+			}
+			if down, err := store.DepList(outside.ID, "down"); err != nil {
+				t.Fatalf("DepList(outside, down): %v", err)
+			} else if outsideStatus == "open" {
+				if len(down) != 1 || down[0].DependsOnID != second.ID || down[0].Type != "blocks" {
+					t.Fatalf("live outside reference = %+v, want its original edge to second", down)
+				}
+			} else if len(down) != 0 {
+				t.Fatalf("terminal outside down deps = %#v, want none", down)
+			}
+			if up, err := store.DepList(outside.ID, "up"); err != nil {
+				t.Fatalf("DepList(outside, up): %v", err)
+			} else if len(up) != 0 {
+				t.Fatalf("outside up deps = %#v, want none after collected bead deletion", up)
+			}
+		})
 	}
 }
 

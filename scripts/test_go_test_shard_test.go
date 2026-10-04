@@ -54,6 +54,7 @@ case "${1:-}" in
       GOMODCACHE) printf '%%s\n' %q ;;
       GOTMPDIR) printf '%%s\n' %q ;;
       GOROOT) printf '%%s\n' %q ;;
+      CGO_ENABLED) printf '%%s\n' "${CGO_ENABLED:-0}" ;;
       *) exit 99 ;;
     esac
     ;;
@@ -357,6 +358,8 @@ func TestGoTestShardWithoutTimingPreservesDirectProductContract(t *testing.T) {
 		"GITHUB_SHA=ignored-control",
 		"RUNNER_OS=ignored-control",
 		"SHOULD_NOT_LEAK=ignored-control",
+		"GOMEMLIMIT=1GiB",
+		"GOMAXPROCS=2",
 	)
 	status, output := runShardCommand(t, cmd)
 	if status != 23 {
@@ -377,7 +380,9 @@ func TestGoTestShardWithoutTimingPreservesDirectProductContract(t *testing.T) {
 		"GOROOT": filepath.Join(fixture.tmpDir, "goroot"), "GOENV": "", "GOFLAGS": "", "GO111MODULE": "",
 		"GOEXPERIMENT": "", "GOPROXY": "", "GOPRIVATE": "", "GONOPROXY": "", "GONOSUMDB": "",
 		"GOSUMDB": "", "GOINSECURE": "", "GOVCS": "", "GOWORK": "", "GC_FAST_UNIT": "0",
-		"CGO_CPPFLAGS": "", "CGO_LDFLAGS": "", "GC_TEST_SHARD_INDEX": "1", "GC_TEST_SHARD_TOTAL": "2",
+		"CGO_ENABLED": "0", "CGO_CPPFLAGS": "", "CGO_LDFLAGS": "", "GC_TEST_SHARD_INDEX": "1", "GC_TEST_SHARD_TOTAL": "2",
+		"BEADS_TEST_BD_BINARY": "", "BEADS_TEST_DOLT_BINARY": "",
+		"GOMEMLIMIT": "1GiB", "GOMAXPROCS": "2",
 	}
 	got := fixtureEnvironment(t, readFixtureFile(t, fixture.productEnvFile))
 	fixture.assertSeededGitConfig(t, got)
@@ -798,5 +803,29 @@ func TestGoTestShardRunsWithoutPreservedProviderEnv(t *testing.T) {
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("test-go-test-shard failed without preserved provider env: %v\n%s", err, out)
+	}
+}
+
+// Explicit CGO mode is part of the caller's build identity, even through env -i.
+func TestGoTestShardPreservesExplicitCGOMode(t *testing.T) {
+	for _, mode := range []string{"0", "1"} {
+		for _, throughMake := range []bool{false, true} {
+			t.Run(fmt.Sprintf("mode=%s/make=%t", mode, throughMake), func(t *testing.T) {
+				fixture := newGoTestShardFixture(t)
+				cmd := fixture.command("CGO_ENABLED=" + mode)
+				if throughMake {
+					cmd.Args = []string{"make", "--no-print-directory", "--silent", "test-acceptance"}
+					cmd.Path, _ = exec.LookPath("make")
+				}
+				code, out := runShardCommand(t, cmd)
+				if (!throughMake && code != 23) || (throughMake && (code == 0 || !strings.Contains(string(out), "Error 23"))) {
+					t.Fatalf("exit = %d, want fake product failure 23: %s", code, out)
+				}
+				captured := fixtureEnvironment(t, readFixtureFile(t, fixture.productEnvFile))
+				if captured["CGO_ENABLED"] != mode {
+					t.Fatalf("CGO_ENABLED = %q, want %q", captured["CGO_ENABLED"], mode)
+				}
+			})
+		}
 	}
 }

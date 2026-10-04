@@ -81,7 +81,7 @@ func loadCursorStructuredHistory(t *testing.T) *worker.HistorySnapshot {
 	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
 		t.Fatalf("write cursor fixture: %v", err)
 	}
-	history, err := testSessionLogAdapter().LoadHistory(worker.LoadRequest{
+	history, err := testSessionLogAdapter(path).LoadHistory(worker.LoadRequest{
 		Provider:       "cursor",
 		TranscriptPath: path,
 		GCSessionID:    "cursor-struct",
@@ -110,7 +110,7 @@ func loadGeminiStructuredHistory(t *testing.T) *worker.HistorySnapshot {
 	if err := os.WriteFile(path, []byte(geminiStructuredFixtureJSON()), 0o600); err != nil {
 		t.Fatalf("write gemini fixture: %v", err)
 	}
-	history, err := testSessionLogAdapter().LoadHistory(worker.LoadRequest{
+	history, err := testSessionLogAdapter(path).LoadHistory(worker.LoadRequest{
 		Provider:       "gemini",
 		TranscriptPath: path,
 		GCSessionID:    "gemini-struct",
@@ -169,7 +169,7 @@ func loadClaudeStructuredHistory(t *testing.T) *worker.HistorySnapshot {
 	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
 		t.Fatalf("write fixture: %v", err)
 	}
-	history, err := testSessionLogAdapter().LoadHistory(worker.LoadRequest{
+	history, err := testSessionLogAdapter(path).LoadHistory(worker.LoadRequest{
 		Provider:       "claude",
 		TranscriptPath: path,
 		GCSessionID:    "struct-1",
@@ -190,7 +190,7 @@ func loadCodexStructuredHistory(t *testing.T) *worker.HistorySnapshot {
 	if err := os.WriteFile(path, []byte(strings.Join(codexStructuredFixtureLines(), "\n")+"\n"), 0o600); err != nil {
 		t.Fatalf("write codex fixture: %v", err)
 	}
-	history, err := testSessionLogAdapter().LoadHistory(worker.LoadRequest{
+	history, err := testSessionLogAdapter(path).LoadHistory(worker.LoadRequest{
 		Provider:       "codex",
 		TranscriptPath: path,
 		GCSessionID:    "codex-struct",

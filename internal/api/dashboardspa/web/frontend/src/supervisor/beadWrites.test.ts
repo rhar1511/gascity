@@ -27,6 +27,7 @@ const baseApi: SupervisorApi = {
   listBeads: vi.fn(),
   listEvents: vi.fn(),
   getBead: vi.fn(),
+  attemptHistory: vi.fn(),
   createBead: vi.fn(),
   updateBead: vi.fn(),
   closeBead: vi.fn(),

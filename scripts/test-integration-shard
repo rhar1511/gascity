@@ -27,6 +27,7 @@ gocache_val="$(go env GOCACHE)"
 gomodcache_val="$(go env GOMODCACHE)"
 gotmpdir_val="$(go env GOTMPDIR)"
 goroot_val="$(go env GOROOT)"
+cgo_enabled_val="$(go env CGO_ENABLED)"
 
 # Mirror the Makefile's CGO path detection here so tests run via this script
 # see the same system dependency paths as `make`.
@@ -55,6 +56,9 @@ run_go() {
     GOTMPDIR="${gotmpdir_val}" \
     GOROOT="${GOROOT:-$goroot_val}" \
     GOENV="${GOENV-}" \
+    CGO_ENABLED="${cgo_enabled_val}" \
+    GOMEMLIMIT="${GOMEMLIMIT-}" \
+    GOMAXPROCS="${GOMAXPROCS-}" \
     GOFLAGS="${GOFLAGS-}" \
     GO111MODULE="${GO111MODULE-}" \
     GOEXPERIMENT="${GOEXPERIMENT-}" \
@@ -67,6 +71,8 @@ run_go() {
     GOVCS="${GOVCS-}" \
     GOWORK="${GOWORK-}" \
     GC_BEADS="${GC_BEADS-}" \
+    BEADS_TEST_BD_BINARY="${BEADS_TEST_BD_BINARY-}" \
+    BEADS_TEST_DOLT_BINARY="${BEADS_TEST_DOLT_BINARY-}" \
     GC_FAST_UNIT=0 \
     CGO_CPPFLAGS="${cgo_cppflags}" \
     CGO_LDFLAGS="${cgo_ldflags}" \

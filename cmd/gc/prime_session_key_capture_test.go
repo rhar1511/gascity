@@ -15,6 +15,7 @@ import (
 func primeCaptureTestStore(t *testing.T) (cityDir string, store beads.Store) {
 	t.Helper()
 	cityDir = t.TempDir()
+	writeMinimalCityToml(t, cityDir)
 	t.Setenv("GC_BEADS", "file")
 	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
 		t.Fatalf("ensureScopedFileStoreLayout: %v", err)

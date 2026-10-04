@@ -14,7 +14,7 @@ import (
 )
 
 func TestAdmissionAttachmentUsesExactQ43TransitionAndCurrentProof(t *testing.T) {
-	store, private, cfg, source, encoded := admissionAttachmentFixture(t)
+	store, cfg, source, encoded := admissionAttachmentFixture(t)
 	adapter, err := NewAdmissionAttachmentAdapter(store)
 	if err != nil {
 		t.Fatal(err)
@@ -58,11 +58,10 @@ func TestAdmissionAttachmentUsesExactQ43TransitionAndCurrentProof(t *testing.T) 
 	if _, _, err := adapter.Attach(encoded, revoked, "rig:pilot"); err == nil {
 		t.Fatal("exact retry succeeded after the receipt signer was removed from current authority")
 	}
-	_ = private
 }
 
 func TestAdmissionAttachmentRecoversLostTransitionResponseFromExactReceipt(t *testing.T) {
-	store, _, cfg, source, encoded := admissionAttachmentFixture(t)
+	store, cfg, source, encoded := admissionAttachmentFixture(t)
 	store.returnAfterCommitErr = errors.New("lost response")
 	adapter, err := NewAdmissionAttachmentAdapter(store)
 	if err != nil {
@@ -80,7 +79,7 @@ func TestAdmissionAttachmentRecoversLostTransitionResponseFromExactReceipt(t *te
 func TestAdmissionAttachmentTransitionVerifierAllowsOnlyExactQ54AdvancedSource(t *testing.T) {
 	for _, state := range []string{"reserved", "attached"} {
 		t.Run(state, func(t *testing.T) {
-			store, _, cfg, source, encoded := admissionAttachmentFixture(t)
+			store, cfg, source, encoded := admissionAttachmentFixture(t)
 			adapter, err := NewAdmissionAttachmentAdapter(store)
 			if err != nil {
 				t.Fatal(err)
@@ -115,7 +114,7 @@ func TestAdmissionAttachmentTransitionVerifierAllowsOnlyExactQ54AdvancedSource(t
 	}
 
 	t.Run("advanced source without matching marker", func(t *testing.T) {
-		store, _, cfg, source, encoded := admissionAttachmentFixture(t)
+		store, cfg, source, encoded := admissionAttachmentFixture(t)
 		adapter, err := NewAdmissionAttachmentAdapter(store)
 		if err != nil {
 			t.Fatal(err)
@@ -131,7 +130,7 @@ func TestAdmissionAttachmentTransitionVerifierAllowsOnlyExactQ54AdvancedSource(t
 	})
 
 	t.Run("advanced source with mismatched marker", func(t *testing.T) {
-		store, _, cfg, source, encoded := admissionAttachmentFixture(t)
+		store, cfg, source, encoded := admissionAttachmentFixture(t)
 		adapter, err := NewAdmissionAttachmentAdapter(store)
 		if err != nil {
 			t.Fatal(err)
@@ -165,7 +164,7 @@ func encodeAttachmentTestValue(t *testing.T, value any) string {
 
 func setAdmissionAttachmentSnapshotOverride(t *testing.T, store *admissionAttachmentTestStore, sourceID string, metadata map[string]string) {
 	t.Helper()
-	current, err := store.MemStore.Get(sourceID)
+	current, err := store.Get(sourceID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,7 +178,7 @@ func setAdmissionAttachmentSnapshotOverride(t *testing.T, store *admissionAttach
 
 func TestAdmissionAttachmentRejectsStaleUnsupportedAndCorruptProofs(t *testing.T) {
 	t.Run("stale source revision", func(t *testing.T) {
-		store, _, cfg, source, encoded := admissionAttachmentFixture(t)
+		store, cfg, source, encoded := admissionAttachmentFixture(t)
 		if err := store.Update(source.ID, beads.UpdateOpts{Title: stringPtr("edited after review")}); err != nil {
 			t.Fatal(err)
 		}
@@ -203,7 +202,7 @@ func TestAdmissionAttachmentRejectsStaleUnsupportedAndCorruptProofs(t *testing.T
 	})
 
 	t.Run("corrupt durable receipt", func(t *testing.T) {
-		store, _, cfg, source, encoded := admissionAttachmentFixture(t)
+		store, cfg, source, encoded := admissionAttachmentFixture(t)
 		adapter, err := NewAdmissionAttachmentAdapter(store)
 		if err != nil {
 			t.Fatal(err)
@@ -221,7 +220,7 @@ func TestAdmissionAttachmentRejectsStaleUnsupportedAndCorruptProofs(t *testing.T
 	})
 
 	t.Run("source changed after attach", func(t *testing.T) {
-		store, _, cfg, source, encoded := admissionAttachmentFixture(t)
+		store, cfg, source, encoded := admissionAttachmentFixture(t)
 		adapter, err := NewAdmissionAttachmentAdapter(store)
 		if err != nil {
 			t.Fatal(err)
@@ -242,7 +241,7 @@ func TestAdmissionAttachmentRejectsStaleUnsupportedAndCorruptProofs(t *testing.T
 	})
 
 	t.Run("matching-looking response without durable receipt", func(t *testing.T) {
-		store, _, cfg, _, encoded := admissionAttachmentFixture(t)
+		store, cfg, _, encoded := admissionAttachmentFixture(t)
 		store.returnWithoutPersistingReceipt = true
 		adapter, err := NewAdmissionAttachmentAdapter(store)
 		if err != nil {
@@ -270,7 +269,7 @@ func TestAdmissionAttachmentRejectsStaleUnsupportedAndCorruptProofs(t *testing.T
 		{name: "wrong kind", mutate: func(receipt *beads.ControllerMetadataTransitionReceipt) { receipt.Kind = "other" }},
 	} {
 		t.Run("durable receipt "+tc.name, func(t *testing.T) {
-			store, _, cfg, source, encoded := admissionAttachmentFixture(t)
+			store, cfg, source, encoded := admissionAttachmentFixture(t)
 			adapter, err := NewAdmissionAttachmentAdapter(store)
 			if err != nil {
 				t.Fatal(err)
@@ -289,7 +288,7 @@ func TestAdmissionAttachmentRejectsStaleUnsupportedAndCorruptProofs(t *testing.T
 	}
 }
 
-func admissionAttachmentFixture(t *testing.T) (*admissionAttachmentTestStore, ed25519.PrivateKey, config.LifecycleConfig, beads.Bead, string) {
+func admissionAttachmentFixture(t *testing.T) (*admissionAttachmentTestStore, config.LifecycleConfig, beads.Bead, string) {
 	t.Helper()
 	public, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -320,7 +319,7 @@ func admissionAttachmentFixture(t *testing.T) (*admissionAttachmentTestStore, ed
 	if err != nil {
 		t.Fatal(err)
 	}
-	return store, private, cfg, source, encoded
+	return store, cfg, source, encoded
 }
 
 type admissionAttachmentTestStore struct {
@@ -333,9 +332,11 @@ type admissionAttachmentTestStore struct {
 	returnWithoutPersistingReceipt bool
 }
 
-var _ beads.DecisionFrontierSourceReaderHandleProvider = (*admissionAttachmentTestStore)(nil)
-var _ beads.ControllerMetadataTransitionWriterHandleProvider = (*admissionAttachmentTestStore)(nil)
-var _ beads.ControllerMetadataTransitionReceiptReaderHandleProvider = (*admissionAttachmentTestStore)(nil)
+var (
+	_ beads.DecisionFrontierSourceReaderHandleProvider              = (*admissionAttachmentTestStore)(nil)
+	_ beads.ControllerMetadataTransitionWriterHandleProvider        = (*admissionAttachmentTestStore)(nil)
+	_ beads.ControllerMetadataTransitionReceiptReaderHandleProvider = (*admissionAttachmentTestStore)(nil)
+)
 
 func (s *admissionAttachmentTestStore) DecisionFrontierSourceReaderHandle() (beads.DecisionFrontierSourceReader, bool) {
 	return s, true
@@ -347,7 +348,7 @@ func (s *admissionAttachmentTestStore) DecisionFrontierSourceSnapshot(id string)
 		current.Metadata = cloneStringMap(current.Metadata)
 		return current, nil
 	}
-	return s.MemStore.Get(id)
+	return s.Get(id)
 }
 
 func (s *admissionAttachmentTestStore) ControllerMetadataTransitionWriterHandle() (beads.ControllerMetadataTransitionWriter, bool) {
@@ -364,7 +365,7 @@ func (s *admissionAttachmentTestStore) TransitionMetadata(issueID string, reques
 	if prior, ok := s.receipts[request.ReceiptID]; ok {
 		return beads.ControllerMetadataTransitionResult{Applied: true, Replayed: true, Receipt: &prior}, nil
 	}
-	current, err := s.MemStore.Get(issueID)
+	current, err := s.Get(issueID)
 	if err != nil {
 		return beads.ControllerMetadataTransitionResult{}, err
 	}
@@ -375,10 +376,10 @@ func (s *admissionAttachmentTestStore) TransitionMetadata(issueID string, reques
 	if request.Value == nil || json.Unmarshal(*request.Value, &next) != nil {
 		return beads.ControllerMetadataTransitionResult{}, errors.New("invalid transition value")
 	}
-	if err := s.MemStore.UpdateIfMatch(issueID, request.ExpectedVersion, beads.UpdateOpts{Metadata: map[string]string{request.Key: next}}); err != nil {
+	if err := s.UpdateIfMatch(issueID, request.ExpectedVersion, beads.UpdateOpts{Metadata: map[string]string{request.Key: next}}); err != nil {
 		return beads.ControllerMetadataTransitionResult{}, err
 	}
-	committed, err := s.MemStore.Get(issueID)
+	committed, err := s.Get(issueID)
 	if err != nil {
 		return beads.ControllerMetadataTransitionResult{}, err
 	}

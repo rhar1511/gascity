@@ -341,7 +341,7 @@ func TestControllerTransitionPatchHTTPRefusesMissingCapabilityAndInvalidRequest(
 }
 
 func TestControllerTransitionPatchHTTPIsOptInAndRedactsProblemDetails(t *testing.T) {
-	transport := &controllerTransitionPatchTestTransport{handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	transport := &controllerTransitionPatchTestTransport{handler: http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		t.Fatalf("disabled patch capability made HTTP request: %s %s", r.Method, r.URL.Path)
 	})}
 	store := controllerTransitionPatchTestStoreWithOptIn(t, transport, false)

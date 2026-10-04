@@ -873,26 +873,19 @@ func TestResetSessionCircuitBreakerOnControllerMalformedReply(t *testing.T) {
 
 func writeGenericNamedSessionCityTOML(t *testing.T, dir string) {
 	t.Helper()
+	writeCompletionAgentToml(t, dir, config.Agent{Name: "session-a", Provider: "codex", StartCommand: "echo"})
 	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
 		t.Fatalf("MkdirAll(.gc): %v", err)
 	}
 	data := []byte(`[workspace]
-name = "test-city"
 
 [beads]
 provider = "file"
 
-[[agent]]
-name = "session-a"
-provider = "codex"
-start_command = "echo"
-
 [[named_session]]
 template = "session-a"
 `)
-	if err := os.WriteFile(filepath.Join(dir, "city.toml"), data, 0o644); err != nil {
-		t.Fatalf("WriteFile(city.toml): %v", err)
-	}
+	writeSchema2RigCity(t, dir, "test-city", string(data), "")
 }
 
 // TestCmdSessionReset_RollsBackStuckPendingCreate: reset is what an operator

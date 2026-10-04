@@ -85,7 +85,7 @@ func verifyAdvancedAdmissionProofAttachment(bead beads.Bead, receipt AdmissionRe
 	}
 	digest, err := AdmissionDigestV2(receipt)
 	if err != nil {
-		return fmt.Errorf("%w: receipt digest could not be recomputed: %v", ErrAdmissionAttachmentInvalid, err)
+		return fmt.Errorf("%w: receipt digest could not be recomputed: %s", ErrAdmissionAttachmentInvalid, err.Error())
 	}
 	encoded := bead.Metadata[beadmeta.LifecycleAdmissionReceiptV2MetadataKey]
 	request, err := admissionAttachmentRequest(receipt, encoded, digest)
@@ -138,7 +138,7 @@ func verifyAdmissionProofAttachment(bead beads.Bead, receipt AdmissionReceiptV2,
 	}
 	digest, err := AdmissionDigestV2(receipt)
 	if err != nil {
-		return fmt.Errorf("%w: receipt digest could not be recomputed: %v", ErrAdmissionAttachmentInvalid, err)
+		return fmt.Errorf("%w: receipt digest could not be recomputed: %s", ErrAdmissionAttachmentInvalid, err.Error())
 	}
 	encoded := bead.Metadata[beadmeta.LifecycleAdmissionReceiptV2MetadataKey]
 	request, err := admissionAttachmentRequest(receipt, encoded, digest)

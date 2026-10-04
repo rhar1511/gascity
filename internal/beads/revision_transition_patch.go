@@ -18,6 +18,8 @@ import (
 // name Beads verifies for a typed atomic issue patch.
 const RevisionTransitionPatchProtectedMutationOperation = "issue.revision_transition_patch"
 
+// ErrRevisionTransitionPatchUnavailable and the other patch errors classify
+// missing transport, invalid protocol, receipt conflicts, and policy refusals.
 var (
 	ErrRevisionTransitionPatchUnavailable     = errors.New("revision transition patch HTTP transport unavailable")
 	ErrRevisionTransitionPatchProtocol        = errors.New("revision transition patch HTTP protocol unsupported")
@@ -195,12 +197,7 @@ func RevisionTransitionPatchProtectedMutationDigest(issueID string, request Revi
 		PriorReceiptDigest string                       `json:"prior_receipt_digest"`
 		Patch              RevisionTransitionIssuePatch `json:"patch"`
 	}
-	encoded, err := json.Marshal(canonicalRequest{
-		ReceiptID: plan.ReceiptID, IssueID: plan.IssueID, Scope: plan.Scope,
-		Kind: plan.Kind, Actor: plan.Actor, ExpectedVersion: plan.ExpectedVersion,
-		PriorReceiptID: plan.PriorReceiptID, PriorReceiptDigest: plan.PriorReceiptDigest,
-		Patch: plan.Patch,
-	})
+	encoded, err := json.Marshal(canonicalRequest(plan))
 	if err != nil {
 		return "", fmt.Errorf("encode canonical revision transition patch: %w", err)
 	}

@@ -596,6 +596,7 @@ func TestOrderTrackingWatchdogsReachTheOrdersBinding(t *testing.T) {
 func TestOneShotOrderReadsReachTheOrdersBinding(t *testing.T) {
 	cityPath := t.TempDir()
 	t.Setenv("GC_BEADS", "file")
+	writeCityTOML(t, cityPath, "test-city")
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 	binding := beads.NewMemStore()
 	binding.IDPrefix = "gcg"
@@ -638,6 +639,7 @@ func TestOneShotOrderReadsReachTheOrdersBinding(t *testing.T) {
 func TestOrderSweepTrackingReachesTheOrdersBinding(t *testing.T) {
 	cityPath := t.TempDir()
 	t.Setenv("GC_BEADS", "file")
+	writeCityTOML(t, cityPath, "test-city")
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 	binding := beads.NewMemStore()
 	binding.IDPrefix = "gcg"

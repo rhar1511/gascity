@@ -281,6 +281,61 @@ func TestSQLiteStoreCreatesAndGets(t *testing.T) {
 	}
 }
 
+// A new row owns a new destination revision, including migration copies.
+// Caller revisions are not tokens for the destination store. Legacy persisted
+// rows remain covered by TestSQLiteStoreReadOnlyReadsLegacySchemaWithoutRevision.
+func TestSQLiteStoreCreateReturnsPersistedRevision(t *testing.T) {
+	for _, operation := range []string{"create", "foreign-id", "transaction"} {
+		t.Run(operation, func(t *testing.T) {
+			opened, err := OpenSQLiteStore(t.TempDir())
+			if err != nil {
+				t.Fatalf("OpenSQLiteStore: %v", err)
+			}
+			store := opened.(*SQLiteStore)
+			t.Cleanup(func() { _ = store.CloseStore() })
+			input := Bead{ID: "foreign-42", Title: "new row", Revision: 99}
+			var created Bead
+			switch operation {
+			case "create":
+				created, err = store.Create(input)
+			case "foreign-id":
+				created, err = store.CreateWithForeignID(input)
+			case "transaction":
+				err = store.Tx("new row", func(tx Tx) error {
+					var createErr error
+					created, createErr = tx.Create(input)
+					return createErr
+				})
+			}
+			if err != nil {
+				t.Fatalf("%s: %v", operation, err)
+			}
+			persisted, err := store.Get(created.ID)
+			if err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			if created.Revision != 1 || persisted.Revision != created.Revision {
+				t.Fatalf("new row revisions: returned=%d persisted=%d, want destination token 1", created.Revision, persisted.Revision)
+			}
+			title := "changed under creation token"
+			if err := store.UpdateIfMatch(created.ID, created.Revision, UpdateOpts{Title: &title}); err != nil {
+				t.Fatalf("UpdateIfMatch: %v", err)
+			}
+			var stale *PreconditionFailedError
+			if err := store.UpdateIfMatch(created.ID, created.Revision, UpdateOpts{Title: &input.Title}); !errors.As(err, &stale) {
+				t.Fatalf("stale creation token: %v, want PreconditionFailedError", err)
+			}
+			persisted, err = store.Get(created.ID)
+			if err != nil {
+				t.Fatalf("Get updated: %v", err)
+			}
+			if persisted.Revision != 2 || persisted.Title != title {
+				t.Fatalf("updated row = %+v, want revision 2 and fenced title", persisted)
+			}
+		})
+	}
+}
+
 func TestSQLiteStorePersistsLocalStringsOutsideDatabase(t *testing.T) {
 	dir := t.TempDir()
 	opened, err := OpenSQLiteStore(dir)

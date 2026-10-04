@@ -6,6 +6,7 @@ import {
   getV0Cities,
   getV0CityByCityNameAgents,
   getV0CityByCityNameBeadById,
+  getV0CityByCityNameBeadByIdAttemptsBySessionIdHistory,
   getV0CityByCityNameBeads,
   getV0CityByCityNameEvents,
   getV0CityByCityNameFormulasByName,
@@ -41,6 +42,7 @@ import type {
   BeadCreateInputBody,
   BeadUpdateBody,
   AttemptEvidenceRead,
+  AttemptInspection,
   Evidence,
   FormulaFeedBody,
   GetV0CityByCityNameBeadsData,
@@ -129,6 +131,12 @@ export interface SupervisorApi {
     query?: NonNullable<GetV0CityByCityNameEventsData['query']>,
   ): Promise<ListBodyWireEvent>;
   getBead(cityName: string, id: string): Promise<Bead>;
+  attemptHistory(
+    cityName: string,
+    beadID: string,
+    sessionID: string,
+    signal?: AbortSignal,
+  ): Promise<AttemptInspection>;
   createBead(cityName: string, body: BeadCreateInputBody): Promise<Bead>;
   updateBead(cityName: string, id: string, body: BeadUpdateBody): Promise<OkResponseBody>;
   closeBead(cityName: string, id: string): Promise<OkResponseBody>;
@@ -239,14 +247,15 @@ export function createSupervisorApi(options: CreateSupervisorApiOptions = {}): S
     responseStyle: 'fields' as const,
     throwOnError: false,
   };
+  const requestFetch = withSupervisorTimeout(
+    options.fetch ?? globalThis.fetch,
+    supervisorTimeoutMs(options.timeoutMs),
+  );
   const client =
     options.client ??
     createClient({
       ...clientOptions,
-      fetch: withSupervisorTimeout(
-        options.fetch ?? globalThis.fetch,
-        supervisorTimeoutMs(options.timeoutMs),
-      ),
+      fetch: requestFetch,
     });
 
   return {
@@ -346,6 +355,16 @@ export function createSupervisorApi(options: CreateSupervisorApiOptions = {}): S
           path: { cityName, id },
         }) as Promise<SupervisorResult<Bead>>,
         'gc supervisor bead response was empty',
+      );
+    },
+    attemptHistory(cityName, beadID, sessionID, signal) {
+      return unwrapSupervisorResult<AttemptInspection>(
+        getV0CityByCityNameBeadByIdAttemptsBySessionIdHistory({
+          client,
+          path: { cityName, id: beadID, sessionID },
+          ...(signal === undefined ? {} : { signal }),
+        }) as Promise<SupervisorResult<AttemptInspection>>,
+        'gc supervisor historical attempt response was empty',
       );
     },
     createBead(cityName, body) {
@@ -580,7 +599,11 @@ export function createSupervisorApi(options: CreateSupervisorApiOptions = {}): S
         'gc supervisor attempt-evidence list response was empty',
       );
       if (!Array.isArray(rows)) {
-        throw new SupervisorApiError(undefined, 'gc supervisor attempt-evidence list was malformed', undefined);
+        throw new SupervisorApiError(
+          undefined,
+          'gc supervisor attempt-evidence list was malformed',
+          undefined,
+        );
       }
       return rows;
     },
@@ -597,6 +620,12 @@ export function createSupervisorApi(options: CreateSupervisorApiOptions = {}): S
     executePRAction(cityName, body, idempotencyKey) {
       if ((body as PrActionExecuteBody).action === 'merge') {
         throw new Error('Workbench does not support PR merge actions');
+      }
+      if (body.action !== 'prepare' && body.action !== 'queue_review') {
+        throw new Error('Workbench supports only prepare and queue_review actions');
+      }
+      if (Object.prototype.hasOwnProperty.call(body, 'human_grant')) {
+        throw new Error('Workbench does not submit human approval grants');
       }
       return unwrapSupervisorResult<PrActionResult>(
         executePrAction({

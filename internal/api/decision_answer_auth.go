@@ -18,6 +18,8 @@ const decisionAnswerProtocol = "gascity.decision-answer.v1"
 
 var decisionAnswerSigningDomain = []byte(decisionAnswerProtocol + "\x00")
 
+// ErrDecisionAnswerGrantMalformed and the other grant errors distinguish the
+// rejected human answer protocol, authority scope, and exact challenge binding.
 var (
 	ErrDecisionAnswerGrantMalformed = errors.New("decision answer grant is malformed")
 	ErrDecisionAnswerGrantDomain    = errors.New("decision answer grant protocol is unsupported")
@@ -65,8 +67,7 @@ func DecisionAnswerGrantSigningInput(claims DecisionAnswerGrantClaims) ([]byte, 
 	if err != nil {
 		return nil, fmt.Errorf("%w: encode claims", ErrDecisionAnswerGrantMalformed)
 	}
-	input := make([]byte, 0, len(decisionAnswerSigningDomain)+len(payload))
-	input = append(input, decisionAnswerSigningDomain...)
+	input := append([]byte(nil), decisionAnswerSigningDomain...)
 	input = append(input, payload...)
 	return input, nil
 }

@@ -550,6 +550,8 @@ func (r proxiedControllerMetadataTransitionReceiptReader) ControllerMetadataTran
 	return receipt, found, r.store.classifyReadError(err)
 }
 
+// ControllerMetadataTransitionReceiptReaderHandle forwards exact Q43 receipt
+// reads through the proxy's read-error classification and ledger boundary.
 func (s *ProxiedStore) ControllerMetadataTransitionReceiptReaderHandle() (ControllerMetadataTransitionReceiptReader, bool) {
 	if s == nil {
 		return nil, false
@@ -634,6 +636,8 @@ func (w proxiedRevisionTransitionWriter) CompareAndSetMetadataKeyWithReceipt(id,
 	return bead, won, err
 }
 
+// RevisionTransitionWriterHandle forwards atomic source transitions through
+// the proxy's mutation boundary only when the write ledger supports them.
 func (s *ProxiedStore) RevisionTransitionWriterHandle() (RevisionTransitionWriter, bool) {
 	if s == nil {
 		return nil, false

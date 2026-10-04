@@ -144,12 +144,12 @@ func ResolveCanonicalAdmissionPoolV2(identity string, context AdmissionTargetRes
 		!validAdmissionCapacity(context.City.Workspace.MaxActiveSessions) {
 		return CanonicalAdmissionPoolV2{}, admissionPolicyV2Error("target pool has invalid session capacity bounds")
 	}
-	max, maxSource := inheritedAdmissionCapacity(agent.MaxActiveSessions, rig.MaxActiveSessions, context.City.Workspace.MaxActiveSessions)
-	min := agent.EffectiveMinActiveSessions()
-	supportsGenericEphemeral := agent.SupportsGenericEphemeralSessions() && max != 0 &&
+	maximum, maxSource := inheritedAdmissionCapacity(agent.MaxActiveSessions, rig.MaxActiveSessions, context.City.Workspace.MaxActiveSessions)
+	minimum := agent.EffectiveMinActiveSessions()
+	supportsGenericEphemeral := agent.SupportsGenericEphemeralSessions() && maximum != 0 &&
 		!admissionAncestorCapacityIsZero(rig.MaxActiveSessions, context.City.Workspace.MaxActiveSessions)
 	if !supportsGenericEphemeral ||
-		(max >= 0 && min > max) {
+		(maximum >= 0 && minimum > maximum) {
 		return CanonicalAdmissionPoolV2{}, admissionPolicyV2Error("target pool does not support generic ephemeral sessions within its inherited capacity")
 	}
 	customSlingQueryAbsent := normalizeAdmissionSlingQuery(agent.SlingQuery) == "" ||
@@ -162,8 +162,8 @@ func ResolveCanonicalAdmissionPoolV2(identity string, context AdmissionTargetRes
 		return CanonicalAdmissionPoolV2{}, admissionPolicyV2Error("target pool has no canonical effective default sling formula")
 	}
 	var maxActiveSessions *int
-	if max != -1 {
-		maxValue := max
+	if maximum != -1 {
+		maxValue := maximum
 		maxActiveSessions = &maxValue
 	}
 	agentMax := cloneAdmissionInt(agent.MaxActiveSessions)
@@ -180,9 +180,9 @@ func ResolveCanonicalAdmissionPoolV2(identity string, context AdmissionTargetRes
 		RigMaxActiveSessions:       rigMax,
 		WorkspaceMaxActiveSessions: workspaceMax,
 		MaxActiveSessions:          maxActiveSessions,
-		InheritedMaxActiveSessions: max,
+		InheritedMaxActiveSessions: maximum,
 		InheritedMaxSource:         maxSource,
-		MinActiveSessions:          min,
+		MinActiveSessions:          minimum,
 		ConfigRigSuspendedOnStart:  rig.EffectiveSuspendedOnStart(),
 		RuntimeRigSuspensionKnown:  context.RuntimeRigSuspended != nil,
 		RuntimeRigSuspended:        *context.RuntimeRigSuspended,
@@ -213,8 +213,8 @@ func cloneAdmissionInt(value *int) *int {
 	if value == nil {
 		return nil
 	}
-	copy := *value
-	return &copy
+	cloned := *value
+	return &cloned
 }
 
 func normalizeAdmissionSlingQuery(value string) string {
@@ -720,7 +720,7 @@ func validSHA256Hex(value string) bool {
 		return false
 	}
 	for _, char := range value {
-		if !(char >= '0' && char <= '9') && !(char >= 'a' && char <= 'f') {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
 			return false
 		}
 	}

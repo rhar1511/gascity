@@ -28,6 +28,8 @@ const CollectorVersion = "selector-host-inventory-v1"
 // Status is the complete set of outcomes understood by this collector.
 type Status string
 
+// Source statuses distinguish successful capture from absent, unavailable,
+// denied, malformed, raced, or unsupported evidence.
 const (
 	StatusAvailable        Status = "available"         // The bounded source read and parse succeeded.
 	StatusAbsent           Status = "absent"            // The enumerated source did not exist.
@@ -921,11 +923,11 @@ func parseAnacron(sourceID, pathID string, data []byte) ([]Finding, []string) {
 			issues = append(issues, "anacron_entry_malformed")
 			continue
 		}
-		if _, ok := parseBoundedDecimal(fields[0], 1, maxAnacronPeriodDays); !ok {
+		if !validBoundedDecimal(fields[0], 1, maxAnacronPeriodDays) {
 			issues = append(issues, "anacron_entry_malformed")
 			continue
 		}
-		if _, ok := parseBoundedDecimal(fields[1], 0, maxAnacronDelayMins); !ok {
+		if !validBoundedDecimal(fields[1], 0, maxAnacronDelayMins) {
 			issues = append(issues, "anacron_entry_malformed")
 			continue
 		}
@@ -1140,15 +1142,12 @@ func parseCronInteger(value string) (int, bool) {
 	return parsed, err == nil
 }
 
-func parseBoundedDecimal(value string, minimum, maximum int) (int, bool) {
+func validBoundedDecimal(value string, minimum, maximum int) bool {
 	if len(value) == 0 || len(value) > len(strconv.Itoa(maximum)) {
-		return 0, false
+		return false
 	}
 	parsed, ok := parseCronInteger(value)
-	if !ok || parsed < minimum || parsed > maximum {
-		return 0, false
-	}
-	return parsed, true
+	return ok && parsed >= minimum && parsed <= maximum
 }
 
 func isCronEnvironment(line string) bool {
@@ -1431,7 +1430,7 @@ func uniqueSorted(values []string) []string {
 	return result
 }
 
-// JoinStatus checks that this record is bound to the caller's exact controller
+// JoinResult reports whether this record is bound to the caller's exact controller
 // snapshot. A matching join remains unavailable until exact in-flight identities
 // exist; matching digests never imply absence or retirement authority.
 type JoinResult struct {

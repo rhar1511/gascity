@@ -98,9 +98,13 @@ func TestControllerStateReloadRefreshesUsageSink(t *testing.T) {
 	assertSinkKind(t, cs.UsageSink(), "discard")
 
 	// Full-rebuild reload path, both directions.
-	cs.update(localCfg, runtime.NewFake())
+	if err := cs.update(localCfg, runtime.NewFake()); err != nil {
+		t.Fatalf("reload local usage sink: %v", err)
+	}
 	assertSinkKind(t, cs.UsageSink(), "local")
-	cs.update(discardCfg, runtime.NewFake())
+	if err := cs.update(discardCfg, runtime.NewFake()); err != nil {
+		t.Fatalf("reload discard usage sink: %v", err)
+	}
 	assertSinkKind(t, cs.UsageSink(), "discard")
 
 	// Store-reuse reload path, both directions.

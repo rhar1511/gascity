@@ -58,8 +58,8 @@ func decisionFrontierRevisionTransitionReceipt(bead Bead, issueID, receiptID str
 		}
 		seen[receipt.ID] = struct{}{}
 		if receipt.ID == receiptID {
-			copy := receipt
-			found = &copy
+			matched := receipt
+			found = &matched
 		}
 	}
 	if found == nil {

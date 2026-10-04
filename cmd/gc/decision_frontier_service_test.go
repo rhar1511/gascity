@@ -58,10 +58,10 @@ func TestControllerStateDecisionFrontierUsesConfiguredTargetAndReloadSnapshot(t 
 	if first.Prompt.Status != "accepted" {
 		t.Fatalf("configured target prompt status = %q, want accepted", first.Prompt.Status)
 	}
-	if got := countRuntimeCalls(provider.Calls, "Nudge", frontierCompositionSessionName("mayor")); got != 1 {
+	if got := countRuntimeNudges(provider.Calls, frontierCompositionSessionName("mayor")); got != 1 {
 		t.Fatalf("configured target sent %d prompts to Mayor, want one", got)
 	}
-	if got := countRuntimeCalls(provider.Calls, "Nudge", frontierCompositionSessionName("reviewer")); got != 0 {
+	if got := countRuntimeNudges(provider.Calls, frontierCompositionSessionName("reviewer")); got != 0 {
 		t.Fatalf("configured target sent %d prompts to the other session, want zero", got)
 	}
 
@@ -76,7 +76,7 @@ func TestControllerStateDecisionFrontierUsesConfiguredTargetAndReloadSnapshot(t 
 		decisionfrontier.Proposal{Questions: []decisionfrontier.Question{{ID: "choose", Title: "Choose", Prompt: "Choose."}}}); err != nil {
 		t.Fatalf("replay old bound prompt after target reload: %v", err)
 	}
-	if got := countRuntimeCalls(provider.Calls, "Nudge", frontierCompositionSessionName("reviewer")); got != 0 {
+	if got := countRuntimeNudges(provider.Calls, frontierCompositionSessionName("reviewer")); got != 0 {
 		t.Fatalf("replay moved the existing prompt to the new target (%d reviewer sends)", got)
 	}
 
@@ -86,7 +86,7 @@ func TestControllerStateDecisionFrontierUsesConfiguredTargetAndReloadSnapshot(t 
 	if second.Prompt.Status != "accepted" {
 		t.Fatalf("reloaded target prompt status = %q, want accepted", second.Prompt.Status)
 	}
-	if got := countRuntimeCalls(provider.Calls, "Nudge", frontierCompositionSessionName("reviewer")); got != 1 {
+	if got := countRuntimeNudges(provider.Calls, frontierCompositionSessionName("reviewer")); got != 1 {
 		t.Fatalf("new work sent %d prompts to reloaded target, want one", got)
 	}
 }
@@ -201,10 +201,10 @@ func ensureCompositionFrontier(t *testing.T, service decisionfrontier.Service, s
 	return frontier
 }
 
-func countRuntimeCalls(calls []runtime.Call, method, name string) int {
+func countRuntimeNudges(calls []runtime.Call, name string) int {
 	count := 0
 	for _, call := range calls {
-		if call.Method == method && call.Name == name {
+		if call.Method == "Nudge" && call.Name == name {
 			count++
 		}
 	}

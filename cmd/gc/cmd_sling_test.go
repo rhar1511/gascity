@@ -50,6 +50,10 @@ func (s *selectiveErrStore) Create(b beads.Bead) (beads.Bead, error) {
 	return s.Store.Create(b)
 }
 
+func (s *selectiveErrStore) ConditionalWriterHandle() (beads.ConditionalWriter, bool) {
+	return beads.ConditionalWriterFor(s.Store)
+}
+
 type getErrStore struct {
 	beads.Store
 	err error
@@ -70,7 +74,19 @@ func seededStore(ids ...string) beads.Store {
 			Metadata: map[string]string{},
 		})
 	}
-	return beads.NewMemStoreFrom(0, seed, nil)
+	return versionedSlingStore(0, seed, nil)
+}
+
+// versionedSlingStore restores positive fixtures with observed revisions in
+// their backing ledger. Tests for absent revisions use explicit wrappers instead.
+func versionedSlingStore(seq int, seed []beads.Bead, deps []beads.Dep) *beads.MemStore {
+	seed = slices.Clone(seed)
+	for i := range seed {
+		if seed[i].Revision == 0 {
+			seed[i].Revision = 1
+		}
+	}
+	return beads.NewMemStoreFrom(seq, seed, deps)
 }
 
 // recordingStore wraps a store and overrides Get for bead injection.
@@ -95,22 +111,16 @@ type fakeRunnerRule struct {
 
 type slingTestStore struct {
 	beads.Store
-	synthetic map[string]beads.Bead
 }
 
 func newSlingTestStore() *slingTestStore {
-	return &slingTestStore{Store: beads.NewMemStore(), synthetic: map[string]beads.Bead{}}
+	store := beads.NewMemStore()
+	store.HonorExplicitIDs = true
+	return &slingTestStore{Store: store}
 }
 
-func (s *slingTestStore) ensureSynthetic(id string) beads.Bead {
-	b, ok := s.synthetic[id]
-	if !ok {
-		b = beads.Bead{ID: id, Title: id, Type: "task", Status: "open", Metadata: map[string]string{}}
-	}
-	if b.Metadata == nil {
-		b.Metadata = map[string]string{}
-	}
-	return b
+func (s *slingTestStore) ConditionalWriterHandle() (beads.ConditionalWriter, bool) {
+	return beads.ConditionalWriterFor(s.Store)
 }
 
 func (s *slingTestStore) Get(id string) (beads.Bead, error) {
@@ -118,14 +128,10 @@ func (s *slingTestStore) Get(id string) (beads.Bead, error) {
 	if err == nil || !errors.Is(err, beads.ErrNotFound) {
 		return b, err
 	}
-	b, ok := s.synthetic[id]
-	if !ok {
-		if !slingTestLooksLikeBeadID(id) {
-			return beads.Bead{}, err
-		}
-		return s.ensureSynthetic(id), nil
+	if !slingTestLooksLikeBeadID(id) {
+		return beads.Bead{}, err
 	}
-	return b, nil
+	return s.Create(beads.Bead{ID: id, Title: id, Type: "task", Status: "open", Metadata: map[string]string{}})
 }
 
 // slingTestLooksLikeBeadID accepts the same single-dash shapes as
@@ -175,71 +181,17 @@ func slingTestLooksLikeBeadID(id string) bool {
 }
 
 func (s *slingTestStore) SetMetadata(id, key, value string) error {
-	if err := s.Store.SetMetadata(id, key, value); err == nil || !errors.Is(err, beads.ErrNotFound) {
+	if _, err := s.Get(id); err != nil {
 		return err
 	}
-	b := s.ensureSynthetic(id)
-	b.Metadata[key] = value
-	s.synthetic[id] = b
-	return nil
+	return s.Store.SetMetadata(id, key, value)
 }
 
 func (s *slingTestStore) Update(id string, opts beads.UpdateOpts) error {
-	if err := s.Store.Update(id, opts); err == nil || !errors.Is(err, beads.ErrNotFound) {
+	if _, err := s.Get(id); err != nil {
 		return err
 	}
-	b := s.ensureSynthetic(id)
-	if opts.Title != nil {
-		b.Title = *opts.Title
-	}
-	if opts.Status != nil {
-		b.Status = *opts.Status
-	}
-	if opts.Type != nil {
-		b.Type = *opts.Type
-	}
-	if opts.Priority != nil {
-		p := *opts.Priority
-		b.Priority = &p
-	}
-	if opts.Description != nil {
-		b.Description = *opts.Description
-	}
-	if opts.ParentID != nil {
-		b.ParentID = *opts.ParentID
-	}
-	if opts.Assignee != nil {
-		b.Assignee = *opts.Assignee
-	}
-	if len(opts.Labels) > 0 {
-		b.Labels = append(b.Labels, opts.Labels...)
-	}
-	if len(opts.RemoveLabels) > 0 {
-		filtered := b.Labels[:0]
-		for _, existing := range b.Labels {
-			remove := false
-			for _, doomed := range opts.RemoveLabels {
-				if existing == doomed {
-					remove = true
-					break
-				}
-			}
-			if !remove {
-				filtered = append(filtered, existing)
-			}
-		}
-		b.Labels = filtered
-	}
-	if len(opts.Metadata) > 0 {
-		if b.Metadata == nil {
-			b.Metadata = map[string]string{}
-		}
-		for k, v := range opts.Metadata {
-			b.Metadata[k] = v
-		}
-	}
-	s.synthetic[id] = b
-	return nil
+	return s.Store.Update(id, opts)
 }
 
 // fakeRunner records the commands it receives and returns canned output.
@@ -362,6 +314,9 @@ func initSharedSlingTestFixtures(root string) {
 
 	cityDir := filepath.Join(fixtureRoot, "city")
 	if err := os.MkdirAll(cityDir, 0o755); err != nil {
+		panic(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\nprefix = \"gc\"\n[beads]\nprovider = \"file\"\n"), 0o644); err != nil {
 		panic(err)
 	}
 	sharedTestCityDir = cityDir
@@ -2206,20 +2161,14 @@ dolt.auto-start: false
 		t.Fatal(err)
 	}
 	cityToml := `[workspace]
-name = "demo"
 
 [[rigs]]
 name = "frontend"
-path = "frontend"
 prefix = "FE"
-
-[[agent]]
-name = "worker"
-dir = "frontend"
 `
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
-		t.Fatalf("WriteFile(city.toml): %v", err)
-	}
+	writeSchema2RigCity(t, cityDir, "demo", cityToml,
+		fmt.Sprintf("workspace_name = \"demo\"\n[[rig]]\nname = \"frontend\"\npath = %q\n", rigDir))
+	writeCompletionAgentToml(t, cityDir, config.Agent{Name: "worker", Dir: "frontend"})
 	return cityDir, rigDir
 }
 
@@ -2244,6 +2193,13 @@ func installCaptureBdRunner(t *testing.T) *[]bdInvocation {
 	t.Cleanup(func() { beadsExecCommandRunnerWithEnv = orig })
 
 	calls := &[]bdInvocation{}
+	stores := map[string]*beads.MemStore{}
+	marshalBead := func(b beads.Bead) ([]byte, error) {
+		return json.Marshal(struct {
+			beads.Bead
+			Revision int64 `json:"revision"`
+		}{b, b.Revision})
+	}
 	beadsExecCommandRunnerWithEnv = func(env map[string]string) beads.CommandRunner {
 		snap := maps.Clone(env)
 		return func(dir, name string, args ...string) ([]byte, error) {
@@ -2252,17 +2208,77 @@ func installCaptureBdRunner(t *testing.T) *[]bdInvocation {
 				t.Errorf("unexpected command %q args=%v", name, args)
 				return nil, fmt.Errorf("unexpected command %q", name)
 			}
+			scope := snap["BEADS_DIR"]
+			if scope == "" {
+				scope = filepath.Join(dir, ".beads")
+			}
+			store := stores[scope]
+			if store == nil {
+				store = beads.NewMemStore()
+				store.HonorExplicitIDs = true
+				stores[scope] = store
+			}
 			switch {
+			case len(args) == 2 && args[1] == "--help" && slices.Contains([]string{"update", "close", "assign", "delete"}, args[0]):
+				return []byte("--if-revision"), nil
 			case len(args) >= 2 && args[0] == "create" && args[1] == "--json":
 				title := ""
 				if len(args) > 2 {
 					title = args[2]
 				}
-				return []byte(fmt.Sprintf(`{"id":"FE-abc","title":%q,"status":"open","issue_type":"task","created_at":"2026-04-22T00:00:00Z","assignee":"","from":"","parent":"","ref":"","needs":null,"description":"","labels":null}`, title)), nil
+				b, err := store.Create(beads.Bead{ID: "FE-abc", Title: title, Status: "open", Type: "task"})
+				if err != nil {
+					return nil, err
+				}
+				return marshalBead(b)
 			case len(args) >= 2 && args[0] == "update" && args[1] == "--json":
+				if len(args) < 3 {
+					return nil, errors.New("update requires an exact bead ID")
+				}
+				opts := beads.UpdateOpts{Metadata: map[string]string{}}
+				var expectedRevision int64
+				for i := 3; i < len(args); i += 2 {
+					if i+1 >= len(args) {
+						return nil, fmt.Errorf("missing value for %s", args[i])
+					}
+					switch args[i] {
+					case "--set-metadata":
+						key, value, ok := strings.Cut(args[i+1], "=")
+						if !ok {
+							return nil, errors.New("metadata requires key=value")
+						}
+						opts.Metadata[key] = value
+					case "--if-revision":
+						var err error
+						expectedRevision, err = strconv.ParseInt(args[i+1], 10, 64)
+						if err != nil || expectedRevision <= 0 {
+							return nil, errors.New("invalid expected revision")
+						}
+					default:
+						return nil, fmt.Errorf("unexpected update flag %s", args[i])
+					}
+				}
+				if expectedRevision != 0 {
+					if err := store.UpdateIfMatch(args[2], expectedRevision, opts); err != nil {
+						return nil, err
+					}
+				} else if err := store.Update(args[2], opts); err != nil {
+					return nil, err
+				}
 				return []byte(`{}`), nil
 			case len(args) >= 2 && args[0] == "show" && args[1] == "--json":
-				return nil, fmt.Errorf("issue not found")
+				if len(args) != 3 {
+					return nil, errors.New("show requires an exact bead ID")
+				}
+				b, err := store.Get(args[2])
+				if err != nil {
+					return nil, fmt.Errorf("issue not found: %w", err)
+				}
+				row, err := marshalBead(b)
+				if err != nil {
+					return nil, err
+				}
+				return json.Marshal([]json.RawMessage{row})
 			case len(args) >= 2 && args[0] == "list" && args[1] == "--json":
 				return []byte(`[]`), nil
 			case len(args) >= 2 && args[0] == "query" && args[1] == "--json":
@@ -4518,7 +4534,7 @@ func TestOnFormulaAttachesAndRoutes(t *testing.T) {
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
-	deps.Store = beads.NewMemStoreFrom(1, []beads.Bead{
+	deps.Store = versionedSlingStore(1, []beads.Bead{
 		{ID: "BL-42", Title: "Work", Type: "task", Status: "open"},
 	}, nil)
 	opts := testOpts(a, "BL-42")
@@ -4580,7 +4596,7 @@ version = 1
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
-	deps.Store = beads.NewMemStoreFrom(1, []beads.Bead{
+	deps.Store = versionedSlingStore(1, []beads.Bead{
 		{ID: "BL-42", Title: "Work", Type: "task", Status: "open"},
 	}, nil)
 	opts := testOpts(a, "BL-42")
@@ -4676,7 +4692,7 @@ func TestOnFormulaCopiesSourcePriorityToCreatedBeads(t *testing.T) {
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
-	deps.Store = beads.NewMemStoreFrom(1, []beads.Bead{
+	deps.Store = versionedSlingStore(1, []beads.Bead{
 		{ID: "BL-42", Title: "Source", Type: "task", Status: "open", Priority: priorityPtr(4)},
 	}, nil)
 	opts := testOpts(a, "BL-42")
@@ -4768,7 +4784,7 @@ title = "Do work"
 	}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
-	deps.Store = beads.NewMemStoreFrom(1, []beads.Bead{
+	deps.Store = versionedSlingStore(1, []beads.Bead{
 		{ID: "BL-42", Title: "Work", Type: "task", Status: "open"},
 	}, nil)
 	config.InjectImplicitAgents(cfg)
@@ -4920,7 +4936,7 @@ title = "Do work"
 	}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
-	deps.Store = beads.NewMemStoreFrom(1, []beads.Bead{
+	deps.Store = versionedSlingStore(1, []beads.Bead{
 		{ID: "BL-42", Title: "Work", Type: "task", Status: "open"},
 		{
 			ID:     "wf-existing",
@@ -4975,7 +4991,7 @@ title = "Do work"
 	q.childrenOf["CVY-1"] = []beads.Bead{{ID: "BL-1", Status: "open"}}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
-	deps.Store = beads.NewMemStoreFrom(1, []beads.Bead{
+	deps.Store = versionedSlingStore(1, []beads.Bead{
 		{ID: "CVY-1", Title: "Batch", Type: "convoy", Status: "open"},
 		{ID: "BL-1", Title: "Child", Type: "task", Status: "open"},
 	}, nil)
@@ -5043,7 +5059,7 @@ title = "Do work"
 	q.childrenOf["CVY-1"] = []beads.Bead{{ID: "BL-1", Status: "open"}}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
-	deps.Store = beads.NewMemStoreFrom(1, []beads.Bead{
+	deps.Store = versionedSlingStore(1, []beads.Bead{
 		{ID: "CVY-1", Title: "Batch", Type: "convoy", Status: "open"},
 		{ID: "BL-1", Title: "Child", Type: "task", Status: "open"},
 		{
@@ -5487,7 +5503,7 @@ title = "Do work"
 	}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
-	deps.Store = beads.NewMemStoreFrom(1, []beads.Bead{
+	deps.Store = versionedSlingStore(1, []beads.Bead{
 		{ID: "BL-42", Title: "Work", Type: "task", Status: "open"},
 	}, nil)
 	opts := testOpts(a, "BL-42")
@@ -5517,6 +5533,7 @@ func TestOnFormulaWithTitle(t *testing.T) {
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	deps.Store = seededStore("BL-42")
 	opts := testOpts(a, "BL-42")
 	opts.Title = "my-review"
 	opts.OnFormula = "code-review"
@@ -5889,7 +5906,7 @@ func TestOnFormulaAutoBurnStaleMolecule(t *testing.T) {
 	q.childrenOf["BL-42"] = []beads.Bead{{ID: "MOL-1", Type: "molecule", Status: "open"}}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
-	deps.Store = beads.NewMemStoreFrom(1, []beads.Bead{
+	deps.Store = versionedSlingStore(1, []beads.Bead{
 		{ID: "BL-42", Title: "Work", Type: "task", Status: "open"},
 		{ID: "MOL-1", Type: "molecule", Status: "open"},
 	}, nil)
@@ -5914,7 +5931,7 @@ func TestOnFormulaMetadataAttachmentSkipsIdempotentRetry(t *testing.T) {
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
-	deps.Store = beads.NewMemStoreFrom(1, []beads.Bead{{ID: "BL-42", Title: "Work", Type: "task", Status: "open"}}, nil)
+	deps.Store = versionedSlingStore(1, []beads.Bead{{ID: "BL-42", Title: "Work", Type: "task", Status: "open"}}, nil)
 	opts := testOpts(a, "BL-42")
 	opts.OnFormula = "code-review"
 
@@ -6038,13 +6055,33 @@ func TestOnFormulaOutput(t *testing.T) {
 		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
 	}
 	out := stdout.String()
-	// MemStore generates IDs like "gc-1".
-	if !strings.Contains(out, "Attached wisp gc-1 (formula \"code-review\") to BL-42") {
-		t.Errorf("stdout = %q, want attach message", out)
+	root := slingAttachedWispForTest(t, deps.Store, "BL-42", "code-review")
+	if want := fmt.Sprintf("Attached wisp %s (formula \"code-review\") to BL-42", root.ID); !strings.Contains(out, want) {
+		t.Errorf("stdout = %q, want persisted attachment %q", out, want)
 	}
 	if !strings.Contains(out, "Slung BL-42 (with formula \"code-review\")") {
 		t.Errorf("stdout = %q, want slung with formula message", out)
 	}
+}
+
+func slingAttachedWispForTest(t *testing.T, store beads.Store, workID, formula string) beads.Bead {
+	t.Helper()
+	work, err := store.Get(workID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", workID, err)
+	}
+	rootID := work.Metadata[beadmeta.MoleculeIDMetadataKey]
+	if rootID == "" {
+		t.Fatalf("work %s has no persisted molecule binding: %+v", workID, work)
+	}
+	root, err := store.Get(rootID)
+	if err != nil {
+		t.Fatalf("Get(%s) for work %s: %v", rootID, workID, err)
+	}
+	if !sling.IsAttachedRoot(root) || root.Status != "open" || root.Metadata[beadmeta.FormulaNameMetadataKey] != formula {
+		t.Fatalf("attachment for %s = %+v, want open %s formula root", workID, root, formula)
+	}
+	return root
 }
 
 func TestOnFormulaTitleOverrideBypassesRootTitlePlaceholder(t *testing.T) {
@@ -6110,7 +6147,10 @@ func TestBatchOnConvoy(t *testing.T) {
 		t.Fatalf("doSlingBatch returned %d, want 0; stderr: %s", code, stderr.String())
 	}
 	// MolCookOn goes through the store, verify 3 wisps were created.
-	all, _ := deps.Store.ListOpen()
+	all, err := deps.Store.ListOpen()
+	if err != nil {
+		t.Fatalf("ListOpen: %v", err)
+	}
 	molCount := 0
 	for _, b := range all {
 		if b.Type == "molecule" {
@@ -6121,16 +6161,13 @@ func TestBatchOnConvoy(t *testing.T) {
 		t.Errorf("got %d molecule beads in store, want 3", molCount)
 	}
 	out := stdout.String()
-	// MemStore generates IDs gc-1, gc-2, ... Each molecule.Cook creates
-	// 2 beads (root + step), so wisp root IDs are gc-1, gc-3, gc-5.
-	if !strings.Contains(out, "Attached wisp gc-1") {
-		t.Errorf("stdout = %q, want gc-1 attach", out)
-	}
-	if !strings.Contains(out, "Attached wisp gc-3") {
-		t.Errorf("stdout = %q, want gc-3 attach", out)
-	}
-	if !strings.Contains(out, "Attached wisp gc-5") {
-		t.Errorf("stdout = %q, want gc-5 attach", out)
+	// Source rows occupy IDs too. Verify the reported IDs against the persisted
+	// parent/formula bindings instead of assuming an allocator starting point.
+	for _, child := range q.childrenOf["CVY-1"] {
+		root := slingAttachedWispForTest(t, deps.Store, child.ID, "code-review")
+		if want := fmt.Sprintf("Attached wisp %s (formula \"code-review\") → %s", root.ID, child.ID); !strings.Contains(out, want) {
+			t.Errorf("stdout = %q, want persisted attachment %q", out, want)
+		}
 	}
 	if !strings.Contains(out, "Slung 3/3 children") {
 		t.Errorf("stdout = %q, want summary", out)
@@ -6244,6 +6281,11 @@ func TestBatchOnConvoyCopiesChildPriorityToCreatedBeads(t *testing.T) {
 	}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	// The query and authoritative store describe the same existing source rows.
+	// Only the new molecule and its step inherit the child's priority.
+	deps.Store = versionedSlingStore(0, []beads.Bead{
+		q.beadsByID["CVY-1"], q.childrenOf["CVY-1"][0],
+	}, nil)
 	opts := testOpts(a, "CVY-1")
 	opts.OnFormula = "code-review"
 	code := doSlingBatch(opts, deps, q, stdout, stderr)
@@ -6256,10 +6298,22 @@ func TestBatchOnConvoyCopiesChildPriorityToCreatedBeads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
+	created := 0
 	for _, bead := range all {
+		if bead.ID == "CVY-1" || bead.ID == "BL-1" {
+			continue
+		}
+		created++
 		if bead.Priority == nil || *bead.Priority != 3 {
 			t.Fatalf("created bead %s priority = %v, want 3", bead.ID, bead.Priority)
 		}
+	}
+	if created != 2 {
+		t.Fatalf("created %d beads, want the molecule and its step", created)
+	}
+	convoy, err := deps.Store.Get("CVY-1")
+	if err != nil || convoy.Priority != nil {
+		t.Fatalf("source convoy priority changed: %+v, err=%v", convoy, err)
 	}
 }
 
@@ -6312,7 +6366,7 @@ func TestBatchAutoBurnStaleMolecules(t *testing.T) {
 	q.childrenOf["BL-2"] = []beads.Bead{{ID: "MOL-1", Type: "molecule", Status: "open"}}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
-	deps.Store = beads.NewMemStoreFrom(1, []beads.Bead{
+	deps.Store = versionedSlingStore(1, []beads.Bead{
 		{ID: "CVY-1", Title: "Batch", Type: "convoy", Status: "open"},
 		{ID: "BL-1", Title: "One", Type: "task", Status: "open"},
 		{ID: "BL-2", Title: "Two", Type: "task", Status: "open"},
@@ -6363,7 +6417,7 @@ needs = ["prep"]
 	a := config.Agent{Name: "polecat", Dir: "repo", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5)}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
-	deps.Store = beads.NewMemStoreFrom(1, []beads.Bead{
+	deps.Store = versionedSlingStore(1, []beads.Bead{
 		{ID: "BL-42", Title: "Work", Type: "task", Status: "open"},
 	}, nil)
 
@@ -6455,7 +6509,7 @@ func TestBatchOnPartialCookFailure(t *testing.T) {
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
 	createCount := 0
 	deps.Store = &selectiveErrStore{
-		Store: beads.NewMemStoreFrom(1, []beads.Bead{
+		Store: versionedSlingStore(1, []beads.Bead{
 			{ID: "BL-1", Title: "One", Type: "task", Status: "open"},
 			{ID: "BL-2", Title: "Two", Type: "task", Status: "open"},
 			{ID: "BL-3", Title: "Three", Type: "task", Status: "open"},
@@ -6556,9 +6610,9 @@ func TestBatchOnRegularPassthrough(t *testing.T) {
 		t.Fatalf("doSlingBatch returned %d, want 0; stderr: %s", code, stderr.String())
 	}
 	out := stdout.String()
-	// MemStore generates IDs like "gc-1".
-	if !strings.Contains(out, "Attached wisp gc-1") {
-		t.Errorf("stdout = %q, want attach message", out)
+	root := slingAttachedWispForTest(t, deps.Store, "BL-42", "code-review")
+	if want := fmt.Sprintf("Attached wisp %s (formula \"code-review\") to BL-42", root.ID); !strings.Contains(out, want) {
+		t.Errorf("stdout = %q, want persisted attachment %q", out, want)
 	}
 	if !strings.Contains(out, "Slung BL-42 (with formula") {
 		t.Errorf("stdout = %q, want slung with formula", out)
@@ -7103,7 +7157,7 @@ func TestDryRunConvoyUsesTracksMembers(t *testing.T) {
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
-	store := beads.NewMemStoreFrom(0, []beads.Bead{
+	store := versionedSlingStore(0, []beads.Bead{
 		{ID: "CVY-1", Type: "convoy", Status: "open", Title: "Sprint 12 tasks"},
 		{ID: "EPIC-1", Type: "epic", Status: "open", Title: "Product work"},
 		{ID: "BL-1", Type: "task", Status: "open", Title: "Login page", ParentID: "EPIC-1"},
@@ -7758,7 +7812,7 @@ func TestDoSlingKeepsWorkflowParentIdempotent(t *testing.T) {
 	t.Cleanup(func() { slingPokeController = oldPoke })
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
-	deps.Store = beads.NewMemStoreFrom(0, []beads.Bead{
+	deps.Store = versionedSlingStore(0, []beads.Bead{
 		{ID: "WF-1", Title: "workflow", Type: "workflow", Status: "in_progress", Metadata: map[string]string{"gc.kind": "workflow"}},
 		{
 			ID:       "BL-42",
@@ -8402,7 +8456,7 @@ func TestDefaultFormulaApplied(t *testing.T) {
 	a := config.Agent{Name: "polecat", Dir: "hw", DefaultSlingFormula: strPtr("mol-polecat-work")}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
-	deps.Store = beads.NewMemStoreFrom(1, []beads.Bead{{ID: "HW-42", Title: "Work", Type: "task", Status: "open"}}, nil)
+	deps.Store = versionedSlingStore(1, []beads.Bead{{ID: "HW-42", Title: "Work", Type: "task", Status: "open"}}, nil)
 	opts := testOpts(a, "HW-42")
 	code := doSling(opts, deps, nil, stdout, stderr)
 
@@ -8443,7 +8497,7 @@ func TestDefaultFormulaAppliedFromInheritedPackDefault(t *testing.T) {
 	a := config.Agent{Name: "polecat", Dir: "hw", InheritedDefaultSlingFormula: strPtr("mol-polecat-work")}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
-	deps.Store = beads.NewMemStoreFrom(1, []beads.Bead{{ID: "HW-42", Title: "Work", Type: "task", Status: "open"}}, nil)
+	deps.Store = versionedSlingStore(1, []beads.Bead{{ID: "HW-42", Title: "Work", Type: "task", Status: "open"}}, nil)
 	opts := testOpts(a, "HW-42")
 	code := doSling(opts, deps, nil, stdout, stderr)
 
@@ -8555,13 +8609,7 @@ func TestDefaultFormulaExplicitOnOverrides(t *testing.T) {
 		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
 	}
 	// MolCookOn goes through the store; verify the explicit formula was used.
-	b, err := deps.Store.Get("gc-1")
-	if err != nil {
-		t.Fatalf("store.Get(gc-1): %v", err)
-	}
-	if b.Ref != "custom-formula" {
-		t.Errorf("bead Ref = %q, want explicit custom-formula", b.Ref)
-	}
+	_ = slingAttachedWispForTest(t, deps.Store, "HW-42", "custom-formula")
 	// Output should mention explicit formula, not default.
 	if strings.Contains(stdout.String(), "default formula") {
 		t.Errorf("stdout should not mention default formula when --on is explicit: %q", stdout.String())
@@ -9387,6 +9435,7 @@ func TestSlingStdinSingleLine(t *testing.T) {
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	deps.Store = beads.NewMemStore()
 
 	// Override slingStdin to provide test input.
 	old := slingStdin
@@ -9426,6 +9475,7 @@ func TestSlingStdinMultiLine(t *testing.T) {
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	deps.Store = beads.NewMemStore()
 
 	old := slingStdin
 	slingStdin = func() io.Reader {

@@ -10,8 +10,8 @@ import (
 	worker "github.com/gastownhall/gascity/internal/worker"
 )
 
-func testSessionLogAdapter() worker.SessionLogAdapter {
-	return worker.SessionLogAdapter{SearchPaths: []string{os.TempDir()}}
+func testSessionLogAdapter(path string) worker.SessionLogAdapter {
+	return worker.SessionLogAdapter{SearchPaths: []string{filepath.Dir(path)}}
 }
 
 func writeMalformedHistoryTranscript(t *testing.T, profile Profile) string {
@@ -475,7 +475,7 @@ func historyHasOpenToolUseEvidence(history *worker.HistorySnapshot) bool {
 func loadHistory(t *testing.T, provider, path string) *worker.HistorySnapshot {
 	t.Helper()
 
-	history, err := testSessionLogAdapter().LoadHistory(worker.LoadRequest{
+	history, err := testSessionLogAdapter(path).LoadHistory(worker.LoadRequest{
 		Provider:       provider,
 		TranscriptPath: path,
 	})

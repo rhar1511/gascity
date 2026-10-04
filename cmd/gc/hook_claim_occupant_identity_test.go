@@ -123,7 +123,7 @@ work_query = "printf '[{\"id\":\"%s\",\"status\":\"open\",\"assignee\":\"\",\"me
 	ownerPath := filepath.Join(stateDir, "owner")
 	openShow := "printf '[]'"
 	if canonical {
-		openShow = fmt.Sprintf(`printf '[{"id":"%s","status":"open","assignee":"","metadata":{"gc.routed_to":"builder"}}]'`, beadID)
+		openShow = fmt.Sprintf(`printf '[{"id":"%s","issue_type":"task","status":"open","assignee":"","revision":1,"metadata":{"gc.routed_to":"builder"}}]'`, beadID)
 	}
 	// `bd update <id> --claim --json` is the claim mutation (BdStore.Claim); it
 	// takes its actor implicitly from BEADS_ACTOR, so echoing that back as the
@@ -134,21 +134,33 @@ work_query = "printf '[{\"id\":\"%s\",\"status\":\"open\",\"assignee\":\"\",\"me
 printf '%%s\t%%s\n' "$BEADS_ACTOR" "$*" >> %q
 for arg in "$@"; do
   if [ "$arg" = "--claim" ]; then
+    if [ "$2" != %q ]; then
+      printf 'unexpected claim target\n' >&2
+      exit 1
+    fi
     printf '%%s' "$BEADS_ACTOR" > %q
-    printf '{"id":"%s","status":"in_progress","assignee":"%%s","metadata":{"gc.routed_to":"builder"}}' "$BEADS_ACTOR"
+    printf '{"id":"%s","issue_type":"task","status":"in_progress","assignee":"%%s","revision":2,"metadata":{"gc.routed_to":"builder"}}' "$BEADS_ACTOR"
     exit 0
   fi
 done
+if [ "$1" = "show" ] && [ "$3" != %q ]; then
+  printf '[]'
+  exit 0
+fi
 if [ "$1" = "show" ] && [ -f %q ]; then
-  printf '[{"id":"%s","status":"in_progress","assignee":"%%s","metadata":{"gc.routed_to":"builder"}}]' "$(cat %q)"
+  printf '[{"id":"%s","issue_type":"task","status":"in_progress","assignee":"%%s","revision":2,"metadata":{"gc.routed_to":"builder"}}]' "$(cat %q)"
   exit 0
 fi
 if [ "$1" = "show" ]; then
   %s
   exit 0
 fi
+if [ "$1" = "ready" ] && [ ! -f %q ]; then
+  %s
+  exit 0
+fi
 printf '[]'
-`, logPath, ownerPath, beadID, ownerPath, beadID, ownerPath, openShow)
+`, logPath, beadID, ownerPath, beadID, beadID, ownerPath, beadID, ownerPath, openShow, ownerPath, openShow)
 	if err := os.WriteFile(filepath.Join(fakeBin, "bd"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}

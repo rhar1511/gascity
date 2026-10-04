@@ -27,6 +27,8 @@ const (
 	controllerBeadsPermitMaxTokenSize   = 64 << 10
 )
 
+// ErrControllerBeadsPermitIssuerConfig and the other permit errors distinguish
+// invalid trusted issuer configuration, rejected requests, and signing failures.
 var (
 	ErrControllerBeadsPermitIssuerConfig = errors.New("controller Beads permit issuer configuration is invalid")
 	ErrControllerBeadsPermitRequest      = errors.New("controller Beads permit request is invalid")

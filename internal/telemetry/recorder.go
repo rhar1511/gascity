@@ -192,21 +192,21 @@ func statusStr(err error) string {
 }
 
 // emit sends an OTel log event with the given body and key-value attributes.
-func emit(ctx context.Context, body string, sev otellog.Severity, attrs ...otellog.KeyValue) {
+func emit(ctx context.Context, body string, sev otellog.Severity, attrs ...attribute.KeyValue) {
 	logger := global.GetLoggerProvider().Logger(loggerName)
 	var r otellog.Record
-	r.SetBody(otellog.StringValue(body))
+	r.SetBody(attribute.StringValue(body))
 	r.SetSeverity(sev)
 	r.AddAttributes(attrs...)
 	logger.Emit(ctx, r)
 }
 
 // errKV returns a log KeyValue with the error message, or empty string if nil.
-func errKV(err error) otellog.KeyValue {
+func errKV(err error) attribute.KeyValue {
 	if err != nil {
-		return otellog.String("error", err.Error())
+		return attribute.String("error", err.Error())
 	}
-	return otellog.String("error", "")
+	return attribute.String("error", "")
 }
 
 // severity returns SeverityInfo on success, SeverityError on failure.
@@ -264,12 +264,12 @@ func sanitizeBDArgs(args []string) []string {
 	return out
 }
 
-func logStringSlice(key string, values []string) otellog.KeyValue {
-	otelValues := make([]otellog.Value, 0, len(values))
+func logStringSlice(key string, values []string) attribute.KeyValue {
+	otelValues := make([]attribute.Value, 0, len(values))
 	for _, value := range values {
-		otelValues = append(otelValues, otellog.StringValue(value))
+		otelValues = append(otelValues, attribute.StringValue(value))
 	}
-	return otellog.Slice(key, otelValues...)
+	return attribute.Slice(key, otelValues...)
 }
 
 // RecordAgentStart records an agent session start (metrics + log event).
@@ -283,9 +283,9 @@ func RecordAgentStart(ctx context.Context, sessionName, agentName string, err er
 		),
 	)
 	emit(ctx, "agent.start", severity(err),
-		otellog.String("session", sessionName),
-		otellog.String("agent", agentName),
-		otellog.String("status", status),
+		attribute.String("session", sessionName),
+		attribute.String("agent", agentName),
+		attribute.String("status", status),
 		errKV(err),
 	)
 }
@@ -315,10 +315,10 @@ func RecordAgentStop(ctx context.Context, sessionName, agentName, reason string,
 		)
 	}
 	emit(ctx, "agent.stop", severity(err),
-		otellog.String("session", sessionName),
-		otellog.String("agent", agentName),
-		otellog.String("reason", reason),
-		otellog.String("status", status),
+		attribute.String("session", sessionName),
+		attribute.String("agent", agentName),
+		attribute.String("reason", reason),
+		attribute.String("status", status),
 		errKV(err),
 	)
 }
@@ -330,8 +330,8 @@ func RecordAgentCrash(ctx context.Context, agentName, lastOutput string) {
 		metric.WithAttributes(attribute.String("agent", agentName)),
 	)
 	emit(ctx, "agent.crash", otellog.SeverityWarn,
-		otellog.String("agent", agentName),
-		otellog.String("last_output", truncateOutput(lastOutput, maxStdoutLog)),
+		attribute.String("agent", agentName),
+		attribute.String("last_output", truncateOutput(lastOutput, maxStdoutLog)),
 	)
 }
 
@@ -342,7 +342,7 @@ func RecordAgentQuarantine(ctx context.Context, agentName string) {
 		metric.WithAttributes(attribute.String("agent", agentName)),
 	)
 	emit(ctx, "agent.quarantine", otellog.SeverityWarn,
-		otellog.String("agent", agentName),
+		attribute.String("agent", agentName),
 	)
 }
 
@@ -353,7 +353,7 @@ func RecordAgentIdleKill(ctx context.Context, agentName string) {
 		metric.WithAttributes(attribute.String("agent", agentName)),
 	)
 	emit(ctx, "agent.idle_kill", otellog.SeverityInfo,
-		otellog.String("agent", agentName),
+		attribute.String("agent", agentName),
 	)
 }
 
@@ -364,7 +364,7 @@ func RecordAgentMaxAgeKill(ctx context.Context, agentName string) {
 		metric.WithAttributes(attribute.String("agent", agentName)),
 	)
 	emit(ctx, "agent.max_age_kill", otellog.SeverityInfo,
-		otellog.String("agent", agentName),
+		attribute.String("agent", agentName),
 	)
 }
 
@@ -380,7 +380,7 @@ func RecordReconcileCycle(ctx context.Context, started int) {
 		),
 	)
 	emit(ctx, "reconcile.cycle", otellog.SeverityInfo,
-		otellog.Int("started", started),
+		attribute.Int("started", started),
 	)
 }
 
@@ -395,8 +395,8 @@ func RecordNudge(ctx context.Context, target string, err error) {
 		),
 	)
 	emit(ctx, "session.nudge", severity(err),
-		otellog.String("target", target),
-		otellog.String("status", status),
+		attribute.String("target", target),
+		attribute.String("status", status),
 		errKV(err),
 	)
 }
@@ -413,11 +413,11 @@ func RecordConfigReload(ctx context.Context, revision, source, outcome string, w
 		),
 	)
 	emit(ctx, "config.reload", severity(err),
-		otellog.String("revision", revision),
-		otellog.String("status", status),
-		otellog.String("source", source),
-		otellog.String("outcome", outcome),
-		otellog.Int("warning_count", warningCount),
+		attribute.String("revision", revision),
+		attribute.String("status", status),
+		attribute.String("source", source),
+		attribute.String("outcome", outcome),
+		attribute.Int("warning_count", warningCount),
 		errKV(err),
 	)
 }
@@ -430,7 +430,7 @@ func RecordControllerLifecycle(ctx context.Context, event string) {
 		metric.WithAttributes(attribute.String("event", event)),
 	)
 	emit(ctx, "controller.lifecycle", otellog.SeverityInfo,
-		otellog.String("event", event),
+		attribute.String("event", event),
 	)
 }
 
@@ -446,7 +446,7 @@ func RecordSupervisorStarted(ctx context.Context, previousExit string) {
 		),
 	)
 	emit(ctx, "supervisor.started", otellog.SeverityInfo,
-		otellog.String("previous_exit", previousExit),
+		attribute.String("previous_exit", previousExit),
 	)
 }
 
@@ -465,10 +465,10 @@ func RecordSling(ctx context.Context, target, targetType, method string, err err
 		),
 	)
 	emit(ctx, "sling.dispatch", severity(err),
-		otellog.String("target", target),
-		otellog.String("target_type", targetType),
-		otellog.String("method", method),
-		otellog.String("status", status),
+		attribute.String("target", target),
+		attribute.String("target_type", targetType),
+		attribute.String("method", method),
+		attribute.String("status", status),
 		errKV(err),
 	)
 }
@@ -506,18 +506,18 @@ func RecordBDCall(ctx context.Context, args []string, durationMs float64, err er
 	)
 	inst.bdTotal.Add(ctx, 1, attrs)
 	inst.bdDurationHist.Record(ctx, durationMs, attrs)
-	kvs := []otellog.KeyValue{
-		otellog.String("subcommand", subcommand),
-		otellog.String("args", strings.Join(sanitizedArgs, " ")),
-		otellog.Float64("duration_ms", durationMs),
-		otellog.String("status", status),
+	kvs := []attribute.KeyValue{
+		attribute.String("subcommand", subcommand),
+		attribute.String("args", strings.Join(sanitizedArgs, " ")),
+		attribute.Float64("duration_ms", durationMs),
+		attribute.String("status", status),
 		errKV(err),
 	}
 	// stdout/stderr are opt-in: they may contain tokens or PII returned by bd.
 	if os.Getenv("GC_LOG_BD_OUTPUT") == "true" {
 		kvs = append(kvs,
-			otellog.String("stdout", truncateOutput(redactPrivateEvidenceBDOutput(stdout), maxStdoutLog)),
-			otellog.String("stderr", truncateOutput(redactPrivateEvidenceBDOutput([]byte(stderr)), maxStderrLog)),
+			attribute.String("stdout", truncateOutput(redactPrivateEvidenceBDOutput(stdout), maxStdoutLog)),
+			attribute.String("stderr", truncateOutput(redactPrivateEvidenceBDOutput([]byte(stderr)), maxStderrLog)),
 		)
 	}
 	emit(ctx, "bd.call", severity(err), kvs...)
@@ -544,15 +544,15 @@ func RecordBDSlow(ctx context.Context, args []string, dir, agentID string) {
 		AgentID:   strings.TrimSpace(agentID),
 		Threshold: BDSlowThreshold.Milliseconds(),
 	}
-	kvs := []otellog.KeyValue{
-		otellog.String("timestamp", event.Timestamp.Format(time.RFC3339Nano)),
+	kvs := []attribute.KeyValue{
+		attribute.String("timestamp", event.Timestamp.Format(time.RFC3339Nano)),
 		logStringSlice("args", event.Args),
-		otellog.String("dir", event.Dir),
-		otellog.Int64("elapsed_ms", event.ElapsedMs),
-		otellog.Int64("threshold_ms", event.Threshold),
+		attribute.String("dir", event.Dir),
+		attribute.Int64("elapsed_ms", event.ElapsedMs),
+		attribute.Int64("threshold_ms", event.Threshold),
 	}
 	if event.AgentID != "" {
-		kvs = append(kvs, otellog.String("agent_id", event.AgentID))
+		kvs = append(kvs, attribute.String("agent_id", event.AgentID))
 	}
 	emit(ctx, "bd.slow", otellog.SeverityWarn, kvs...)
 }
@@ -572,10 +572,10 @@ func RecordCacheScanLarge(ctx context.Context, rig string, beadCount, threshold 
 		rig = "(no-prefix)"
 	}
 	emit(ctx, "beads.cache.scan_large", otellog.SeverityWarn,
-		otellog.String("rig", rig),
-		otellog.Int64("bead_count", int64(beadCount)),
-		otellog.Int64("threshold", int64(threshold)),
-		otellog.Int64("elapsed_ms", elapsed.Milliseconds()),
+		attribute.String("rig", rig),
+		attribute.Int64("bead_count", int64(beadCount)),
+		attribute.Int64("threshold", int64(threshold)),
+		attribute.Int64("elapsed_ms", elapsed.Milliseconds()),
 	)
 }
 
@@ -591,8 +591,8 @@ func RecordPoolSpawn(ctx context.Context, agent string, instance int) {
 		),
 	)
 	emit(ctx, "pool.spawn", otellog.SeverityInfo,
-		otellog.String("agent", agent),
-		otellog.Int("instance", instance),
+		attribute.String("agent", agent),
+		attribute.Int("instance", instance),
 	)
 }
 
@@ -607,8 +607,8 @@ func RecordPoolRemove(ctx context.Context, agent, reason string) {
 		),
 	)
 	emit(ctx, "pool.remove", otellog.SeverityInfo,
-		otellog.String("agent", agent),
-		otellog.String("reason", reason),
+		attribute.String("agent", agent),
+		attribute.String("reason", reason),
 	)
 }
 
@@ -623,10 +623,10 @@ func RecordPoolCheck(ctx context.Context, agent string, durationMs float64, desi
 		),
 	)
 	emit(ctx, "pool.check", severity(err),
-		otellog.String("agent", agent),
-		otellog.Float64("duration_ms", durationMs),
-		otellog.Int("desired", desired),
-		otellog.String("status", status),
+		attribute.String("agent", agent),
+		attribute.Float64("duration_ms", durationMs),
+		attribute.Int("desired", desired),
+		attribute.String("status", status),
 		errKV(err),
 	)
 }
@@ -643,8 +643,8 @@ func RecordMailOp(ctx context.Context, operation string, err error) {
 		),
 	)
 	emit(ctx, "mail.operation", severity(err),
-		otellog.String("operation", operation),
-		otellog.String("status", status),
+		attribute.String("operation", operation),
+		attribute.String("status", status),
 		errKV(err),
 	)
 }
@@ -671,12 +671,12 @@ func RecordHTTPRequest(ctx context.Context, method, route string, status int, du
 		sev = otellog.SeverityWarn
 	}
 	emit(ctx, "http.request", sev,
-		otellog.String("method", method),
-		otellog.String("route", route),
-		otellog.Int("status", status),
-		otellog.Float64("duration_ms", durationMs),
-		otellog.String("data_source", dataSource),
-		otellog.String("status_class", statusStr),
+		attribute.String("method", method),
+		attribute.String("route", route),
+		attribute.Int("status", status),
+		attribute.Float64("duration_ms", durationMs),
+		attribute.String("data_source", dataSource),
+		attribute.String("status_class", statusStr),
 	)
 }
 
@@ -692,8 +692,8 @@ func RecordDrainTransition(ctx context.Context, sessionName, reason, transition 
 		),
 	)
 	emit(ctx, "drain.transition", otellog.SeverityInfo,
-		otellog.String("session", sessionName),
-		otellog.String("reason", reason),
-		otellog.String("transition", transition),
+		attribute.String("session", sessionName),
+		attribute.String("reason", reason),
+		attribute.String("transition", transition),
 	)
 }

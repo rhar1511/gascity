@@ -36,7 +36,7 @@ func (s *sourceSnapshotWrapperTestStore) DecisionFrontierSourceReaderHandle() (D
 // DecisionFrontierRevisionTransitionReceipt deliberately exists without an
 // explicit receipt-reader handle. It models wrappers whose method set is wider
 // than the capability of their backing source reader.
-func (s *sourceSnapshotWrapperTestStore) DecisionFrontierRevisionTransitionReceipt(issueID, receiptID string) (RevisionTransitionReceipt, bool, error) {
+func (s *sourceSnapshotWrapperTestStore) DecisionFrontierRevisionTransitionReceipt(_, _ string) (RevisionTransitionReceipt, bool, error) {
 	return RevisionTransitionReceipt{}, false, ErrConditionalWriteUnsupported
 }
 

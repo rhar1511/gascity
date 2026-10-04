@@ -1795,6 +1795,7 @@ func TestNextWaitDeliveryAttempt_IncrementsAfterTerminalNudge(t *testing.T) {
 func TestDispatchReadyWaitNudges_EnqueuesDeterministicNudge(t *testing.T) {
 	setWaitTestFileBeads(t)
 	dir := t.TempDir()
+	writeCityTOML(t, dir, "wait-test")
 	store, err := openCityStoreAt(dir)
 	if err != nil {
 		t.Fatalf("openCityStoreAt: %v", err)
@@ -2286,6 +2287,7 @@ func TestDispatchReadyWaitNudges_PropagatesPollerFailure(t *testing.T) {
 func TestWithdrawQueuedWaitNudges_RemovesQueuedNudge(t *testing.T) {
 	setWaitTestFileBeads(t)
 	dir := t.TempDir()
+	writeCityTOML(t, dir, "wait-test")
 	item := newQueuedNudgeWithOptions("worker", "Wait satisfied.", "wait", time.Now().Add(-time.Minute), queuedNudgeOptions{
 		ID:        "wait-gc-1-1-1",
 		Reference: &nudgeReference{Kind: "bead", ID: "gc-1"},

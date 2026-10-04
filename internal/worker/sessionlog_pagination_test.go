@@ -77,7 +77,7 @@ func TestLoadHistorySkipsCodexTailUsageOnBeforePage(t *testing.T) {
 		`{"timestamp":"2026-01-02T00:00:04Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":110,"cached_input_tokens":10,"output_tokens":40,"reasoning_output_tokens":8,"total_tokens":150},"last_token_usage":{"input_tokens":110,"cached_input_tokens":10,"output_tokens":40,"reasoning_output_tokens":8,"total_tokens":150},"model_context_window":258400}}}`,
 	)
 
-	full, err := testSessionLogAdapter().LoadHistory(LoadRequest{Provider: "codex/tmux-cli", TranscriptPath: path})
+	full, err := testSessionLogAdapter(path).LoadHistory(LoadRequest{Provider: "codex/tmux-cli", TranscriptPath: path})
 	if err != nil {
 		t.Fatalf("LoadHistory(full) error = %v", err)
 	}
@@ -91,7 +91,7 @@ func TestLoadHistorySkipsCodexTailUsageOnBeforePage(t *testing.T) {
 
 	// Scroll up: a "before" page excludes the tail, so its older assistant must
 	// not inherit the newest, off-page turn's token counts.
-	older, err := testSessionLogAdapter().LoadHistory(LoadRequest{
+	older, err := testSessionLogAdapter(path).LoadHistory(LoadRequest{
 		Provider:       "codex/tmux-cli",
 		TranscriptPath: path,
 		BeforeEntryID:  full.Entries[1].ID,
@@ -132,7 +132,7 @@ func TestSessionLogAdapterPaginationProviderMatrix(t *testing.T) {
 		t.Run(provider, func(t *testing.T) {
 			t.Parallel()
 			path := writeWorkerPaginationFixture(t, sessionlog.ProviderFamily(provider))
-			adapter := testSessionLogAdapter()
+			adapter := testSessionLogAdapter(path)
 
 			for _, raw := range []bool{false, true} {
 				raw := raw
@@ -237,7 +237,7 @@ func TestSessionLogAdapterPaginationKeepsTranscriptGlobalTailMetadata(t *testing
 		`{"uuid":"pending-1","parentUuid":"compact-1","type":"assistant","message":{"role":"assistant","content":[{"type":"interaction","request_id":"approval-1","kind":"approval","state":"pending","prompt":"Allow Read?","options":["approve","deny"]}]},"sessionId":"provider-claude"}`,
 	)
 
-	snapshot, err := testSessionLogAdapter().LoadHistory(LoadRequest{
+	snapshot, err := testSessionLogAdapter(path).LoadHistory(LoadRequest{
 		Provider:       "claude/tmux-cli",
 		TranscriptPath: path,
 		BeforeEntryID:  "u1",
@@ -275,7 +275,7 @@ func TestSessionLogAdapterPaginationKeepsResolvedInteractionOutOfGlobalPending(t
 		`{"uuid":"resolved-1","parentUuid":"pending-1","type":"user","message":{"role":"user","content":[{"type":"interaction","request_id":"approval-1","kind":"approval","state":"resolved","action":"approve"}]},"sessionId":"provider-claude"}`,
 	)
 
-	snapshot, err := testSessionLogAdapter().LoadHistory(LoadRequest{
+	snapshot, err := testSessionLogAdapter(path).LoadHistory(LoadRequest{
 		Provider:       "claude/tmux-cli",
 		TranscriptPath: path,
 		BeforeEntryID:  "u1",
@@ -297,7 +297,7 @@ func TestSessionLogAdapterRejectsBeforeAndAfterConsistently(t *testing.T) {
 	t.Parallel()
 
 	path := writeWorkerPaginationFixture(t, "claude/tmux-cli")
-	adapter := testSessionLogAdapter()
+	adapter := testSessionLogAdapter(path)
 	const want = "before and after entry IDs are mutually exclusive"
 
 	_, transcriptErr := adapter.ReadTranscript(TranscriptRequest{
@@ -336,7 +336,7 @@ func TestSessionLogAdapterPropagatesDuplicateEntryID(t *testing.T) {
 		`{"type":"assistant.message","data":{"content":"one"},"id":"duplicate"}`,
 		`{"type":"user.message","data":{"content":"two"},"id":"copilot-2"}`,
 	)
-	adapter := testSessionLogAdapter()
+	adapter := testSessionLogAdapter(path)
 
 	_, transcriptErr := adapter.ReadTranscript(TranscriptRequest{
 		Provider:       "copilot/tmux-cli",

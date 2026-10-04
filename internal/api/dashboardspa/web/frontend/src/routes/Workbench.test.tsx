@@ -7,6 +7,7 @@ import { invalidate } from '../api/cache';
 import { NowProvider } from '../contexts/NowContext';
 import type { SupervisorBead } from '../supervisor/beadReads';
 import type { WorkbenchPRActionBody } from '../supervisor/client';
+import { resetSupervisorApiForTests } from '../supervisor/client';
 import { createHash } from 'node:crypto';
 import { gzipSync } from 'node:zlib';
 import type {
@@ -130,13 +131,30 @@ beforeEach(() => {
           const next = sessionRequestResponses.shift();
           if (next) {
             if (next.status < 400) {
-              const body = (capturedBody ?? {}) as { request_id?: string; generation?: number };
+              const body = (capturedBody ?? {}) as {
+                request_id?: string;
+                generation?: number;
+                work_id?: string;
+                claim_generation?: string;
+              };
               const sessionId = url.pathname.split('/').at(-2) ?? '';
               const receipt = {
                 ...(next.body as Record<string, unknown>),
                 request_id: body.request_id,
                 generation: body.generation,
                 session_id: sessionId,
+                attempt: {
+                  attempt_id: 'ae-chat',
+                  identity: {
+                    kind: 'workbench',
+                    owner_bead_id: body.work_id,
+                    session_id: sessionId,
+                    session_generation: String(body.generation),
+                    claim_generation: body.claim_generation,
+                  },
+                  store_ref: 'rig:test',
+                  work_revision: '1',
+                },
               } as RequestReceipt;
               sessionRequestReceipt = receipt;
               return jsonResponse(receipt, { status: next.status });
@@ -206,6 +224,15 @@ beforeEach(() => {
           },
         });
       }
+      if (/\/attempts\/s-old\/history$/.test(url.pathname) && method === 'GET') {
+        return jsonResponse({
+          bead_id: 'gascity-0001',
+          session_id: 's-old',
+          association: { state: 'available' },
+          diff: { state: 'unavailable', reason: 'historical_diff_not_recorded' },
+          pull_request: { state: 'unavailable', reason: 'attempt_pr_state_not_recorded' },
+        });
+      }
       if (beadMatch) {
         const id = decodeURIComponent(beadMatch[1] ?? '');
         const bead =
@@ -222,6 +249,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  resetSupervisorApiForTests();
   vi.unstubAllGlobals();
 });
 
@@ -245,6 +273,111 @@ describe('WorkbenchPage', () => {
     expect(within(detail).getByText('Sample bead description.')).toBeTruthy();
     expect(within(detail).getByLabelText('Execution attempt')).toBeTruthy();
     expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('puts attempt controls before a collapsed Wayfinder disclosure', async () => {
+    setStub({
+      kind: 'ok',
+      beads: [
+        {
+          ...sampleBead(),
+          issue_type: 'epic',
+          description: 'Review: Lavish AXI',
+        } as SupervisorBead,
+      ],
+    });
+    renderPage('/workbench?bead=gascity-0001');
+
+    const detail = await screen.findByRole('region', { name: /selected bead/i });
+    const attempt = within(detail).getByLabelText('Execution attempt');
+    const disclosure = detail.querySelector<HTMLDetailsElement>(
+      'details[aria-label="Wayfinder review details"]',
+    );
+
+    expect(disclosure).not.toBeNull();
+    if (!disclosure) return;
+
+    expect(disclosure.open).toBe(false);
+    expect(
+      attempt.compareDocumentPosition(disclosure) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(disclosure.querySelector('[aria-label="Wayfinder review"]')).not.toBeNull();
+
+    const summary = disclosure.querySelector('summary');
+    expect(summary).not.toBeNull();
+    if (!summary) return;
+
+    fireEvent.click(summary);
+    expect(disclosure.open).toBe(true);
+    expect(within(detail).getByRole('region', { name: 'Wayfinder review' })).toBeTruthy();
+  });
+
+  it('keeps Wayfinder review beside the epic and opens published artifacts externally', async () => {
+    setStub({
+      kind: 'ok',
+      beads: [
+        {
+          ...sampleBead(),
+          issue_type: 'epic',
+          description: '## Notes\n\nReview: Lavish AXI',
+          metadata: {
+            'gc.prototype_url': 'http://localhost:3000/prototype?bead=gascity-0001',
+            'gc.wayfinder_review_url': 'http://127.0.0.1:4173/session/abc',
+          },
+        } as SupervisorBead,
+      ],
+    });
+    renderPage('/workbench?bead=gascity-0001');
+
+    const detail = await screen.findByRole('region', { name: /selected bead/i });
+    const summary = detail.querySelector('summary');
+    expect(summary).not.toBeNull();
+    if (!summary) return;
+    fireEvent.click(summary);
+
+    const review = await screen.findByRole('region', { name: 'Wayfinder review' });
+    expect(within(review).getByText(/lavish axi.*local document review/i)).toBeTruthy();
+    expect(within(review).getByRole('button', { name: 'Record annotation' })).toBeTruthy();
+    expect(within(review).getByRole('link', { name: 'Prototype A' }).getAttribute('href')).toBe(
+      'http://localhost:3000/prototype?bead=gascity-0001&variant=A',
+    );
+    const lavish = within(review).getByRole('link', { name: /open lavish review/i });
+    expect(lavish.getAttribute('target')).toBe('_blank');
+    expect(lavish.getAttribute('rel')).toContain('noopener');
+    expect(supervisorWrites).toEqual([]);
+  });
+
+  it('explains an unlaunched Lavish review without claiming that prompts are approved', async () => {
+    setStub({
+      kind: 'ok',
+      beads: [
+        {
+          ...sampleBead(),
+          issue_type: 'epic',
+          description: 'Review: Lavish AXI',
+        } as SupervisorBead,
+      ],
+    });
+    renderPage('/workbench?bead=gascity-0001');
+    const detail = await screen.findByRole('region', { name: /selected bead/i });
+    const summary = detail.querySelector('summary');
+    expect(summary).not.toBeNull();
+    if (!summary) return;
+    fireEvent.click(summary);
+
+    const review = await screen.findByRole('region', { name: 'Wayfinder review' });
+    expect(within(review).getByText(/no lavish session is linked/i)).toBeTruthy();
+    expect(within(review).getByText(/explicit approval/i)).toBeTruthy();
+    expect(within(review).queryByRole('link', { name: /open lavish review/i })).toBeNull();
+    fireEvent.change(within(review).getByRole('textbox', { name: 'Local Lavish URL' }), {
+      target: { value: 'http://example.com/session/abc' },
+    });
+    expect(within(review).queryByRole('link', { name: /open lavish review/i })).toBeNull();
+    fireEvent.change(within(review).getByRole('textbox', { name: 'Local Lavish URL' }), {
+      target: { value: 'http://127.0.0.1:4173/session/abc' },
+    });
+    expect(within(review).getByRole('link', { name: /open lavish review/i })).toBeTruthy();
+    expect(supervisorWrites).toEqual([]);
   });
 
   it('is read-only: renders no create, close, or claim controls and performs no writes', async () => {
@@ -855,6 +988,14 @@ describe('WorkbenchPage', () => {
     fireEvent.click(await screen.findByRole('button', { name: /inspect worker-old/i }));
     expect(await screen.findByText(/valid execution generation is unavailable/i)).toBeTruthy();
     expect(screen.queryByText('must not be selected by a guessed generation')).toBeNull();
+    const panel = screen.getByLabelText('Execution attempt');
+    expect(within(panel).queryByRole('button', { name: /send/i })).toBeNull();
+    const artifacts = await within(panel).findByRole('region', {
+      name: /historical attempt artifacts/i,
+    });
+    expect(await within(artifacts).findByText(/did not save a diff snapshot/i)).toBeTruthy();
+    expect(within(artifacts).getByText(/did not save PR state/i)).toBeTruthy();
+    expect(within(artifacts).queryByText(/\+new/)).toBeNull();
   });
 
   it('does not offer PR actions without a Gas City queue, policy and conflict verdict', async () => {
@@ -1258,6 +1399,7 @@ function beadListPayload(items: ReadonlyArray<SupervisorBead>): {
 function sampleBead(): SupervisorBead {
   return {
     id: `${PROJECT}-0001`,
+    metadata: { 'gc.claim_generation': 'claim-7' },
     title: 'Sample bead',
     description: 'Sample bead description.',
     status: 'open',

@@ -329,59 +329,57 @@ func releaseOrphanedPoolAssignments(
 			// are not proof that this claim belongs to a closed session. Hold it
 			// for an explicit recovery decision instead of reopening it here.
 			continue
-		} else {
-			if openSessionOwnsWork(legacyOpenIdentifiers, openIdentifiers, assignee, workStoreRef, storeRefAware) {
-				continue
+		}
+		if openSessionOwnsWork(legacyOpenIdentifiers, openIdentifiers, assignee, workStoreRef, storeRefAware) {
+			continue
+		}
+		if assigneePreservesNamedSessionRoute(cfg, cityPath, template, assignee, workStoreRef, storeRefAware) {
+			continue
+		}
+		// Ordered ahead of the store-listing probe below deliberately: both
+		// are pure skip-gates with no mutation, so the released set is
+		// identical either way, but this one answers from the in-memory
+		// openSessionInfos snapshot while the next one issues a live
+		// per-assignee store listing.
+		if liveEphemeralSessionForTemplate(openSessionInfos, cfg, cityPath, agentCfg, assignee, template, workStoreRef, storeRefAware) {
+			continue
+		}
+		if memoizedLiveOpenSessionAssignmentExists(sessionStoreLiveAssignee, assignee, sessionStore.Store, assignee) {
+			continue
+		}
+		// The sessions binding is not the only ledger that can hold a session
+		// bead. Graph-resident run sessions (gcg-session-*) are written into
+		// the same store as the work they drive, so on a city whose graph
+		// binding is separate from the sessions binding the probe above is
+		// structurally blind to every graph-run assignee and releases live
+		// claims. A session bead of that shape lives in the work bead's own
+		// owner store, so probing that one store after the sessions store
+		// misses closes the gap without enumerating every attached store.
+		// ownerStore varies per bead, so the memo key must name the store.
+		// assignedWorkStoreRefs is the index-aligned ref the caller already
+		// uses to scope readiness (storeScopedBeadKey), but it only IDENTIFIES
+		// the store when assignedWorkStores is what ownerStore came from: both
+		// slices are index-aligned to the same leg, so equal refs mean the same
+		// leg. Without that slice assignedWorkOwnerStore falls back to routing
+		// each bead through storeForPoolAssignment(wb), and two beads sharing a
+		// ref can then resolve to DIFFERENT stores — collapsing them onto one
+		// cached answer could release a live holder's claim. Require both, and
+		// leave the fallback unmemoized rather than risk that.
+		if ownerStore != nil {
+			live := false
+			probeCallStart := time.Now()
+			if storeAware && storeRefAware {
+				memoizedProbeCount++
+				live = memoizedLiveOpenSessionAssignmentExists(ownerStoreLiveAssignee, workStoreRef+"\x00"+assignee, ownerStore, assignee)
+			} else {
+				fallbackProbeCount++
+				live = liveOpenSessionAssignmentExists(ownerStore, assignee)
 			}
-			if assigneePreservesNamedSessionRoute(cfg, cityPath, template, assignee, workStoreRef, storeRefAware) {
+			probeElapsed += time.Since(probeCallStart)
+			if live {
 				continue
-			}
-			// Ordered ahead of the store-listing probe below deliberately: both
-			// are pure skip-gates with no mutation, so the released set is
-			// identical either way, but this one answers from the in-memory
-			// openSessionInfos snapshot while the next one issues a live
-			// per-assignee store listing.
-			if liveEphemeralSessionForTemplate(openSessionInfos, cfg, cityPath, agentCfg, assignee, template, workStoreRef, storeRefAware) {
-				continue
-			}
-			if memoizedLiveOpenSessionAssignmentExists(sessionStoreLiveAssignee, assignee, sessionStore.Store, assignee) {
-				continue
-			}
-			// The sessions binding is not the only ledger that can hold a session
-			// bead. Graph-resident run sessions (gcg-session-*) are written into
-			// the same store as the work they drive, so on a city whose graph
-			// binding is separate from the sessions binding the probe above is
-			// structurally blind to every graph-run assignee and releases live
-			// claims. A session bead of that shape lives in the work bead's own
-			// owner store, so probing that one store after the sessions store
-			// misses closes the gap without enumerating every attached store.
-			// ownerStore varies per bead, so the memo key must name the store.
-			// assignedWorkStoreRefs is the index-aligned ref the caller already
-			// uses to scope readiness (storeScopedBeadKey), but it only IDENTIFIES
-			// the store when assignedWorkStores is what ownerStore came from: both
-			// slices are index-aligned to the same leg, so equal refs mean the same
-			// leg. Without that slice assignedWorkOwnerStore falls back to routing
-			// each bead through storeForPoolAssignment(wb), and two beads sharing a
-			// ref can then resolve to DIFFERENT stores — collapsing them onto one
-			// cached answer could release a live holder's claim. Require both, and
-			// leave the fallback unmemoized rather than risk that.
-			if ownerStore != nil {
-				live := false
-				probeCallStart := time.Now()
-				if storeAware && storeRefAware {
-					memoizedProbeCount++
-					live = memoizedLiveOpenSessionAssignmentExists(ownerStoreLiveAssignee, workStoreRef+"\x00"+assignee, ownerStore, assignee)
-				} else {
-					fallbackProbeCount++
-					live = liveOpenSessionAssignmentExists(ownerStore, assignee)
-				}
-				probeElapsed += time.Since(probeCallStart)
-				if live {
-					continue
-				}
 			}
 		}
-
 		if ownerStore == nil {
 			if storeAware {
 				log.Printf("releaseOrphanedPoolAssignments: missing owner store for assigned work %q at index %d", wb.ID, i)

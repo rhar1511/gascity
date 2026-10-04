@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -459,10 +460,11 @@ func TestControllerClosesYieldToAKillFenceThatLandsInTheWindow(t *testing.T) {
 // bdCloseLedger is a one-row fake bd CLI: enough of show, update, close and
 // list for a controller close to run end to end against a real BdStore.
 type bdCloseLedger struct {
-	mu        sync.Mutex
-	bead      beads.Bead
-	calls     []string
-	closeArgs [][]string
+	mu                 sync.Mutex
+	bead               beads.Bead
+	calls              []string
+	closeArgs          [][]string
+	conditionalUpdates int
 }
 
 func (l *bdCloseLedger) run(_, name string, args ...string) ([]byte, error) {
@@ -472,6 +474,9 @@ func (l *bdCloseLedger) run(_, name string, args ...string) ([]byte, error) {
 		return nil, fmt.Errorf("unexpected command %s %v", name, args)
 	}
 	l.calls = append(l.calls, args[0])
+	if len(args) == 2 && args[1] == "--help" && slices.Contains([]string{"update", "close", "assign", "delete"}, args[0]) {
+		return []byte("--if-revision"), nil
+	}
 	switch args[0] {
 	case "show":
 		return l.render(true)
@@ -482,6 +487,7 @@ func (l *bdCloseLedger) run(_, name string, args ...string) ([]byte, error) {
 	case "close":
 		l.closeArgs = append(l.closeArgs, append([]string(nil), args...))
 		l.bead.Status = "closed"
+		l.bead.Revision++
 		return []byte(`{}`), nil
 	default:
 		return nil, fmt.Errorf("unexpected bd args: %v", args)
@@ -489,6 +495,13 @@ func (l *bdCloseLedger) run(_, name string, args ...string) ([]byte, error) {
 }
 
 func (l *bdCloseLedger) update(args []string) ([]byte, error) {
+	fence := testFlagValue(args, "--if-revision")
+	if fence != "" && fence != fmt.Sprint(l.bead.Revision) {
+		return nil, fmt.Errorf("bd update: stale revision %q, current %d", fence, l.bead.Revision)
+	}
+	if slices.Contains(args, "--status") && fence == "" {
+		return nil, fmt.Errorf("bd update: status mutation requires revision fence")
+	}
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--json", l.bead.ID:
@@ -499,12 +512,18 @@ func (l *bdCloseLedger) update(args []string) ([]byte, error) {
 			i++
 			key, value, _ := strings.Cut(args[i], "=")
 			l.bead.Metadata[key] = value
+		case "--if-revision":
+			i++
 		case "--title", "--type", "--priority", "--description", "--assignee", "--parent", "--add-label", "--remove-label":
 			i++
 		default:
 			return nil, fmt.Errorf("bd update: unsupported arg %q in %v", args[i], args)
 		}
 	}
+	if fence != "" {
+		l.conditionalUpdates++
+	}
+	l.bead.Revision++
 	return []byte(`{}`), nil
 }
 
@@ -514,6 +533,7 @@ func (l *bdCloseLedger) render(list bool) ([]byte, error) {
 		"title":      l.bead.Title,
 		"status":     l.bead.Status,
 		"issue_type": l.bead.Type,
+		"revision":   l.bead.Revision,
 		"labels":     l.bead.Labels,
 		"created_at": nowForBDJSONTest().Format(time.RFC3339),
 		"metadata":   l.bead.Metadata,
@@ -534,11 +554,12 @@ func TestControllerClosesOnBdStoreKeepTheStagedTx(t *testing.T) {
 	for _, path := range controllerClosePaths(now) {
 		t.Run(path.name, func(t *testing.T) {
 			ledger := &bdCloseLedger{bead: beads.Bead{
-				ID:     "mc-1",
-				Title:  "worker",
-				Status: "open",
-				Type:   sessionBeadType,
-				Labels: []string{sessionBeadLabel},
+				ID:       "mc-1",
+				Title:    "worker",
+				Status:   "open",
+				Type:     sessionBeadType,
+				Revision: 1,
+				Labels:   []string{sessionBeadLabel},
 				Metadata: map[string]string{
 					"session_name":         "worker-1",
 					"state":                string(session.StateCreating),
@@ -557,6 +578,9 @@ func TestControllerClosesOnBdStoreKeepTheStagedTx(t *testing.T) {
 			defer ledger.mu.Unlock()
 			if len(ledger.closeArgs) != 1 {
 				t.Fatalf("bd close calls = %v, want exactly one", ledger.closeArgs)
+			}
+			if ledger.conditionalUpdates == 0 {
+				t.Fatal("controller close did not exercise the revision-fenced update")
 			}
 			if got, want := testFlagValue(ledger.closeArgs[0], "--reason"), path.want["close_reason"]; got != want {
 				t.Fatalf("bd close --reason = %q, want %q", got, want)

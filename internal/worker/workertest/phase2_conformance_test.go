@@ -70,7 +70,7 @@ func TestPhase2HistoryDiagnostics(t *testing.T) {
 		profile := profile
 		t.Run(string(profile.ID), func(t *testing.T) {
 			path := writeMalformedHistoryTranscript(t, profile)
-			history, err := testSessionLogAdapter().LoadHistory(worker.LoadRequest{
+			history, err := testSessionLogAdapter(path).LoadHistory(worker.LoadRequest{
 				Provider:       profile.Provider,
 				TranscriptPath: path,
 			})
@@ -82,7 +82,7 @@ func TestPhase2HistoryDiagnostics(t *testing.T) {
 func TestPiMalformedTranscriptFixtureReportsMalformedTail(t *testing.T) {
 	profile := Profile{ID: ProfilePiTmuxCLI, Provider: "pi/tmux-cli"}
 	path := writeMalformedHistoryTranscript(t, profile)
-	history, err := testSessionLogAdapter().LoadHistory(worker.LoadRequest{
+	history, err := testSessionLogAdapter(path).LoadHistory(worker.LoadRequest{
 		Provider:       profile.Provider,
 		TranscriptPath: path,
 	})

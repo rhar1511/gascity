@@ -17,8 +17,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const maxLinuxIdentityFileBytes = 64 << 10
-const maxLinuxIdentityPathComponents = 64
+const (
+	maxLinuxIdentityFileBytes      = 64 << 10
+	maxLinuxIdentityPathComponents = 64
+)
 
 // LinuxIdentityPaths contains explicit inputs selected by trusted startup
 // code. This adapter has no default host paths and performs no directory scan.
@@ -77,7 +79,7 @@ func (r *LinuxIdentityReader) ReadIdentity(ctx context.Context) (HostIdentity, e
 			opened.close()
 			return HostIdentity{}, ErrUnavailable
 		}
-		identity := linuxIdentityObjectID{device: uint64(info.Dev), inode: uint64(info.Ino)}
+		identity := linuxIdentityObjectID{device: info.Dev, inode: info.Ino}
 		if _, duplicate := seenInputs[identity]; duplicate {
 			opened.close()
 			return HostIdentity{}, ErrUnavailable

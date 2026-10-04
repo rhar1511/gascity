@@ -190,6 +190,9 @@ provider = "sqlite"
 	bdPath := filepath.Join(binDir, "bd")
 	script := fmt.Sprintf(`#!/bin/sh
 printf 'pwd=%%s BEADS_DIR=%%s args=%%s\n' "$PWD" "${BEADS_DIR:-}" "$*" >> %q
+if [ "${2:-}" = "--help" ]; then
+  case "$1" in update|close|assign|delete) printf '%%s\n' '--if-revision'; exit 0 ;; esac
+fi
 case "$1" in
   init)
     mkdir -p "${BEADS_DIR:-$PWD/.beads}"
@@ -199,7 +202,12 @@ case "$1" in
     printf '[]\n'
     exit 0
     ;;
+  show)
+    printf '[{"id":"tc-1","title":"rig work","status":"open","issue_type":"task","revision":1}]\n'
+    exit 0
+    ;;
   update)
+    case "$*" in *'--if-revision 1') ;; *) exit 1 ;; esac
     exit 0
     ;;
   *)
@@ -254,6 +262,7 @@ esac
 	for _, want := range []string{
 		"init --server -p tc --skip-hooks --database tc",
 		"update --json tc-1 --set-metadata gc.routed_to=sample/session-a",
+		"--if-revision 1",
 	} {
 		if !strings.Contains(log, want) {
 			t.Fatalf("bd log missing %q:\n%s", want, log)

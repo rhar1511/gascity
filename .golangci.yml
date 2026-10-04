@@ -41,6 +41,9 @@ linters:
       locale: US
 
   exclusions:
+    # npm dependencies may contain Go sources; they are not maintained here.
+    paths:
+      - '(^|/)node_modules/'
     rules:
       # runtime shadows stdlib but is isolated to internal/.
       - path: internal/runtime/

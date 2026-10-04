@@ -202,17 +202,20 @@ func (f *failAgentTomlRenameOSFS) Rename(oldpath, newpath string) error {
 
 func TestControllerStateReadAccess(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
+	cityDir := t.TempDir()
+	rigDir := t.TempDir()
+	writeSchema2RigCity(t, cityDir, "test-city", "[workspace]\n[beads]\nprovider = \"file\"\n[[rigs]]\nname = \"rig1\"\n", fmt.Sprintf("workspace_name = \"test-city\"\n[rigs.rig1]\npath = %q\n", rigDir))
 
 	sp := runtime.NewFake()
 	ep := events.NewFake()
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Rigs: []config.Rig{
-			{Name: "rig1", Path: t.TempDir()},
+			{Name: "rig1", Path: rigDir},
 		},
 	}
 
-	cs := newControllerState(context.Background(), cfg, sp, ep, "test-city", t.TempDir())
+	cs := newControllerState(context.Background(), cfg, sp, ep, "test-city", cityDir)
 
 	if got := cs.CityName(); got != "test-city" {
 		t.Errorf("CityName() = %q, want %q", got, "test-city")
@@ -2770,6 +2773,7 @@ func TestControllerStateBuildStoresUsesScopeLocalFileStores(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 
 	cityDir := t.TempDir()
+	writeMinimalCityToml(t, cityDir)
 	rigDir := filepath.Join(t.TempDir(), "rig1")
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -2789,7 +2793,7 @@ func TestControllerStateBuildStoresUsesScopeLocalFileStores(t *testing.T) {
 		Rigs:      []config.Rig{{Name: "rig1", Path: rigDir}},
 	}
 
-	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "test-city", cityDir)
+	cs := newFileStoreControllerState(context.Background(), t, cfg, runtime.NewFake(), events.NewFake(), cityDir)
 
 	rigStore := cs.BeadStore("rig1")
 	if rigStore == nil {
@@ -2902,6 +2906,7 @@ func TestControllerStateBuildStoresFileStoresUseLockFiles(t *testing.T) {
 
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(t.TempDir(), "rig1")
+	writeSchema2RigCity(t, cityDir, "test-city", "[workspace]\n[beads]\nprovider = \"file\"\n[[rigs]]\nname = \"rig1\"\n", fmt.Sprintf("workspace_name = \"test-city\"\n[rigs.rig1]\npath = %q\n", rigDir))
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -2920,7 +2925,7 @@ func TestControllerStateBuildStoresFileStoresUseLockFiles(t *testing.T) {
 		Rigs:      []config.Rig{{Name: "rig1", Path: rigDir}},
 	}
 
-	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "test-city", cityDir)
+	cs := newFileStoreControllerState(context.Background(), t, cfg, runtime.NewFake(), events.NewFake(), cityDir)
 
 	rigStore := cs.BeadStore("rig1")
 	if rigStore == nil {
@@ -2950,6 +2955,7 @@ func TestControllerStateFileRigStoreReloadsAcrossConcurrentHandles(t *testing.T)
 
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(t.TempDir(), "rig1")
+	writeSchema2RigCity(t, cityDir, "test-city", "[workspace]\n[beads]\nprovider = \"file\"\n[[rigs]]\nname = \"rig1\"\n", fmt.Sprintf("workspace_name = \"test-city\"\n[rigs.rig1]\npath = %q\n", rigDir))
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -2968,7 +2974,7 @@ func TestControllerStateFileRigStoreReloadsAcrossConcurrentHandles(t *testing.T)
 		Rigs:      []config.Rig{{Name: "rig1", Path: rigDir}},
 	}
 
-	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "test-city", cityDir)
+	cs := newFileStoreControllerState(context.Background(), t, cfg, runtime.NewFake(), events.NewFake(), cityDir)
 	rigStore := cs.BeadStore("rig1")
 	if rigStore == nil {
 		t.Fatal("BeadStore(rig1) = nil")
@@ -3015,6 +3021,7 @@ func TestControllerStateLegacyFileProviderUsesSharedCityStoreWithoutCreatingRigS
 
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(t.TempDir(), "rig1")
+	writeSchema2RigCity(t, cityDir, "test-city", "[workspace]\n[beads]\nprovider = \"file\"\n[[rigs]]\nname = \"rig1\"\n", fmt.Sprintf("workspace_name = \"test-city\"\n[rigs.rig1]\npath = %q\n", rigDir))
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -3031,7 +3038,7 @@ func TestControllerStateLegacyFileProviderUsesSharedCityStoreWithoutCreatingRigS
 		Workspace: config.Workspace{Name: "test-city"},
 		Rigs:      []config.Rig{{Name: "rig1", Path: rigDir}},
 	}
-	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "test-city", cityDir)
+	cs := newFileStoreControllerState(context.Background(), t, cfg, runtime.NewFake(), events.NewFake(), cityDir)
 
 	rigStore := cs.BeadStore("rig1")
 	if rigStore == nil {
@@ -3062,6 +3069,7 @@ func TestControllerStateLegacyFileProviderSharesRigStoreHandle(t *testing.T) {
 	if err := os.MkdirAll(rigTwo, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	writeSchema2RigCity(t, cityDir, "test-city", "[workspace]\n[beads]\nprovider = \"file\"\n[[rigs]]\nname = \"rig1\"\n[[rigs]]\nname = \"rig2\"\n", fmt.Sprintf("workspace_name = \"test-city\"\n[rigs.rig1]\npath = %q\n[rigs.rig2]\npath = %q\n", rigOne, rigTwo))
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Rigs: []config.Rig{
@@ -3070,6 +3078,9 @@ func TestControllerStateLegacyFileProviderSharesRigStoreHandle(t *testing.T) {
 		},
 	}
 	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "test-city", cityDir)
+	if fileStoreUsesScopedRoots(cityDir) {
+		t.Fatal("legacy sharing fixture unexpectedly enabled scope-local file stores")
+	}
 
 	rigStoreOne := cs.BeadStore("rig1")
 	rigStoreTwo := cs.BeadStore("rig2")
@@ -4987,4 +4998,26 @@ func TestControllerStateUpdateRigPathDetachesProviderOwnershipBeforeConfigWrite(
 	if key, _, owned, err := providerScopeOwnershipRecord(cs2.cityPath, cfg2.Rigs[0].Path); err != nil || !owned || key != "rig:rig1" {
 		t.Fatalf("ownership after prefix-only update = (%q, %t, %v), want attached rig label", key, owned, err)
 	}
+}
+
+// newFileStoreControllerState seeds the real city config required by scoped
+// file stores. An existing config is retained so malformed-config tests still
+// exercise their explicit fixture rather than silently receiving a replacement.
+func newFileStoreControllerState(ctx context.Context, t *testing.T, cfg *config.City, sp runtime.Provider, ep events.Provider, cityPath string) *controllerState {
+	t.Helper()
+	const cityName = "test-city"
+	if _, err := os.Stat(filepath.Join(cityPath, "city.toml")); os.IsNotExist(err) {
+		fixture := *cfg
+		if fixture.Workspace.Name == "" {
+			fixture.Workspace.Name = cityName
+		}
+		contents, marshalErr := fixture.Marshal()
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		if writeErr := os.WriteFile(filepath.Join(cityPath, "city.toml"), contents, 0o644); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+	}
+	return newControllerState(ctx, cfg, sp, ep, cityName, cityPath)
 }

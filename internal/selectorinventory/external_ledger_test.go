@@ -365,10 +365,14 @@ func newQuietExternalLedgerTestFixture(t *testing.T) *externalLedgerTestFixture 
 	fixture.ledger.SequenceStart = 103
 	fixture.ledger.SequenceEnd = 104
 	fixture.ledger.Sequences = []LedgerSequence{
-		{Sequence: 103, SourceScope: "orders", EntrySHA256: LedgerSequenceCoverageCheckpointDigest(103, firstCoverage),
-			EntryKind: LedgerSequenceKindCoverageCheckpoint, CoverageWindow: &firstCoverage},
-		{Sequence: 104, SourceScope: "orders", EntrySHA256: LedgerSequenceCoverageCheckpointDigest(104, secondCoverage),
-			EntryKind: LedgerSequenceKindCoverageCheckpoint, CoverageWindow: &secondCoverage},
+		{
+			Sequence: 103, SourceScope: "orders", EntrySHA256: LedgerSequenceCoverageCheckpointDigest(103, firstCoverage),
+			EntryKind: LedgerSequenceKindCoverageCheckpoint, CoverageWindow: &firstCoverage,
+		},
+		{
+			Sequence: 104, SourceScope: "orders", EntrySHA256: LedgerSequenceCoverageCheckpointDigest(104, secondCoverage),
+			EntryKind: LedgerSequenceKindCoverageCheckpoint, CoverageWindow: &secondCoverage,
+		},
 	}
 	fixture.refresh(t)
 	return fixture

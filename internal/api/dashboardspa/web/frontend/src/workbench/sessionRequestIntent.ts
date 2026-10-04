@@ -8,6 +8,8 @@ export interface SessionRequestIntent {
   requestId: string;
   generation: number;
   message: string;
+  workId?: string;
+  claimGeneration?: string;
   receipt?: RequestReceipt;
   submissionError?: string | undefined;
 }
@@ -26,6 +28,7 @@ export function createSessionRequestIntent(
   generation: number,
   message: string,
   createRequestId: () => string = newRequestId,
+  binding?: { workId: string; claimGeneration: string },
 ): SessionRequestIntent {
   if (!Number.isSafeInteger(generation) || generation <= 0) {
     throw new Error('The current execution generation is unavailable; the message was not sent.');
@@ -39,6 +42,7 @@ export function createSessionRequestIntent(
     requestId,
     generation,
     message: cleanMessage,
+    ...(binding ?? {}),
   };
   const key = storageKey(city, sessionId, requestId);
   const encoded = JSON.stringify(intent);

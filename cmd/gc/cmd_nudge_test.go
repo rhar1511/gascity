@@ -5082,6 +5082,10 @@ func TestEnqueueSupersedes_SameAgentSourceReference(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
 	now := time.Now()
+	store := openNudgeFixtureStore(t, dir)
+	if store.Store == nil {
+		t.Fatal("expected configured nudge shadow store before enqueue")
+	}
 
 	first := newQueuedNudgeWithOptions("worker", "first reminder", "sling", now, queuedNudgeOptions{
 		ID:        "n-first",
@@ -5089,6 +5093,9 @@ func TestEnqueueSupersedes_SameAgentSourceReference(t *testing.T) {
 	})
 	if err := enqueueQueuedNudge(dir, first); err != nil {
 		t.Fatalf("enqueueQueuedNudge(first): %v", err)
+	}
+	if record, ok, err := nudgeFrontDoor(store).FindIncludingTerminal("n-first"); err != nil || !ok || record.State != "queued" {
+		t.Fatalf("first queued shadow = %+v, found=%v, err=%v", record, ok, err)
 	}
 
 	second := newQueuedNudgeWithOptions("worker", "second reminder", "sling", now.Add(time.Second), queuedNudgeOptions{
@@ -5117,7 +5124,7 @@ func TestEnqueueSupersedes_SameAgentSourceReference(t *testing.T) {
 	}
 
 	// Verify the superseded nudge has a terminal bead record with state "superseded".
-	store := openNudgeFixtureStore(t, dir)
+	store = openNudgeFixtureStore(t, dir)
 	if store.Store != nil {
 		b, ok, err := nudgeFrontDoor(store).FindIncludingTerminal("n-first")
 		if err != nil {
@@ -5226,6 +5233,7 @@ func TestListQueuedNudges_CategorizesPendingAndDead(t *testing.T) {
 func TestCmdNudgeDropDeadLettersPendingNudge(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
+	writeCityTOML(t, dir, "nudge-drop")
 	t.Setenv("GC_CITY", dir)
 
 	item := newQueuedNudgeWithOptions("worker", "stale reminder", "session", time.Now(), queuedNudgeOptions{ID: "n-drop-1"})
@@ -5278,6 +5286,7 @@ func TestCmdNudgeDropDeadLettersPendingNudge(t *testing.T) {
 func TestCmdNudgeDropDeadLettersInFlightNudge(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
+	writeCityTOML(t, dir, "nudge-drop")
 	t.Setenv("GC_CITY", dir)
 	now := time.Now()
 
@@ -5378,6 +5387,7 @@ func TestCmdNudgeDropAlreadyDeadReportsError(t *testing.T) {
 func TestCmdNudgeDropMixedValidAndInvalidIDsProcessesValidOnes(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
+	writeCityTOML(t, dir, "nudge-drop")
 	t.Setenv("GC_CITY", dir)
 
 	item := newQueuedNudgeWithOptions("worker", "reminder", "session", time.Now(), queuedNudgeOptions{ID: "n-valid"})
@@ -5409,6 +5419,7 @@ func TestCmdNudgeDropMixedValidAndInvalidIDsProcessesValidOnes(t *testing.T) {
 func TestCmdNudgeDropJSON(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
+	writeCityTOML(t, dir, "nudge-drop")
 	t.Setenv("GC_CITY", dir)
 
 	item := newQueuedNudgeWithOptions("worker", "reminder", "session", time.Now(), queuedNudgeOptions{ID: "n-json"})

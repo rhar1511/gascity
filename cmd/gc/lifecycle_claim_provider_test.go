@@ -273,7 +273,7 @@ func newLifecycleClaimProviderFixture(t *testing.T) (lifecycleAdmissionTransitio
 
 func seedLifecycleClaimBlocker(t *testing.T, setup lifecycleAdmissionTransitionSetup) {
 	t.Helper()
-	blocker, err := setup.store.MemStore.Create(beads.Bead{
+	blocker, err := setup.store.Create(beads.Bead{
 		ID: "pilot-rig-claim-blocker", Title: "open dependency", Type: "task", Status: "open",
 	})
 	if err != nil {

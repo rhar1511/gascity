@@ -62,6 +62,8 @@ func (p *RevisionTransitionPatchProblem) Unwrap() error {
 	}
 }
 
+// RevisionTransitionPatchWriterHandle exposes atomic patch writes only when
+// the configured private HTTP transport advertises the required capability.
 func (s *BdStore) RevisionTransitionPatchWriterHandle() (RevisionTransitionPatchWriter, bool) {
 	if s == nil || s.privateEvidenceHTTP == nil || s.privateEvidenceHTTPInitErr != nil || !s.privateEvidenceHTTP.revisionTransitionPatches {
 		return nil, false
@@ -69,6 +71,8 @@ func (s *BdStore) RevisionTransitionPatchWriterHandle() (RevisionTransitionPatch
 	return s, true
 }
 
+// RevisionTransitionPatchReceiptReaderHandle exposes durable patch receipts
+// only when the configured private HTTP transport supports exact readback.
 func (s *BdStore) RevisionTransitionPatchReceiptReaderHandle() (RevisionTransitionPatchReceiptReader, bool) {
 	if s == nil || s.privateEvidenceHTTP == nil || s.privateEvidenceHTTPInitErr != nil || !s.privateEvidenceHTTP.revisionTransitionPatches {
 		return nil, false
@@ -409,8 +413,8 @@ func patchRawPointer(members map[string]json.RawMessage, name string) *json.RawM
 	if !ok {
 		return nil
 	}
-	copy := append(json.RawMessage(nil), raw...)
-	return &copy
+	cloned := append(json.RawMessage(nil), raw...)
+	return &cloned
 }
 
 func validUTF8String(value string) bool {

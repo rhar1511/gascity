@@ -11,7 +11,15 @@ import {
   type SessionRequestIntent,
 } from './sessionRequestIntent';
 
-export function AttemptChatPanel({ attempt }: { attempt: ExecutionAttempt }) {
+export function AttemptChatPanel({
+  attempt,
+  workId,
+  claimGeneration,
+}: {
+  attempt: ExecutionAttempt;
+  workId: string;
+  claimGeneration: string | null;
+}) {
   const cityName = getActiveCity();
   const [draft, setDraft] = useState('');
   const [intents, setIntents] = useState<SessionRequestIntent[]>([]);
@@ -21,12 +29,16 @@ export function AttemptChatPanel({ attempt }: { attempt: ExecutionAttempt }) {
   useEffect(() => {
     if (cityName === null) return;
     try {
-      setIntents(readSessionRequestIntents(window.localStorage, cityName, attempt.sessionId));
+      setIntents(
+        readSessionRequestIntents(window.localStorage, cityName, attempt.sessionId).filter(
+          (intent) => intent.workId === workId,
+        ),
+      );
       setStorageError(null);
     } catch (cause) {
       setStorageError(errorText(cause));
     }
-  }, [cityName, attempt.sessionId]);
+  }, [cityName, attempt.sessionId, workId]);
 
   const updateIntent = useCallback((updated: SessionRequestIntent) => {
     try {
@@ -47,6 +59,13 @@ export function AttemptChatPanel({ attempt }: { attempt: ExecutionAttempt }) {
   const submitIntent = useCallback(
     async (intent: SessionRequestIntent) => {
       if (cityName === null || busyRequestId !== null) return;
+      if (!intent.workId || !intent.claimGeneration) {
+        updateIntent({
+          ...intent,
+          submissionError: 'The saved request has no exact work claim; it cannot be sent.',
+        });
+        return;
+      }
       setBusyRequestId(intent.requestId);
       const submitting = { ...intent, submissionError: undefined };
       if (!updateIntent(submitting)) {
@@ -58,6 +77,8 @@ export function AttemptChatPanel({ attempt }: { attempt: ExecutionAttempt }) {
           request_id: intent.requestId,
           generation: intent.generation,
           message: intent.message,
+          work_id: intent.workId,
+          claim_generation: intent.claimGeneration,
         });
         if (!receiptMatchesIntent(receipt, intent)) {
           throw new Error('The supervisor returned a receipt for a different session request.');
@@ -97,7 +118,13 @@ export function AttemptChatPanel({ attempt }: { attempt: ExecutionAttempt }) {
 
   const send = () => {
     const text = draft.trim();
-    if (cityName === null || attempt.executionGeneration === null || text.length === 0) return;
+    if (
+      cityName === null ||
+      attempt.executionGeneration === null ||
+      claimGeneration === null ||
+      text.length === 0
+    )
+      return;
     try {
       const intent = createSessionRequestIntent(
         window.localStorage,
@@ -105,6 +132,8 @@ export function AttemptChatPanel({ attempt }: { attempt: ExecutionAttempt }) {
         attempt.sessionId,
         attempt.executionGeneration,
         text,
+        undefined,
+        { workId, claimGeneration },
       );
       setDraft('');
       setIntents((current) => [...current, intent]);
@@ -115,7 +144,8 @@ export function AttemptChatPanel({ attempt }: { attempt: ExecutionAttempt }) {
     }
   };
 
-  const canCompose = cityName !== null && attempt.executionGeneration !== null;
+  const canCompose =
+    cityName !== null && attempt.executionGeneration !== null && claimGeneration !== null;
   const canSend = canCompose && draft.trim().length > 0;
   return (
     <section aria-label="Attempt chat" className="mt-3 space-y-2">
@@ -123,6 +153,11 @@ export function AttemptChatPanel({ attempt }: { attempt: ExecutionAttempt }) {
         <p role="status" className="text-label text-fg-faint">
           Session messages are unavailable because the supervisor did not provide a safe current
           execution generation.
+        </p>
+      ) : null}
+      {claimGeneration === null ? (
+        <p role="status" className="text-label text-fg-faint">
+          Session messages are unavailable because the selected work claim cannot be verified.
         </p>
       ) : null}
       {cityName === null ? (
@@ -217,7 +252,9 @@ function receiptMatchesIntent(receipt: RequestReceipt, intent: SessionRequestInt
   return (
     receipt.request_id === intent.requestId &&
     receipt.session_id === intent.sessionId &&
-    receipt.generation === intent.generation
+    receipt.generation === intent.generation &&
+    receipt.attempt?.identity.owner_bead_id === intent.workId &&
+    receipt.attempt?.identity.claim_generation === intent.claimGeneration
   );
 }
 

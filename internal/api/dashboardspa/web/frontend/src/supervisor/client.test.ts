@@ -74,6 +74,27 @@ describe('supervisor client wrapper', () => {
     expect(requestedUrl(fetchSpy.mock.calls[0]?.[0])).toBe('http://gc-supervisor.test/health');
   });
 
+  it('reads exact historical attempt artifacts through the generated SDK', async () => {
+    const inspection = {
+      bead_id: 'bead/one',
+      session_id: 'session two',
+      association: { state: 'unavailable', reason: 'attempt_session_link_not_recorded' },
+      diff: { state: 'unavailable', reason: 'historical_diff_not_recorded' },
+      pull_request: { state: 'unavailable', reason: 'attempt_pr_state_not_recorded' },
+    };
+    const fetchSpy = vi.fn(async (_input: RequestInfo | URL) => jsonResponse(inspection));
+    const api = createSupervisorApi({ baseUrl: 'http://gc-supervisor.test', fetch: fetchSpy });
+    const controller = new AbortController();
+
+    await expect(
+      api.attemptHistory('test-city', 'bead/one', 'session two', controller.signal),
+    ).resolves.toEqual(inspection);
+    expect(requestedUrl(fetchSpy.mock.calls[0]?.[0])).toBe(
+      'http://gc-supervisor.test/v0/city/test-city/bead/bead%2Fone/attempts/session%20two/history',
+    );
+    expect(fetchSpy).toHaveBeenCalledOnce();
+  });
+
   it('calls supervisor cities through the generated SDK without dashboard DTO stripping', async () => {
     const fetchSpy = vi.fn(
       async (_input: RequestInfo | URL) =>
@@ -1085,7 +1106,7 @@ describe('supervisor client wrapper', () => {
 
   it('normalizes supervisor error responses', async () => {
     const fetchSpy = vi.fn(
-      async () =>
+      async (_input: RequestInfo | URL) =>
         new Response(JSON.stringify({ error: 'supervisor unavailable', kind: 'upstream' }), {
           status: 503,
           statusText: 'Service Unavailable',
@@ -1111,7 +1132,7 @@ describe('supervisor client wrapper', () => {
 
   it('preserves the typed problem code on supervisor errors', async () => {
     const fetchSpy = vi.fn(
-      async () =>
+      async (_input: RequestInfo | URL) =>
         new Response(
           JSON.stringify({
             type: 'urn:gascity:error:city-not-found',
@@ -1424,10 +1445,60 @@ describe('supervisor client wrapper', () => {
   });
 
   it('refuses a merge even when a caller bypasses the Workbench action type', async () => {
-    const api = createSupervisorApi({ baseUrl: 'http://gc-supervisor.test' });
+    const fetchSpy = vi.fn(async () => jsonResponse({}));
+    const api = createSupervisorApi({
+      baseUrl: 'http://gc-supervisor.test',
+      fetch: fetchSpy as typeof fetch,
+    });
     expect(() =>
       api.executePRAction('test-city', { action: 'merge' } as never, 'wb-pr-merge-attempt'),
     ).toThrow('Workbench does not support PR merge actions');
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('keeps approval authority out of the Workbench action adapter', () => {
+    const fetchSpy = vi.fn(async () => jsonResponse({}));
+    const api = createSupervisorApi({
+      baseUrl: 'http://gc-supervisor.test',
+      fetch: fetchSpy as typeof fetch,
+    });
+    expect(() =>
+      api.executePRAction('test-city', { action: 'human_grant' } as never, 'approval-key'),
+    ).toThrow('Workbench supports only prepare and queue_review actions');
+    expect(() =>
+      api.executePRAction(
+        'test-city',
+        { action: 'prepare', human_grant: 'not-authority' } as never,
+        'approval-key',
+      ),
+    ).toThrow('Workbench does not submit human approval grants');
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('sends prepare without work identifiers or an idempotency key in the typed body', async () => {
+    const receipt = { id: 'prepare-receipt', action: 'prepare', status: 'verified' };
+    const fetchSpy = vi.fn(async (_input: RequestInfo | URL) => jsonResponse(receipt));
+    const api = createSupervisorApi({
+      baseUrl: 'http://gc-supervisor.test',
+      fetch: fetchSpy as typeof fetch,
+    });
+    const body = {
+      action: 'prepare' as const,
+      monitor: 'main',
+      owner: 'acme',
+      repo: 'widget',
+      pull_request: 42,
+      head_sha: 'a'.repeat(40),
+      base_sha: 'b'.repeat(40),
+      policy_version: 'policy-v1',
+    };
+    await expect(api.executePRAction('test-city', body, 'prepare-request-123')).resolves.toEqual(
+      receipt,
+    );
+    const request = fetchSpy.mock.calls[0]?.[0];
+    if (!(request instanceof Request)) throw new Error('expected a Request');
+    expect(request.headers.get('Idempotency-Key')).toBe('prepare-request-123');
+    expect(await request.clone().json()).toEqual(body);
   });
 
   it('reads immutable attempt evidence through the generated city-scoped endpoint', async () => {
@@ -1535,6 +1606,7 @@ describe('supervisor client wrapper', () => {
       prActionQueue: vi.fn(),
       listAttemptEvidence: vi.fn(),
       getAttemptEvidence: vi.fn(),
+      attemptHistory: vi.fn(),
       executePRAction: vi.fn(),
       submitSessionRequest: vi.fn(),
       getSessionRequest: vi.fn(),

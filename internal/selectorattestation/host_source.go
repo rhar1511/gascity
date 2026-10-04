@@ -86,14 +86,14 @@ func (s FileHostAuthoritySource) Load(ctx context.Context) (Bundle, error) {
 	}
 	var keyring hostKeyringFile
 	if err := readProtectedHostJSON(s.root, HostKeyringFile, maxHostKeyringBytes, &keyring); err != nil {
-		return Bundle{}, fmt.Errorf("read selector attestation keyring: %w: %v", ErrUnavailable, err)
+		return Bundle{}, fmt.Errorf("read selector attestation keyring: %w: %s", ErrUnavailable, err.Error())
 	}
 	if keyring.SchemaVersion != HostAuthoritySchemaV1 {
 		return Bundle{}, fmt.Errorf("selector attestation keyring schema is unsupported: %w", ErrUnavailable)
 	}
 	var revocations SignedRevocations
 	if err := readProtectedHostJSON(s.root, HostRevocationsFile, maxRevocationBytes, &revocations); err != nil {
-		return Bundle{}, fmt.Errorf("read selector attestation revocations: %w: %v", ErrUnavailable, err)
+		return Bundle{}, fmt.Errorf("read selector attestation revocations: %w: %s", ErrUnavailable, err.Error())
 	}
 	if err := s.verifyRootIdentity(); err != nil {
 		return Bundle{}, err
