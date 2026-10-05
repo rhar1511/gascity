@@ -530,6 +530,9 @@ func TestSessionRequestClientRoundTrip(t *testing.T) {
 	if err != nil || receipt.RequestId != "client-request" || receipt.AcknowledgedAt != nil {
 		t.Fatalf("submit %+v,%v", receipt, err)
 	}
+	if success, failure := waitForSessionSubmitResult(t, state.eventProv, "client-request"); failure != nil || success == nil {
+		t.Fatalf("request delivery result: success=%+v failure=%+v", success, failure)
+	}
 	receipt, err = client.AcknowledgeSessionRequest(info.ID, "client-request", generation, persisted.InstanceToken)
 	if err != nil || receipt.AcknowledgedAt == nil {
 		t.Fatalf("ack %+v,%v", receipt, err)
