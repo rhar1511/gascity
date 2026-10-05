@@ -3,11 +3,18 @@
 package integration
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"strings"
 	"testing"
 )
+
+func runGraphHarnessFunction(source string, env []string) ([]byte, error) {
+	cmd := exec.Command("bash", "-c", source)
+	cmd.Env = append([]string{"PATH=" + os.Getenv("PATH")}, env...)
+	return cmd.CombinedOutput()
+}
 
 // extractShellFunc returns the source text of a top-level shell function
 // (header line through its column-0 closing brace) from a script file, so a
@@ -81,11 +88,46 @@ func TestGraphDispatchHookFallbackForNamedWorker(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			cmd := exec.Command("bash", "-c", fn+"\nshould_use_hook_fallback\n")
-			cmd.Env = append([]string{"PATH=" + os.Getenv("PATH")}, tc.env...)
-			got := cmd.Run() == nil // exit 0 => fallback selected
+			_, err := runGraphHarnessFunction(fn+"\nshould_use_hook_fallback\n", tc.env)
+			got := err == nil // exit 0 => fallback selected
 			if got != tc.want {
 				t.Fatalf("should_use_hook_fallback(env=%v) selected=%v, want %v", tc.env, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestGraphDispatchResumeQueueUsesClaimActor(t *testing.T) {
+	fn := extractShellFunc(t, agentScript("graph-dispatch.sh"), "fetch_in_progress_queue")
+	// Model bd's exact assignee filter: the claimed row is owned by the
+	// actor passed to bd update --claim, regardless of its runtime name.
+	const store = `
+timeout() { shift; "$@"; }
+bd() {
+    if [ "$1" = list ] && [ "$2" = --assignee ] && [ "$3" = "$BEADS_ACTOR" ]; then
+        printf '[{"id":"claimed-attempt","status":"in_progress","assignee":"%s"}]\n' "$BEADS_ACTOR"
+    else
+        printf '[]\n'
+    fi
+}
+`
+	for _, actor := range []string{"runtime-name", "polecat-1", "session-bead-id"} {
+		t.Run(actor, func(t *testing.T) {
+			out, err := runGraphHarnessFunction(store+fn+"\nfetch_in_progress_queue\n", []string{
+				"ASSIGNEE=runtime-name", "BEADS_ACTOR=" + actor,
+			})
+			if err != nil {
+				t.Fatalf("query owned queue: %v: %s", err, out)
+			}
+			var rows []struct {
+				ID       string `json:"id"`
+				Assignee string `json:"assignee"`
+			}
+			if err := json.Unmarshal(out, &rows); err != nil {
+				t.Fatalf("decode owned queue: %v: %s", err, out)
+			}
+			if len(rows) != 1 || rows[0].ID != "claimed-attempt" || rows[0].Assignee != actor {
+				t.Fatalf("owned queue = %s, want claimed attempt owned by %q", out, actor)
 			}
 		})
 	}
