@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/reviewquorum"
+	"github.com/gastownhall/gascity/internal/storybench"
 )
 
 // TrustedEvaluationSchemaV1 is the signed evaluator manifest schema accepted
@@ -136,11 +137,38 @@ type JudgeRecord struct {
 	Lane            reviewquorum.LaneOutput
 }
 
+// BenchmarkRecord binds trace bytes to the exact controller-resolved execution.
+type BenchmarkRecord struct {
+	BeadID          string
+	BeadRevision    int64
+	ControlBeadID   string
+	ControlRevision int64
+	ActorID         string
+	SessionID       string
+	Status          string
+	Outcome         string
+	RawOutput       string
+}
+
+// BenchmarkAuthorization attests independent read-only capture and output identity.
+type BenchmarkAuthorization struct {
+	BeadID          string               `json:"bead_id"`
+	BeadRevision    int64                `json:"bead_revision"`
+	ControlBeadID   string               `json:"control_bead_id"`
+	ControlRevision int64                `json:"control_revision"`
+	ActorID         string               `json:"actor_id"`
+	SessionID       string               `json:"session_id"`
+	OutputSHA256    string               `json:"output_sha256"`
+	Permissions     ExecutionPermissions `json:"permissions"`
+}
+
 // ResolveRequest contains controller-resolved candidate and judge executions.
 type ResolveRequest struct {
-	Context   EvaluationContext
-	Candidate CandidateRecord
-	Judges    []JudgeRecord
+	StoryBenchmarkRequired bool
+	Benchmark              *BenchmarkRecord
+	Context                EvaluationContext
+	Candidate              CandidateRecord
+	Judges                 []JudgeRecord
 }
 
 // ResolveRequestInputSHA256 binds all pre-existing gate inputs independently
@@ -154,14 +182,16 @@ func ResolveRequestInputSHA256(request ResolveRequest) string {
 		return judges[i].ControlBeadID < judges[j].ControlBeadID
 	})
 	bound := struct {
-		ProtocolVersion string          `json:"protocol_version"`
-		CityID          string          `json:"city_id"`
-		StoreRef        string          `json:"store_ref"`
-		WorkflowRootID  string          `json:"workflow_root_id"`
-		GateID          string          `json:"gate_id"`
-		Candidate       CandidateRecord `json:"candidate"`
-		Judges          []JudgeRecord   `json:"judges"`
-	}{request.Context.ProtocolVersion, request.Context.CityID, request.Context.StoreRef, request.Context.WorkflowRootID, request.Context.GateID, request.Candidate, judges}
+		ProtocolVersion        string           `json:"protocol_version"`
+		CityID                 string           `json:"city_id"`
+		StoreRef               string           `json:"store_ref"`
+		WorkflowRootID         string           `json:"workflow_root_id"`
+		GateID                 string           `json:"gate_id"`
+		Candidate              CandidateRecord  `json:"candidate"`
+		Judges                 []JudgeRecord    `json:"judges"`
+		StoryBenchmarkRequired bool             `json:"story_benchmark_required,omitempty"`
+		Benchmark              *BenchmarkRecord `json:"benchmark,omitempty"`
+	}{request.Context.ProtocolVersion, request.Context.CityID, request.Context.StoreRef, request.Context.WorkflowRootID, request.Context.GateID, request.Candidate, judges, request.StoryBenchmarkRequired, request.Benchmark}
 	raw, _ := json.Marshal(bound)
 	digest := sha256.Sum256(raw)
 	return hex.EncodeToString(digest[:])
@@ -276,37 +306,39 @@ type WorkerTimeLedgerEvidence struct {
 // binds one candidate bead, exact source bundles, frozen suite, measured work,
 // judge executions, and immutable evidence files.
 type TrustedEvaluationManifest struct {
-	SchemaVersion            string               `json:"schema_version"`
-	ProtocolVersion          string               `json:"protocol_version"`
-	CityID                   string               `json:"city_id"`
-	StoreRef                 string               `json:"store_ref"`
-	WorkflowRootID           string               `json:"workflow_root_id"`
-	GateID                   string               `json:"gate_id"`
-	InputSHA256              string               `json:"input_sha256"`
-	ID                       string               `json:"id"`
-	PolicyVersion            string               `json:"policy_version"`
-	EvaluatorKeyID           string               `json:"evaluator_key_id"`
-	IssuedAt                 string               `json:"issued_at"`
-	ExpiresAt                string               `json:"expires_at"`
-	CandidateBeadID          string               `json:"candidate_bead_id"`
-	CandidateBeadRevision    int64                `json:"candidate_bead_revision"`
-	CandidateControlBeadID   string               `json:"candidate_control_bead_id"`
-	CandidateControlRevision int64                `json:"candidate_control_revision"`
-	CandidateOutputSHA256    string               `json:"candidate_output_sha256"`
-	Objective                string               `json:"objective"`
-	Current                  Bundle               `json:"current"`
-	Candidate                Bundle               `json:"candidate"`
-	EvalSuiteHash            string               `json:"eval_suite_hash"`
-	Baseline                 Metrics              `json:"baseline"`
-	CandidateMetrics         Metrics              `json:"candidate_metrics"`
-	Limits                   Limits               `json:"limits"`
-	AuthorityClass           string               `json:"authority_class"`
-	Attempt                  int                  `json:"attempt"`
-	MaxAttempts              int                  `json:"max_attempts"`
-	WorkAccounting           WorkAccounting       `json:"work_accounting"`
-	CandidateExecution       CandidateExecution   `json:"candidate_execution"`
-	Judges                   []JudgeAuthorization `json:"judges"`
-	Evidence                 []EvidenceReference  `json:"evidence"`
+	StoryBenchmarkRequired   bool                    `json:"story_benchmark_required,omitempty"`
+	Benchmark                *BenchmarkAuthorization `json:"story_benchmark,omitempty"`
+	SchemaVersion            string                  `json:"schema_version"`
+	ProtocolVersion          string                  `json:"protocol_version"`
+	CityID                   string                  `json:"city_id"`
+	StoreRef                 string                  `json:"store_ref"`
+	WorkflowRootID           string                  `json:"workflow_root_id"`
+	GateID                   string                  `json:"gate_id"`
+	InputSHA256              string                  `json:"input_sha256"`
+	ID                       string                  `json:"id"`
+	PolicyVersion            string                  `json:"policy_version"`
+	EvaluatorKeyID           string                  `json:"evaluator_key_id"`
+	IssuedAt                 string                  `json:"issued_at"`
+	ExpiresAt                string                  `json:"expires_at"`
+	CandidateBeadID          string                  `json:"candidate_bead_id"`
+	CandidateBeadRevision    int64                   `json:"candidate_bead_revision"`
+	CandidateControlBeadID   string                  `json:"candidate_control_bead_id"`
+	CandidateControlRevision int64                   `json:"candidate_control_revision"`
+	CandidateOutputSHA256    string                  `json:"candidate_output_sha256"`
+	Objective                string                  `json:"objective"`
+	Current                  Bundle                  `json:"current"`
+	Candidate                Bundle                  `json:"candidate"`
+	EvalSuiteHash            string                  `json:"eval_suite_hash"`
+	Baseline                 Metrics                 `json:"baseline"`
+	CandidateMetrics         Metrics                 `json:"candidate_metrics"`
+	Limits                   Limits                  `json:"limits"`
+	AuthorityClass           string                  `json:"authority_class"`
+	Attempt                  int                     `json:"attempt"`
+	MaxAttempts              int                     `json:"max_attempts"`
+	WorkAccounting           WorkAccounting          `json:"work_accounting"`
+	CandidateExecution       CandidateExecution      `json:"candidate_execution"`
+	Judges                   []JudgeAuthorization    `json:"judges"`
+	Evidence                 []EvidenceReference     `json:"evidence"`
 }
 
 // HumanApprovalManifest is signed by a separate human key. Approval is bound
@@ -385,12 +417,15 @@ func (r FileResolver) Resolve(ctx context.Context, request ResolveRequest) (Trus
 	if err := verifySignedPayload(manifestBytes, publicKey, evaluatorSignatureDomain, &manifest); err != nil {
 		return TrustedEvaluation{}, fmt.Errorf("verify trusted evaluation: %w", err)
 	}
-	if err := validateManifest(manifest, r.config.EvaluationKeyID, evaluationPath, request); err != nil {
+	story, err := validateManifest(manifest, r.config.EvaluationKeyID, evaluationPath, request)
+	if err != nil {
 		return TrustedEvaluation{}, err
 	}
 
 	evaluationDigest := sha256.Sum256(manifestBytes)
 	input := manifest.input(request)
+	input.StoryBenchmarkRequired = manifest.StoryBenchmarkRequired || request.StoryBenchmarkRequired || story != nil
+	input.StoryBenchmark = story
 	approvalID, approvalVerified, err := r.resolveApproval(manifest, request, evaluationDigest, publicKey)
 	if err != nil {
 		return TrustedEvaluation{}, err
@@ -480,69 +515,66 @@ func (manifest TrustedEvaluationManifest) input(request ResolveRequest) Input {
 	}
 }
 
-func validateManifest(manifest TrustedEvaluationManifest, expectedKeyID string, manifestPath string, request ResolveRequest) error {
+func validateManifest(manifest TrustedEvaluationManifest, expectedKeyID string, manifestPath string, request ResolveRequest) (*storybench.Result, error) {
 	if manifest.SchemaVersion != TrustedEvaluationSchemaV1 || manifest.PolicyVersion != PolicyVersionV1 {
-		return errors.New("trusted evaluation schema or policy version is unsupported")
+		return nil, errors.New("trusted evaluation schema or policy version is unsupported")
 	}
 	if !equalEvaluationContext(request.Context, EvaluationContext{
 		ProtocolVersion: manifest.ProtocolVersion, CityID: manifest.CityID, StoreRef: manifest.StoreRef,
 		WorkflowRootID: manifest.WorkflowRootID, GateID: manifest.GateID, InputSHA256: manifest.InputSHA256,
 	}) {
-		return errors.New("trusted evaluation context does not match this protocol, city, store, workflow, gate, and input")
+		return nil, errors.New("trusted evaluation context does not match this protocol, city, store, workflow, gate, and input")
 	}
 	if strings.TrimSpace(manifest.ID) == "" || manifest.EvaluatorKeyID != expectedKeyID {
-		return errors.New("trusted evaluation identity does not match controller configuration")
+		return nil, errors.New("trusted evaluation identity does not match controller configuration")
 	}
 	if err := validateFreshness(manifest.IssuedAt, manifest.ExpiresAt); err != nil {
-		return fmt.Errorf("trusted evaluation freshness: %w", err)
+		return nil, fmt.Errorf("trusted evaluation freshness: %w", err)
 	}
 	if strings.TrimSpace(manifest.Objective) == "" || strings.TrimSpace(manifest.AuthorityClass) == "" ||
 		strings.TrimSpace(manifest.CandidateBeadID) == "" || manifest.CandidateBeadID != request.Candidate.BeadID ||
 		manifest.CandidateBeadRevision != request.Candidate.BeadRevision ||
 		strings.TrimSpace(manifest.CandidateControlBeadID) == "" || manifest.CandidateControlBeadID != request.Candidate.ControlBeadID ||
 		manifest.CandidateControlRevision != request.Candidate.ControlRevision {
-		return errors.New("trusted evaluation does not identify the candidate bead and objective")
+		return nil, errors.New("trusted evaluation does not identify the candidate bead and objective")
 	}
 	if request.Candidate.Status != "closed" || request.Candidate.Outcome != "pass" {
-		return errors.New("candidate evidence bead is not closed with a passing outcome")
+		return nil, errors.New("candidate evidence bead is not closed with a passing outcome")
 	}
 	if request.Candidate.ActorID != manifest.CandidateExecution.ActorID || request.Candidate.SessionID != manifest.CandidateExecution.SessionID ||
 		request.Candidate.ActorID == "" || request.Candidate.SessionID == "" {
-		return errors.New("candidate execution identity does not match trusted evaluation")
+		return nil, errors.New("candidate execution identity does not match trusted evaluation")
 	}
 	if request.Candidate.Attempt < 1 || request.Candidate.MaxAttempts < 1 ||
 		manifest.Attempt != request.Candidate.Attempt || manifest.MaxAttempts != request.Candidate.MaxAttempts {
-		return errors.New("trusted evaluation attempt budget does not match the controller retry state")
+		return nil, errors.New("trusted evaluation attempt budget does not match the controller retry state")
 	}
 	if !candidatePermissionsValid(manifest.CandidateExecution.Permissions) {
-		return errors.New("candidate execution has access to evaluator policy or authoritative results")
+		return nil, errors.New("candidate execution has access to evaluator policy or authoritative results")
 	}
 	if !validBundle(manifest.Current) || !validBundle(manifest.Candidate) ||
 		manifest.Candidate.Parent != manifest.Current.ID || manifest.EvalSuiteHash == "" ||
 		manifest.Current.EvalSuiteHash != manifest.EvalSuiteHash || manifest.Candidate.EvalSuiteHash != manifest.EvalSuiteHash ||
 		manifest.Current.ID == manifest.Candidate.ID || !bundleRevisionChanged(manifest.Current, manifest.Candidate) {
-		return errors.New("trusted evaluation bundle lineage or suite identity is invalid")
+		return nil, errors.New("trusted evaluation bundle lineage or suite identity is invalid")
 	}
 	if !equalBundle(request.Candidate.Proposal.Candidate, manifest.Candidate) {
-		return errors.New("candidate revision does not match the trusted evaluation")
+		return nil, errors.New("candidate revision does not match the trusted evaluation")
 	}
 	if digestText(request.Candidate.RawOutput) != manifest.CandidateOutputSHA256 {
-		return errors.New("candidate output digest does not match trusted evaluation")
+		return nil, errors.New("candidate output digest does not match trusted evaluation")
 	}
 	if !validMetrics(manifest.Baseline) || !validMetrics(manifest.CandidateMetrics) || !validLimits(manifest.Limits) ||
 		!validWorkAccounting(manifest.WorkAccounting) {
-		return errors.New("trusted evaluation is missing valid measurements, limits, or fixed work accounting")
+		return nil, errors.New("trusted evaluation is missing valid measurements, limits, or fixed work accounting")
 	}
 	if len(manifest.Judges) < 2 || len(request.Judges) != len(manifest.Judges) {
-		return errors.New("trusted evaluation requires at least two bound judge executions")
+		return nil, errors.New("trusted evaluation requires at least two bound judge executions")
 	}
 	if err := validateJudgeBindings(manifest, request); err != nil {
-		return err
+		return nil, err
 	}
-	if err := validateEvidenceReferences(manifest.Evidence, manifestPath, manifest, request); err != nil {
-		return err
-	}
-	return nil
+	return validateEvidenceReferences(manifest.Evidence, manifestPath, manifest, request)
 }
 
 func bundleRevisionChanged(current, candidate Bundle) bool {
@@ -614,7 +646,7 @@ func judgePermissionsValid(p ExecutionPermissions) bool {
 		!p.HeldOutDataRead && !p.ControllerConfigWrite && !p.SigningKeyRead && !p.AuthoritativeWrite && p.OwnOutputWrite
 }
 
-func validateEvidenceReferences(refs []EvidenceReference, manifestPath string, manifest TrustedEvaluationManifest, request ResolveRequest) error {
+func validateEvidenceReferences(refs []EvidenceReference, manifestPath string, manifest TrustedEvaluationManifest, request ResolveRequest) (*storybench.Result, error) {
 	required := map[string]string{
 		"baseline-artifact":  manifest.Current.ID,
 		"candidate-artifact": manifest.Candidate.ID,
@@ -624,27 +656,37 @@ func validateEvidenceReferences(refs []EvidenceReference, manifestPath string, m
 	for _, judge := range manifest.Judges {
 		required["judge-lane:"+judge.LaneID] = manifest.Candidate.ID
 	}
+	storyRequired := manifest.StoryBenchmarkRequired || request.StoryBenchmarkRequired || manifest.Benchmark != nil || request.Benchmark != nil
+	for _, ref := range refs {
+		if ref.Kind == "story-suite" || ref.Kind == "story-traces" {
+			storyRequired = true
+		}
+	}
+	if storyRequired {
+		required["story-suite"] = ""
+		required["story-traces"] = manifest.Candidate.ID
+	}
 	baseDir := filepath.Dir(manifestPath)
 	contents := make(map[string][]byte, len(refs))
 	for _, ref := range refs {
 		if _, ok := required[ref.Kind]; !ok {
-			return fmt.Errorf("trusted evaluation contains unknown evidence kind %q", ref.Kind)
+			return nil, fmt.Errorf("trusted evaluation contains unknown evidence kind %q", ref.Kind)
 		}
 		if required[ref.Kind] != ref.BundleID {
-			return fmt.Errorf("trusted evaluation evidence %q is bound to the wrong artifact", ref.Kind)
+			return nil, fmt.Errorf("trusted evaluation evidence %q is bound to the wrong artifact", ref.Kind)
 		}
 		if ref.EvalSuiteHash != manifest.EvalSuiteHash || !validSHA256(ref.SHA256) || strings.TrimSpace(ref.Path) == "" {
-			return fmt.Errorf("trusted evaluation evidence %q is missing a digest or suite binding", ref.Kind)
+			return nil, fmt.Errorf("trusted evaluation evidence %q is missing a digest or suite binding", ref.Kind)
 		}
 		data, err := readEvidenceFile(baseDir, ref.Path)
 		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				return fmt.Errorf("%w: signed evidence artifact %q has not arrived", ErrTrustedEvaluationPending, ref.Kind)
+			if errors.Is(err, os.ErrNotExist) && ref.Kind != "story-suite" && ref.Kind != "story-traces" {
+				return nil, fmt.Errorf("%w: signed evidence artifact %q has not arrived", ErrTrustedEvaluationPending, ref.Kind)
 			}
-			return fmt.Errorf("trusted evaluation evidence %q: %w", ref.Kind, err)
+			return nil, fmt.Errorf("trusted evaluation evidence %q: %w", ref.Kind, err)
 		}
 		if digestText(string(data)) != strings.ToLower(ref.SHA256) {
-			return fmt.Errorf("trusted evaluation evidence %q: file digest does not match the signed reference", ref.Kind)
+			return nil, fmt.Errorf("trusted evaluation evidence %q: file digest does not match the signed reference", ref.Kind)
 		}
 		contents[ref.Kind] = data
 		delete(required, ref.Kind)
@@ -654,7 +696,7 @@ func validateEvidenceReferences(refs []EvidenceReference, manifestPath string, m
 		for kind := range required {
 			missing = append(missing, kind)
 		}
-		return fmt.Errorf("trusted evaluation is missing evidence references: %s", strings.Join(missing, ", "))
+		return nil, fmt.Errorf("trusted evaluation is missing evidence references: %s", strings.Join(missing, ", "))
 	}
 	for _, item := range []struct {
 		kind   string
@@ -665,30 +707,30 @@ func validateEvidenceReferences(refs []EvidenceReference, manifestPath string, m
 	} {
 		var evidence ArtifactIdentityEvidence
 		if err := decodeStrictJSON(contents[item.kind], &evidence); err != nil {
-			return fmt.Errorf("trusted evaluation evidence %q is malformed: %w", item.kind, err)
+			return nil, fmt.Errorf("trusted evaluation evidence %q is malformed: %w", item.kind, err)
 		}
 		if evidence.SchemaVersion != "gc.rsi.artifact-identity.v1" || evidence.EvaluationID != manifest.ID ||
 			!equalBundle(evidence.Bundle, item.bundle) || evidence.EvalSuiteHash != manifest.EvalSuiteHash {
-			return fmt.Errorf("trusted evaluation evidence %q does not identify the bound artifact", item.kind)
+			return nil, fmt.Errorf("trusted evaluation evidence %q does not identify the bound artifact", item.kind)
 		}
 	}
 	var acceptance AcceptanceLedgerEvidence
 	if err := decodeStrictJSON(contents["acceptance-ledger"], &acceptance); err != nil {
-		return fmt.Errorf("trusted acceptance ledger is malformed: %w", err)
+		return nil, fmt.Errorf("trusted acceptance ledger is malformed: %w", err)
 	}
 	if acceptance.SchemaVersion != "gc.rsi.acceptance-ledger.v1" || acceptance.EvaluationID != manifest.ID ||
 		acceptance.EvalSuiteHash != manifest.EvalSuiteHash ||
 		!equalStringSet(acceptance.AcceptanceUnitIDs, manifest.WorkAccounting.AcceptanceUnitIDs) ||
 		!equalStringSet(acceptance.BaselineUsefulUnitIDs, manifest.WorkAccounting.BaselineUsefulUnitIDs) ||
 		!equalStringSet(acceptance.CandidateUsefulUnitIDs, manifest.WorkAccounting.CandidateUsefulUnitIDs) {
-		return errors.New("trusted acceptance ledger does not match the frozen acceptance set and per-unit results")
+		return nil, errors.New("trusted acceptance ledger does not match the frozen acceptance set and per-unit results")
 	}
 	var workerTime WorkerTimeLedgerEvidence
 	if err := decodeStrictJSON(contents["worker-time-ledger"], &workerTime); err != nil {
-		return fmt.Errorf("trusted worker-time ledger is malformed: %w", err)
+		return nil, fmt.Errorf("trusted worker-time ledger is malformed: %w", err)
 	}
 	if err := validateWorkerTimeLedger(workerTime, manifest, request); err != nil {
-		return err
+		return nil, err
 	}
 	for _, judge := range manifest.Judges {
 		var record *JudgeRecord
@@ -699,10 +741,13 @@ func validateEvidenceReferences(refs []EvidenceReference, manifestPath string, m
 			}
 		}
 		if record == nil || !bytes.Equal(contents["judge-lane:"+judge.LaneID], []byte(record.RawOutput)) {
-			return fmt.Errorf("trusted judge evidence for lane %q differs from the assigned judge output", judge.LaneID)
+			return nil, fmt.Errorf("trusted judge evidence for lane %q differs from the assigned judge output", judge.LaneID)
 		}
 	}
-	return nil
+	if storyRequired {
+		return validateStoryEvidence(contents, manifest, request)
+	}
+	return nil, nil
 }
 
 func validateWorkerTimeLedger(ledger WorkerTimeLedgerEvidence, manifest TrustedEvaluationManifest, request ResolveRequest) error {

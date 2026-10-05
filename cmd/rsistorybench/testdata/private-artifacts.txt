@@ -1,0 +1,6 @@
+# Replacing existing permissive destinations must publish private artifacts.
+exitcode 0 --suite suite.json --baseline baseline.json --candidate candidate.json --improver worker --out result.json --evidence-out evidence.json
+grep '"eligible": true' result.json
+grep '"bundle_id": "accepted"' evidence.json
+grep '"bundle_id": "candidate"' evidence.json
+[!windows] private result.json evidence.json

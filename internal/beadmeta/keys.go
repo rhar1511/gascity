@@ -217,6 +217,7 @@ const (
 	PRActionTargetMetadataKey           = "gc.pr_action.target_key"
 	PerDispatchModelMetadataKey         = "gc.per_dispatch_model"
 	RalphStepIDMetadataKey              = "gc.ralph_step_id"
+	RSIStoryRequiredMetadataKey         = "gc.rsi_story_benchmark_required"
 	RSIRoleMetadataKey                  = "gc.rsi_role"
 	RSIAuthorityClassMetadataKey        = "gc.rsi_authority_class"
 	RSICandidateInputMetadataKey        = "gc.rsi_candidate_input"
@@ -651,6 +652,7 @@ var KnownMetadataKeys = []string{
 	PRActionTargetMetadataKey,
 	PerDispatchModelMetadataKey,
 	RalphStepIDMetadataKey,
+	RSIStoryRequiredMetadataKey,
 	RSIRoleMetadataKey,
 	RSIAuthorityClassMetadataKey,
 	RSICandidateInputMetadataKey,

@@ -1,0 +1,16 @@
+# Eligible evidence and stdout result.
+exitcode 0 --suite suite.json --baseline baseline.json --candidate candidate.json --improver worker
+stdout '"eligible": true'
+
+# Valid evidence with a critical veto.
+exitcode 1 --suite suite.json --baseline baseline.json --candidate veto.json --improver worker
+stdout 'critical_case_failed'
+
+# Invalid invocation, malformed traces, and unavailable output destination.
+exitcode 2
+stderr 'required:'
+exitcode 2 --unknown
+exitcode 2 --suite suite.json --baseline baseline.json --candidate malformed.json --improver worker
+stderr 'candidate:'
+exitcode 2 --suite suite.json --baseline baseline.json --candidate candidate.json --improver worker --out missing/result.json
+stderr 'missing'

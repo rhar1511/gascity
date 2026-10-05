@@ -570,6 +570,9 @@ func rsiRequestFromStore(t *testing.T, store beads.Store, gate beads.Bead) rsipo
 				maxAttempts, _ = strconv.Atoi(worker.Metadata[beadmeta.MaxAttemptsMetadataKey])
 			}
 			request.Candidate = rsipolicy.CandidateRecord{BeadID: worker.ID, BeadRevision: worker.Revision, ControlBeadID: logical.ID, ControlRevision: logical.Revision, Attempt: beadmeta.RetryAttemptNumber(worker.Metadata), MaxAttempts: maxAttempts, ActorID: mustRSIBinding(t, worker).ActorID, SessionID: mustRSIBinding(t, worker).SessionID, Status: worker.Status, Outcome: worker.Metadata[beadmeta.OutcomeMetadataKey], RawOutput: raw, Proposal: proposal}
+		case beadmeta.RSIRoleBenchmark:
+			binding := mustRSIBinding(t, worker)
+			request.Benchmark = &rsipolicy.BenchmarkRecord{BeadID: worker.ID, BeadRevision: worker.Revision, ControlBeadID: logical.ID, ControlRevision: logical.Revision, ActorID: binding.ActorID, SessionID: binding.SessionID, Status: worker.Status, Outcome: worker.Metadata[beadmeta.OutcomeMetadataKey], RawOutput: raw}
 		case beadmeta.RSIRoleJudge:
 			var lane reviewquorum.LaneOutput
 			if err := json.Unmarshal([]byte(raw), &lane); err != nil {
@@ -579,6 +582,7 @@ func rsiRequestFromStore(t *testing.T, store beads.Store, gate beads.Bead) rsipo
 			request.Judges = append(request.Judges, rsipolicy.JudgeRecord{BeadID: worker.ID, BeadRevision: worker.Revision, ControlBeadID: logical.ID, ControlRevision: logical.Revision, ActorID: binding.ActorID, SessionID: binding.SessionID, Status: worker.Status, Outcome: worker.Metadata[beadmeta.OutcomeMetadataKey], RawOutput: raw, Lane: lane})
 		}
 	}
+	request.StoryBenchmarkRequired = request.Benchmark != nil || gate.Metadata[beadmeta.RSIStoryRequiredMetadataKey] == "true"
 	request.Context.InputSHA256 = rsipolicy.ResolveRequestInputSHA256(request)
 	return request
 }

@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/reviewquorum"
+	"github.com/gastownhall/gascity/internal/storybench"
 )
 
 // Stable reason codes returned by Evaluate.
@@ -38,6 +39,12 @@ const (
 	ReasonWorkAccountingInvalid   = "work_accounting_invalid"
 	ReasonUnknownAuthorityClass   = "unknown_authority_class"
 	ReasonHumanApprovalRequired   = "human_approval_required"
+)
+
+// Story benchmark vetoes supplement the trusted measurements and judge quorum.
+const (
+	ReasonStoryBenchmarkMissing = "story_benchmark_missing"
+	ReasonStoryBenchmarkFailed  = "story_benchmark_failed"
 )
 
 // Bundle is an immutable revision bundle. Each field identifies the exact
@@ -210,18 +217,20 @@ func (review Review) FinalizedSummary() reviewquorum.Summary {
 
 // Input is one bounded improvement attempt.
 type Input struct {
-	Objective             string         `json:"objective"`
-	Current               Bundle         `json:"current"`
-	Candidate             Bundle         `json:"candidate"`
-	Baseline              Metrics        `json:"baseline"`
-	CandidateMetrics      Metrics        `json:"candidate_metrics"`
-	Limits                Limits         `json:"limits"`
-	WorkAccounting        WorkAccounting `json:"work_accounting"`
-	Review                Review         `json:"review"`
-	AuthorityClass        string         `json:"authority_class"`
-	Attempts              int            `json:"attempts"`
-	MaxAttempts           int            `json:"max_attempts"`
-	HumanApprovalVerified bool           `json:"human_approval_verified"`
+	StoryBenchmarkRequired bool               `json:"story_benchmark_required,omitempty"`
+	StoryBenchmark         *storybench.Result `json:"story_benchmark,omitempty"`
+	Objective              string             `json:"objective"`
+	Current                Bundle             `json:"current"`
+	Candidate              Bundle             `json:"candidate"`
+	Baseline               Metrics            `json:"baseline"`
+	CandidateMetrics       Metrics            `json:"candidate_metrics"`
+	Limits                 Limits             `json:"limits"`
+	WorkAccounting         WorkAccounting     `json:"work_accounting"`
+	Review                 Review             `json:"review"`
+	AuthorityClass         string             `json:"authority_class"`
+	Attempts               int                `json:"attempts"`
+	MaxAttempts            int                `json:"max_attempts"`
+	HumanApprovalVerified  bool               `json:"human_approval_verified"`
 }
 
 // Decision is the auditable result of Evaluate. Reasons are stable machine
@@ -300,6 +309,13 @@ func Evaluate(in Input) Decision {
 		add(ReasonWorkAccountingInvalid)
 	}
 
+	if in.StoryBenchmarkRequired || in.StoryBenchmark != nil {
+		if in.StoryBenchmark == nil {
+			add(ReasonStoryBenchmarkMissing)
+		} else if !validStoryBenchmark(*in.StoryBenchmark, in.Current, in.Candidate, in.Review.Improver) {
+			add(ReasonStoryBenchmarkFailed)
+		}
+	}
 	summary := in.Review.FinalizedSummary()
 	judges := normalizedJudges(in.Review.Judges)
 	if len(judges) < 2 || len(summary.Lanes) < 2 {
@@ -346,6 +362,38 @@ func Evaluate(in Input) Decision {
 	decision.Reason = reasons[0]
 	decision.Reasons = reasons
 	return decision
+}
+
+func validStoryBenchmark(result storybench.Result, current, candidate Bundle, improver string) bool {
+	if !result.Eligible || strings.TrimSpace(improver) == "" || strings.TrimSpace(result.SuiteID) == "" || result.SuiteHash != current.EvalSuiteHash ||
+		result.SuiteHash != candidate.EvalSuiteHash ||
+		result.BaselineBundleID != current.ID || result.CandidateBundleID != candidate.ID ||
+		result.CriticalFailures != 0 || result.Regressions != 0 || len(result.Cases) == 0 ||
+		len(result.Reasons) != 0 || strings.TrimSpace(result.BaselineCapturedBy) == "" ||
+		strings.TrimSpace(result.CandidateCapturedBy) == "" ||
+		strings.TrimSpace(result.BaselineCapturedBy) == strings.TrimSpace(improver) ||
+		strings.TrimSpace(result.CandidateCapturedBy) == strings.TrimSpace(improver) {
+		return false
+	}
+	baselinePassed, candidatePassed := 0, 0
+	seen := make(map[string]bool, len(result.Cases))
+	for _, c := range result.Cases {
+		if strings.TrimSpace(c.CaseID) == "" || strings.TrimSpace(c.StoryID) == "" || seen[c.CaseID] ||
+			(c.CandidatePassed && len(c.CandidateViolations) != 0) ||
+			(!c.CandidatePassed && len(c.CandidateViolations) == 0) ||
+			(c.Critical && !c.CandidatePassed) || (c.BaselinePassed && !c.CandidatePassed) {
+			return false
+		}
+		seen[c.CaseID] = true
+		if c.BaselinePassed {
+			baselinePassed++
+		}
+		if c.CandidatePassed {
+			candidatePassed++
+		}
+	}
+	return result.BaselinePassed == baselinePassed && result.CandidatePassed == candidatePassed &&
+		candidatePassed > baselinePassed
 }
 
 func validBundle(bundle Bundle) bool {
