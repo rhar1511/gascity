@@ -309,10 +309,12 @@ fetch_ready_queue() {
 }
 
 fetch_in_progress_queue() {
-    if [ -z "$ASSIGNEE" ]; then
+    if [ -z "$BEADS_ACTOR" ]; then
         return 1
     fi
-    timeout 10 bd list --assignee "$ASSIGNEE" --status=in_progress --json 2>/dev/null
+    # Claims belong to the canonical actor (alias or session bead ID), not
+    # necessarily the provider-facing runtime session name.
+    timeout 10 bd list --assignee "$BEADS_ACTOR" --status=in_progress --json 2>/dev/null
 }
 
 select_candidate_from_queue() {
