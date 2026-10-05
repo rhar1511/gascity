@@ -12,6 +12,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/runtimetest"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // fakeSSHScript stands in for the ssh(1) client. sshArgs always shell-quotes
@@ -92,7 +93,9 @@ func buildSSHConformanceFixture(t *testing.T) Endpoint {
 		t.Fatalf("writing fake ssh fixture: %v", err)
 	}
 	t.Setenv("PATH", fixtureDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("TMUX_TMPDIR", t.TempDir())
+	// macOS's default test directory plus tmux's socket suffix can exceed
+	// sockaddr_un.sun_path even though the temporary directory itself is valid.
+	t.Setenv("TMUX_TMPDIR", testutil.ShortTempDir(t, "gcssh-"))
 
 	prevTMUX, hadTMUX := os.LookupEnv("TMUX")
 	if err := os.Unsetenv("TMUX"); err != nil {
