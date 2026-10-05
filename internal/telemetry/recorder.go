@@ -264,11 +264,7 @@ func sanitizeBDArgs(args []string) []string {
 }
 
 func logStringSlice(key string, values []string) attribute.KeyValue {
-	otelValues := make([]attribute.Value, 0, len(values))
-	for _, value := range values {
-		otelValues = append(otelValues, attribute.StringValue(value))
-	}
-	return attribute.Slice(key, otelValues...)
+	return attribute.StringSlice(key, values)
 }
 
 // RecordAgentStart records an agent session start (metrics + log event).

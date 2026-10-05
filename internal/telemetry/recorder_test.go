@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
+
 	otellog "go.opentelemetry.io/otel/log"
 	otellogglobal "go.opentelemetry.io/otel/log/global"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
@@ -372,10 +373,5 @@ func recordAttrs(rec sdklog.Record) map[string]attribute.Value {
 }
 
 func logValueStringSlice(value attribute.Value) []string {
-	values := value.AsSlice()
-	out := make([]string, 0, len(values))
-	for _, item := range values {
-		out = append(out, item.AsString())
-	}
-	return out
+	return value.AsStringSlice()
 }

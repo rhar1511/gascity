@@ -3,419 +3,194 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
-	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/githubmonitor"
+	"github.com/gastownhall/gascity/internal/api"
 )
 
-type fakeGitHubPRLister struct {
-	prs []githubmonitor.PullRequest
-	err error
+func centralPRTestQueue() api.PRActionQueue {
+	now := time.Now().UTC()
+	return api.PRActionQueue{
+		Availability: api.PRActionAvailabilityReady, PolicyState: api.PRActionSourceReady,
+		PolicyVersion: "policy-v1", ObservedAt: now, FreshUntil: now.Add(time.Minute),
+		Sources: []api.PRActionSource{{Monitor: "central", Owner: "example", Repo: "project", Rig: "project", State: api.PRActionSourceReady}},
+		Items:   []api.PRActionQueueItem{{Monitor: "central", Owner: "example", Repo: "project", PullRequest: 7, Title: "Repair", HeadSHA: strings.Repeat("a", 40), BaseSHA: strings.Repeat("b", 40), PolicyVersion: "policy-v1", ObservedAt: now, FreshUntil: now.Add(time.Minute), Actions: []api.PRActionOption{{Action: api.PRActionPrepare, Available: true, Reason: "server-approved repair"}}}},
+	}
 }
 
-func (f fakeGitHubPRLister) ListOpenPullRequests(context.Context, string, string) ([]githubmonitor.PullRequest, error) {
-	return f.prs, f.err
+type fakeGitHubPRActionClient struct {
+	queue          api.PRActionQueue
+	queueErr       error
+	queueCalls     int
+	actionRequests []api.PRActionRequest
+	execute        func(api.PRActionRequest) (api.PRActionResult, error)
 }
 
-// stubGitHubPRLister is a pointer-backed lister whose PR set can be mutated
-// between backfill runs to simulate evolving GitHub state.
-type stubGitHubPRLister struct {
-	prs []githubmonitor.PullRequest
+func (c *fakeGitHubPRActionClient) GetPRActionQueue(context.Context) (api.PRActionQueue, error) {
+	c.queueCalls++
+	return c.queue, c.queueErr
 }
 
-func (s *stubGitHubPRLister) ListOpenPullRequests(context.Context, string, string) ([]githubmonitor.PullRequest, error) {
-	return s.prs, nil
+func (c *fakeGitHubPRActionClient) ExecutePRAction(_ context.Context, request api.PRActionRequest) (api.PRActionResult, error) {
+	c.actionRequests = append(c.actionRequests, request)
+	if c.execute != nil {
+		return c.execute(request)
+	}
+	return centralPRActionReceipt(request), nil
 }
 
-// stubGitHubRepairWorkflowAttach replaces the workflow-attach seam with a
-// recorder so repair-bead tests stay hermetic (no on-disk formulas). The
-// returned slice pointer accumulates the workflow name attached per create.
-func stubGitHubRepairWorkflowAttach(t *testing.T) *[]string {
+func useCentralPRTestClient(t *testing.T, client githubPRActionAPI) string {
 	t.Helper()
-	old := attachGitHubPRRepairWorkflow
-	calls := []string{}
-	attachGitHubPRRepairWorkflow = func(_ beads.Store, _ beads.GraphStore, _ *config.City, _ config.Rig, monitor config.GitHubPRMonitor, _ beads.Bead, _ githubmonitor.Result) error {
-		calls = append(calls, monitor.RepairWorkflowOrDefault())
-		return nil
-	}
-	t.Cleanup(func() { attachGitHubPRRepairWorkflow = old })
-	return &calls
+	return useCentralPRTestClientAt(t, writeBeadsTestCity(t), client)
 }
 
-func TestGitHubPRBackfillCommandReportsActionableResults(t *testing.T) {
-	cityPath := writeGitHubMonitorTestCity(t)
-	oldToken := resolveGitHubTokenForBackfill
-	oldClient := newGitHubPRBackfillClient
-	resolveGitHubTokenForBackfill = func(context.Context) (string, error) { return "token", nil }
-	newGitHubPRBackfillClient = func(token string) githubPRLister {
-		if token != "token" {
-			t.Fatalf("token = %q, want test token", token)
-		}
-		return fakeGitHubPRLister{prs: []githubmonitor.PullRequest{
-			{
-				Number:           2560,
-				Title:            "Deploy",
-				URL:              "https://github.com/partcleda/partcl/pull/2560",
-				BaseRefName:      "main",
-				HeadRefName:      "fix",
-				HeadSHA:          "abc123",
-				MergeStateStatus: "BLOCKED",
-				Checks:           []githubmonitor.Check{{Name: "deploy", Status: "COMPLETED", Conclusion: "FAILURE"}},
-			},
-		}}
-	}
-	t.Cleanup(func() {
-		resolveGitHubTokenForBackfill = oldToken
-		newGitHubPRBackfillClient = oldClient
-	})
-
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"--city", cityPath, "github", "pr", "backfill", "partcl-main", "--json"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("run code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
-	}
-	var payload struct {
-		MonitorCount    int `json:"monitor_count"`
-		ResultCount     int `json:"result_count"`
-		ActionableCount int `json:"actionable_count"`
-		Results         []githubmonitor.Result
-		OK              bool `json:"ok"`
-	}
-	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
-		t.Fatalf("decode stdout %q: %v", stdout.String(), err)
-	}
-	if !payload.OK {
-		t.Fatal("ok = false, want true")
-	}
-	if payload.MonitorCount != 1 || payload.ResultCount != 1 || payload.ActionableCount != 1 {
-		t.Fatalf("counts = monitors %d results %d actionable %d, want 1/1/1", payload.MonitorCount, payload.ResultCount, payload.ActionableCount)
-	}
-	if got := payload.Results[0]; got.Number != 2560 || got.State != githubmonitor.StateFailed || got.RepairRoute != "partcl/polecat" {
-		t.Fatalf("result = %#v, want failing PR routed to partcl/polecat", got)
-	}
-}
-
-func TestGitHubPRBackfillCommandCreatesDedupedRepairBeads(t *testing.T) {
-	cityPath := writeGitHubMonitorTestCity(t)
-	store := beads.NewMemStore()
-	oldToken := resolveGitHubTokenForBackfill
-	oldClient := newGitHubPRBackfillClient
-	oldStore := openGitHubPRRepairStore
-	resolveGitHubTokenForBackfill = func(context.Context) (string, error) { return "token", nil }
-	newGitHubPRBackfillClient = func(string) githubPRLister {
-		return fakeGitHubPRLister{prs: []githubmonitor.PullRequest{
-			{
-				Number:           2560,
-				Title:            "Deploy",
-				URL:              "https://github.com/partcleda/partcl/pull/2560",
-				BaseRefName:      "main",
-				HeadRefName:      "fix",
-				HeadSHA:          "abc123",
-				MergeStateStatus: "BLOCKED",
-				Checks:           []githubmonitor.Check{{Name: "deploy", Status: "COMPLETED", Conclusion: "FAILURE"}},
-			},
-		}}
-	}
-	openGitHubPRRepairStore = func(string, string) (beads.Store, error) {
-		return store, nil
-	}
-	attachCalls := stubGitHubRepairWorkflowAttach(t)
-	t.Cleanup(func() {
-		resolveGitHubTokenForBackfill = oldToken
-		newGitHubPRBackfillClient = oldClient
-		openGitHubPRRepairStore = oldStore
-	})
-
-	for i := 0; i < 2; i++ {
-		var stdout, stderr bytes.Buffer
-		code := run([]string{"--city", cityPath, "github", "pr", "backfill", "partcl-main", "--create-repair-beads", "--json"}, &stdout, &stderr)
-		if code != 0 {
-			t.Fatalf("run %d code = %d, stdout = %q, stderr = %q", i, code, stdout.String(), stderr.String())
-		}
-	}
-
-	created, err := store.ListByMetadata(map[string]string{
-		"source":          "github-pr-monitor",
-		"github.owner":    "partcleda",
-		"github.repo":     "partcl",
-		"github.pr":       "2560",
-		"github.head_sha": "abc123",
-	}, 0)
-	if err != nil {
-		t.Fatalf("ListByMetadata: %v", err)
-	}
-	if len(created) != 1 {
-		t.Fatalf("created repair beads = %#v, want one deduped bead", created)
-	}
-	if got := created[0].Metadata["gc.routed_to"]; got != "partcl/polecat" {
-		t.Fatalf("gc.routed_to = %q, want partcl/polecat", got)
-	}
-	if !strings.Contains(created[0].Description, "deploy") {
-		t.Fatalf("description = %q, want failed check detail", created[0].Description)
-	}
-	// The workflow attaches exactly once — on creation, not on the second
-	// (update) pass over the same PR/head.
-	if len(*attachCalls) != 1 {
-		t.Fatalf("workflow attach calls = %v, want exactly one (create only)", *attachCalls)
-	}
-	if (*attachCalls)[0] != "mol-polecat-work" {
-		t.Fatalf("attached workflow = %q, want mol-polecat-work default", (*attachCalls)[0])
-	}
-}
-
-func TestGitHubPRBackfillCoalescesAcrossFailureKindTransition(t *testing.T) {
-	cityPath := writeGitHubMonitorTestCity(t)
-	store := beads.NewMemStore()
-	lister := &stubGitHubPRLister{}
-	oldToken := resolveGitHubTokenForBackfill
-	oldClient := newGitHubPRBackfillClient
-	oldStore := openGitHubPRRepairStore
-	resolveGitHubTokenForBackfill = func(context.Context) (string, error) { return "token", nil }
-	newGitHubPRBackfillClient = func(string) githubPRLister { return lister }
-	openGitHubPRRepairStore = func(string, string) (beads.Store, error) { return store, nil }
-	stubGitHubRepairWorkflowAttach(t)
-	t.Cleanup(func() {
-		resolveGitHubTokenForBackfill = oldToken
-		newGitHubPRBackfillClient = oldClient
-		openGitHubPRRepairStore = oldStore
-	})
-
-	// Pass 1: GitHub reports the PR as BLOCKED (failure_kind=blocked).
-	lister.prs = []githubmonitor.PullRequest{{
-		Number: 2601, Title: "Feature", URL: "https://github.com/partcleda/partcl/pull/2601",
-		BaseRefName: "main", HeadRefName: "feat", HeadSHA: "deadbeef", MergeStateStatus: "BLOCKED",
-	}}
-	runGitHubBackfillOrFatal(t, cityPath)
-
-	// Pass 2: same head SHA, but now a required check has failed
-	// (failure_kind=checks_failed). This must update the existing bead, not
-	// create a second one.
-	lister.prs = []githubmonitor.PullRequest{{
-		Number: 2601, Title: "Feature", URL: "https://github.com/partcleda/partcl/pull/2601",
-		BaseRefName: "main", HeadRefName: "feat", HeadSHA: "deadbeef", MergeStateStatus: "BLOCKED",
-		Checks: []githubmonitor.Check{{Name: "build", Status: "COMPLETED", Conclusion: "FAILURE"}},
-	}}
-	runGitHubBackfillOrFatal(t, cityPath)
-
-	beadsForHead, err := store.ListByMetadata(map[string]string{
-		"source":          "github-pr-monitor",
-		"github.owner":    "partcleda",
-		"github.repo":     "partcl",
-		"github.pr":       "2601",
-		"github.head_sha": "deadbeef",
-	}, 0)
-	if err != nil {
-		t.Fatalf("ListByMetadata: %v", err)
-	}
-	if len(beadsForHead) != 1 {
-		t.Fatalf("repair beads for PR/head = %d, want one coalesced bead across failure-kind transition", len(beadsForHead))
-	}
-	if got := beadsForHead[0].Metadata["github.failure_kind"]; got != githubmonitor.FailureKindChecksFailed {
-		t.Fatalf("failure_kind = %q, want refreshed to %q", got, githubmonitor.FailureKindChecksFailed)
-	}
-	if got := beadsForHead[0].Metadata["github.failed_checks"]; !strings.Contains(got, "build") {
-		t.Fatalf("failed_checks = %q, want refreshed build failure", got)
-	}
-}
-
-func TestGitHubPRBackfillCreatesSeparateBeadForNewHeadSHA(t *testing.T) {
-	cityPath := writeGitHubMonitorTestCity(t)
-	store := beads.NewMemStore()
-	lister := &stubGitHubPRLister{}
-	oldToken := resolveGitHubTokenForBackfill
-	oldClient := newGitHubPRBackfillClient
-	oldStore := openGitHubPRRepairStore
-	resolveGitHubTokenForBackfill = func(context.Context) (string, error) { return "token", nil }
-	newGitHubPRBackfillClient = func(string) githubPRLister { return lister }
-	openGitHubPRRepairStore = func(string, string) (beads.Store, error) { return store, nil }
-	stubGitHubRepairWorkflowAttach(t)
-	t.Cleanup(func() {
-		resolveGitHubTokenForBackfill = oldToken
-		newGitHubPRBackfillClient = oldClient
-		openGitHubPRRepairStore = oldStore
-	})
-
-	base := githubmonitor.PullRequest{
-		Number: 2601, Title: "Feature", URL: "https://github.com/partcleda/partcl/pull/2601",
-		BaseRefName: "main", HeadRefName: "feat", MergeStateStatus: "DIRTY",
-	}
-	first := base
-	first.HeadSHA = "sha-one"
-	lister.prs = []githubmonitor.PullRequest{first}
-	runGitHubBackfillOrFatal(t, cityPath)
-
-	// A force-push changes the head SHA: stale-commit failures should not be
-	// merged into a fresh bead, so a new bead is keyed on the new SHA.
-	second := base
-	second.HeadSHA = "sha-two"
-	lister.prs = []githubmonitor.PullRequest{second}
-	runGitHubBackfillOrFatal(t, cityPath)
-
-	all, err := store.ListByMetadata(map[string]string{
-		"source":       "github-pr-monitor",
-		"github.owner": "partcleda",
-		"github.repo":  "partcl",
-		"github.pr":    "2601",
-	}, 0)
-	if err != nil {
-		t.Fatalf("ListByMetadata: %v", err)
-	}
-	if len(all) != 2 {
-		t.Fatalf("repair beads = %d, want one per distinct head SHA (2)", len(all))
-	}
-}
-
-func TestGitHubPRBackfillDispatchesWorkflowOnCreateOnly(t *testing.T) {
-	cityPath := writeGitHubMonitorTestCity(t)
-	store := beads.NewMemStore()
-	lister := &stubGitHubPRLister{prs: []githubmonitor.PullRequest{{
-		Number: 2560, Title: "Deploy", URL: "https://github.com/partcleda/partcl/pull/2560",
-		BaseRefName: "main", HeadRefName: "fix", HeadSHA: "abc123", MergeStateStatus: "DIRTY",
-	}}}
-	oldToken := resolveGitHubTokenForBackfill
-	oldClient := newGitHubPRBackfillClient
-	oldStore := openGitHubPRRepairStore
-	resolveGitHubTokenForBackfill = func(context.Context) (string, error) { return "token", nil }
-	newGitHubPRBackfillClient = func(string) githubPRLister { return lister }
-	openGitHubPRRepairStore = func(string, string) (beads.Store, error) { return store, nil }
-	attachCalls := stubGitHubRepairWorkflowAttach(t)
-	t.Cleanup(func() {
-		resolveGitHubTokenForBackfill = oldToken
-		newGitHubPRBackfillClient = oldClient
-		openGitHubPRRepairStore = oldStore
-	})
-
-	// First pass creates and dispatches.
-	var stdout, stderr bytes.Buffer
-	if code := run([]string{"--city", cityPath, "github", "pr", "backfill", "partcl-main", "--create-repair-beads", "--json"}, &stdout, &stderr); code != 0 {
-		t.Fatalf("run code = %d, stderr = %q", code, stderr.String())
-	}
-	var payload githubPRBackfillResult
-	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
-		t.Fatalf("decode %q: %v", stdout.String(), err)
-	}
-	if payload.CreatedRepairs != 1 || payload.DispatchedRepairs != 1 {
-		t.Fatalf("created=%d dispatched=%d, want 1/1", payload.CreatedRepairs, payload.DispatchedRepairs)
-	}
-	if len(payload.RepairBeads) != 1 || !payload.RepairBeads[0].Dispatched || payload.RepairBeads[0].Workflow != "mol-polecat-work" {
-		t.Fatalf("repair bead = %#v, want dispatched mol-polecat-work", payload.RepairBeads)
-	}
-
-	// Second pass over the same PR/head updates, does not re-dispatch.
-	var stdout2, stderr2 bytes.Buffer
-	if code := run([]string{"--city", cityPath, "github", "pr", "backfill", "partcl-main", "--create-repair-beads", "--json"}, &stdout2, &stderr2); code != 0 {
-		t.Fatalf("run 2 code = %d, stderr = %q", code, stderr2.String())
-	}
-	var payload2 githubPRBackfillResult
-	if err := json.Unmarshal(stdout2.Bytes(), &payload2); err != nil {
-		t.Fatalf("decode %q: %v", stdout2.String(), err)
-	}
-	if payload2.CreatedRepairs != 0 || payload2.UpdatedRepairs != 1 || payload2.DispatchedRepairs != 0 {
-		t.Fatalf("second pass created=%d updated=%d dispatched=%d, want 0/1/0", payload2.CreatedRepairs, payload2.UpdatedRepairs, payload2.DispatchedRepairs)
-	}
-	if len(*attachCalls) != 1 {
-		t.Fatalf("attach calls = %v, want exactly one across both passes", *attachCalls)
-	}
-}
-
-func runGitHubBackfillOrFatal(t *testing.T, cityPath string) {
+func useCentralPRTestClientAt(t *testing.T, cityPath string, client githubPRActionAPI) string {
 	t.Helper()
-	var stdout, stderr bytes.Buffer
-	if code := run([]string{"--city", cityPath, "github", "pr", "backfill", "partcl-main", "--create-repair-beads", "--json"}, &stdout, &stderr); code != 0 {
-		t.Fatalf("run code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
-	}
-}
-
-func TestGitHubPRBackfillCommandFiltersCleanResultsByDefault(t *testing.T) {
-	cityPath := writeGitHubMonitorTestCity(t)
-	oldToken := resolveGitHubTokenForBackfill
-	oldClient := newGitHubPRBackfillClient
-	resolveGitHubTokenForBackfill = func(context.Context) (string, error) { return "token", nil }
-	newGitHubPRBackfillClient = func(string) githubPRLister {
-		return fakeGitHubPRLister{prs: []githubmonitor.PullRequest{
-			{Number: 1, BaseRefName: "main", MergeStateStatus: "CLEAN"},
-		}}
-	}
-	t.Cleanup(func() {
-		resolveGitHubTokenForBackfill = oldToken
-		newGitHubPRBackfillClient = oldClient
-	})
-
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"--city", cityPath, "github", "pr", "backfill", "--json"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("run code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
-	}
-	if strings.Contains(stdout.String(), `"number":1`) {
-		t.Fatalf("stdout = %s, clean PR should be filtered by default", stdout.String())
-	}
-}
-
-func writeGitHubMonitorTestCity(t *testing.T) string {
-	t.Helper()
-	cityPath := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
-		t.Fatalf("mkdir .gc: %v", err)
-	}
-	body := `[workspace]
-name = "test-city"
-
-[[rigs]]
-name = "partcl"
-path = "partcl"
-prefix = "pa"
-
-[[github.pr_monitor]]
-name = "partcl-main"
-owner = "partcleda"
-repo = "partcl"
-base_branches = ["main"]
-rig = "partcl"
-repair_route = "partcl/polecat"
-notify = ["gastown.mayor"]
-poll_interval = "2m"
-merge_queue = "repair"
-`
-	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(body), 0o644); err != nil {
-		t.Fatalf("write city.toml: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Join(cityPath, "partcl"), 0o755); err != nil {
-		t.Fatalf("mkdir partcl: %v", err)
+	t.Setenv("GC_NO_API", "")
+	previous := githubPRActionClientForCommand
+	t.Cleanup(func() { githubPRActionClientForCommand = previous })
+	githubPRActionClientForCommand = func() (string, githubPRActionAPI, error) {
+		return cityPath, client, nil
 	}
 	return cityPath
 }
 
-func TestGitHubPRBackfillCommandPropagatesRepairStoreError(t *testing.T) {
-	cityPath := writeGitHubMonitorTestCity(t)
-	oldToken := resolveGitHubTokenForBackfill
-	oldClient := newGitHubPRBackfillClient
-	oldStore := openGitHubPRRepairStore
-	resolveGitHubTokenForBackfill = func(context.Context) (string, error) { return "token", nil }
-	newGitHubPRBackfillClient = func(string) githubPRLister {
-		return fakeGitHubPRLister{prs: []githubmonitor.PullRequest{{Number: 1, BaseRefName: "main", HeadSHA: "abc", MergeStateStatus: "DIRTY"}}}
+func centralPRActionReceipt(request api.PRActionRequest) api.PRActionResult {
+	outcome := api.PRActionOutcomePrepared
+	workID := request.WorkID
+	if workID == "" {
+		workID = "work-1"
 	}
-	openGitHubPRRepairStore = func(string, string) (beads.Store, error) {
-		return nil, fmt.Errorf("store unavailable")
+	if request.Action == api.PRActionQueueReview {
+		outcome = api.PRActionOutcomeReviewQueued
 	}
-	t.Cleanup(func() {
-		resolveGitHubTokenForBackfill = oldToken
-		newGitHubPRBackfillClient = oldClient
-		openGitHubPRRepairStore = oldStore
-	})
+	return api.PRActionResult{ID: "action-1", Action: request.Action, Status: api.PRActionStatusVerified, Outcome: outcome, IdempotencyKey: request.IdempotencyKey, Monitor: request.Monitor, Owner: request.Owner, Repo: request.Repo, PullRequest: request.PullRequest, WorkID: workID, AttemptID: request.AttemptID, HeadSHA: request.HeadSHA, BaseSHA: request.BaseSHA, PolicyVersion: request.PolicyVersion, ActorKeyID: "worker-key", CreatedAt: time.Now().UTC(), VerifiedAt: time.Now().UTC()}
+}
 
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"--city", cityPath, "github", "pr", "backfill", "--create-repair-beads"}, &stdout, &stderr)
-	if code == 0 {
-		t.Fatalf("run code = 0, want failure")
+func TestGitHubPRBackfillPrepareUsesExactServerVerdictAndStableKey(t *testing.T) {
+	client := &fakeGitHubPRActionClient{queue: centralPRTestQueue()}
+	cityPath := useCentralPRTestClient(t, client)
+	for range 2 {
+		var out, errOut bytes.Buffer
+		if code := run([]string{"--city", cityPath, "github", "pr", "backfill", "--create-repair-beads", "--json"}, &out, &errOut); code != 0 {
+			t.Fatalf("exit=%d stderr=%s", code, &errOut)
+		}
+		validateJSONResultSchema(t, []string{"github", "pr", "backfill"}, out.Bytes())
+		if !strings.Contains(out.String(), "work_prepared") || strings.Contains(out.String(), "dispatched") {
+			t.Fatalf("wrong outcome: %s", &out)
+		}
 	}
-	if !strings.Contains(stderr.String(), "store unavailable") {
-		t.Fatalf("stderr = %q, want store error", stderr.String())
+	if client.queueCalls != 2 || len(client.actionRequests) != 2 {
+		t.Fatalf("queue calls/actions = %d/%d, want 2/2", client.queueCalls, len(client.actionRequests))
+	}
+	first, second := client.actionRequests[0], client.actionRequests[1]
+	if first.HeadSHA != strings.Repeat("a", 40) || first.BaseSHA != strings.Repeat("b", 40) || first.PolicyVersion != "policy-v1" || first.Owner != "example" || first.Repo != "project" || first.PullRequest != 7 || first.Monitor != "central" || first.Action != api.PRActionPrepare {
+		t.Fatalf("wrong exact request: %+v", first)
+	}
+	if first.IdempotencyKey == "" || first.IdempotencyKey != second.IdempotencyKey {
+		t.Fatalf("retry keys = %q / %q; want same stable key", first.IdempotencyKey, second.IdempotencyKey)
+	}
+}
+
+func TestGitHubPRBackfillUnavailableSourcesDoNotPrepare(t *testing.T) {
+	queue := centralPRTestQueue()
+	queue.Availability = api.PRActionAvailabilityPartial
+	queue.Sources = append(queue.Sources, api.PRActionSource{Monitor: "missing", State: api.PRActionSourceUnavailable, Detail: "forge unavailable"})
+	client := &fakeGitHubPRActionClient{queue: queue}
+	cityPath := useCentralPRTestClient(t, client)
+	var out, errOut bytes.Buffer
+	if code := run([]string{"--city", cityPath, "github", "pr", "backfill", "--create-repair-beads"}, &out, &errOut); code == 0 {
+		t.Fatal("partial source allowed repair submission")
+	}
+	if len(client.actionRequests) != 0 {
+		t.Fatalf("actions=%d", len(client.actionRequests))
+	}
+	out.Reset()
+	errOut.Reset()
+	if code := run([]string{"--city", cityPath, "github", "pr", "backfill", "--json"}, &out, &errOut); code != 0 || !strings.Contains(out.String(), "forge unavailable") {
+		t.Fatalf("partial read lost source state: exit=%d stdout=%s stderr=%s", code, &out, &errOut)
+	}
+}
+
+func TestGitHubPRBackfillServerErrorsNeverUseLocalPolicy(t *testing.T) {
+	for _, status := range []int{404, 409, 503} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			client := &fakeGitHubPRActionClient{queueErr: fmt.Errorf("HTTP %d: central authority unavailable", status)}
+			cityPath := useCentralPRTestClient(t, client)
+			var out, errOut bytes.Buffer
+			if code := run([]string{"--city", cityPath, "github", "pr", "backfill", "--create-repair-beads"}, &out, &errOut); code == 0 {
+				t.Fatal("server error reported success")
+			}
+			if client.queueCalls != 1 || len(client.actionRequests) != 0 {
+				t.Fatalf("queue calls/actions = %d/%d; want one read and no mutation", client.queueCalls, len(client.actionRequests))
+			}
+			if !strings.Contains(errOut.String(), "central") {
+				t.Fatalf("missing server error: %s", &errOut)
+			}
+		})
+	}
+}
+
+func TestGitHubPRActionPreservesExactAttemptAndRejectsUnknownOrMismatchedReceipts(t *testing.T) {
+	for _, variant := range []string{"verified", "unknown", "wrong-base", "stale"} {
+		t.Run(variant, func(t *testing.T) {
+			client := &fakeGitHubPRActionClient{execute: func(request api.PRActionRequest) (api.PRActionResult, error) {
+				if request.WorkID != "work-7" || request.AttemptID != "attempt-2" || request.IdempotencyKey != "explicit-request-7" {
+					t.Errorf("identity changed: %+v", request)
+				}
+				if variant == "stale" {
+					return api.PRActionResult{}, errors.New("stale revision")
+				}
+				receipt := centralPRActionReceipt(request)
+				if variant == "unknown" {
+					receipt.Status = api.PRActionStatusUnknown
+				}
+				if variant == "wrong-base" {
+					receipt.BaseSHA = strings.Repeat("c", 40)
+				}
+				return receipt, nil
+			}}
+			cityPath := useCentralPRTestClient(t, client)
+			args := []string{"--city", cityPath, "github", "pr", "action", "queue_review", "--repo", "example/project", "--monitor", "central", "--pr", "7", "--head-sha", strings.Repeat("a", 40), "--base-sha", strings.Repeat("b", 40), "--policy-version", "policy-v1", "--idempotency-key", "explicit-request-7", "--work-id", "work-7", "--attempt-id", "attempt-2"}
+			var out, errOut bytes.Buffer
+			code := run(args, &out, &errOut)
+			if variant == "verified" {
+				if code != 0 {
+					t.Fatalf("exit=%d stderr=%s", code, &errOut)
+				}
+				validateJSONResultSchema(t, []string{"github", "pr", "action"}, out.Bytes())
+			} else {
+				if code == 0 {
+					t.Fatalf("%s receipt reported success", variant)
+				}
+				if errOut.Len() == 0 {
+					t.Fatalf("%s rejection has no diagnostic", variant)
+				}
+			}
+			if len(client.actionRequests) != 1 {
+				t.Fatalf("actions=%d; action must not silently retry", len(client.actionRequests))
+			}
+		})
+	}
+}
+
+func TestGitHubPRActionsRespectAPIDisableAndMergeDeferral(t *testing.T) {
+	cityPath := writeBeadsTestCity(t)
+	t.Setenv("GC_NO_API", "1")
+	var out, errOut bytes.Buffer
+	if code := run([]string{"--city", cityPath, "github", "pr", "backfill", "--create-repair-beads"}, &out, &errOut); code == 0 {
+		t.Fatal("API disable allowed local repair")
+	}
+	t.Setenv("GC_NO_API", "")
+	out.Reset()
+	errOut.Reset()
+	cmd := newGitHubPRActionCmd(&out, &errOut)
+	cmd.SetArgs([]string{"merge", "--repo", "example/project", "--monitor", "central", "--pr", "7", "--head-sha", strings.Repeat("a", 40), "--base-sha", strings.Repeat("b", 40), "--policy-version", "policy-v1", "--idempotency-key", "explicit-request-7"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("GitHub merge enabled")
 	}
 }

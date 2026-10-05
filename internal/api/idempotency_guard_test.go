@@ -14,6 +14,7 @@ import (
 // Idempotency-Key header. This set grows as each wiring slice (audit P0 #4)
 // lands; a regression that drops the header fails TestCreateEndpointsAreTriagedForIdempotency.
 var requireIdempotency = map[string]bool{
+	"execute-pr-action":       true,
 	"create-bead":             true,
 	"send-mail":               true,
 	"create-agent":            true,

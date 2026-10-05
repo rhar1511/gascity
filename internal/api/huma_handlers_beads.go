@@ -708,6 +708,9 @@ type BeadDepsResponse struct {
 // humaHandleBeadCreate is the Huma-typed handler for POST /v0/beads.
 // Title required via struct tag on BeadCreateInput.
 func (s *Server) humaHandleBeadCreate(ctx context.Context, input *BeadCreateInput) (*IndexOutput[beads.Bead], error) {
+	if err := validatePRActionMetadata(input.Body.Metadata); err != nil {
+		return nil, err
+	}
 	if err := validateGenericBeadMetadata(input.Body.Metadata); err != nil {
 		return nil, err
 	}
@@ -765,6 +768,9 @@ func (s *Server) humaHandleBeadClose(ctx context.Context, input *BeadCloseInput)
 	if err != nil {
 		return nil, err
 	}
+	if err := rejectPRActionLedgerMutation(current); err != nil {
+		return nil, err
+	}
 	if err := s.gateWorkRecordClose(ctx, id, store, current, nil); err != nil {
 		return nil, err
 	}
@@ -794,6 +800,9 @@ func (s *Server) humaHandleBeadReopen(_ context.Context, input *BeadReopenInput)
 
 	store, b, err := s.resolveBeadOwner(id)
 	if err != nil {
+		return nil, err
+	}
+	if err := rejectPRActionLedgerMutation(b); err != nil {
 		return nil, err
 	}
 	open := "open"
@@ -826,6 +835,9 @@ func (s *Server) humaHandleBeadAssign(ctx context.Context, input *BeadAssignInpu
 	id := input.ID
 	store, current, err := s.resolveBeadOwner(id)
 	if err != nil {
+		return nil, err
+	}
+	if err := rejectPRActionLedgerMutation(current); err != nil {
 		return nil, err
 	}
 	assignee, err := s.normalizeRawBeadAssignee(ctx, input.Body.Assignee)
@@ -870,6 +882,9 @@ func (s *Server) humaHandleBeadAssign(ctx context.Context, input *BeadAssignInpu
 func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInput) (*OKResponse, error) {
 	id := input.ID
 	body := input.Body
+	if err := validatePRActionMetadata(body.Metadata); err != nil {
+		return nil, err
+	}
 	if err := validateGenericBeadMetadata(body.Metadata); err != nil {
 		return nil, err
 	}
@@ -894,6 +909,9 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 
 	store, current, err := s.resolveBeadOwner(id)
 	if err != nil {
+		return nil, err
+	}
+	if err := rejectPRActionLedgerMutation(current); err != nil {
 		return nil, err
 	}
 	if body.Assignee != nil {
@@ -986,6 +1004,9 @@ func (s *Server) humaHandleBeadDelete(_ context.Context, input *BeadDeleteInput)
 	id := input.ID
 	store, current, err := s.resolveBeadOwner(id)
 	if err != nil {
+		return nil, err
+	}
+	if err := rejectPRActionLedgerMutation(current); err != nil {
 		return nil, err
 	}
 	closed := "closed"

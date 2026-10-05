@@ -207,6 +207,14 @@ const (
 	PackMetadataKey                     = "gc.pack"
 	PackRootMetadataKey                 = "gc.pack_root"
 	PackWorkspaceMetadataKey            = "gc.pack_workspace"
+	PRActionClaimMetadataKey            = "gc.pr_action.claim"
+	PRActionFingerprintMetadataKey      = "gc.pr_action.fingerprint"
+	PRActionIdempotencyMetadataKey      = "gc.pr_action.idempotency_key"
+	PRActionQueueIndexMetadataKey       = "gc.pr_action.queue_index"
+	PRActionRecordMetadataKey           = "gc.pr_action.record"
+	PRActionRouteProposalMetadataKey    = "gc.pr_action.proposed_route"
+	PRActionSourceMetadataKey           = "gc.pr_action.source"
+	PRActionTargetMetadataKey           = "gc.pr_action.target_key"
 	PerDispatchModelMetadataKey         = "gc.per_dispatch_model"
 	RalphStepIDMetadataKey              = "gc.ralph_step_id"
 	RSIRoleMetadataKey                  = "gc.rsi_role"
@@ -358,6 +366,12 @@ const FormulaVarPrefix = Namespace + "var."
 // are defined once as local constants next to their reader/writer (rigidem.go),
 // so it is declared as a prefix here rather than re-enumerated in this file.
 const IdemPrefix = Namespace + "idem."
+
+// PRActionMetadataPrefix reserves the controller-owned PR action ledger.
+const PRActionMetadataPrefix = Namespace + "pr_action."
+
+// LifecycleAdmissionReceiptMetadataKey names legacy admission evidence; presence alone grants no authority.
+const LifecycleAdmissionReceiptMetadataKey = "gc.lifecycle.admission_receipt.v1"
 
 // SessionRequestReceiptPrefix is the dynamic key family for durable session
 // request receipts. The request ID is the open-world suffix.
@@ -627,6 +641,14 @@ var KnownMetadataKeys = []string{
 	PackMetadataKey,
 	PackRootMetadataKey,
 	PackWorkspaceMetadataKey,
+	PRActionClaimMetadataKey,
+	PRActionFingerprintMetadataKey,
+	PRActionIdempotencyMetadataKey,
+	PRActionQueueIndexMetadataKey,
+	PRActionRecordMetadataKey,
+	PRActionRouteProposalMetadataKey,
+	PRActionSourceMetadataKey,
+	PRActionTargetMetadataKey,
 	PerDispatchModelMetadataKey,
 	RalphStepIDMetadataKey,
 	RSIRoleMetadataKey,
@@ -706,6 +728,7 @@ var KnownMetadataKeys = []string{
 // begins with one of these is considered declared even though its full key is
 // not enumerable.
 var KnownMetadataPrefixes = []string{
+	PRActionMetadataPrefix,
 	FormulaVarPrefix,
 	IdemPrefix,
 	SessionRequestReceiptPrefix,

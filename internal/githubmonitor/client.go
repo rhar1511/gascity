@@ -155,6 +155,11 @@ query GasCityPRReadiness($owner: String!, $repo: String!, $cursor: String) {
         isDraft
         mergeStateStatus
         baseRefName
+        baseRef {
+          target {
+            oid
+          }
+        }
         headRefName
         headRefOid
         commits(last: 1) {
