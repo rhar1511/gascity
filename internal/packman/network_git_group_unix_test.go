@@ -3,13 +3,15 @@
 package packman
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/processgroup/processgrouptest"
 )
 
-// TestDefaultRunNetworkGitKillsDescendants pins that the deadline reaches git's
+// TestDefaultRunNetworkGitKillsDescendants pins that cancellation reaches git's
 // children, not just git.
 //
 // The first version of this bound relied on cmd.WaitDelay, whose contract is to
@@ -30,17 +32,43 @@ import (
 func TestDefaultRunNetworkGitKillsDescendants(t *testing.T) {
 	wedged := wedgedGit(t)
 
-	restore := networkGitTimeout
-	networkGitTimeout = 300 * time.Millisecond
-	t.Cleanup(func() { networkGitTimeout = restore })
+	// Cancel after the descendant is ready; a short wall-clock deadline can
+	// kill the shim before it forks on loaded hosts. Deadline speed is covered
+	// separately by TestDefaultRunNetworkGitIsBounded.
+	ctx, cancel := context.WithCancel(context.Background())
+	restoreContext := networkGitWithTimeout
+	networkGitWithTimeout = func(context.Context, time.Duration) (context.Context, context.CancelFunc) {
+		return ctx, cancel
+	}
+	t.Cleanup(func() { networkGitWithTimeout = restoreContext })
 	restoreWait := networkGitWaitDelay
 	networkGitWaitDelay = time.Second
 	t.Cleanup(func() { networkGitWaitDelay = restoreWait })
 
-	if _, err := defaultRunNetworkGit("", wedged.URL, "", "clone", "--quiet", wedged.URL, t.TempDir()+"/dest"); err == nil {
-		t.Fatal("cloning a wedged remote succeeded, want a timeout error")
+	dest := t.TempDir() + "/dest"
+	done := make(chan struct{})
+	var runErr error
+	go func() {
+		defer close(done)
+		_, runErr = defaultRunNetworkGit("", wedged.URL, "", "clone", "--quiet", wedged.URL, dest)
+	}()
+	waitDone := func() {
+		t.Helper()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("network git did not return after cancellation")
+		}
 	}
+	t.Cleanup(func() { cancel(); waitDone() })
 
+	processgrouptest.WaitForFileSize(t, wedged.ReadyPath)
+	processgrouptest.WaitForFileSize(t, wedged.PIDPath)
+	cancel()
+	waitDone()
+	if !errors.Is(runErr, errNetworkGitTimeout) {
+		t.Fatalf("cloning a wedged remote: %v; want a network timeout", runErr)
+	}
 	size := processgrouptest.WaitForFileSize(t, wedged.HeartbeatPath)
 	// The window has to be a comfortable multiple of the shim's 50ms write
 	// cadence, because the failure mode of getting it wrong is silent: a live
