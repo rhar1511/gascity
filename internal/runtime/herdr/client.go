@@ -243,6 +243,8 @@ func (c *client) runWithSecrets(ctx context.Context, declared []string, args ...
 // agentInfo mirrors herdr's agent object. Verified live against herdr 0.7.3:
 // the per-entry name field is emitted under the JSON key "agent", not "name"
 // (`herdr agent list` → {"agents":[{"agent":"act-a","agent_status":"idle",...}]}).
+// Detection-based releases can put a shared kind such as "codex" in that field;
+// it is not ownership evidence. Managed sessions resolve through bound pane IDs.
 type agentInfo struct {
 	Name        string `json:"agent"`
 	PaneID      string `json:"pane_id"`
