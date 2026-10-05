@@ -43,6 +43,8 @@ go_test(
         "livegate_test.go",
         "liveness_test.go",
         "no_named_agent_test.go",
+        "ownership_live_test.go",
+        "ownership_test.go",
         "panebinding_live_test.go",
         "panebinding_provider_test.go",
         "panebinding_test.go",

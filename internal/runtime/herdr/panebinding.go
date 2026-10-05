@@ -3,6 +3,7 @@ package herdr
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -20,8 +21,8 @@ import (
 // Reading a live session as absent is the spawn storm: IsRunning goes false,
 // the reconciler re-Starts every tick, and each wrongful Start leaks a pane.
 // The *pane id* is the stable handle, so Start persists it (plus the launch
-// mode) in the metadata sidecar and every name→pane resolution falls back to
-// it, probed live before it is trusted (pane ids recycle).
+// mode) in the metadata sidecar. Session operations resolve that owned pane
+// directly: registry detections can describe an agent kind shared by many panes.
 
 // Sidecar keys for the placement herdr assigned at Start. Namespaced away from
 // the GC_* env keys seedMetaFromEnv mirrors into the same store.
@@ -70,7 +71,7 @@ type paneProbe struct {
 // so the resolution decision is unit-testable without a live herdr server
 // (mirrors agentStartOps).
 type paneLookupOps struct {
-	// getAgent is the name-keyed registry lookup (fast path while the name lives).
+	// getAgent looks up the agent detected in the owned pane.
 	getAgent func() (agentInfo, bool, error)
 	// boundPane reads the sidecar pane binding ("" when absent).
 	boundPane func() string
@@ -91,7 +92,7 @@ type paneLookupOps struct {
 }
 
 // resolveBinding resolves a session name to its herdr pane id and a running
-// verdict: registry name lookup first (a live name is a running agent), then
+// verdict: the owned pane's registry lookup first, then
 // the sidecar pane binding, trusted only after a live probe. Running is
 // mode-aware: a busy pane always runs; a bare shell prompt runs only for
 // bindModeShell. A bindModeAgent pane at a bare prompt past the launch grace
@@ -197,8 +198,8 @@ func (p *Provider) clearPaneBinding(name string) {
 }
 
 // boundSessionNames enumerates the session names with a live-looking sidecar
-// binding (a stored name and pane id), for ListRunning to merge with herdr's
-// registry — which never sees raw shell sessions.
+// binding (a stored name and pane id), including raw shell sessions that do not
+// appear in Herdr's agent registry.
 func (p *Provider) boundSessionNames() []string {
 	entries, err := os.ReadDir(p.metaDir)
 	if err != nil {
@@ -358,7 +359,16 @@ func (p *Provider) lookupOps(ctx context.Context, name string) paneLookupOps {
 		return v
 	}
 	return paneLookupOps{
-		getAgent:  func() (agentInfo, bool, error) { return p.c.getAgent(ctx, herdrAgentName(name)) },
+		getAgent: func() (agentInfo, bool, error) {
+			pane, err := p.ownedBoundPane(name)
+			if err != nil {
+				return agentInfo{}, false, err
+			}
+			if pane != "" {
+				return p.c.getAgent(ctx, pane)
+			}
+			return agentInfo{}, false, nil
+		},
 		boundPane: func() string { return meta(metaBoundPane) },
 		boundMode: func() string { return strings.TrimSpace(meta(metaBoundMode)) },
 		boundAge: func() time.Duration {
@@ -372,4 +382,25 @@ func (p *Provider) lookupOps(ctx context.Context, name string) paneLookupOps {
 		reapPane:     func(paneID string) { _ = p.c.closePane(ctx, paneID) },
 		clearBinding: func() { p.clearPaneBinding(name) },
 	}
+}
+
+// ownedBoundPane rejects ambiguous owners before resolving a session's pane.
+// Older bindings may lack the exact name; when present it fences the lossy
+// directory name so a sanitized alias cannot control or replace its owner.
+func (p *Provider) ownedBoundPane(name string) (string, error) {
+	owner, err := p.GetMeta(name, metaBoundName)
+	if err != nil {
+		return "", err
+	}
+	if owner != "" && owner != name {
+		return "", fmt.Errorf("herdr: metadata for %q belongs to %q", name, owner)
+	}
+	pane, err := p.GetMeta(name, metaBoundPane)
+	if err != nil {
+		return "", err
+	}
+	if pane != "" && p.boundPaneNames().conflicts[pane] {
+		return "", fmt.Errorf("herdr: pane %q has conflicting session owners", pane)
+	}
+	return pane, nil
 }

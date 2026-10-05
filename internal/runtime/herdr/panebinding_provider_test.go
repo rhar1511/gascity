@@ -447,8 +447,11 @@ func TestObserveLivenessExitedAgentReadsDead(t *testing.T) {
 func TestListRunningIncludesUnregisteredBoundSessions(t *testing.T) {
 	p, state := newFakeHerdrProvider(t)
 	setState(t, state, "busy")
-	for _, name := range []string{"gastown__worker-1", "gastown__worker-2", "other__worker"} {
+	for i, name := range []string{"gastown__worker-1", "gastown__worker-2", "other__worker"} {
 		bindTestPane(t, p, name, bindModeShell)
+		if err := p.SetMeta(name, metaBoundPane, fmt.Sprintf("%%%d", i+5)); err != nil {
+			t.Fatal(err)
+		}
 		if err := p.SetMeta(name, metaBoundName, name); err != nil {
 			t.Fatal(err)
 		}

@@ -50,6 +50,24 @@ herdr's side cannot fail the build. After a herdr upgrade, run
 `make test-herdr-live` and then put a session through a full work cycle before
 trusting it.
 
+## Session ownership
+
+Gas City enumerates and controls sessions through its persisted pane bindings.
+Herdr's detected `agent` value can be a kind such as `codex` shared by several
+panes; it does not identify a Gas City worker. Foreign or manually created panes
+without a Gas City binding are excluded from worker enumeration and orphan
+cleanup. Name-based stop and interrupt operations cannot target them.
+
+For managed workers, liveness resolves the bound pane directly. A stop closes
+only that pane, rejects conflicting owners, and retains its binding if the close
+fails. An explicit `pane_not_found` response permits idempotent cleanup. A
+name-collision recovery may adopt or reap a holder only when its pane is already
+bound to that same Gas City session. Where the stored exact session name is
+present, aliases that share its sanitized directory cannot control or replace
+the owner. Registry failures are reported as errors rather than an empty list.
+Existing unbound panes require an explicit
+ownership decision before they can become managed workers.
+
 ## Enabling herdr
 
 `herdr` is selected with the same runtime selector used for every other
