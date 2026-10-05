@@ -10,8 +10,8 @@
 // Model: one shared herdr *session* per city (≈ the tmux `-L gc` server). Within
 // that session agents are grouped one *workspace* per rig (or per town) and one
 // *tab* per agent, so each gascity session is its own switchable space rather
-// than a tiled pane. Agents are addressable by name, 1:1 with gascity session
-// names.
+// than a tiled pane. Gas City session names resolve through persisted pane
+// bindings; Herdr's detected agent kind may be shared by multiple panes.
 package herdr
 
 import (

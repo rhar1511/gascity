@@ -3,7 +3,6 @@ package herdr
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"reflect"
 	"testing"
 	"time"
@@ -37,9 +36,9 @@ func TestProviderLiveSharedKindPreservesForeignPane(t *testing.T) {
 		t.Fatalf("peer fixture did not launch=%+v,%v", probe, err)
 	}
 	for _, pane := range []string{peer, owned} {
-		output, err := exec.CommandContext(ctx, "herdr", "--session", session, "pane", "report-agent", pane, "--source", "gctest", "--agent", "codex", "--state", "idle").CombinedOutput()
+		_, err := p.c.run(ctx, "pane", "report-agent", pane, "--source", "gctest", "--agent", "codex", "--state", "idle")
 		if err != nil {
-			t.Fatalf("report shared kind: %v: %s", err, output)
+			t.Fatalf("report shared kind: %v", err)
 		}
 	}
 	for _, pane := range []string{peer, owned} {
