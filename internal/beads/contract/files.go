@@ -190,6 +190,9 @@ func (e *configParseError) Unwrap() error {
 func ReadIssuePrefix(fs fsys.FS, path string) (string, bool, error) {
 	doc, err := readConfigDoc(fs, path)
 	if err != nil {
+		if errors.Is(err, errLocalConfig) {
+			return "", false, err
+		}
 		if os.IsNotExist(err) {
 			return "", false, nil
 		}
@@ -208,6 +211,9 @@ func ReadIssuePrefix(fs fsys.FS, path string) (string, bool, error) {
 func ReadAutoStartDisabled(fs fsys.FS, path string) (bool, error) {
 	doc, err := readConfigDoc(fs, path)
 	if err != nil {
+		if errors.Is(err, errLocalConfig) {
+			return false, err
+		}
 		if os.IsNotExist(err) {
 			return false, nil
 		}
@@ -238,6 +244,9 @@ func ReadAutoStartDisabled(fs fsys.FS, path string) (bool, error) {
 func ReadExportAuto(fs fsys.FS, path string) (value bool, ok bool, err error) {
 	doc, err := readConfigDoc(fs, path)
 	if err != nil {
+		if errors.Is(err, errLocalConfig) {
+			return false, false, err
+		}
 		if os.IsNotExist(err) {
 			return false, false, nil
 		}
@@ -258,10 +267,13 @@ func ReadExportAuto(fs fsys.FS, path string) (value bool, ok bool, err error) {
 	return false, false, nil
 }
 
-// ReadDoltConfig reads the Dolt-specific GC config object from config.yaml.
+// ReadDoltConfig reads Dolt settings from portable config and its local layer.
 func ReadDoltConfig(fs fsys.FS, path string) (DoltConfig, bool, error) {
 	doc, err := readConfigDoc(fs, path)
 	if err != nil {
+		if errors.Is(err, errLocalConfig) {
+			return DoltConfig{}, false, err
+		}
 		if os.IsNotExist(err) {
 			return DoltConfig{}, false, nil
 		}
@@ -280,6 +292,9 @@ func ReadDoltConfig(fs fsys.FS, path string) (DoltConfig, bool, error) {
 func ReadEndpointStatus(fs fsys.FS, path string) (EndpointStatus, bool, error) {
 	doc, err := readConfigDoc(fs, path)
 	if err != nil {
+		if errors.Is(err, errLocalConfig) {
+			return "", false, err
+		}
 		if os.IsNotExist(err) {
 			return "", false, nil
 		}
@@ -305,10 +320,13 @@ func ReadEndpointStatus(fs fsys.FS, path string) (EndpointStatus, bool, error) {
 	return "", false, nil
 }
 
-// ReadConfigState reads canonical endpoint config from .beads/config.yaml.
+// ReadConfigState reads portable config plus an explicit config.local.yaml layer.
 func ReadConfigState(fs fsys.FS, path string) (ConfigState, bool, error) {
 	doc, err := readConfigDoc(fs, path)
 	if err != nil {
+		if errors.Is(err, errLocalConfig) {
+			return ConfigState{}, false, err
+		}
 		if os.IsNotExist(err) {
 			return ConfigState{}, false, nil
 		}
@@ -551,10 +569,15 @@ func canonicalScopeFilePerm(fs fsys.FS, path string) os.FileMode {
 	return info.Mode().Perm()
 }
 
-// EnsureCanonicalConfig rewrites config.yaml into canonical GC-managed form.
+// EnsureCanonicalConfig writes canonical GC state to an explicit local layer
+// when present, otherwise retaining the legacy single-file behavior.
 func EnsureCanonicalConfig(fs fsys.FS, path string, state ConfigState) (bool, error) {
+	path, portable, state, err := canonicalConfigWriteLayer(fs, path, state)
+	if err != nil {
+		return false, err
+	}
 	missing := false
-	doc, err := readConfigDoc(fs, path)
+	doc, err := readSingleConfigDoc(fs, path)
 	if err != nil {
 		if isConfigParseError(err) {
 			return ensureCanonicalConfigFallback(fs, path, state)
@@ -613,23 +636,23 @@ func EnsureCanonicalConfig(fs fsys.FS, path string, state ConfigState) (bool, er
 	if host != "" {
 		changed = setString(root, "dolt.host", host) || changed
 	} else {
-		changed = deleteKeys(root, "dolt.host") || changed
+		changed = clearCanonicalConfigKey(root, portable, "dolt.host") || changed
 	}
 	if port != "" {
 		changed = setPort(root, "dolt.port", port) || changed
 	} else {
-		changed = deleteKeys(root, "dolt.port") || changed
+		changed = clearCanonicalConfigKey(root, portable, "dolt.port") || changed
 	}
 	socket := strings.TrimSpace(state.DoltSocket)
 	if socket != "" {
 		changed = setString(root, "dolt.socket", socket) || changed
 	} else {
-		changed = deleteKeys(root, "dolt.socket") || changed
+		changed = clearCanonicalConfigKey(root, portable, "dolt.socket") || changed
 	}
 	if user != "" {
 		changed = setString(root, "dolt.user", user) || changed
 	} else {
-		changed = deleteKeys(root, "dolt.user") || changed
+		changed = clearCanonicalConfigKey(root, portable, "dolt.user") || changed
 	}
 
 	if mode := strings.TrimSpace(state.DoltMode); mode != "" {
@@ -640,7 +663,7 @@ func EnsureCanonicalConfig(fs fsys.FS, path string, state ConfigState) (bool, er
 		// meant a scope bd had migrated to proxied-server kept gc's
 		// pre-migration `dolt.mode: server` forever, with no writer able to
 		// clear it.
-		changed = deleteKeys(root, "dolt.mode") || changed
+		changed = clearCanonicalConfigKey(root, portable, "dolt.mode") || changed
 	}
 
 	if len(state.CustomTypes) > 0 {
@@ -950,7 +973,7 @@ func newConfigDoc() *yaml.Node {
 	return &yaml.Node{Kind: yaml.DocumentNode, Content: []*yaml.Node{{Kind: yaml.MappingNode}}}
 }
 
-func readConfigDoc(fs fsys.FS, path string) (*yaml.Node, error) {
+func readSingleConfigDoc(fs fsys.FS, path string) (*yaml.Node, error) {
 	data, err := fs.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -995,6 +1018,9 @@ func mappingRoot(doc *yaml.Node) *yaml.Node {
 func configStringValue(root *yaml.Node, keys ...string) (string, bool) {
 	for _, key := range keys {
 		if node := findValue(root, key); node != nil {
+			if node.Tag == "!!null" {
+				continue
+			}
 			if value := strings.TrimSpace(node.Value); value != "" {
 				return value, true
 			}
