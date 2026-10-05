@@ -180,7 +180,7 @@ go_test(
         "//internal/storebinding/sqlite",
         "//internal/testenv",
         "//internal/testutil",
-        "@org_modernc_sqlite//:go_default_library",
+        "@org_modernc_sqlite//:sqlite",
     ] + select({
         "@rules_go//go/platform:android": [
             "//internal/runtime/proctable",
