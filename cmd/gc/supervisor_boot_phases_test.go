@@ -103,6 +103,14 @@ shutdown_timeout = "100ms"
 	// Listed in boot order; the order assertion below is what makes a phase
 	// attached to the wrong step visible.
 	phases := []string{
+		"creating_session_provider",
+		"checking_agent_images",
+		"opening_event_recorder",
+		"computing_pool_sessions",
+		"computing_pool_death_handlers",
+		"computing_config_watch_targets",
+		"computing_config_revision",
+		"building_city_runtime",
 		"opening_controller_state",
 		"releasing_stale_name_claims",
 		"starting_bead_event_watcher",
