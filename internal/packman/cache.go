@@ -38,6 +38,10 @@ var (
 // instead of never. It is a var so tests can shrink it.
 var networkGitTimeout = 10 * time.Minute
 
+// networkGitWithTimeout uses the production deadline normally. The seam lets
+// process-group tests cancel only after a real descendant is observably ready.
+var networkGitWithTimeout = context.WithTimeout
+
 // networkGitWaitDelay caps how long the call may stay blocked in CombinedOutput
 // after the deadline fires. This is not defensive padding: git's helpers
 // (git-remote-http, credential helpers) inherit the output pipes, so a read on
@@ -389,7 +393,7 @@ func defaultRunNetworkGit(cityRoot, remoteURL, dir string, args ...string) (stri
 		return "", fmt.Errorf("loading git credentials for %s: %w", gitcred.RedactUserinfo(remoteURL), err)
 	}
 	cmdArgs := buildNetworkGitArgs(inj, args...)
-	ctx, cancel := context.WithTimeout(context.Background(), networkGitTimeout)
+	ctx, cancel := networkGitWithTimeout(context.Background(), networkGitTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", cmdArgs...)
 	if dir != "" {
