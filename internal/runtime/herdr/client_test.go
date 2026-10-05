@@ -14,31 +14,24 @@ import (
 // Verified empirically against the herdr binary itself: `XDG_CONFIG_HOME=X
 // herdr --help` prints "Config: X/herdr/config.toml" regardless of $HOME,
 // and with XDG_CONFIG_HOME unset it falls back to "$HOME/.config/herdr/…" —
-// standard XDG Base Directory precedence, which os.UserConfigDir()
-// implements and the old os.UserHomeDir()+".config" join did not: a sandbox
+// standard XDG Base Directory precedence. A sandbox
 // that sets XDG_CONFIG_HOME to the real user's config dir while redirecting
 // $HOME elsewhere (this fleet's agent sandboxes do exactly that) made the
 // old code compute a path no herdr process ever binds.
 //
-// Both tests below are Linux-only: os.UserConfigDir() on darwin ignores
-// XDG_CONFIG_HOME entirely and always resolves under
-// "$HOME/Library/Application Support" (see the Go stdlib implementation),
-// so asserting an XDG- or ".config"-rooted path is only valid on the
-// platforms os.UserConfigDir() treats as XDG-following (this repo's
-// non-Windows, non-Darwin default case). Whether herdr's own binary uses
-// pure-XDG resolution on macOS too is unverified here — the empirical
-// check above was run on Linux only — so the tests skip rather than assert
-// an unconfirmed cross-platform contract.
+// Herdr's own `--help` confirms the same XDG and HOME paths on macOS. Go's
+// os.UserConfigDir() does not follow them there, which previously made every
+// live Herdr server fail Gas City's readiness check on a Mac.
 
-func skipUnlessXDGPlatform(t *testing.T) {
+func skipWindowsHerdrPath(t *testing.T) {
 	t.Helper()
-	if runtime.GOOS != "linux" {
-		t.Skipf("os.UserConfigDir() does not follow XDG_CONFIG_HOME on %s; herdr's own resolution on this platform is unverified (see ga-nqlb8q)", runtime.GOOS)
+	if runtime.GOOS == "windows" {
+		t.Skip("Herdr's Windows config path is unverified")
 	}
 }
 
 func TestSocketPathHonorsXDGConfigHomeOverHome(t *testing.T) {
-	skipUnlessXDGPlatform(t)
+	skipWindowsHerdrPath(t)
 	xdg := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", xdg)
 	t.Setenv("HOME", t.TempDir()) // deliberately different; must be ignored
@@ -55,7 +48,7 @@ func TestSocketPathHonorsXDGConfigHomeOverHome(t *testing.T) {
 }
 
 func TestSocketPathFallsBackToHomeConfigWhenXDGUnset(t *testing.T) {
-	skipUnlessXDGPlatform(t)
+	skipWindowsHerdrPath(t)
 	t.Setenv("XDG_CONFIG_HOME", "")
 	home := t.TempDir()
 	t.Setenv("HOME", home)

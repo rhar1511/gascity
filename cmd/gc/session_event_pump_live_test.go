@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -51,12 +50,8 @@ func TestSessionEventPumpLiveHerdr(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = p.Stop(agentName) })
 
-	// Register the pane as an agent under the gc session name BEFORE the pump
-	// subscribes. The stream builds its pane-to-session map from herdr's agent
-	// registry, and herdr 0.8.0 registers nothing for a raw-command pane, so
-	// without this every frame for this pane arrives unattributed and the pump
-	// drops it by design.
-	herdrtest.ReportAgent(t, session, agentName, "working", func() string { return herdrLivePaneID(p, agentName) })
+	// Raw-command panes are absent from herdr's agent registry. The event
+	// stream must attribute this exit through Gas City's persisted pane binding.
 
 	pokeCh := make(chan struct{}, 1)
 	pump := newSessionEventPump(ctx, pokeCh, &bytes.Buffer{}, "live")
@@ -89,21 +84,4 @@ func TestSessionEventPumpLiveHerdr(t *testing.T) {
 	case <-time.After(15 * time.Second):
 		t.Fatal("no reconcile poke after the agent process exited")
 	}
-}
-
-// herdrLivePaneID resolves the pane herdr bound to a gc session by reading the
-// sidecar binding the provider writes at Start. It deliberately does NOT ask
-// `herdr agent list`: from herdr 0.8.0 that registry holds only panes with a
-// registered agent, and these fixtures start a raw command rather than an agent
-// kind, so the pane has no registration until this file creates one. Resolving
-// the pane through the registry is therefore circular -- it needs the
-// registration it exists to make possible. "GC_HERDR_PANE_ID" is
-// internal/runtime/herdr's metaBoundPane, the same value the provider's own
-// lookups read. Returns "" until the binding lands, so callers can poll.
-func herdrLivePaneID(p *herdr.Provider, agentName string) string {
-	pane, err := p.GetMeta(agentName, "GC_HERDR_PANE_ID")
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(pane)
 }
