@@ -230,6 +230,7 @@
               "reference/cli",
               "reference/gastown-command-map",
               "reference/config",
+              "reference/beads-local-config",
               "reference/trust-boundaries",
               "reference/rsi-trusted-evaluation",
               "reference/api",
