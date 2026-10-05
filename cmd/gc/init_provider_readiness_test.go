@@ -1059,6 +1059,7 @@ func TestCmdInitNoStartSkipsSupervisorRegistration(t *testing.T) {
 	t.Setenv("GC_DOLT", "skip")
 	configureIsolatedRuntimeEnv(t)
 	disableBootstrapForTests(t)
+	stubInitRemoteImports(t)
 
 	cityPath := filepath.Join(t.TempDir(), "bright-lights")
 	calledRegister := false

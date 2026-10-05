@@ -27,9 +27,9 @@ jobs:
   evidence:
     name: Evidence / critical-path suites
     runs-on: ubuntu-latest
-    # Slightly above the watchdog's own 25-minute observation deadline, to
+    # Slightly above the watchdog's own 75-minute observation deadline, to
     # leave room for checkout/setup either side of the polling loop.
-    timeout-minutes: 30
+    timeout-minutes: 80
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:

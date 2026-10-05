@@ -48,7 +48,7 @@ const (
 	RequiredCheckName = "Evidence / critical-path suites"
 	// ObservationDeadline bounds how long the watchdog observes a head
 	// commit before failing closed.
-	ObservationDeadline = 25 * time.Minute
+	ObservationDeadline = 75 * time.Minute
 )
 
 // CheckRun is a single GitHub check run observation for a head commit.

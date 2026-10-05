@@ -158,29 +158,29 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 	overrides := readFile(t, root, ".github/requirements/mcp-agent-mail.overrides.txt")
 	lock := readFile(t, root, ".github/requirements/mcp-agent-mail.txt")
 	for _, floor := range []struct {
-		name, version string
-		override      bool
+		name, version, lockVersion string
+		override                   bool
 	}{
-		{"gitpython", "3.1.60", false},
-		{"aiohttp", "3.14.3", false},
-		{"anyio", "4.14.2", false},
-		{"pillow", "12.3.0", false},
-		{"urllib3", "2.8.0", false},
-		{"pyjwt", "2.14.0", true},
-		{"cryptography", "50.0.0", true},
+		{"gitpython", "3.1.60", "3.2.0", false},
+		{"aiohttp", "3.14.3", "3.14.3", false},
+		{"anyio", "4.14.2", "4.14.2", false},
+		{"pillow", "12.3.0", "12.3.0", false},
+		{"urllib3", "2.8.0", "2.8.0", false},
+		{"pyjwt", "2.14.0", "2.15.1", true},
+		{"cryptography", "50.0.0", "50.0.0", true},
 	} {
 		t.Run(floor.name, func(t *testing.T) {
 			declaration := input
 			if floor.override {
 				declaration = overrides
 			}
-			want := parseModuleSemver(t, "v"+floor.version)
-			for _, contract := range []struct{ text, operator string }{
-				{declaration, ">="}, {lock, "=="},
+			for _, contract := range []struct{ text, operator, version string }{
+				{declaration, ">=", floor.version}, {lock, "==", floor.lockVersion},
 			} {
+				want := parseModuleSemver(t, "v"+contract.version)
 				have := mailRequirementVersion(t, contract.text, floor.name, contract.operator)
 				if !semverAtLeast(have, want) {
-					t.Errorf("%s %s contract resolves below patched version %s", floor.name, contract.operator, floor.version)
+					t.Errorf("%s %s contract resolves below patched version %s", floor.name, contract.operator, contract.version)
 				}
 			}
 		})

@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -112,8 +113,9 @@ func TestWatchdogWorkflow_RequiredCheckJobExists(t *testing.T) {
 	}
 
 	timeout, ok := found["timeout-minutes"].(int)
-	if !ok || timeout <= 0 || timeout > 35 {
-		t.Fatalf("job %q timeout-minutes = %v, want a bounded value > 0 and <= 35 (slightly above the 25m observation deadline)", RequiredCheckName, found["timeout-minutes"])
+	deadlineMinutes := int(ObservationDeadline / time.Minute)
+	if !ok || timeout < deadlineMinutes+5 || timeout > 85 {
+		t.Fatalf("job %q timeout-minutes = %v, want at least five minutes beyond the %dm observation deadline and at most 85m", RequiredCheckName, found["timeout-minutes"], deadlineMinutes)
 	}
 }
 
