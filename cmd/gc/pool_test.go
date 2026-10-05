@@ -1581,3 +1581,109 @@ func TestSessionSetupContextForAgentCarriesConfiguredDefaultBranch(t *testing.T)
 		t.Errorf("city-scoped agent: DefaultBranch = %q, want empty", cityScoped.DefaultBranch)
 	}
 }
+
+// A setup pass must not repeat a full provider census for every configured
+// pool. Each Herdr census probes every owned pane through its native client.
+func TestPoolSetupUsesOneCensusPerPass(t *testing.T) {
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
+	for i := 0; i < 8; i++ {
+		cfg.Agents = append(cfg.Agents, config.Agent{Name: fmt.Sprintf("worker%d", i), MinActiveSessions: intPtr(0), OnDeath: "echo death"})
+	}
+	for _, compute := range []struct {
+		name string
+		run  func(*runtime.Fake)
+	}{
+		{"sessions", func(p *runtime.Fake) { computePoolSessions(cfg, "test", "", p) }},
+		{"death_handlers", func(p *runtime.Fake) { computePoolDeathHandlers(cfg, "test", t.TempDir(), p, nil) }},
+	} {
+		t.Run(compute.name, func(t *testing.T) {
+			p := runtime.NewFake()
+			compute.run(p)
+			calls := 0
+			for _, c := range p.Calls {
+				if c.Method == "ListRunning" {
+					calls++
+				}
+			}
+			if calls != 1 {
+				t.Fatalf("provider censuses=%d for8 pools, want1", calls)
+			}
+		})
+	}
+}
+
+func TestPoolSetupSnapshotRefreshesBetweenPasses(t *testing.T) {
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}, Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), OnDeath: "echo death"}}}
+	p := runtime.NewFake()
+	if err := p.Start(t.Context(), "worker-1", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	first := computePoolSessions(cfg, "test", "", p)
+	if _, ok := first["worker-1"]; !ok {
+		t.Fatalf("first census=%v", first)
+	}
+	if err := p.Stop("worker-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Start(t.Context(), "worker-2", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	second := computePoolSessions(cfg, "test", "", p)
+	if _, ok := second["worker-2"]; !ok {
+		t.Fatalf("fresh census=%v", second)
+	}
+	if _, ok := second["worker-1"]; ok {
+		t.Fatalf("stale session survived=%v", second)
+	}
+	handlers := computePoolDeathHandlers(cfg, "test", t.TempDir(), p, nil)
+	if _, ok := handlers["worker-2"]; !ok {
+		t.Fatalf("fresh handlers=%v", handlers)
+	}
+}
+
+func TestPoolSetupSnapshotRetainsCanonicalIdentityOnCensusError(t *testing.T) {
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}, Agents: []config.Agent{
+		{Name: "single", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(1), OnDeath: "echo death"},
+		{Name: "unlimited", MinActiveSessions: intPtr(0), OnDeath: "echo death"},
+	}}
+	p := &partialListPoolProvider{Fake: runtime.NewFake(), listNames: []string{"unlimited-1"}, listErr: errors.New("unavailable")}
+	sessions := computePoolSessions(cfg, "test", "", p)
+	if len(sessions) != 1 {
+		t.Fatalf("partial census became authoritative: %v", sessions)
+	}
+	if _, ok := sessions["single"]; !ok {
+		t.Fatalf("canonical identity lost: %v", sessions)
+	}
+	handlers := computePoolDeathHandlers(cfg, "test", t.TempDir(), p, nil)
+	if len(handlers) != 1 {
+		t.Fatalf("partial handler census became authoritative: %v", handlers)
+	}
+	if _, ok := handlers["single"]; !ok {
+		t.Fatalf("canonical handler lost: %v", handlers)
+	}
+	p.listErr = nil
+	sessions = computePoolSessions(cfg, "test", "", p)
+	if _, ok := sessions["unlimited-1"]; !ok {
+		t.Fatalf("next pass did not retry failed census: %v", sessions)
+	}
+}
+
+func TestPoolSetupBoundedPoolsAvoidProviderCensus(t *testing.T) {
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}, Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), OnDeath: "echo death"}}}
+	p := runtime.NewFake()
+	if n := len(computePoolSessions(cfg, "test", "", p)); n != 3 {
+		t.Fatalf("bounded sessions=%d", n)
+	}
+	if n := len(computePoolDeathHandlers(cfg, "test", t.TempDir(), p, nil)); n != 3 {
+		t.Fatalf("bounded handlers=%d", n)
+	}
+	for _, c := range p.Calls {
+		if c.Method == "ListRunning" {
+			t.Fatal("static bounded pool queried provider")
+		}
+	}
+	cfg.Agents[0].MaxActiveSessions = intPtr(1)
+	if n := len(computePoolSessions(cfg, "test", "", nil)); n != 1 {
+		t.Fatalf("nil-provider canonical sessions=%d", n)
+	}
+}
