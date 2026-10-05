@@ -458,7 +458,7 @@ func (s *Server) rollbackCreatedSession(store beads.SessionStore, sessionID stri
 	if err := s.sessionManager(store.Store).Close(sessionID); err != nil {
 		return fmt.Errorf("close created session: %w", err)
 	}
-	if err := store.Delete(sessionID); err != nil {
+	if err := session.NewStore(store).DeleteClosedSession(sessionID); err != nil {
 		return fmt.Errorf("delete created session bead: %w", err)
 	}
 	return nil

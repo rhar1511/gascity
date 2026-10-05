@@ -1,0 +1,4 @@
+[pack]
+name = "inktree-story-benchmark"
+schema = 2
+version = "0.1.0"

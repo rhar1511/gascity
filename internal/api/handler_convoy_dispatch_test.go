@@ -12,14 +12,81 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/session"
 )
+
+type workflowDeleteInterleavingStore struct {
+	*beads.MemStore
+	beforeCloseAll  func()
+	afterCloseAll   func()
+	beforeFenceCAS  func()
+	afterFenceCAS   func()
+	fenceConflictID string
+	blockRequestCAS bool
+	casReady        chan struct{}
+	releaseCAS      chan struct{}
+	casResult       chan error
+	beforeDelete    func(string)
+}
+
+func (s *workflowDeleteInterleavingStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	if s.beforeCloseAll != nil {
+		s.beforeCloseAll()
+	}
+	n, err := s.MemStore.CloseAll(ids, metadata)
+	if s.afterCloseAll != nil {
+		s.afterCloseAll()
+	}
+	return n, err
+}
+
+func (s *workflowDeleteInterleavingStore) UpdateIfMatch(id string, revision int64, opts beads.UpdateOpts) error {
+	if _, acquiringFence := opts.Metadata[beadmeta.SessionRequestPurgeFenceMetadataKey]; acquiringFence {
+		if s.beforeFenceCAS != nil {
+			before := s.beforeFenceCAS
+			s.beforeFenceCAS = nil
+			before()
+		}
+		if id == s.fenceConflictID {
+			s.fenceConflictID = ""
+			if err := s.Update(id, beads.UpdateOpts{Metadata: map[string]string{"race_marker": "winner"}}); err != nil {
+				return err
+			}
+		}
+		err := s.MemStore.UpdateIfMatch(id, revision, opts)
+		if err == nil && s.afterFenceCAS != nil {
+			after := s.afterFenceCAS
+			s.afterFenceCAS = nil
+			after()
+		}
+		return err
+	}
+	if s.blockRequestCAS {
+		close(s.casReady)
+		<-s.releaseCAS
+	}
+	err := s.MemStore.UpdateIfMatch(id, revision, opts)
+	if s.casResult != nil {
+		s.casResult <- err
+	}
+	return err
+}
+
+func (s *workflowDeleteInterleavingStore) DeleteIfMatch(id string, revision int64) error {
+	if s.beforeDelete != nil {
+		s.beforeDelete(id)
+	}
+	return s.MemStore.DeleteIfMatch(id, revision)
+}
 
 func TestWorkflowGetSelectsScopedRootMatch(t *testing.T) {
 	state := newFakeState(t)
@@ -79,6 +146,49 @@ func TestWorkflowGetSelectsScopedRootMatch(t *testing.T) {
 	}
 	if len(snapshot.Beads) == 0 || snapshot.Beads[0].Title != rigRoot.Title {
 		t.Fatalf("selected workflow title = %q, want %q", firstWorkflowBeadTitle(snapshot.Beads), rigRoot.Title)
+	}
+}
+
+func TestWorkflowSnapshotRedactsSessionExecutionCredential(t *testing.T) {
+	state := newFakeState(t)
+	store := state.stores["myrig"]
+	root, err := store.Create(beads.Bead{
+		Title: "Workflow root",
+		Type:  "task",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+			beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	member, err := store.Create(beads.Bead{
+		Title: "Session step", Type: session.BeadType, Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			beadmeta.RootBeadIDMetadataKey:           root.ID,
+			beadmeta.SessionInstanceTokenMetadataKey: "workflow-secret",
+			"generation":                             "9",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	newTestCityHandler(t, state).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, cityURL(state, "/workflow/")+root.ID, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET workflow = %d: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "workflow-secret") || strings.Contains(rec.Body.String(), `"instance_token"`) {
+		t.Fatalf("workflow snapshot leaked credential: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"generation":"9"`) {
+		t.Fatalf("workflow snapshot lost safe metadata: %s", rec.Body.String())
+	}
+	stored, err := store.Get(member.ID)
+	if err != nil || stored.Metadata[beadmeta.SessionInstanceTokenMetadataKey] != "workflow-secret" {
+		t.Fatalf("workflow snapshot mutated stored member: %+v, %v", stored, err)
 	}
 }
 
@@ -631,6 +741,354 @@ func TestWorkflowDeleteIncludesClosedDescendantsAndDeletesBeads(t *testing.T) {
 	}
 	if _, err := memStore.Get(child.ID); !errors.Is(err, beads.ErrNotFound) {
 		t.Fatalf("Get(child) err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestWorkflowDeleteRefusesReceiptEvidenceWithoutPartialPurge(t *testing.T) {
+	state := newFakeState(t)
+	state.cityName = "test-city"
+	memStore := beads.NewMemStore()
+	state.cityBeadStore = memStore
+
+	root, err := memStore.Create(beads.Bead{
+		Title: "Protected workflow",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:       beadmeta.KindWorkflow,
+			beadmeta.WorkflowIDMetadataKey: "wf_delete_protected",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+	child, err := memStore.Create(beads.Bead{
+		Title: "Ordinary child",
+		Metadata: map[string]string{
+			beadmeta.RootBeadIDMetadataKey: root.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(child): %v", err)
+	}
+	protected := createTestSession(t, memStore, state.sp, "Receipt-bearing child")
+	if err := memStore.Update(protected.ID, beads.UpdateOpts{Metadata: map[string]string{
+		beadmeta.RootBeadIDMetadataKey: root.ID,
+	}}); err != nil {
+		t.Fatalf("link protected session: %v", err)
+	}
+	generation, err := strconv.Atoi(protected.Generation)
+	if err != nil {
+		t.Fatalf("parse generation: %v", err)
+	}
+	requestStore := session.NewStore(beads.SessionStore{Store: memStore})
+	if _, err := requestStore.AcceptRequest(protected.ID, "retain-me", generation, "report progress", time.Now()); err != nil {
+		t.Fatalf("AcceptRequest: %v", err)
+	}
+
+	ids := []string{root.ID, child.ID, protected.ID}
+	before := make(map[string]beads.Bead, len(ids))
+	for _, id := range ids {
+		before[id], err = memStore.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s) before delete: %v", id, err)
+		}
+	}
+
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodDelete, cityURL(state, "/workflow/")+root.ID+"?scope_kind=city&scope_ref=test-city&delete=true", nil)
+	req.Header.Set("X-GC-Request", "test")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409: %s", rec.Code, rec.Body.String())
+	}
+	for _, id := range ids {
+		after, err := memStore.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s) after refused delete: %v", id, err)
+		}
+		if !reflect.DeepEqual(after, before[id]) {
+			t.Fatalf("bead %s changed during refused delete\nbefore: %+v\nafter:  %+v", id, before[id], after)
+		}
+	}
+}
+
+func TestWorkflowDeleteRetainsReceiptWonBeforePurgeFence(t *testing.T) {
+	state := newFakeState(t)
+	state.cityName = "test-city"
+	store := &workflowDeleteInterleavingStore{MemStore: beads.NewMemStore()}
+	state.cityBeadStore = store
+
+	root, err := store.Create(beads.Bead{
+		Title: "Racing workflow",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:       beadmeta.KindWorkflow,
+			beadmeta.WorkflowIDMetadataKey: "wf_delete_racing_receipt",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+	child, err := store.Create(beads.Bead{Title: "Racing child", Metadata: map[string]string{
+		beadmeta.RootBeadIDMetadataKey: root.ID,
+	}})
+	if err != nil {
+		t.Fatalf("Create(child): %v", err)
+	}
+	protected := createTestSession(t, store, state.sp, "Racing session")
+	if err := store.Update(protected.ID, beads.UpdateOpts{Metadata: map[string]string{
+		beadmeta.RootBeadIDMetadataKey: root.ID,
+	}}); err != nil {
+		t.Fatalf("link protected session: %v", err)
+	}
+	if err := store.DepAdd(child.ID, root.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd: %v", err)
+	}
+	generation, err := strconv.Atoi(protected.Generation)
+	if err != nil {
+		t.Fatalf("parse generation: %v", err)
+	}
+	requestStore := session.NewStore(beads.SessionStore{Store: store})
+	var concurrentErr error
+	store.beforeFenceCAS = func() {
+		_, concurrentErr = requestStore.AcceptRequest(protected.ID, "won-before-fence", generation, "report progress", time.Now())
+	}
+
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodDelete, cityURL(state, "/workflow/")+root.ID+"?scope_kind=city&scope_ref=test-city&delete=true", nil)
+	req.Header.Set("X-GC-Request", "test")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if concurrentErr != nil {
+		t.Fatalf("concurrent AcceptRequest: %v", concurrentErr)
+	}
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409: %s", rec.Code, rec.Body.String())
+	}
+	for _, id := range []string{root.ID, child.ID, protected.ID} {
+		b, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s) after fenced abort: %v", id, err)
+		}
+		if b.Status == "closed" {
+			t.Fatalf("status of %s = closed, purge mutated rows after fence conflict", id)
+		}
+	}
+	if _, err := requestStore.GetRequest(protected.ID, "won-before-fence"); err != nil {
+		t.Fatalf("concurrent receipt was not retained: %v", err)
+	}
+	deps, err := store.DepList(child.ID, "down")
+	if err != nil || len(deps) != 1 || deps[0].DependsOnID != root.ID {
+		t.Fatalf("dependency changed during fenced abort: deps=%+v err=%v", deps, err)
+	}
+}
+
+func TestWorkflowDeletePurgeFenceRejectsStaleFreshAndReopen(t *testing.T) {
+	state := newFakeState(t)
+	state.cityName = "test-city"
+	store := &workflowDeleteInterleavingStore{MemStore: beads.NewMemStore()}
+	state.cityBeadStore = store
+
+	root, err := store.Create(beads.Bead{
+		Title: "Fenced workflow",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:       beadmeta.KindWorkflow,
+			beadmeta.WorkflowIDMetadataKey: "wf_delete_fenced",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+	protected := createTestSession(t, store, state.sp, "Fenced session")
+	if err := store.Update(protected.ID, beads.UpdateOpts{Metadata: map[string]string{
+		beadmeta.RootBeadIDMetadataKey: root.ID,
+	}}); err != nil {
+		t.Fatalf("link protected session: %v", err)
+	}
+	generation, err := strconv.Atoi(protected.Generation)
+	if err != nil {
+		t.Fatalf("parse generation: %v", err)
+	}
+	requestStore := session.NewStore(beads.SessionStore{Store: store})
+	store.blockRequestCAS = true
+	store.casReady = make(chan struct{})
+	store.releaseCAS = make(chan struct{})
+	store.casResult = make(chan error, 1)
+	acceptDone := make(chan struct{})
+	var staleErr, freshErr error
+	go func() {
+		defer close(acceptDone)
+		_, staleErr = requestStore.AcceptRequest(protected.ID, "stale-request", generation, "report progress", time.Now())
+	}()
+	<-store.casReady
+	store.afterFenceCAS = func() {
+		close(store.releaseCAS)
+		<-acceptDone
+		store.blockRequestCAS = false
+	}
+
+	h := newTestCityHandler(t, state)
+	var reopenCode, updateCode int
+	store.afterCloseAll = func() {
+		_, freshErr = requestStore.AcceptRequest(protected.ID, "fresh-after-close", generation, "report progress", time.Now())
+		reopen := httptest.NewRecorder()
+		h.ServeHTTP(reopen, newPostRequest(cityURL(state, "/bead/")+protected.ID+"/reopen", nil))
+		reopenCode = reopen.Code
+		update := httptest.NewRecorder()
+		h.ServeHTTP(update, newPostRequest(cityURL(state, "/bead/")+protected.ID+"/update", strings.NewReader(`{"status":"open"}`)))
+		updateCode = update.Code
+	}
+
+	req := httptest.NewRequest(http.MethodDelete, cityURL(state, "/workflow/")+root.ID+"?scope_kind=city&scope_ref=test-city&delete=true", nil)
+	req.Header.Set("X-GC-Request", "test")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	var staleCAS *beads.PreconditionFailedError
+	if err := <-store.casResult; !errors.As(err, &staleCAS) {
+		t.Fatalf("stale receipt CAS error = %v, want revision precondition failure", err)
+	}
+	if !errors.Is(staleErr, session.ErrRequestConflict) {
+		t.Fatalf("stale AcceptRequest error = %v, want request conflict", staleErr)
+	}
+	if !errors.Is(freshErr, session.ErrRequestConflict) {
+		t.Fatalf("fresh post-close AcceptRequest error = %v, want request conflict", freshErr)
+	}
+	if reopenCode != http.StatusConflict || updateCode != http.StatusConflict {
+		t.Fatalf("post-fence reopen statuses = endpoint:%d update:%d, want 409/409", reopenCode, updateCode)
+	}
+}
+
+func TestWorkflowDeleteFenceConflictRollsBackWithoutPartialDeletion(t *testing.T) {
+	state := newFakeState(t)
+	state.cityName = "test-city"
+	store := &workflowDeleteInterleavingStore{MemStore: beads.NewMemStore()}
+	state.cityBeadStore = store
+
+	root, err := store.Create(beads.Bead{
+		Title: "Fence conflict workflow",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:       beadmeta.KindWorkflow,
+			beadmeta.WorkflowIDMetadataKey: "wf_delete_fence_conflict",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+	first := createTestSession(t, store, state.sp, "First fenced session")
+	second := createTestSession(t, store, state.sp, "Conflicting fenced session")
+	for _, id := range []string{first.ID, second.ID} {
+		if err := store.Update(id, beads.UpdateOpts{Metadata: map[string]string{
+			beadmeta.RootBeadIDMetadataKey: root.ID,
+		}}); err != nil {
+			t.Fatalf("link session %s: %v", id, err)
+		}
+	}
+	if err := store.DepAdd(second.ID, first.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd: %v", err)
+	}
+	store.fenceConflictID = second.ID
+
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodDelete, cityURL(state, "/workflow/")+root.ID+"?scope_kind=city&scope_ref=test-city&delete=true", nil)
+	req.Header.Set("X-GC-Request", "test")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409: %s", rec.Code, rec.Body.String())
+	}
+	for _, id := range []string{root.ID, first.ID, second.ID} {
+		b, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s) after fence conflict: %v", id, err)
+		}
+		if b.Status == "closed" {
+			t.Fatalf("%s was closed after pre-delete fence conflict", id)
+		}
+		if session.IsRequestPurgeFenced(b) {
+			t.Fatalf("%s retained this purge's fence after rollback", id)
+		}
+	}
+	deps, err := store.DepList(second.ID, "down")
+	if err != nil || len(deps) != 1 || deps[0].DependsOnID != first.ID {
+		t.Fatalf("dependency changed after fence conflict: deps=%+v err=%v", deps, err)
+	}
+}
+
+func TestWorkflowDeleteRevisionDriftPreservesFencedSession(t *testing.T) {
+	state := newFakeState(t)
+	state.cityName = "test-city"
+	store := &workflowDeleteInterleavingStore{MemStore: beads.NewMemStore()}
+	state.cityBeadStore = store
+
+	root, err := store.Create(beads.Bead{
+		Title: "Revision drift workflow",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:       beadmeta.KindWorkflow,
+			beadmeta.WorkflowIDMetadataKey: "wf_delete_revision_drift",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+	protected := createTestSession(t, store, state.sp, "Revision drift session")
+	if err := store.Update(protected.ID, beads.UpdateOpts{Metadata: map[string]string{
+		beadmeta.RootBeadIDMetadataKey: root.ID,
+	}}); err != nil {
+		t.Fatalf("link protected session: %v", err)
+	}
+	h := newTestCityHandler(t, state)
+	var reopenErr error
+	var typeUpdateCode, reopenCode, statusUpdateCode int
+	store.beforeDelete = func(id string) {
+		if id != protected.ID {
+			return
+		}
+		store.beforeDelete = nil
+		typeUpdate := httptest.NewRecorder()
+		h.ServeHTTP(typeUpdate, newPostRequest(cityURL(state, "/bead/")+id+"/update", strings.NewReader(`{"type":"task"}`)))
+		typeUpdateCode = typeUpdate.Code
+		reopenErr = session.SetStatusOpenIfUnfenced(store, id, nil)
+		task := "task"
+		if err := store.Update(id, beads.UpdateOpts{Type: &task, Metadata: map[string]string{"revision_drift": "winner"}}); err != nil {
+			t.Fatalf("inject revision drift: %v", err)
+		}
+		reopen := httptest.NewRecorder()
+		h.ServeHTTP(reopen, newPostRequest(cityURL(state, "/bead/")+id+"/reopen", nil))
+		reopenCode = reopen.Code
+		statusUpdate := httptest.NewRecorder()
+		h.ServeHTTP(statusUpdate, newPostRequest(cityURL(state, "/bead/")+id+"/update", strings.NewReader(`{"status":"open"}`)))
+		statusUpdateCode = statusUpdate.Code
+	}
+
+	req := httptest.NewRequest(http.MethodDelete, cityURL(state, "/workflow/")+root.ID+"?scope_kind=city&scope_ref=test-city&delete=true", nil)
+	req.Header.Set("X-GC-Request", "test")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want partial 200: %s", rec.Code, rec.Body.String())
+	}
+	if !errors.Is(reopenErr, session.ErrRequestConflict) {
+		t.Fatalf("reconciler-style reopen = %v, want fenced conflict", reopenErr)
+	}
+	if typeUpdateCode != http.StatusConflict || reopenCode != http.StatusConflict || statusUpdateCode != http.StatusConflict {
+		t.Fatalf("fenced type/reopen/status results = %d/%d/%d, want 409/409/409", typeUpdateCode, reopenCode, statusUpdateCode)
+	}
+	row, err := store.Get(protected.ID)
+	if err != nil {
+		t.Fatalf("revision-drifted session was deleted: %v", err)
+	}
+	if row.Type != "task" || row.Status != "closed" || !session.IsRequestPurgeFenced(row) {
+		t.Fatalf("revision-drifted session became live or unfenced: %+v", row)
+	}
+	if row.Metadata["revision_drift"] != "winner" {
+		t.Fatalf("concurrent revision change was lost: %+v", row.Metadata)
 	}
 }
 

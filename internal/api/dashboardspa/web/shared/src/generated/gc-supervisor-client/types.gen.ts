@@ -243,6 +243,11 @@ export type AnnotatedProviderResponse = {
     ready_delay_ms?: number;
 };
 
+export type ArtifactAvailability = {
+    reason?: string;
+    state: string;
+};
+
 export type AsyncAcceptedBody = {
     /**
      * City event-stream sequence captured before the async request was accepted. Pass this value as after_seq to /v0/city/{cityName}/events/stream to receive the request result without replaying unrelated historical backlog. A value of 0 can also mean no event provider is configured or the event log is empty.
@@ -267,6 +272,14 @@ export type AsyncAcceptedResponse = {
      * Correlation ID. Watch /v0/events/stream for request.result.city.create, request.result.city.unregister, or request.failed with this request_id.
      */
     request_id: string;
+};
+
+export type AttemptInspection = {
+    association: ArtifactAvailability;
+    bead_id: string;
+    diff: HistoricalDiff;
+    pull_request: HistoricalPullRequest;
+    session_id: string;
 };
 
 export type BackendCredentialResolvedPayload = {
@@ -1454,6 +1467,22 @@ export type HeartbeatEvent = {
     timestamp: string;
 };
 
+export type HistoricalDiff = {
+    binary?: boolean;
+    bytes?: number;
+    reason?: string;
+    state: string;
+    text?: string;
+    truncated?: boolean;
+};
+
+export type HistoricalPullRequest = {
+    reason?: string;
+    state: string;
+    status?: string;
+    url?: string;
+};
+
 export type HookClaimReclaimedStalePayload = {
     bead_id: string;
     new_assignee: string;
@@ -2219,6 +2248,144 @@ export type OutputTurn = {
     timestamp?: string;
 };
 
+export type PrActionAttemptReference = {
+    attempt_id: string;
+    base_sha: string;
+    candidate_sha: string;
+    diff_sha256: string;
+    diff_source: string;
+    store_ref: string;
+    work_id: string;
+    working_tree_status: string;
+};
+
+export type PrActionExecuteBody = {
+    /**
+     * Requested action from the current server queue.
+     */
+    action: 'prepare' | 'queue_review' | 'merge';
+    /**
+     * Exact immutable attempt ID from the server queue.
+     */
+    attempt_id?: string;
+    /**
+     * Exact base commit SHA from the current queue item.
+     */
+    base_sha: string;
+    /**
+     * Exact candidate commit SHA from the current queue item.
+     */
+    head_sha: string;
+    /**
+     * Separate authority-signed exact merge approval; required for merge.
+     */
+    human_grant?: string;
+    /**
+     * Configured PR monitor name.
+     */
+    monitor: string;
+    /**
+     * Repository owner from the server queue.
+     */
+    owner: string;
+    /**
+     * Policy version copied from the current queue.
+     */
+    policy_version: string;
+    pull_request: number;
+    /**
+     * Repository name from the server queue.
+     */
+    repo: string;
+    /**
+     * Exact durable repair-work bead when the action needs one.
+     */
+    work_id?: string;
+};
+
+export type PrActionOption = {
+    action: string;
+    available: boolean;
+    reason: string;
+    requires_human_approval: boolean;
+};
+
+export type PrActionQueue = {
+    availability: string;
+    fresh_until: string;
+    items: Array<PrActionQueueItem> | null;
+    observed_at: string;
+    policy_detail?: string;
+    policy_state: string;
+    policy_version: string;
+    sources: Array<PrActionSource> | null;
+};
+
+export type PrActionQueueItem = {
+    action_receipts: Array<PrActionResult> | null;
+    actions: Array<PrActionOption> | null;
+    attempt_evidence: Array<PrActionAttemptReference> | null;
+    base_ref_name: string;
+    base_sha: string;
+    evidence_state: string;
+    fresh_until: string;
+    head_ref_name?: string;
+    head_sha: string;
+    is_draft: boolean;
+    merge_state: string;
+    monitor: string;
+    observed_at: string;
+    owner: string;
+    policy_version: string;
+    pull_request: number;
+    repo: string;
+    title: string;
+    url?: string;
+    work_records: Array<PrActionWorkRecord> | null;
+};
+
+export type PrActionResult = {
+    action: string;
+    actor_issuer?: string;
+    actor_key_id: string;
+    actor_subject?: string;
+    attempt_id?: string;
+    base_sha: string;
+    created_at: string;
+    detail?: string;
+    head_sha: string;
+    id: string;
+    idempotency_key: string;
+    merge_commit_sha?: string;
+    monitor: string;
+    outcome?: string;
+    owner: string;
+    policy_version: string;
+    pull_request: number;
+    repo: string;
+    status: string;
+    verified_at?: string;
+    work_id?: string;
+};
+
+export type PrActionSource = {
+    detail?: string;
+    monitor: string;
+    owner: string;
+    repo: string;
+    rig: string;
+    state: string;
+};
+
+export type PrActionWorkRecord = {
+    assignee?: string;
+    base_sha: string;
+    candidate_sha: string;
+    current_revision: boolean;
+    id: string;
+    status: string;
+};
+
 export type PackAddInputBody = {
     /**
      * Optional local binding name override; derived from the source when omitted.
@@ -2695,6 +2862,19 @@ export type RequestFailedPayload = {
      * Correlation ID from the 202 response.
      */
     request_id: string;
+};
+
+export type RequestReceipt = {
+    accepted_at: string;
+    acknowledged_at?: string;
+    delivery: string;
+    delivery_attempted_at?: string;
+    effect: string;
+    generation: number;
+    message_digest: string;
+    provider_result_at?: string;
+    request_id: string;
+    session_id: string;
 };
 
 export type RigActionBody = {
@@ -3331,6 +3511,28 @@ export type SessionRenameInputBody = {
      * New session title.
      */
     title: string;
+};
+
+export type SessionRequestAcknowledgementInputBody = {
+    /**
+     * Intended session execution generation.
+     */
+    generation: number;
+};
+
+export type SessionRequestSubmitInputBody = {
+    /**
+     * Exact intended execution generation.
+     */
+    generation: number;
+    /**
+     * Message delivered with its request identity.
+     */
+    message: string;
+    /**
+     * Durable idempotency identity for this request.
+     */
+    request_id: string;
 };
 
 export type SessionResetStalledPayload = {
@@ -11282,6 +11484,56 @@ export type GetV0CityByCityNameBeadByIdAttemptsDiffResponses = {
 
 export type GetV0CityByCityNameBeadByIdAttemptsDiffResponse = GetV0CityByCityNameBeadByIdAttemptsDiffResponses[keyof GetV0CityByCityNameBeadByIdAttemptsDiffResponses];
 
+export type GetV0CityByCityNameBeadByIdAttemptsBySessionIdHistoryData = {
+    body?: never;
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Bead ID.
+         */
+        id: string;
+        /**
+         * Session bead ID for the selected execution attempt.
+         */
+        sessionID: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/bead/{id}/attempts/{sessionID}/history';
+};
+
+export type GetV0CityByCityNameBeadByIdAttemptsBySessionIdHistoryErrors = {
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type GetV0CityByCityNameBeadByIdAttemptsBySessionIdHistoryError = GetV0CityByCityNameBeadByIdAttemptsBySessionIdHistoryErrors[keyof GetV0CityByCityNameBeadByIdAttemptsBySessionIdHistoryErrors];
+
+export type GetV0CityByCityNameBeadByIdAttemptsBySessionIdHistoryResponses = {
+    /**
+     * OK
+     */
+    200: AttemptInspection;
+};
+
+export type GetV0CityByCityNameBeadByIdAttemptsBySessionIdHistoryResponse = GetV0CityByCityNameBeadByIdAttemptsBySessionIdHistoryResponses[keyof GetV0CityByCityNameBeadByIdAttemptsBySessionIdHistoryResponses];
+
 export type PostV0CityByCityNameBeadByIdCloseData = {
     body?: never;
     headers: {
@@ -16238,6 +16490,116 @@ export type GetV0CityByCityNamePendingResponses = {
 
 export type GetV0CityByCityNamePendingResponse = GetV0CityByCityNamePendingResponses[keyof GetV0CityByCityNamePendingResponses];
 
+export type ExecutePrActionData = {
+    body: PrActionExecuteBody;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+        /**
+         * Stable key for this exact action request.
+         */
+        'Idempotency-Key': string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/pr-actions';
+};
+
+export type ExecutePrActionErrors = {
+    /**
+     * Bad Request
+     */
+    400: ErrorModel;
+    /**
+     * Unauthorized
+     */
+    401: ErrorModel;
+    /**
+     * Forbidden
+     */
+    403: ErrorModel;
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type ExecutePrActionError = ExecutePrActionErrors[keyof ExecutePrActionErrors];
+
+export type ExecutePrActionResponses = {
+    /**
+     * OK
+     */
+    200: PrActionResult;
+};
+
+export type ExecutePrActionResponse = ExecutePrActionResponses[keyof ExecutePrActionResponses];
+
+export type GetV0CityByCityNamePrActionsQueueData = {
+    body?: never;
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/pr-actions/queue';
+};
+
+export type GetV0CityByCityNamePrActionsQueueErrors = {
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type GetV0CityByCityNamePrActionsQueueError = GetV0CityByCityNamePrActionsQueueErrors[keyof GetV0CityByCityNamePrActionsQueueErrors];
+
+export type GetV0CityByCityNamePrActionsQueueResponses = {
+    /**
+     * OK
+     */
+    200: PrActionQueue;
+};
+
+export type GetV0CityByCityNamePrActionsQueueResponse = GetV0CityByCityNamePrActionsQueueResponses[keyof GetV0CityByCityNamePrActionsQueueResponses];
+
 export type GetV0CityByCityNameProviderReadinessData = {
     body?: never;
     path: {
@@ -17995,6 +18357,200 @@ export type PostV0CityByCityNameSessionByIdRenameResponses = {
 
 export type PostV0CityByCityNameSessionByIdRenameResponse = PostV0CityByCityNameSessionByIdRenameResponses[keyof PostV0CityByCityNameSessionByIdRenameResponses];
 
+export type PostV0CityByCityNameSessionByIdRequestsData = {
+    body: SessionRequestSubmitInputBody;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+        /**
+         * Idempotency key for exact request replay.
+         */
+        'Idempotency-Key'?: string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Exact durable session ID.
+         */
+        id: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/session/{id}/requests';
+};
+
+export type PostV0CityByCityNameSessionByIdRequestsErrors = {
+    /**
+     * Unauthorized
+     */
+    401: ErrorModel;
+    /**
+     * Forbidden
+     */
+    403: ErrorModel;
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type PostV0CityByCityNameSessionByIdRequestsError = PostV0CityByCityNameSessionByIdRequestsErrors[keyof PostV0CityByCityNameSessionByIdRequestsErrors];
+
+export type PostV0CityByCityNameSessionByIdRequestsResponses = {
+    /**
+     * Accepted
+     */
+    202: RequestReceipt;
+};
+
+export type PostV0CityByCityNameSessionByIdRequestsResponse = PostV0CityByCityNameSessionByIdRequestsResponses[keyof PostV0CityByCityNameSessionByIdRequestsResponses];
+
+export type GetV0CityByCityNameSessionByIdRequestsByRequestIdData = {
+    body?: never;
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Exact durable session ID.
+         */
+        id: string;
+        /**
+         * Exact request ID.
+         */
+        request_id: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/session/{id}/requests/{request_id}';
+};
+
+export type GetV0CityByCityNameSessionByIdRequestsByRequestIdErrors = {
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type GetV0CityByCityNameSessionByIdRequestsByRequestIdError = GetV0CityByCityNameSessionByIdRequestsByRequestIdErrors[keyof GetV0CityByCityNameSessionByIdRequestsByRequestIdErrors];
+
+export type GetV0CityByCityNameSessionByIdRequestsByRequestIdResponses = {
+    /**
+     * OK
+     */
+    200: RequestReceipt;
+};
+
+export type GetV0CityByCityNameSessionByIdRequestsByRequestIdResponse = GetV0CityByCityNameSessionByIdRequestsByRequestIdResponses[keyof GetV0CityByCityNameSessionByIdRequestsByRequestIdResponses];
+
+export type PostV0CityByCityNameSessionByIdRequestsByRequestIdAckData = {
+    body: SessionRequestAcknowledgementInputBody;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+        /**
+         * Credential of the intended session execution.
+         */
+        'X-GC-Session-Token': string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Exact durable session ID.
+         */
+        id: string;
+        /**
+         * Exact request ID.
+         */
+        request_id: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/session/{id}/requests/{request_id}/ack';
+};
+
+export type PostV0CityByCityNameSessionByIdRequestsByRequestIdAckErrors = {
+    /**
+     * Unauthorized
+     */
+    401: ErrorModel;
+    /**
+     * Forbidden
+     */
+    403: ErrorModel;
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type PostV0CityByCityNameSessionByIdRequestsByRequestIdAckError = PostV0CityByCityNameSessionByIdRequestsByRequestIdAckErrors[keyof PostV0CityByCityNameSessionByIdRequestsByRequestIdAckErrors];
+
+export type PostV0CityByCityNameSessionByIdRequestsByRequestIdAckResponses = {
+    /**
+     * OK
+     */
+    200: RequestReceipt;
+};
+
+export type PostV0CityByCityNameSessionByIdRequestsByRequestIdAckResponse = PostV0CityByCityNameSessionByIdRequestsByRequestIdAckResponses[keyof PostV0CityByCityNameSessionByIdRequestsByRequestIdAckResponses];
+
 export type RespondSessionData = {
     body: SessionRespondInputBody;
     headers: {
@@ -19021,6 +19577,10 @@ export type DeleteV0CityByCityNameWorkflowByWorkflowIdErrors = {
      * Not Found
      */
     404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
     /**
      * Unprocessable Entity
      */

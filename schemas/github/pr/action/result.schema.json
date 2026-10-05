@@ -1,0 +1,96 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "action": {
+      "type": "string"
+    },
+    "actor_issuer": {
+      "type": "string"
+    },
+    "actor_key_id": {
+      "type": "string"
+    },
+    "actor_subject": {
+      "type": "string"
+    },
+    "attempt_id": {
+      "type": "string"
+    },
+    "base_sha": {
+      "type": "string"
+    },
+    "created_at": {
+      "format": "date-time",
+      "type": "string"
+    },
+    "detail": {
+      "type": "string"
+    },
+    "head_sha": {
+      "type": "string"
+    },
+    "id": {
+      "type": "string"
+    },
+    "idempotency_key": {
+      "type": "string"
+    },
+    "merge_commit_sha": {
+      "type": "string"
+    },
+    "monitor": {
+      "type": "string"
+    },
+    "outcome": {
+      "type": "string"
+    },
+    "owner": {
+      "type": "string"
+    },
+    "policy_version": {
+      "type": "string"
+    },
+    "pull_request": {
+      "format": "int64",
+      "type": "integer"
+    },
+    "repo": {
+      "type": "string"
+    },
+    "status": {
+      "type": "string"
+    },
+    "verified_at": {
+      "format": "date-time",
+      "type": "string"
+    },
+    "work_id": {
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "1"
+    },
+    "ok": {
+      "const": true
+    }
+  },
+  "required": [
+    "id",
+    "action",
+    "status",
+    "idempotency_key",
+    "monitor",
+    "owner",
+    "repo",
+    "pull_request",
+    "head_sha",
+    "base_sha",
+    "policy_version",
+    "actor_key_id",
+    "created_at",
+    "schema_version",
+    "ok"
+  ],
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

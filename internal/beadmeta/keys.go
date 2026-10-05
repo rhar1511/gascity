@@ -29,6 +29,11 @@
 // engdocs/design/beads-dolt-contract-redesign.md for the storage contract.
 package beadmeta
 
+import (
+	"fmt"
+	"strings"
+)
+
 // Namespace is the reserved prefix for every engine-minted bead-metadata key.
 // Runtime guards that reserve the namespace (e.g. rejecting caller-supplied
 // "gc."-prefixed keys) compare against this single source of truth.
@@ -202,18 +207,24 @@ const (
 	PackMetadataKey                     = "gc.pack"
 	PackRootMetadataKey                 = "gc.pack_root"
 	PackWorkspaceMetadataKey            = "gc.pack_workspace"
+	PRActionClaimMetadataKey            = "gc.pr_action.claim"
+	PRActionFingerprintMetadataKey      = "gc.pr_action.fingerprint"
+	PRActionIdempotencyMetadataKey      = "gc.pr_action.idempotency_key"
+	PRActionQueueIndexMetadataKey       = "gc.pr_action.queue_index"
+	PRActionRecordMetadataKey           = "gc.pr_action.record"
+	PRActionRouteProposalMetadataKey    = "gc.pr_action.proposed_route"
+	PRActionSourceMetadataKey           = "gc.pr_action.source"
+	PRActionTargetMetadataKey           = "gc.pr_action.target_key"
 	PerDispatchModelMetadataKey         = "gc.per_dispatch_model"
 	RalphStepIDMetadataKey              = "gc.ralph_step_id"
+	RSIStoryRequiredMetadataKey         = "gc.rsi_story_benchmark_required"
 	RSIRoleMetadataKey                  = "gc.rsi_role"
 	RSIAuthorityClassMetadataKey        = "gc.rsi_authority_class"
 	RSICandidateInputMetadataKey        = "gc.rsi_candidate_input"
+	RSIExecutionBindingMetadataKey      = "gc.rsi_execution_binding"
+	RSIManualApprovalMetadataKey        = "gc.rsi_manual_approval_required"
 	RSIPromoteMetadataKey               = "gc.rsi_promote"
 	RSIReasonMetadataKey                = "gc.rsi_reason"
-	RSIManualApprovalMetadataKey        = "gc.rsi_manual_approval_required"
-	RSIStoryRequiredMetadataKey         = "gc.rsi_story_benchmark_required"
-	RSISuitePathMetadataKey             = "gc.rsi_suite_path"
-	RSISuiteHashMetadataKey             = "gc.rsi_eval_suite"
-	RSIParentBundleMetadataKey          = "gc.rsi_parent_bundle"
 	ReasoningMetadataKey                = "gc.reasoning"
 	RequiredArtifactMetadataKey         = "gc.required_artifact"
 	RequiredArtifactsMetadataKey        = "gc.required_artifacts"
@@ -356,6 +367,86 @@ const FormulaVarPrefix = Namespace + "var."
 // are defined once as local constants next to their reader/writer (rigidem.go),
 // so it is declared as a prefix here rather than re-enumerated in this file.
 const IdemPrefix = Namespace + "idem."
+
+// PRActionMetadataPrefix reserves the controller-owned PR action ledger.
+const PRActionMetadataPrefix = Namespace + "pr_action."
+
+// LifecycleAdmissionReceiptMetadataKey names legacy admission evidence; presence alone grants no authority.
+const LifecycleAdmissionReceiptMetadataKey = "gc.lifecycle.admission_receipt.v1"
+
+// SessionRequestReceiptPrefix is the dynamic key family for durable session
+// request receipts. The request ID is the open-world suffix.
+const SessionRequestReceiptPrefix = Namespace + "session_request.v1."
+
+// SessionRequestPurgeFenceMetadataKey blocks new request acceptance and reopen
+// while a workflow hard purge is closing and validating selected sessions.
+const SessionRequestPurgeFenceMetadataKey = Namespace + "session_request_purge_fence"
+
+// SessionInstanceTokenMetadataKey is the raw execution-incarnation credential.
+// It is deliberately bare for compatibility with the persisted session schema.
+const SessionInstanceTokenMetadataKey = "instance_token"
+
+var executionCredentialMetadataKeys = map[string]struct{}{
+	SessionInstanceTokenMetadataKey: {},
+	"execution_token":               {},
+	Namespace + "instance_token":    {},
+	Namespace + "execution_token":   {},
+}
+
+var executionIdentityMetadataKeys = map[string]struct{}{
+	"session_name":                  {},
+	"sessionName":                   {},
+	SessionNameMetadataKey:          {},
+	SessionNameCamelMetadataKey:     {},
+	"generation":                    {},
+	Namespace + "generation":        {},
+	SessionInstanceTokenMetadataKey: {},
+	"execution_token":               {},
+	Namespace + "instance_token":    {},
+	Namespace + "execution_token":   {},
+}
+
+// IsExecutionCredentialMetadataKey reports metadata that grants execution
+// identity and therefore must never cross a generic bead boundary.
+func IsExecutionCredentialMetadataKey(key string) bool {
+	_, ok := executionCredentialMetadataKeys[key]
+	return ok
+}
+
+// IsGenericMutationReservedKey reports metadata owned by a privileged session
+// protocol rather than generic bead create/update tooling.
+func IsGenericMutationReservedKey(key string) bool {
+	_, executionIdentity := executionIdentityMetadataKeys[key]
+	return executionIdentity ||
+		key == RSIExecutionBindingMetadataKey ||
+		strings.HasPrefix(key, SessionRequestReceiptPrefix) ||
+		key == SessionRequestPurgeFenceMetadataKey
+}
+
+// ValidateGenericMetadata rejects authority-bearing metadata on generic writes.
+func ValidateGenericMetadata(metadata map[string]string) error {
+	for key := range metadata {
+		if IsGenericMutationReservedKey(key) {
+			return fmt.Errorf("metadata key %q is reserved for the session lifecycle", key)
+		}
+	}
+	return nil
+}
+
+// RedactGenericMetadata returns a copy without execution credentials. Protocol
+// evidence remains visible; only credential material is removed.
+func RedactGenericMetadata(metadata map[string]string) map[string]string {
+	if metadata == nil {
+		return nil
+	}
+	out := make(map[string]string, len(metadata))
+	for key, value := range metadata {
+		if !IsExecutionCredentialMetadataKey(key) {
+			out[key] = value
+		}
+	}
+	return out
+}
 
 // Directory keys: a deliberate non-"gc."-prefixed sibling family on bead
 // metadata, declared here so the vocabulary has one home. Their read/write
@@ -551,18 +642,24 @@ var KnownMetadataKeys = []string{
 	PackMetadataKey,
 	PackRootMetadataKey,
 	PackWorkspaceMetadataKey,
+	PRActionClaimMetadataKey,
+	PRActionFingerprintMetadataKey,
+	PRActionIdempotencyMetadataKey,
+	PRActionQueueIndexMetadataKey,
+	PRActionRecordMetadataKey,
+	PRActionRouteProposalMetadataKey,
+	PRActionSourceMetadataKey,
+	PRActionTargetMetadataKey,
 	PerDispatchModelMetadataKey,
 	RalphStepIDMetadataKey,
+	RSIStoryRequiredMetadataKey,
 	RSIRoleMetadataKey,
 	RSIAuthorityClassMetadataKey,
 	RSICandidateInputMetadataKey,
+	RSIExecutionBindingMetadataKey,
+	RSIManualApprovalMetadataKey,
 	RSIPromoteMetadataKey,
 	RSIReasonMetadataKey,
-	RSIManualApprovalMetadataKey,
-	RSIStoryRequiredMetadataKey,
-	RSISuitePathMetadataKey,
-	RSISuiteHashMetadataKey,
-	RSIParentBundleMetadataKey,
 	ReasoningMetadataKey,
 	RequiredArtifactMetadataKey,
 	RequiredArtifactsMetadataKey,
@@ -591,6 +688,7 @@ var KnownMetadataKeys = []string{
 	SessionIDCamelMetadataKey,
 	SessionNameMetadataKey,
 	SessionNameCamelMetadataKey,
+	SessionRequestPurgeFenceMetadataKey,
 	SourceBeadIDMetadataKey,
 	SourceStepSpecMetadataKey,
 	SourceStoreRefMetadataKey,
@@ -632,8 +730,10 @@ var KnownMetadataKeys = []string{
 // begins with one of these is considered declared even though its full key is
 // not enumerable.
 var KnownMetadataPrefixes = []string{
+	PRActionMetadataPrefix,
 	FormulaVarPrefix,
 	IdemPrefix,
+	SessionRequestReceiptPrefix,
 }
 
 // SessionAffinityMetadataKeys are the metadata keys that pin a work bead to a

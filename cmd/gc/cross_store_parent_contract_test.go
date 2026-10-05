@@ -5,8 +5,8 @@ package main
 // The conformance suite pins what ONE store does with a ParentID naming a row
 // it does not have. This pins the shape that makes that case matter: a molecule
 // in the graph binding whose parent is a work bead in a rig ledger, which is
-// what defaultAttachGitHubPRRepairWorkflow produces on every converged city
-// (see its store-choice comment). The link spans two ledgers by design, and the
+// the shape produced by graph-class workflow materialization. The link spans
+// two ledgers by design, and the
 // design only holds if neither store needs the other's rows.
 //
 // It is written against a genuinely disjoint pair rather than one store used

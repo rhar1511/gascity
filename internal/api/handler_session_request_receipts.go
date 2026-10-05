@@ -1,0 +1,137 @@
+package api
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"net/url"
+	"time"
+
+	"github.com/danielgtaylor/huma/v2"
+	"github.com/gastownhall/gascity/internal/api/apierr"
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/worker"
+)
+
+// SessionRequestInput selects an exact durable session request.
+type SessionRequestInput struct {
+	CityScope
+	ID        string `path:"id" doc:"Exact durable session ID."`
+	RequestID string `path:"request_id" doc:"Exact request ID."`
+}
+
+// SessionRequestAcknowledgementInput binds acknowledgement to an execution credential.
+type SessionRequestAcknowledgementInput struct {
+	SessionRequestInput
+	Token string `header:"X-GC-Session-Token" required:"true" doc:"Credential of the intended session execution."`
+	Body  struct {
+		Generation int `json:"generation" minimum:"1" doc:"Intended session execution generation."`
+	}
+}
+
+func validateGenericBeadMetadata(metadata map[string]string) error {
+	if err := session.ValidateUnownedRequestMetadata(metadata); err != nil {
+		return apierr.Forbidden.Msg("session lifecycle metadata requires a privileged protocol")
+	}
+	return nil
+}
+
+// SessionRequestOutput exposes the credential-free receipt.
+type SessionRequestOutput struct {
+	Body session.RequestReceipt
+}
+
+func registerSessionRequestRoutes(sm *SupervisorMux) {
+	cityPost(sm, "/session/{id}/requests", (*Server).humaHandleSessionRequestSubmit, func(op *huma.Operation) { op.DefaultStatus = http.StatusAccepted }, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
+	cityGet(sm, "/session/{id}/requests/{request_id}", (*Server).humaHandleSessionRequestGet, errorStatuses(http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
+	cityPost(sm, "/session/{id}/requests/{request_id}/ack", (*Server).humaHandleSessionRequestAcknowledge, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
+}
+
+func (s *Server) humaHandleSessionRequestGet(_ context.Context, input *SessionRequestInput) (*SessionRequestOutput, error) {
+	receipt, err := session.NewStore(s.state.SessionsBeadStore()).GetRequest(input.ID, input.RequestID)
+	if err != nil {
+		return nil, sessionRequestError(err)
+	}
+	return &SessionRequestOutput{Body: receipt}, nil
+}
+
+func (s *Server) humaHandleSessionRequestAcknowledge(_ context.Context, input *SessionRequestAcknowledgementInput) (*SessionRequestOutput, error) {
+	receipt, err := session.NewStore(s.state.SessionsBeadStore()).AcknowledgeRequest(input.ID, input.RequestID, input.Body.Generation, input.Token, time.Now())
+	if err != nil {
+		return nil, sessionRequestError(err)
+	}
+	return &SessionRequestOutput{Body: receipt}, nil
+}
+
+func sessionRequestError(err error) error {
+	switch {
+	case errors.Is(err, session.ErrRequestAcknowledgementRejected):
+		return apierr.Forbidden.Msg("acknowledgement does not match the intended execution")
+	case errors.Is(err, session.ErrRequestNotFound):
+		return apierr.SessionRequestNotFound.Msg("session request not found")
+	case errors.Is(err, session.ErrSessionNotFound), errors.Is(err, beads.ErrNotFound):
+		return apierr.SessionNotFound.Msg("session not found")
+	case errors.Is(err, session.ErrRequestConflict):
+		return apierr.SessionConflict.Msg("session request identity, content, or stored evidence conflicts")
+	default:
+		return apierr.ServiceUnavailable.Msg("session request storage unavailable")
+	}
+}
+
+// SessionRequestSubmitInput names the exact intended execution and request content.
+type SessionRequestSubmitInput struct {
+	CityScope
+	ID             string `path:"id" doc:"Exact durable session ID."`
+	IdempotencyKey string `header:"Idempotency-Key" required:"false" doc:"Idempotency key for exact request replay."`
+	Body           struct {
+		RequestID  string `json:"request_id" minLength:"1" maxLength:"200" doc:"Durable idempotency identity for this request."`
+		Generation int    `json:"generation" minimum:"1" doc:"Exact intended execution generation."`
+		Message    string `json:"message" minLength:"1" doc:"Message delivered with its request identity."`
+	}
+}
+
+// Acceptance is persisted before background delivery. Repeated submissions
+// share the same record; the session domain reserves provider delivery once.
+func (s *Server) humaHandleSessionRequestSubmit(_ context.Context, input *SessionRequestSubmitInput) (*SessionRequestOutput, error) {
+	store := s.state.SessionsBeadStore()
+	if store.Store == nil {
+		return nil, apierr.ServiceUnavailable.Msg("session request storage unavailable")
+	}
+	sessionID := input.ID
+	requestID, generation, message := input.Body.RequestID, input.Body.Generation, input.Body.Message
+	accepted, err := withIdempotency(s.idem, "/v0/session/"+url.PathEscape(sessionID)+"/requests", input.IdempotencyKey, input.Body, func() (session.RequestReceipt, error) {
+		acceptance, err := session.NewStore(store).AcceptRequest(sessionID, requestID, generation, message, time.Now())
+		if err != nil {
+			return session.RequestReceipt{}, sessionRequestError(err)
+		}
+		return acceptance.RequestReceipt, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	// Every HTTP attempt may resume a durable pending receipt. The session CAS
+	// reserves provider delivery once, so replays after reservation cannot send.
+	// Resolution belongs here too: once acceptance commits, a worker/config
+	// failure must not replace the durable 202 response.
+	go func() {
+		defer s.recoverAsRequestFailed(requestID, RequestOperationSessionSubmit)
+		handle, err := s.workerHandleForSession(store.Store, sessionID)
+		if err != nil {
+			s.emitSessionSubmitFailed(requestID, "tracked_submit_resolution_failed", err.Error())
+			return
+		}
+		result, err := handle.Message(context.Background(), worker.MessageRequest{RequestID: requestID, Generation: generation, Text: message})
+		if err != nil {
+			s.emitSessionSubmitFailed(requestID, "tracked_submit_failed", err.Error())
+			return
+		}
+		if result.Receipt == nil || result.Receipt.Delivery != session.RequestDeliveryAccepted {
+			s.emitSessionSubmitFailed(requestID, "delivery_unknown", "provider delivery has not been established; inspect the durable receipt")
+			return
+		}
+		// Provider submission does not establish acknowledgement or effect.
+		s.emitSessionSubmitSucceeded(requestID, sessionID, false, string(session.SubmitIntentDefault))
+	}()
+	return &SessionRequestOutput{Body: accepted}, nil
+}

@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+
 	otellog "go.opentelemetry.io/otel/log"
 	otellogglobal "go.opentelemetry.io/otel/log/global"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
@@ -361,20 +363,15 @@ func (e *recordingLogExporter) recordByBody(body string) *sdklog.Record {
 	return nil
 }
 
-func recordAttrs(rec sdklog.Record) map[string]otellog.Value {
-	attrs := make(map[string]otellog.Value)
-	rec.WalkAttributes(func(kv otellog.KeyValue) bool {
-		attrs[kv.Key] = kv.Value
+func recordAttrs(rec sdklog.Record) map[string]attribute.Value {
+	attrs := make(map[string]attribute.Value)
+	rec.WalkAttributes(func(kv attribute.KeyValue) bool {
+		attrs[string(kv.Key)] = kv.Value
 		return true
 	})
 	return attrs
 }
 
-func logValueStringSlice(value otellog.Value) []string {
-	values := value.AsSlice()
-	out := make([]string, 0, len(values))
-	for _, item := range values {
-		out = append(out, item.AsString())
-	}
-	return out
+func logValueStringSlice(value attribute.Value) []string {
+	return value.AsStringSlice()
 }

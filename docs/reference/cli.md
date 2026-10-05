@@ -36,6 +36,7 @@ gc [flags]
 | [gc completion](#gc-completion) | Generate the autocompletion script for the specified shell |
 | [gc config](#gc-config) | Inspect and validate city configuration |
 | [gc context](#gc-context) | Manage named remote cities (~/.gc/contexts.toml) |
+| [gc controller](#gc-controller) | Request controller reconciliation |
 | [gc converge](#gc-converge) | Manage convergence loops (bounded iterative refinement) |
 | [gc convoy](#gc-convoy) | Manage convoys — graphs of related work |
 | [gc costs](#gc-costs) | Show per-run usage and estimated cost for this city |
@@ -930,6 +931,33 @@ with no arguments is not supported; remove the default by removing the context.
 ```
 gc context use <name>
 ```
+
+## gc controller
+
+Request controller reconciliation
+
+```
+gc controller
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc controller reconcile](#gc-controller-reconcile) | Request a tick from the running local controller |
+
+## gc controller reconcile
+
+Request a reconciliation tick using the running local controller's
+existing configuration and policy. A successful reply acknowledges the request;
+it does not establish session readiness, useful progress, or completed recovery.
+Requests may be coalesced with a pending tick.
+
+```
+gc controller reconcile [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | emit a JSON request acknowledgement |
 
 ## gc converge
 
@@ -1901,11 +1929,11 @@ gc github
 
 | Subcommand | Description |
 |------------|-------------|
-| [gc github pr](#gc-github-pr) | GitHub pull-request monitor commands |
+| [gc github pr](#gc-github-pr) | Read and act on the central PR queue |
 
 ## gc github pr
 
-GitHub pull-request monitor commands
+Read and act on the central PR queue
 
 ```
 gc github pr
@@ -1913,17 +1941,43 @@ gc github pr
 
 | Subcommand | Description |
 |------------|-------------|
-| [gc github pr backfill](#gc-github-pr-backfill) | Query configured GitHub PR readiness monitors |
+| [gc github pr action](#gc-github-pr-action) | Submit an exact revision to the central PR action API |
+| [gc github pr backfill](#gc-github-pr-backfill) | Read the Gas City server's PR queue and policy verdicts |
+
+## gc github pr action
+
+Submit a prepare or queue_review action using revisions and policy from
+backfill --all --json. Reuse the same idempotency key and exact arguments after
+an uncertain response. queue_review requires --work-id and --attempt-id from the
+server queue. GitHub merge actions remain unavailable. Output is JSON.
+
+```
+gc github pr action <prepare|queue_review> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--attempt-id` | string |  | exact immutable attempt from the queue |
+| `--base-sha` | string |  | exact base revision |
+| `--head-sha` | string |  | exact candidate revision |
+| `--idempotency-key` | string |  | stable key reused for retries of this exact request |
+| `--monitor` | string |  | server monitor name |
+| `--policy-version` | string |  | server policy version |
+| `--pr` | int |  | pull request number |
+| `--repo` | string |  | exact owner/repository from server queue |
+| `--timeout` | duration | `45s` | server request timeout |
+| `--work-id` | string |  | exact work record from the queue |
 
 ## gc github pr backfill
 
-Query configured GitHub PR readiness monitors.
+Read the Gas City server's PR queue and policy verdicts.
 
-The command reads [[github.pr_monitor]] entries from the resolved city
-configuration, queries open pull requests from GitHub, and reports PRs that
-need repair: failed checks, merge conflicts, blocked mergeability, or branches
-behind their base. By default clean and pending-only PRs are omitted; pass
---all to include every observed PR.
+The server supplies repository revisions, policy versions, evidence and permitted
+actions. By default, show items with an available action; --all includes blocked
+items. --create-repair-beads submits only server-permitted prepare actions with
+stable revision-specific idempotency keys. Prepared work is not dispatched by
+this command. A server failure never falls back to local policy or ledger writes.
+JSON schema version 2 contains the server queue and verified action receipts.
 
 ```
 gc github pr backfill [monitor-name] [flags]
@@ -1931,10 +1985,10 @@ gc github pr backfill [monitor-name] [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--all` | bool |  | include clean and pending-only PRs |
-| `--create-repair-beads` | bool |  | create deduped repair beads for actionable PRs |
+| `--all` | bool |  | include items without available actions |
+| `--create-repair-beads` | bool |  | submit server-permitted prepare actions |
 | `--json` | bool |  | emit JSON |
-| `--timeout` | duration | `45s` | GitHub query timeout |
+| `--timeout` | duration | `45s` | server request timeout |
 
 ## gc graph
 
@@ -4120,6 +4174,7 @@ gc session
 | [gc session pin](#gc-session-pin) | Keep a session awake |
 | [gc session prune](#gc-session-prune) | Close old dormant sessions |
 | [gc session rename](#gc-session-rename) | Rename a session |
+| [gc session request](#gc-session-request) | Submit, inspect, and acknowledge tracked session requests |
 | [gc session reset](#gc-session-reset) | Restart a session fresh while preserving the bead |
 | [gc session submit](#gc-session-submit) | Submit a message with semantic delivery intent |
 | [gc session suspend](#gc-session-suspend) | Suspend a session (save state, free resources) |
@@ -4352,6 +4407,48 @@ gc session rename <session-id-or-alias> <title> [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--json` | bool |  | emit JSONL |
+
+## gc session request
+
+Submit, inspect, and acknowledge tracked session requests
+
+```
+gc session request
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc session request ack](#gc-session-request-ack) | Acknowledge receipt from this session execution |
+| [gc session request get](#gc-session-request-get) | Read the server's durable request receipt |
+| [gc session request submit](#gc-session-request-submit) | Submit a request to an exact live execution |
+
+## gc session request ack
+
+Acknowledge receipt using GC_SESSION_ID, GC_RUNTIME_EPOCH, and GC_INSTANCE_TOKEN from this execution. An acknowledgement does not verify the requested effect.
+
+```
+gc session request ack <request-id>
+```
+
+## gc session request get
+
+Read the server's durable request receipt
+
+```
+gc session request get <session-id> <request-id>
+```
+
+## gc session request submit
+
+Submit a request to an exact live execution
+
+```
+gc session request submit <session-id> <request-id> <message...> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--generation` | int |  | exact intended execution generation |
 
 ## gc session reset
 

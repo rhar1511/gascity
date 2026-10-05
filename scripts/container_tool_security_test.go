@@ -149,36 +149,70 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 	}
 }
 
+// TestMCPMailImagePinsPatchedPythonDependencies checks the normalized package
+// version contracts consumed by the mail image's hash-locked pip installation.
+// Newer patched versions are valid; comments cannot satisfy a security floor.
 func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 	root := repoRoot(t)
 	input := readFile(t, root, ".github/requirements/mcp-agent-mail.in")
-	for _, want := range []string{
-		"gitpython>=3.1.59",
-		"aiohttp>=3.14.3",
-		"anyio>=4.14.2",
-		"pillow>=12.3.0",
-	} {
-		if !strings.Contains(input, want) {
-			t.Errorf("mcp-agent-mail input requirements missing security floor %q", want)
-		}
-	}
 	overrides := readFile(t, root, ".github/requirements/mcp-agent-mail.overrides.txt")
-	if !strings.Contains(overrides, "cryptography>=50.0.0") {
-		t.Error("mcp-agent-mail overrides missing cryptography security floor >=50.0.0")
-	}
-
 	lock := readFile(t, root, ".github/requirements/mcp-agent-mail.txt")
-	for _, want := range []string{
-		"gitpython==3.1.59 \\",
-		"aiohttp==3.14.3 \\",
-		"anyio==4.14.2 \\",
-		"cryptography==50.0.0 \\",
-		"pillow==12.3.0 \\",
+	for _, floor := range []struct {
+		name, version, lockVersion string
+		override                   bool
+	}{
+		{"gitpython", "3.1.60", "3.2.0", false},
+		{"aiohttp", "3.14.3", "3.14.3", false},
+		{"anyio", "4.14.2", "4.14.2", false},
+		{"pillow", "12.3.0", "12.3.0", false},
+		{"urllib3", "2.8.0", "2.8.0", false},
+		{"pyjwt", "2.14.0", "2.15.1", true},
+		{"cryptography", "50.0.0", "50.0.0", true},
 	} {
-		if !strings.Contains(lock, want) {
-			t.Errorf("mcp-agent-mail hashed lock missing patched dependency %q", want)
-		}
+		t.Run(floor.name, func(t *testing.T) {
+			declaration := input
+			if floor.override {
+				declaration = overrides
+			}
+			for _, contract := range []struct{ text, operator, version string }{
+				{declaration, ">=", floor.version}, {lock, "==", floor.lockVersion},
+			} {
+				want := parseModuleSemver(t, "v"+contract.version)
+				have := mailRequirementVersion(t, contract.text, floor.name, contract.operator)
+				if !semverAtLeast(have, want) {
+					t.Errorf("%s %s contract resolves below patched version %s", floor.name, contract.operator, contract.version)
+				}
+			}
+		})
 	}
+}
+
+// mailRequirementVersion reads the supported numeric version contract from a
+// pip requirements declaration, ignoring hashes, continuations and comments.
+func mailRequirementVersion(t *testing.T, requirements, name, operator string) [3]int {
+	t.Helper()
+	var version [3]int
+	found := false
+	for _, raw := range strings.Split(requirements, "\n") {
+		line, _, _ := strings.Cut(raw, "#")
+		pkg, value, ok := strings.Cut(strings.TrimSpace(line), operator)
+		if !ok || strings.ToLower(strings.TrimSpace(pkg)) != name {
+			continue
+		}
+		if found {
+			t.Fatalf("duplicate %s %s contract", name, operator)
+		}
+		fields := strings.Fields(value)
+		if len(fields) == 0 {
+			t.Fatalf("missing %s version", name)
+		}
+		version = parseModuleSemver(t, "v"+fields[0])
+		found = true
+	}
+	if !found {
+		t.Fatalf("missing %s %s package contract", name, operator)
+	}
+	return version
 }
 
 // TestMCPMailImageUpgradesPatchedOSPackages guards the --only-upgrade list in

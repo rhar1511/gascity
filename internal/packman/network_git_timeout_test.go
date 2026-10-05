@@ -14,13 +14,15 @@ import (
 )
 
 // wedgedRemote is what wedgedGit hands back: the remote URL the shim ignores,
-// plus the two artifacts its backgrounded child produces so a test can observe
+// plus the lifecycle artifacts its backgrounded child produces so a test can observe
 // the child's lifecycle without polling it.
 type wedgedRemote struct {
 	// URL is a syntactically valid remote the shim never actually contacts.
 	URL string
 	// PIDPath receives the backgrounded child's pid, for cleanup.
 	PIDPath string
+	// ReadyPath is written after the child has emitted its first heartbeat.
+	ReadyPath string
 	// HeartbeatPath grows for as long as that child is alive. Its size is the
 	// direct measurement of the thing the bound has to stop: not "did the call
 	// return" but "did the work stop".
@@ -65,6 +67,7 @@ func wedgedGit(t *testing.T) wedgedRemote {
 	w := wedgedRemote{
 		URL:           "http://packman.invalid/wedged.git",
 		PIDPath:       filepath.Join(dir, "child.pid"),
+		ReadyPath:     filepath.Join(dir, "child.ready"),
 		HeartbeatPath: filepath.Join(dir, "child.heartbeat"),
 	}
 	// The first heartbeat is written by the foreground shim, before the loop is
@@ -81,7 +84,7 @@ func wedgedGit(t *testing.T) wedgedRemote {
 	// window, or a live child idling between writes reads as a dead one.
 	script := "#!/bin/sh\n" +
 		"echo . >> " + w.HeartbeatPath + "\n" +
-		"{ while : ; do echo . >> " + w.HeartbeatPath + " ; " + sleep + " 0.05 ; done ; } &\n" +
+		"{ echo . >> " + w.HeartbeatPath + "; echo ready > " + w.ReadyPath + "; while : ; do echo . >> " + w.HeartbeatPath + " ; " + sleep + " 0.05 ; done ; } &\n" +
 		"echo $! > " + w.PIDPath + "\n" +
 		"wait\n"
 	if err := os.WriteFile(filepath.Join(dir, "git"), []byte(script), 0o755); err != nil {

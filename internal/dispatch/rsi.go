@@ -2,43 +2,39 @@ package dispatch
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/reviewquorum"
 	"github.com/gastownhall/gascity/internal/rsipolicy"
-	"github.com/gastownhall/gascity/internal/storybench"
 )
 
 const (
-	rsiCandidateEvidenceMissing    = "rsi_candidate_evidence_missing"
-	rsiCandidateEvidenceAmbiguous  = "rsi_candidate_evidence_ambiguous"
-	rsiCandidateEvidenceMalformed  = "rsi_candidate_evidence_malformed"
-	rsiJudgeEvidenceMalformed      = "rsi_judge_evidence_malformed"
-	rsiBenchmarkEvidenceAmbiguous  = "rsi_benchmark_evidence_ambiguous"
-	rsiBenchmarkEvidenceMalformed  = "rsi_benchmark_evidence_malformed"
-	rsiBenchmarkRequirementInvalid = "rsi_benchmark_requirement_invalid"
-	rsiBenchmarkSuiteInvalid       = "rsi_benchmark_suite_invalid"
-	rsiBenchmarkEvidenceInvalid    = "rsi_benchmark_evidence_invalid"
+	rsiCandidateEvidenceMissing     = "rsi_candidate_evidence_missing"
+	rsiCandidateEvidenceAmbiguous   = "rsi_candidate_evidence_ambiguous"
+	rsiCandidateEvidenceMalformed   = "rsi_candidate_evidence_malformed"
+	rsiJudgeEvidenceMalformed       = "rsi_judge_evidence_malformed"
+	rsiEvidenceRoleUnknown          = "rsi_evidence_role_unknown"
+	rsiTrustedEvaluationUnavailable = "rsi_trusted_evaluation_unavailable"
 )
 
-// processRSIPromotionGate evaluates the durable candidate and independent judge
-// outputs attached to an RSI gate. The gate is the only writer of the policy
-// decision; worker beads remain evidence records and cannot self-promote.
-func processRSIPromotionGate(store beads.Store, bead beads.Bead, _ ProcessOptions) (ControlResult, error) {
+// processRSIPromotionGate evaluates only controller-resolved trusted policy
+// evidence. Durable worker outputs identify the proposed candidate and judge
+// reports; no worker-supplied policy, limits, metrics, attempts, or authority
+// fields are used to build the promotion input.
+func processRSIPromotionGate(store beads.Store, bead beads.Bead, opts ProcessOptions) (ControlResult, error) {
 	deps, err := store.DepList(bead.ID, "down")
 	if err != nil {
 		return ControlResult{}, fmt.Errorf("%s: listing RSI evidence dependencies: %w", bead.ID, err)
 	}
 
-	candidateCount := 0
-	var candidate rsipolicy.CandidateEvidence
-	var benchmark *storybench.Evidence
-	var lanes []reviewquorum.LaneOutput
+	var candidate rsipolicy.CandidateRecord
+	var candidateCount int
+	var benchmark *rsipolicy.BenchmarkRecord
+	var judges []rsipolicy.JudgeRecord
 	for _, dep := range deps {
 		if dep.Type != "blocks" && dep.Type != "" {
 			continue
@@ -51,115 +47,161 @@ func processRSIPromotionGate(store beads.Store, bead beads.Bead, _ ProcessOption
 		case beadmeta.RSIRoleImprover:
 			candidateCount++
 			if candidateCount > 1 {
-				return closeRSIPromotionGate(store, bead, rsipolicy.Decision{
-					Reason:  rsiCandidateEvidenceAmbiguous,
-					Reasons: []string{rsiCandidateEvidenceAmbiguous},
-				}, beadmeta.OutcomeFail, "rsi-reject")
+				return closeRSIPromotionGate(store, bead, rsiReject(rsiCandidateEvidenceAmbiguous), beadmeta.OutcomeFail, "rsi-reject")
 			}
-			if err := decodeRSIJSON(dependency, &candidate); err != nil {
-				return closeRSIPromotionGate(store, bead, rsipolicy.Decision{
-					Reason:  rsiCandidateEvidenceMalformed,
-					Reasons: []string{rsiCandidateEvidenceMalformed},
-				}, beadmeta.OutcomeFail, "rsi-reject")
+			actual, resolveErr := resolveRSIWorkerExecution(store, dependency)
+			if resolveErr != nil || dependency.Metadata[beadmeta.OutputJSONMetadataKey] != actual.Metadata[beadmeta.OutputJSONMetadataKey] {
+				return closeRSIPromotionGate(store, bead, rsiReject(rsiTrustedEvaluationUnavailable), beadmeta.OutcomeFail, "rsi-reject")
+			}
+			rawOutput := actual.Metadata[beadmeta.OutputJSONMetadataKey]
+			var proposal rsipolicy.CandidateProposal
+			if err := decodeRSIOutput(rawOutput, &proposal); err != nil {
+				return closeRSIPromotionGate(store, bead, rsiReject(rsiCandidateEvidenceMalformed), beadmeta.OutcomeFail, "rsi-reject")
+			}
+			binding, bindErr := rsipolicy.ParseExecutionBinding(actual.Metadata[beadmeta.RSIExecutionBindingMetadataKey])
+			if bindErr != nil {
+				return closeRSIPromotionGate(store, bead, rsiReject(rsiTrustedEvaluationUnavailable), beadmeta.OutcomeFail, "rsi-reject")
+			}
+			candidate = rsipolicy.CandidateRecord{
+				BeadID:          actual.ID,
+				BeadRevision:    actual.Revision,
+				ControlBeadID:   dependency.ID,
+				ControlRevision: dependency.Revision,
+				Attempt:         beadmeta.RetryAttemptNumber(actual.Metadata),
+				MaxAttempts:     retryMaxAttempts(dependency),
+				ActorID:         binding.ActorID,
+				SessionID:       binding.SessionID,
+				Status:          strings.TrimSpace(actual.Status),
+				Outcome:         strings.TrimSpace(actual.Metadata[beadmeta.OutcomeMetadataKey]),
+				RawOutput:       rawOutput,
+				Proposal:        proposal,
 			}
 		case beadmeta.RSIRoleJudge:
-			var lane reviewquorum.LaneOutput
-			if err := decodeRSIJSON(dependency, &lane); err != nil {
-				return closeRSIPromotionGate(store, bead, rsipolicy.Decision{
-					Reason:  rsiJudgeEvidenceMalformed,
-					Reasons: []string{rsiJudgeEvidenceMalformed},
-				}, beadmeta.OutcomeFail, "rsi-reject")
+			actual, resolveErr := resolveRSIWorkerExecution(store, dependency)
+			if resolveErr != nil || dependency.Metadata[beadmeta.OutputJSONMetadataKey] != actual.Metadata[beadmeta.OutputJSONMetadataKey] {
+				return closeRSIPromotionGate(store, bead, rsiReject(rsiTrustedEvaluationUnavailable), beadmeta.OutcomeFail, "rsi-reject")
 			}
-			lanes = append(lanes, lane)
+			rawOutput := actual.Metadata[beadmeta.OutputJSONMetadataKey]
+			var lane rsipolicy.JudgeRecord
+			if err := decodeRSIOutput(rawOutput, &lane.Lane); err != nil {
+				return closeRSIPromotionGate(store, bead, rsiReject(rsiJudgeEvidenceMalformed), beadmeta.OutcomeFail, "rsi-reject")
+			}
+			binding, bindErr := rsipolicy.ParseExecutionBinding(actual.Metadata[beadmeta.RSIExecutionBindingMetadataKey])
+			if bindErr != nil {
+				return closeRSIPromotionGate(store, bead, rsiReject(rsiTrustedEvaluationUnavailable), beadmeta.OutcomeFail, "rsi-reject")
+			}
+			lane.BeadID = actual.ID
+			lane.BeadRevision = actual.Revision
+			lane.ControlBeadID = dependency.ID
+			lane.ControlRevision = dependency.Revision
+			lane.ActorID = binding.ActorID
+			lane.SessionID = binding.SessionID
+			lane.Status = strings.TrimSpace(actual.Status)
+			lane.Outcome = strings.TrimSpace(actual.Metadata[beadmeta.OutcomeMetadataKey])
+			lane.RawOutput = rawOutput
+			judges = append(judges, lane)
 		case beadmeta.RSIRoleBenchmark:
 			if benchmark != nil {
-				return closeRSIPromotionGate(store, bead, rsipolicy.Decision{
-					Reason: rsiBenchmarkEvidenceAmbiguous, Reasons: []string{rsiBenchmarkEvidenceAmbiguous},
-				}, beadmeta.OutcomeFail, "rsi-reject")
+				return closeRSIPromotionGate(store, bead, rsiReject("rsi_benchmark_evidence_ambiguous"), beadmeta.OutcomeFail, "rsi-reject")
 			}
-			var evidence storybench.Evidence
-			if err := decodeRSIJSON(dependency, &evidence); err != nil {
-				return closeRSIPromotionGate(store, bead, rsipolicy.Decision{
-					Reason: rsiBenchmarkEvidenceMalformed, Reasons: []string{rsiBenchmarkEvidenceMalformed},
-				}, beadmeta.OutcomeFail, "rsi-reject")
+			actual, resolveErr := resolveRSIWorkerExecution(store, dependency)
+			if resolveErr != nil || dependency.Metadata[beadmeta.OutputJSONMetadataKey] != actual.Metadata[beadmeta.OutputJSONMetadataKey] {
+				return closeRSIPromotionGate(store, bead, rsiReject(rsiTrustedEvaluationUnavailable), beadmeta.OutcomeFail, "rsi-reject")
 			}
-			benchmark = &evidence
+			binding, bindErr := rsipolicy.ParseExecutionBinding(actual.Metadata[beadmeta.RSIExecutionBindingMetadataKey])
+			if bindErr != nil {
+				return closeRSIPromotionGate(store, bead, rsiReject(rsiTrustedEvaluationUnavailable), beadmeta.OutcomeFail, "rsi-reject")
+			}
+			benchmark = &rsipolicy.BenchmarkRecord{BeadID: actual.ID, BeadRevision: actual.Revision, ControlBeadID: dependency.ID, ControlRevision: dependency.Revision, ActorID: binding.ActorID, SessionID: binding.SessionID, Status: actual.Status, Outcome: actual.Metadata[beadmeta.OutcomeMetadataKey], RawOutput: actual.Metadata[beadmeta.OutputJSONMetadataKey]}
+		default:
+			return closeRSIPromotionGate(store, bead, rsiReject(rsiEvidenceRoleUnknown), beadmeta.OutcomeFail, "rsi-reject")
 		}
 	}
 
 	if candidateCount == 0 {
-		return closeRSIPromotionGate(store, bead, rsipolicy.Decision{
-			Reason:  rsiCandidateEvidenceMissing,
-			Reasons: []string{rsiCandidateEvidenceMissing},
-		}, beadmeta.OutcomeFail, "rsi-reject")
+		return closeRSIPromotionGate(store, bead, rsiReject(rsiCandidateEvidenceMissing), beadmeta.OutcomeFail, "rsi-reject")
 	}
-
-	input := candidate.Input(lanes)
+	if opts.ResolveRSIEvaluation == nil {
+		return closeRSIPromotionGate(store, bead, rsiReject(rsiTrustedEvaluationUnavailable), beadmeta.OutcomeFail, "rsi-reject")
+	}
 	requirement := strings.TrimSpace(bead.Metadata[beadmeta.RSIStoryRequiredMetadataKey])
 	if requirement != "" && requirement != "true" && requirement != "false" {
-		return closeRSIPromotionGate(store, bead, rsipolicy.Decision{
-			Reason: rsiBenchmarkRequirementInvalid, Reasons: []string{rsiBenchmarkRequirementInvalid},
-		}, beadmeta.OutcomeFail, "rsi-reject")
+		return closeRSIPromotionGate(store, bead, rsiReject("rsi_benchmark_requirement_invalid"), beadmeta.OutcomeFail, "rsi-reject")
 	}
-	input.StoryBenchmarkRequired = requirement == "true"
-	if input.StoryBenchmarkRequired {
-		suitePath := strings.TrimSpace(bead.Metadata[beadmeta.RSISuitePathMetadataKey])
-		expectedHash := strings.TrimSpace(bead.Metadata[beadmeta.RSISuiteHashMetadataKey])
-		expectedParent := strings.TrimSpace(bead.Metadata[beadmeta.RSIParentBundleMetadataKey])
-		if !filepath.IsAbs(suitePath) || expectedHash == "" || expectedParent == "" ||
-			input.Current.ID != expectedParent || input.Current.EvalSuiteHash != expectedHash ||
-			input.Candidate.EvalSuiteHash != expectedHash {
-			return closeRSIPromotionGate(store, bead, rsipolicy.Decision{
-				Reason: rsiBenchmarkSuiteInvalid, Reasons: []string{rsiBenchmarkSuiteInvalid},
-			}, beadmeta.OutcomeFail, "rsi-reject")
+	request := rsipolicy.ResolveRequest{Context: opts.RSIEvaluationContext, Candidate: candidate, Judges: judges, Benchmark: benchmark, StoryBenchmarkRequired: requirement == "true" || benchmark != nil}
+	request.Context.ProtocolVersion = rsipolicy.ProtocolVersionV1
+	request.Context.WorkflowRootID = strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
+	request.Context.GateID = bead.ID
+	request.Context.InputSHA256 = rsipolicy.ResolveRequestInputSHA256(request)
+	trusted, err := opts.ResolveRSIEvaluation(opts.Context, request)
+	if err != nil {
+		if errors.Is(err, rsipolicy.ErrTrustedEvaluationPending) {
+			return ControlResult{}, fmt.Errorf("%w: %w", ErrControlPending, err)
 		}
-		rawSuite, err := os.ReadFile(suitePath)
-		if err != nil || storybench.SuiteHash(rawSuite) != expectedHash {
-			return closeRSIPromotionGate(store, bead, rsipolicy.Decision{
-				Reason: rsiBenchmarkSuiteInvalid, Reasons: []string{rsiBenchmarkSuiteInvalid},
-			}, beadmeta.OutcomeFail, "rsi-reject")
-		}
-		if benchmark != nil {
-			result, err := storybench.Evaluate(rawSuite, benchmark.Baseline, benchmark.Candidate, candidate.Improver)
-			if err != nil {
-				return closeRSIPromotionGate(store, bead, rsipolicy.Decision{
-					Reason: rsiBenchmarkEvidenceInvalid, Reasons: []string{rsiBenchmarkEvidenceInvalid},
-				}, beadmeta.OutcomeFail, "rsi-reject")
-			}
-			input.StoryBenchmark = &result
-		}
-	} else if benchmark != nil {
-		return closeRSIPromotionGate(store, bead, rsipolicy.Decision{
-			Reason: rsiBenchmarkRequirementInvalid, Reasons: []string{rsiBenchmarkRequirementInvalid},
-		}, beadmeta.OutcomeFail, "rsi-reject")
+		return closeRSIPromotionGate(store, bead, rsiReject(rsiTrustedEvaluationUnavailable), beadmeta.OutcomeFail, "rsi-reject")
 	}
-	// The gate metadata is the authoritative authority class. Candidate workers
-	// may report it for evidence, but they must not be able to downgrade a
-	// human-approval boundary in their own payload.
-	if authorityClass := strings.TrimSpace(bead.Metadata[beadmeta.RSIAuthorityClassMetadataKey]); authorityClass != "" {
-		input.AuthorityClass = authorityClass
+	if request.StoryBenchmarkRequired && (!trusted.Input.StoryBenchmarkRequired || trusted.Input.StoryBenchmark == nil) {
+		return closeRSIPromotionGate(store, bead, rsiReject(rsiTrustedEvaluationUnavailable), beadmeta.OutcomeFail, "rsi-reject")
 	}
-	decision := rsipolicy.Evaluate(input)
+	trusted.Input.HumanApprovalVerified = trusted.HumanApprovalVerified
+	decision := rsipolicy.Evaluate(trusted.Input)
 	if decision.ManualApprovalRequired && onlyRSIHumanApprovalReason(decision) {
-		return closeRSIPromotionGate(store, bead, decision, beadmeta.OutcomePass, "rsi-human-approval")
+		return ControlResult{}, fmt.Errorf("%w: human signature required for this evaluation", ErrControlPending)
 	}
 	if decision.Promote {
 		return closeRSIPromotionGate(store, bead, decision, beadmeta.OutcomePass, "rsi-promote")
 	}
-	return closeRSIPromotionGate(store, bead, decision, beadmeta.OutcomePass, "rsi-reject")
+	return closeRSIPromotionGate(store, bead, decision, beadmeta.OutcomeFail, "rsi-reject")
+}
+
+// resolveRSIWorkerExecution follows a retry control to the exact successful
+// attempt that supplied its output. Retry controls intentionally do not copy
+// assignment/session metadata from workers, so those values must come from the
+// closed attempt bead rather than the logical control bead.
+func resolveRSIWorkerExecution(store beads.Store, logical beads.Bead) (beads.Bead, error) {
+	if logical.Status != "closed" || logical.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomePass {
+		return beads.Bead{}, fmt.Errorf("logical RSI worker %s is not closed with pass", logical.ID)
+	}
+	actual := logical
+	if logical.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindRetry {
+		attempt, err := findLatestAttempt(store, logical)
+		if err != nil {
+			return beads.Bead{}, err
+		}
+		if attempt.ID == "" || attempt.Status != "closed" || attempt.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomePass {
+			return beads.Bead{}, fmt.Errorf("RSI retry control %s has no passing closed attempt", logical.ID)
+		}
+		actual = attempt
+		closedBy, parseErr := strconv.Atoi(strings.TrimSpace(logical.Metadata[beadmeta.ClosedByAttemptMetadataKey]))
+		if parseErr != nil || closedBy < 1 || beadmeta.RetryAttemptNumber(actual.Metadata) != closedBy {
+			return beads.Bead{}, fmt.Errorf("RSI retry control %s does not bind its successful execution to gc.closed_by_attempt", logical.ID)
+		}
+	}
+	if actual.Metadata[beadmeta.RSIRoleMetadataKey] != logical.Metadata[beadmeta.RSIRoleMetadataKey] {
+		return beads.Bead{}, fmt.Errorf("RSI retry execution %s does not carry the logical worker role", actual.ID)
+	}
+	return actual, nil
+}
+
+func retryMaxAttempts(control beads.Bead) int {
+	maxAttempts, _ := strconv.Atoi(strings.TrimSpace(control.Metadata[beadmeta.MaxAttemptsMetadataKey]))
+	return maxAttempts
+}
+
+func rsiReject(reason string) rsipolicy.Decision {
+	return rsipolicy.Decision{Reason: reason, Reasons: []string{reason}}
 }
 
 func onlyRSIHumanApprovalReason(decision rsipolicy.Decision) bool {
 	return len(decision.Reasons) == 1 && decision.Reasons[0] == rsipolicy.ReasonHumanApprovalRequired
 }
 
-func decodeRSIJSON[T any](bead beads.Bead, dst *T) error {
-	raw := strings.TrimSpace(bead.Metadata[beadmeta.OutputJSONMetadataKey])
-	if raw == "" {
-		return fmt.Errorf("%s: %s is empty", bead.ID, beadmeta.OutputJSONMetadataKey)
+func decodeRSIOutput[T any](raw string, dst *T) error {
+	if strings.TrimSpace(raw) == "" {
+		return fmt.Errorf("%s is empty", beadmeta.OutputJSONMetadataKey)
 	}
 	if err := json.Unmarshal([]byte(raw), dst); err != nil {
-		return fmt.Errorf("%s: decode %s: %w", bead.ID, beadmeta.OutputJSONMetadataKey, err)
+		return fmt.Errorf("decode %s: %w", beadmeta.OutputJSONMetadataKey, err)
 	}
 	return nil
 }

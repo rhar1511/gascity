@@ -137,3 +137,13 @@ func TestEvaluateChecksElapsedTimeWhenStoryHasShortArc(t *testing.T) {
 		t.Fatalf("overlong arc passed: %+v", result)
 	}
 }
+
+func TestEvaluateRejectsUnknownSuiteFields(t *testing.T) {
+	raw := []byte(strings.Replace(testSuite, `"version":1`, `"version":1,"unexpected_policy":true`, 1))
+	hash := SuiteHash(raw)
+	baseline := testRun(hash, "bundle-1", "harness", nil, []string{"offer_exit"})
+	candidate := testRun(hash, "bundle-2", "harness", []string{"end_session"}, []string{"offer_exit"})
+	if _, err := Evaluate(raw, baseline, candidate, "improver"); err == nil {
+		t.Fatal("unknown suite policy field accepted")
+	}
+}

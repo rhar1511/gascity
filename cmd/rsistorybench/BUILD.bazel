@@ -1,11 +1,15 @@
-load("@rules_go//go:def.bzl", "go_binary", "go_library")
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
 
 go_library(
     name = "rsistorybench_lib",
     srcs = ["main.go"],
     importpath = "github.com/gastownhall/gascity/cmd/rsistorybench",
     visibility = ["//visibility:private"],
-    deps = ["//internal/storybench"],
+    deps = [
+        "//internal/fsys",
+        "//internal/storybench",
+        "@com_github_spf13_cobra//:cobra",
+    ],
 )
 
 go_binary(
@@ -24,4 +28,19 @@ filegroup(
         exclude = ["BUILD.bazel"],
     ),
     visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "rsistorybench_test",
+    srcs = [
+        "main_test.go",
+        "testenv_import_test.go",
+    ],
+    data = glob(["testdata/**"]),
+    embed = [":rsistorybench_lib"],
+    deps = [
+        "//internal/storybench",
+        "//internal/testenv",
+        "@com_github_rogpeppe_go_internal//testscript",
+    ],
 )

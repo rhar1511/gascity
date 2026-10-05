@@ -1536,18 +1536,17 @@ esac
 // group unblocks the child so the trap runs inside the grace window.
 func TestProvider_StartCancellationInterruptsForegroundChild(t *testing.T) {
 	dir := t.TempDir()
-	readyFile := filepath.Join(dir, "ready")
+	childReadyFile := filepath.Join(dir, "child-ready")
 	interruptFile := filepath.Join(dir, "interrupted")
 	script := writeScript(t, dir, fmt.Sprintf(`
 case "$1" in
   start)
     trap 'printf "%%s\n" interrupted > "%s"; exit 0' INT
-    : > "%s"
-    sleep 30
+    sh -c ': > "%s"; exec sleep 30'
     ;;
   *) exit 2 ;;
 esac
-	`, interruptFile, readyFile))
+	`, interruptFile, childReadyFile))
 	p := NewProvider(script)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1557,13 +1556,13 @@ esac
 		done <- p.Start(ctx, "test-sess", runtime.Config{})
 	}()
 
-	// Wait until the adapter is blocked in the foreground sleep.
+	// Wait for the foreground child to start before canceling the adapter.
 	readyDeadline := time.NewTimer(5 * time.Second)
 	defer readyDeadline.Stop()
 	readyPoll := time.NewTicker(10 * time.Millisecond)
 	defer readyPoll.Stop()
 	for {
-		if _, err := os.Stat(readyFile); err == nil {
+		if _, err := os.Stat(childReadyFile); err == nil {
 			break
 		} else if !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("stat readiness marker: %v", err)

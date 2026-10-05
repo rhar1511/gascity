@@ -218,6 +218,9 @@ func (h *RuntimeHandle) State(context.Context) (State, error) {
 // telemetry (gc.agent.tokens.*, gc.agent.invocation.cost_usd); see
 // SessionHandle.recordInvocationTelemetry. Do not add a telemetry hook here.
 func (h *RuntimeHandle) Message(ctx context.Context, req MessageRequest) (result MessageResult, err error) {
+	if req.RequestID != "" || req.Generation != 0 {
+		return MessageResult{}, fmt.Errorf("tracked requests require a durable session")
+	}
 	event := h.beginOperationEvent(ctx, workerOperationMessage)
 	defer func() {
 		event.payload.Queued = boolPointer(result.Queued)

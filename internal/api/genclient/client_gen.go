@@ -117,6 +117,27 @@ func (e EventRotateArchiveCompressionStatus) Valid() bool {
 	}
 }
 
+// Defines values for PRActionExecuteBodyAction.
+const (
+	Merge       PRActionExecuteBodyAction = "merge"
+	Prepare     PRActionExecuteBodyAction = "prepare"
+	QueueReview PRActionExecuteBodyAction = "queue_review"
+)
+
+// Valid indicates whether the value is a known member of the PRActionExecuteBodyAction enum.
+func (e PRActionExecuteBodyAction) Valid() bool {
+	switch e {
+	case Merge:
+		return true
+	case Prepare:
+		return true
+	case QueueReview:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for RequestFailedPayloadOperation.
 const (
 	CityCreate     RequestFailedPayloadOperation = "city.create"
@@ -1125,6 +1146,12 @@ type AnnotatedProviderResponse struct {
 	ReadyDelayMs *int64  `json:"ready_delay_ms,omitempty"`
 }
 
+// ArtifactAvailability defines model for ArtifactAvailability.
+type ArtifactAvailability struct {
+	Reason *string `json:"reason,omitempty"`
+	State  string  `json:"state"`
+}
+
 // AsyncAcceptedBody defines model for AsyncAcceptedBody.
 type AsyncAcceptedBody struct {
 	// EventCursor City event-stream sequence captured before the async request was accepted. Pass this value as after_seq to /v0/city/{cityName}/events/stream to receive the request result without replaying unrelated historical backlog. A value of 0 can also mean no event provider is configured or the event log is empty.
@@ -1144,6 +1171,15 @@ type AsyncAcceptedResponse struct {
 
 	// RequestId Correlation ID. Watch /v0/events/stream for request.result.city.create, request.result.city.unregister, or request.failed with this request_id.
 	RequestId string `json:"request_id"`
+}
+
+// AttemptInspection defines model for AttemptInspection.
+type AttemptInspection struct {
+	Association ArtifactAvailability  `json:"association"`
+	BeadId      string                `json:"bead_id"`
+	Diff        HistoricalDiff        `json:"diff"`
+	PullRequest HistoricalPullRequest `json:"pull_request"`
+	SessionId   string                `json:"session_id"`
 }
 
 // BackendCredentialResolvedPayload defines model for BackendCredentialResolvedPayload.
@@ -2208,6 +2244,24 @@ type HeartbeatEvent struct {
 	Timestamp string `json:"timestamp"`
 }
 
+// HistoricalDiff defines model for HistoricalDiff.
+type HistoricalDiff struct {
+	Binary    *bool   `json:"binary,omitempty"`
+	Bytes     *int64  `json:"bytes,omitempty"`
+	Reason    *string `json:"reason,omitempty"`
+	State     string  `json:"state"`
+	Text      *string `json:"text,omitempty"`
+	Truncated *bool   `json:"truncated,omitempty"`
+}
+
+// HistoricalPullRequest defines model for HistoricalPullRequest.
+type HistoricalPullRequest struct {
+	Reason *string `json:"reason,omitempty"`
+	State  string  `json:"state"`
+	Status *string `json:"status,omitempty"`
+	Url    *string `json:"url,omitempty"`
+}
+
 // HookClaimReclaimedStalePayload defines model for HookClaimReclaimedStalePayload.
 type HookClaimReclaimedStalePayload struct {
 	BeadId        string `json:"bead_id"`
@@ -2854,6 +2908,144 @@ type OutputTurn struct {
 	Timestamp *string `json:"timestamp,omitempty"`
 }
 
+// PRActionAttemptReference defines model for PRActionAttemptReference.
+type PRActionAttemptReference struct {
+	AttemptId         string `json:"attempt_id"`
+	BaseSha           string `json:"base_sha"`
+	CandidateSha      string `json:"candidate_sha"`
+	DiffSha256        string `json:"diff_sha256"`
+	DiffSource        string `json:"diff_source"`
+	StoreRef          string `json:"store_ref"`
+	WorkId            string `json:"work_id"`
+	WorkingTreeStatus string `json:"working_tree_status"`
+}
+
+// PRActionExecuteBody defines model for PRActionExecuteBody.
+type PRActionExecuteBody struct {
+	// Action Requested action from the current server queue.
+	Action PRActionExecuteBodyAction `json:"action"`
+
+	// AttemptId Exact immutable attempt ID from the server queue.
+	AttemptId *string `json:"attempt_id,omitempty"`
+
+	// BaseSha Exact base commit SHA from the current queue item.
+	BaseSha string `json:"base_sha"`
+
+	// HeadSha Exact candidate commit SHA from the current queue item.
+	HeadSha string `json:"head_sha"`
+
+	// HumanGrant Separate authority-signed exact merge approval; required for merge.
+	HumanGrant *string `json:"human_grant,omitempty"`
+
+	// Monitor Configured PR monitor name.
+	Monitor string `json:"monitor"`
+
+	// Owner Repository owner from the server queue.
+	Owner string `json:"owner"`
+
+	// PolicyVersion Policy version copied from the current queue.
+	PolicyVersion string `json:"policy_version"`
+	PullRequest   int64  `json:"pull_request"`
+
+	// Repo Repository name from the server queue.
+	Repo string `json:"repo"`
+
+	// WorkId Exact durable repair-work bead when the action needs one.
+	WorkId *string `json:"work_id,omitempty"`
+}
+
+// PRActionExecuteBodyAction Requested action from the current server queue.
+type PRActionExecuteBodyAction string
+
+// PRActionOption defines model for PRActionOption.
+type PRActionOption struct {
+	Action                string `json:"action"`
+	Available             bool   `json:"available"`
+	Reason                string `json:"reason"`
+	RequiresHumanApproval bool   `json:"requires_human_approval"`
+}
+
+// PRActionQueue defines model for PRActionQueue.
+type PRActionQueue struct {
+	Availability  string               `json:"availability"`
+	FreshUntil    time.Time            `json:"fresh_until"`
+	Items         *[]PRActionQueueItem `json:"items"`
+	ObservedAt    time.Time            `json:"observed_at"`
+	PolicyDetail  *string              `json:"policy_detail,omitempty"`
+	PolicyState   string               `json:"policy_state"`
+	PolicyVersion string               `json:"policy_version"`
+	Sources       *[]PRActionSource    `json:"sources"`
+}
+
+// PRActionQueueItem defines model for PRActionQueueItem.
+type PRActionQueueItem struct {
+	ActionReceipts  *[]PRActionResult           `json:"action_receipts"`
+	Actions         *[]PRActionOption           `json:"actions"`
+	AttemptEvidence *[]PRActionAttemptReference `json:"attempt_evidence"`
+	BaseRefName     string                      `json:"base_ref_name"`
+	BaseSha         string                      `json:"base_sha"`
+	EvidenceState   string                      `json:"evidence_state"`
+	FreshUntil      time.Time                   `json:"fresh_until"`
+	HeadRefName     *string                     `json:"head_ref_name,omitempty"`
+	HeadSha         string                      `json:"head_sha"`
+	IsDraft         bool                        `json:"is_draft"`
+	MergeState      string                      `json:"merge_state"`
+	Monitor         string                      `json:"monitor"`
+	ObservedAt      time.Time                   `json:"observed_at"`
+	Owner           string                      `json:"owner"`
+	PolicyVersion   string                      `json:"policy_version"`
+	PullRequest     int64                       `json:"pull_request"`
+	Repo            string                      `json:"repo"`
+	Title           string                      `json:"title"`
+	Url             *string                     `json:"url,omitempty"`
+	WorkRecords     *[]PRActionWorkRecord       `json:"work_records"`
+}
+
+// PRActionResult defines model for PRActionResult.
+type PRActionResult struct {
+	Action         string     `json:"action"`
+	ActorIssuer    *string    `json:"actor_issuer,omitempty"`
+	ActorKeyId     string     `json:"actor_key_id"`
+	ActorSubject   *string    `json:"actor_subject,omitempty"`
+	AttemptId      *string    `json:"attempt_id,omitempty"`
+	BaseSha        string     `json:"base_sha"`
+	CreatedAt      time.Time  `json:"created_at"`
+	Detail         *string    `json:"detail,omitempty"`
+	HeadSha        string     `json:"head_sha"`
+	Id             string     `json:"id"`
+	IdempotencyKey string     `json:"idempotency_key"`
+	MergeCommitSha *string    `json:"merge_commit_sha,omitempty"`
+	Monitor        string     `json:"monitor"`
+	Outcome        *string    `json:"outcome,omitempty"`
+	Owner          string     `json:"owner"`
+	PolicyVersion  string     `json:"policy_version"`
+	PullRequest    int64      `json:"pull_request"`
+	Repo           string     `json:"repo"`
+	Status         string     `json:"status"`
+	VerifiedAt     *time.Time `json:"verified_at,omitempty"`
+	WorkId         *string    `json:"work_id,omitempty"`
+}
+
+// PRActionSource defines model for PRActionSource.
+type PRActionSource struct {
+	Detail  *string `json:"detail,omitempty"`
+	Monitor string  `json:"monitor"`
+	Owner   string  `json:"owner"`
+	Repo    string  `json:"repo"`
+	Rig     string  `json:"rig"`
+	State   string  `json:"state"`
+}
+
+// PRActionWorkRecord defines model for PRActionWorkRecord.
+type PRActionWorkRecord struct {
+	Assignee        *string `json:"assignee,omitempty"`
+	BaseSha         string  `json:"base_sha"`
+	CandidateSha    string  `json:"candidate_sha"`
+	CurrentRevision bool    `json:"current_revision"`
+	Id              string  `json:"id"`
+	Status          string  `json:"status"`
+}
+
 // PackAddInputBody defines model for PackAddInputBody.
 type PackAddInputBody struct {
 	// Name Optional local binding name override; derived from the source when omitted.
@@ -3261,6 +3453,20 @@ type RequestFailedPayload struct {
 
 // RequestFailedPayloadOperation Which operation failed.
 type RequestFailedPayloadOperation string
+
+// RequestReceipt defines model for RequestReceipt.
+type RequestReceipt struct {
+	AcceptedAt          time.Time  `json:"accepted_at"`
+	AcknowledgedAt      *time.Time `json:"acknowledged_at,omitempty"`
+	Delivery            string     `json:"delivery"`
+	DeliveryAttemptedAt *time.Time `json:"delivery_attempted_at,omitempty"`
+	Effect              string     `json:"effect"`
+	Generation          int64      `json:"generation"`
+	MessageDigest       string     `json:"message_digest"`
+	ProviderResultAt    *time.Time `json:"provider_result_at,omitempty"`
+	RequestId           string     `json:"request_id"`
+	SessionId           string     `json:"session_id"`
+}
 
 // RigActionBody defines model for RigActionBody.
 type RigActionBody struct {
@@ -3776,6 +3982,24 @@ type SessionRawMessageFrame = interface{}
 type SessionRenameInputBody struct {
 	// Title New session title.
 	Title string `json:"title"`
+}
+
+// SessionRequestAcknowledgementInputBody defines model for SessionRequestAcknowledgementInputBody.
+type SessionRequestAcknowledgementInputBody struct {
+	// Generation Intended session execution generation.
+	Generation int64 `json:"generation"`
+}
+
+// SessionRequestSubmitInputBody defines model for SessionRequestSubmitInputBody.
+type SessionRequestSubmitInputBody struct {
+	// Generation Exact intended execution generation.
+	Generation int64 `json:"generation"`
+
+	// Message Message delivered with its request identity.
+	Message string `json:"message"`
+
+	// RequestId Durable idempotency identity for this request.
+	RequestId string `json:"request_id"`
 }
 
 // SessionResetStalledPayload defines model for SessionResetStalledPayload.
@@ -9835,6 +10059,15 @@ type PutV0CityByCityNamePatchesRigsParams struct {
 	XGCRequest string `json:"X-GC-Request"`
 }
 
+// ExecutePrActionParams defines parameters for ExecutePrAction.
+type ExecutePrActionParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+
+	// IdempotencyKey Stable key for this exact action request.
+	IdempotencyKey string `json:"Idempotency-Key"`
+}
+
 // GetV0CityByCityNameProviderReadinessParams defines parameters for GetV0CityByCityNameProviderReadiness.
 type GetV0CityByCityNameProviderReadinessParams struct {
 	// Providers Comma-separated provider names to check (default: claude,codex,gemini).
@@ -9989,6 +10222,24 @@ type PostV0CityByCityNameSessionByIdPermissionModeParams struct {
 type PostV0CityByCityNameSessionByIdRenameParams struct {
 	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
 	XGCRequest string `json:"X-GC-Request"`
+}
+
+// PostV0CityByCityNameSessionByIdRequestsParams defines parameters for PostV0CityByCityNameSessionByIdRequests.
+type PostV0CityByCityNameSessionByIdRequestsParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+
+	// IdempotencyKey Idempotency key for exact request replay.
+	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
+}
+
+// PostV0CityByCityNameSessionByIdRequestsByRequestIdAckParams defines parameters for PostV0CityByCityNameSessionByIdRequestsByRequestIdAck.
+type PostV0CityByCityNameSessionByIdRequestsByRequestIdAckParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+
+	// XGCSessionToken Credential of the intended session execution.
+	XGCSessionToken string `json:"X-GC-Session-Token"`
 }
 
 // RespondSessionParams defines parameters for RespondSession.
@@ -10282,6 +10533,9 @@ type PutV0CityByCityNamePatchesProvidersJSONRequestBody = ProviderPatchSetInputB
 // PutV0CityByCityNamePatchesRigsJSONRequestBody defines body for PutV0CityByCityNamePatchesRigs for application/json ContentType.
 type PutV0CityByCityNamePatchesRigsJSONRequestBody = RigPatchSetInputBody
 
+// ExecutePrActionJSONRequestBody defines body for ExecutePrAction for application/json ContentType.
+type ExecutePrActionJSONRequestBody = PRActionExecuteBody
+
 // PatchV0CityByCityNameProviderByNameJSONRequestBody defines body for PatchV0CityByCityNameProviderByName for application/json ContentType.
 type PatchV0CityByCityNameProviderByNameJSONRequestBody = ProviderUpdateInputBody
 
@@ -10305,6 +10559,12 @@ type PostV0CityByCityNameSessionByIdPermissionModeJSONRequestBody = SessionPermi
 
 // PostV0CityByCityNameSessionByIdRenameJSONRequestBody defines body for PostV0CityByCityNameSessionByIdRename for application/json ContentType.
 type PostV0CityByCityNameSessionByIdRenameJSONRequestBody = SessionRenameInputBody
+
+// PostV0CityByCityNameSessionByIdRequestsJSONRequestBody defines body for PostV0CityByCityNameSessionByIdRequests for application/json ContentType.
+type PostV0CityByCityNameSessionByIdRequestsJSONRequestBody = SessionRequestSubmitInputBody
+
+// PostV0CityByCityNameSessionByIdRequestsByRequestIdAckJSONRequestBody defines body for PostV0CityByCityNameSessionByIdRequestsByRequestIdAck for application/json ContentType.
+type PostV0CityByCityNameSessionByIdRequestsByRequestIdAckJSONRequestBody = SessionRequestAcknowledgementInputBody
 
 // RespondSessionJSONRequestBody defines body for RespondSession for application/json ContentType.
 type RespondSessionJSONRequestBody = SessionRespondInputBody
@@ -19752,6 +20012,9 @@ type ClientInterface interface {
 	// GetV0CityByCityNameBeadByIdAttemptsDiff request
 	GetV0CityByCityNameBeadByIdAttemptsDiff(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// GetV0CityByCityNameBeadByIdAttemptsBySessionIdHistory request
+	GetV0CityByCityNameBeadByIdAttemptsBySessionIdHistory(ctx context.Context, cityName string, id string, sessionID string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// PostV0CityByCityNameBeadByIdClose request
 	PostV0CityByCityNameBeadByIdClose(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdCloseParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -20064,6 +20327,14 @@ type ClientInterface interface {
 	// GetV0CityByCityNamePending request
 	GetV0CityByCityNamePending(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// ExecutePrActionWithBody request with any body
+	ExecutePrActionWithBody(ctx context.Context, cityName string, params *ExecutePrActionParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	ExecutePrAction(ctx context.Context, cityName string, params *ExecutePrActionParams, body ExecutePrActionJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetV0CityByCityNamePrActionsQueue request
+	GetV0CityByCityNamePrActionsQueue(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// GetV0CityByCityNameProviderReadiness request
 	GetV0CityByCityNameProviderReadiness(ctx context.Context, cityName string, params *GetV0CityByCityNameProviderReadinessParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -20175,6 +20446,19 @@ type ClientInterface interface {
 	PostV0CityByCityNameSessionByIdRenameWithBody(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdRenameParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	PostV0CityByCityNameSessionByIdRename(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdRenameParams, body PostV0CityByCityNameSessionByIdRenameJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// PostV0CityByCityNameSessionByIdRequestsWithBody request with any body
+	PostV0CityByCityNameSessionByIdRequestsWithBody(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdRequestsParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	PostV0CityByCityNameSessionByIdRequests(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdRequestsParams, body PostV0CityByCityNameSessionByIdRequestsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetV0CityByCityNameSessionByIdRequestsByRequestId request
+	GetV0CityByCityNameSessionByIdRequestsByRequestId(ctx context.Context, cityName string, id string, requestId string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// PostV0CityByCityNameSessionByIdRequestsByRequestIdAckWithBody request with any body
+	PostV0CityByCityNameSessionByIdRequestsByRequestIdAckWithBody(ctx context.Context, cityName string, id string, requestId string, params *PostV0CityByCityNameSessionByIdRequestsByRequestIdAckParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	PostV0CityByCityNameSessionByIdRequestsByRequestIdAck(ctx context.Context, cityName string, id string, requestId string, params *PostV0CityByCityNameSessionByIdRequestsByRequestIdAckParams, body PostV0CityByCityNameSessionByIdRequestsByRequestIdAckJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// RespondSessionWithBody request with any body
 	RespondSessionWithBody(ctx context.Context, cityName string, id string, params *RespondSessionParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -20610,6 +20894,18 @@ func (c *Client) PostV0CityByCityNameBeadByIdAssign(ctx context.Context, cityNam
 
 func (c *Client) GetV0CityByCityNameBeadByIdAttemptsDiff(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetV0CityByCityNameBeadByIdAttemptsDiffRequest(c.Server, cityName, id)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetV0CityByCityNameBeadByIdAttemptsBySessionIdHistory(ctx context.Context, cityName string, id string, sessionID string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetV0CityByCityNameBeadByIdAttemptsBySessionIdHistoryRequest(c.Server, cityName, id, sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -21964,6 +22260,42 @@ func (c *Client) GetV0CityByCityNamePending(ctx context.Context, cityName string
 	return c.Client.Do(req)
 }
 
+func (c *Client) ExecutePrActionWithBody(ctx context.Context, cityName string, params *ExecutePrActionParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewExecutePrActionRequestWithBody(c.Server, cityName, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ExecutePrAction(ctx context.Context, cityName string, params *ExecutePrActionParams, body ExecutePrActionJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewExecutePrActionRequest(c.Server, cityName, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetV0CityByCityNamePrActionsQueue(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetV0CityByCityNamePrActionsQueueRequest(c.Server, cityName)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) GetV0CityByCityNameProviderReadiness(ctx context.Context, cityName string, params *GetV0CityByCityNameProviderReadinessParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetV0CityByCityNameProviderReadinessRequest(c.Server, cityName, params)
 	if err != nil {
@@ -22434,6 +22766,66 @@ func (c *Client) PostV0CityByCityNameSessionByIdRenameWithBody(ctx context.Conte
 
 func (c *Client) PostV0CityByCityNameSessionByIdRename(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdRenameParams, body PostV0CityByCityNameSessionByIdRenameJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewPostV0CityByCityNameSessionByIdRenameRequest(c.Server, cityName, id, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PostV0CityByCityNameSessionByIdRequestsWithBody(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdRequestsParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameSessionByIdRequestsRequestWithBody(c.Server, cityName, id, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PostV0CityByCityNameSessionByIdRequests(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdRequestsParams, body PostV0CityByCityNameSessionByIdRequestsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameSessionByIdRequestsRequest(c.Server, cityName, id, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetV0CityByCityNameSessionByIdRequestsByRequestId(ctx context.Context, cityName string, id string, requestId string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetV0CityByCityNameSessionByIdRequestsByRequestIdRequest(c.Server, cityName, id, requestId)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PostV0CityByCityNameSessionByIdRequestsByRequestIdAckWithBody(ctx context.Context, cityName string, id string, requestId string, params *PostV0CityByCityNameSessionByIdRequestsByRequestIdAckParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameSessionByIdRequestsByRequestIdAckRequestWithBody(c.Server, cityName, id, requestId, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PostV0CityByCityNameSessionByIdRequestsByRequestIdAck(ctx context.Context, cityName string, id string, requestId string, params *PostV0CityByCityNameSessionByIdRequestsByRequestIdAckParams, body PostV0CityByCityNameSessionByIdRequestsByRequestIdAckJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameSessionByIdRequestsByRequestIdAckRequest(c.Server, cityName, id, requestId, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -24144,6 +24536,54 @@ func NewGetV0CityByCityNameBeadByIdAttemptsDiffRequest(server string, cityName s
 	}
 
 	operationPath := fmt.Sprintf("/v0/city/%s/bead/%s/attempts/diff", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewGetV0CityByCityNameBeadByIdAttemptsBySessionIdHistoryRequest generates requests for GetV0CityByCityNameBeadByIdAttemptsBySessionIdHistory
+func NewGetV0CityByCityNameBeadByIdAttemptsBySessionIdHistoryRequest(server string, cityName string, id string, sessionID string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam2 string
+
+	pathParam2, err = runtime.StyleParamWithOptions("simple", false, "sessionID", sessionID, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/bead/%s/attempts/%s/history", pathParam0, pathParam1, pathParam2)
 	if operationPath[0] == '/' {
 		operationPath = "." + operationPath
 	}
@@ -29847,6 +30287,109 @@ func NewGetV0CityByCityNamePendingRequest(server string, cityName string) (*http
 	return req, nil
 }
 
+// NewExecutePrActionRequest calls the generic ExecutePrAction builder with application/json body
+func NewExecutePrActionRequest(server string, cityName string, params *ExecutePrActionParams, body ExecutePrActionJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewExecutePrActionRequestWithBody(server, cityName, params, "application/json", bodyReader)
+}
+
+// NewExecutePrActionRequestWithBody generates requests for ExecutePrAction with any type of body
+func NewExecutePrActionRequestWithBody(server string, cityName string, params *ExecutePrActionParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/pr-actions", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+		var headerParam1 string
+
+		headerParam1, err = runtime.StyleParamWithOptions("simple", false, "Idempotency-Key", params.IdempotencyKey, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("Idempotency-Key", headerParam1)
+
+	}
+
+	return req, nil
+}
+
+// NewGetV0CityByCityNamePrActionsQueueRequest generates requests for GetV0CityByCityNamePrActionsQueue
+func NewGetV0CityByCityNamePrActionsQueueRequest(server string, cityName string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/pr-actions/queue", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewGetV0CityByCityNameProviderReadinessRequest generates requests for GetV0CityByCityNameProviderReadiness
 func NewGetV0CityByCityNameProviderReadinessRequest(server string, cityName string, params *GetV0CityByCityNameProviderReadinessParams) (*http.Request, error) {
 	var err error
@@ -31674,6 +32217,215 @@ func NewPostV0CityByCityNameSessionByIdRenameRequestWithBody(server string, city
 	return req, nil
 }
 
+// NewPostV0CityByCityNameSessionByIdRequestsRequest calls the generic PostV0CityByCityNameSessionByIdRequests builder with application/json body
+func NewPostV0CityByCityNameSessionByIdRequestsRequest(server string, cityName string, id string, params *PostV0CityByCityNameSessionByIdRequestsParams, body PostV0CityByCityNameSessionByIdRequestsJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewPostV0CityByCityNameSessionByIdRequestsRequestWithBody(server, cityName, id, params, "application/json", bodyReader)
+}
+
+// NewPostV0CityByCityNameSessionByIdRequestsRequestWithBody generates requests for PostV0CityByCityNameSessionByIdRequests with any type of body
+func NewPostV0CityByCityNameSessionByIdRequestsRequestWithBody(server string, cityName string, id string, params *PostV0CityByCityNameSessionByIdRequestsParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/session/%s/requests", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+		if params.IdempotencyKey != nil {
+			var headerParam1 string
+
+			headerParam1, err = runtime.StyleParamWithOptions("simple", false, "Idempotency-Key", *params.IdempotencyKey, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("Idempotency-Key", headerParam1)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewGetV0CityByCityNameSessionByIdRequestsByRequestIdRequest generates requests for GetV0CityByCityNameSessionByIdRequestsByRequestId
+func NewGetV0CityByCityNameSessionByIdRequestsByRequestIdRequest(server string, cityName string, id string, requestId string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam2 string
+
+	pathParam2, err = runtime.StyleParamWithOptions("simple", false, "request_id", requestId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/session/%s/requests/%s", pathParam0, pathParam1, pathParam2)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewPostV0CityByCityNameSessionByIdRequestsByRequestIdAckRequest calls the generic PostV0CityByCityNameSessionByIdRequestsByRequestIdAck builder with application/json body
+func NewPostV0CityByCityNameSessionByIdRequestsByRequestIdAckRequest(server string, cityName string, id string, requestId string, params *PostV0CityByCityNameSessionByIdRequestsByRequestIdAckParams, body PostV0CityByCityNameSessionByIdRequestsByRequestIdAckJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewPostV0CityByCityNameSessionByIdRequestsByRequestIdAckRequestWithBody(server, cityName, id, requestId, params, "application/json", bodyReader)
+}
+
+// NewPostV0CityByCityNameSessionByIdRequestsByRequestIdAckRequestWithBody generates requests for PostV0CityByCityNameSessionByIdRequestsByRequestIdAck with any type of body
+func NewPostV0CityByCityNameSessionByIdRequestsByRequestIdAckRequestWithBody(server string, cityName string, id string, requestId string, params *PostV0CityByCityNameSessionByIdRequestsByRequestIdAckParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam2 string
+
+	pathParam2, err = runtime.StyleParamWithOptions("simple", false, "request_id", requestId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/session/%s/requests/%s/ack", pathParam0, pathParam1, pathParam2)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+		var headerParam1 string
+
+		headerParam1, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Session-Token", params.XGCSessionToken, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Session-Token", headerParam1)
+
+	}
+
+	return req, nil
+}
+
 // NewRespondSessionRequest calls the generic RespondSession builder with application/json body
 func NewRespondSessionRequest(server string, cityName string, id string, params *RespondSessionParams, body RespondSessionJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
@@ -33358,6 +34110,9 @@ type ClientWithResponsesInterface interface {
 	// GetV0CityByCityNameBeadByIdAttemptsDiffWithResponse request
 	GetV0CityByCityNameBeadByIdAttemptsDiffWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameBeadByIdAttemptsDiffResponse, error)
 
+	// GetV0CityByCityNameBeadByIdAttemptsBySessionIdHistoryWithResponse request
+	GetV0CityByCityNameBeadByIdAttemptsBySessionIdHistoryWithResponse(ctx context.Context, cityName string, id string, sessionID string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameBeadByIdAttemptsBySessionIdHistoryResponse, error)
+
 	// PostV0CityByCityNameBeadByIdCloseWithResponse request
 	PostV0CityByCityNameBeadByIdCloseWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdCloseParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadByIdCloseResponse, error)
 
@@ -33670,6 +34425,14 @@ type ClientWithResponsesInterface interface {
 	// GetV0CityByCityNamePendingWithResponse request
 	GetV0CityByCityNamePendingWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNamePendingResponse, error)
 
+	// ExecutePrActionWithBodyWithResponse request with any body
+	ExecutePrActionWithBodyWithResponse(ctx context.Context, cityName string, params *ExecutePrActionParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ExecutePrActionResponse, error)
+
+	ExecutePrActionWithResponse(ctx context.Context, cityName string, params *ExecutePrActionParams, body ExecutePrActionJSONRequestBody, reqEditors ...RequestEditorFn) (*ExecutePrActionResponse, error)
+
+	// GetV0CityByCityNamePrActionsQueueWithResponse request
+	GetV0CityByCityNamePrActionsQueueWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNamePrActionsQueueResponse, error)
+
 	// GetV0CityByCityNameProviderReadinessWithResponse request
 	GetV0CityByCityNameProviderReadinessWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameProviderReadinessParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameProviderReadinessResponse, error)
 
@@ -33781,6 +34544,19 @@ type ClientWithResponsesInterface interface {
 	PostV0CityByCityNameSessionByIdRenameWithBodyWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdRenameParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdRenameResponse, error)
 
 	PostV0CityByCityNameSessionByIdRenameWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdRenameParams, body PostV0CityByCityNameSessionByIdRenameJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdRenameResponse, error)
+
+	// PostV0CityByCityNameSessionByIdRequestsWithBodyWithResponse request with any body
+	PostV0CityByCityNameSessionByIdRequestsWithBodyWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdRequestsParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdRequestsResponse, error)
+
+	PostV0CityByCityNameSessionByIdRequestsWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdRequestsParams, body PostV0CityByCityNameSessionByIdRequestsJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdRequestsResponse, error)
+
+	// GetV0CityByCityNameSessionByIdRequestsByRequestIdWithResponse request
+	GetV0CityByCityNameSessionByIdRequestsByRequestIdWithResponse(ctx context.Context, cityName string, id string, requestId string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameSessionByIdRequestsByRequestIdResponse, error)
+
+	// PostV0CityByCityNameSessionByIdRequestsByRequestIdAckWithBodyWithResponse request with any body
+	PostV0CityByCityNameSessionByIdRequestsByRequestIdAckWithBodyWithResponse(ctx context.Context, cityName string, id string, requestId string, params *PostV0CityByCityNameSessionByIdRequestsByRequestIdAckParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdRequestsByRequestIdAckResponse, error)
+
+	PostV0CityByCityNameSessionByIdRequestsByRequestIdAckWithResponse(ctx context.Context, cityName string, id string, requestId string, params *PostV0CityByCityNameSessionByIdRequestsByRequestIdAckParams, body PostV0CityByCityNameSessionByIdRequestsByRequestIdAckJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdRequestsByRequestIdAckResponse, error)
 
 	// RespondSessionWithBodyWithResponse request with any body
 	RespondSessionWithBodyWithResponse(ctx context.Context, cityName string, id string, params *RespondSessionParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RespondSessionResponse, error)
@@ -34493,6 +35269,32 @@ func (r GetV0CityByCityNameBeadByIdAttemptsDiffResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r GetV0CityByCityNameBeadByIdAttemptsDiffResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type GetV0CityByCityNameBeadByIdAttemptsBySessionIdHistoryResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON200                   *AttemptInspection
+	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON422 *ErrorModel
+	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON503 *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r GetV0CityByCityNameBeadByIdAttemptsBySessionIdHistoryResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetV0CityByCityNameBeadByIdAttemptsBySessionIdHistoryResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -36891,6 +37693,62 @@ func (r GetV0CityByCityNamePendingResponse) StatusCode() int {
 	return 0
 }
 
+type ExecutePrActionResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON200                   *PRActionResult
+	ApplicationproblemJSON400 *ErrorModel
+	ApplicationproblemJSON401 *ErrorModel
+	ApplicationproblemJSON403 *ErrorModel
+	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON409 *ErrorModel
+	ApplicationproblemJSON422 *ErrorModel
+	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON503 *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r ExecutePrActionResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ExecutePrActionResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type GetV0CityByCityNamePrActionsQueueResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON200                   *PRActionQueue
+	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON422 *ErrorModel
+	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON503 *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r GetV0CityByCityNamePrActionsQueueResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetV0CityByCityNamePrActionsQueueResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type GetV0CityByCityNameProviderReadinessResponse struct {
 	Body                      []byte
 	HTTPResponse              *http.Response
@@ -37763,6 +38621,91 @@ func (r PostV0CityByCityNameSessionByIdRenameResponse) StatusCode() int {
 	return 0
 }
 
+type PostV0CityByCityNameSessionByIdRequestsResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON202                   *RequestReceipt
+	ApplicationproblemJSON401 *ErrorModel
+	ApplicationproblemJSON403 *ErrorModel
+	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON409 *ErrorModel
+	ApplicationproblemJSON422 *ErrorModel
+	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON503 *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r PostV0CityByCityNameSessionByIdRequestsResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r PostV0CityByCityNameSessionByIdRequestsResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type GetV0CityByCityNameSessionByIdRequestsByRequestIdResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON200                   *RequestReceipt
+	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON409 *ErrorModel
+	ApplicationproblemJSON422 *ErrorModel
+	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON503 *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r GetV0CityByCityNameSessionByIdRequestsByRequestIdResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetV0CityByCityNameSessionByIdRequestsByRequestIdResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type PostV0CityByCityNameSessionByIdRequestsByRequestIdAckResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON200                   *RequestReceipt
+	ApplicationproblemJSON401 *ErrorModel
+	ApplicationproblemJSON403 *ErrorModel
+	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON409 *ErrorModel
+	ApplicationproblemJSON422 *ErrorModel
+	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON503 *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r PostV0CityByCityNameSessionByIdRequestsByRequestIdAckResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r PostV0CityByCityNameSessionByIdRequestsByRequestIdAckResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type RespondSessionResponse struct {
 	Body                      []byte
 	HTTPResponse              *http.Response
@@ -38179,6 +39122,7 @@ type DeleteV0CityByCityNameWorkflowByWorkflowIdResponse struct {
 	ApplicationproblemJSON401 *ErrorModel
 	ApplicationproblemJSON403 *ErrorModel
 	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON409 *ErrorModel
 	ApplicationproblemJSON422 *ErrorModel
 	ApplicationproblemJSON500 *ErrorModel
 }
@@ -38586,6 +39530,15 @@ func (c *ClientWithResponses) GetV0CityByCityNameBeadByIdAttemptsDiffWithRespons
 		return nil, err
 	}
 	return ParseGetV0CityByCityNameBeadByIdAttemptsDiffResponse(rsp)
+}
+
+// GetV0CityByCityNameBeadByIdAttemptsBySessionIdHistoryWithResponse request returning *GetV0CityByCityNameBeadByIdAttemptsBySessionIdHistoryResponse
+func (c *ClientWithResponses) GetV0CityByCityNameBeadByIdAttemptsBySessionIdHistoryWithResponse(ctx context.Context, cityName string, id string, sessionID string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameBeadByIdAttemptsBySessionIdHistoryResponse, error) {
+	rsp, err := c.GetV0CityByCityNameBeadByIdAttemptsBySessionIdHistory(ctx, cityName, id, sessionID, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetV0CityByCityNameBeadByIdAttemptsBySessionIdHistoryResponse(rsp)
 }
 
 // PostV0CityByCityNameBeadByIdCloseWithResponse request returning *PostV0CityByCityNameBeadByIdCloseResponse
@@ -39572,6 +40525,32 @@ func (c *ClientWithResponses) GetV0CityByCityNamePendingWithResponse(ctx context
 	return ParseGetV0CityByCityNamePendingResponse(rsp)
 }
 
+// ExecutePrActionWithBodyWithResponse request with arbitrary body returning *ExecutePrActionResponse
+func (c *ClientWithResponses) ExecutePrActionWithBodyWithResponse(ctx context.Context, cityName string, params *ExecutePrActionParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ExecutePrActionResponse, error) {
+	rsp, err := c.ExecutePrActionWithBody(ctx, cityName, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseExecutePrActionResponse(rsp)
+}
+
+func (c *ClientWithResponses) ExecutePrActionWithResponse(ctx context.Context, cityName string, params *ExecutePrActionParams, body ExecutePrActionJSONRequestBody, reqEditors ...RequestEditorFn) (*ExecutePrActionResponse, error) {
+	rsp, err := c.ExecutePrAction(ctx, cityName, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseExecutePrActionResponse(rsp)
+}
+
+// GetV0CityByCityNamePrActionsQueueWithResponse request returning *GetV0CityByCityNamePrActionsQueueResponse
+func (c *ClientWithResponses) GetV0CityByCityNamePrActionsQueueWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNamePrActionsQueueResponse, error) {
+	rsp, err := c.GetV0CityByCityNamePrActionsQueue(ctx, cityName, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetV0CityByCityNamePrActionsQueueResponse(rsp)
+}
+
 // GetV0CityByCityNameProviderReadinessWithResponse request returning *GetV0CityByCityNameProviderReadinessResponse
 func (c *ClientWithResponses) GetV0CityByCityNameProviderReadinessWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameProviderReadinessParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameProviderReadinessResponse, error) {
 	rsp, err := c.GetV0CityByCityNameProviderReadiness(ctx, cityName, params, reqEditors...)
@@ -39922,6 +40901,49 @@ func (c *ClientWithResponses) PostV0CityByCityNameSessionByIdRenameWithResponse(
 		return nil, err
 	}
 	return ParsePostV0CityByCityNameSessionByIdRenameResponse(rsp)
+}
+
+// PostV0CityByCityNameSessionByIdRequestsWithBodyWithResponse request with arbitrary body returning *PostV0CityByCityNameSessionByIdRequestsResponse
+func (c *ClientWithResponses) PostV0CityByCityNameSessionByIdRequestsWithBodyWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdRequestsParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdRequestsResponse, error) {
+	rsp, err := c.PostV0CityByCityNameSessionByIdRequestsWithBody(ctx, cityName, id, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePostV0CityByCityNameSessionByIdRequestsResponse(rsp)
+}
+
+func (c *ClientWithResponses) PostV0CityByCityNameSessionByIdRequestsWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdRequestsParams, body PostV0CityByCityNameSessionByIdRequestsJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdRequestsResponse, error) {
+	rsp, err := c.PostV0CityByCityNameSessionByIdRequests(ctx, cityName, id, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePostV0CityByCityNameSessionByIdRequestsResponse(rsp)
+}
+
+// GetV0CityByCityNameSessionByIdRequestsByRequestIdWithResponse request returning *GetV0CityByCityNameSessionByIdRequestsByRequestIdResponse
+func (c *ClientWithResponses) GetV0CityByCityNameSessionByIdRequestsByRequestIdWithResponse(ctx context.Context, cityName string, id string, requestId string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameSessionByIdRequestsByRequestIdResponse, error) {
+	rsp, err := c.GetV0CityByCityNameSessionByIdRequestsByRequestId(ctx, cityName, id, requestId, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetV0CityByCityNameSessionByIdRequestsByRequestIdResponse(rsp)
+}
+
+// PostV0CityByCityNameSessionByIdRequestsByRequestIdAckWithBodyWithResponse request with arbitrary body returning *PostV0CityByCityNameSessionByIdRequestsByRequestIdAckResponse
+func (c *ClientWithResponses) PostV0CityByCityNameSessionByIdRequestsByRequestIdAckWithBodyWithResponse(ctx context.Context, cityName string, id string, requestId string, params *PostV0CityByCityNameSessionByIdRequestsByRequestIdAckParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdRequestsByRequestIdAckResponse, error) {
+	rsp, err := c.PostV0CityByCityNameSessionByIdRequestsByRequestIdAckWithBody(ctx, cityName, id, requestId, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePostV0CityByCityNameSessionByIdRequestsByRequestIdAckResponse(rsp)
+}
+
+func (c *ClientWithResponses) PostV0CityByCityNameSessionByIdRequestsByRequestIdAckWithResponse(ctx context.Context, cityName string, id string, requestId string, params *PostV0CityByCityNameSessionByIdRequestsByRequestIdAckParams, body PostV0CityByCityNameSessionByIdRequestsByRequestIdAckJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdRequestsByRequestIdAckResponse, error) {
+	rsp, err := c.PostV0CityByCityNameSessionByIdRequestsByRequestIdAck(ctx, cityName, id, requestId, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePostV0CityByCityNameSessionByIdRequestsByRequestIdAckResponse(rsp)
 }
 
 // RespondSessionWithBodyWithResponse request with arbitrary body returning *RespondSessionResponse
@@ -41550,6 +42572,60 @@ func ParseGetV0CityByCityNameBeadByIdAttemptsDiffResponse(rsp *http.Response) (*
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest Diff
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetV0CityByCityNameBeadByIdAttemptsBySessionIdHistoryResponse parses an HTTP response from a GetV0CityByCityNameBeadByIdAttemptsBySessionIdHistoryWithResponse call
+func ParseGetV0CityByCityNameBeadByIdAttemptsBySessionIdHistoryResponse(rsp *http.Response) (*GetV0CityByCityNameBeadByIdAttemptsBySessionIdHistoryResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetV0CityByCityNameBeadByIdAttemptsBySessionIdHistoryResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest AttemptInspection
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -47068,6 +48144,142 @@ func ParseGetV0CityByCityNamePendingResponse(rsp *http.Response) (*GetV0CityByCi
 	return response, nil
 }
 
+// ParseExecutePrActionResponse parses an HTTP response from a ExecutePrActionWithResponse call
+func ParseExecutePrActionResponse(rsp *http.Response) (*ExecutePrActionResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ExecutePrActionResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest PRActionResult
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 400:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON400 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON401 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON403 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON409 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetV0CityByCityNamePrActionsQueueResponse parses an HTTP response from a GetV0CityByCityNamePrActionsQueueWithResponse call
+func ParseGetV0CityByCityNamePrActionsQueueResponse(rsp *http.Response) (*GetV0CityByCityNamePrActionsQueueResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetV0CityByCityNamePrActionsQueueResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest PRActionQueue
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseGetV0CityByCityNameProviderReadinessResponse parses an HTTP response from a GetV0CityByCityNameProviderReadinessWithResponse call
 func ParseGetV0CityByCityNameProviderReadinessResponse(rsp *http.Response) (*GetV0CityByCityNameProviderReadinessResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -49076,6 +50288,217 @@ func ParsePostV0CityByCityNameSessionByIdRenameResponse(rsp *http.Response) (*Po
 	return response, nil
 }
 
+// ParsePostV0CityByCityNameSessionByIdRequestsResponse parses an HTTP response from a PostV0CityByCityNameSessionByIdRequestsWithResponse call
+func ParsePostV0CityByCityNameSessionByIdRequestsResponse(rsp *http.Response) (*PostV0CityByCityNameSessionByIdRequestsResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &PostV0CityByCityNameSessionByIdRequestsResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest RequestReceipt
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON202 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON401 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON403 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON409 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetV0CityByCityNameSessionByIdRequestsByRequestIdResponse parses an HTTP response from a GetV0CityByCityNameSessionByIdRequestsByRequestIdWithResponse call
+func ParseGetV0CityByCityNameSessionByIdRequestsByRequestIdResponse(rsp *http.Response) (*GetV0CityByCityNameSessionByIdRequestsByRequestIdResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetV0CityByCityNameSessionByIdRequestsByRequestIdResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest RequestReceipt
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON409 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParsePostV0CityByCityNameSessionByIdRequestsByRequestIdAckResponse parses an HTTP response from a PostV0CityByCityNameSessionByIdRequestsByRequestIdAckWithResponse call
+func ParsePostV0CityByCityNameSessionByIdRequestsByRequestIdAckResponse(rsp *http.Response) (*PostV0CityByCityNameSessionByIdRequestsByRequestIdAckResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &PostV0CityByCityNameSessionByIdRequestsByRequestIdAckResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest RequestReceipt
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON401 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON403 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON409 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseRespondSessionResponse parses an HTTP response from a RespondSessionWithResponse call
 func ParseRespondSessionResponse(rsp *http.Response) (*RespondSessionResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -50060,6 +51483,13 @@ func ParseDeleteV0CityByCityNameWorkflowByWorkflowIdResponse(rsp *http.Response)
 			return nil, err
 		}
 		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON409 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest ErrorModel

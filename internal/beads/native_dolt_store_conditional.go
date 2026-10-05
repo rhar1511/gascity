@@ -117,6 +117,27 @@ func (s *NativeDoltStore) UpdateIfMatch(id string, expectedRevision int64, opts 
 	defer release()
 	ctx, cancel := nativeDoltOperationContext(context.TODO())
 	defer cancel()
+	if opts.ParentID != nil || len(opts.Labels) > 0 || len(opts.RemoveLabels) > 0 {
+		err = retryOnNativeDoltSerializationConflict(func() error {
+			return storage.RunInTransaction(ctx, fmt.Sprintf("gc: fenced update bead %s", id), func(tx beadslib.Transaction) error {
+				issue, err := tx.GetIssue(ctx, id)
+				if err != nil {
+					return nativeStoreError(id, err)
+				}
+				if issue == nil {
+					return fmt.Errorf("bead %q: %w", id, ErrNotFound)
+				}
+				if issue.RowVersion != expectedRevision {
+					return &PreconditionFailedError{ID: id, Expected: expectedRevision, Current: issue.RowVersion, Raw: "native row-version mismatch"}
+				}
+				return s.applyUpdateInTx(ctx, tx, id, opts)
+			})
+		})
+		if err != nil {
+			return nativeStoreError(id, err)
+		}
+		return nil
+	}
 
 	updates, err := s.nativeUpdates(ctx, storage, id, opts)
 	if err != nil {

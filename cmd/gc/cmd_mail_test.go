@@ -1931,6 +1931,26 @@ func TestMailReadJSONRecordsEventWhenOutputFails(t *testing.T) {
 	}
 }
 
+func TestMailReadEventDoesNotTrustEnvironmentSessionID(t *testing.T) {
+	t.Setenv("GC_SESSION_ID", "session-ack-target")
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	mp.Send("human", "worker", "Follow-up", "please continue") //nolint:errcheck
+	rec := events.NewFake()
+
+	code := doMailReadWithJSON(mp, rec, []string{"gc-1"}, true, &bytes.Buffer{}, &bytes.Buffer{})
+	if code != 0 {
+		t.Fatalf("doMailReadWithJSON = %d, want 0", code)
+	}
+	if len(rec.Events) != 1 {
+		t.Fatalf("recorded events = %d, want 1: %#v", len(rec.Events), rec.Events)
+	}
+	got := rec.Events[0]
+	if got.Type != events.MailRead || got.Subject != "gc-1" || got.SessionID != "" {
+		t.Fatalf("recorded event = %#v, want mail.read for gc-1 with no client-asserted session attribution", got)
+	}
+}
+
 // --- gc mail peek ---
 
 func TestMailPeekSuccess(t *testing.T) {

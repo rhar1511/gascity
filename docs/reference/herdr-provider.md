@@ -152,17 +152,20 @@ path:
 - Once agents are on herdr, their workspaces and tabs are visible through
   herdr's own UI (`herdr` lists the per-rig/town workspaces and per-agent tabs).
 
-## What is not wired yet
+## Session events and reconciliation
 
-**The controller does not consume herdr's session-event stream.** herdr pushes
-session events and the provider implements the stream
-(`runtime.SessionEventProvider`), but the only consumer today is the provider's
-own activity reporting. The reconciler discovers session state on its periodic
-pass, so a session that goes away is noticed on the next pass rather than when the
-event arrives. That costs latency rather than correctness, because each pass reads
-live state rather than trusting an event. The delay is bounded by the reconcile
-interval only while the controller keeps up: ticks run one at a time, so a busy
-controller stretches it. That is the thing to watch during a pilot.
+The controller subscribes to herdr's session-event stream. An attributed pane
+exit or close pokes the reconciler immediately; a reconnect or subscription
+change schedules a delayed resync. Gas City attributes managed raw-command
+panes through persisted pane bindings, even when herdr has no agent-registry
+entry for them. The reconciler always reads live session state on the resulting
+tick; events are hints, not the source of truth.
+
+Periodic patrol remains the fallback when a stream is unavailable, an event
+cannot be attributed, or the controller is busy. Ticks run one at a time, so
+event delivery does not guarantee a fixed recovery time during a long tick.
+Watch the controller's session-event diagnostics and patrol interval during a
+pilot.
 
 ## Layout
 

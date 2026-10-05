@@ -1,0 +1,27 @@
+load("@rules_go//go:def.bzl", "go_test")
+
+go_test(
+    name = "inktree-story-benchmark_test",
+    srcs = [
+        "formula_test.go",
+        "testenv_import_test.go",
+    ],
+    embedsrcs = ["formulas/mol-rsi-story-candidate.toml"],
+    deps = [
+        "//internal/bootstrap/packs/core",
+        "//internal/formula",
+        "//internal/testenv",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

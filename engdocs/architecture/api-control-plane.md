@@ -116,6 +116,17 @@ that window return `404` with the typed not-found problem detail. The
 city list and lifecycle events are the readiness boundary for clients
 that need to issue per-city requests.
 
+### Central PR action authority
+
+The fork's `PRActionService` in `internal/api/pr_actions.go` is a deliberate,
+currently colocated service boundary. It owns the revision-bound action policy
+and durable action ledger for both HTTP and `gc github pr action`; the CLI
+submits to this same controller service and has no local mutation fallback.
+Handlers adapt typed input and authenticated principals to that service. They
+must not implement a second action state machine. Moving the service into a
+separate domain package is an ownership cleanup, not permission to duplicate
+its claims, relax exact revision checks, or add client-side merge authority.
+
 ### The generated Go client
 
 `internal/api/genclient/` has three in-tree consumer categories,

@@ -1022,6 +1022,9 @@ func TestBeadsProxiedDefault(t *testing.T) {
 	})
 
 	t.Run("legacy-managed-city-unchanged", func(t *testing.T) {
+		// This fixture owns its throwaway shared server. Its old-way rig init
+		// needs the same schema-migration consent as the other legacy fixtures.
+		env := helpers.LegacyInitEnv(env)
 		// The grandfathering claim this branch has to keep is about the cities
 		// that exist today: GC-managed direct servers — metadata dolt_mode
 		// server, canonical config gc.endpoint_origin managed_city, no

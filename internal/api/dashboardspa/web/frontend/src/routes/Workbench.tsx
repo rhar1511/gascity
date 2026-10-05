@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { GC_EVENT_PREFIX } from 'gas-city-dashboard-shared';
 import { getActiveCity } from '../api/cityBase';
@@ -17,6 +17,14 @@ import { sendSupervisorMail } from '../supervisor/mailWrites';
 import { useOperatorConfig } from '../contexts/OperatorConfigContext';
 import { resolveAttempts, type ExecutionAttempt } from '../lib/workbenchAttempts';
 import { resolvePreview } from '../lib/workbenchPreview';
+import { WayfinderReviewWorkflow } from '../workbench/WayfinderReviewWorkflow';
+import { HistoricalAttemptArtifacts } from '../workbench/HistoricalAttemptArtifacts';
+import { FollowUpDeliveryStatus } from '../workbench/FollowUpDeliveryStatus';
+import { startFollowUpDelivery, type FollowUpDeliveryState } from '../workbench/followUpDelivery';
+import { supervisorApi } from '../supervisor/client';
+import type { ExecutePRActionRequest, PRActionKind, PRActionResult } from '../supervisor/prActions';
+import { PullRequestActions } from '../workbench/PullRequestActions';
+import { actionOptionIsAvailable, bindPRActions } from '../workbench/prActionBinding';
 
 // Gas City Workbench: Canvas/Kanban/Priority/Work Queue as views over the same
 // Beads data.
@@ -355,6 +363,20 @@ export function WorkbenchPage() {
               <>
                 <BeadBody bead={selectedBead} />
                 <AttemptPanel bead={selectedBead} sessions={sessions} />
+                <details
+                  aria-label="Wayfinder review details"
+                  className="mt-4 border-t border-rule pt-3"
+                >
+                  <summary className="cursor-pointer text-label font-semibold text-fg focus-mark">
+                    Design review
+                    <span className="ml-2 font-normal text-fg-muted">
+                      Prototypes, document notes, and approvals
+                    </span>
+                  </summary>
+                  <div className="mt-3">
+                    <WayfinderReviewWorkflow bead={selectedBead} />
+                  </div>
+                </details>
               </>
             ) : hasLoadedQueue ? (
               <p className="text-body text-fg-muted">This bead was resolved or removed.</p>
@@ -604,16 +626,22 @@ function AttemptPanel({
             showCaption
           />
           {inspectingHistory ? (
-            <p className="text-label text-fg-muted">
-              Historical worktree diff and PR actions are unavailable; showing this session’s output
-              only.
-            </p>
+            <HistoricalAttemptArtifacts
+              key={`${bead.id}:${inspected.sessionId}`}
+              beadId={bead.id}
+              sessionId={inspected.sessionId}
+              sessionLabel={inspected.sessionName}
+            />
           ) : (
             <>
               <AttemptDiffPanel key={`diff:${inspected.sessionId}`} beadId={bead.id} />
               <AttemptChatPanel key={`chat:${inspected.sessionId}`} attempt={inspected} />
               <AttemptPreviewPanel bead={bead} />
-              <AttemptPullRequestPanel bead={bead} attempt={inspected} />
+              <AttemptPullRequestPanel
+                key={`pr-actions:${bead.id}:${inspected.sessionId}`}
+                bead={bead}
+                attempt={inspected}
+              />
             </>
           )}
         </>
@@ -696,13 +724,155 @@ function AttemptDiffPanel({ beadId }: { beadId: string }) {
 // has no merge authority: prepare/queue delegate to Gas City (here, a request to
 // the merge queue role), and the action + result are auditable against the Bead.
 function AttemptPullRequestPanel({ bead, attempt }: { bead: Row; attempt: ExecutionAttempt }) {
+  const cityName = getActiveCity();
+  const queueKey = `workbench:pr-actions:${cityName ?? 'no-city'}`;
+  const { data, loading, error, refresh } = useCachedData(queueKey, (signal) => {
+    if (!cityName) return Promise.reject(new Error('Select a city before reading PR actions.'));
+    return supervisorApi().prActionQueue(cityName, signal);
+  });
+  const [now, setNow] = useState(Date.now());
+  const [busy, setBusy] = useState<PRActionKind | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [receipt, setReceipt] = useState<PRActionResult | null>(null);
+  const idempotencyKeys = useRef(new Map<string, string>());
+  const binding = useMemo(
+    () => (data ? bindPRActions(data, bead, attempt, now) : null),
+    [data, bead, attempt, now],
+  );
+
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1_000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const runAction = async (action: PRActionKind) => {
+    if (!cityName || !data || binding?.state !== 'ready' || loading || busy !== null) return;
+    const { item, workId, attemptId } = binding.actions;
+    const actionOption =
+      action === 'prepare' ? binding.actions.prepare : binding.actions.queueReview;
+    if (!actionOptionIsAvailable(actionOption)) return;
+    if (Date.parse(item.fresh_until) <= Date.now() || Date.parse(data.fresh_until) <= Date.now()) {
+      setActionError('Gas City PR verdict expired. Refresh the queue before acting.');
+      void refresh();
+      return;
+    }
+    if (action === 'queue_review' && (!workId || !attemptId)) return;
+
+    const keyParts = [
+      cityName,
+      action,
+      item.monitor,
+      item.owner,
+      item.repo,
+      item.pull_request,
+      item.head_sha,
+      item.base_sha,
+      item.policy_version,
+      action === 'queue_review' ? workId : '',
+      action === 'queue_review' ? attemptId : '',
+    ];
+    const keyScope = keyParts.join(':');
+    let idempotencyKey = idempotencyKeys.current.get(keyScope);
+    if (!idempotencyKey) {
+      const priorReceipt = [...(item.action_receipts ?? [])]
+        .filter(
+          (candidate) =>
+            candidate.action === action &&
+            candidate.head_sha === item.head_sha &&
+            candidate.base_sha === item.base_sha &&
+            candidate.policy_version === item.policy_version &&
+            (action !== 'queue_review' ||
+              (candidate.work_id === workId && candidate.attempt_id === attemptId)),
+        )
+        .sort((left, right) => right.created_at.localeCompare(left.created_at))[0];
+      idempotencyKey =
+        priorReceipt?.idempotency_key ?? `workbench-${globalThis.crypto.randomUUID()}`;
+      idempotencyKeys.current.set(keyScope, idempotencyKey);
+    }
+
+    const request: ExecutePRActionRequest = {
+      action,
+      monitor: item.monitor,
+      owner: item.owner,
+      repo: item.repo,
+      pull_request: item.pull_request,
+      head_sha: item.head_sha,
+      base_sha: item.base_sha,
+      policy_version: item.policy_version,
+      idempotency_key: idempotencyKey,
+      ...(action === 'queue_review' && workId && attemptId
+        ? { work_id: workId, attempt_id: attemptId }
+        : {}),
+    };
+
+    setBusy(action);
+    setActionError(null);
+    try {
+      const result = await supervisorApi().executePRAction(cityName, request);
+      setReceipt(result);
+      await refresh();
+    } catch (cause) {
+      // Keep the key for retry: a lost response must not repeat the side effect.
+      setActionError(cause instanceof Error ? cause.message : 'Gas City PR action failed.');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  if (loading && data === undefined) {
+    return (
+      <section aria-label="Pull request actions" className="mt-3">
+        <p role="status" className="text-body text-fg-muted">
+          Loading Gas City PR verdict…
+        </p>
+      </section>
+    );
+  }
+  if (error && data === undefined) {
+    return (
+      <section aria-label="Pull request actions" className="mt-3 space-y-2">
+        <p role="alert" className="text-body text-accent">
+          PR verdict unavailable: {error}
+        </p>
+        <Button size="sm" onClick={() => void refresh()} disabled={loading}>
+          Retry
+        </Button>
+      </section>
+    );
+  }
+  if (!data || !binding || binding.state === 'unavailable') {
+    return (
+      <section aria-label="Pull request actions" className="mt-3 space-y-2">
+        <p role="status" className="text-body text-fg-muted">
+          {binding?.state === 'unavailable'
+            ? binding.reason
+            : 'Gas City has no PR verdict for this attempt.'}
+        </p>
+        {error && (
+          <p role="alert" className="text-body text-accent">
+            Refresh failed: {error}
+          </p>
+        )}
+        <Button size="sm" tone="quiet" onClick={() => void refresh()} disabled={loading}>
+          Refresh PR verdict
+        </Button>
+      </section>
+    );
+  }
+
   return (
-    <section aria-label="Pull request actions" className="mt-3">
-      <p role="status" className="text-body text-fg-muted">
-        PR actions unavailable: Gas City has not supplied queue, policy, and conflict verdicts for{' '}
-        <code>{bead.id}</code> / <code>{attempt.sessionId}</code>.
-      </p>
-    </section>
+    <PullRequestActions
+      item={binding.actions.item}
+      prepare={binding.actions.prepare}
+      queueReview={binding.actions.queueReview}
+      busy={busy}
+      refreshing={loading}
+      actionsDisabled={error !== null}
+      error={actionError ?? error}
+      receipt={receipt}
+      onAction={(action) => void runAction(action)}
+      onRefresh={() => void refresh()}
+    />
   );
 }
 
@@ -792,11 +962,10 @@ function AttemptStartActions({ bead, hasHistory }: { bead: Row; hasHistory: bool
   );
 }
 
-type ChatState = 'queued' | 'mail accepted; awaiting session acknowledgement' | 'rejected';
 interface ChatMessage {
   id: string;
   text: string;
-  state: ChatState;
+  delivery: FollowUpDeliveryState | null;
 }
 
 // AttemptChatPanel adds per-attempt chat: a submitted message targets the newest
@@ -808,30 +977,29 @@ function AttemptChatPanel({ attempt }: { attempt: ExecutionAttempt }) {
   const { operatorWireAlias } = useOperatorConfig();
   const [draft, setDraft] = useState('');
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const stopDeliveries = useRef<Array<() => void>>([]);
+
+  useEffect(() => () => stopDeliveries.current.forEach((stop) => stop()), []);
 
   const submit = async () => {
     const text = draft.trim();
     if (text.length === 0) return;
     const id = `${attempt.sessionId}:${Date.now()}:${messages.length}`;
-    setMessages((current) => [...current, { id, text, state: 'queued' }]);
+    setMessages((current) => [...current, { id, text, delivery: null }]);
     setDraft('');
-    try {
-      await sendSupervisorMail(
-        { to: attempt.sessionName, subject: 'workbench follow-up', body: text },
-        operatorWireAlias,
-      );
-      setMessages((current) =>
-        current.map((message) =>
-          message.id === id
-            ? { ...message, state: 'mail accepted; awaiting session acknowledgement' }
-            : message,
+    const stop = startFollowUpDelivery({
+      cityName: getActiveCity() ?? '',
+      send: () =>
+        sendSupervisorMail(
+          { to: attempt.sessionName, subject: 'workbench follow-up', body: text },
+          operatorWireAlias,
         ),
-      );
-    } catch {
-      setMessages((current) =>
-        current.map((message) => (message.id === id ? { ...message, state: 'rejected' } : message)),
-      );
-    }
+      onChange: (delivery) =>
+        setMessages((current) =>
+          current.map((message) => (message.id === id ? { ...message, delivery } : message)),
+        ),
+    });
+    stopDeliveries.current.push(stop);
   };
 
   return (
@@ -839,7 +1007,12 @@ function AttemptChatPanel({ attempt }: { attempt: ExecutionAttempt }) {
       <ul aria-label="Queued messages" className="space-y-1">
         {messages.map((message) => (
           <li key={message.id} className="text-label text-fg-faint">
-            <span className="uppercase tracking-wider">{message.state}</span> · {message.text}
+            <span>{message.text}</span>
+            {message.delivery ? (
+              <FollowUpDeliveryStatus state={message.delivery} />
+            ) : (
+              <span>Queued</span>
+            )}
           </li>
         ))}
       </ul>

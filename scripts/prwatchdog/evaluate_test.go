@@ -71,6 +71,14 @@ func TestEvaluate_CoreStateMachine(t *testing.T) {
 			wantTerm: false,
 		},
 		{
+			name: "hour-long comprehensive CI has no summary yet: keep observing",
+			checkRuns: []CheckRun{
+				{Name: CheckName, HeadSHA: testHeadSHA, Status: StatusCompleted, Conclusion: ConclusionSuccess, StartedAt: base},
+			},
+			elapsed:  60 * time.Minute,
+			wantTerm: false,
+		},
+		{
 			name: "check success, CI/required absent at deadline: fail closed, incomplete evidence",
 			checkRuns: []CheckRun{
 				{Name: CheckName, HeadSHA: testHeadSHA, Status: StatusCompleted, Conclusion: ConclusionSuccess, StartedAt: base},

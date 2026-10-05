@@ -39,11 +39,14 @@ result, using case IDs and action tags in the benchmark artifact.
 The runner checks complete case coverage, suite hash, distinct bundle IDs,
 capturer identity, required and forbidden actions, and action budgets. It
 blocks promotion when a critical case fails, a previously passing case
-regresses, or no case improves. The RSI gate reads the pinned suite and
-recomputes the result from the two captured traces; it checks the accepted and
-candidate bundle IDs and suite hash. The `captured_by` field
-is an auditable claim, not cryptographic proof; the workflow operator must
-enforce the read-only and independent-harness boundary.
+regresses, or no case improves. The RSI resolver verifies evaluator-signed `story-suite` and `story-traces`
+references and recomputes from those already verified bytes. Both references
+are required when either is present, and bind the suite and both bundle IDs.
+The signed benchmark authorization binds protected execution identities,
+bead/control revisions, read-only permissions and the exact output digest;
+trace bytes must equal that execution output. `captured_by` must match the
+bound actor and cannot establish provenance by itself. A separate human
+signature remains required; no sensitive authority is automatically activated.
 
 ## Run
 
@@ -65,7 +68,8 @@ before the suite can gate a real candidate.
 
 Build `go build -o /absolute/path/rsistorybench ./cmd/rsistorybench` for an
 independent judge host, then pass that pinned path as `benchmark_command` to
-`mol-rsi-story-candidate`. Set its `authority_class` explicitly for each
+`mol-rsi-story-candidate` in `contrib/inktree-story-benchmark`. The host must
+supply its reviewed `mol-rsi-candidate` base. Set its `authority_class` explicitly for each
 candidate; the story variant does not inherit the generic optimization default.
 
 Exit `0` means benchmark-eligible, `1` means valid evidence with a veto or no

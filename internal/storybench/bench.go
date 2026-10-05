@@ -3,10 +3,12 @@
 package storybench
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 )
 
@@ -102,8 +104,14 @@ func Evaluate(rawSuite []byte, baseline, candidate Run, improver string) (Result
 		return Result{}, fmt.Errorf("improver identity missing")
 	}
 	var suite Suite
-	if err := json.Unmarshal(rawSuite, &suite); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(rawSuite))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&suite); err != nil {
 		return Result{}, fmt.Errorf("decode story suite: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return Result{}, fmt.Errorf("story suite contains trailing JSON")
 	}
 	if err := validateSuite(suite); err != nil {
 		return Result{}, err

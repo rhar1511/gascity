@@ -27,12 +27,10 @@ go_library(
         "//internal/graphv2",
         "//internal/molecule",
         "//internal/pathutil",
-        "//internal/reviewquorum",
         "//internal/rsipolicy",
         "//internal/session",
         "//internal/sourceworkflow",
         "//internal/storeref",
-        "//internal/storybench",
     ],
 )
 
@@ -59,6 +57,7 @@ go_test(
         "retry_artifact_iteration_test.go",
         "retry_attempt_key_test.go",
         "retry_test.go",
+        "rsi_story_test.go",
         "rsi_test.go",
         "runtime_test.go",
         "scope_skip_compat_test.go",
@@ -66,6 +65,7 @@ go_test(
         "testenv_import_test.go",
         "zz_boolptr_test.go",
     ],
+    data = ["//internal/bootstrap/packs/core:formulas/mol-rsi-candidate.toml"],
     embed = [":dispatch"],
     deps = [
         "//internal/beadmeta",

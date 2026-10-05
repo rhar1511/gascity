@@ -1,67 +1,171 @@
-import { useState } from 'react';
 import { Button } from '../components/Button';
-import {
-  blockedReasonLabel,
-  pullRequestPolicy,
-  type PullRequestAction,
-  type PullRequestContext,
-} from './pullRequestPolicy';
+import type {
+  PRActionKind,
+  PRActionOption,
+  PRActionQueueItem,
+  PRActionResult,
+} from '../supervisor/prActions';
+import { actionOptionIsAvailable } from './prActionBinding';
 
-// Policy-bound pull-request actions for the selected Execution Attempt.
-//
-// The offered actions are exactly what Gas City policy allows; the Workbench
-// renders NO merge, approve, or force-push control. Every action is delegated
-// through onAction (which calls the typed Gas City API), so the request and its
-// result are auditable against the Bead and attempt.
 export function PullRequestActions({
-  context,
+  item,
+  prepare,
+  queueReview,
+  busy,
+  refreshing,
+  actionsDisabled,
+  error,
+  receipt,
   onAction,
+  onRefresh,
 }: {
-  context: PullRequestContext;
-  onAction: (action: PullRequestAction) => Promise<void>;
+  item: PRActionQueueItem;
+  prepare: PRActionOption | null;
+  queueReview: PRActionOption | null;
+  busy: PRActionKind | null;
+  refreshing: boolean;
+  actionsDisabled: boolean;
+  error: string | null;
+  receipt: PRActionResult | null;
+  onAction: (action: PRActionKind) => void;
+  onRefresh: () => void;
 }) {
-  const policy = pullRequestPolicy(context);
-  const [busy, setBusy] = useState<PullRequestAction | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  if (policy.blocked) {
-    return (
-      <p role="status" className="text-body text-fg-muted italic">
-        {blockedReasonLabel(policy.blocked)}
-      </p>
-    );
-  }
-
-  const run = async (action: PullRequestAction) => {
-    if (busy !== null) return; // idempotent: no duplicate submission in flight
-    setBusy(action);
-    setError(null);
-    try {
-      await onAction(action);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'action failed');
-    } finally {
-      setBusy(null);
-    }
-  };
-
+  const offered = prepare !== null || queueReview !== null;
+  const pullRequestURL = safePullRequestURL(item.url);
+  const serverReceipt = [...(item.action_receipts ?? [])]
+    .filter((candidate) => candidate.action === 'prepare' || candidate.action === 'queue_review')
+    .sort((left, right) => right.created_at.localeCompare(left.created_at))[0];
+  const visibleReceipt = receipt ?? serverReceipt ?? null;
   return (
-    <div className="flex items-center gap-2">
-      {policy.allowed.includes('prepare') && (
-        <Button size="sm" onClick={() => void run('prepare')} disabled={busy !== null}>
-          Prepare PR
-        </Button>
+    <section aria-label="Pull request actions" className="mt-3 space-y-2">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <p className="text-body text-fg">
+          PR #{item.pull_request}: <span className="font-medium">{item.title}</span>
+        </p>
+        {pullRequestURL && (
+          <a
+            href={pullRequestURL}
+            target="_blank"
+            rel="noreferrer"
+            className="text-label text-fg-muted underline decoration-rule hover:text-fg focus-mark"
+          >
+            Open pull request
+          </a>
+        )}
+      </div>
+      <p className="text-label text-fg-faint">
+        Server verdict · {item.merge_state || 'merge state unknown'} · head{' '}
+        <code>{item.head_sha.slice(0, 12)}</code> · {item.evidence_state} attempt evidence
+        {item.is_draft ? ' · draft PR' : ''}
+      </p>
+      {offered ? (
+        <div className="flex flex-wrap items-start gap-2">
+          {prepare && (
+            <ActionButton
+              label="Prepare PR"
+              action="prepare"
+              option={prepare}
+              busy={busy}
+              refreshing={refreshing}
+              actionsDisabled={actionsDisabled}
+              onAction={onAction}
+            />
+          )}
+          {queueReview && (
+            <ActionButton
+              label="Queue PR for review"
+              action="queue_review"
+              option={queueReview}
+              busy={busy}
+              refreshing={refreshing}
+              actionsDisabled={actionsDisabled}
+              onAction={onAction}
+            />
+          )}
+        </div>
+      ) : (
+        <p role="status" className="text-body text-fg-muted">
+          Gas City currently offers no prepare or review-queue action for this revision.
+        </p>
       )}
-      {policy.allowed.includes('queue') && (
-        <Button size="sm" onClick={() => void run('queue')} disabled={busy !== null}>
-          Queue PR
-        </Button>
+      {prepare && !prepare.available && prepare.reason && (
+        <p className="text-label text-fg-muted">Prepare: {prepare.reason}</p>
+      )}
+      {queueReview && !queueReview.available && queueReview.reason && (
+        <p className="text-label text-fg-muted">Queue review: {queueReview.reason}</p>
+      )}
+      {busy && (
+        <p role="status" className="text-label text-fg-muted">
+          Sending {busy === 'prepare' ? 'prepare' : 'review queue'} request to Gas City…
+        </p>
       )}
       {error && (
-        <span role="alert" className="text-body text-accent">
-          {error}
-        </span>
+        <div role="alert" className="space-y-1 text-body text-accent">
+          <p>{error}</p>
+          <p className="text-label">
+            If the outcome is uncertain, refresh before retrying; a retry keeps the same idempotency
+            key.
+          </p>
+        </div>
       )}
-    </div>
+      {visibleReceipt && (
+        <p role="status" className="text-label text-fg-muted">
+          Last server receipt: {visibleReceipt.action} · {visibleReceipt.status}
+          {visibleReceipt.outcome ? ` · ${visibleReceipt.outcome}` : ''}
+          {visibleReceipt.detail ? ` · ${visibleReceipt.detail}` : ''}
+        </p>
+      )}
+      <Button size="sm" tone="quiet" onClick={onRefresh} disabled={busy !== null || refreshing}>
+        Refresh PR verdict
+      </Button>
+    </section>
+  );
+}
+
+function safePullRequestURL(value: string | undefined): string | null {
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    if (
+      (url.protocol !== 'https:' && url.protocol !== 'http:') ||
+      !url.hostname ||
+      url.username ||
+      url.password
+    ) {
+      return null;
+    }
+    return url.href;
+  } catch {
+    return null;
+  }
+}
+
+function ActionButton({
+  label,
+  action,
+  option,
+  busy,
+  refreshing,
+  actionsDisabled,
+  onAction,
+}: {
+  label: string;
+  action: PRActionKind;
+  option: PRActionOption;
+  busy: PRActionKind | null;
+  refreshing: boolean;
+  actionsDisabled: boolean;
+  onAction: (action: PRActionKind) => void;
+}) {
+  const available = actionOptionIsAvailable(option);
+  return (
+    <Button
+      size="sm"
+      onClick={() => onAction(action)}
+      disabled={!available || busy !== null || refreshing || actionsDisabled}
+      title={option.reason || undefined}
+    >
+      {busy === action ? 'Sending…' : label}
+    </Button>
   );
 }

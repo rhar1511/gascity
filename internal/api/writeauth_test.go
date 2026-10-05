@@ -129,6 +129,35 @@ func TestWriteAuthMiddleware_AcceptsValidGrantAndResetsBody(t *testing.T) {
 	}
 }
 
+func TestWriteAuthMiddlewareAddsOnlyVerifiedIssuerFactsToContext(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	pub, priv := mustKeypair(t)
+	body := []byte(`{"action":"prepare"}`)
+	path := "/v0/city/acme/pr-actions"
+	tok := mintToken(t, priv, grantFor(now, "acme", "POST", path, body, "context-jti"))
+	var seen bool
+	var actor VerifiedCityWritePrincipal
+	h := writeAuthMiddleware(newTestWriteVerifier(t, pub, now), false, http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		seen = true
+		var ok bool
+		actor, ok = verifiedCityWritePrincipal(r.Context())
+		if !ok {
+			t.Error("verified city-write principal missing from context")
+		}
+	}))
+	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body))
+	req.Header.Set(writeAuthHeader, tok)
+	req.Header.Set(csrfHeaderName, "1")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if !seen || rec.Code != http.StatusOK {
+		t.Fatalf("handler result: seen=%v status=%d", seen, rec.Code)
+	}
+	if actor.KeyID != "k1" || actor.City != "acme" {
+		t.Fatalf("verified actor = %+v", actor)
+	}
+}
+
 func TestWriteAuthMiddleware_GatesOtherMutationMethods(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	pub, priv := mustKeypair(t)

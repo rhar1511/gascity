@@ -55,8 +55,12 @@ type PullRequest struct {
 	Title            string  `json:"title"`
 	URL              string  `json:"url"`
 	BaseRefName      string  `json:"base_ref_name"`
+	BaseSHA          string  `json:"base_sha"`
 	HeadRefName      string  `json:"head_ref_name"`
 	HeadSHA          string  `json:"head_sha"`
+	State            string  `json:"state,omitempty"`
+	IsMerged         bool    `json:"is_merged,omitempty"`
+	MergeCommitSHA   string  `json:"merge_commit_sha,omitempty"`
 	MergeStateStatus string  `json:"merge_state_status"`
 	IsDraft          bool    `json:"is_draft"`
 	Checks           []Check `json:"checks,omitempty"`
@@ -253,9 +257,16 @@ type graphQLPullRequest struct {
 	IsDraft          bool               `json:"isDraft"`
 	MergeStateStatus string             `json:"mergeStateStatus"`
 	BaseRefName      string             `json:"baseRefName"`
+	BaseRef          graphQLRef         `json:"baseRef"`
 	HeadRefName      string             `json:"headRefName"`
 	HeadRefOID       string             `json:"headRefOid"`
 	Commits          graphQLCommitNodes `json:"commits"`
+}
+
+type graphQLRef struct {
+	Target struct {
+		OID string `json:"oid"`
+	} `json:"target"`
 }
 
 type graphQLCommitNodes struct {
@@ -318,8 +329,10 @@ func DecodePullRequestsPage(r io.Reader) ([]PullRequest, string, error) {
 			IsDraft:          node.IsDraft,
 			MergeStateStatus: node.MergeStateStatus,
 			BaseRefName:      node.BaseRefName,
+			BaseSHA:          node.BaseRef.Target.OID,
 			HeadRefName:      node.HeadRefName,
 			HeadSHA:          node.HeadRefOID,
+			State:            "OPEN",
 		}
 		if len(node.Commits.Nodes) > 0 {
 			commit := node.Commits.Nodes[len(node.Commits.Nodes)-1].Commit
