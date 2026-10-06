@@ -36,9 +36,17 @@ type beadPolicyGraphStore struct {
 }
 
 var (
-	_ beads.ConditionalAssignmentReleaser    = (*beadPolicyStore)(nil)
-	_ beads.ConditionalWritesResolveTargeter = (*beadPolicyStore)(nil)
-	_ beads.ConditionalWriterHandleProvider  = (*beadPolicyStore)(nil)
+	_ beads.ConditionalAssignmentReleaser                           = (*beadPolicyStore)(nil)
+	_ beads.ConditionalWriterHandleProvider                         = (*beadPolicyStore)(nil)
+	_ beads.ConditionalWritesResolveTargeter                        = (*beadPolicyStore)(nil)
+	_ beads.PrivateEvidenceMetadataCASWriterHandleProvider          = (*beadPolicyStore)(nil)
+	_ beads.PrivateEvidenceArchiveReaderHandleProvider              = (*beadPolicyStore)(nil)
+	_ beads.ControllerMetadataTransitionWriterHandleProvider        = (*beadPolicyStore)(nil)
+	_ beads.ControllerMetadataTransitionReceiptReaderHandleProvider = (*beadPolicyStore)(nil)
+	_ beads.DecisionFrontierSourceReaderHandleProvider              = (*beadPolicyStore)(nil)
+	_ beads.DecisionFrontierRecordWriterHandleProvider              = (*beadPolicyStore)(nil)
+	_ beads.RevisionTransitionReceiptReaderHandleProvider           = (*beadPolicyStore)(nil)
+	_ beads.RevisionTransitionWriterHandleProvider                  = (*beadPolicyStore)(nil)
 )
 
 // ConditionalWritesResolveTarget declares the wrapped store as the
@@ -51,10 +59,66 @@ var (
 // *beadPolicyStore.
 func (s *beadPolicyStore) ConditionalWritesResolveTarget() beads.Store { return s.Store }
 
-// ConditionalWriterHandle preserves revision-fenced mutations through the
-// policy wrapper without claiming support when the backing lacks it.
+// ConditionalWriterHandle preserves the backing store's conditional writer
+// through this policy wrapper. Built-in sling routing requires a revision
+// compare-and-swap even when the rollout gate is unset; exposing the exact
+// backing capability keeps that route fail-closed without an unconditional
+// fallback.
 func (s *beadPolicyStore) ConditionalWriterHandle() (beads.ConditionalWriter, bool) {
+	if s == nil {
+		return nil, false
+	}
 	return beads.ConditionalWriterFor(s.Store)
+}
+
+// PrivatePayloadValueTransportTarget lets evidence capture inspect the actual
+// store rather than assuming the policy wrapper's command transport is safe.
+func (s *beadPolicyStore) PrivatePayloadValueTransportTarget() beads.Store { return s.Store }
+
+// PrivateEvidenceMetadataCASWriterHandle preserves the inner transport and
+// write-owner wrapper path for immutable attempt evidence.
+func (s *beadPolicyStore) PrivateEvidenceMetadataCASWriterHandle() (beads.PrivateEvidenceMetadataCASWriter, bool) {
+	return beads.PrivateEvidenceMetadataCASWriterFor(s.Store)
+}
+
+func (s *beadPolicyStore) PrivateEvidenceArchiveReaderHandle() (beads.PrivateEvidenceArchiveReader, bool) {
+	return beads.PrivateEvidenceArchiveReaderFor(s.Store)
+}
+
+// ControllerMetadataTransitionWriterHandle preserves the inner controller
+// transport without treating the policy wrapper as a new write authority.
+func (s *beadPolicyStore) ControllerMetadataTransitionWriterHandle() (beads.ControllerMetadataTransitionWriter, bool) {
+	return beads.ControllerMetadataTransitionWriterFor(s.Store)
+}
+
+// DecisionFrontierSourceReaderHandle preserves the backing's authoritative
+// source-snapshot capability through the policy layer.
+func (s *beadPolicyStore) DecisionFrontierSourceReaderHandle() (beads.DecisionFrontierSourceReader, bool) {
+	return beads.DecisionFrontierSourceReaderFor(s.Store)
+}
+
+// DecisionFrontierRecordWriterHandle preserves the backing's complete private
+// record-writer role through the policy wrapper without claiming support from
+// its embedded Store interface alone.
+func (s *beadPolicyStore) DecisionFrontierRecordWriterHandle() (beads.DecisionFrontierRecordWriter, bool) {
+	if s == nil {
+		return nil, false
+	}
+	return beads.DecisionFrontierRecordWriterFor(s.Store)
+}
+
+// RevisionTransitionReceiptReaderHandle preserves the backing exact-receipt
+// reader through the policy layer without inferring support from source reads.
+func (s *beadPolicyStore) RevisionTransitionReceiptReaderHandle() (beads.RevisionTransitionReceiptReader, bool) {
+	return beads.RevisionTransitionReceiptReaderFor(s.Store)
+}
+
+func (s *beadPolicyStore) ControllerMetadataTransitionReceiptReaderHandle() (beads.ControllerMetadataTransitionReceiptReader, bool) {
+	return beads.ControllerMetadataTransitionReceiptReaderFor(s.Store)
+}
+
+func (s *beadPolicyStore) RevisionTransitionWriterHandle() (beads.RevisionTransitionWriter, bool) {
+	return beads.RevisionTransitionWriterFor(s.Store)
 }
 
 var (
@@ -182,6 +246,21 @@ func (s *beadPolicyStore) DeleteBatch(ids []string) error {
 	}
 	return deleter.DeleteBatch(ids)
 }
+
+// GetExactBatch forwards the exact batch read to the wrapped store. The policy
+// layer shapes creation and listing, not exact reads by id.
+func (s *beadPolicyStore) GetExactBatch(ids []string) (map[string]beads.Bead, []string, error) {
+	getter, ok := s.Store.(beads.ExactBatchGetter)
+	if !ok {
+		return nil, nil, beads.ErrExactBatchGetUnsupported
+	}
+	return getter.GetExactBatch(ids)
+}
+
+var (
+	_ beads.ExactBatchGetter = (*beadPolicyStore)(nil)
+	_ beads.ExactBatchGetter = (*beadPolicyGraphStore)(nil)
+)
 
 var (
 	_ beads.RowWitness = (*beadPolicyStore)(nil)

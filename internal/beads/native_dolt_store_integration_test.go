@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -199,6 +200,108 @@ func TestNativeDoltStoreOpenPreservesMissingIDDefaults(t *testing.T) {
 		Ephemeral: true,
 	}); err != nil {
 		t.Fatalf("Create ephemeral bead (wisp_events write): %v", err)
+	}
+}
+
+// TestNativeDoltStoreReopenPreservesProviderLifecycleSemantics verifies the
+// native store calls the public lifecycle role on a real, isolated Dolt
+// database. Reopen must leave non-done statuses alone, and reopening a closed
+// issue must clear closed_at and record the provider's reopen event.
+func TestNativeDoltStoreReopenPreservesProviderLifecycleSemantics(t *testing.T) {
+	ctx := context.Background()
+	scopeRoot := t.TempDir()
+	t.Setenv("BEADS_TEST_MODE", "1")
+	port := startTestDoltServer(t)
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "1")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "127.0.0.1")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", strconv.Itoa(port))
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "beads")
+	beadsDir := filepath.Join(scopeRoot, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("create .beads directory: %v", err)
+	}
+	metadata := fmt.Sprintf(`{"backend":"dolt","database":"beads","dolt_mode":"server","dolt_server_host":"127.0.0.1","dolt_server_port":%d}`, port)
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadata), 0o644); err != nil {
+		t.Fatalf("write metadata.json: %v", err)
+	}
+	storage, err := beadslib.OpenBestAvailable(ctx, beadsDir)
+	if err != nil {
+		t.Fatalf("open isolated upstream storage: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := storage.Close(); err != nil {
+			t.Fatalf("close upstream storage: %v", err)
+		}
+	})
+	if err := storage.SetConfig(ctx, "issue_prefix", "gc"); err != nil {
+		t.Fatalf("set issue prefix: %v", err)
+	}
+	store := newNativeDoltStoreWithStorageAndPrefix(storage, "reopen-provider-semantics", "gc")
+	created, err := store.Create(Bead{Title: "reopen category semantics"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	events, ok := beadslib.AsEventQuerier(storage)
+	if !ok {
+		t.Fatal("storage does not expose the public event reader")
+	}
+
+	inProgress := "in_progress"
+	if err := store.Update(created.ID, UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("Update status to in_progress: %v", err)
+	}
+	if err := store.Reopen(created.ID); err != nil {
+		t.Fatalf("Reopen(in_progress): %v", err)
+	}
+	active, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get after non-done Reopen: %v", err)
+	}
+	if active.Status != inProgress {
+		t.Fatalf("non-done Reopen status = %q, want unchanged %q", active.Status, inProgress)
+	}
+	closedEvents, err := events.EventsSince(ctx, beadslib.EventCursor{}, created.ID, 50)
+	if err != nil {
+		t.Fatalf("EventsSince after non-done Reopen: %v", err)
+	}
+	for _, event := range closedEvents {
+		if event.EventType == beadslib.EventReopened {
+			t.Fatal("non-done Reopen unexpectedly recorded a reopened event")
+		}
+	}
+
+	if err := store.Close(created.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	closedIssue, err := storage.GetIssue(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("GetIssue after Close: %v", err)
+	}
+	if closedIssue.ClosedAt == nil {
+		t.Fatal("Close did not set closed_at")
+	}
+	if err := store.Reopen(created.ID); err != nil {
+		t.Fatalf("Reopen(closed): %v", err)
+	}
+	reopenedIssue, err := storage.GetIssue(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("GetIssue after Reopen: %v", err)
+	}
+	if reopenedIssue.Status != beadslib.StatusOpen || reopenedIssue.ClosedAt != nil {
+		t.Fatalf("reopened issue status/closed_at = %q/%v, want open/nil", reopenedIssue.Status, reopenedIssue.ClosedAt)
+	}
+	reopenedEvents, err := events.EventsSince(ctx, beadslib.EventCursor{}, created.ID, 50)
+	if err != nil {
+		t.Fatalf("EventsSince after Reopen(closed): %v", err)
+	}
+	reopenCount := 0
+	for _, event := range reopenedEvents {
+		if event.EventType == beadslib.EventReopened {
+			reopenCount++
+		}
+	}
+	if reopenCount != 1 {
+		t.Fatalf("reopened event count = %d, want 1", reopenCount)
 	}
 }
 
@@ -397,6 +500,22 @@ func TestNativeDoltStoreRealBackendRoundTrip(t *testing.T) {
 		t.Fatalf("ParentID = %q, want %q", got.ParentID, parent.ID)
 	}
 	assertNativeDependency(t, got.Dependencies, child.ID, blocker.ID, "blocks")
+	if err := store.Close(child.ID); err == nil || !strings.Contains(strings.ToLower(err.Error()), "blocked issue") {
+		t.Fatalf("Close blocked child = %v, want provider blocked-issue refusal", err)
+	}
+	stillOpen, err := store.Get(child.ID)
+	if err != nil {
+		t.Fatalf("Get child after refused close: %v", err)
+	}
+	if stillOpen.Status != "open" {
+		t.Fatalf("child status after refused close = %q, want open", stillOpen.Status)
+	}
+	// The checked close path enforces live blocker dependencies. Resolve the
+	// child's blocker before closing it so this round-trip exercises a valid
+	// close, rather than depending on the unchecked legacy close behavior.
+	if err := store.Close(blocker.ID); err != nil {
+		t.Fatalf("Close blocker: %v", err)
+	}
 	if err := store.Close(child.ID); err != nil {
 		t.Fatalf("Close child: %v", err)
 	}

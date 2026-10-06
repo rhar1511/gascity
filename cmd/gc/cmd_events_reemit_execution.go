@@ -130,7 +130,7 @@ func openExistingExecutionReemitStore(ctx context.Context, cityPath string, cfg 
 	provider := rawBeadsProviderForScope(scopeRoot, cityPath)
 	switch {
 	case provider == "file":
-		store, err := openExistingScopeLocalFileStore(scopeRoot)
+		store, err := openExistingScopeLocalFileStore(scopeRoot, cityPath)
 		if err != nil {
 			return nil, fmt.Errorf("opening existing file store: %w", err)
 		}
@@ -139,7 +139,7 @@ func openExistingExecutionReemitStore(ctx context.Context, cityPath string, cfg 
 		if err := requireExistingExecutionReemitBdStore(scopeRoot); err != nil {
 			return nil, err
 		}
-		store, err := scopedBdStoreForCity(ctx, cityPath)
+		store, err := scopedBdStoreForCity(ctx, cityPath, cfg)
 		if err != nil {
 			return nil, fmt.Errorf("opening existing bd store without recovery: %w", err)
 		}

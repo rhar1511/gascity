@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -22,8 +23,11 @@ func ReadCopilotFile(path string, _ int) (*Session, error) {
 		return nil, err
 	}
 	defer f.Close() //nolint:errcheck
+	return readCopilotFileFrom(path, f, 0)
+}
 
-	scanner := bufio.NewScanner(f)
+func readCopilotFileFrom(path string, source io.Reader, _ int) (*Session, error) {
+	scanner := bufio.NewScanner(source)
 	scanner.Buffer(make([]byte, 0, 256*1024), 50*1024*1024)
 
 	var messages []*Entry
@@ -621,11 +625,13 @@ func FindCopilotSessionFileByID(searchPaths []string, workDir, sessionID string)
 	}
 	for _, root := range mergeCopilotSearchPaths(searchPaths) {
 		path := filepath.Join(root, sessionID, "events.jsonl")
-		info, err := os.Stat(path)
-		if err != nil || info.IsDir() {
+		transcript, _, err := openCopilotTranscript(root, path)
+		if err != nil {
 			continue
 		}
-		if strings.TrimSpace(workDir) != "" && !copilotSessionCWDMatches(path, workDir) {
+		matches := strings.TrimSpace(workDir) == "" || copilotSessionCWDMatches(transcript, workDir)
+		_ = transcript.Close()
+		if !matches {
 			continue
 		}
 		return path
@@ -643,11 +649,12 @@ func FindCopilotSessionFile(searchPaths []string, workDir string) string {
 	for _, root := range mergeCopilotSearchPaths(searchPaths) {
 		candidates = append(candidates, copilotSessionCandidates(root)...)
 	}
+	defer closeCopilotSessionCandidates(candidates)
 	sort.Slice(candidates, func(i, j int) bool {
 		return candidates[i].modTime.After(candidates[j].modTime)
 	})
 	for _, candidate := range candidates {
-		if copilotSessionCWDMatches(candidate.path, workDir) {
+		if copilotSessionCWDMatches(candidate.transcript, workDir) {
 			return candidate.path
 		}
 	}
@@ -655,22 +662,27 @@ func FindCopilotSessionFile(searchPaths []string, workDir string) string {
 }
 
 type sessionFileCandidate struct {
-	path    string
-	modTime time.Time
+	path       string
+	modTime    time.Time
+	transcript *OpenedTranscript
 }
 
 func copilotSessionCandidates(root string) []sessionFileCandidate {
-	info, err := os.Stat(root)
-	if err != nil || !info.IsDir() {
+	rootHandle, err := os.OpenRoot(root)
+	if err != nil {
 		return nil
 	}
-	var candidates []sessionFileCandidate
-	if path := filepath.Join(root, "events.jsonl"); copilotEventsFileExists(path) {
-		if info, err := os.Stat(path); err == nil {
-			candidates = append(candidates, sessionFileCandidate{path: path, modTime: info.ModTime()})
-		}
+	defer rootHandle.Close() //nolint:errcheck
+	directory, err := rootHandle.Open(".")
+	if err != nil {
+		return nil
 	}
-	entries, err := os.ReadDir(root)
+	defer directory.Close() //nolint:errcheck
+	var candidates []sessionFileCandidate
+	if candidate, ok := copilotSessionCandidate(root, filepath.Join(root, "events.jsonl")); ok {
+		candidates = append(candidates, candidate)
+	}
+	entries, err := directory.ReadDir(-1)
 	if err != nil {
 		return candidates
 	}
@@ -679,46 +691,65 @@ func copilotSessionCandidates(root string) []sessionFileCandidate {
 			continue
 		}
 		path := filepath.Join(root, entry.Name(), "events.jsonl")
-		if !copilotEventsFileExists(path) {
-			continue
+		if candidate, ok := copilotSessionCandidate(root, path); ok {
+			candidates = append(candidates, candidate)
 		}
-		info, err := os.Stat(path)
-		if err != nil {
-			continue
-		}
-		candidates = append(candidates, sessionFileCandidate{path: path, modTime: info.ModTime()})
 	}
 	return candidates
 }
 
-func copilotEventsFileExists(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && !info.IsDir()
+func copilotSessionCandidate(root, path string) (sessionFileCandidate, bool) {
+	transcript, info, err := openCopilotTranscript(root, path)
+	if err != nil {
+		return sessionFileCandidate{}, false
+	}
+	return sessionFileCandidate{path: path, modTime: info.ModTime(), transcript: transcript}, true
 }
 
-func copilotSessionCWDMatches(path, workDir string) bool {
-	cwd := copilotSessionCWD(path)
+func closeCopilotSessionCandidates(candidates []sessionFileCandidate) {
+	for _, candidate := range candidates {
+		_ = candidate.transcript.Close()
+	}
+}
+
+func openCopilotTranscript(root, path string) (*OpenedTranscript, os.FileInfo, error) {
+	transcript, err := OpenTranscript("copilot", []string{root}, path)
+	if err != nil {
+		return nil, nil, err
+	}
+	info, err := transcript.Stat()
+	if err != nil {
+		_ = transcript.Close()
+		return nil, nil, fmt.Errorf("stat opened Copilot session log: %w", err)
+	}
+	if info.IsDir() {
+		_ = transcript.Close()
+		return nil, nil, fmt.Errorf("copilot session log is a directory")
+	}
+	return transcript, info, nil
+}
+
+func copilotSessionCWDMatches(transcript *OpenedTranscript, workDir string) bool {
+	cwd := copilotSessionCWD(transcript)
 	if cwd == "" || workDir == "" {
 		return false
 	}
 	return pathutil.SamePath(cwd, workDir)
 }
 
-func copilotSessionCWD(path string) string {
-	if cwd := copilotSessionStartCWD(path); cwd != "" {
+func copilotSessionCWD(transcript *OpenedTranscript) string {
+	if cwd := copilotSessionStartCWD(transcript.ReadSeeker()); cwd != "" {
 		return cwd
 	}
-	return copilotWorkspaceYAMLCWD(filepath.Join(filepath.Dir(path), "workspace.yaml"))
+	return copilotWorkspaceYAMLCWD(transcript)
 }
 
-func copilotSessionStartCWD(path string) string {
-	f, err := os.Open(path)
-	if err != nil {
+func copilotSessionStartCWD(source io.ReadSeeker) string {
+	if _, err := source.Seek(0, io.SeekStart); err != nil {
 		return ""
 	}
-	defer f.Close() //nolint:errcheck
 
-	scanner := bufio.NewScanner(f)
+	scanner := bufio.NewScanner(source)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
 		line := bytes.TrimSpace(scanner.Bytes())
@@ -747,8 +778,18 @@ func copilotSessionStartCWD(path string) string {
 	return ""
 }
 
-func copilotWorkspaceYAMLCWD(path string) string {
-	data, err := os.ReadFile(path)
+func copilotWorkspaceYAMLCWD(transcript *OpenedTranscript) string {
+	sidecarPath := filepath.Join(filepath.Dir(transcript.relative), "workspace.yaml")
+	sidecar, err := transcript.OpenRelative(sidecarPath)
+	if err != nil {
+		return ""
+	}
+	defer sidecar.Close() //nolint:errcheck
+	info, err := sidecar.Stat()
+	if err != nil || info.IsDir() {
+		return ""
+	}
+	data, err := io.ReadAll(sidecar)
 	if err != nil {
 		return ""
 	}

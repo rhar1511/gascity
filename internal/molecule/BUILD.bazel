@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "molecule",
     srcs = [
+        "action_gate.go",
         "artifact.go",
         "claim_exact.go",
         "cleanup.go",
@@ -26,6 +27,7 @@ go_library(
 go_test(
     name = "molecule_test",
     srcs = [
+        "action_gate_test.go",
         "artifact_test.go",
         "attach_conditional_test.go",
         "attach_test.go",

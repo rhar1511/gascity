@@ -22,12 +22,18 @@ package api
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log"
+	"path/filepath"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/api/apierr"
+	"github.com/gastownhall/gascity/internal/attemptevidence"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/workrecord"
 )
 
@@ -62,30 +68,17 @@ var workRecordCommitReachable = workrecord.CommitReachableOnBranchContext
 // coverage on the stored row and then projects metadata only; moving it belongs
 // in internal/workrecord so both doors move together rather than asking
 // different questions of different populations.
-//
-// ctx is the request's, and it reaches the reachability clause because that
-// clause shells out to git: a client that hangs up has to be able to stop the
-// subprocess, or a wedged repository leaves one blocking call per retry.
-//
-// Known limit — the check and the write are not atomic. The row validated here
-// is the one resolveBeadOwner read, and the caller applies its close or update
-// afterwards without re-reading it, so a concurrent write landing in that window
-// is neither seen by the gate nor refused by the write. A close that races an
-// edit stripping gc.work_outcome can therefore pass a check the final row would
-// have failed. The CLI door has the same shape at evaluateWorkRecordCloseGate in
-// cmd/gc/work_record_gate.go, which validates a stored (or pre-fetched) bead and
-// then lets the bd invocation write.
-//
-// The remedy is to fence the write on the revision the gate read —
-// beads.ConditionalWriter already spells it (CloseIfMatch/UpdateIfMatch, via
-// beads.ResolveConditionalWriter) — so this is a change to the close paths, not
-// to the store contract. It is left for a follow-up because the fence has to be
-// threaded through both doors together and only capable stores carry it: a store
-// that resolves as legacy has no revision to fence on, so the gate would need a
-// degraded path there rather than a refusal. The window is small and the losing
-// outcome is a close that recorded slightly less than it should, not a corrupted
-// row.
+// The closing handlers carry the inspected revision through UpdateIfMatch or
+// CloseIfMatch. Attempt capture may advance only its private index metadata;
+// refreshAfterAttemptCapture rejects any concurrent public or claim mutation
+// before using that new revision. A later competing write is refused by CAS.
+// The CLI close paths likewise carry the revision through the store bridge.
+// Stores without conditional mutation support refuse this transition.
+
 func (s *Server) gateWorkRecordClose(ctx context.Context, id string, store beads.Store, stored beads.Bead, submitted map[string]string) error {
+	if err := s.captureWorkbenchAttempt(ctx, store, stored); err != nil {
+		return apierr.ServiceUnavailable.Msg("attempt evidence capture is pending: " + err.Error())
+	}
 	if !workrecord.Gated(stored) {
 		return nil
 	}
@@ -120,6 +113,86 @@ func (s *Server) gateWorkRecordClose(ctx context.Context, id string, store beads
 		return apierr.ConflictWrongState.Msg("conflict: bead " + id + " does not satisfy the work-record close contract: " + strings.Join(violations, "; "))
 	}
 	return nil
+}
+
+// captureWorkbenchAttempt seals one exact Workbench execution before any
+// close/update path can retire the source bead or make its worktree reusable.
+// It reads only the persisted claim identity. A missing worktree is sealed as
+// explicitly unavailable by attemptevidence; repository/read/write failures
+// are returned so the caller blocks the destructive transition.
+func (s *Server) captureWorkbenchAttempt(ctx context.Context, store beads.Store, stored beads.Bead) error {
+	if !attemptevidence.IsExecutionRecord(stored) {
+		return nil
+	}
+	sessionID := strings.TrimSpace(stored.Metadata[beadmeta.SessionIDMetadataKey])
+	sessionStore := s.state.SessionsBeadStore()
+	if sessionStore.Store == nil {
+		return errors.New("session bead store is unavailable")
+	}
+	info, err := session.NewStore(sessionStore).Get(sessionID)
+	if err != nil {
+		return fmt.Errorf("reading execution session %s: %w", sessionID, err)
+	}
+	if strings.TrimSpace(info.Generation) == "" {
+		return fmt.Errorf("execution session %s has no generation", sessionID)
+	}
+	storeRef := strings.TrimSpace(stored.Metadata[beadmeta.RootStoreRefMetadataKey])
+	if storeRef == "" {
+		rig, cityScope := s.slingStoreScopeForBead(stored.ID)
+		switch {
+		case cityScope:
+			storeRef = "city:" + s.state.CityName()
+		case strings.TrimSpace(rig) != "":
+			storeRef = "rig:" + rig
+		default:
+			return fmt.Errorf("cannot resolve exact store reference for work bead %s", stored.ID)
+		}
+	}
+	workDir := strings.TrimSpace(stored.Metadata[beadmeta.WorkDirMetadataKey])
+	if workDir == "" {
+		workDir = strings.TrimSpace(stored.Metadata[beadmeta.LegacyWorkDirMetadataKey])
+	}
+	if workDir != "" && !filepath.IsAbs(workDir) {
+		repoDir := s.workRecordRepoDir(store, stored)
+		if strings.TrimSpace(repoDir) == "" {
+			return fmt.Errorf("relative execution worktree %q has no known repository root", workDir)
+		}
+		workDir = filepath.Join(repoDir, workDir)
+	}
+	repoDir := s.workRecordRepoDir(store, stored)
+	spec := attemptevidence.CaptureSpec{
+		Identity: attemptevidence.Identity{
+			Kind:              attemptevidence.KindWorkbench,
+			OwnerBeadID:       stored.ID,
+			ExecutionBeadID:   stored.ID,
+			SessionID:         sessionID,
+			SessionGeneration: strings.TrimSpace(info.Generation),
+			ClaimGeneration:   strings.TrimSpace(stored.Metadata[beadmeta.ClaimGenerationMetadataKey]),
+		},
+		StoreRef: storeRef,
+		Permission: attemptevidence.PermissionScope{
+			StoreRef: storeRef, WorkID: stored.ID,
+			RepositoryRoot: strings.TrimSpace(repoDir), WorkspaceRoot: workDir,
+		},
+		WorkDir: workDir,
+		BaseSHA: strings.TrimSpace(stored.Metadata[beadmeta.WorktreeBaseSHAMetadataKey]),
+		Outcome: strings.TrimSpace(stored.Metadata[beadmeta.WorkOutcomeMetadataKey]),
+	}
+	if _, err := attemptevidence.Capture(ctx, store, spec); err != nil {
+		return fmt.Errorf("capturing work bead %s: %w", stored.ID, err)
+	}
+	return nil
+}
+
+// refreshAfterAttemptCapture permits only the private evidence index written
+// by capture to advance the owner's revision. Any concurrent change to the
+// inspected public fields, claim, or authority still refuses the close.
+func refreshAfterAttemptCapture(store beads.Store, inspected beads.Bead) (beads.Bead, error) {
+	current, err := attemptevidence.RefreshOwnerAfterCapture(store, inspected)
+	if err != nil {
+		return beads.Bead{}, apierr.ConflictConcurrentModify.Msg("bead changed during attempt capture")
+	}
+	return current, nil
 }
 
 // closesStatus reports whether an update's status field closes the bead. It

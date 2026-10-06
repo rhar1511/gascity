@@ -1,6 +1,7 @@
 package main
 
 import (
+	"go/token"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -145,15 +146,51 @@ func TestCityConfigLoadersDeclineTheRevisionSnapshot(t *testing.T) {
 	}
 }
 
-// declaredVarName returns the identifier bound by a `var NAME = ...` line.
+func TestDeclaredVarNameRecognizesSingleNamedDeclarations(t *testing.T) {
+	for _, tc := range []struct {
+		line string
+		want string
+	}{
+		{"var opts = config.LoadOptions{}", "opts"},
+		{"var opts config.LoadOptions", "opts"},
+		{"\tloadOptions := config.LoadOptions{}", "loadOptions"},
+		{"opts = config.LoadOptions{}", ""},
+		{"opts, other := values", ""},
+		{"var opts, other config.LoadOptions", ""},
+		{"// opts := config.LoadOptions{}", ""},
+		{"_ := config.LoadOptions{}", ""},
+		{"return opts := config.LoadOptions{}", ""},
+		{"var 123opts = value", ""},
+		{"var for = value", ""},
+	} {
+		t.Run(tc.line, func(t *testing.T) {
+			got, ok := declaredVarName(tc.line)
+			if got != tc.want || ok != (tc.want != "") {
+				t.Fatalf("declaredVarName(%q) = (%q, %v), want (%q, %v)", tc.line, got, ok, tc.want, tc.want != "")
+			}
+		})
+	}
+}
+
+// declaredVarName returns the single identifier bound by var or :=.
 func declaredVarName(line string) (string, bool) {
 	trimmed := strings.TrimSpace(line)
 	rest, ok := strings.CutPrefix(trimmed, "var ")
-	if !ok {
-		return "", false
+	var name string
+	if ok {
+		fields := strings.Fields(rest)
+		if len(fields) < 2 {
+			return "", false
+		}
+		name = fields[0]
+	} else {
+		left, _, short := strings.Cut(trimmed, ":=")
+		if !short {
+			return "", false
+		}
+		name = strings.TrimSpace(left)
 	}
-	name, _, ok := strings.Cut(rest, " ")
-	if !ok || name == "" {
+	if name == "_" || !token.IsIdentifier(name) {
 		return "", false
 	}
 	return name, true

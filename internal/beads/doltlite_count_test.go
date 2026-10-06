@@ -122,6 +122,7 @@ func TestDoltliteCountUnsupportedShapes(t *testing.T) {
 		query ListQuery
 	}{
 		{name: "metadata filter", query: ListQuery{Metadata: map[string]string{"gc.routed_to": "rig/polecat"}}},
+		{name: "absent metadata key", query: ListQuery{Type: "task", AbsentMetadataKey: "private"}},
 		{name: "parent filter", query: ListQuery{ParentID: "gc-parent"}},
 		{name: "limited query", query: ListQuery{AllowScan: true, Limit: 1}},
 		{name: "created before", query: ListQuery{AllowScan: true, CreatedBefore: time.Now().Add(time.Hour)}},
@@ -389,4 +390,17 @@ func BenchmarkDoltliteMoleculeRead(b *testing.B) {
 			}
 		}
 	})
+}
+
+func TestDoltliteAbsentMetadataKeyFiltersBeforeLimit(t *testing.T) {
+	store := newDoltliteStoreWithRows(t, []testDoltliteIssue{
+		{ID: "private", Status: "open", IssueType: "task", CreatedAt: time.Unix(100, 0), Metadata: map[string]string{"private": "payload"}},
+		{ID: "public", Status: "open", IssueType: "task", CreatedAt: time.Unix(101, 0)},
+	}, []testDoltliteIssue{
+		{ID: "private-wisp", Status: "open", IssueType: "task", CreatedAt: time.Unix(99, 0), Metadata: map[string]string{"private": ""}, NoHistory: true},
+	})
+	rows, err := store.List(ListQuery{Type: "task", Sort: SortCreatedAsc, Limit: 1, AbsentMetadataKey: "private"})
+	if err != nil || len(rows) != 1 || rows[0].ID != "public" {
+		t.Fatalf("private prefix consumed DoltLite public page: %+v err=%v", rows, err)
+	}
 }

@@ -29,7 +29,7 @@ func appendMetadataAttachedChildren(store beads.Store, parent beads.Bead, childr
 	// NOTE: "workflow_id" is the bare (non-prefixed) metadata key, distinct
 	// from beadmeta.WorkflowIDMetadataKey ("gc.workflow_id") — do NOT substitute
 	// the prefixed constant here or this would surface a different key.
-	for _, key := range []string{beadmeta.MoleculeIDMetadataKey, "workflow_id"} {
+	for _, key := range []string{beadmeta.MoleculeIDMetadataKey, beadmeta.LegacyWorkflowIDMetadataKey} {
 		attachedID := strings.TrimSpace(parent.Metadata[key])
 		if attachedID == "" {
 			continue
@@ -48,19 +48,11 @@ func appendMetadataAttachedChildren(store beads.Store, parent beads.Bead, childr
 }
 
 func redactGenericBead(b beads.Bead) beads.Bead {
-	b.Metadata = beadmeta.RedactGenericMetadata(b.Metadata)
-	return b
+	return beads.PublicBead(b)
 }
 
 func redactGenericBeads(items []beads.Bead) []beads.Bead {
-	if items == nil {
-		return nil
-	}
-	out := make([]beads.Bead, len(items))
-	for i, b := range items {
-		out[i] = redactGenericBead(b)
-	}
-	return out
+	return beads.PublicBeads(items)
 }
 
 func (s *Server) beadListAssigneeTerms(ctx context.Context, assignee string) []string {

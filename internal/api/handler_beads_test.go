@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/importsvc"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/sessionauthority"
 )
 
 type prefixedAliasStore struct {
@@ -462,6 +463,52 @@ func TestBeadCloseVerifiesStoreContainsBeadBeforeClosing(t *testing.T) {
 	}
 }
 
+func TestBeadCloseAndUpdateRejectLifecycleSourceWithoutCompletion(t *testing.T) {
+	state := newFakeState(t)
+	store := state.stores["myrig"]
+	s := New(state)
+	closed := "closed"
+	for _, tc := range []struct {
+		name  string
+		write func(string) error
+	}{
+		{
+			name: "close endpoint",
+			write: func(id string) error {
+				_, err := s.humaHandleBeadClose(context.Background(), &BeadCloseInput{ID: id})
+				return err
+			},
+		},
+		{
+			name: "update endpoint",
+			write: func(id string) error {
+				_, err := s.humaHandleBeadUpdate(context.Background(), &BeadUpdateInput{ID: id, Body: beadUpdateBody{Status: &closed}})
+				return err
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			created, err := store.Create(beads.Bead{
+				Title: "lifecycle source", Type: "task", Status: "open",
+				Metadata: map[string]string{beadmeta.LifecycleAdmissionReceiptMetadataKey: "unverified receipt"},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := tc.write(created.ID); err == nil {
+				t.Fatal("ordinary API close succeeded without verified completion")
+			}
+			after, err := store.Get(created.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if after.Status != "open" {
+				t.Fatalf("status = %q after refused close, want open", after.Status)
+			}
+		})
+	}
+}
+
 func TestBeadStoresForIDUsesConfiguredRigPrefixBeforeFallback(t *testing.T) {
 	state := newFakeState(t)
 	cityStore := beads.NewMemStore()
@@ -589,8 +636,8 @@ func TestGenericBeadAPIHidesExecutionCredentialButPreservesLifecycleAccess(t *te
 		if !strings.Contains(rec.Body.String(), `"generation":"7"`) {
 			t.Fatalf("GET %s lost safe generation metadata: %s", path, rec.Body.String())
 		}
-		if !strings.Contains(rec.Body.String(), beadmeta.SessionRequestReceiptPrefix+"history") {
-			t.Fatalf("GET %s hid historical request evidence: %s", path, rec.Body.String())
+		if strings.Contains(rec.Body.String(), beadmeta.SessionRequestReceiptPrefix+"history") {
+			t.Fatalf("GET %s leaked private request storage: %s", path, rec.Body.String())
 		}
 	}
 
@@ -600,6 +647,10 @@ func TestGenericBeadAPIHidesExecutionCredentialButPreservesLifecycleAccess(t *te
 	}
 	if info.InstanceToken != "raw-secret-token" {
 		t.Fatalf("lifecycle token = %q, want retained raw token", info.InstanceToken)
+	}
+	stored, err := store.Get(b.ID)
+	if err != nil || stored.Metadata[beadmeta.SessionRequestReceiptPrefix+"history"] != `{}` {
+		t.Fatalf("public projection mutated authoritative request evidence: %+v, %v", stored, err)
 	}
 }
 
@@ -1419,6 +1470,63 @@ func TestBeadCreatePersistsMetadataAndParent(t *testing.T) {
 	}
 }
 
+func TestBeadCreateRejectsSessionAuthorityMetadata(t *testing.T) {
+	state := newFakeState(t)
+	h := newTestCityHandler(t, state)
+
+	for _, tc := range []struct {
+		name        string
+		trustFile   string
+		metadataKey string
+	}{
+		{name: "proof is always protected", metadataKey: sessionauthority.MetadataAuthorization},
+		{name: "launch options are protected during enforcement", trustFile: "/host/session-authority.json", metadataKey: sessionauthority.MetadataTemplateOverrides},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(sessionauthority.HostTrustFileEnv, tc.trustFile)
+			body := `{"rig":"myrig","title":"forged","metadata":{"` + tc.metadataKey + `":"forged"}}`
+			req := newPostRequest(cityURL(state, "/beads"), bytes.NewBufferString(body))
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("create status = %d, want %d: %s", rec.Code, http.StatusForbidden, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestBeadUpdateRejectsAuthorityOptionAfterEnforcementIsDisabled(t *testing.T) {
+	state := newFakeState(t)
+	store := state.stores["myrig"]
+	b, err := store.Create(beads.Bead{
+		Title: "protected session",
+		Metadata: map[string]string{
+			sessionauthority.MetadataProfile: string(sessionauthority.ProfileWorker),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	h := newTestCityHandler(t, state)
+	t.Setenv(sessionauthority.HostTrustFileEnv, "")
+
+	body := `{"metadata":{"template_overrides":"{}"}}`
+	req := newPostRequest(cityURL(state, "/bead/")+b.ID+"/update", bytes.NewBufferString(body))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("update status = %d, want %d: %s", rec.Code, http.StatusForbidden, rec.Body.String())
+	}
+
+	got, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if _, ok := got.Metadata[sessionauthority.MetadataTemplateOverrides]; ok {
+		t.Fatalf("generic API persisted protected launch options: %#v", got.Metadata)
+	}
+}
+
 func TestBeadCreatePersistsDeferUntil(t *testing.T) {
 	state := newFakeState(t)
 	store := state.stores["myrig"]
@@ -2071,6 +2179,77 @@ func TestBeadReopenNotClosed(t *testing.T) {
 	}
 }
 
+func TestBeadReopenCannotEraseLifecycleEnrollmentFirst(t *testing.T) {
+	state := newFakeState(t)
+	store := state.stores["myrig"]
+	bead, err := store.Create(beads.Bead{Title: "Enrolled task", Status: "open", Metadata: map[string]string{
+		beadmeta.LifecycleAdmissionReceiptMetadataKey: "signed admission evidence",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer, ok := beads.ConditionalWriterFor(store)
+	if !ok {
+		t.Fatal("fixture store lacks the trusted conditional completion path")
+	}
+	current, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.CloseIfMatch(bead.ID, current.Revision); err != nil {
+		t.Fatalf("seed controller-completed enrolled row: %v", err)
+	}
+	closed, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closed.Status != "closed" {
+		t.Fatalf("fixture status = %q, want closed", closed.Status)
+	}
+	h := newTestCityHandler(t, state)
+
+	for _, tc := range []struct {
+		name string
+		path string
+		body string
+	}{
+		{
+			name: "clear receipt",
+			path: "/bead/" + bead.ID + "/update",
+			body: `{"metadata":{"` + beadmeta.LifecycleAdmissionReceiptMetadataKey + `":""}}`,
+		},
+		{
+			name: "generic reopen through status update",
+			path: "/bead/" + bead.ID + "/update",
+			body: `{"status":"open"}`,
+		},
+		{
+			name: "reopen endpoint",
+			path: "/bead/" + bead.ID + "/reopen",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var requestBody io.Reader
+			if tc.body != "" {
+				requestBody = bytes.NewBufferString(tc.body)
+			}
+			req := newPostRequest(cityURL(state, tc.path), requestBody)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != http.StatusConflict {
+				t.Fatalf("status = %d, want conflict; body=%s", rec.Code, rec.Body.String())
+			}
+			current, err := store.Get(bead.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if current.Status != "closed" || current.Metadata[beadmeta.LifecycleAdmissionReceiptMetadataKey] == "" {
+				t.Fatalf("refused request changed enrolled record: status=%q metadata=%v", current.Status, current.Metadata)
+			}
+		})
+	}
+}
+
 func TestBeadAssign(t *testing.T) {
 	state := newFakeState(t)
 	store := state.stores["myrig"]
@@ -2089,6 +2268,68 @@ func TestBeadAssign(t *testing.T) {
 	got, _ := store.Get(b.ID)
 	if got.Assignee != "worker-1" {
 		t.Errorf("Assignee = %q, want %q", got.Assignee, "worker-1")
+	}
+}
+
+func TestGenericBeadMutationsRefuseLifecycleEnrolledWork(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		method string
+		path   func(string) string
+		body   string
+	}{
+		{
+			name:   "assign",
+			method: http.MethodPost,
+			path:   func(id string) string { return "/bead/" + id + "/assign" },
+			body:   `{"assignee":"worker-new"}`,
+		},
+		{
+			name:   "update",
+			method: http.MethodPost,
+			path:   func(id string) string { return "/bead/" + id + "/update" },
+			body:   `{"title":"Changed","description":"changed","assignee":"worker-new"}`,
+		},
+		{
+			name:   "delete",
+			method: http.MethodDelete,
+			path:   func(id string) string { return "/bead/" + id },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := newFakeState(t)
+			store := state.stores["myrig"]
+			original, err := store.Create(beads.Bead{
+				Title:    "Protected",
+				Status:   "open",
+				Assignee: "worker-old",
+				Metadata: map[string]string{beadmeta.LifecycleAdmissionReceiptMetadataKey: "persisted admission evidence"},
+			})
+			if err != nil {
+				t.Fatalf("Create(): %v", err)
+			}
+			h := newTestCityHandler(t, state)
+			var req *http.Request
+			if tc.method == http.MethodDelete {
+				req = httptest.NewRequest(tc.method, cityURL(state, tc.path(original.ID)), nil)
+				req.Header.Set("X-GC-Request", "true")
+			} else {
+				req = newPostRequest(cityURL(state, tc.path(original.ID)), bytes.NewBufferString(tc.body))
+			}
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusConflict {
+				t.Fatalf("%s status = %d, want %d; body: %s", tc.name, rec.Code, http.StatusConflict, rec.Body.String())
+			}
+			got, err := store.Get(original.ID)
+			if err != nil {
+				t.Fatalf("Get(): %v", err)
+			}
+			if got.Status != "open" || got.Title != "Protected" || got.Assignee != "worker-old" || got.Description != "" {
+				t.Fatalf("refused %s changed enrolled row: %+v", tc.name, got)
+			}
+		})
 	}
 }
 

@@ -28,6 +28,7 @@ import (
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/graphv2"
+	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/rsipolicy"
 	"github.com/gastownhall/gascity/internal/session"
@@ -236,6 +237,9 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 	}
 
 	opts := dispatch.ProcessOptions{CityPath: cityPath, StorePath: storePath}
+	graphStoreRef := graphMaterializationStoreRef(cityPath, storePath, cfg, store, graphStore)
+	opts.FormulaActionGate = controllerFormulaActionGate(cityPath, cfg, graphStoreRef)
+	opts.RequireFormulaActionGate = true
 	opts.Tracef = workflowTracef
 	loadCfg := false
 	// This is a per-kind capability switch (does this control kind need city
@@ -333,6 +337,9 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 			}
 		case "retry", "ralph":
 			opts.FormulaSearchPaths = workflowFormulaSearchPaths(cfg, bead)
+			opts.CaptureAttemptEvidence = func(ctx context.Context, control, attempt beads.Bead, attemptNum int, outcome string) error {
+				return captureControlAttemptEvidence(ctx, graphStore, cityPath, storePath, cfg, control, attempt, attemptNum, outcome)
+			}
 			// Same cross-store required-artifact source resolution as
 			// retry-eval above.
 			if graphStore != store {
@@ -391,6 +398,10 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 // returns nil once the bead is quarantined and the (possibly quiet-wrapped)
 // cause when the bead should be retried.
 func handleControlDispatchError(cityPath, storePath string, graphStore beads.Store, bead beads.Bead, beadID string, cause error, stderr io.Writer) error {
+	var actionErr *molecule.FormulaActionError
+	if errors.As(cause, &actionErr) {
+		return cause
+	}
 	if errors.Is(cause, dispatch.ErrControlPending) {
 		return cause
 	}
@@ -2577,6 +2588,10 @@ func purgeWorkflowBeads(store beads.Store, ids []string) (int, error) {
 	if !ok || !beads.InspectConditionalWrites(store).Capable {
 		return 0, beads.ErrConditionalWriteUnsupported
 	}
+	ids, err := beads.DependencySafeDeleteOrder(store, ids)
+	if err != nil {
+		return 0, err
+	}
 
 	candidates := make([]workflowPurgeFence, 0)
 	for _, id := range ids {
@@ -2645,6 +2660,10 @@ func purgeWorkflowBeads(store beads.Store, ids []string) (int, error) {
 			rollback()
 			return 0, fmt.Errorf("%s: %w", id, session.ErrRequestEvidenceRetained)
 		}
+		if b.Status != "closed" || b.Revision == 0 {
+			rollback()
+			return 0, fmt.Errorf("%s: workflow purge requires a versioned closed row", id)
+		}
 		if _, fenced := acquired[id]; fenced && (b.Status != "closed" || session.RequestPurgeFence(b) != token) {
 			rollback()
 			return 0, fmt.Errorf("%s: session purge fence was not preserved", id)
@@ -2654,7 +2673,7 @@ func purgeWorkflowBeads(store beads.Store, ids []string) (int, error) {
 
 	deleted := 0
 	for _, row := range verified {
-		if err := deleteWorkflowBeadIfMatch(store, writer, row.id, row.revision); err != nil {
+		if err := deleteWorkflowBeadIfMatch(writer, row.id, row.revision); err != nil {
 			return deleted, fmt.Errorf("%s: %w", row.id, err)
 		}
 		deleted++
@@ -2662,33 +2681,11 @@ func purgeWorkflowBeads(store beads.Store, ids []string) (int, error) {
 	return deleted, nil
 }
 
-func deleteWorkflowBeadIfMatch(store beads.Store, writer beads.ConditionalWriter, id string, revision int64) error {
-	downDeps, err := store.DepList(id, "down")
-	if err != nil {
-		return fmt.Errorf("list down deps: %w", err)
-	}
-	upDeps, err := store.DepList(id, "up")
-	if err != nil {
-		return fmt.Errorf("list up deps: %w", err)
-	}
-	removedDown := make([]beads.Dep, 0, len(downDeps))
-	for _, dep := range downDeps {
-		if err := store.DepRemove(id, dep.DependsOnID); err != nil {
-			return withWorkflowDeleteRestoreError(fmt.Errorf("remove down dep %s -> %s: %w", id, dep.DependsOnID, err), restoreWorkflowDeleteDeps(store, removedDown, nil))
-		}
-		removedDown = append(removedDown, dep)
-	}
-	removedUp := make([]beads.Dep, 0, len(upDeps))
-	for _, dep := range upDeps {
-		if err := store.DepRemove(dep.IssueID, id); err != nil {
-			return withWorkflowDeleteRestoreError(fmt.Errorf("remove up dep %s -> %s: %w", dep.IssueID, id, err), restoreWorkflowDeleteDeps(store, removedDown, removedUp))
-		}
-		removedUp = append(removedUp, dep)
-	}
-	if err := writer.DeleteIfMatch(id, revision); err != nil {
-		return withWorkflowDeleteRestoreError(fmt.Errorf("delete bead: %w", err), restoreWorkflowDeleteDeps(store, removedDown, removedUp))
-	}
-	return nil
+func deleteWorkflowBeadIfMatch(writer beads.ConditionalWriter, id string, revision int64) error {
+	// The conditional delete owns reference cleanup in its transaction. A
+	// pre-delete DepRemove would invalidate this revision on memory/file stores
+	// and leave lost edges after refusal on any backend.
+	return writer.DeleteIfMatch(id, revision)
 }
 
 // deleteWorkflowBead removes a single workflow bead after proving the delete
@@ -2712,28 +2709,6 @@ func deleteWorkflowBead(store beads.Store, id string) error {
 	}
 	_, err = purgeWorkflowBeads(store, []string{id})
 	return err
-}
-
-func withWorkflowDeleteRestoreError(primary, restoreErr error) error {
-	if restoreErr == nil {
-		return primary
-	}
-	return errors.Join(primary, fmt.Errorf("rollback failed: %w", restoreErr))
-}
-
-func restoreWorkflowDeleteDeps(store beads.Store, downDeps, upDeps []beads.Dep) error {
-	var restoreErr error
-	for _, dep := range downDeps {
-		if err := store.DepAdd(dep.IssueID, dep.DependsOnID, dep.Type); err != nil {
-			restoreErr = errors.Join(restoreErr, fmt.Errorf("restore dep %s -> %s: %w", dep.IssueID, dep.DependsOnID, err))
-		}
-	}
-	for _, dep := range upDeps {
-		if err := store.DepAdd(dep.IssueID, dep.DependsOnID, dep.Type); err != nil {
-			restoreErr = errors.Join(restoreErr, fmt.Errorf("restore dep %s -> %s: %w", dep.IssueID, dep.DependsOnID, err))
-		}
-	}
-	return restoreErr
 }
 
 // openSourceWorkflowStoresForCollect is the store-opening step
@@ -2804,19 +2779,34 @@ func ensureSelectedSourceStorePresent(cfg *config.City, cityPath, cityName, sour
 		return nil
 	}
 	present := slices.ContainsFunc(stores, func(info convoyStoreView) bool {
-		return info.store != nil &&
-			sourceworkflow.NormalizeSourceStoreRef(workflowStoreRefForDir(info.scopePath(cityPath), cityPath, cityName, cfg)) == selectedRef
+		return info.store != nil && sourceStoreRefSelectsDir(selectedRef, info.scopePath(cityPath), cityPath, cityName, cfg)
 	})
 	if present {
 		return nil
 	}
 	for _, skip := range skips {
-		skipRef := sourceworkflow.NormalizeSourceStoreRef(workflowStoreRefForDir(skip.path, cityPath, cityName, cfg))
-		if skipRef == selectedRef && skip.err != nil {
+		if skip.err != nil && sourceStoreRefSelectsDir(selectedRef, skip.path, cityPath, cityName, cfg) {
 			return fmt.Errorf("selected source workflow store %s is unavailable to scan: %w", selectedRef, skip.err)
 		}
 	}
 	return fmt.Errorf("selected source workflow store %s is unavailable to scan", selectedRef)
+}
+
+// sourceStoreRefSelectsDir reports whether selectedRef names the store rooted
+// at storeDir.
+//
+// It is not a string comparison because the two sides come from different
+// code. workflowStoreRefForDir always renders the city store as
+// "city:<name>", using the city directory's basename when the config has no
+// [workspace] name. A caller that builds the ref from city.toml alone has no
+// basename to fall back to and names the same store with a bare "city:", the
+// form openSourceWorkflowStoreRef, makeStoreRefResolver, and
+// sourceworkflow.LockScopeForStoreRef already accept. SameSourceStoreRef
+// canonicalizes the bare form to this city's name, so a ref naming a different
+// city is still a miss.
+func sourceStoreRefSelectsDir(selectedRef, storeDir, cityPath, cityName string, cfg *config.City) bool {
+	dirRef := workflowStoreRefForDir(storeDir, cityPath, cityName, cfg)
+	return dirRef != "" && sourceworkflow.SameSourceStoreRef(selectedRef, dirRef, cityName)
 }
 
 // sourceWorkflowMatchCollector walks the source-workflow graph across every
@@ -2890,14 +2880,14 @@ func (c *sourceWorkflowMatchCollector) scanStore(index int, info convoyStoreView
 	c.visited[visitKey] = struct{}{}
 	c.attemptedStores[index] = struct{}{}
 
-	roots, err := sourceworkflow.ListLiveRoots(info.store, currentSourceID, currentSourceStoreRef, rootStoreRef)
+	roots, err := sourceworkflow.ListLiveRootsInCity(info.store, currentSourceID, currentSourceStoreRef, rootStoreRef, c.cityName)
 	if err != nil {
 		return nil, c.recordScanFailure(index, info, currentSourceStoreRef, "listing live source workflows", err)
 	}
 	if err := c.mergeRootMatches(info, roots); err != nil {
 		return nil, c.recordScanFailure(index, info, currentSourceStoreRef, "listing source workflow beads", err)
 	}
-	children, err := sourceWorkflowChildSources(info.store, currentSourceID, currentSourceStoreRef, rootStoreRef)
+	children, err := sourceWorkflowChildSources(info.store, currentSourceID, currentSourceStoreRef, rootStoreRef, c.cityName)
 	if err != nil {
 		return nil, c.recordScanFailure(index, info, currentSourceStoreRef, "listing source workflow children", err)
 	}
@@ -2957,10 +2947,7 @@ func (c *sourceWorkflowMatchCollector) recordScanFailure(index int, info convoyS
 	if info.isClassBinding() {
 		return refusePartialSweep(operation+" in", label, scanErr)
 	}
-	rootStoreRef := workflowStoreRefForDir(info.scopePath(c.cityPath), c.cityPath, c.cityName, c.cfg)
-	selectedStore := strings.TrimSpace(currentSourceStoreRef) != "" &&
-		sourceworkflow.NormalizeSourceStoreRef(rootStoreRef) == sourceworkflow.NormalizeSourceStoreRef(currentSourceStoreRef)
-	if selectedStore {
+	if sourceStoreRefSelectsDir(currentSourceStoreRef, info.scopePath(c.cityPath), c.cityPath, c.cityName, c.cfg) {
 		return wrapped
 	}
 	return nil
@@ -3095,7 +3082,7 @@ func mergeSourceWorkflowMatch(matches map[string]sourceWorkflowStoreMatch, next 
 	matches[next.label] = current
 }
 
-func sourceWorkflowChildSources(store beads.Store, sourceBeadID, sourceStoreRef, rootStoreRef string) ([]beads.Bead, error) {
+func sourceWorkflowChildSources(store beads.Store, sourceBeadID, sourceStoreRef, rootStoreRef, cityName string) ([]beads.Bead, error) {
 	sourceBeadID = strings.TrimSpace(sourceBeadID)
 	if store == nil || sourceBeadID == "" {
 		return nil, nil
@@ -3114,7 +3101,7 @@ func sourceWorkflowChildSources(store beads.Store, sourceBeadID, sourceStoreRef,
 		if candidate.ID == "" || sourceworkflow.IsWorkflowRoot(candidate) {
 			continue
 		}
-		if !sourceworkflow.WorkflowMatchesSource(candidate, sourceBeadID, sourceStoreRef, rootStoreRef) {
+		if !sourceworkflow.WorkflowMatchesSourceInCity(candidate, sourceBeadID, sourceStoreRef, rootStoreRef, cityName) {
 			continue
 		}
 		children = append(children, candidate)
@@ -3201,8 +3188,7 @@ func unscannedSourceWorkflowStoreSkips(cfg *config.City, cityPath, selectedStore
 	unscanned := make([]sourceWorkflowStoreSkip, 0, len(skips))
 	selectedRecovered := false
 	for _, skip := range skips {
-		skipRef := sourceworkflow.NormalizeSourceStoreRef(workflowStoreRefForDir(skip.path, cityPath, cityName, cfg))
-		if skipRef == selectedStoreRef {
+		if sourceStoreRefSelectsDir(selectedStoreRef, skip.path, cityPath, cityName, cfg) {
 			selectedRecovered = true
 			continue
 		}

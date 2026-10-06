@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -60,7 +61,7 @@ func TestSessionRequestReadAndAcknowledgementHTTP(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := newTestCityHandler(t, fs)
-	client := newInProcessCityClient(t, fs.CityName(), h)
+	client := NewCityScopedClient("http://127.0.0.1", fs.CityName(), WithHTTPTransport(loopbackTransport{h: h}))
 	if _, err := client.SubmitSessionRequest(info.ID, "request-http-1", generation, "report progress"); err != nil {
 		t.Fatal(err)
 	}
@@ -271,16 +272,11 @@ func TestSessionRequestSubmitHTTPReturnsAcceptanceBeforeResolutionAndReplayRecov
 		t.Fatalf("provider calls after resolution failure = %d", got)
 	}
 
-	afterSeq, err := state.eventProv.LatestSeq()
-	if err != nil {
-		t.Fatal(err)
-	}
-	watcher := newSessionRequestEventWatcher(t, state.eventProv, afterSeq)
 	second := post()
 	if second.Code != http.StatusAccepted || second.Body.String() != first.Body.String() {
 		t.Fatalf("same-key replay = %d %s, want exact %s", second.Code, second.Body.String(), first.Body.String())
 	}
-	waitForSessionRequestDelivery(t, watcher, "resolution-http-1")
+	waitForTrackedRequestEvents(t, state.eventProv, "resolution-http-1", events.RequestResultSessionSubmit, 1)
 	receipt, err = session.NewStore(state.SessionsBeadStore()).GetRequest(info.ID, "resolution-http-1")
 	if err != nil || receipt.Delivery != session.RequestDeliveryAccepted || state.sp.CountCalls("Nudge", info.SessionName) != 1 {
 		t.Fatalf("recovered receipt=%+v error=%v", receipt, err)
@@ -318,16 +314,11 @@ func TestSessionRequestSameKeyReplayResumesAfterPreReservationFailure(t *testing
 		t.Fatalf("pre-reservation failure receipt=%+v error=%v", receipt, err)
 	}
 	state.sp.SetPendingInteraction(info.SessionName, nil)
-	afterSeq, err := state.eventProv.LatestSeq()
-	if err != nil {
-		t.Fatal(err)
-	}
-	watcher := newSessionRequestEventWatcher(t, state.eventProv, afterSeq)
 	second := post()
 	if second.Code != http.StatusAccepted || second.Body.String() != first.Body.String() {
 		t.Fatalf("same-key replay = %d %s, want exact %s", second.Code, second.Body.String(), first.Body.String())
 	}
-	waitForSessionRequestDelivery(t, watcher, "retry-http-1")
+	waitForTrackedRequestEvents(t, state.eventProv, "retry-http-1", events.RequestResultSessionSubmit, 1)
 	receipt, err = session.NewStore(state.SessionsBeadStore()).GetRequest(info.ID, "retry-http-1")
 	if err != nil || receipt.Delivery != session.RequestDeliveryAccepted || state.sp.CountCalls("Nudge", info.SessionName) != 1 {
 		t.Fatalf("resumed receipt=%+v error=%v", receipt, err)
@@ -365,76 +356,40 @@ func TestSessionRequestSameKeyReplayDoesNotResendUnknownDelivery(t *testing.T) {
 	if second.Code != http.StatusAccepted || second.Body.String() != first.Body.String() {
 		t.Fatalf("same-key replay = %d %s, want exact %s", second.Code, second.Body.String(), first.Body.String())
 	}
-	waitForSessionRequestFailures(t, state, "unknown-http-1", 2)
+	waitForTrackedRequestEvents(t, state.eventProv, "unknown-http-1", events.RequestFailed, 2)
 	receipt, err := session.NewStore(state.SessionsBeadStore()).GetRequest(info.ID, "unknown-http-1")
 	if err != nil || receipt.Delivery != session.RequestDeliveryUnknown || state.sp.CountCalls("Nudge", info.SessionName) != 1 {
 		t.Fatalf("uncertain replay receipt=%+v error=%v", receipt, err)
 	}
 }
 
-func newSessionRequestEventWatcher(t *testing.T, provider events.Provider, afterSeq uint64) events.Watcher {
+func waitForTrackedRequestEvents(t *testing.T, prov events.Provider, requestID, eventType string, want int) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), testEventTimeout)
-	watcher, err := provider.Watch(ctx, afterSeq)
+	defer cancel()
+	watcher, err := prov.Watch(ctx, 0)
 	if err != nil {
-		cancel()
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		cancel()
-		if err := watcher.Close(); err != nil {
-			t.Errorf("close session request watcher: %v", err)
-		}
-	})
-	return watcher
-}
-
-func waitForSessionRequestDelivery(t *testing.T, watcher events.Watcher, requestID string) {
-	t.Helper()
-	for {
+	defer watcher.Close() //nolint:errcheck // test watcher cleanup
+	for count := 0; count < want; {
 		row, err := watcher.Next()
 		if err != nil {
-			t.Fatalf("wait for request %s delivery: %v", requestID, err)
+			t.Fatalf("waiting for %d %s events for %s: %v", want, eventType, requestID, err)
 		}
-		switch row.Type {
-		case events.RequestResultSessionSubmit:
-			var payload SessionSubmitSucceededPayload
-			if err := json.Unmarshal(row.Payload, &payload); err != nil {
-				t.Fatal(err)
-			}
-			if requestIDMatches(payload.RequestID, requestID) {
-				return
-			}
-		case events.RequestFailed:
-			var payload RequestFailedPayload
-			if err := json.Unmarshal(row.Payload, &payload); err != nil {
-				t.Fatal(err)
-			}
-			if payload.Operation == RequestOperationSessionSubmit && requestIDMatches(payload.RequestID, requestID) {
-				t.Fatalf("request %s replay failed: %+v", requestID, payload)
-			}
-		}
-	}
-}
-
-func waitForSessionRequestFailures(t *testing.T, state *fakeState, requestID string, want int) {
-	t.Helper()
-	watcher := newSessionRequestEventWatcher(t, state.eventProv, 0)
-	count := 0
-	for count < want {
-		row, err := watcher.Next()
-		if err != nil {
-			t.Fatalf("wait for %d request failures (received %d): %v", want, count, err)
-		}
-		if row.Type != events.RequestFailed {
+		if row.Type != eventType {
 			continue
 		}
-		var payload RequestFailedPayload
-		if err := json.Unmarshal(row.Payload, &payload); err != nil {
-			t.Fatal(err)
-		}
-		if payload.Operation == RequestOperationSessionSubmit && requestIDMatches(payload.RequestID, requestID) {
-			count++
+		if eventType == events.RequestFailed {
+			var p RequestFailedPayload
+			if json.Unmarshal(row.Payload, &p) == nil && p.Operation == RequestOperationSessionSubmit && p.RequestID == requestID {
+				count++
+			}
+		} else {
+			var p SessionSubmitSucceededPayload
+			if json.Unmarshal(row.Payload, &p) == nil && p.RequestID == requestID {
+				count++
+			}
 		}
 	}
 }
@@ -525,7 +480,7 @@ func TestSessionRequestClientRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	generation, _ := strconv.Atoi(persisted.Generation)
-	client := newInProcessCityClient(t, state.CityName(), newTestCityHandler(t, state))
+	client := NewCityScopedClient("http://127.0.0.1", state.CityName(), WithHTTPTransport(loopbackTransport{h: newTestCityHandler(t, state)}))
 	receipt, err := client.SubmitSessionRequest(info.ID, "client-request", generation, "report progress")
 	if err != nil || receipt.RequestId != "client-request" || receipt.AcknowledgedAt != nil {
 		t.Fatalf("submit %+v,%v", receipt, err)
@@ -563,4 +518,44 @@ func TestSessionRequestHistorySurvivesCloseDeleteAPI(t *testing.T) {
 	if _, err := front.GetRequest(info.ID, "retained-http"); err != nil {
 		t.Fatalf("receipt lost: %v", err)
 	}
+}
+
+func TestSessionRequestSubmitHTTPWithoutHeaderPreservesAcceptanceAndSendsOnce(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		state := newSessionFakeState(t)
+		info := createTestSession(t, state.cityBeadStore, state.sp, "Tracked target")
+		front := session.NewStore(state.SessionsBeadStore())
+		persisted, err := front.Get(info.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		generation, _ := strconv.Atoi(persisted.Generation)
+		h := newTestCityHandler(t, state)
+		url := cityURL(state, "/session/"+info.ID+"/requests")
+		body := fmt.Sprintf(`{"request_id":"submit-http-1","generation":%d,"message":"report progress"}`, generation)
+		for range 2 {
+			response := httptest.NewRecorder()
+			h.ServeHTTP(response, newPostRequest(url, strings.NewReader(body)))
+			if response.Code != http.StatusAccepted {
+				t.Fatalf("submit = %d: %s", response.Code, response.Body.String())
+			}
+		}
+		synctest.Wait()
+		receipt, err := front.GetRequest(info.ID, "submit-http-1")
+		if err != nil || receipt.Delivery != session.RequestDeliveryAccepted {
+			t.Fatalf("delivery not recorded: %+v, %v", receipt, err)
+		}
+		if receipt.AcknowledgedAt != nil || receipt.Effect != "unverified" {
+			t.Fatal("provider send invented acknowledgement/effect")
+		}
+		sends := 0
+		for _, call := range state.sp.SnapshotCalls() {
+			if call.Name == info.SessionName && (call.Method == "Nudge" || call.Method == "NudgeNow") {
+				sends++
+			}
+		}
+		if sends != 1 {
+			t.Fatalf("provider sends = %d, want one for repeated request identity", sends)
+		}
+	})
 }

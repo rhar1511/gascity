@@ -3,6 +3,8 @@ package worker
 import (
 	"encoding/json"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // Profile identifies a canonical worker profile.
@@ -376,35 +378,38 @@ type StructuredToolResult struct {
 
 // HistorySnapshot is the Phase 1 normalized transcript/history view.
 type HistorySnapshot struct {
-	GCSessionID           string                `json:"gc_session_id,omitempty"`
-	LogicalConversationID string                `json:"logical_conversation_id,omitempty"`
-	ProviderSessionID     string                `json:"provider_session_id,omitempty"`
-	TranscriptStreamID    string                `json:"transcript_stream_id"`
-	Generation            Generation            `json:"generation"`
-	Cursor                Cursor                `json:"cursor"`
-	Continuity            Continuity            `json:"continuity"`
-	TailState             TailState             `json:"tail_state"`
-	Diagnostics           []HistoryDiagnostic   `json:"diagnostics,omitempty"`
-	Pagination            *TranscriptPagination `json:"pagination,omitempty"`
-	Entries               []HistoryEntry        `json:"entries"`
+	GCSessionID           string                           `json:"gc_session_id,omitempty"`
+	LogicalConversationID string                           `json:"logical_conversation_id,omitempty"`
+	ProviderSessionID     string                           `json:"provider_session_id,omitempty"`
+	TranscriptStreamID    string                           `json:"transcript_stream_id"`
+	Generation            Generation                       `json:"generation"`
+	Cursor                Cursor                           `json:"cursor"`
+	Continuity            Continuity                       `json:"continuity"`
+	TailState             TailState                        `json:"tail_state"`
+	Diagnostics           []HistoryDiagnostic              `json:"diagnostics,omitempty"`
+	Pagination            *TranscriptPagination            `json:"pagination,omitempty"`
+	RequestLedger         *session.RequestLedgerProjection `json:"request_ledger,omitempty"`
+	Entries               []HistoryEntry                   `json:"entries"`
 }
 
 // HistoryEntry is a normalized transcript entry.
 type HistoryEntry struct {
-	ID          string              `json:"id"`
-	Kind        string              `json:"kind"`
-	Actor       Actor               `json:"actor"`
-	Order       int                 `json:"order"`
-	Timestamp   *time.Time          `json:"timestamp,omitempty"`
-	Status      ResultStatus        `json:"status"`
-	Text        string              `json:"text,omitempty"`
-	Model       string              `json:"model,omitempty"`
-	StopReason  string              `json:"stop_reason,omitempty"`
-	Usage       *HistoryUsage       `json:"usage,omitempty"`
-	UserPrompt  *HistoryUserPrompt  `json:"user_prompt,omitempty"`
-	SystemEvent *HistorySystemEvent `json:"system_event,omitempty"`
-	Blocks      []HistoryBlock      `json:"blocks,omitempty"`
-	Provenance  Provenance          `json:"provenance"`
+	ID            string              `json:"id"`
+	Kind          string              `json:"kind"`
+	Actor         Actor               `json:"actor"`
+	Order         int                 `json:"order"`
+	Timestamp     *time.Time          `json:"timestamp,omitempty"`
+	Status        ResultStatus        `json:"status"`
+	Text          string              `json:"text,omitempty"`
+	Model         string              `json:"model,omitempty"`
+	StopReason    string              `json:"stop_reason,omitempty"`
+	Usage         *HistoryUsage       `json:"usage,omitempty"`
+	UserPrompt    *HistoryUserPrompt  `json:"user_prompt,omitempty"`
+	SystemEvent   *HistorySystemEvent `json:"system_event,omitempty"`
+	Blocks        []HistoryBlock      `json:"blocks,omitempty"`
+	Provenance    Provenance          `json:"provenance"`
+	parentEntryID string              `json:"-"`
+	parentKnown   bool                `json:"-"`
 }
 
 // HistoryBlock carries normalized content/tool payload.

@@ -23,6 +23,7 @@ import (
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/graphv2"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
@@ -30,6 +31,7 @@ import (
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	"github.com/gastownhall/gascity/internal/worker"
+	"github.com/gastownhall/gascity/internal/worklifecycle"
 	"github.com/spf13/cobra"
 )
 
@@ -497,17 +499,22 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 	if !dryRun {
 		eventRecorder = openCityRecorderAt(cityPath, stderr)
 	}
+	graphStore := resolveGraphStore(cliStorageRoutes(cityPath), store, cfg, cityPath, eventRecorder)
+	graphStoreRef := formulaMaterializationStoreRef(cityPath, cfg, storeDir, store, graphStore, graphStore)
 	deps := slingDeps{
-		CityName:           cityName,
-		CityPath:           cityPath,
-		Cfg:                cfg,
-		SP:                 sp,
-		Runner:             runner,
-		Store:              store,
-		GraphStore:         resolveGraphStore(cliStorageRoutes(cityPath), store, cfg, cityPath, eventRecorder),
-		Events:             eventRecorder,
-		ExecutionWorkStore: executionEmitStore(store, cityPath),
-		StoreRef:           storeRef,
+		CityName:                 cityName,
+		CityPath:                 cityPath,
+		Cfg:                      cfg,
+		SP:                       sp,
+		Runner:                   runner,
+		Store:                    store,
+		GraphStore:               graphStore,
+		GraphStoreRef:            graphStoreRef,
+		FormulaActionGate:        controllerFormulaActionGate(cityPath, cfg, graphStoreRef),
+		RequireFormulaActionGate: true,
+		Events:                   eventRecorder,
+		ExecutionWorkStore:       executionEmitStore(store, cityPath),
+		StoreRef:                 storeRef,
 		SourceWorkflowStores: func() ([]sling.SourceWorkflowStore, error) {
 			stores, skips, err := openSourceWorkflowStoresWithProvider(cfg, cityPath, "", func(scopeRoot string) string {
 				return authoritativeBeadsProviderForScope(scopeRoot, cityPath)
@@ -750,8 +757,27 @@ func (r cliBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 	if r.deps == nil {
 		return fmt.Errorf("sling router: missing dependencies")
 	}
+	if r.deps.Store == nil {
+		return fmt.Errorf("sling routing requires a store to check lifecycle enrollment")
+	}
+	current, err := r.deps.Store.Get(req.BeadID)
+	if err != nil {
+		if !errors.Is(err, beads.ErrNotFound) {
+			return fmt.Errorf("checking lifecycle routing for %s: %w", req.BeadID, err)
+		}
+	} else {
+		if err := worklifecycle.ValidateGenericMutation(current); err != nil {
+			return err
+		}
+		if err := beads.ValidateLifecycleRouting(current); err != nil {
+			return fmt.Errorf("routing bead %s: %w", req.BeadID, err)
+		}
+	}
 	if r.deps.Cfg != nil {
 		if agentCfg, ok := findAgentByQualified(r.deps.Cfg, req.Target); ok && isCustomSlingQuery(agentCfg) {
+			if r.deps.Cfg.Lifecycle.AdmissionEnabled {
+				return fmt.Errorf("custom sling_query routing is disabled while lifecycle admission is enabled; custom runners have no atomic pre-effect guard")
+			}
 			if r.deps.Runner == nil {
 				return fmt.Errorf("custom sling_query requires a runner")
 			}
@@ -760,15 +786,24 @@ func (r cliBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 			return err
 		}
 	}
-	if r.deps.Store == nil {
-		return fmt.Errorf("built-in sling routing requires a store")
-	}
 	routedTo := req.Target
 	if r.deps.Cfg != nil {
 		routedTo = agentutil.NormalizePoolRouteTarget(r.deps.Cfg, req.Target)
 	}
-	if err := r.deps.Store.SetMetadata(req.BeadID, beadmeta.RoutedToMetadataKey, routedTo); err != nil {
+	if err != nil {
 		return fmt.Errorf("setting gc.routed_to on %s: %w", req.BeadID, err)
+	}
+	if current.Revision == 0 {
+		return fmt.Errorf("built-in sling routing on %s requires a nonzero observed revision", req.BeadID)
+	}
+	writer, ok := beads.ConditionalWriterFor(r.deps.Store)
+	if !ok {
+		return fmt.Errorf("built-in sling routing requires a conditional writer: %w", beads.ErrConditionalWriteUnsupported)
+	}
+	if err := writer.UpdateIfMatch(req.BeadID, current.Revision, beads.UpdateOpts{Metadata: map[string]string{
+		beadmeta.RoutedToMetadataKey: routedTo,
+	}}); err != nil {
+		return fmt.Errorf("conditionally setting gc.routed_to on %s: %w", req.BeadID, err)
 	}
 	return nil
 }
@@ -1585,6 +1620,7 @@ func doSlingNudge(a *config.Agent, cityName, cityPath string, cfg *config.City,
 			}
 		}
 		// No running config session — poke controller for immediate wake.
+		// Key-less (allocator): the wake is template demand, not a session.
 		if err := pokeController(cityPath); err != nil {
 			fmt.Fprintf(stderr, "No running sessions for %q; poke failed: %v\n", a.QualifiedName(), err) //nolint:errcheck // best-effort
 		} else {
@@ -1720,7 +1756,9 @@ func deliverSlingNudge(target nudgeTarget, sp runtime.Provider, store beads.Stor
 		maybeStartNudgePoller(target)
 	} else {
 		maybeStartNudgePoller(target)
-		if err := pokeController(cityPath); err != nil {
+		// The asleep target session is known by ID, runtime name, or both;
+		// with neither it degrades to the allocator key.
+		if err := enqueueController(cityPath, reconcilekey.SessionRef(target.sessionID, target.sessionName)); err != nil {
 			fmt.Fprintf(stderr, "Session %q is asleep; poke failed: %v\n", target.agent.QualifiedName(), err) //nolint:errcheck // best-effort
 		} else {
 			fmt.Fprintf(stdout, "Session %q is asleep — poked controller for wake\n", target.agent.QualifiedName()) //nolint:errcheck // best-effort

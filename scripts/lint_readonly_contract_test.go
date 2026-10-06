@@ -36,11 +36,15 @@ func TestLintUsesReadonlyModuleDownloads(t *testing.T) {
 	if !strings.Contains(string(makefile), readonlyGOFlags) {
 		t.Fatalf("Makefile must derive QUALITY_GATE_GOFLAGS from effective GOFLAGS")
 	}
+	const lintEnv = `LINT_ENV = GOFLAGS="$(QUALITY_GATE_GOFLAGS)" GOMEMLIMIT=$(LINT_GOMEMLIMIT)`
+	if !strings.Contains(string(makefile), lintEnv) {
+		t.Fatalf("Makefile must bind readonly GOFLAGS and GOMEMLIMIT through LINT_ENV")
+	}
 	for target, wantGOFLAGS := range map[string]string{
-		"lint-full":     `GOFLAGS="$(QUALITY_GATE_GOFLAGS)"`,
-		"lint-new":      `GOFLAGS="$(QUALITY_GATE_GOFLAGS)"`,
+		"lint-full":     `$(LINT_ENV)`,
+		"lint-new":      `$(LINT_ENV)`,
 		"lint-changed":  `export GOFLAGS="$(QUALITY_GATE_GOFLAGS)"`,
-		"lint-affected": `GOFLAGS="$(QUALITY_GATE_GOFLAGS)"`,
+		"lint-affected": `$(LINT_ENV)`,
 	} {
 		t.Run(target, func(t *testing.T) {
 			body := makeTargetBody(t, string(makefile), target)
@@ -59,6 +63,25 @@ func TestLintUsesReadonlyModuleDownloads(t *testing.T) {
 	}
 }
 
+func TestLintAllowsParallelRunners(t *testing.T) {
+	configPath := filepath.Join(repoRoot(t), ".golangci.yml")
+	body, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", configPath, err)
+	}
+	var config struct {
+		Run struct {
+			AllowParallelRunners bool `yaml:"allow-parallel-runners"`
+		} `yaml:"run"`
+	}
+	if err := yaml.Unmarshal(body, &config); err != nil {
+		t.Fatalf("parse %s: %v", configPath, err)
+	}
+	if !config.Run.AllowParallelRunners {
+		t.Fatalf("run.allow-parallel-runners must be true: concurrent lint runs on a shared host otherwise fail with %q before analysis (ga-88dvlm)", "parallel golangci-lint is running")
+	}
+}
+
 func TestQualityGateTargetsUseReadonlyModuleDownloads(t *testing.T) {
 	makefile, err := os.ReadFile(filepath.Join(repoRoot(t), "Makefile"))
 	if err != nil {
@@ -70,8 +93,8 @@ func TestQualityGateTargetsUseReadonlyModuleDownloads(t *testing.T) {
 	}
 
 	for target, wantGOFLAGS := range map[string]string{
-		"fmt-check":                `GOFLAGS="$(QUALITY_GATE_GOFLAGS)"`,
-		"fmt-check-changed":        `GOFLAGS="$(QUALITY_GATE_GOFLAGS)"`,
+		"fmt-check":                `$(LINT_ENV)`,
+		"fmt-check-changed":        `$(LINT_ENV)`,
 		"vet":                      `GOFLAGS="$(QUALITY_GATE_GOFLAGS)"`,
 		"test":                     `$(TEST_ENV) GOFLAGS="$(QUALITY_GATE_GOFLAGS)"`,
 		"test-fsys-darwin-compile": `$(TEST_ENV) GOFLAGS="$(QUALITY_GATE_GOFLAGS)"`,
@@ -79,6 +102,67 @@ func TestQualityGateTargetsUseReadonlyModuleDownloads(t *testing.T) {
 		t.Run(target, func(t *testing.T) {
 			if body := makeTargetBody(t, string(makefile), target); !strings.Contains(body, wantGOFLAGS) {
 				t.Fatalf("%s must scope QUALITY_GATE_GOFLAGS to its subprocess tree", target)
+			}
+		})
+	}
+}
+
+func TestLintTargetsApplyMemoryLimit(t *testing.T) {
+	fixture := newPRStaticScopeFixture(t, map[string]string{
+		"example.go": "package example\n\nfunc Value() int { return 1 }\n",
+	})
+	writeTestFile(t, filepath.Join(fixture.repoRoot, "example.go"), "package example\n\nfunc Value() int { return 2 }\n")
+	limitLog := filepath.Join(t.TempDir(), "lint-memory-limit.log")
+	recordingLint := filepath.Join(t.TempDir(), "golangci-lint")
+	writeExecutable(t, recordingLint, `#!/bin/sh
+set -eu
+printf '%s\n' "${GOMEMLIMIT-unset}" >> "$LINT_MEMORY_LIMIT_LOG"
+`)
+	for _, target := range []string{"lint-full", "lint-new", "lint-changed", "lint-affected", "fmt-check", "fmt-check-changed", "fmt"} {
+		t.Run(target, func(t *testing.T) {
+			for _, tc := range []struct {
+				name, override, want string
+			}{
+				{name: "default", want: "6GiB"},
+				{name: "operator override", override: "1GiB", want: "1GiB"},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					writeTestFile(t, limitLog, "")
+					args := []string{
+						"--no-print-directory", "-f", fixture.productionMakefile,
+						"GOLANGCI_LINT=" + recordingLint, "LINT_CHANGED_SCOPE=tracked", "LINT_CHANGED_REF=HEAD", "LINT_FLAGS=", "SYS_USR_CGO_FALLBACK=0",
+					}
+					if tc.override != "" {
+						args = append(args, "LINT_GOMEMLIMIT="+tc.override)
+					}
+					cmd := makeCommand(append(args, target)...)
+					cmd.Dir = fixture.repoRoot
+					env := fixture.commandEnv()
+					filtered := env[:0]
+					for _, entry := range env {
+						if !strings.HasPrefix(entry, "LINT_GOMEMLIMIT=") {
+							filtered = append(filtered, entry)
+						}
+					}
+					cmd.Env = replaceScriptEnv(filtered, "GOMEMLIMIT", "256MiB")
+					cmd.Env = replaceScriptEnv(cmd.Env, "LINT_MEMORY_LIMIT_LOG", limitLog)
+					if output, err := cmd.CombinedOutput(); err != nil {
+						t.Fatalf("make %s: %v\n%s", target, err, output)
+					}
+					body, err := os.ReadFile(limitLog)
+					if err != nil {
+						t.Fatal(err)
+					}
+					limits := strings.Fields(string(body))
+					if len(limits) == 0 {
+						t.Fatalf("%s did not invoke the recording lint executable", target)
+					}
+					for _, got := range limits {
+						if got != tc.want {
+							t.Errorf("%s lint process GOMEMLIMIT = %q, want %q", target, got, tc.want)
+						}
+					}
+				})
 			}
 		})
 	}

@@ -1,6 +1,8 @@
 import type { SupervisorBead } from '../supervisor/beadReads';
 import type { ExecutionAttempt } from '../lib/workbenchAttempts';
 import type { PRActionOption, PRActionQueue, PRActionQueueItem } from '../supervisor/prActions';
+import type { Evidence } from 'gas-city-dashboard-shared/gc-supervisor';
+import { matchingWorkbenchEvidence } from './attemptEvidence';
 
 export interface BoundPRActions {
   item: PRActionQueueItem;
@@ -29,6 +31,7 @@ export function bindPRActions(
   bead: SupervisorBead,
   attempt: ExecutionAttempt,
   now = Date.now(),
+  archived?: Pick<Evidence, 'attempt_id' | 'store_ref' | 'base_sha' | 'candidate_sha' | 'identity'>,
 ): PRActionBinding {
   if (!attempt.active) return unavailable('No active attempt is available.');
   if (queue.availability !== 'ready' || queue.policy_state !== 'ready') {
@@ -80,13 +83,25 @@ export function bindPRActions(
       record.candidate_sha === item.head_sha &&
       record.base_sha === item.base_sha,
   );
-  const evidence = (item.attempt_evidence ?? []).find(
-    (reference) =>
-      reference.work_id === bead.id &&
-      reference.attempt_id === attempt.sessionId &&
-      reference.base_sha === item.base_sha &&
-      reference.candidate_sha === item.head_sha,
-  );
+  const archiveMatches =
+    archived !== undefined &&
+    archived.attempt_id.trim() !== '' &&
+    (archived.store_ref ?? '').trim() !== '' &&
+    archived.identity.execution_bead_id.trim() !== '' &&
+    (archived.identity.claim_generation ?? '').trim() !== '' &&
+    archived.base_sha === item.base_sha &&
+    archived.candidate_sha === item.head_sha &&
+    matchingWorkbenchEvidence([archived], bead.id, attempt).length === 1;
+  const evidence = archiveMatches
+    ? (item.attempt_evidence ?? []).find(
+        (reference) =>
+          reference.work_id === bead.id &&
+          reference.attempt_id === archived.attempt_id &&
+          reference.store_ref === archived.store_ref &&
+          reference.base_sha === item.base_sha &&
+          reference.candidate_sha === item.head_sha,
+      )
+    : undefined;
   const options = item.actions ?? [];
   const prepare = options.find((option) => option.action === 'prepare') ?? null;
   const queueReviewOption = options.find((option) => option.action === 'queue_review') ?? null;

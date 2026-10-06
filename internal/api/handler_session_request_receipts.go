@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -82,12 +83,14 @@ func sessionRequestError(err error) error {
 // SessionRequestSubmitInput names the exact intended execution and request content.
 type SessionRequestSubmitInput struct {
 	CityScope
-	ID             string `path:"id" doc:"Exact durable session ID."`
 	IdempotencyKey string `header:"Idempotency-Key" required:"false" doc:"Idempotency key for exact request replay."`
+	ID             string `path:"id" doc:"Exact durable session ID."`
 	Body           struct {
-		RequestID  string `json:"request_id" minLength:"1" maxLength:"200" doc:"Durable idempotency identity for this request."`
-		Generation int    `json:"generation" minimum:"1" doc:"Exact intended execution generation."`
-		Message    string `json:"message" minLength:"1" doc:"Message delivered with its request identity."`
+		RequestID       string  `json:"request_id" minLength:"1" maxLength:"200" doc:"Durable idempotency identity for this request."`
+		Generation      int     `json:"generation" minimum:"1" doc:"Exact intended execution generation."`
+		Message         string  `json:"message" minLength:"1" doc:"Message delivered with its request identity."`
+		WorkID          *string `json:"work_id,omitempty" minLength:"1" maxLength:"200" dependentRequired:"claim_generation" doc:"Optional Workbench attempt selector. Provide with claim_generation; the server verifies both against the current session claim."`
+		ClaimGeneration *string `json:"claim_generation,omitempty" minLength:"1" maxLength:"200" dependentRequired:"work_id" doc:"Optional Workbench attempt selector. Provide with work_id; the server verifies both against the current session claim."`
 	}
 }
 
@@ -98,17 +101,31 @@ func (s *Server) humaHandleSessionRequestSubmit(_ context.Context, input *Sessio
 	if store.Store == nil {
 		return nil, apierr.ServiceUnavailable.Msg("session request storage unavailable")
 	}
+	if (input.Body.WorkID == nil) != (input.Body.ClaimGeneration == nil) {
+		return nil, sessionRequestError(session.ErrRequestConflict)
+	}
+	if input.Body.WorkID != nil && (strings.TrimSpace(*input.Body.WorkID) != *input.Body.WorkID || *input.Body.WorkID == "" || strings.TrimSpace(*input.Body.ClaimGeneration) != *input.Body.ClaimGeneration || *input.Body.ClaimGeneration == "") {
+		return nil, sessionRequestError(session.ErrRequestConflict)
+	}
 	sessionID := input.ID
 	requestID, generation, message := input.Body.RequestID, input.Body.Generation, input.Body.Message
+	acceptedNow := false
 	accepted, err := withIdempotency(s.idem, "/v0/session/"+url.PathEscape(sessionID)+"/requests", input.IdempotencyKey, input.Body, func() (session.RequestReceipt, error) {
-		acceptance, err := session.NewStore(store).AcceptRequest(sessionID, requestID, generation, message, time.Now())
+		acceptance, err := s.acceptAttributedSessionRequest(session.NewStore(store), sessionID, requestID, generation, message, input.Body.WorkID, input.Body.ClaimGeneration, time.Now())
 		if err != nil {
 			return session.RequestReceipt{}, sessionRequestError(err)
 		}
+		acceptedNow = true
 		return acceptance.RequestReceipt, nil
 	})
 	if err != nil {
 		return nil, err
+	}
+	if !acceptedNow && (accepted.Attempt != nil || input.Body.WorkID != nil) {
+		// Cache replay cannot bypass the current bound-attempt claim fence.
+		if _, err := s.acceptAttributedSessionRequest(session.NewStore(store), sessionID, requestID, generation, message, input.Body.WorkID, input.Body.ClaimGeneration, time.Now()); err != nil {
+			return nil, sessionRequestError(err)
+		}
 	}
 	// Every HTTP attempt may resume a durable pending receipt. The session CAS
 	// reserves provider delivery once, so replays after reservation cannot send.

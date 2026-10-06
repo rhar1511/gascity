@@ -105,9 +105,9 @@ func cmdSessionLogs(args []string, follow bool, tail int, jsonOutput bool, stdou
 	}
 
 	if jsonOutput {
-		return doSessionLogsJSON(path, provider, identifier, follow, tail, stdout, stderr)
+		return doSessionLogsJSON(path, provider, searchPaths, identifier, follow, tail, stdout, stderr)
 	}
-	return doSessionLogs(path, provider, follow, tail, stdout, stderr)
+	return doSessionLogs(path, provider, searchPaths, follow, tail, stdout, stderr)
 }
 
 func resolveSessionLogPath(searchPaths []string, logCtx sessionLogContext) string {
@@ -208,12 +208,12 @@ func resolveConfiguredSessionLogContext(cityPath string, cfg *config.City, ident
 // The tail parameter specifies how many of the most recent log entries to
 // print (0 = all). Semantics match the conventional Unix `tail -n` flag:
 // `--tail 5` prints the LAST 5 entries of the transcript, not the first 5.
-func doSessionLogs(path, provider string, follow bool, tail int, stdout, stderr io.Writer) int {
+func doSessionLogs(path, provider string, searchPaths []string, follow bool, tail int, stdout, stderr io.Writer) int {
 	if tail < 0 {
 		fmt.Fprintln(stderr, "gc session logs: --tail must be >= 0") //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	factory, err := worker.NewFactory(worker.FactoryConfig{})
+	factory, err := worker.NewFactory(worker.FactoryConfig{SearchPaths: searchPaths})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session logs: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -265,7 +265,7 @@ type transcriptContentBlockJSON struct {
 	IsError   bool            `json:"is_error,omitempty"`
 }
 
-func doSessionLogsJSON(path, provider, target string, follow bool, tail int, stdout, stderr io.Writer) int {
+func doSessionLogsJSON(path, provider string, searchPaths []string, target string, follow bool, tail int, stdout, stderr io.Writer) int {
 	if follow {
 		fmt.Fprintln(stderr, "gc session logs: --json is only supported for bounded snapshots; omit --follow") //nolint:errcheck // best-effort stderr
 		return 1
@@ -274,7 +274,7 @@ func doSessionLogsJSON(path, provider, target string, follow bool, tail int, std
 		fmt.Fprintln(stderr, "gc session logs: --tail must be >= 0") //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	factory, err := worker.NewFactory(worker.FactoryConfig{})
+	factory, err := worker.NewFactory(worker.FactoryConfig{SearchPaths: searchPaths})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session logs: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1

@@ -267,6 +267,7 @@ func snapshotForRun(beadList []beads.Bead, rootID string, version int, eventSeq 
 // gc.original_kind overrides; ref→step_ref; scope_ref / logical_bead_id mirrored
 // from metadata).
 func toRunSnapshotBead(b beads.Bead) runSnapshotBead {
+	b = beads.PublicBead(b)
 	kind := b.Type
 	if v, ok := b.Metadata[beadmeta.OriginalKindMetadataKey]; ok {
 		kind = v

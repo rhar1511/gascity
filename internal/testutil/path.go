@@ -27,12 +27,16 @@ func AssertSamePath(t *testing.T, got, want string) {
 }
 
 // ShortTempDir returns a test-owned temporary directory rooted at a short path
-// on macOS so Unix socket paths stay under the platform limit.
+// on Unix so socket paths stay under the platform limit even with a long TMPDIR.
 func ShortTempDir(t *testing.T, prefix string) string {
 	t.Helper()
 	root := os.TempDir()
-	if runtime.GOOS == "darwin" {
+	switch runtime.GOOS {
+	case "darwin":
 		root = "/tmp"
+	case "linux":
+		// Keep socket fixtures on disk; compiler scratch still uses TMPDIR.
+		root = "/var/tmp"
 	}
 	dir, err := os.MkdirTemp(root, prefix)
 	if err != nil {

@@ -1,6 +1,9 @@
 package beads
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+)
 
 // DependencyBatchLister reads the DOWN edges of many anchors in one round trip.
 //
@@ -53,4 +56,66 @@ var ErrDepListBatchUnsupported = errors.New("batched dep-edge read unsupported b
 func DepListBatchFor(store Store) (DependencyBatchLister, bool) {
 	batch, ok := store.(DependencyBatchLister)
 	return batch, ok
+}
+
+// DependencySafeDeleteOrder orders selected sources before their targets, so
+// reference cleanup cannot invalidate another selected row's checked revision.
+// Cycles require an atomic multi-row delete; refuse before any caller mutation
+// rather than refreshing a stale revision and accepting unrelated changes.
+func DependencySafeDeleteOrder(store Store, ids []string) ([]string, error) {
+	selected := make(map[string]bool, len(ids))
+	orderedIDs := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if !selected[id] {
+			selected[id] = true
+			orderedIDs = append(orderedIDs, id)
+		}
+	}
+	indegree := make(map[string]int, len(ids))
+	edges := make(map[string][]string, len(ids))
+	for _, id := range orderedIDs {
+		row, err := store.Get(id)
+		if err != nil {
+			return nil, fmt.Errorf("plan deletion parent for %s: %w", id, err)
+		}
+		deps, err := store.DepList(id, "down")
+		if err != nil {
+			return nil, fmt.Errorf("plan deletion dependencies for %s: %w", id, err)
+		}
+		// Some stores retain ancestry as a row field without an edge projection.
+		if row.ParentID != "" {
+			deps = append(deps, Dep{DependsOnID: row.ParentID})
+		}
+		seen := make(map[string]bool, len(deps))
+		for _, dep := range deps {
+			target := dep.DependsOnID
+			if target != id && selected[target] && !seen[target] {
+				seen[target] = true
+				edges[id] = append(edges[id], target)
+				indegree[target]++
+			}
+		}
+	}
+	queue := make([]string, 0, len(ids))
+	for _, id := range orderedIDs {
+		if indegree[id] == 0 {
+			queue = append(queue, id)
+		}
+	}
+	result := make([]string, 0, len(ids))
+	for len(queue) > 0 {
+		id := queue[0]
+		queue = queue[1:]
+		result = append(result, id)
+		for _, target := range edges[id] {
+			indegree[target]--
+			if indegree[target] == 0 {
+				queue = append(queue, target)
+			}
+		}
+	}
+	if len(result) != len(orderedIDs) {
+		return nil, errors.New("deletion dependency cycle requires atomic multi-row deletion")
+	}
+	return result, nil
 }

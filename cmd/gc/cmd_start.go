@@ -747,6 +747,22 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		fmt.Fprintf(stderr, "gc start: runtime scaffold: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	// A foreground start takes the controller lock before it touches the
+	// city, and in particular before it starts the bead-store provider. A
+	// start that loses the lock (to a running controller, or to gc stop,
+	// which holds it while it retires the provider) must not have restarted
+	// that provider first. The lock is held from here through the whole
+	// controller run and released when this function returns. A dry run
+	// never becomes the controller, so it previews without the lock.
+	var controllerLock *os.File
+	if controllerMode && !dryRunMode {
+		controllerLock, err = acquireControllerLock(cityPath)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		defer controllerLock.Close() //nolint:errcheck // releasing the flock cannot fail meaningfully
+	}
 	if missing := checkHardDependencies(cityPath); len(missing) > 0 {
 		fmt.Fprintf(stderr, "gc start: missing required dependencies:\n\n") //nolint:errcheck // best-effort stderr
 		for _, dep := range missing {
@@ -775,6 +791,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		return 1
 	}
 	applyFeatureFlags(cfg)
+	applyRuntimeCityIdentity(cfg, loadedCityName(cfg, cityPath))
 	fatalWarnings, nonFatalWarnings := splitStrictConfigWarnings(prov.Warnings)
 	// Strict mode (default) promotes strict-eligible config warnings to errors.
 	if strictMode && len(fatalWarnings) > 0 {
@@ -820,7 +837,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 
 	// Resolve rig paths and run the full bead store lifecycle:
 	// probe → init+hooks(city) → init+hooks(rigs) → routes.
-	resolveRigPaths(cityPath, cfg.Rigs)
+	resolveRigPathsAndRefreshQualification(cityPath, cfg, prov)
 	if err := startBeadsLifecycle(cityPath, cityName, cfg, stderr); err != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", err)                      //nolint:errcheck // best-effort stderr
 		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
@@ -842,9 +859,12 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		warmupCityPath = absCityPath
 	}
 	skipRigDoltChecks := gcDoltSkip()
+	// While this start holds the controller lock no other controller runs;
+	// probing the flock would only find this start's own lock.
+	warmupControllerRunning := controllerLock == nil && doctor.IsControllerRunning(warmupCityPath)
 	warmupChecks := buildDoctorChecks(warmupCityPath, cfg, nil, buildDoctorChecksOpts{
 		Stderr:               io.Discard,
-		ControllerRunning:    doctor.IsControllerRunning(warmupCityPath),
+		ControllerRunning:    warmupControllerRunning,
 		SkipCityDoltCheck:    skipRigDoltChecks || (!scopeUsesManagedBdStoreContract(warmupCityPath, warmupCityPath) && !workspaceNeedsCityDoltCheck(warmupCityPath, cfg)),
 		SkipManagedDoltCheck: managedDoltOpsCheckSkip(warmupCityPath, cfg, nil),
 		SkipRigDoltChecks:    skipRigDoltChecks,
@@ -978,7 +998,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		poolDeathHandlers := computePoolDeathHandlers(cfg, cityName, cityPath, sp, stderr)
 		watchTargets := config.WatchTargets(prov, cfg, cityPath)
 		configRev := config.Revision(fsys.OSFS{}, prov, cfg, cityPath)
-		return runController(cityPath, tomlPath, cfg, configRev, buildAgents, buildAgentsWithSessionBeads, sp,
+		return runController(cityPath, controllerLock, tomlPath, cfg, configRev, buildAgents, buildAgentsWithSessionBeads, sp,
 			newDrainOps(sp), poolSessions, poolDeathHandlers, watchTargets, recorder, eventProv, stdout, stderr)
 	}
 
@@ -1148,7 +1168,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 }
 
 func loadStartCityConfig(cityPath string) (*config.City, *config.Provenance, error) {
-	return loadCityConfigWithBuiltinPacks(cityPath, extraConfigFiles...)
+	return loadCityConfigWithBuiltinPacksOptions(cityPath, config.LoadOptions{CaptureQualificationInputs: true}, extraConfigFiles...)
 }
 
 // printDryRunPreview prints what agents would be started without starting them.
@@ -1572,14 +1592,29 @@ var controllerOnlyEnvKeys = func() map[string]bool {
 // GC_BEADS/GC_DOLT so they use the same bead store as the parent,
 // GC_DOLT_HOST/PORT/USER/PASSWORD so agents can connect to remote Dolt servers,
 // and Claude auth/home context so managed sessions can launch reliably under
-// shell and supervisor-driven flows. The GC_ sweep is otherwise complete;
-// controllerOnlyEnvKeys is the one exclusion it applies, and those keys come
-// back pinned to the empty string rather than absent.
+// shell and supervisor-driven flows. The GC_ sweep covers every gc-owned key
+// by name rather than an enumerated list; a non-GC_-prefixed key reaches a
+// session only via [workspace.env] (a per-city, always-on declaration) or by
+// being named in GC_SUPERVISOR_ENV — the same opt-in that
+// supervisorServiceExtraEnv uses to widen the persisted service-file env, so
+// one comma-separated list controls both "survives a supervisor restart" and
+// "reaches every agent session" instead of requiring two separate,
+// independently-maintained allowlists to agree. controllerOnlyEnvKeys is
+// checked before either path and cannot be bypassed by an opt-in; those keys
+// come back pinned to the empty string rather than absent.
 func passthroughEnv() map[string]string {
 	m := providerProcessPassthroughEnv()
+	explicitKeys := supervisorServiceExplicitEnvKeys(os.Getenv("GC_SUPERVISOR_ENV"))
+	explicit := make(map[string]bool, len(explicitKeys))
+	for _, key := range explicitKeys {
+		explicit[key] = true
+	}
 	for _, entry := range os.Environ() {
 		key, val, ok := strings.Cut(entry, "=")
-		if !ok || val == "" || !strings.HasPrefix(key, "GC_") || controllerOnlyEnvKeys[key] {
+		if !ok || val == "" || controllerOnlyEnvKeys[key] {
+			continue
+		}
+		if !strings.HasPrefix(key, "GC_") && !explicit[key] {
 			continue
 		}
 		m[key] = val

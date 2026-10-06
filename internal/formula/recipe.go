@@ -52,6 +52,11 @@ type Recipe struct {
 
 	// FormulaSource is the file path from which the formula was loaded.
 	FormulaSource string
+
+	// FormulaSources contains the exact parsed formula files contributing to
+	// this recipe, including inheritance and compiler-loaded compositions.
+	// It is process-local provenance and is not serialized into bead metadata.
+	FormulaSources []SourceIdentity `json:"-" toml:"-"`
 }
 
 // RecipeStep represents a single step in a compiled recipe.

@@ -32,6 +32,7 @@ const baseApi: SupervisorApi = {
   listBeads: vi.fn(),
   listEvents: vi.fn(),
   getBead: vi.fn(),
+  attemptHistory: vi.fn(),
   createBead: vi.fn(),
   updateBead: vi.fn(),
   closeBead: vi.fn(),
@@ -53,7 +54,11 @@ const baseApi: SupervisorApi = {
   workflowRun: vi.fn(),
   formulaDetail: vi.fn(),
   prActionQueue: vi.fn(),
+  listAttemptEvidence: vi.fn(),
+  getAttemptEvidence: vi.fn(),
   executePRAction: vi.fn(),
+  submitSessionRequest: vi.fn(),
+  getSessionRequest: vi.fn(),
   mutationHeaders: () => ({ 'X-GC-Request': 'dashboard' }),
 };
 

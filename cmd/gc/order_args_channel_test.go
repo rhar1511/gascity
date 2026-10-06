@@ -111,6 +111,7 @@ title = "Work {i}"
 // title-only unresolved-var guard never catches it), reproducing the
 // reporter's silent empty-text symptom on the manual `gc order run` path.
 func TestOrderRunSubstitutesCallerVarsInBeadText(t *testing.T) {
+	cityDir := setupCity(t, "order-run-caller-vars")
 	dir := t.TempDir()
 	// subject is a declared-but-defaultless var: instantiation renders {{subject}}
 	// empty unless the caller value is threaded through to molecule.Instantiate.
@@ -134,7 +135,7 @@ description = "Handle {{subject}} now."
 	store := beads.NewMemStore()
 
 	var stdout, stderr bytes.Buffer
-	code := doOrderRunWithJSON(aa, "textorder", "", t.TempDir(), beads.OrdersStore{Store: store}, nil, false, map[string]string{"subject": "widgets"}, &stdout, &stderr)
+	code := doOrderRunWithJSON(aa, "textorder", "", cityDir, beads.OrdersStore{Store: store}, nil, false, map[string]string{"subject": "widgets"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doOrderRunWithJSON = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -363,10 +364,11 @@ description = "Operate on {target}."
 // ValidateRecipeRuntimeVars itself would pass with the bug still in place.
 func TestOrderRunAcceptsSuppliedRequiredVar(t *testing.T) {
 	dir := requiredVarFormulaDir(t)
+	cityDir := setupCity(t, "order-run-required-var")
 	aa := []orders.Order{{Name: "needs-target", Trigger: "manual", Formula: "e1-var-required", FormulaLayer: dir}}
 
 	var stdout, stderr bytes.Buffer
-	code := doOrderRunWithJSON(aa, "needs-target", "", "/city", beads.OrdersStore{Store: beads.NewMemStore()},
+	code := doOrderRunWithJSON(aa, "needs-target", "", cityDir, beads.OrdersStore{Store: beads.NewMemStore()},
 		nil, false, map[string]string{"target": "srvcity"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doOrderRunWithJSON = %d, want 0; stderr: %s\n"+
@@ -377,7 +379,7 @@ func TestOrderRunAcceptsSuppliedRequiredVar(t *testing.T) {
 
 	// Omitting it must still be refused — the fix must not turn required off.
 	var stdout2, stderr2 bytes.Buffer
-	if code := doOrderRunWithJSON(aa, "needs-target", "", "/city", beads.OrdersStore{Store: beads.NewMemStore()},
+	if code := doOrderRunWithJSON(aa, "needs-target", "", cityDir, beads.OrdersStore{Store: beads.NewMemStore()},
 		nil, false, nil, &stdout2, &stderr2); code == 0 {
 		t.Fatal("doOrderRunWithJSON with no vars = 0, want non-zero: a required var with no " +
 			"default must still be refused when omitted")

@@ -27,6 +27,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/storeref"
+	"github.com/gastownhall/gascity/test/toolhome"
 	"golang.org/x/mod/semver"
 )
 
@@ -771,7 +772,11 @@ func TestBuildPinnedBDBinaryForTestsUsesGoModSource(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pinnedBeadsModuleVersion: %v", err)
 	}
-	out, err := exec.Command(bdPath, "version").CombinedOutput()
+	// bd resolves user-level state from HOME and writes machine-id, event and
+	// metrics state there even for `version`; never let it see the real one.
+	versionCmd := exec.Command(bdPath, "version")
+	versionCmd.Env = toolhome.Environ(os.Environ(), t.TempDir())
+	out, err := versionCmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("%s version: %v\n%s", bdPath, err, out)
 	}
@@ -1790,6 +1795,7 @@ func TestNextWaitDeliveryAttempt_IncrementsAfterTerminalNudge(t *testing.T) {
 func TestDispatchReadyWaitNudges_EnqueuesDeterministicNudge(t *testing.T) {
 	setWaitTestFileBeads(t)
 	dir := t.TempDir()
+	writeCityTOML(t, dir, "wait-test")
 	store, err := openCityStoreAt(dir)
 	if err != nil {
 		t.Fatalf("openCityStoreAt: %v", err)
@@ -2281,6 +2287,7 @@ func TestDispatchReadyWaitNudges_PropagatesPollerFailure(t *testing.T) {
 func TestWithdrawQueuedWaitNudges_RemovesQueuedNudge(t *testing.T) {
 	setWaitTestFileBeads(t)
 	dir := t.TempDir()
+	writeCityTOML(t, dir, "wait-test")
 	item := newQueuedNudgeWithOptions("worker", "Wait satisfied.", "wait", time.Now().Add(-time.Minute), queuedNudgeOptions{
 		ID:        "wait-gc-1-1-1",
 		Reference: &nudgeReference{Kind: "bead", ID: "gc-1"},

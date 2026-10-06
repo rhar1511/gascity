@@ -2,6 +2,7 @@ package sessionlog
 
 import (
 	"encoding/json"
+	"io"
 	"log"
 	"os"
 	"time"
@@ -60,8 +61,12 @@ func ExtractTailUsage(path string) ([]TailUsage, error) {
 		return nil, err
 	}
 	defer f.Close() //nolint:errcheck // best-effort close on read-only file
+	return ExtractTailUsageFrom(f)
+}
 
-	data, _, err := readTail(f)
+// ExtractTailUsageFrom reads usage from an already-open transcript.
+func ExtractTailUsageFrom(source io.ReadSeeker) ([]TailUsage, error) {
+	data, _, err := readTail(source)
 	if err != nil {
 		return nil, err
 	}
@@ -144,9 +149,12 @@ func extractTailUsageSince(path, cursorID string, maxScanBytes int64) ([]TailUsa
 		return nil, err
 	}
 	defer f.Close() //nolint:errcheck // best-effort close on read-only file
+	return extractTailUsageSinceFrom(f, path, cursorID, maxScanBytes)
+}
 
+func extractTailUsageSinceFrom(source io.ReadSeeker, path, cursorID string, maxScanBytes int64) ([]TailUsage, error) {
 	if cursorID == "" {
-		data, _, err := readTail(f)
+		data, _, err := readTail(source)
 		if err != nil {
 			return nil, err
 		}
@@ -154,7 +162,7 @@ func extractTailUsageSince(path, cursorID string, maxScanBytes int64) ([]TailUsa
 	}
 
 	for window := int64(tailChunkSize); ; window *= 2 {
-		data, _, truncated, err := readTailWindow(f, window)
+		data, _, truncated, err := readTailWindow(source, window)
 		if err != nil {
 			return nil, err
 		}
@@ -249,20 +257,22 @@ func parseTailUsage(data []byte) ([]TailUsage, error) {
 // after verifying path resolves under one of the configured session-log
 // search roots. Mirrors ExtractTailUsageFromSearchPaths.
 func ExtractTailUsageSinceFromSearchPaths(searchPaths []string, path, cursorID string) ([]TailUsage, error) {
-	safePath, err := validateSearchPathFile(searchPaths, path)
+	transcript, err := OpenTranscript("claude", searchPaths, path)
 	if err != nil {
 		return nil, err
 	}
-	return ExtractTailUsageSince(safePath, cursorID)
+	defer transcript.Close() //nolint:errcheck
+	return transcript.TailUsageSince(cursorID)
 }
 
 // ExtractTailUsageFromSearchPaths reads tail usage only after verifying
 // path resolves under one of the configured session-log search roots.
 // Mirrors ExtractTailMetaFromSearchPaths.
 func ExtractTailUsageFromSearchPaths(searchPaths []string, path string) ([]TailUsage, error) {
-	safePath, err := validateSearchPathFile(searchPaths, path)
+	transcript, err := OpenTranscript("claude", searchPaths, path)
 	if err != nil {
 		return nil, err
 	}
-	return ExtractTailUsage(safePath)
+	defer transcript.Close() //nolint:errcheck
+	return transcript.TailUsage()
 }

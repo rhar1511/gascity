@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/pricing"
+	"github.com/gastownhall/gascity/internal/qualification"
 	"github.com/gastownhall/gascity/internal/remotesource"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 )
@@ -274,9 +275,15 @@ type City struct {
 	Formulas FormulasConfig `toml:"formulas,omitempty"`
 	// Daemon configures controller daemon settings.
 	Daemon DaemonConfig `toml:"daemon,omitempty"`
+	// Lifecycle configures the opt-in, evidence-backed work admission and
+	// recovery contract. Both gates default to disabled; see LifecycleConfig.
+	Lifecycle LifecycleConfig `toml:"lifecycle,omitempty"`
 	// RSI points the controller at trusted signed evaluation and human
 	// approval records. An unset evaluator leaves promotion fail-closed.
 	RSI RSIConfig `toml:"rsi,omitempty"`
+	// DecisionFrontier configures optional delivery of persisted human-decision
+	// prompts. An empty target leaves prompt delivery disabled.
+	DecisionFrontier DecisionFrontierConfig `toml:"decision_frontier,omitempty"`
 	// Orders configures order settings: skip list, max_timeout cap, and
 	// per-order overrides.
 	Orders OrdersConfig `toml:"orders,omitempty"`
@@ -448,6 +455,20 @@ type City struct {
 	// CityPricing preserves the city-level pricing layer before Pricing is
 	// flattened for legacy callers. Runtime-only.
 	CityPricing []pricing.ModelPricing `toml:"-" json:"-"`
+
+	qualificationInputs       qualification.InputClosure `toml:"-" json:"-"`
+	qualificationSnapshot     *qualification.Snapshot    `toml:"-" json:"-"`
+	packCompatibilityBindings []PackCompatibilityBinding `toml:"-" json:"-"`
+}
+
+// DecisionFrontierConfig configures the optional human prompt target for
+// decision-frontier records. PromptTarget must resolve to one configured
+// named session; leaving it empty keeps prompt delivery disabled.
+type DecisionFrontierConfig struct {
+	// PromptTarget is a config-facing identity for one configured named session.
+	// The controller resolves it to the canonical identity and requires persisted
+	// evidence for that exact session execution before delivery.
+	PromptTarget string `toml:"prompt_target,omitempty"`
 }
 
 // NamedSession defines a canonical persistent session backed by an agent
@@ -856,7 +877,11 @@ type PackMeta struct {
 	Version string `toml:"version"`
 	// Schema is the pack format version (currently 1).
 	Schema int `toml:"schema" jsonschema:"required"`
-	// RequiresGC is an optional minimum gc version requirement.
+	// RequiresGC is an optional semver constraint on the minimum compatible
+	// gc controller version. A non-empty value activates the controller's
+	// generic compatibility gate for formulas loaded from this pack; it does
+	// not declare capabilities or authorize actions. Trusted release policy
+	// supplies the required capability set separately.
 	RequiresGC string `toml:"requires_gc,omitempty"`
 	// Description is an optional human-readable summary of the pack.
 	Description string `toml:"description,omitempty"`
@@ -1426,6 +1451,11 @@ type BeadsConfig struct {
 	// "require" (guarded release or a typed refusal). Empty defaults to "off".
 	// Any other value fails config load.
 	GuardedRelease string `toml:"guarded_release,omitempty" jsonschema:"enum=off,enum=auto,enum=require"`
+	// PrivateEvidence opts selected canonical city/rig Beads scopes into the
+	// controller-only HTTP body transport for attempt evidence. An absent map
+	// keeps the capability disabled. Keys are canonical refs such as
+	// "city:town" and "rig:api"; tokens stay in protected files.
+	PrivateEvidence map[string]PrivateEvidenceTransportConfig `toml:"private_evidence,omitempty"`
 	// Policies defines per-bead-use storage and garbage-collection defaults.
 	// Policy names are interpreted by higher-level systems; unknown names are
 	// preserved so packs can stage future policy classes without breaking load.
@@ -2155,21 +2185,22 @@ type OrdersConfig struct {
 	// emit max_dispatches_per_tick = 0 into every marshaled city.toml.
 
 	// MaxDispatchesPerTick caps how many clock-driven orders (cooldown, cron
-	// and event triggers) the supervisor dispatches per tick, in a rotation
-	// that resumes where the previous tick stopped. Unset keeps the built-in
-	// default of 4; set to 1 to drain overdue cooldown orders one-per-tick at
-	// cold start instead of firing several concurrent goroutines at once.
-	// Condition-triggered orders are outside this budget: a passing check
-	// means work is pending right now, so they dispatch on the tick that
-	// observes it. The open-tracking and open-work gates still run for them
-	// (unless the order sets no_work_gate), but those gates are keyed per
-	// order and only hold back a redispatch of an order whose previous run
-	// is still moving, so they do not bound the tick as a whole: a tick
-	// launches at most this budget plus one dispatch per condition order
-	// whose check passed on that tick. That second term grows with how many
-	// condition orders a city defines, not with this setting, and at cold
-	// start, before any tracking bead exists, neither gate holds a
-	// simultaneously-due set back.
+	// and event triggers) the supervisor dispatches per orders-lane pass, in
+	// a rotation that resumes where the previous pass stopped. The key keeps
+	// its historical name from when order dispatch ran once per controller
+	// tick. Unset keeps the built-in default of 4; set to 1 to drain overdue
+	// cooldown orders one per pass at cold start instead of firing several
+	// concurrent goroutines at once. Condition-triggered orders are outside
+	// this budget: a passing check means work is pending right now, so they
+	// dispatch on the pass that observes it. The open-tracking and open-work
+	// gates still run for them (unless the order sets no_work_gate), but
+	// those gates are keyed per order and only hold back a redispatch of an
+	// order whose previous run is still moving, so they do not bound the pass
+	// as a whole: a pass launches at most this budget plus one dispatch per
+	// condition order whose check passed on that pass. That second term grows
+	// with how many condition orders a city defines, not with this setting,
+	// and at cold start, before any tracking bead exists, neither gate holds
+	// a simultaneously-due set back.
 	MaxDispatchesPerTick *int `toml:"max_dispatches_per_tick,omitempty"`
 	// Overrides apply per-order field overrides after scanning.
 	// Each override targets an order by name and optionally by rig.
@@ -2313,6 +2344,10 @@ type APIConfig struct {
 	// separated. The GC_CITY_READ_PUBKEY env var overrides this. Grant revocation
 	// via an epoch floor is an ops-plane control set only through the
 	// GC_CITY_READ_EPOCH_FLOOR env var; it has no config field.
+	// GC_CITY_READ_CID binds grants to the deployment's tenant-specific city
+	// identity; set it when signing keys are shared across tenants. Retained
+	// attempt evidence additionally requires the signed authenticated subject
+	// and exact original-scope read grants from that permission authority.
 	ReadAuthVerifyKey string `toml:"read_auth_verify_key,omitempty"`
 	// ReadAuthRequired makes a missing or empty ReadAuthVerifyKey a startup error
 	// instead of silently disabling the gate, so a config that intends to gate
@@ -4747,6 +4782,12 @@ func Parse(data []byte) (*City, error) {
 		return nil, err
 	}
 	if err := validateGuardedRelease(cfg.Beads.GuardedRelease); err != nil {
+		return nil, err
+	}
+	if err := validatePrivateEvidenceTransports(cfg.Beads.PrivateEvidence); err != nil {
+		return nil, err
+	}
+	if err := validateLifecycleConfig(cfg.Lifecycle); err != nil {
 		return nil, err
 	}
 	if err := validateRSIConfig(cfg.RSI); err != nil {

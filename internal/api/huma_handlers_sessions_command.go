@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -17,8 +19,10 @@ import (
 	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/sessionauthority"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 	"github.com/gastownhall/gascity/internal/worker"
 )
@@ -45,6 +49,9 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 	body := input.Body
 	if body.LegacySessionName != nil {
 		return nil, apierr.InvalidRequest.Msg("session_name is no longer accepted; use alias")
+	}
+	if sessionauthority.EnforcementEnabled() && strings.TrimSpace(body.Options[sessionPermissionModeOptionKey]) != "" {
+		return nil, apierr.InvalidRequest.Msg("permission_mode requires a signed authority-profile transition after session creation")
 	}
 
 	kind := body.Kind
@@ -194,7 +201,7 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 			return
 		}
 		if waitForCommandable {
-			s.state.Poke()
+			s.state.Enqueue(reconcilekey.Session(info.ID))
 			waitCtx, cancel := context.WithTimeout(context.Background(), sessionCreateCommandableTimeout)
 			info, createErr = waiter.WaitForSessionCommandable(waitCtx, info.ID)
 			cancel()
@@ -209,7 +216,7 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 		s.emitSessionCreateSucceeded(reqID, resp)
 		s.persistSessionMeta(store, info.ID, body.ProjectID, nil)
 		if !waitForCommandable {
-			s.state.Poke()
+			s.state.Enqueue(reconcilekey.Session(info.ID))
 		}
 
 		titleProvider := s.resolveTitleProvider()
@@ -261,6 +268,9 @@ func (s *Server) humaCreateProviderSession(_ context.Context, store beads.Sessio
 			}
 			return nil, apierr.InvalidRequest.Msg(optErr.Error())
 		}
+	}
+	if sessionauthority.EnforcementEnabled() {
+		delete(optMeta, sessionPermissionModeOptionKey)
 	}
 
 	template := providerName
@@ -519,7 +529,8 @@ func (s *Server) humaHandleSessionPatch(_ context.Context, input *SessionPatchIn
 
 	// Huma has already validated:
 	//  - `additionalProperties: false` → unknown fields (e.g. "template") are 422
-	//  - `minLength:"1"` on Title → non-empty when provided
+	//  - `minLength:"1"` on Title → non-empty when provided (a whitespace-only
+	//    title passes that and is refused by the session manager → 400)
 	// The handler only needs to enforce "at least one field" and the
 	// alias-controller-managed rule below.
 	titlePtr := input.Body.Title
@@ -616,15 +627,23 @@ func (s *Server) updateSessionPermissionMode(idRef string, body SessionPermissio
 	if err != nil {
 		return nil, humaSessionManagerError(err)
 	}
+	protectedRequest := sessionauthority.EnforcementEnabled() || sessionauthority.HasAuthorityMetadata(b.Metadata) || strings.TrimSpace(body.AuthorityProfile) != "" ||
+		body.ExpectedGeneration != 0 || strings.TrimSpace(body.EffectiveConfigSHA256) != "" || strings.TrimSpace(body.Authorization) != ""
+	reject := func(reason string, rejection error) error {
+		if !protectedRequest {
+			return rejection
+		}
+		return s.denySessionAuthorityTransition(store.Store, id, info, body, reason, rejection)
+	}
 	if info.Closed {
-		return nil, apierr.SessionConflict.Msg("conflict: session is closed")
+		return nil, reject("session_closed", apierr.SessionConflict.Msg("conflict: session is closed"))
 	}
 	if session.IsTemplateOverrideRuntimeActive(info.State) {
-		return nil, apierr.SessionConflict.Msg("conflict: session is running; permission_mode changes use schema options and apply only before the next launch")
+		return nil, reject("session_active", apierr.SessionConflict.Msg("conflict: session is running; permission_mode changes use schema options and apply only before the next launch"))
 	}
 	cfg := s.state.Config()
 	if cfg == nil {
-		return nil, apierr.ServiceUnavailable.Msg("city config not loaded yet")
+		return nil, reject("config_unavailable", apierr.ServiceUnavailable.Msg("city config not loaded yet"))
 	}
 	agent, agentFound := findAgent(cfg, info.Template)
 	if session.UseAgentTemplateForProviderResolution(legacySessionKind(b.Metadata), b.Metadata, info.Provider, agent.Provider, agentFound) {
@@ -636,23 +655,95 @@ func (s *Server) updateSessionPermissionMode(idRef string, body SessionPermissio
 	resolved, resolveErr := resolveProviderForSessionOptions(info, b.Metadata, cfg)
 	if resolved == nil {
 		if resolveErr != nil {
-			return nil, apierr.SessionConflict.Msg("conflict: session provider no longer resolves: " + resolveErr.Error())
+			return nil, reject("provider_unavailable", apierr.SessionConflict.Msg("conflict: session provider no longer resolves: "+resolveErr.Error()))
 		}
-		return nil, apierr.NotImplemented.Msg("unsupported: session provider does not accept schema options")
+		return nil, reject("provider_options_unsupported", apierr.NotImplemented.Msg("unsupported: session provider does not accept schema options"))
 	}
 	if !providerHasOption(resolved.OptionsSchema, sessionPermissionModeOptionKey) {
-		return nil, apierr.NotImplemented.Msg("unsupported: session provider does not define permission_mode in options_schema")
+		return nil, reject("permission_mode_unsupported", apierr.NotImplemented.Msg("unsupported: session provider does not define permission_mode in options_schema"))
 	}
 
 	mode := strings.TrimSpace(body.PermissionMode)
 	if _, optErr := config.ResolveExplicitOptions(resolved.OptionsSchema, map[string]string{sessionPermissionModeOptionKey: mode}); optErr != nil {
-		return nil, apierr.InvalidRequest.Msg(optErr.Error())
+		return nil, reject("provider_mode_invalid", apierr.InvalidRequest.Msg(optErr.Error()))
 	}
-
-	if _, err := mgr.UpdateTemplateOverrides(id, map[string]string{sessionPermissionModeOptionKey: mode}); err != nil {
+	if !protectedRequest {
+		if _, err := mgr.UpdateTemplateOverrides(id, map[string]string{sessionPermissionModeOptionKey: mode}); err != nil {
+			return nil, humaSessionManagerError(err)
+		}
+		s.state.Enqueue(reconcilekey.Session(id))
+		info, presponse, err := sessionGetEnriched(session.NewStore(store), mgr, id)
+		if err != nil {
+			return nil, humaSessionManagerError(err)
+		}
+		resp := sessionResponseWithReason(info, presponse, s.state.Config(), s.state.SessionProvider(), strings.TrimSpace(s.state.CityPath()) != "")
+		return &IndexOutput[sessionResponse]{Index: s.latestIndex(), Body: resp}, nil
+	}
+	generation, genErr := strconv.ParseUint(strings.TrimSpace(info.Generation), 10, 64)
+	profile := sessionauthority.Profile(strings.TrimSpace(body.AuthorityProfile))
+	configSHA := strings.ToLower(strings.TrimSpace(body.EffectiveConfigSHA256))
+	actualConfigSHA := s.sessionAuthorityConfigSHA()
+	if genErr != nil || generation == 0 || body.ExpectedGeneration != generation || configSHA == "" || configSHA != actualConfigSHA || !profile.Valid() {
+		return nil, s.denySessionAuthorityTransition(store.Store, id, info, body, "stale_or_invalid_scope", apierr.SessionConflict.Msg("conflict: session authority transition scope is stale or invalid"))
+	}
+	fromProfile := sessionauthority.ProfileDesign
+	if raw := strings.TrimSpace(b.Metadata[sessionauthority.MetadataProfile]); raw != "" {
+		fromProfile = sessionauthority.Profile(raw)
+		if !fromProfile.Valid() {
+			return nil, s.denySessionAuthorityTransition(store.Store, id, info, body, "current_profile_invalid", apierr.SessionConflict.Msg("conflict: current session authority profile is invalid"))
+		}
+	}
+	verifier, verifyErr := sessionauthority.LoadHostVerifier()
+	if verifyErr != nil {
+		return nil, s.denySessionAuthorityTransition(store.Store, id, info, body, "authority_unavailable", apierr.ServiceUnavailable.Msg("session authority is unavailable"))
+	}
+	if current, decodeErr := sessionauthority.DecodeAuthorization(b.Metadata[sessionauthority.MetadataAuthorization]); decodeErr == nil &&
+		current.Token == strings.TrimSpace(body.Authorization) && current.Claims.ToProfile == profile {
+		overrides, overrideErr := session.ParseTemplateOverrides(b.Metadata)
+		retryWant := sessionauthority.Expectation{
+			City: strings.TrimSpace(s.state.CityName()), SessionID: id, Generation: generation,
+			EffectiveConfigSHA256: actualConfigSHA, FromProfile: current.Claims.FromProfile,
+			ToProfile: profile, PermissionMode: mode,
+		}
+		if overrideErr == nil && strings.TrimSpace(overrides[sessionPermissionModeOptionKey]) == mode && verifier.VerifyStored(current, retryWant) == nil {
+			info, presponse, err := sessionGetEnriched(session.NewStore(store), mgr, id)
+			if err != nil {
+				return nil, humaSessionManagerError(err)
+			}
+			resp := sessionResponseWithReason(info, presponse, s.state.Config(), s.state.SessionProvider(), strings.TrimSpace(s.state.CityPath()) != "")
+			return &IndexOutput[sessionResponse]{Index: s.latestIndex(), Body: resp}, nil
+		}
+	}
+	want := sessionauthority.Expectation{
+		City: strings.TrimSpace(s.state.CityName()), SessionID: id, Generation: generation,
+		EffectiveConfigSHA256: actualConfigSHA, FromProfile: fromProfile, ToProfile: profile, PermissionMode: mode,
+	}
+	auth, verifyErr := verifier.Verify(strings.TrimSpace(body.Authorization), want)
+	if verifyErr != nil {
+		return nil, s.denySessionAuthorityTransition(store.Store, id, info, body, "authorization_rejected", apierr.Forbidden.Msg("session authority grant rejected"))
+	}
+	record := sessionauthority.TransitionRecord{
+		AttemptedAt: time.Now().UTC().Format(time.RFC3339Nano), Outcome: "accepted", Reason: "authorized",
+		SessionID: id, Generation: generation, EffectiveConfigSHA256: actualConfigSHA,
+		FromProfile: fromProfile, ToProfile: profile, PermissionMode: mode,
+		AuthorizationID: auth.Claims.AuthorizationID, Principal: auth.Principal,
+	}
+	if _, err := mgr.UpdateAuthorityProfile(id, generation, mode, profile, auth, record); err != nil {
+		if errors.Is(err, sessionauthority.ErrReplay) {
+			return nil, reject("authorization_replayed", apierr.SessionConflict.Msg("conflict: session authority grant was already used"))
+		}
+		if errors.Is(err, session.ErrSessionActive) {
+			return nil, reject("session_state_changed", humaSessionManagerError(err))
+		}
+		if errors.Is(err, session.ErrSessionClosed) {
+			return nil, reject("session_closed", humaSessionManagerError(err))
+		}
+		if errors.Is(err, sessionauthority.ErrTargetMismatch) {
+			return nil, reject("authorization_state_mismatch", apierr.SessionConflict.Msg("conflict: session authority state changed"))
+		}
 		return nil, humaSessionManagerError(err)
 	}
-	s.state.Poke()
+	s.state.Enqueue(reconcilekey.Session(id))
 
 	info, presponse, err := sessionGetEnriched(session.NewStore(store), mgr, id)
 	if err != nil {
@@ -665,6 +756,52 @@ func (s *Server) updateSessionPermissionMode(idRef string, body SessionPermissio
 	}, nil
 }
 
+func (s *Server) denySessionAuthorityTransition(store beads.Store, id string, info session.Info, body SessionPermissionModeBody, reason string, rejection error) error {
+	generation, _ := strconv.ParseUint(strings.TrimSpace(info.Generation), 10, 64)
+	if generation == 0 {
+		generation = body.ExpectedGeneration
+	}
+	configSHA := strings.ToLower(strings.TrimSpace(body.EffectiveConfigSHA256))
+	if actual := s.sessionAuthorityConfigSHA(); actual != "" {
+		configSHA = actual
+	}
+	from := sessionauthority.ProfileDesign
+	to := sessionauthority.Profile(strings.TrimSpace(body.AuthorityProfile))
+	if b, err := store.Get(id); err == nil {
+		from = sessionauthority.ProfileFromMetadata(b.Metadata)
+	}
+	if generation == 0 || !from.Valid() || strings.TrimSpace(body.PermissionMode) == "" {
+		return rejection
+	}
+	record := sessionauthority.TransitionRecord{
+		AttemptedAt: time.Now().UTC().Format(time.RFC3339Nano), Outcome: "denied", Reason: reason,
+		SessionID: id, Generation: generation, EffectiveConfigSHA256: configSHA,
+		FromProfile: from, ToProfile: to, PermissionMode: strings.TrimSpace(body.PermissionMode),
+	}
+	writer, ok := store.(beads.ConditionalWriter)
+	if !ok {
+		return apierr.ServiceUnavailable.Msg("cannot record denied session authority transition")
+	}
+	for range 8 {
+		b, err := store.Get(id)
+		if err != nil {
+			return humaStoreError(err)
+		}
+		raw, err := sessionauthority.AppendTransition(b.Metadata[sessionauthority.MetadataTransitions], record)
+		if err != nil {
+			return apierr.ServiceUnavailable.Msg("cannot record denied session authority transition")
+		}
+		err = writer.UpdateIfMatch(id, b.Revision, beads.UpdateOpts{Metadata: map[string]string{sessionauthority.MetadataTransitions: raw}})
+		if err == nil {
+			return rejection
+		}
+		if !beads.IsPreconditionFailed(err) {
+			return humaStoreError(err)
+		}
+	}
+	return apierr.ServiceUnavailable.Msg("cannot record denied session authority transition")
+}
+
 func providerHasOption(schema []config.ProviderOption, key string) bool {
 	for _, opt := range schema {
 		if opt.Key == key {
@@ -674,24 +811,51 @@ func providerHasOption(schema []config.ProviderOption, key string) bool {
 	return false
 }
 
+// sessionActionIdempotencyPath scopes an Idempotency-Key to one session
+// action on one target. The target comes from the URL, not the body, so it
+// must be part of the scope or the same key + body against two sessions would
+// collide. PathEscape keeps a crafted target from forging the "/<action>"
+// boundary. The scope is the target as addressed: the same key sent once by
+// alias and once by bead ID is two independent requests.
+func sessionActionIdempotencyPath(target, action string) string {
+	return "/v0/session/" + url.PathEscape(target) + "/" + action
+}
+
 // --- Session Submit ---
 
 // humaHandleSessionSubmit is the Huma-typed handler for POST /v0/session/{id}/submit.
 
 func (s *Server) humaHandleSessionSubmit(ctx context.Context, input *SessionSubmitInput) (*SessionSubmitOutput, error) {
+	// Idempotency: accept (and deliver) at most once per Idempotency-Key. A
+	// replay returns the original 202 body — same request_id and event_cursor —
+	// without starting a second delivery. The target is folded into the scope
+	// because it lives in the URL, not the body.
+	accepted, err := withIdempotency(s.idem, sessionActionIdempotencyPath(input.ID, "submit"), input.IdempotencyKey, input.Body,
+		func() (asyncAcceptedBody, error) {
+			return s.acceptSessionSubmit(ctx, input)
+		})
+	if err != nil {
+		return nil, err
+	}
+	return &SessionSubmitOutput{Body: accepted}, nil
+}
+
+// acceptSessionSubmit validates the submit target, starts the asynchronous
+// delivery, and returns the 202 body.
+func (s *Server) acceptSessionSubmit(ctx context.Context, input *SessionSubmitInput) (asyncAcceptedBody, error) {
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
-		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
+		return asyncAcceptedBody{}, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
 	if err := s.sessionTargetDeliverable(ctx, store.Store, input.ID); err != nil {
 		if errors.Is(err, session.ErrSessionNotFound) {
-			return nil, apierr.SessionNotFound.Msg(fmt.Sprintf("session %q not found and not a configured named session", input.ID))
+			return asyncAcceptedBody{}, apierr.SessionNotFound.Msg(fmt.Sprintf("session %q not found and not a configured named session", input.ID))
 		}
 		// Ambiguous bare names and configured-name/live-bead conflicts are
 		// deterministic client addressing errors: map them through the resolve
 		// helper so they surface as 409 (matching /stop, /respond, and the
 		// synchronous message twin) instead of a 500 from humaStoreError.
-		return nil, humaResolveError(err)
+		return asyncAcceptedBody{}, humaResolveError(err)
 	}
 
 	intent := input.Body.Intent
@@ -701,11 +865,11 @@ func (s *Server) humaHandleSessionSubmit(ctx context.Context, input *SessionSubm
 
 	reqID, reqIDErr := newRequestID()
 	if reqIDErr != nil {
-		return nil, apierr.Internal.Msg(reqIDErr.Error())
+		return asyncAcceptedBody{}, apierr.Internal.Msg(reqIDErr.Error())
 	}
 	eventCursor, cursorErr := s.currentCityEventCursor()
 	if cursorErr != nil {
-		return nil, apierr.Internal.Msg(cursorErr.Error())
+		return asyncAcceptedBody{}, apierr.Internal.Msg(cursorErr.Error())
 	}
 	message := input.Body.Message
 	sessionTarget := input.ID
@@ -724,11 +888,7 @@ func (s *Server) humaHandleSessionSubmit(ctx context.Context, input *SessionSubm
 		}
 	}()
 
-	out := &SessionSubmitOutput{}
-	out.Body.Status = "accepted"
-	out.Body.RequestID = reqID
-	out.Body.EventCursor = eventCursor
-	return out, nil
+	return asyncAcceptedBody{Status: "accepted", RequestID: reqID, EventCursor: eventCursor}, nil
 }
 
 // --- Session Messages ---
@@ -736,28 +896,43 @@ func (s *Server) humaHandleSessionSubmit(ctx context.Context, input *SessionSubm
 // humaHandleSessionMessage is the Huma-typed handler for POST /v0/session/{id}/messages.
 
 func (s *Server) humaHandleSessionMessage(ctx context.Context, input *SessionMessageInput) (*SessionMessageOutput, error) {
+	// Idempotency: accept (and deliver) at most once per Idempotency-Key; see
+	// humaHandleSessionSubmit.
+	accepted, err := withIdempotency(s.idem, sessionActionIdempotencyPath(input.ID, "messages"), input.IdempotencyKey, input.Body,
+		func() (asyncAcceptedBody, error) {
+			return s.acceptSessionMessage(ctx, input)
+		})
+	if err != nil {
+		return nil, err
+	}
+	return &SessionMessageOutput{Body: accepted}, nil
+}
+
+// acceptSessionMessage validates the message target, starts the asynchronous
+// delivery, and returns the 202 body.
+func (s *Server) acceptSessionMessage(ctx context.Context, input *SessionMessageInput) (asyncAcceptedBody, error) {
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
-		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
+		return asyncAcceptedBody{}, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
 	if err := s.sessionTargetDeliverable(ctx, store.Store, input.ID); err != nil {
 		if errors.Is(err, session.ErrSessionNotFound) {
-			return nil, apierr.SessionNotFound.Msg(fmt.Sprintf("session %q not found and not a configured named session", input.ID))
+			return asyncAcceptedBody{}, apierr.SessionNotFound.Msg(fmt.Sprintf("session %q not found and not a configured named session", input.ID))
 		}
 		// Ambiguous bare names and configured-name/live-bead conflicts are
 		// deterministic client addressing errors: map them through the resolve
 		// helper so they surface as 409 (matching /stop, /respond, and the
 		// synchronous message twin) instead of a 500 from humaStoreError.
-		return nil, humaResolveError(err)
+		return asyncAcceptedBody{}, humaResolveError(err)
 	}
 
 	reqID, reqIDErr := newRequestID()
 	if reqIDErr != nil {
-		return nil, apierr.Internal.Msg(reqIDErr.Error())
+		return asyncAcceptedBody{}, apierr.Internal.Msg(reqIDErr.Error())
 	}
 	eventCursor, cursorErr := s.currentCityEventCursor()
 	if cursorErr != nil {
-		return nil, apierr.Internal.Msg(cursorErr.Error())
+		return asyncAcceptedBody{}, apierr.Internal.Msg(cursorErr.Error())
 	}
 	message := input.Body.Message
 	sessionTarget := input.ID
@@ -835,11 +1010,7 @@ func (s *Server) humaHandleSessionMessage(ctx context.Context, input *SessionMes
 		}
 	}()
 
-	out := &SessionMessageOutput{}
-	out.Body.Status = "accepted"
-	out.Body.RequestID = reqID
-	out.Body.EventCursor = eventCursor
-	return out, nil
+	return asyncAcceptedBody{Status: "accepted", RequestID: reqID, EventCursor: eventCursor}, nil
 }
 
 // --- Session Stop ---
@@ -898,11 +1069,13 @@ func (s *Server) humaHandleSessionKill(_ context.Context, input *SessionIDInput)
 	return out, nil
 }
 
-// --- Session Respond ---
+// --- Session Reset ---
 
-// humaHandleSessionRespond is the Huma-typed handler for POST /v0/session/{id}/respond.
-
-func (s *Server) humaHandleSessionRespond(_ context.Context, input *SessionRespondInput) (*SessionRespondOutput, error) {
+// humaHandleSessionReset is the Huma-typed handler for POST /v0/session/{id}/reset.
+// It records a fresh-restart request through the worker boundary (the same
+// path as `gc session reset`) and enqueues the session's reconcile key, which
+// restarts the session on the next continuation epoch.
+func (s *Server) humaHandleSessionReset(ctx context.Context, input *SessionIDInput) (*OKWithIDResponse, error) {
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
 		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
@@ -913,15 +1086,56 @@ func (s *Server) humaHandleSessionRespond(_ context.Context, input *SessionRespo
 		return nil, humaResolveError(err)
 	}
 
-	// Huma validates Body.Action (minLength:1); no handler guard needed.
-	mgr := s.sessionManager(store.Store)
-	if err := mgr.Respond(id, runtime.InteractionResponse{
-		RequestID: input.Body.RequestID,
-		Action:    input.Body.Action,
-		Text:      input.Body.Text,
-		Metadata:  input.Body.Metadata,
-	}); err != nil {
+	handle, err := s.workerHandleForSession(store.Store, id)
+	if err != nil {
 		return nil, humaSessionManagerError(err)
+	}
+	if err := handle.Reset(ctx); err != nil {
+		return nil, humaSessionManagerError(err)
+	}
+	s.state.Enqueue(reconcilekey.Session(id))
+
+	out := &OKWithIDResponse{}
+	out.Body.Status = "ok"
+	out.Body.ID = id
+	return out, nil
+}
+
+// --- Session Respond ---
+
+// humaHandleSessionRespond is the Huma-typed handler for POST /v0/session/{id}/respond.
+
+func (s *Server) humaHandleSessionRespond(_ context.Context, input *SessionRespondInput) (*SessionRespondOutput, error) {
+	// Idempotency: deliver the interaction response at most once per
+	// Idempotency-Key. The cached value is the resolved session ID, so a replay
+	// rebuilds the identical body without a second Respond (which would fail
+	// with no_pending once the first one cleared the interaction).
+	id, err := withIdempotency(s.idem, sessionActionIdempotencyPath(input.ID, "respond"), input.IdempotencyKey, input.Body,
+		func() (string, error) {
+			store := s.state.SessionsBeadStore()
+			if store.Store == nil {
+				return "", apierr.ServiceUnavailable.Msg("no bead store configured")
+			}
+
+			id, err := s.resolveSessionIDWithConfig(store.Store, input.ID)
+			if err != nil {
+				return "", humaResolveError(err)
+			}
+
+			// Huma validates Body.Action (minLength:1); no handler guard needed.
+			mgr := s.sessionManager(store.Store)
+			if err := mgr.Respond(id, runtime.InteractionResponse{
+				RequestID: input.Body.RequestID,
+				Action:    input.Body.Action,
+				Text:      input.Body.Text,
+				Metadata:  input.Body.Metadata,
+			}); err != nil {
+				return "", humaSessionManagerError(err)
+			}
+			return id, nil
+		})
+	if err != nil {
+		return nil, err
 	}
 
 	out := &SessionRespondOutput{}
@@ -1078,7 +1292,8 @@ func (s *Server) humaHandleSessionRename(_ context.Context, input *SessionRename
 		return nil, humaResolveError(err)
 	}
 
-	// Huma validates Body.Title (minLength:1); no handler guard needed.
+	// Huma validates Body.Title (minLength:1); a whitespace-only title passes
+	// that and is refused by the session manager (ErrInvalidSessionTitle → 400).
 	// Validate through the session front door (mirrors humaHandleSessionPatch):
 	// nothing downstream reads the raw bead — rename operates by id. Present-but-
 	// non-session → the existing "not a session" 400; absent → beads.ErrNotFound

@@ -28,6 +28,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/session/sessiontest"
+	"github.com/gastownhall/gascity/internal/sessionauthority"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 	"github.com/gastownhall/gascity/internal/shellquote"
 	"github.com/gastownhall/gascity/internal/testutil"
@@ -1403,26 +1404,27 @@ func TestPrepareStartCandidateReloadsOverridesBeforeWake(t *testing.T) {
 		t.Fatalf("SetMetadata(template_overrides): %v", err)
 	}
 
-	prepared, err := prepareStartCandidate(startCandidate{
-		info: sessiontest.SeedBead(t, session),
-		tp: TemplateParams{
-			TemplateName: "worker",
-			SessionName:  "worker",
-			Command:      "codex --ask-for-approval on-request",
-			ResolvedProvider: &config.ResolvedProvider{
-				Name:          "codex",
-				ResumeFlag:    "resume",
-				ResumeStyle:   "subcommand",
-				ResumeCommand: "codex resume {{.SessionKey}} --ask-for-approval on-request",
-				OptionsSchema: []config.ProviderOption{{
-					Key: "permission_mode",
-					Choices: []config.OptionChoice{
-						{Value: "default", FlagArgs: []string{"--ask-for-approval", "on-request"}},
-						{Value: "plan", FlagArgs: []string{"--ask-for-approval", "never"}},
-					},
-				}},
-			},
+	tp := TemplateParams{
+		TemplateName: "worker",
+		SessionName:  "worker",
+		Command:      "codex --ask-for-approval on-request",
+		ResolvedProvider: &config.ResolvedProvider{
+			Name:          "codex",
+			ResumeFlag:    "resume",
+			ResumeStyle:   "subcommand",
+			ResumeCommand: "codex resume {{.SessionKey}} --ask-for-approval on-request",
+			OptionsSchema: []config.ProviderOption{{
+				Key: "permission_mode",
+				Choices: []config.OptionChoice{
+					{Value: "default", FlagArgs: []string{"--ask-for-approval", "on-request"}},
+					{Value: "plan", FlagArgs: []string{"--ask-for-approval", "never"}},
+				},
+			}},
 		},
+	}
+	prepared, err := prepareStartCandidate(startCandidate{
+		info:  sessiontest.SeedBead(t, session),
+		tp:    tp,
 		order: 0,
 	}, &config.City{}, store, &clock.Fake{Time: time.Date(2026, 5, 13, 12, 0, 0, 0, time.UTC)})
 	if err != nil {
@@ -1434,6 +1436,15 @@ func TestPrepareStartCandidateReloadsOverridesBeforeWake(t *testing.T) {
 	want := "codex resume --ask-for-approval never abc-123"
 	if prepared.cfg.Command != want {
 		t.Fatalf("prepared.cfg.Command = %q, want %q", prepared.cfg.Command, want)
+	}
+
+	t.Setenv(sessionauthority.HostTrustFileEnv, filepath.Join(t.TempDir(), "missing-trust.json"))
+	current, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := buildPreparedStart(startCandidate{info: sessiontest.SeedBead(t, current), tp: tp}, &config.City{}, store); !errors.Is(err, sessionauthority.ErrUnavailable) {
+		t.Fatalf("protected raw permission_mode launch = %v, want authority unavailable", err)
 	}
 }
 
@@ -5272,6 +5283,104 @@ func TestCommitStartResult_AtomicBatchLandsStateAndClaimClearTogether(t *testing
 	}
 	if got.Metadata["pending_create_claim"] != "" {
 		t.Fatalf("pending_create_claim = %q, want cleared atomically with state transition", got.Metadata["pending_create_claim"])
+	}
+}
+
+// TestCommitStartResult_HealedAwakeBeforeCommitStillConfirmsCreation pins the
+// Tier C first-run race: the async start is enqueued while the bead is
+// "creating", the reconciler's heal pass sees the live runtime and projects
+// "awake" onto the bead, and only then does the start commit land. The commit
+// must still stamp state_reason=creation_complete — that marker is what
+// poolSessionWithinPostCreateProtection keys the post-create demand floor on,
+// and without it the fresh pool worker was drained as "orphaned" seconds after
+// claiming its first step. The in-flight awake interval the heal opened must
+// not be reset (mirrors recoverRunningPendingCreate).
+func TestCommitStartResult_HealedAwakeBeforeCommitStillConfirmsCreation(t *testing.T) {
+	store := beads.NewMemStore()
+	healedAwakeAt := "2026-03-18T11:59:58Z"
+	bead, err := store.Create(beads.Bead{
+		Title:  "claude",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":         "claude-w1",
+			"template":             "claude",
+			"pool_managed":         "true",
+			"pending_create_claim": "true",
+			// The heal pass already rewrote creating -> awake.
+			"state":            "awake",
+			"awake_started_at": healedAwakeAt,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := startResult{
+		prepared: preparedStart{
+			candidate: startCandidate{
+				info: sessiontest.SeedBead(t, bead),
+				tp: TemplateParams{
+					SessionName:  "claude-w1",
+					TemplateName: "claude",
+				},
+			},
+			coreHash: "core",
+			liveHash: "live",
+		},
+		outcome:  "success",
+		started:  time.Date(2026, 3, 18, 11, 59, 57, 0, time.UTC),
+		finished: time.Date(2026, 3, 18, 12, 0, 0, 0, time.UTC),
+	}
+	commitAt := time.Date(2026, 3, 18, 12, 0, 1, 0, time.UTC)
+	if !commitStartResult(result, sessionFrontDoor(store), &clock.Fake{Time: commitAt}, events.Discard, 0, ioDiscard{}, ioDiscard{}) {
+		t.Fatal("commitStartResult returned false for a successful start onto a healed-awake bead")
+	}
+
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Metadata["state"] != "active" {
+		t.Errorf("state = %q, want active", got.Metadata["state"])
+	}
+	if got.Metadata["state_reason"] != "creation_complete" {
+		t.Errorf("state_reason = %q, want creation_complete: a start committed after the heal pass wrote awake lost its post-create protection", got.Metadata["state_reason"])
+	}
+	if got.Metadata["pending_create_claim"] != "" {
+		t.Errorf("pending_create_claim = %q, want cleared", got.Metadata["pending_create_claim"])
+	}
+	if got.Metadata["awake_started_at"] != healedAwakeAt {
+		t.Errorf("awake_started_at = %q, want the in-flight interval %q kept (StartsAwakeInterval must stay keyed on a genuine pending start)", got.Metadata["awake_started_at"], healedAwakeAt)
+	}
+	if info := sessiontest.SeedBead(t, got); !poolSessionWithinPostCreateProtection(info, commitAt.Add(30*time.Second)) {
+		t.Error("fresh pool worker is not within post-create protection after its start committed onto a healed-awake bead")
+	}
+}
+
+// TestConfirmStartCommitState pins the shared start-commit confirm predicate
+// used by both commitStartResultTraced and recoverRunningPendingCreate.
+func TestConfirmStartCommitState(t *testing.T) {
+	for state, want := range map[string]bool{
+		"":              true,
+		"start-pending": true,
+		"creating":      true,
+		"asleep":        true,
+		"drained":       true,
+		"awake":         true,
+		"active":        false,
+		"draining":      false,
+		"archived":      false,
+		"quarantined":   false,
+	} {
+		if got := confirmStartCommitState(state); got != want {
+			t.Errorf("confirmStartCommitState(%q) = %v, want %v", state, got, want)
+		}
+		if confirmPendingStart(state) && !confirmStartCommitState(state) {
+			t.Errorf("confirmStartCommitState(%q) must be a superset of confirmPendingStart", state)
+		}
+	}
+	if confirmPendingStart("awake") {
+		t.Error("confirmPendingStart(awake) = true; StartsAwakeInterval would reset an in-flight awake interval")
 	}
 }
 

@@ -19,6 +19,8 @@ export interface ExecutionAttempt {
   active: boolean;
   startedAt: string;
   lastActive: string;
+  /** Positive generation supplied by the supervisor, never inferred locally. */
+  executionGeneration: number | null;
 }
 
 export interface ResolvedAttempts {
@@ -53,6 +55,7 @@ function isActive(session: SupervisorSession): boolean {
 }
 
 function toAttempt(session: SupervisorSession): ExecutionAttempt {
+  const generation = session.execution_generation;
   return {
     sessionId: session.id,
     sessionName: session.session_name ?? session.id,
@@ -61,6 +64,10 @@ function toAttempt(session: SupervisorSession): ExecutionAttempt {
     active: isActive(session),
     startedAt: session.created_at ?? '',
     lastActive: session.last_active ?? '',
+    executionGeneration:
+      typeof generation === 'number' && Number.isSafeInteger(generation) && generation > 0
+        ? generation
+        : null,
   };
 }
 

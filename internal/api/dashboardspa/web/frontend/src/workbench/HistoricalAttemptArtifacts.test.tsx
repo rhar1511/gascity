@@ -1,6 +1,7 @@
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { HistoricalAttemptArtifacts } from './HistoricalAttemptArtifacts';
+import { resetSupervisorApiForTests } from '../supervisor/client';
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -11,6 +12,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 afterEach(() => {
   cleanup();
+  resetSupervisorApiForTests();
   vi.unstubAllGlobals();
 });
 

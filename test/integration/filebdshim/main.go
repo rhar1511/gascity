@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,7 +25,16 @@ func main() {
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
+	authority, args, err := consumeFixtureAuthority(args)
+	if err != nil {
+		fmt.Fprintln(stderr, "bd shim: refusing invalid fixture launcher authority") //nolint:errcheck
+		return 1
+	}
 	realBD := strings.TrimSpace(os.Getenv("GC_INTEGRATION_REAL_BD"))
+	if err := requireDisposableBeadsDir(args, authority); err != nil {
+		fmt.Fprintln(stderr, "bd shim: refusing real bd outside the disposable fixture") //nolint:errcheck
+		return 1
+	}
 	if len(args) == 0 {
 		return proxy(realBD, args, stdout, stderr)
 	}
@@ -64,6 +74,413 @@ func proxy(realBD string, args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+const (
+	fixtureAuthorityFlag = "--gc-integration-fixture-authority="
+	fixtureDatabaseName  = "hq"
+)
+
+type fixtureAuthority struct {
+	CityDir  string `json:"city_dir"`
+	Database string `json:"database"`
+	Project  string `json:"project_id"`
+	bound    bool
+}
+
+func consumeFixtureAuthority(args []string) (fixtureAuthority, []string, error) {
+	var authority fixtureAuthority
+	for i, arg := range args {
+		if !strings.HasPrefix(arg, fixtureAuthorityFlag) {
+			continue
+		}
+		if i != 0 || authority.bound {
+			return fixtureAuthority{}, nil, errors.New("fixture authority must be the first argument")
+		}
+		encoded := strings.TrimPrefix(arg, fixtureAuthorityFlag)
+		data, err := base64.RawURLEncoding.DecodeString(encoded)
+		if err != nil || len(data) == 0 {
+			return fixtureAuthority{}, nil, errors.New("fixture authority is malformed")
+		}
+		if err := json.Unmarshal(data, &authority); err != nil {
+			return fixtureAuthority{}, nil, errors.New("fixture authority is malformed")
+		}
+		if strings.TrimSpace(authority.CityDir) == "" || !filepath.IsAbs(authority.CityDir) {
+			return fixtureAuthority{}, nil, errors.New("fixture authority city is missing or relative")
+		}
+		if authority.Database != fixtureDatabaseName {
+			return fixtureAuthority{}, nil, errors.New("fixture authority database does not match the disposable city")
+		}
+		authority.bound = true
+		args = args[1:]
+		break
+	}
+	for _, arg := range args {
+		if strings.HasPrefix(arg, fixtureAuthorityFlag) {
+			return fixtureAuthority{}, nil, errors.New("fixture authority may not appear as a bd argument")
+		}
+	}
+	return authority, args, nil
+}
+
+func requireDisposableBeadsDir(args []string, authority fixtureAuthority) error {
+	expected := strings.TrimSpace(os.Getenv("GC_INTEGRATION_DISPOSABLE_BEADS_DIR"))
+	required := strings.TrimSpace(os.Getenv("GC_INTEGRATION_REQUIRE_DISPOSABLE_BEADS_DIR")) == "1"
+	cityDir := strings.TrimSpace(os.Getenv("GC_INTEGRATION_DISPOSABLE_CITY_DIR"))
+	database := strings.TrimSpace(os.Getenv("GC_INTEGRATION_DISPOSABLE_DATABASE"))
+	projectID := strings.TrimSpace(os.Getenv("GC_INTEGRATION_DISPOSABLE_PROJECT_ID"))
+	if authority.bound {
+		cityDir = filepath.Clean(authority.CityDir)
+		boundBeadsDir := filepath.Join(cityDir, ".beads")
+		if expected != "" && filepath.Clean(expected) != boundBeadsDir {
+			return errors.New("fixture target conflicts with launcher authority")
+		}
+		if database != "" && authority.Database != "" && database != authority.Database {
+			return errors.New("fixture database conflicts with launcher authority")
+		}
+		if projectID != "" && authority.Project != "" && projectID != authority.Project {
+			return errors.New("fixture project conflicts with launcher authority")
+		}
+		expected = boundBeadsDir
+		database = authority.Database
+		projectID = authority.Project
+		required = true
+		if err := validateFixtureBackendSelectors(expected, database, projectID); err != nil {
+			return err
+		}
+	}
+	if expected == "" {
+		if required {
+			return errors.New("required fixture target is missing")
+		}
+		return nil
+	}
+	if cityDir == "" {
+		cityDir = filepath.Dir(expected)
+	}
+	actual := strings.TrimSpace(os.Getenv("BEADS_DIR"))
+	if !filepath.IsAbs(expected) || !filepath.IsAbs(cityDir) || !filepath.IsAbs(actual) {
+		return errors.New("fixture paths must be absolute")
+	}
+	expected, err := filepath.Abs(expected)
+	if err != nil {
+		return err
+	}
+	cityDir, err = filepath.Abs(cityDir)
+	if err != nil {
+		return err
+	}
+	actual, err = filepath.Abs(actual)
+	if err != nil {
+		return err
+	}
+	expected = filepath.Clean(expected)
+	cityDir = filepath.Clean(cityDir)
+	if expected != filepath.Join(cityDir, ".beads") || !fixturePathMatches(cityDir, cityDir, false) {
+		return errors.New("fixture Beads directory is outside its city")
+	}
+	if !fixturePathMatches(actual, expected, true) {
+		return errors.New("beads directory does not match fixture")
+	}
+	if err := validateBdScopeArgs(args, cityDir, expected, database, projectID); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateFixtureBackendSelectors(beadsDir, database, projectID string) error {
+	root := filepath.Join(beadsDir, "dolt")
+	for name, expected := range map[string]string{
+		"BEADS_PROXIED_SERVER_ROOT_PATH": root,
+		"BEADS_DOLT_DATA_DIR":            root,
+		"GC_DOLT_DATA_DIR":               root,
+		"BEADS_PROXIED_SERVER_CONFIG":    filepath.Join(root, "config.yaml"),
+		"BEADS_PROXIED_SERVER_LOG":       filepath.Join(root, "server.log"),
+	} {
+		if value := strings.TrimSpace(os.Getenv(name)); value != "" && (!filepath.IsAbs(value) || filepath.Clean(value) != expected) {
+			return fmt.Errorf("%s is outside the fixture's proxied root", name)
+		}
+	}
+	for _, name := range []string{
+		"BEADS_SHARED_SERVER_DIR", "BEADS_DOLT_SERVER_DATABASE", "BEADS_DOLT_SERVER_SOCKET",
+		"BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_SERVER_USER", "BEADS_DOLT_SERVER_PASSWORD",
+		"BEADS_DOLT_SERVER_TLS", "BEADS_DOLT_REMOTESAPI_PORT", "BEADS_DOLT_CREDENTIAL_COMMAND",
+		"BEADS_DOLT_HOST", "BEADS_DOLT_PORT", "BEADS_DOLT_SOCKET", "BEADS_DOLT_USER", "BEADS_DOLT_PASSWORD",
+		"BEADS_PROXIED_SERVER_PORT", "BEADS_PROXIED_SERVER_EXTERNAL_HOST", "BEADS_PROXIED_SERVER_EXTERNAL_PORT", "BEADS_PROXIED_SERVER_EXTERNAL_SOCKET_PATH",
+		"BD_DB", "BEADS_DB", "BEADS_CENTRAL_CONFIG",
+		"GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER", "GC_DOLT_PASSWORD",
+		"GC_DOLT_DATABASE", "GC_DOLT_CONFIG_FILE", "GC_DOLT_LOG_FILE", "GC_DOLT_PID_FILE",
+		"GC_DOLT_LOCK_FILE", "GC_DOLT_STATE_FILE",
+		"GC_BEADS_PROXY_EXTERNAL_HOST", "GC_BEADS_PROXY_EXTERNAL_PORT", "GC_BEADS_PROXY_EXTERNAL_SOCKET",
+	} {
+		if strings.TrimSpace(os.Getenv(name)) != "" {
+			return fmt.Errorf("%s is not supported by the fixture's local proxied backend", name)
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("BEADS_DOLT_SHARED_SERVER")); value != "" && value != "0" && !strings.EqualFold(value, "false") {
+		return errors.New("shared Beads server mode is not supported by the fixture")
+	}
+	if value := strings.TrimSpace(os.Getenv("BEADS_DOLT_SERVER_MODE")); value != "" && value != "0" && !strings.EqualFold(value, "false") {
+		return errors.New("direct Beads server mode is not supported by the fixture")
+	}
+	if value := strings.TrimSpace(os.Getenv("BEADS_DOLT_PROXIED_SERVER")); value != "" && value != "1" {
+		return errors.New("proxied Beads server selector conflicts with the fixture")
+	}
+	if value := strings.TrimSpace(os.Getenv("GC_BEADS_TRANSPORT")); value != "" && value != "proxied" {
+		return errors.New("beads transport selector conflicts with the fixture")
+	}
+	if value := strings.TrimSpace(os.Getenv("GC_BEADS_TARGET")); value != "" && value != "local" {
+		return errors.New("beads target selector conflicts with the fixture")
+	}
+	for _, name := range []string{"GC_BEADS_BACKEND", "BEADS_BACKEND"} {
+		if value := strings.TrimSpace(os.Getenv(name)); value != "" && value != "dolt" {
+			return fmt.Errorf("%s does not select the fixture's Dolt backend", name)
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("GC_BEADS")); value != "" && value != "bd" {
+		return errors.New("beads command selector conflicts with the fixture")
+	}
+	if value := strings.TrimSpace(os.Getenv("BEADS_DOLT_DATABASE")); value != "" && (database == "" || value != database) {
+		return errors.New("beads database selector conflicts with the fixture")
+	}
+	if value := strings.TrimSpace(os.Getenv("GC_INTEGRATION_DISPOSABLE_PROJECT_ID")); value != "" && (projectID == "" || value != projectID) {
+		return errors.New("fixture project selector conflicts with launcher authority")
+	}
+	return nil
+}
+
+func fixturePathMatches(path, expected string, allowMissing bool) bool {
+	if !filepath.IsAbs(path) || !filepath.IsAbs(expected) {
+		return false
+	}
+	path, err := filepath.Abs(path)
+	if err != nil {
+		return false
+	}
+	expected, err = filepath.Abs(expected)
+	if err != nil {
+		return false
+	}
+	path = filepath.Clean(path)
+	expected = filepath.Clean(expected)
+	if path != expected {
+		return false
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err == nil {
+		return filepath.Clean(resolved) == path
+	}
+	if !allowMissing || !errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	ancestor := path
+	for {
+		resolvedAncestor, resolveErr := filepath.EvalSymlinks(ancestor)
+		if resolveErr == nil {
+			return filepath.Clean(resolvedAncestor) == ancestor
+		}
+		if !errors.Is(resolveErr, os.ErrNotExist) {
+			return false
+		}
+		parent := filepath.Dir(ancestor)
+		if parent == ancestor {
+			return false
+		}
+		ancestor = parent
+	}
+}
+
+func validateBdScopeArgs(args []string, cityDir, beadsDir, database, projectID string) error {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if strings.HasPrefix(arg, "--proxied-server-external-") || strings.HasPrefix(arg, "--server-") || strings.HasPrefix(arg, "--external-") {
+			return errors.New("server endpoint override is not supported by the fixture's local proxied backend")
+		}
+		name, value, inline := splitFixtureTargetFlag(arg)
+		switch name {
+		case "-C", "--directory", "--dir":
+			if !inline {
+				if i+1 >= len(args) {
+					return errors.New("directory override is incomplete")
+				}
+				i++
+				value = args[i]
+			}
+			if !fixturePathMatches(value, cityDir, false) {
+				return errors.New("directory override is outside the fixture city")
+			}
+		case "--beads-dir":
+			if !inline {
+				if i+1 >= len(args) {
+					return errors.New("beads directory override is incomplete")
+				}
+				i++
+				value = args[i]
+			}
+			if !fixturePathMatches(value, beadsDir, true) {
+				return errors.New("beads directory override is outside the fixture city")
+			}
+		case "--db":
+			return errors.New("--db path overrides are not supported by the fixture")
+		case "--database":
+			if !inline {
+				if i+1 >= len(args) {
+					return errors.New("database override is incomplete")
+				}
+				i++
+				value = args[i]
+			}
+			if database == "" || value != database {
+				return errors.New("database override does not match the fixture")
+			}
+		case "--project", "--project-id":
+			if !inline {
+				if i+1 >= len(args) {
+					return errors.New("project override is incomplete")
+				}
+				i++
+				value = args[i]
+			}
+			if projectID == "" || value != projectID {
+				return errors.New("project override does not match the fixture")
+			}
+		case "--server", "--shared-server", "--external", "--global", "--server-tls":
+			return errors.New("direct, shared, and external server modes are not supported by the fixture")
+		case "--server-host", "--server-port", "--server-socket", "--server-user", "--proxied-server-port", "--host", "--port", "--socket", "--user":
+			return errors.New("endpoint override is not supported by the fixture's local proxied backend")
+		case "--proxied-server-idle-timeout":
+			if !inline {
+				if i+1 >= len(args) {
+					return errors.New("proxied idle-timeout override is incomplete")
+				}
+				i++
+				value = args[i]
+			}
+			if value != "0" {
+				return errors.New("fixture proxied-server idle timeout must stay disabled")
+			}
+		case "--proxied-server-root-path":
+			if !inline {
+				if i+1 >= len(args) {
+					return errors.New("proxied root override is incomplete")
+				}
+				i++
+				value = args[i]
+			}
+			if !fixturePathMatches(value, filepath.Join(beadsDir, "dolt"), true) {
+				return errors.New("proxied root override is outside the fixture city")
+			}
+		case "--proxied-server-config-path":
+			if !inline {
+				if i+1 >= len(args) {
+					return errors.New("proxied config override is incomplete")
+				}
+				i++
+				value = args[i]
+			}
+			if !fixturePathMatches(value, filepath.Join(beadsDir, "dolt", "config.yaml"), true) {
+				return errors.New("proxied config override is outside the fixture city")
+			}
+		case "--proxied-server-log-path":
+			if !inline {
+				if i+1 >= len(args) {
+					return errors.New("proxied log override is incomplete")
+				}
+				i++
+				value = args[i]
+			}
+			if !fixturePathMatches(value, filepath.Join(beadsDir, "dolt", "server.log"), true) {
+				return errors.New("proxied log override is outside the fixture city")
+			}
+		}
+	}
+
+	if len(args) > 0 && args[0] == "init" {
+		path, found, err := bdInitDirectoryArgument(args[1:])
+		if err != nil {
+			return err
+		}
+		if found {
+			if !fixturePathMatches(path, cityDir, false) {
+				return errors.New("init directory is outside the fixture city")
+			}
+		} else {
+			cwd, err := os.Getwd()
+			if err != nil || !fixturePathMatches(cwd, cityDir, false) {
+				return errors.New("init working directory is outside the fixture city")
+			}
+		}
+	}
+	return nil
+}
+
+func splitFixtureTargetFlag(arg string) (name, value string, inline bool) {
+	// pflag accepts attached values for the persistent -C shorthand (for
+	// example `-C/other-city`) as well as the conventional `-C=/other-city`.
+	// Normalize both before validating the effective city directory.
+	if strings.HasPrefix(arg, "-C") && len(arg) > 2 && arg[2] != '-' {
+		return "-C", strings.TrimPrefix(arg[2:], "="), true
+	}
+	if equals := strings.IndexByte(arg, '='); equals > 0 {
+		flagName := arg[:equals]
+		switch flagName {
+		case "--server", "--shared-server", "--external", "--global", "--server-tls":
+			// These are selectors, so rejecting `=false` is safer than treating
+			// one spelling as harmless while another selects a shared backend.
+			return flagName, arg[equals+1:], true
+		}
+	}
+	for _, name := range []string{
+		"--directory", "--beads-dir", "--database", "--project-id", "--project", "--db", "--dir", "-C",
+		"--server-host", "--server-port", "--server-socket", "--proxied-server-idle-timeout",
+		"--proxied-server-port",
+		"--proxied-server-root-path", "--proxied-server-config-path", "--proxied-server-log-path",
+		"--proxied-server-external-host", "--proxied-server-external-port", "--proxied-server-external-socket-path",
+	} {
+		if strings.HasPrefix(arg, name+"=") {
+			return name, strings.TrimPrefix(arg, name+"="), true
+		}
+	}
+	return arg, "", false
+}
+
+func bdInitDirectoryArgument(args []string) (string, bool, error) {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			if i+1 < len(args) {
+				return args[i+1], true, nil
+			}
+			return "", false, nil
+		}
+		if !strings.HasPrefix(arg, "-") {
+			return arg, true, nil
+		}
+		if fixtureFlagTakesValue(arg) {
+			if i+1 >= len(args) {
+				return "", false, errors.New("init option is incomplete")
+			}
+			i++
+		}
+	}
+	return "", false, nil
+}
+
+func fixtureFlagTakesValue(arg string) bool {
+	if strings.Contains(arg, "=") {
+		return false
+	}
+	switch arg {
+	case "-C", "--directory", "--dir", "--beads-dir", "--db", "--database", "--project", "--project-id",
+		"-p", "--prefix", "--server-host", "--server-port", "--server-socket", "--proxied-server-idle-timeout", "--proxied-server-port", "--host", "--port", "--user",
+		"--proxied-server-root-path", "--proxied-server-config-path", "--proxied-server-log-path",
+		"--proxied-server-external-host", "--proxied-server-external-port", "--proxied-server-external-socket-path",
+		"--actor", "--format", "--limit", "--title", "--assignee", "--type", "--issue-type", "--parent",
+		"--description", "--label":
+		return true
+	default:
+		return false
+	}
 }
 
 func detectFileStoreCity() (string, bool) {

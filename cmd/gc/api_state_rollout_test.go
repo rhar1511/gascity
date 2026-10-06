@@ -266,7 +266,9 @@ func TestControllerStateRolloutDriftThroughReloadSeams(t *testing.T) {
 	}
 
 	// Reload via update(): on-disk drops to off → drift recorded, gate NOT re-latched.
-	cs.update(cityOf("off"), runtime.NewFake())
+	if err := cs.update(cityOf("off"), runtime.NewFake()); err != nil {
+		t.Fatalf("reload controller for rollout drift: %v", err)
+	}
 	if got := cs.RolloutFlags().BeadsConditionalWrites(); got != rollout.Require {
 		t.Errorf("update() re-latched the gate: %q, want require", got)
 	}

@@ -16,7 +16,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	beadslib "github.com/steveyegge/beads"
+	beadops "github.com/steveyegge/beads/issueops"
 )
 
 func TestNativeDoltStoreCreateDelegatesToUpstreamStorage(t *testing.T) {
@@ -585,9 +587,9 @@ func TestNativeDoltStoreCloseForwardsMetadataCloseReason(t *testing.T) {
 				Metadata:  raw,
 			}, nil
 		},
-		closeIssue: func(_ context.Context, _ string, reason string, _ string, _ string) error {
-			gotReason = reason
-			return nil
+		closeIssueChecked: func(_ context.Context, _ string, _ string, opts beadslib.CloseIssueOptions) (beadslib.CloseIssueResult, error) {
+			gotReason = opts.Reason
+			return beadslib.CloseIssueResult{}, nil
 		},
 	}
 	store := newNativeDoltStoreForTest(storage)
@@ -600,9 +602,8 @@ func TestNativeDoltStoreCloseForwardsMetadataCloseReason(t *testing.T) {
 	}
 }
 
-func TestNativeDoltStoreCloseTreatsMalformedMetadataAsEmptyReason(t *testing.T) {
+func TestNativeDoltStoreCloseFailsClosedOnMalformedMetadata(t *testing.T) {
 	closeCalled := false
-	var gotReason string
 	storage := &nativeDoltStorageSpy{
 		getIssue: func(context.Context, string) (*beadslib.Issue, error) {
 			return &beadslib.Issue{
@@ -614,22 +615,18 @@ func TestNativeDoltStoreCloseTreatsMalformedMetadataAsEmptyReason(t *testing.T) 
 				Metadata:  json.RawMessage(`{"close_reason":`),
 			}, nil
 		},
-		closeIssue: func(_ context.Context, _ string, reason string, _ string, _ string) error {
+		closeIssueChecked: func(context.Context, string, string, beadslib.CloseIssueOptions) (beadslib.CloseIssueResult, error) {
 			closeCalled = true
-			gotReason = reason
-			return nil
+			return beadslib.CloseIssueResult{}, nil
 		},
 	}
 	store := newNativeDoltStoreForTest(storage)
 
-	if err := store.Close("gc-close"); err != nil {
-		t.Fatalf("Close: %v", err)
+	if err := store.Close("gc-close"); err == nil || !errors.Is(err, ErrMetadataParse) {
+		t.Fatalf("Close error = %v, want metadata parse refusal", err)
 	}
-	if !closeCalled {
-		t.Fatal("CloseIssue was not called")
-	}
-	if gotReason != "" {
-		t.Fatalf("Close reason = %q, want empty reason for malformed metadata", gotReason)
+	if closeCalled {
+		t.Fatal("CloseIssueChecked was called after lifecycle metadata could not be validated")
 	}
 }
 
@@ -732,8 +729,8 @@ func TestNativeDoltStoreCloseStoreWaitsForInFlightOperation(t *testing.T) {
 			<-release
 			return &beadslib.Issue{ID: "gc-open", Status: beadslib.StatusOpen}, nil
 		},
-		closeIssue: func(context.Context, string, string, string, string) error {
-			return nil
+		closeIssueChecked: func(context.Context, string, string, beadslib.CloseIssueOptions) (beadslib.CloseIssueResult, error) {
+			return beadslib.CloseIssueResult{}, nil
 		},
 		close: func() error {
 			close(closed)
@@ -781,9 +778,9 @@ func TestNativeDoltStoreReopenAlreadyOpenSkipsUpstreamCall(t *testing.T) {
 		getIssue: func(context.Context, string) (*beadslib.Issue, error) {
 			return &beadslib.Issue{ID: "gc-open", Status: beadslib.StatusOpen}, nil
 		},
-		reopenIssue: func(context.Context, string, string, string) error {
+		updateIssueChecked: func(context.Context, string, map[string]interface{}, string, beadslib.UpdateIssueOptions) error {
 			reopened = true
-			return errors.New("unexpected reopen")
+			return errors.New("unexpected checked reopen update")
 		},
 	}
 	store := newNativeDoltStoreForTest(storage)
@@ -792,7 +789,7 @@ func TestNativeDoltStoreReopenAlreadyOpenSkipsUpstreamCall(t *testing.T) {
 		t.Fatalf("Reopen(open): %v", err)
 	}
 	if reopened {
-		t.Fatal("Reopen(open) called upstream ReopenIssue")
+		t.Fatal("Reopen(open) called UpdateIssueChecked")
 	}
 }
 
@@ -1473,6 +1470,98 @@ func TestNativeDoltStoreTxCoalescesWritesIntoSingleCommit(t *testing.T) {
 	if gotMembership.Metadata["role"] != "member" {
 		t.Fatalf("membership metadata = %#v, want created-in-tx fields", gotMembership.Metadata)
 	}
+}
+
+func TestNativeDoltStoreTxSetMetadataBatchRejectsProtectedKeysAndRollsBack(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		key  string
+		want error
+	}{
+		{name: "decision frontier namespace", key: beadmeta.DecisionFrontierMetadataPrefix + "caller_forged", want: ErrDecisionFrontierMutationBlocked},
+		{name: "lifecycle transition head", key: beadmeta.LifecycleTransitionHeadMetadataKey, want: ErrLifecycleMutationBlocked},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, currentIssue, commitCount := newNativeDoltTxMetadataStoreForTest()
+			err := store.Tx("protected metadata rollback", func(tx Tx) error {
+				if err := tx.SetMetadataBatch("gc-tx-metadata", map[string]string{"prior_write": "must roll back"}); err != nil {
+					return err
+				}
+				return tx.SetMetadataBatch("gc-tx-metadata", map[string]string{tc.key: "forged"})
+			})
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("Tx protected metadata error = %v, want %v", err, tc.want)
+			}
+			if got := commitCount(); got != 0 {
+				t.Fatalf("commits = %d, want 0 after rejected protected metadata write", got)
+			}
+			metadata := map[string]string{}
+			if err := json.Unmarshal(currentIssue().Metadata, &metadata); err != nil {
+				t.Fatalf("unmarshal stored metadata: %v", err)
+			}
+			if metadata["initial"] != "yes" || metadata["prior_write"] != "" || metadata[tc.key] != "" {
+				t.Fatalf("metadata after rejected Tx = %#v, want original metadata with all tx writes rolled back", metadata)
+			}
+		})
+	}
+}
+
+func TestNativeDoltStoreTxSetMetadataBatchAllowsOrdinaryMetadata(t *testing.T) {
+	store, currentIssue, commitCount := newNativeDoltTxMetadataStoreForTest()
+	if err := store.Tx("ordinary metadata", func(tx Tx) error {
+		return tx.SetMetadataBatch("gc-tx-metadata", map[string]string{"phase": "committed"})
+	}); err != nil {
+		t.Fatalf("Tx ordinary SetMetadataBatch: %v", err)
+	}
+	if got := commitCount(); got != 1 {
+		t.Fatalf("commits = %d, want 1", got)
+	}
+	metadata := map[string]string{}
+	if err := json.Unmarshal(currentIssue().Metadata, &metadata); err != nil {
+		t.Fatalf("unmarshal stored metadata: %v", err)
+	}
+	if metadata["initial"] != "yes" || metadata["phase"] != "committed" {
+		t.Fatalf("metadata after Tx = %#v, want initial=yes and phase=committed", metadata)
+	}
+}
+
+func newNativeDoltTxMetadataStoreForTest() (*NativeDoltStore, func() *beadslib.Issue, func() int) {
+	issue := &beadslib.Issue{
+		ID:        "gc-tx-metadata",
+		Title:     "transaction metadata",
+		Status:    beadslib.StatusOpen,
+		IssueType: beadslib.TypeTask,
+		Metadata:  json.RawMessage(`{"initial":"yes"}`),
+	}
+	commits := 0
+	storage := &nativeDoltStorageSpy{}
+	storage.getIssue = func(_ context.Context, id string) (*beadslib.Issue, error) {
+		if id != issue.ID {
+			return nil, ErrNotFound
+		}
+		return cloneNativeIssueForTest(issue), nil
+	}
+	storage.updateIssue = func(_ context.Context, id string, updates map[string]interface{}, _ string) error {
+		if id != issue.ID {
+			return ErrNotFound
+		}
+		metadata, ok := updates["metadata"].(json.RawMessage)
+		if !ok {
+			return fmt.Errorf("metadata update had type %T, want json.RawMessage", updates["metadata"])
+		}
+		issue.Metadata = append(json.RawMessage(nil), metadata...)
+		return nil
+	}
+	storage.runInTransaction = func(_ context.Context, _ string, fn func(beadslib.Transaction) error) error {
+		before := cloneNativeIssueForTest(issue)
+		if err := fn(nativeDoltTransactionForTest{storage: storage}); err != nil {
+			issue = before
+			return err
+		}
+		commits++
+		return nil
+	}
+	return newNativeDoltStoreForTest(storage), func() *beadslib.Issue { return issue }, func() int { return commits }
 }
 
 // TestNativeDoltStoreTxRollsBackOnError verifies the coalesced transaction is
@@ -2569,6 +2658,7 @@ type nativeDoltTransactionTestStorage interface {
 	AddDependency(context.Context, *beadslib.Dependency, string) error
 	RemoveDependency(context.Context, string, string, string) error
 	GetDependencyRecords(context.Context, string) ([]*beadslib.Dependency, error)
+	GetDependentRecordsForIssues(context.Context, []string) (map[string][]*beadslib.Dependency, error)
 }
 
 type nativeDoltTransactionForTest struct {
@@ -2590,6 +2680,10 @@ func (tx nativeDoltTransactionForTest) CloseIssue(ctx context.Context, id, reaso
 
 func (tx nativeDoltTransactionForTest) DeleteIssue(ctx context.Context, id string) error {
 	return tx.storage.DeleteIssue(ctx, id)
+}
+
+func (tx nativeDoltTransactionForTest) GetDependentRecordsForIssues(ctx context.Context, ids []string) (map[string][]*beadslib.Dependency, error) {
+	return tx.storage.GetDependentRecordsForIssues(ctx, ids)
 }
 
 func (tx nativeDoltTransactionForTest) GetIssue(ctx context.Context, id string) (*beadslib.Issue, error) {
@@ -2622,28 +2716,30 @@ func (tx nativeDoltTransactionForTest) GetDependencyRecords(ctx context.Context,
 
 type nativeDoltStorageSpy struct {
 	beadslib.Storage
-	createIssue                 func(context.Context, *beadslib.Issue, string) error
-	createIssues                func(context.Context, []*beadslib.Issue, string) error
-	getIssue                    func(context.Context, string) (*beadslib.Issue, error)
-	updateIssue                 func(context.Context, string, map[string]interface{}, string) error
-	updateIssueChecked          func(context.Context, string, map[string]interface{}, string, beadslib.UpdateIssueOptions) error
-	runInTransaction            func(context.Context, string, func(beadslib.Transaction) error) error
-	reopenIssue                 func(context.Context, string, string, string) error
-	closeIssue                  func(context.Context, string, string, string, string) error
-	closeIssueChecked           func(context.Context, string, string, beadslib.CloseIssueOptions) (beadslib.CloseIssueResult, error)
-	deleteIssue                 func(context.Context, string) error
-	searchIssues                func(context.Context, string, beadslib.IssueFilter) ([]*beadslib.Issue, error)
-	countIssues                 func(context.Context, string, beadslib.IssueFilter) (int64, error)
-	getReadyWork                func(context.Context, beadslib.WorkFilter) ([]*beadslib.Issue, error)
-	addLabel                    func(context.Context, string, string, string) error
-	removeLabel                 func(context.Context, string, string, string) error
-	addDependency               func(context.Context, *beadslib.Dependency, string) error
-	removeDependency            func(context.Context, string, string, string) error
-	getDependencyRecords        func(context.Context, string) ([]*beadslib.Dependency, error)
-	getDependenciesWithMetadata func(context.Context, string) ([]*beadslib.IssueWithDependencyMetadata, error)
-	getDependentsWithMetadata   func(context.Context, string) ([]*beadslib.IssueWithDependencyMetadata, error)
-	getConfig                   func(context.Context, string) (string, error)
-	close                       func() error
+	createIssue                  func(context.Context, *beadslib.Issue, string) error
+	createIssues                 func(context.Context, []*beadslib.Issue, string) error
+	getIssue                     func(context.Context, string) (*beadslib.Issue, error)
+	updateIssue                  func(context.Context, string, map[string]interface{}, string) error
+	updateIssueChecked           func(context.Context, string, map[string]interface{}, string, beadslib.UpdateIssueOptions) error
+	runInTransaction             func(context.Context, string, func(beadslib.Transaction) error) error
+	issueLifecycle               func() (beadops.Lifecycle, error)
+	reopenIssue                  func(context.Context, string, string, string) error
+	closeIssue                   func(context.Context, string, string, string, string) error
+	closeIssueChecked            func(context.Context, string, string, beadslib.CloseIssueOptions) (beadslib.CloseIssueResult, error)
+	deleteIssue                  func(context.Context, string) error
+	searchIssues                 func(context.Context, string, beadslib.IssueFilter) ([]*beadslib.Issue, error)
+	countIssues                  func(context.Context, string, beadslib.IssueFilter) (int64, error)
+	getReadyWork                 func(context.Context, beadslib.WorkFilter) ([]*beadslib.Issue, error)
+	addLabel                     func(context.Context, string, string, string) error
+	removeLabel                  func(context.Context, string, string, string) error
+	addDependency                func(context.Context, *beadslib.Dependency, string) error
+	removeDependency             func(context.Context, string, string, string) error
+	getDependencyRecords         func(context.Context, string) ([]*beadslib.Dependency, error)
+	getDependenciesWithMetadata  func(context.Context, string) ([]*beadslib.IssueWithDependencyMetadata, error)
+	getDependentsWithMetadata    func(context.Context, string) ([]*beadslib.IssueWithDependencyMetadata, error)
+	getDependentRecordsForIssues func(context.Context, []string) (map[string][]*beadslib.Dependency, error)
+	getConfig                    func(context.Context, string) (string, error)
+	close                        func() error
 }
 
 func (s *nativeDoltStorageSpy) CreateIssue(ctx context.Context, issue *beadslib.Issue, actor string) error {
@@ -2693,6 +2789,13 @@ func (s *nativeDoltStorageSpy) RunInTransaction(ctx context.Context, commitMsg s
 	return fn(nativeDoltTransactionForTest{storage: s})
 }
 
+func (s *nativeDoltStorageSpy) IssueLifecycle() (beadops.Lifecycle, error) {
+	if s.issueLifecycle == nil {
+		return nil, errors.New("IssueLifecycle test seam not configured")
+	}
+	return s.issueLifecycle()
+}
+
 func (s *nativeDoltStorageSpy) ReopenIssue(ctx context.Context, id string, reason string, actor string) error {
 	if s.reopenIssue == nil {
 		return nil
@@ -2719,6 +2822,13 @@ func (s *nativeDoltStorageSpy) DeleteIssue(ctx context.Context, id string) error
 		return nil
 	}
 	return s.deleteIssue(ctx, id)
+}
+
+func (s *nativeDoltStorageSpy) GetDependentRecordsForIssues(ctx context.Context, ids []string) (map[string][]*beadslib.Dependency, error) {
+	if s.getDependentRecordsForIssues != nil {
+		return s.getDependentRecordsForIssues(ctx, ids)
+	}
+	return map[string][]*beadslib.Dependency{}, nil
 }
 
 func (s *nativeDoltStorageSpy) SearchIssues(ctx context.Context, query string, filter beadslib.IssueFilter) ([]*beadslib.Issue, error) {
@@ -2821,6 +2931,40 @@ type nativeDoltMemStorage struct {
 
 func newNativeDoltMemStorage() *nativeDoltMemStorage {
 	return &nativeDoltMemStorage{store: NewMemStore()}
+}
+
+// IssueLifecycle supplies the public lifecycle role needed by reopenOnce in
+// tests that use this in-memory native-storage adapter. Production storage
+// provides the full implementation; this fixture implements only Reopen,
+// which is the operation exercised by the cache notification regression.
+func (s *nativeDoltMemStorage) IssueLifecycle() (beadops.Lifecycle, error) {
+	return nativeDoltMemLifecycle{Lifecycle: nil, storage: s}, nil
+}
+
+type nativeDoltMemLifecycle struct {
+	beadops.Lifecycle
+	storage *nativeDoltMemStorage
+}
+
+func (l nativeDoltMemLifecycle) Reopen(ctx context.Context, request beadops.ReopenRequest) (beadops.ReopenResult, error) {
+	current, err := l.storage.GetIssue(ctx, request.IssueID)
+	if err != nil || current == nil {
+		return beadops.ReopenResult{}, err
+	}
+	if request.ExpectedVersion != nil && current.RowVersion != *request.ExpectedVersion {
+		return beadops.ReopenResult{}, beadops.ErrVersionMismatch
+	}
+	if current.Status != beadslib.StatusClosed {
+		return beadops.ReopenResult{Issue: current}, nil
+	}
+	if err := l.storage.store.Reopen(request.IssueID); err != nil {
+		return beadops.ReopenResult{}, err
+	}
+	reopened, err := l.storage.GetIssue(ctx, request.IssueID)
+	if err != nil {
+		return beadops.ReopenResult{}, err
+	}
+	return beadops.ReopenResult{Issue: reopened, Changed: true}, nil
 }
 
 func (s *nativeDoltMemStorage) RunInTransaction(_ context.Context, _ string, fn func(beadslib.Transaction) error) error {
@@ -2933,7 +3077,27 @@ func (s *nativeDoltMemStorage) CloseIssueChecked(
 }
 
 func (s *nativeDoltMemStorage) DeleteIssue(_ context.Context, id string) error {
-	return s.store.Delete(id)
+	// Model the pinned backend's transactional cascade, not MemStore's
+	// legacy unconditional dangling-edge deletion.
+	current, err := s.store.Get(id)
+	if err != nil {
+		return err
+	}
+	return s.store.DeleteIfMatch(id, current.Revision)
+}
+
+func (s *nativeDoltMemStorage) GetDependentRecordsForIssues(_ context.Context, ids []string) (map[string][]*beadslib.Dependency, error) {
+	result := make(map[string][]*beadslib.Dependency, len(ids))
+	for _, id := range ids {
+		deps, err := s.store.DepList(id, "up")
+		if err != nil {
+			return nil, err
+		}
+		for _, dep := range deps {
+			result[id] = append(result[id], &beadslib.Dependency{IssueID: dep.IssueID, DependsOnID: dep.DependsOnID, Type: beadslib.DependencyType(dep.Type)})
+		}
+	}
+	return result, nil
 }
 
 func nativeDoltMemCheckedError(err error) error {
@@ -3152,6 +3316,11 @@ func (s *nativeDoltFailingCloseStorage) CloseIssue(ctx context.Context, id, reas
 func (s *nativeDoltCloseCapturingStorage) CloseIssue(ctx context.Context, id string, reason string, actor string, session string) error {
 	s.closeReasons = append(s.closeReasons, reason)
 	return s.nativeDoltMemStorage.CloseIssue(ctx, id, reason, actor, session)
+}
+
+func (s *nativeDoltCloseCapturingStorage) CloseIssueChecked(ctx context.Context, id string, actor string, opts beadslib.CloseIssueOptions) (beadslib.CloseIssueResult, error) {
+	s.closeReasons = append(s.closeReasons, opts.Reason)
+	return s.nativeDoltMemStorage.CloseIssueChecked(ctx, id, actor, opts)
 }
 
 func (s *nativeDoltMemStorage) issueForDependency(id string) *beadslib.Issue {
@@ -3521,6 +3690,9 @@ func TestNativeDoltStoreReadyWorkOutcomeFilterToleratesOpenGates(t *testing.T) {
 // The start-time shell heal (INSERT IGNORE into custom_types) is covered end to
 // end by TestEnsureBdRuntimeCustomTypesHealsUpgradedNativeStore in cmd/gc.
 func TestNativeDoltStoreCustomTypesComeFromTheDatabaseNotYAML(t *testing.T) {
+	// Bazel passes a hermetic HOME path, but that directory is not itself a
+	// runfile. Give embedded Dolt an existing private home for its local config.
+	t.Setenv("HOME", t.TempDir())
 	ctx := context.Background()
 	beadsDir := filepath.Join(t.TempDir(), ".beads")
 	storage, err := beadslib.OpenBestAvailable(ctx, beadsDir)

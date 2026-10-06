@@ -86,8 +86,9 @@ func TestPassthroughEnvOmitsUnset(t *testing.T) {
 // os.Environ() on the subprocess/ACP paths. The neighboring GC_ key proves the
 // exclusion is by exact name — a prefix match would strand the identity anchors
 // and the Dolt vars agents need.
-func TestPassthroughEnvPinsControllerTokenEmpty(t *testing.T) {
+func TestPassthroughEnvPinsControllerOnlyValuesEmpty(t *testing.T) {
 	t.Setenv(convergence.TokenEnvVar, "super-secret-controller-token")
+	t.Setenv(hostBeadsPermitAuthorityDirEnv, "/run/gc/protected-authority")
 	t.Setenv("GC_BEADS", "file")
 
 	got := passthroughEnv()
@@ -98,8 +99,72 @@ func TestPassthroughEnvPinsControllerTokenEmpty(t *testing.T) {
 	} else if val != "" {
 		t.Errorf("passthroughEnv()[%s] = %q, want empty", convergence.TokenEnvVar, val)
 	}
+	if val, ok := got[hostBeadsPermitAuthorityDirEnv]; !ok {
+		t.Errorf("passthroughEnv() omits %s; want present and empty", hostBeadsPermitAuthorityDirEnv)
+	} else if val != "" {
+		t.Errorf("passthroughEnv()[%s] = %q, want empty", hostBeadsPermitAuthorityDirEnv, val)
+	}
 	if got["GC_BEADS"] != "file" {
 		t.Errorf("passthroughEnv()[GC_BEADS] = %q, want %q (the exclusion must be by exact name)", got["GC_BEADS"], "file")
+	}
+}
+
+// A non-GC_-prefixed var is invisible to agent sessions by default — the
+// prefix sweep alone would never forward it, and nothing else short of
+// [workspace.env] does either.
+func TestPassthroughEnvOmitsNonGCVarWithoutOptIn(t *testing.T) {
+	t.Setenv("EXAMPLE_TOOL_HOME", "/opt/example-tool")
+
+	got := passthroughEnv()
+
+	if _, ok := got["EXAMPLE_TOOL_HOME"]; ok {
+		t.Error("passthroughEnv() forwarded a non-GC_ var with no GC_SUPERVISOR_ENV opt-in")
+	}
+}
+
+// Naming a non-GC_ var in GC_SUPERVISOR_ENV is the same opt-in
+// supervisorServiceExtraEnv already uses to widen the persisted service-file
+// env — this pins that it also reaches the session sweep, so one list opts a
+// var into both, rather than needing two lists kept in sync by hand.
+func TestPassthroughEnvHonorsSupervisorEnvOptIn(t *testing.T) {
+	t.Setenv("GC_SUPERVISOR_ENV", "EXAMPLE_TOOL_HOME")
+	t.Setenv("EXAMPLE_TOOL_HOME", "/opt/example-tool")
+
+	got := passthroughEnv()
+
+	if got["EXAMPLE_TOOL_HOME"] != "/opt/example-tool" {
+		t.Errorf("passthroughEnv()[EXAMPLE_TOOL_HOME] = %q, want the opted-in value", got["EXAMPLE_TOOL_HOME"])
+	}
+}
+
+// GC_SUPERVISOR_ENV accepts comma or space separated names (matching
+// supervisorServiceExplicitEnvKeys' parser) and an unset value for an opted-in
+// key is still omitted, same as the unconditional GC_ sweep.
+func TestPassthroughEnvSupervisorEnvOptInCommaSeparatedOmitsUnset(t *testing.T) {
+	t.Setenv("GC_SUPERVISOR_ENV", "EXAMPLE_TOOL_HOME,CUSTOM_TOKEN")
+	t.Setenv("EXAMPLE_TOOL_HOME", "/opt/example-tool")
+
+	got := passthroughEnv()
+
+	if got["EXAMPLE_TOOL_HOME"] != "/opt/example-tool" {
+		t.Errorf("passthroughEnv()[EXAMPLE_TOOL_HOME] = %q, want the opted-in value", got["EXAMPLE_TOOL_HOME"])
+	}
+	if _, ok := got["CUSTOM_TOKEN"]; ok {
+		t.Error("passthroughEnv() should omit an opted-in key that is unset in the environment")
+	}
+}
+
+// The controller token must stay withheld even if an operator names it in
+// GC_SUPERVISOR_ENV, deliberately or by a copy-paste mistake — the opt-in
+// widens what a non-GC_ var can reach, not a way around controllerOnlyEnvKeys.
+func TestPassthroughEnvSupervisorEnvOptInCannotUnpinControllerToken(t *testing.T) {
+	t.Setenv("GC_SUPERVISOR_ENV", convergence.TokenEnvVar)
+	t.Setenv(convergence.TokenEnvVar, "super-secret-controller-token")
+
+	got := passthroughEnv()
+
+	if val, ok := got[convergence.TokenEnvVar]; !ok || val != "" {
+		t.Errorf("passthroughEnv()[%s] = (%q, present=%v), want (\"\", true) even when named in GC_SUPERVISOR_ENV", convergence.TokenEnvVar, val, ok)
 	}
 }
 

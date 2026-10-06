@@ -519,6 +519,7 @@ func deriveRunStepStatus(b beads.Bead) RunStepStatus {
 // carries the controller's human-readable error (gc.controller_error) when
 // present, else a close-reason marker.
 func runLastError(status RunStatus, root beads.Bead) *RunLastError {
+	root = beads.PublicBead(root)
 	if status != RunStatusFailed && status != RunStatusCanceled {
 		return nil
 	}
@@ -654,6 +655,7 @@ func allRunLanes(summary runproj.RunSummary) []runproj.RunLane {
 }
 
 func runStepTitle(b beads.Bead) string {
+	b = beads.PublicBead(b)
 	if t := strings.TrimSpace(b.Title); t != "" {
 		return t
 	}

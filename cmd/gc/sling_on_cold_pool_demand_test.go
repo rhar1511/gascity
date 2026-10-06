@@ -51,7 +51,10 @@ func TestOnFormulaLegacyColdPoolSeesDemand(t *testing.T) {
 	}
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
 	store := newSlingTestStore()
-	deps.Store = store
+	// Use the resolved backing here because this unit fixture's convenience
+	// wrapper models synthetic-bead reads but does not implement the optional
+	// ConditionalWriter capability used by built-in routing.
+	deps.Store = store.Store
 	// The bead lives in the saitoc rig store, reused below as the rig store for
 	// the scale_check probe; align StoreRef so the HQ->rig-pool route is allowed
 	// and the bead ID prefix matches the rig prefix (cross-rig guard).

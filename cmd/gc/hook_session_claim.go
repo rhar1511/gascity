@@ -47,12 +47,12 @@ func sessionCurrentClaimFrontDoor() (*session.Store, error) {
 // publishHookClaimRunMap, which stays a file-based sidecar for exactly that
 // reason). SetCurrentClaim also compare-and-skips, so the per-tick adoption
 // re-run issues no write once the value is current.
-func hookStampSessionCurrentClaim(sessionID, beadID string) error {
+func hookStampSessionCurrentClaim(sessionID, beadID, claimGeneration string) error {
 	sessFront, err := sessionCurrentClaimFrontDoor()
 	if err != nil {
 		return err
 	}
-	_, err = sessFront.SetCurrentClaim(sessionID, beadID)
+	_, err = sessFront.SetCurrentClaimForGeneration(sessionID, beadID, claimGeneration)
 	return err
 }
 

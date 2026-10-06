@@ -401,6 +401,10 @@ var (
 	// ErrPendingInteraction reports that the session is blocked on a pending
 	// approval or question and cannot accept a new user turn.
 	ErrPendingInteraction = errors.New("session has a pending interaction")
+	// ErrSessionKillPending reports that a `gc session kill` is tearing the
+	// session's runtime down (see KillPendingReason). The caller should retry
+	// once the kill completes and the lifecycle rules have taken over again.
+	ErrSessionKillPending = errors.New("session is being killed")
 )
 
 type sessionMutationLockEntry struct {
@@ -425,6 +429,12 @@ func withSessionMutationLock(id string, fn func() error) error {
 }
 
 func acquireSessionMutationLock(id string) *sessionMutationLockEntry {
+	lock := referenceSessionMutationLock(id)
+	lock.mu.Lock()
+	return lock
+}
+
+func referenceSessionMutationLock(id string) *sessionMutationLockEntry {
 	sessionMutationLocksMu.Lock()
 	lock := sessionMutationLocks[id]
 	if lock == nil {
@@ -434,19 +444,33 @@ func acquireSessionMutationLock(id string) *sessionMutationLockEntry {
 	lock.refs++
 	sessionMutationLocksMu.Unlock()
 
-	lock.mu.Lock()
 	return lock
 }
 
 func releaseSessionMutationLock(id string, lock *sessionMutationLockEntry) {
 	lock.mu.Unlock()
+	unreferenceSessionMutationLock(id, lock)
+}
 
+func unreferenceSessionMutationLock(id string, lock *sessionMutationLockEntry) {
 	sessionMutationLocksMu.Lock()
 	lock.refs--
 	if lock.refs == 0 {
 		delete(sessionMutationLocks, id)
 	}
 	sessionMutationLocksMu.Unlock()
+}
+
+// tryWithSessionMutationLock defers background reconciliation rather than
+// waiting for an interactive attachment or an in-flight runtime start.
+func tryWithSessionMutationLock(id string, fn func() error) (bool, error) {
+	lock := referenceSessionMutationLock(id)
+	if !lock.mu.TryLock() {
+		unreferenceSessionMutationLock(id, lock)
+		return false, nil
+	}
+	defer releaseSessionMutationLock(id, lock)
+	return true, fn()
 }
 
 func sessionName(id string, b beads.Bead) string {
@@ -524,6 +548,14 @@ func (m *Manager) commitPendingContinuationReset(id string, b beads.Bead) (int, 
 }
 
 func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config) error {
+	// A kill-fenced row reads asleep while its runtime is still being torn
+	// down. Treating that runtime as live would flip the row back to active
+	// (confirmLiveSessionState) and erase the fence, so once the Stop landed the
+	// row would claim a live runtime that is gone; delivering into it would lose
+	// the input with the process. Starting a replacement would race the kill.
+	if KillPendingMetadata(b.Metadata["state"], b.Metadata["state_reason"], b.Metadata["sleep_reason"], b.Metadata["slept_at"], m.now()) {
+		return fmt.Errorf("%w: %s", ErrSessionKillPending, id)
+	}
 	transport, transportVerified := m.transportForBead(b, sessName)
 	unroute := m.routeACPIfNeeded(b.Metadata["provider"], transport, sessName)
 	if State(b.Metadata["state"]) != StateSuspended && m.sp.IsRunning(sessName) {
@@ -587,7 +619,10 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 		return fmt.Errorf("pre-start orphan cleanup: %w", orphanErr)
 	}
 	if err := m.sp.Start(ctx, sessName, cfg); err != nil {
-		if errors.Is(err, runtime.ErrSessionDiedDuringStartup) {
+		// A capacity refusal is also a startup death, but the endpoint refused
+		// the launch: that says nothing about the resume key, so it falls
+		// through to the plain failure below instead of the stale-key recovery.
+		if errors.Is(err, runtime.ErrSessionDiedDuringStartup) && !runtime.IsProviderCapacity(err) {
 			retried, retryErr := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, unroute)
 			if retryErr != nil {
 				return retryErr
@@ -715,7 +750,9 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b bea
 	}
 	if err := m.sp.Start(ctx, sessName, cfg); err != nil {
 		switch {
-		case errors.Is(err, runtime.ErrSessionDiedDuringStartup):
+		// A capacity refusal says nothing about the resume key; it takes the
+		// plain failure path, not the stale-key recovery (see ensureRunning).
+		case errors.Is(err, runtime.ErrSessionDiedDuringStartup) && !runtime.IsProviderCapacity(err):
 			retried, retryErr := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, unroute)
 			if retryErr != nil {
 				return retryErr
@@ -1233,7 +1270,11 @@ func (m *Manager) TranscriptPathClassified(id string, searchPaths []string) (str
 		searchPaths = sessionlog.DefaultSearchPaths()
 	}
 	if path := workertranscript.DiscoverKeyedPath(searchPaths, provider, workDir, b.Metadata["session_key"]); path != "" {
-		return path, TranscriptFound, nil
+		validated, err := sessionlog.ValidateTranscriptPath(provider, searchPaths, path)
+		if err != nil {
+			return "", TranscriptAbsent, nil
+		}
+		return validated, TranscriptFound, nil
 	}
 	// zcode carries no session_key — no session-id flag, no hook plugin — so
 	// the keyed lookup above can never hit for it and the ambiguity guard below
@@ -1248,7 +1289,11 @@ func (m *Manager) TranscriptPathClassified(id string, searchPaths []string) (str
 		b.ID,
 		b.Metadata["continuation_epoch"],
 	); path != "" {
-		return path, TranscriptFound, nil
+		validated, err := sessionlog.ValidateTranscriptPath(provider, searchPaths, path)
+		if err != nil {
+			return "", TranscriptAbsent, nil
+		}
+		return validated, TranscriptFound, nil
 	}
 
 	sameWorkDirSessions, err := m.sameWorkDirSessionBeads(b, provider, workDir)
@@ -1261,14 +1306,22 @@ func (m *Manager) TranscriptPathClassified(id string, searchPaths []string) (str
 			sameWorkDirInfos = append(sameWorkDirInfos, infoFromPersistedBead(s))
 		}
 		if path := ResolveCodexTranscriptBySessionOrder(searchPaths, provider, workDir, b.ID, sameWorkDirInfos); path != "" {
-			return path, TranscriptFound, nil
+			validated, err := sessionlog.ValidateTranscriptPath(provider, searchPaths, path)
+			if err != nil {
+				return "", TranscriptAbsent, nil
+			}
+			return validated, TranscriptFound, nil
 		}
 		// Without a stable session key, multiple sessions sharing the same
 		// workdir cannot be mapped safely to a single transcript.
 		return "", TranscriptAmbiguous, nil
 	}
 	if path := workertranscript.DiscoverPath(searchPaths, provider, workDir, ""); path != "" {
-		return path, TranscriptFound, nil
+		validated, err := sessionlog.ValidateTranscriptPath(provider, searchPaths, path)
+		if err != nil {
+			return "", TranscriptAbsent, nil
+		}
+		return validated, TranscriptFound, nil
 	}
 	return "", TranscriptAbsent, nil
 }

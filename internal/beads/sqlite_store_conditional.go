@@ -20,12 +20,23 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
-var _ ConditionalWriter = (*SQLiteStore)(nil)
+var (
+	_ ConditionalWriter                     = (*SQLiteStore)(nil)
+	_ RevisionTransitionWriter              = (*SQLiteStore)(nil)
+	_ DecisionFrontierRecordWriter          = (*SQLiteStore)(nil)
+	_ AtomicConditionalCloser               = (*SQLiteStore)(nil)
+	_ AtomicConditionalCloserHandleProvider = (*SQLiteStore)(nil)
+)
 
 // UpdateIfMatch applies opts only when the stored revision matches.
 func (s *SQLiteStore) UpdateIfMatch(id string, expectedRevision int64, opts UpdateOpts) error {
+	if err := rejectAttemptEvidencePayloadMetadataWrite(opts.Metadata); err != nil {
+		return err
+	}
 	if err := s.ensureOpen(); err != nil {
 		return err
 	}
@@ -33,6 +44,12 @@ func (s *SQLiteStore) UpdateIfMatch(id string, expectedRevision int64, opts Upda
 		return ErrEmptyConditionalUpdate
 	}
 	return s.conditionalWrite(id, expectedRevision, func(ctx context.Context, tx *sql.Tx, b Bead) error {
+		if err := protectAttemptEvidenceUpdate(b, opts); err != nil {
+			return err
+		}
+		if err := ValidateLifecycleMutation(b, opts); err != nil {
+			return fmt.Errorf("conditional update lifecycle bead %q: %w", id, err)
+		}
 		next := applySQLiteUpdateOpts(b, opts)
 		next.UpdatedAt = time.Now()
 		return s.upsertBeadTx(ctx, tx, next)
@@ -45,10 +62,62 @@ func (s *SQLiteStore) CloseIfMatch(id string, expectedRevision int64) error {
 		return err
 	}
 	return s.conditionalWrite(id, expectedRevision, func(ctx context.Context, tx *sql.Tx, b Bead) error {
+		if HasLifecycleRecoveryIntent(b) {
+			return ErrLifecycleIntentImmutable
+		}
+		if err := protectAttemptEvidencePayloadMutation(b); err != nil {
+			return err
+		}
+		if err := ValidateDecisionFrontierClose(b); err != nil {
+			return err
+		}
 		b.Status = "closed"
 		b.UpdatedAt = time.Now()
 		return s.upsertBeadTx(ctx, tx, b)
 	})
+}
+
+// CloseWithMetadataIfMatch merges metadata into id and closes it, but only
+// while the stored revision still equals expectedRevision. Both changes are one
+// upsert inside the fence's own transaction, so they commit together or not at
+// all, and no writer can land between them. A losing fence returns
+// *PreconditionFailedError and leaves the row untouched. It returns the
+// committed row.
+func (s *SQLiteStore) CloseWithMetadataIfMatch(id string, expectedRevision int64, metadata map[string]string) (Bead, error) {
+	if err := s.ensureOpen(); err != nil {
+		return Bead{}, err
+	}
+	closedStatus := "closed"
+	var closed Bead
+	err := s.conditionalWrite(id, expectedRevision, func(ctx context.Context, tx *sql.Tx, b Bead) error {
+		next := applySQLiteUpdateOpts(b, UpdateOpts{Status: &closedStatus, Metadata: metadata})
+		next.UpdatedAt = time.Now()
+		if err := s.upsertBeadTx(ctx, tx, next); err != nil {
+			return err
+		}
+		stored, err := s.getTx(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		closed = stored
+		return nil
+	})
+	if err != nil {
+		return Bead{}, err
+	}
+	return closed, nil
+}
+
+// AtomicConditionalCloserHandle reports the atomic terminal close only for a
+// layout that carries the revision column. AtomicConditionalCloserFor is a
+// hard capability gate, and a legacy layout without the column cannot fence at
+// all (conditionalWrite refuses it), so discovery must answer no there rather
+// than hand out a closer that always fails.
+func (s *SQLiteStore) AtomicConditionalCloserHandle() (AtomicConditionalCloser, bool) {
+	if s == nil || !s.hasRevisionColumn {
+		return nil, false
+	}
+	return s, true
 }
 
 // DeleteIfMatch deletes the bead only when the stored revision matches.
@@ -56,7 +125,19 @@ func (s *SQLiteStore) DeleteIfMatch(id string, expectedRevision int64) error {
 	if err := s.ensureOpen(); err != nil {
 		return err
 	}
-	return s.conditionalWrite(id, expectedRevision, func(ctx context.Context, tx *sql.Tx, _ Bead) error {
+	return s.conditionalWrite(id, expectedRevision, func(ctx context.Context, tx *sql.Tx, current Bead) error {
+		if err := ValidateDecisionFrontierDelete(current); err != nil {
+			return err
+		}
+		if err := protectRetainedEvidenceDelete(current); err != nil {
+			return err
+		}
+		if err := ValidateLifecycleDelete(current); err != nil {
+			return err
+		}
+		if err := s.guardAndFenceIncomingDependenciesTx(ctx, tx, []string{id}, []string{id}, &current); err != nil {
+			return fmt.Errorf("deleting bead %q incoming dependencies: %w", id, err)
+		}
 		if _, err := tx.Exec(`DELETE FROM beads WHERE id=?`, id); err != nil {
 			return fmt.Errorf("deleting bead %q: %w", id, err)
 		}
@@ -77,6 +158,12 @@ func (s *SQLiteStore) DeleteIfMatch(id string, expectedRevision int64) error {
 // expected. A genuine mismatch is (false, nil) — the caller lost the race —
 // distinct from an error.
 func (s *SQLiteStore) CompareAndSetMetadataKey(id, key, expected, next string) (bool, error) {
+	if isDecisionFrontierControlKey(key) {
+		return false, ErrDecisionFrontierMutationBlocked
+	}
+	if err := rejectAttemptEvidencePayloadMetadataKeyWrite(key); err != nil {
+		return false, err
+	}
 	if err := s.ensureOpen(); err != nil {
 		return false, err
 	}
@@ -99,8 +186,17 @@ func (s *SQLiteStore) CompareAndSetMetadataKey(id, key, expected, next string) (
 			}
 			return err
 		}
+		if IsDecisionFrontierRecord(b) {
+			return ErrDecisionFrontierMutationBlocked
+		}
+		if err := protectAttemptEvidenceRecordMutation(b); err != nil {
+			return err
+		}
 		if b.Metadata[key] != expected {
 			return tx.Commit() // genuine mismatch: caller lost, not an error
+		}
+		if err := ValidateLifecycleMutation(b, UpdateOpts{Metadata: map[string]string{key: next}}); err != nil {
+			return err
 		}
 		if b.Metadata == nil {
 			b.Metadata = make(map[string]string, 1)
@@ -120,6 +216,191 @@ func (s *SQLiteStore) CompareAndSetMetadataKey(id, key, expected, next string) (
 		return false, err
 	}
 	return swapped, nil
+}
+
+// CreateDecisionFrontierRecord is implemented in sqlite_store.go; this
+// compile-time assertion pins both halves of the trusted capability.
+
+// CompareAndSetDecisionFrontierRecordMetadataKey advances only an allowed
+// controller-owned record field inside one SQLite transaction.
+func (s *SQLiteStore) CompareAndSetDecisionFrontierRecordMetadataKey(id, key, expected, next string) (bool, error) {
+	if err := s.ensureOpen(); err != nil {
+		return false, err
+	}
+	if !s.hasRevisionColumn {
+		return false, ErrConditionalWriteUnsupported
+	}
+	swapped := false
+	err := retryOnBusy(func() error {
+		swapped = false
+		ctx := context.Background()
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("sqlite decision-record compare-and-set: begin tx: %w", err)
+		}
+		defer tx.Rollback() //nolint:errcheck
+		b, err := s.getTx(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		if b.Metadata[key] != expected {
+			return tx.Commit()
+		}
+		if err := validateDecisionFrontierRecordCAS(b, key, expected, next); err != nil {
+			return err
+		}
+		if b.Metadata == nil {
+			b.Metadata = make(map[string]string, 1)
+		}
+		b.Metadata[key] = next
+		b.UpdatedAt = time.Now()
+		if err := s.upsertBeadTx(ctx, tx, b); err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		swapped = true
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return swapped, nil
+}
+
+// EnsureDecisionFrontierLink adds only a relationship authorized by the
+// immutable endpoint documents. The records and edge change share one SQLite
+// transaction, and exact retries are no-ops.
+func (s *SQLiteStore) EnsureDecisionFrontierLink(sourceID, targetID, depType string) error {
+	if err := s.ensureOpen(); err != nil {
+		return err
+	}
+	if !s.hasRevisionColumn {
+		return ErrConditionalWriteUnsupported
+	}
+	return retryOnBusy(func() error {
+		ctx := context.Background()
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("sqlite decision-frontier link: begin tx: %w", err)
+		}
+		defer tx.Rollback() //nolint:errcheck
+		source, err := s.getTx(ctx, tx, sourceID)
+		if err != nil {
+			return fmt.Errorf("decision-frontier link source %q: %w", sourceID, err)
+		}
+		target, err := s.getTx(ctx, tx, targetID)
+		if err != nil {
+			return fmt.Errorf("decision-frontier link target %q: %w", targetID, err)
+		}
+		sourceDoc, _, err := decisionFrontierLinkRecord(source)
+		if err != nil {
+			return err
+		}
+		mapBead := target
+		if targetID != sourceDoc.MapID {
+			mapBead, err = s.getTx(ctx, tx, sourceDoc.MapID)
+			if err != nil {
+				return fmt.Errorf("decision-frontier link map %q: %w", sourceDoc.MapID, err)
+			}
+		}
+		if err := validateDecisionFrontierLink(source, target, mapBead, depType); err != nil {
+			return err
+		}
+		existingType, exists, err := s.dependencyStateTx(ctx, tx, sourceID, targetID)
+		if err != nil {
+			return err
+		}
+		metadataMatches, err := s.graphEdgeMetadataMatchesTx(ctx, tx, sourceID, targetID, depType, "")
+		if err != nil {
+			return err
+		}
+		if !metadataMatches {
+			return ErrDecisionFrontierLinkConflict
+		}
+		if exists {
+			if existingType != depType {
+				return ErrDecisionFrontierLinkConflict
+			}
+			return tx.Commit()
+		}
+		if err := s.depAddInitialTx(ctx, tx, sourceID, targetID, depType); err != nil {
+			return err
+		}
+		if err := s.bumpDependencySourceRevisionTx(ctx, tx, sourceID, true); err != nil {
+			return err
+		}
+		return tx.Commit()
+	})
+}
+
+// CompareAndSetMetadataKeyWithReceipt commits a decision-frontier source
+// transition and its exact resulting revision token in one SQLite transaction.
+func (s *SQLiteStore) CompareAndSetMetadataKeyWithReceipt(id, key, expected, next string, expectedRevision int64, receipt RevisionTransitionReceipt) (Bead, bool, error) {
+	if err := s.ensureOpen(); err != nil {
+		return Bead{}, false, err
+	}
+	if !s.hasRevisionColumn {
+		return Bead{}, false, ErrConditionalWriteUnsupported
+	}
+	var result Bead
+	swapped := false
+	err := retryOnBusy(func() error {
+		swapped = false
+		ctx := context.Background()
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("sqlite decision-frontier transition: begin tx: %w", err)
+		}
+		defer tx.Rollback() //nolint:errcheck
+		b, err := s.getTx(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		if b.Revision != expectedRevision {
+			return &PreconditionFailedError{ID: id, Expected: expectedRevision, Current: b.Revision}
+		}
+		if b.Metadata[key] != expected {
+			return tx.Commit()
+		}
+		if err := validateDecisionFrontierTransition(b, key, expected, next, expectedRevision, receipt); err != nil {
+			return err
+		}
+		if expectedRevision == int64(^uint64(0)>>1) {
+			return fmt.Errorf("decision-frontier transition exhausted revision token")
+		}
+		toRevision := expectedRevision + 1
+		receipts, err := appendRevisionTransitionReceipt(b.Metadata[beadmeta.DecisionFrontierRevisionReceiptsMetadataKey], receipt, toRevision)
+		if err != nil {
+			return err
+		}
+		if b.Metadata == nil {
+			b.Metadata = make(StringMap)
+		}
+		b.Metadata[key] = next
+		b.Metadata[beadmeta.DecisionFrontierRevisionReceiptsMetadataKey] = receipts
+		b.UpdatedAt = time.Now()
+		if err := s.upsertBeadTx(ctx, tx, b); err != nil {
+			return err
+		}
+		result, err = s.getTx(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		if result.Revision != toRevision {
+			return fmt.Errorf("sqlite decision-frontier transition revision changed unexpectedly: got %d want %d", result.Revision, toRevision)
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		swapped = true
+		return nil
+	})
+	if err != nil {
+		return Bead{}, false, err
+	}
+	return cloneBead(result), swapped, nil
 }
 
 // conditionalWrite is the shared fenced read-check-write body: load the bead
@@ -215,9 +496,42 @@ func (s *SQLiteStore) deleteBatchChunk(chunk []string) error {
 			return fmt.Errorf("sqlite delete batch: begin tx: %w", err)
 		}
 		defer tx.Rollback() //nolint:errcheck
+		for _, id := range chunk {
+			protected, err := sqliteProtectedAttemptEvidenceRecordIDTx(ctx, tx, id)
+			if err != nil {
+				return fmt.Errorf("deleting batch bead %q: checking archive protection: %w", id, err)
+			}
+			if protected {
+				return fmt.Errorf("deleting batch bead %q: %w", id, ErrProtectedAttemptEvidenceArchive)
+			}
+			current, err := s.getTx(ctx, tx, id)
+			if err != nil {
+				if errors.Is(err, ErrNotFound) {
+					continue
+				}
+				return fmt.Errorf("deleting batch bead %q: read row: %w", id, err)
+			}
+			if err := ValidateDecisionFrontierDelete(current); err != nil {
+				return fmt.Errorf("deleting batch bead %q: %w", id, err)
+			}
+			if err := protectRetainedEvidenceDelete(current); err != nil {
+				return err
+			}
+		}
+		if err := s.guardAndFenceIncomingDependenciesTx(ctx, tx, chunk, chunk, nil); err != nil {
+			return fmt.Errorf("deleting batch incoming dependencies: %w", err)
+		}
 		args := make([]any, 0, len(chunk))
 		placeholders := make([]string, 0, len(chunk))
 		for _, id := range chunk {
+			current, getErr := s.getTx(ctx, tx, id)
+			if getErr == nil {
+				if err := ValidateLifecycleDelete(current); err != nil {
+					return fmt.Errorf("deleting lifecycle bead %q: %w", id, err)
+				}
+			} else if !errors.Is(getErr, ErrNotFound) {
+				return fmt.Errorf("reading bead %q before batch delete: %w", id, getErr)
+			}
 			args = append(args, id)
 			placeholders = append(placeholders, "?")
 		}

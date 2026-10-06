@@ -40,7 +40,7 @@ func slingHandoffCase(t *testing.T, beadID, moleculeID, assignee string, agentMu
 	}
 
 	parent := beads.Bead{
-		ID: beadID, Title: beadID, Type: "task", Status: "open",
+		ID: beadID, Title: beadID, Type: "task", Status: "open", Revision: 1,
 		Assignee: assignee, Metadata: map[string]string{},
 	}
 	mol := beads.Bead{

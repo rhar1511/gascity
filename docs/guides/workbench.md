@@ -10,9 +10,10 @@ City's sling operation. PR actions remain unavailable until Gas City supplies
 queue, policy, and conflict verdicts.
 
 Selecting an earlier attempt shows that Session's output and an attempt-scoped
-artifact read. Gas City currently does not retain a frozen per-attempt diff or
-PR-state snapshot, so both are shown as unavailable. Workbench never substitutes
-the selected Bead's current, mutable worktree diff for historical evidence.
+artifact read. Authorized historical reads show the verified archived diff and
+retained attempt evidence. Missing archives or evidence that cannot be verified
+remain explicitly unavailable. Workbench never substitutes the selected Bead's
+current, mutable worktree diff or current PR state for historical evidence.
 
 ## Wayfinder review
 

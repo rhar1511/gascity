@@ -128,7 +128,7 @@ func (s *Server) humaHandleConvoyList(ctx context.Context, input *ConvoyListInpu
 		Index:     index,
 		CacheAgeS: cacheAge,
 		Body: ListBody[beads.Bead]{
-			Items:         page,
+			Items:         beads.PublicBeads(page),
 			Total:         total,
 			NextCursor:    nextCursor,
 			Partial:       pa.partial(),
@@ -193,13 +193,13 @@ func (s *Server) humaHandleConvoyGet(_ context.Context, input *ConvoyGetInput) (
 			}
 		}
 
-		redactedConvoy := redactGenericBead(b)
+		b = beads.PublicBead(b)
 		return &IndexOutput[convoyGetResponse]{
 			Index:     s.latestIndex(),
 			CacheAgeS: cacheAgeSeconds(cityStore),
 			Body: convoyGetResponse{
-				Convoy:   &redactedConvoy,
-				Children: redactGenericBeads(children),
+				Convoy:   &b,
+				Children: beads.PublicBeads(children),
 				Progress: &convoyProgress{Total: total, Closed: closed},
 			},
 		}, nil
@@ -757,6 +757,11 @@ func (s *Server) humaHandleWorkflowDelete(_ context.Context, input *WorkflowDele
 				return nil, apierr.Internal.Msg("workflow deletion requires conditional-write protection")
 			}
 			plan.writer = writer
+			ordered, err := beads.DependencySafeDeleteOrder(plan.info.store, plan.ids)
+			if err != nil {
+				return nil, apierr.ConflictConcurrentDelete.Msg("workflow deletion dependency plan failed")
+			}
+			plan.ids = ordered
 			for _, id := range plan.ids {
 				b, err := plan.info.store.Get(id)
 				if err != nil {
@@ -879,6 +884,10 @@ func (s *Server) humaHandleWorkflowDelete(_ context.Context, input *WorkflowDele
 					rollbackFences()
 					return nil, apierr.SessionConflict.Msg(session.ErrRequestEvidenceRetained.Error())
 				}
+				if b.Status != "closed" {
+					rollbackFences()
+					return nil, apierr.ConflictConcurrentDelete.Msg("workflow row reopened after deletion fence")
+				}
 				_, acquired := acquiredFenceIDs[planIndex][id]
 				if acquired && (b.Status != "closed" || session.RequestPurgeFence(b) != fenceToken) {
 					rollbackFences()
@@ -892,32 +901,16 @@ func (s *Server) humaHandleWorkflowDelete(_ context.Context, input *WorkflowDele
 			}
 		}
 
-		// Phase 3: Only the post-fence evidence check authorizes irreversible
-		// dependency removal and deletion.
+		// Phase 3: The conditional delete atomically removes the row and its
+		// references. Never remove dependencies before checking its revision.
 		for _, row := range verified {
 			info := row.info
 			id := row.id
-			if deps, err := info.store.DepList(id, "down"); err == nil {
-				for _, dep := range deps {
-					if err := info.store.DepRemove(id, dep.DependsOnID); err != nil {
-						pa.record("store "+info.scopeRef+" dep-remove "+id+"→"+dep.DependsOnID, err)
-					}
-				}
-			} else {
-				pa.record("store "+info.scopeRef+" dep-list down "+id, err)
-			}
-			if deps, err := info.store.DepList(id, "up"); err == nil {
-				for _, dep := range deps {
-					if err := info.store.DepRemove(dep.IssueID, id); err != nil {
-						pa.record("store "+info.scopeRef+" dep-remove "+dep.IssueID+"→"+id, err)
-					}
-				}
-			} else {
-				pa.record("store "+info.scopeRef+" dep-list up "+id, err)
-			}
 			if err := row.writer.DeleteIfMatch(id, row.revision); err != nil {
 				pa.record("store "+info.scopeRef+" delete "+id, err)
-				continue
+				// Remaining rows may own references from this surviving dependent.
+				// Do not cascade those references after a revision refusal.
+				break
 			}
 			deleted++
 		}

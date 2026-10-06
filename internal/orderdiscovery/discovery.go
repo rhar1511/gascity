@@ -141,6 +141,155 @@ func ScanAll(cityPath string, cfg *config.City, opts ScanOptions) ([]orders.Orde
 	return allOrders, nil
 }
 
+// ScanAllInventory scans the same roots and applies the same layering and
+// overrides as ScanAll, while retaining winning definitions excluded from the
+// active set by source enabled=false or [orders].skip. It is intended for
+// strict read-only evidence collection; existing ScanAll callers retain their
+// filtered behavior.
+func ScanAllInventory(cityPath string, cfg *config.City, opts ScanOptions) ([]orders.InventoryOrder, error) {
+	if cfg == nil {
+		cfg = &config.City{}
+	}
+	fsysImpl := opts.FS
+	if fsysImpl == nil {
+		fsysImpl = fsys.OSFS{}
+	}
+
+	cityLayers := cityFormulaLayers(cityPath, cfg)
+	cityInventory, err := orders.ScanRootsInventory(fsysImpl, CityOrderRoots(cityPath, cfg), cfg.Orders.Skip)
+	if err != nil {
+		return nil, err
+	}
+
+	cityScopedIndex := make(map[string]int, len(cityInventory))
+	cityScopedActive := make(map[string]bool, len(cityInventory))
+	for i, entry := range cityInventory {
+		cityScopedIndex[entry.Order.Name] = i
+		cityScopedActive[entry.Order.Name] = entry.Activation == orders.ActivationEnabled
+	}
+	removedCityEntries := make(map[int]bool)
+	var promotedCityInventory, rigScopedInventory []orders.InventoryOrder
+	pendingInactiveCity := make(map[string]orders.InventoryOrder)
+	var pendingInactiveCityNames []string
+
+	rigNames := make(map[string]struct{}, len(cfg.FormulaLayers.Rigs)+len(cfg.RigPackDirs))
+	for rigName := range cfg.FormulaLayers.Rigs {
+		rigNames[rigName] = struct{}{}
+	}
+	for rigName := range cfg.RigPackDirs {
+		rigNames[rigName] = struct{}{}
+	}
+	for _, rigName := range sortedRigNames(rigNames) {
+		exclusive := RigExclusiveLayers(cfg.FormulaLayers.Rigs[rigName], cityLayers)
+		exclusivePackDirs := cfg.RigPackDirs[rigName]
+		if len(exclusive) == 0 && len(exclusivePackDirs) == 0 {
+			continue
+		}
+		rigInventory, scanErr := orders.ScanRootsInventory(
+			fsysImpl,
+			rigOrderRoots(exclusive, exclusivePackDirs, rigLocalFormulaLayer(exclusive, exclusivePackDirs)),
+			cfg.Orders.Skip,
+		)
+		if scanErr != nil {
+			if opts.OnRigScanError != nil {
+				if handlerErr := opts.OnRigScanError(rigName, scanErr); handlerErr != nil {
+					return nil, handlerErr
+				}
+				continue
+			}
+			return nil, fmt.Errorf("rig %s: %w", rigName, scanErr)
+		}
+		for _, entry := range rigInventory {
+			if entry.Order.IsCityScoped() {
+				name := entry.Order.Name
+				if cityScopedActive[name] {
+					continue
+				}
+				if entry.Activation == orders.ActivationEnabled {
+					if index, exists := cityScopedIndex[name]; exists {
+						removedCityEntries[index] = true
+					}
+					delete(pendingInactiveCity, name)
+					promotedCityInventory = append(promotedCityInventory, entry)
+					cityScopedActive[name] = true
+				} else if _, cityExists := cityScopedIndex[name]; !cityExists {
+					if _, pending := pendingInactiveCity[name]; !pending {
+						pendingInactiveCity[name] = entry
+						pendingInactiveCityNames = append(pendingInactiveCityNames, name)
+					}
+				}
+				continue
+			}
+			entry.Order.Rig = rigName
+			rigScopedInventory = append(rigScopedInventory, entry)
+		}
+	}
+
+	allInventory := make([]orders.InventoryOrder, 0, len(cityInventory)+len(promotedCityInventory)+len(pendingInactiveCity)+len(rigScopedInventory))
+	for i, entry := range cityInventory {
+		if !removedCityEntries[i] {
+			allInventory = append(allInventory, entry)
+		}
+	}
+	allInventory = append(allInventory, promotedCityInventory...)
+	for _, name := range pendingInactiveCityNames {
+		if entry, exists := pendingInactiveCity[name]; exists && !cityScopedActive[name] {
+			allInventory = append(allInventory, entry)
+		}
+	}
+	allInventory = append(allInventory, rigScopedInventory...)
+
+	if tz := cfg.Workspace.Timezone; tz != "" {
+		if _, err := time.LoadLocation(tz); err != nil {
+			return nil, fmt.Errorf("[workspace] timezone %q: %w", tz, err)
+		}
+		for i := range allInventory {
+			if allInventory[i].Order.TZ == "" {
+				allInventory[i].Order.TZ = tz
+			}
+		}
+	}
+	if len(cfg.Orders.Overrides) > 0 {
+		positions := make([]int, 0, len(allInventory))
+		active := make([]orders.Order, 0, len(allInventory))
+		for i, entry := range allInventory {
+			if entry.Activation == orders.ActivationEnabled {
+				positions = append(positions, i)
+				active = append(active, entry.Order)
+			}
+		}
+		if overrideErr := orders.ApplyOverrides(active, overridesFromConfig(cfg.Orders.Overrides)); overrideErr != nil {
+			if opts.OnOverrideError == nil {
+				return nil, overrideErr
+			}
+			if handlerErr := opts.OnOverrideError(overrideErr); handlerErr != nil {
+				return nil, handlerErr
+			}
+		}
+		for i, position := range positions {
+			allInventory[position].Order = active[i]
+			if !active[i].IsEnabled() {
+				allInventory[position].Activation = orders.ActivationDisabledByOverride
+			}
+		}
+	}
+
+	valid := allInventory[:0]
+	for _, entry := range allInventory {
+		if err := validateOrder(entry.Order, opts.ValidateOrder); err != nil {
+			if opts.OnValidateError == nil {
+				return nil, err
+			}
+			if handlerErr := opts.OnValidateError(entry.Order.ScopedName(), err); handlerErr != nil {
+				return nil, handlerErr
+			}
+			continue
+		}
+		valid = append(valid, entry)
+	}
+	return valid, nil
+}
+
 func validateOrders(allOrders []orders.Order, extraValidate OrderValidator, onError ValidateErrorHandler) ([]orders.Order, error) {
 	valid := allOrders[:0]
 	for _, order := range allOrders {

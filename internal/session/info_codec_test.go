@@ -9,6 +9,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/sessionauthority"
 )
 
 // infoFromPersistedBeadFrozen is a verbatim copy of the pre-S09b struct-literal
@@ -115,6 +116,9 @@ func infoFromPersistedBeadFrozen(b beads.Bead) Info {
 		SessionCircuitState:        b.Metadata[SessionCircuitStateMetadataKey],
 		ResetCommittedAt:           b.Metadata[ResetCommittedAtKey],
 		Generation:                 b.Metadata["generation"],
+		AuthorityProfile:           b.Metadata[sessionauthority.MetadataProfile],
+		AuthorityAuthorization:     b.Metadata[sessionauthority.MetadataAuthorization],
+		AuthorityTransitions:       b.Metadata[sessionauthority.MetadataTransitions],
 		StartedConfigHash:          b.Metadata["started_config_hash"],
 		PinAwake:                   b.Metadata["pin_awake"],
 

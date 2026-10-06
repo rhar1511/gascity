@@ -477,7 +477,15 @@ func (r *hookClaimClassRoute) listContinuation(rootID, group string) ([]beads.Be
 	if err != nil {
 		return nil, fmt.Errorf("listing continuation group %q of %q in the relocated class binding: %w", group, rootID, err)
 	}
-	for _, sibling := range siblings {
+	storeRef := ""
+	if len(r.topology.Bindings) == 1 {
+		storeRef = string(r.topology.Bindings[0].Leg.Ref)
+	}
+	for i := range siblings {
+		sibling := &siblings[i]
+		if strings.TrimSpace(sibling.SourceStoreRef) == "" {
+			sibling.SourceStoreRef = storeRef
+		}
 		if id := strings.TrimSpace(sibling.ID); id != "" {
 			r.resident[id] = true
 		}

@@ -28,6 +28,7 @@ pages.
 | [Gas Town → Gas City Command Map](/reference/gastown-command-map) | The closest `gc`/`bd` equivalent for each `gt` command |
 | [System Packs](/reference/system-packs) | Built-in packs bundled with `gc` |
 | [Command Execution Trust Boundaries](/reference/trust-boundaries) | Which component runs what, and with whose authority |
+| [Session Authority Profiles](/reference/session-authority-profiles) | Signed, exact-scope launch-profile transitions and host trust configuration |
 | [Exec Session Provider](/reference/exec-session-provider) | The `exec` session runtime provider contract |
 | [Exec Beads Provider](/reference/exec-beads-provider) | The `exec` beads backend contract |
 | [Tmux Agent Slice](/reference/tmux-agent-slice) | `GC_AGENT_SLICE` systemd scoping for tmux panes |

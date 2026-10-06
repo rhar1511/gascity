@@ -5,7 +5,6 @@ go_library(
     srcs = [
         "backend_bundle.go",
         "backend_registry.go",
-        "config_layers.go",
         "connection.go",
         "files.go",
         "identity.go",
@@ -14,6 +13,7 @@ go_library(
         "mode.go",
         "preflight.go",
         "preflight_checker.go",
+        "shared_server.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/beads/contract",
     visibility = ["//:__subpackages__"],
@@ -32,13 +32,13 @@ go_test(
     name = "contract_test",
     srcs = [
         "backend_registry_test.go",
-        "config_overlay_test.go",
         "connection_bd_external_binding_test.go",
         "connection_bd_owned_direct_binding_test.go",
         "connection_bd_owned_server_test.go",
         "connection_dolt_mode_precedence_test.go",
         "connection_test.go",
         "files_atomic_write_test.go",
+        "files_bd_nested_config_test.go",
         "files_custom_types_test.go",
         "files_test.go",
         "identity_test.go",
@@ -49,6 +49,7 @@ go_test(
         "preflight_bdcontext_skip_test.go",
         "preflight_checker_test.go",
         "preflight_test.go",
+        "shared_server_test.go",
         "testenv_import_test.go",
     ],
     data = glob(
@@ -63,6 +64,7 @@ go_test(
         "//internal/bazeltest",
         "//internal/fsys",
         "//internal/testenv",
+        "@in_gopkg_yaml_v3//:yaml_v3",
     ],
 )
 

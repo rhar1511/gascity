@@ -1008,7 +1008,7 @@
         },
         "requires_gc": {
           "type": "string",
-          "description": "RequiresGC is an optional minimum gc version requirement."
+          "description": "RequiresGC is an optional semver constraint on the minimum compatible\ngc controller version. A non-empty value activates the controller's\ngeneric compatibility gate for formulas loaded from this pack; it does\nnot declare capabilities or authorize actions. Trusted release policy\nsupplies the required capability set separately."
         },
         "description": {
           "type": "string",

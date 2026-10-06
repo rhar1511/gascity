@@ -416,8 +416,8 @@ func TestRunWorkRecordCloseGateReusesPreOpenedStore(t *testing.T) {
 	var stderr strings.Builder
 	const bogusCityPath = "/nonexistent/does-not-exist"
 	t.Setenv(workRecordEnforceEnvVar, "1")
-	block := runWorkRecordCloseGate([]string{"close", "wr-shipped-nocommit"}, t.TempDir(), bogusCityPath, nil, panicOnGetStore{}, preFetched, &stderr)
-	if !block {
+	gateExitCode := runWorkRecordCloseGate([]string{"close", "wr-shipped-nocommit"}, t.TempDir(), bogusCityPath, nil, panicOnGetStore{}, preFetched, &stderr)
+	if gateExitCode == 0 {
 		t.Fatalf("expected block=true for shipped-without-commit, got false (fallback store open may have silently swallowed the preOpened store); stderr=%s", stderr.String())
 	}
 	if !strings.Contains(stderr.String(), "work-record gate (enforced)") {

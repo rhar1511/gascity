@@ -173,7 +173,7 @@ The current adapter/capture target is:
 | claude | Claude JSONL under `~/.claude/projects/...` | rich messages, tool calls/results, thinking placeholder/text when allowed, raw only for native frames |
 | codex | Codex rollout JSONL / `--json` event stream | rich tool calls/results; command and patch events normalize to Bash/Edit where derivable |
 | gemini | Gemini session records | rich tool calls/results, thoughts, token usage; reader must support current JSONL session format |
-| kimi | Kimi Code `agents/main/wire.jsonl` (and legacy context logs while supported) | rich main-agent and subagent messages, tool calls/results |
+| kimi | Kimi Code `agents/main/wire.jsonl`; legacy context logs only when an explicit path is supplied | rich main-agent and subagent messages, tool calls/results |
 | opencode | OpenCode export/mirror JSON | rich tool calls/results and interactions from message parts |
 | mimocode | MiMo Code export/session database mirror using the OpenCode-compatible shape | rich tool calls/results through the MiMo/OpenCode adapter |
 | groq | OpenCode-backed Gas City profile | same as OpenCode; no Groq-specific transcript dialect |
@@ -888,9 +888,10 @@ exactly why Codex results are opaque today. Then:
   work: cover every current `resultDisplay` variant and add an **incremental
   parser** so live frame-granular streaming works (the legacy reader is
   whole-file).
-- Kimi: prefer current `~/.kimi-code/sessions/<workDirKey>/<sessionId>/agents/main/wire.jsonl`
-  and subagent `wire.jsonl` files, while retaining legacy context-log support
-  until it is no longer useful.
+- Kimi: discover current `~/.kimi-code/sessions/<workDirKey>/<sessionId>/agents/main/wire.jsonl`
+  and subagent `wire.jsonl` files. Legacy context logs remain parseable when a
+  path is supplied explicitly, but are no longer auto-discovered because the
+  legacy layout keys workdirs with MD5.
 
 **1D. Alias and Pi-family hardening.**
 

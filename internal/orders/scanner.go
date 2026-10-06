@@ -3,9 +3,36 @@ package orders
 import (
 	"errors"
 	"path/filepath"
+	"sort"
 
 	"github.com/gastownhall/gascity/internal/fsys"
 )
+
+// ActivationDisposition records why a winning order definition is or is not
+// in the scheduler's active set. It is an inventory fact, not an authorization
+// decision.
+type ActivationDisposition string
+
+const (
+	// ActivationEnabled means the winning definition is in the active set.
+	ActivationEnabled ActivationDisposition = "enabled"
+	// ActivationDisabledBySource means enabled=false excluded the definition.
+	ActivationDisabledBySource ActivationDisposition = "disabled_by_source"
+	// ActivationDisabledByOverride means a config override disabled the definition.
+	ActivationDisabledByOverride ActivationDisposition = "disabled_by_override"
+	// ActivationSkippedByName means [orders].skip matched the canonical name.
+	ActivationSkippedByName ActivationDisposition = "skipped_by_name"
+	// ActivationSkippedByAlias means [orders].skip matched a declared alias.
+	ActivationSkippedByAlias ActivationDisposition = "skipped_by_alias"
+)
+
+// InventoryOrder retains one winning definition before active filtering.
+// SkipMatches is canonical and nonempty only for a skipped disposition.
+type InventoryOrder struct {
+	Order       Order                 `json:"order"`
+	Activation  ActivationDisposition `json:"activation"`
+	SkipMatches []string              `json:"skip_matches"`
+}
 
 // orderDir is the subdirectory name within formula layers that contains orders.
 const orderDir = "orders"
@@ -38,6 +65,23 @@ func Scan(fs fsys.FS, formulaLayers []string, skip []string) ([]Order, error) {
 // ScanRoots discovers orders across explicit order roots. Higher-priority
 // roots (later in the slice) override lower ones by order name.
 func ScanRoots(fs fsys.FS, roots []ScanRoot, skip []string) ([]Order, error) {
+	inventory, err := ScanRootsInventory(fs, roots, skip)
+	if err != nil {
+		return nil, err
+	}
+	var result []Order
+	for _, entry := range inventory {
+		if entry.Activation == ActivationEnabled {
+			result = append(result, entry.Order)
+		}
+	}
+	return result, nil
+}
+
+// ScanRootsInventory discovers the same winning definitions as ScanRoots but
+// retains definitions excluded from the active set by source configuration or
+// [orders].skip. Existing ScanRoots callers keep their filtered behavior.
+func ScanRootsInventory(fs fsys.FS, roots []ScanRoot, skip []string) ([]InventoryOrder, error) {
 	skipSet := make(map[string]bool, len(skip))
 	for _, s := range skip {
 		skipSet[s] = true
@@ -70,26 +114,37 @@ func ScanRoots(fs fsys.FS, roots []ScanRoot, skip []string) ([]Order, error) {
 		return nil, legacyOrderLayoutError{findings: legacyFindings}
 	}
 
-	// Collect results, excluding disabled and skipped orders.
-	var result []Order
+	// Collect winning definitions and record the active-filter disposition.
+	result := make([]InventoryOrder, 0, len(order))
 	for _, name := range order {
 		a := found[name]
+		entry := InventoryOrder{Order: a, Activation: ActivationEnabled, SkipMatches: []string{}}
 		if !a.IsEnabled() {
-			continue
+			entry.Activation = ActivationDisabledBySource
+		} else if skipSet[name] {
+			entry.Activation = ActivationSkippedByName
+			entry.SkipMatches = []string{name}
+		} else if matches := skippedAliases(a, skipSet); len(matches) > 0 {
+			entry.Activation = ActivationSkippedByAlias
+			entry.SkipMatches = matches
 		}
-		if skipSet[name] || hasSkippedAlias(a, skipSet) {
-			continue
-		}
-		result = append(result, a)
+		result = append(result, entry)
 	}
 	return result, nil
 }
 
-func hasSkippedAlias(a Order, skipSet map[string]bool) bool {
+func skippedAliases(a Order, skipSet map[string]bool) []string {
+	seen := make(map[string]struct{})
+	var matches []string
 	for _, alias := range a.skipAliases {
-		if skipSet[alias] {
-			return true
+		if !skipSet[alias] {
+			continue
+		}
+		if _, exists := seen[alias]; !exists {
+			seen[alias] = struct{}{}
+			matches = append(matches, alias)
 		}
 	}
-	return false
+	sort.Strings(matches)
+	return matches
 }

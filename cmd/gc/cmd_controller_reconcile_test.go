@@ -1,14 +1,15 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 )
 
 // This command acknowledges a queued tick; it must never report a successful
@@ -98,15 +99,40 @@ func TestControllerReconcileProductionTransportRejectsWhitespaceAcknowledgement(
 	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"test\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	type capturedCommand struct {
-		text     string
-		readErr  error
-		writeErr error
+	socketPath := controllerSocketPath(cityPath)
+	if err := os.MkdirAll(filepath.Dir(socketPath), 0o755); err != nil {
+		t.Fatal(err)
 	}
-	commands := make(chan capturedCommand, 1)
-	startFakeControllerSocket(t, cityPath, " ok \n", func(command string, readErr, writeErr error) {
-		commands <- capturedCommand{text: command, readErr: readErr, writeErr: writeErr}
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() {
+		listener.Close()      //nolint:errcheck
+		os.Remove(socketPath) //nolint:errcheck
 	})
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close() //nolint:errcheck
+		command, err := bufio.NewReader(conn).ReadString('\n')
+		if err != nil {
+			t.Errorf("read command: %v", err)
+			return
+		}
+		if command != "poke\n" {
+			t.Errorf("command = %q, want poke newline", command)
+			return
+		}
+		if _, err := conn.Write([]byte(" ok \n")); err != nil {
+			t.Errorf("write response: %v", err)
+		}
+	}()
 
 	previousCityFlag := cityFlag
 	cityFlag = cityPath
@@ -120,20 +146,7 @@ func TestControllerReconcileProductionTransportRejectsWhitespaceAcknowledgement(
 	if stdout.Len() != 0 {
 		t.Fatalf("malformed acknowledgement emitted success output: %s", stdout.String())
 	}
-	select {
-	case command := <-commands:
-		if command.readErr != nil {
-			t.Fatalf("read controller command: %v", command.readErr)
-		}
-		if command.writeErr != nil {
-			t.Fatalf("write controller response: %v", command.writeErr)
-		}
-		if command.text != "poke\n" {
-			t.Fatalf("command = %q, want poke newline", command.text)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("controller command was not captured by the socket fixture")
-	}
+	<-done
 }
 
 func TestControllerReconcileJSONProductionContract(t *testing.T) {

@@ -4,10 +4,12 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/orders"
 )
 
 func TestScanAllNilConfigUsesDefaultCityRootsAndOSFS(t *testing.T) {
@@ -195,6 +197,162 @@ interval = "1h"
 	}
 	if aa[0].Interval != "15m" {
 		t.Fatalf("Interval = %q, want partially applied override %q", aa[0].Interval, "15m")
+	}
+}
+
+func TestScanAllInventoryRecordsOverrideDisabledWithoutChangingScanAll(t *testing.T) {
+	cityPath, cityLayer := orderDiscoveryCity(t)
+	writeOrderDiscoveryFile(t, filepath.Join(cityPath, "orders"), "candidate", `[order]
+formula = "mol-candidate"
+trigger = "manual"
+`)
+	disabled := false
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{City: []string{cityLayer}},
+		Orders: config.OrdersConfig{Overrides: []config.OrderOverride{{
+			Name: "candidate", Enabled: &disabled,
+		}}},
+	}
+
+	inventory, err := ScanAllInventory(cityPath, cfg, ScanOptions{})
+	if err != nil {
+		t.Fatalf("ScanAllInventory: %v", err)
+	}
+	if len(inventory) != 1 || inventory[0].Activation != orders.ActivationDisabledByOverride || inventory[0].Order.IsEnabled() {
+		t.Fatalf("inventory = %#v, want override-disabled candidate", inventory)
+	}
+	legacy, err := ScanAll(cityPath, cfg, ScanOptions{})
+	if err != nil {
+		t.Fatalf("ScanAll: %v", err)
+	}
+	if len(legacy) != 1 || legacy[0].IsEnabled() {
+		t.Fatalf("legacy ScanAll behavior changed: %#v", legacy)
+	}
+}
+
+func TestScanAllInventoryPreservesDispositionThroughRigPromotion(t *testing.T) {
+	cityPath, cityLayer := orderDiscoveryCity(t)
+	rigLayer := orderDiscoveryRigLayer(t, "alpha")
+	writeOrderDiscoveryFile(t, filepath.Join(cityPath, "orders"), "promoted", `[order]
+formula = "mol-city-disabled"
+scope = "city"
+trigger = "manual"
+enabled = false
+`)
+	writeOrderDiscoveryFile(t, filepath.Join(filepath.Dir(rigLayer), "orders"), "promoted", `[order]
+formula = "mol-rig-active"
+scope = "city"
+trigger = "manual"
+`)
+	writeOrderDiscoveryFile(t, filepath.Join(filepath.Dir(rigLayer), "orders"), "rig-disabled", `[order]
+formula = "mol-rig-disabled"
+trigger = "manual"
+enabled = false
+`)
+	cfg := &config.City{FormulaLayers: config.FormulaLayers{
+		City: []string{cityLayer},
+		Rigs: map[string][]string{"alpha": {cityLayer, rigLayer}},
+	}}
+
+	inventory, err := ScanAllInventory(cityPath, cfg, ScanOptions{})
+	if err != nil {
+		t.Fatalf("ScanAllInventory: %v", err)
+	}
+	if len(inventory) != 2 {
+		t.Fatalf("inventory = %#v, want promoted city order and rig-disabled order", inventory)
+	}
+	byScoped := make(map[string]orders.InventoryOrder, len(inventory))
+	for _, entry := range inventory {
+		byScoped[entry.Order.ScopedName()] = entry
+	}
+	promoted := byScoped["promoted"]
+	if promoted.Activation != orders.ActivationEnabled || promoted.Order.Formula != "mol-rig-active" || promoted.Order.Rig != "" {
+		t.Fatalf("promoted city order = %#v", promoted)
+	}
+	rigDisabled := byScoped["rig-disabled:rig:alpha"]
+	if rigDisabled.Activation != orders.ActivationDisabledBySource || rigDisabled.Order.Rig != "alpha" {
+		t.Fatalf("rig-disabled order = %#v", rigDisabled)
+	}
+}
+
+func TestScanAllInventoryRuntimeViewsMatchScanAll(t *testing.T) {
+	cityPath, cityLayer := orderDiscoveryCity(t)
+	rigLayer := orderDiscoveryRigLayer(t, "alpha")
+	writeOrderDiscoveryFile(t, filepath.Join(cityPath, "orders"), "zeta", `[order]
+formula = "mol-city-active"
+trigger = "manual"
+`)
+	writeOrderDiscoveryFile(t, filepath.Join(cityPath, "orders"), "source-disabled", `[order]
+formula = "mol-source-disabled"
+trigger = "manual"
+enabled = false
+`)
+	writeOrderDiscoveryFile(t, filepath.Join(cityPath, "orders"), "alpha", `[order]
+formula = "mol-city-disabled"
+scope = "city"
+trigger = "manual"
+enabled = false
+`)
+	writeOrderDiscoveryFile(t, filepath.Join(cityPath, "orders"), "skipped", `[order]
+formula = "mol-skipped"
+trigger = "manual"
+`)
+	writeOrderDiscoveryFile(t, filepath.Join(cityPath, "orders"), "override-disabled", `[order]
+formula = "mol-override-disabled"
+trigger = "manual"
+`)
+	writeOrderDiscoveryFile(t, filepath.Join(filepath.Dir(rigLayer), "orders"), "alpha", `[order]
+formula = "mol-rig-promoted"
+scope = "city"
+trigger = "manual"
+`)
+	writeOrderDiscoveryFile(t, filepath.Join(filepath.Dir(rigLayer), "orders"), "rig-active", `[order]
+formula = "mol-rig-active"
+trigger = "manual"
+`)
+	writeOrderDiscoveryFile(t, filepath.Join(filepath.Dir(rigLayer), "orders"), "rig-disabled", `[order]
+formula = "mol-rig-disabled"
+trigger = "manual"
+enabled = false
+`)
+	disabled := false
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityLayer},
+			Rigs: map[string][]string{"alpha": {cityLayer, rigLayer}},
+		},
+		Orders: config.OrdersConfig{
+			Skip: []string{"skipped"},
+			Overrides: []config.OrderOverride{{
+				Name: "override-disabled", Enabled: &disabled,
+			}},
+		},
+	}
+
+	inventory, err := ScanAllInventory(cityPath, cfg, ScanOptions{})
+	if err != nil {
+		t.Fatalf("ScanAllInventory: %v", err)
+	}
+	legacy, err := ScanAll(cityPath, cfg, ScanOptions{})
+	if err != nil {
+		t.Fatalf("ScanAll: %v", err)
+	}
+	legacyView := make([]orders.Order, 0, len(inventory))
+	activeView := make([]orders.Order, 0, len(inventory))
+	for _, entry := range inventory {
+		switch entry.Activation {
+		case orders.ActivationEnabled:
+			legacyView = append(legacyView, entry.Order)
+			activeView = append(activeView, entry.Order)
+		case orders.ActivationDisabledByOverride:
+			legacyView = append(legacyView, entry.Order)
+		}
+	}
+	if !reflect.DeepEqual(legacyView, legacy) {
+		t.Fatalf("inventory runtime-visible view differs from ScanAll:\n inventory=%#v\n ScanAll=%#v", legacyView, legacy)
+	}
+	if want := orders.FilterEnabled(legacy); !reflect.DeepEqual(activeView, want) {
+		t.Fatalf("inventory active view differs from FilterEnabled(ScanAll):\n inventory=%#v\n active=%#v", activeView, want)
 	}
 }
 

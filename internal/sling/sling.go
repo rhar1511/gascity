@@ -41,6 +41,15 @@ type BeadChildQuerier interface {
 	List(query beads.ListQuery) ([]beads.Bead, error)
 }
 
+// FormulaActionLease pins the published store route used by a required
+// formula action. Implementations must make Acquire idempotent while held and
+// Release idempotent while unheld so the sling can drop the pin around an
+// external callback and reacquire it before making any later store writes.
+type FormulaActionLease interface {
+	Acquire() error
+	Release()
+}
+
 // SlingOpts captures the user's intent for a sling operation.
 type SlingOpts struct {
 	Target        config.Agent
@@ -48,15 +57,32 @@ type SlingOpts struct {
 	IsFormula     bool
 	OnFormula     string
 	NoFormula     bool
-	SkipPoke      bool
-	Title         string
-	Vars          []string
-	Merge         string // "", "direct", "mr", "local"
-	NoConvoy      bool
-	Owned         bool
-	Nudge         bool
-	Force         bool
-	DryRun        bool
+	// RequireFormulaAttach prevents the implicit default-formula path from
+	// falling back to a plain route when an existing workflow or molecule
+	// conflicts. Controller-owned lifecycle admission uses it to preserve the
+	// signed workflow contract rather than silently routing around it.
+	RequireFormulaAttach bool
+	// GraphOnlyMaterialization creates the formula graph without linking or
+	// routing the source bead. A separately authorized lifecycle transition
+	// attaches all source pointers atomically after exact graph verification.
+	GraphOnlyMaterialization bool
+	// MaterializationID is a deterministic idempotency marker for controller
+	// graph-only materialization recovery.
+	MaterializationID string
+	// BeforeFormulaAttach runs immediately before formula materialization, under
+	// the source-workflow lock for graph.v2 formulas. Controller admission uses
+	// it to re-read the signed contract and current eligibility at the effect
+	// boundary. It must be read-only and must not acquire the source lock.
+	BeforeFormulaAttach func() error
+	SkipPoke            bool
+	Title               string
+	Vars                []string
+	Merge               string // "", "direct", "mr", "local"
+	NoConvoy            bool
+	Owned               bool
+	Nudge               bool
+	Force               bool
+	DryRun              bool
 	// Reassign clears any existing human assignee on the bead before
 	// routing so the target pool/agent can claim it. Without this, a
 	// bead claimed by a human (`bd update --claim`) stays invisible
@@ -133,6 +159,25 @@ type SlingDeps struct {
 	// store). When nil, graph beads collapse onto Store — the single-store
 	// default — so a single-store caller behaves exactly as before the seam.
 	GraphStore beads.Store
+	// GraphStoreRef names the exact graph store that owns formula molecules.
+	// Empty remains unavailable to required compatibility actions.
+	GraphStoreRef string
+	// FormulaActionGate authorizes required formula compatibility before any
+	// molecule writes and revalidates the same decision immediately before the
+	// store operation.
+	FormulaActionGate molecule.FormulaActionGate
+	// RequireFormulaActionGate makes a missing gate fail closed at this
+	// production materialization boundary.
+	RequireFormulaActionGate bool
+	// FormulaActionLease pins the published graph route while a required
+	// formula action is prepared and materialized. It is released around external
+	// routing callbacks and reacquired before later store writes.
+	FormulaActionLease FormulaActionLease
+	// LifecycleRecipeMetadata is set only by the controller's signed lifecycle
+	// admission path. It is copied onto every graph.v2 recipe bead before the
+	// graph is materialized, so descendants are held while admission is still
+	// reserved and remain identifiable by the hook and retirement guards.
+	LifecycleRecipeMetadata map[string]string
 	// Events records best-effort current execution facts after graph workflow
 	// materialization. Nil leaves sling event-silent.
 	Events events.Recorder
@@ -1339,6 +1384,16 @@ func InstantiateCompiledSlingFormula(ctx context.Context, recipe *formula.Recipe
 	}
 	graphWorkflow := graphroute.IsCompiledGraphWorkflow(recipe)
 	rootKey := ""
+	if deps.LifecycleRecipeMetadata != nil {
+		for i := range recipe.Steps {
+			if recipe.Steps[i].Metadata == nil {
+				recipe.Steps[i].Metadata = make(map[string]string, len(deps.LifecycleRecipeMetadata))
+			}
+			for key, value := range deps.LifecycleRecipeMetadata {
+				recipe.Steps[i].Metadata[key] = value
+			}
+		}
+	}
 	if graphWorkflow {
 		stampGraphV2RootMetadata(recipe, formulaName, opts.Vars, scopeKind, scopeRef)
 		sourceBeadID = ""
@@ -1369,11 +1424,20 @@ func InstantiateCompiledSlingFormula(ctx context.Context, recipe *formula.Recipe
 // atomic across processes.
 func materializeCompiledSlingFormula(ctx context.Context, recipe *formula.Recipe, formulaName string, opts molecule.Options, sourceBeadID, scopeKind, scopeRef string, graphWorkflow bool, a config.Agent, deps SlingDeps, forceGraphV2Replace ...bool) (*molecule.Result, error) {
 	graphStore := deps.graphStore()
+	if deps.RequireFormulaActionGate || deps.FormulaActionGate != nil {
+		opts.ActionGate = deps.FormulaActionGate
+		opts.RequireActionGate = deps.RequireFormulaActionGate
+	}
 	if err := graphroute.ApplyGraphRouting(recipe, &a, agentutil.RoutedToIdentity(&a), opts.Vars, sourceBeadID, scopeKind, scopeRef, deps.StoreRef, graphStore, deps.CityName, deps.Cfg, deps.graphrouteDeps()); err != nil {
 		SlingTracef("instantiate decorate-error formula=%s err=%v", formulaName, err)
 		return nil, err
 	}
 	privatizeAttachedRootOnlyWisp(recipe, sourceBeadID)
+	var err error
+	recipe, opts, err = molecule.PrepareFormulaAction(ctx, graphStore, recipe, opts)
+	if err != nil {
+		return nil, err
+	}
 	var replacedRootID string
 	if graphWorkflow {
 		if err := closeFailedGraphV2Roots(graphStore, recipe); err != nil {

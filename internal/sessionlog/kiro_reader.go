@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -26,8 +27,11 @@ func readKiroFile(path, syntheticPrefix string) (*Session, error) {
 		return nil, err
 	}
 	defer f.Close() //nolint:errcheck
+	return readKiroFileFrom(path, f, syntheticPrefix)
+}
 
-	scanner := bufio.NewScanner(f)
+func readKiroFileFrom(path string, source io.Reader, syntheticPrefix string) (*Session, error) {
+	scanner := bufio.NewScanner(source)
 	scanner.Buffer(make([]byte, 0, 256*1024), 50*1024*1024)
 
 	var messages []*Entry
@@ -636,11 +640,13 @@ func FindKiroSessionFileByID(searchPaths []string, workDir, sessionID string) st
 	}
 	for _, root := range mergeKiroSearchPaths(searchPaths) {
 		path := filepath.Join(root, sessionID+".jsonl")
-		info, err := os.Stat(path)
-		if err != nil || info.IsDir() {
+		transcript, _, err := openKiroTranscript(root, path)
+		if err != nil {
 			continue
 		}
-		if strings.TrimSpace(workDir) != "" && !kiroSessionCWDMatches(path, workDir) {
+		matches := strings.TrimSpace(workDir) == "" || kiroSessionCWDMatches(transcript, workDir)
+		_ = transcript.Close()
+		if !matches {
 			continue
 		}
 		return path
@@ -658,11 +664,12 @@ func FindKiroSessionFile(searchPaths []string, workDir string) string {
 	for _, root := range mergeKiroSearchPaths(searchPaths) {
 		candidates = append(candidates, kiroSessionCandidates(root)...)
 	}
+	defer closeKiroSessionCandidates(candidates)
 	sort.Slice(candidates, func(i, j int) bool {
 		return candidates[i].modTime.After(candidates[j].modTime)
 	})
 	for _, candidate := range candidates {
-		if kiroSessionCWDMatches(candidate.path, workDir) {
+		if kiroSessionCWDMatches(candidate.transcript, workDir) {
 			return candidate.path
 		}
 	}
@@ -670,16 +677,23 @@ func FindKiroSessionFile(searchPaths []string, workDir string) string {
 }
 
 type kiroSessionFileCandidate struct {
-	path    string
-	modTime time.Time
+	path       string
+	modTime    time.Time
+	transcript *OpenedTranscript
 }
 
 func kiroSessionCandidates(root string) []kiroSessionFileCandidate {
-	info, err := os.Stat(root)
-	if err != nil || !info.IsDir() {
+	rootHandle, err := os.OpenRoot(root)
+	if err != nil {
 		return nil
 	}
-	entries, err := os.ReadDir(root)
+	defer rootHandle.Close() //nolint:errcheck
+	directory, err := rootHandle.Open(".")
+	if err != nil {
+		return nil
+	}
+	defer directory.Close() //nolint:errcheck
+	entries, err := directory.ReadDir(-1)
 	if err != nil {
 		return nil
 	}
@@ -689,32 +703,66 @@ func kiroSessionCandidates(root string) []kiroSessionFileCandidate {
 			continue
 		}
 		path := filepath.Join(root, entry.Name())
-		info, err := os.Stat(path)
-		if err != nil || info.IsDir() {
+		transcript, info, err := openKiroTranscript(root, path)
+		if err != nil {
 			continue
 		}
-		candidates = append(candidates, kiroSessionFileCandidate{path: path, modTime: info.ModTime()})
+		candidates = append(candidates, kiroSessionFileCandidate{path: path, modTime: info.ModTime(), transcript: transcript})
 	}
 	return candidates
 }
 
-func kiroSessionCWDMatches(path, workDir string) bool {
-	cwd := kiroSessionCWD(path)
+func closeKiroSessionCandidates(candidates []kiroSessionFileCandidate) {
+	for _, candidate := range candidates {
+		_ = candidate.transcript.Close()
+	}
+}
+
+func openKiroTranscript(root, path string) (*OpenedTranscript, os.FileInfo, error) {
+	transcript, err := OpenTranscript("kiro", []string{root}, path)
+	if err != nil {
+		return nil, nil, err
+	}
+	info, err := transcript.Stat()
+	if err != nil {
+		_ = transcript.Close()
+		return nil, nil, fmt.Errorf("stat opened Kiro session log: %w", err)
+	}
+	if info.IsDir() {
+		_ = transcript.Close()
+		return nil, nil, fmt.Errorf("kiro session log is a directory")
+	}
+	return transcript, info, nil
+}
+
+func kiroSessionCWDMatches(transcript *OpenedTranscript, workDir string) bool {
+	cwd := kiroSessionCWD(transcript)
 	if cwd == "" || workDir == "" {
 		return false
 	}
 	return pathutil.SamePath(cwd, workDir)
 }
 
-func kiroSessionCWD(path string) string {
-	if cwd := kiroSidecarCWD(strings.TrimSuffix(path, filepath.Ext(path)) + ".json"); cwd != "" {
+func kiroSessionCWD(transcript *OpenedTranscript) string {
+	if cwd := kiroSidecarCWD(transcript); cwd != "" {
 		return cwd
 	}
-	return kiroJSONLCWD(path)
+	return kiroJSONLCWD(transcript.ReadSeeker())
 }
 
-func kiroSidecarCWD(path string) string {
-	data, err := os.ReadFile(path)
+func kiroSidecarCWD(transcript *OpenedTranscript) string {
+	name := strings.TrimSuffix(filepath.Base(transcript.relative), filepath.Ext(transcript.relative)) + ".json"
+	sidecarPath := filepath.Join(filepath.Dir(transcript.relative), name)
+	sidecar, err := transcript.OpenRelative(sidecarPath)
+	if err != nil {
+		return ""
+	}
+	defer sidecar.Close() //nolint:errcheck
+	info, err := sidecar.Stat()
+	if err != nil || info.IsDir() {
+		return ""
+	}
+	data, err := io.ReadAll(sidecar)
 	if err != nil {
 		return ""
 	}
@@ -722,14 +770,12 @@ func kiroSidecarCWD(path string) string {
 	return kiroCWDFromRawJSON(raw)
 }
 
-func kiroJSONLCWD(path string) string {
-	f, err := os.Open(path)
-	if err != nil {
+func kiroJSONLCWD(source io.ReadSeeker) string {
+	if _, err := source.Seek(0, io.SeekStart); err != nil {
 		return ""
 	}
-	defer f.Close() //nolint:errcheck
 
-	scanner := bufio.NewScanner(f)
+	scanner := bufio.NewScanner(source)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
 		line := bytes.TrimSpace(scanner.Bytes())

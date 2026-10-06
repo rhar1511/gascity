@@ -3,9 +3,12 @@ package sessionlog
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"sort"
 	"strings"
@@ -113,7 +116,24 @@ var displayTypes = map[string]bool{
 // entries. Returns the most recent tailCompactions worth of messages
 // (0 = all messages).
 func ReadFile(path string, tailCompactions int) (*Session, error) {
-	entries, diagnostics, err := parseFileDetailed(path)
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close() //nolint:errcheck
+	return ReadFileFrom(path, f, tailCompactions)
+}
+
+// ReadFileFrom parses a Claude-shaped transcript from an existing descriptor.
+// It never opens path; path is used only for the session ID.
+func ReadFileFrom(path string, source io.ReadSeeker, tailCompactions int) (*Session, error) {
+	if source == nil {
+		return nil, fmt.Errorf("transcript reader is required")
+	}
+	if _, err := source.Seek(0, io.SeekStart); err != nil {
+		return nil, fmt.Errorf("rewinding transcript: %w", err)
+	}
+	entries, diagnostics, err := parseFileDetailedFrom(source)
 	if err != nil {
 		return nil, err
 	}
@@ -152,41 +172,57 @@ func ReadFile(path string, tailCompactions int) (*Session, error) {
 
 // ReadProviderFile reads a provider-specific transcript file.
 func ReadProviderFile(provider, path string, tailCompactions int) (*Session, error) {
-	var (
-		sess *Session
-		err  error
-	)
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close() //nolint:errcheck
+	return ReadProviderFileFrom(provider, path, f, tailCompactions)
+}
+
+// ReadProviderFileFrom parses a provider transcript from an existing
+// seekable descriptor. The descriptor is rewound before parsing and is never
+// reopened by path.
+func ReadProviderFileFrom(provider, path string, source io.ReadSeeker, tailCompactions int) (*Session, error) {
+	if source == nil {
+		return nil, fmt.Errorf("transcript reader is required")
+	}
+	if _, err := source.Seek(0, io.SeekStart); err != nil {
+		return nil, fmt.Errorf("rewinding transcript: %w", err)
+	}
+	var sess *Session
+	var err error
 	switch ProviderFamily(provider) {
 	case "auggie":
-		sess, err = ReadAuggieFile(path, tailCompactions)
+		sess, err = readCapturedACPFileFrom(path, source, tailCompactions, "auggie")
 	case "amp":
-		sess, err = ReadAmpFile(path, tailCompactions)
+		sess, err = readAmpFileFrom(path, source, tailCompactions)
 	case "codex":
-		sess, err = ReadCodexFile(path, tailCompactions)
+		sess, err = readCodexFileFrom(path, source, tailCompactions)
 	case "copilot":
-		sess, err = ReadCopilotFile(path, tailCompactions)
+		sess, err = readCopilotFileFrom(path, source, tailCompactions)
 	case "cursor":
-		sess, err = ReadCursorFile(path, tailCompactions)
+		sess, err = readCursorFileFrom(path, source, tailCompactions)
 	case "grok":
-		sess, err = ReadGrokFile(path, tailCompactions)
+		sess, err = readCapturedACPFileFrom(path, source, tailCompactions, "grok")
 	case "kiro":
-		sess, err = ReadKiroFile(path, tailCompactions)
+		sess, err = readKiroFileFrom(path, source, "kiro")
 	case "gemini":
-		sess, err = ReadGeminiFile(path, tailCompactions)
+		sess, err = readGeminiFileFrom(path, source, tailCompactions)
 	case "kimi":
-		sess, err = ReadKimiFile(path, tailCompactions)
+		sess, err = readKimiFileFrom(path, source, tailCompactions)
 	case "mimocode":
-		sess, err = ReadMimoCodeFile(path, tailCompactions)
+		sess, err = readOpenCodeFileFrom(path, source, tailCompactions)
 	case "opencode":
-		sess, err = ReadOpenCodeFile(path, tailCompactions)
+		sess, err = readOpenCodeFileFrom(path, source, tailCompactions)
 	case "zcode":
-		sess, err = ReadZCodeFile(path, tailCompactions)
+		sess, err = readOpenCodeFileFrom(path, source, tailCompactions)
 	case "pi":
-		sess, err = ReadPiFile(path, tailCompactions)
+		sess, err = readPiFileFrom(path, source, tailCompactions)
 	case "antigravity":
-		sess, err = ReadAntigravityFile(path, tailCompactions)
+		sess, err = readAntigravityFileFrom(path, source, false)
 	default:
-		sess, err = ReadFile(path, tailCompactions)
+		sess, err = ReadFileFrom(path, source, tailCompactions)
 	}
 	if err != nil {
 		return nil, err
@@ -201,7 +237,24 @@ func ReadProviderFile(provider, path string, tailCompactions int) (*Session, err
 // All DAG-resolved entries are returned, preserving tool_use, progress,
 // and other non-display types. Used by the raw transcript API.
 func ReadFileRaw(path string, tailCompactions int) (*Session, error) {
-	entries, diagnostics, err := parseFileDetailed(path)
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close() //nolint:errcheck
+	return ReadFileRawFrom(path, f, tailCompactions)
+}
+
+// ReadFileRawFrom parses a raw Claude-shaped transcript from an existing
+// descriptor. It never opens path; path is used only for the session ID.
+func ReadFileRawFrom(path string, source io.ReadSeeker, tailCompactions int) (*Session, error) {
+	if source == nil {
+		return nil, fmt.Errorf("transcript reader is required")
+	}
+	if _, err := source.Seek(0, io.SeekStart); err != nil {
+		return nil, fmt.Errorf("rewinding transcript: %w", err)
+	}
+	entries, diagnostics, err := parseFileDetailedFrom(source)
 	if err != nil {
 		return nil, err
 	}
@@ -234,41 +287,56 @@ func ReadFileRaw(path string, tailCompactions int) (*Session, error) {
 // on each returned entry, so the Codex reader is sufficient for both raw and
 // conversation views.
 func ReadProviderFileRaw(provider, path string, tailCompactions int) (*Session, error) {
-	var (
-		sess *Session
-		err  error
-	)
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close() //nolint:errcheck
+	return ReadProviderFileRawFrom(provider, path, f, tailCompactions)
+}
+
+// ReadProviderFileRawFrom parses a provider transcript from an existing
+// descriptor without display-type filtering. It never reopens path.
+func ReadProviderFileRawFrom(provider, path string, source io.ReadSeeker, tailCompactions int) (*Session, error) {
+	if source == nil {
+		return nil, fmt.Errorf("transcript reader is required")
+	}
+	if _, err := source.Seek(0, io.SeekStart); err != nil {
+		return nil, fmt.Errorf("rewinding transcript: %w", err)
+	}
+	var sess *Session
+	var err error
 	switch ProviderFamily(provider) {
 	case "auggie":
-		sess, err = ReadAuggieFile(path, tailCompactions)
+		sess, err = readCapturedACPFileFrom(path, source, tailCompactions, "auggie")
 	case "amp":
-		sess, err = ReadAmpFile(path, tailCompactions)
+		sess, err = readAmpFileFrom(path, source, tailCompactions)
 	case "codex":
-		sess, err = ReadCodexFile(path, tailCompactions)
+		sess, err = readCodexFileFrom(path, source, tailCompactions)
 	case "copilot":
-		sess, err = ReadCopilotFile(path, tailCompactions)
+		sess, err = readCopilotFileFrom(path, source, tailCompactions)
 	case "cursor":
-		sess, err = ReadCursorFile(path, tailCompactions)
+		sess, err = readCursorFileFrom(path, source, tailCompactions)
 	case "grok":
-		sess, err = ReadGrokFile(path, tailCompactions)
+		sess, err = readCapturedACPFileFrom(path, source, tailCompactions, "grok")
 	case "kiro":
-		sess, err = ReadKiroFile(path, tailCompactions)
+		sess, err = readKiroFileFrom(path, source, "kiro")
 	case "gemini":
-		sess, err = ReadGeminiFile(path, tailCompactions)
+		sess, err = readGeminiFileFrom(path, source, tailCompactions)
 	case "kimi":
-		sess, err = ReadKimiFile(path, tailCompactions)
+		sess, err = readKimiFileFrom(path, source, tailCompactions)
 	case "mimocode":
-		sess, err = ReadMimoCodeFile(path, tailCompactions)
+		sess, err = readOpenCodeFileFrom(path, source, tailCompactions)
 	case "opencode":
-		sess, err = ReadOpenCodeFile(path, tailCompactions)
+		sess, err = readOpenCodeFileFrom(path, source, tailCompactions)
 	case "zcode":
-		sess, err = ReadZCodeFile(path, tailCompactions)
+		sess, err = readOpenCodeFileFrom(path, source, tailCompactions)
 	case "pi":
-		sess, err = ReadPiFile(path, tailCompactions)
+		sess, err = readPiFileFrom(path, source, tailCompactions)
 	case "antigravity":
-		sess, err = ReadAntigravityFileRaw(path, tailCompactions)
+		sess, err = readAntigravityFileFrom(path, source, true)
 	default:
-		sess, err = ReadFileRaw(path, tailCompactions)
+		sess, err = ReadFileRawFrom(path, source, tailCompactions)
 	}
 	if err != nil {
 		return nil, err
@@ -417,6 +485,19 @@ func ReadFileRecords(path string) ([]*Entry, error) {
 	return parseFile(path)
 }
 
+// ReadFileRecordsFrom reads every JSONL record from an already-open
+// descriptor. It never reopens a path.
+func ReadFileRecordsFrom(source io.ReadSeeker) ([]*Entry, error) {
+	if source == nil {
+		return nil, fmt.Errorf("transcript reader is required")
+	}
+	if _, err := source.Seek(0, io.SeekStart); err != nil {
+		return nil, fmt.Errorf("rewinding transcript: %w", err)
+	}
+	entries, _, err := parseFileDetailedFrom(source)
+	return entries, err
+}
+
 // parseFileDetailed reads all JSONL lines from a file into entries and
 // returns load diagnostics for malformed lines and torn tails.
 func parseFileDetailed(path string) ([]*Entry, SessionDiagnostics, error) {
@@ -425,11 +506,14 @@ func parseFileDetailed(path string) ([]*Entry, SessionDiagnostics, error) {
 		return nil, SessionDiagnostics{}, fmt.Errorf("opening session file: %w", err)
 	}
 	defer f.Close() //nolint:errcheck // read-only file
+	return parseFileDetailedFrom(f)
+}
 
+func parseFileDetailedFrom(source io.Reader) ([]*Entry, SessionDiagnostics, error) {
 	var entries []*Entry
 	var diagnostics SessionDiagnostics
 	var lastNonEmptyLineMalformed bool
-	scanner := bufio.NewScanner(f)
+	scanner := bufio.NewScanner(source)
 	// Default scanner buffer is 64KB; Claude entries can be large
 	// (tool results with full file contents, base64 images, etc.).
 	// Use 50MB max to handle very large entries without aborting the whole file.
@@ -657,13 +741,12 @@ func findSessionFileByIDForCandidates(searchPaths, slugs []string, fileName stri
 		var bestTime int64
 		for _, slug := range slugs {
 			path := filepath.Join(base, slug, fileName)
-			info, err := os.Stat(path)
-			if err != nil || info.IsDir() {
+			modTime, ok := confinedTranscriptModTime("claude", searchPaths, path)
+			if !ok {
 				continue
 			}
-			mt := info.ModTime().UnixNano()
-			if mt > bestTime {
-				bestTime = mt
+			if modTime > bestTime {
+				bestTime = modTime
 				bestPath = path
 			}
 		}
@@ -687,13 +770,12 @@ func findClaudeLatestSessionFileForCandidates(searchPaths, slugs []string) strin
 		var bestTime int64
 		for _, slug := range slugs {
 			path := filepath.Join(base, slug, "latest-session.jsonl")
-			info, err := os.Stat(path)
-			if err != nil || info.IsDir() {
+			modTime, ok := confinedTranscriptModTime("claude", searchPaths, path)
+			if !ok {
 				continue
 			}
-			mt := info.ModTime().UnixNano()
-			if mt > bestTime {
-				bestTime = mt
+			if modTime > bestTime {
+				bestTime = modTime
 				bestPath = path
 			}
 		}
@@ -727,27 +809,55 @@ func findSlugSessionFileForCandidates(searchPaths, slugs []string) string {
 	for _, slug := range slugs {
 		for _, base := range searchPaths {
 			dir := filepath.Join(base, slug)
-			entries, err := os.ReadDir(dir)
+			baseRoot, err := os.OpenRoot(base)
+			if err != nil {
+				continue
+			}
+			dirHandle, err := baseRoot.Open(slug)
+			if err != nil {
+				_ = baseRoot.Close()
+				continue
+			}
+			entries, err := dirHandle.ReadDir(-1)
+			_ = dirHandle.Close()
+			_ = baseRoot.Close()
 			if err != nil {
 				continue
 			}
 			for _, e := range entries {
-				if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
+				if !strings.HasSuffix(e.Name(), ".jsonl") {
 					continue
 				}
-				info, err := e.Info()
-				if err != nil {
+				path := filepath.Join(dir, e.Name())
+				modTime, ok := confinedTranscriptModTime("claude", searchPaths, path)
+				if !ok {
 					continue
 				}
-				mt := info.ModTime().UnixNano()
-				if mt > globalBestTime {
-					globalBestTime = mt
-					globalBestPath = filepath.Join(dir, e.Name())
+				if modTime > globalBestTime {
+					globalBestTime = modTime
+					globalBestPath = path
 				}
 			}
 		}
 	}
 	return globalBestPath
+}
+
+// confinedTranscriptModTime returns metadata only after opening the candidate
+// beneath a configured provider root. Stat uses the same descriptor that
+// OpenTranscript authorized, so a candidate symlink cannot redirect the
+// metadata lookup outside those roots.
+func confinedTranscriptModTime(provider string, searchPaths []string, path string) (int64, bool) {
+	transcript, err := OpenTranscript(provider, searchPaths, path)
+	if err != nil {
+		return 0, false
+	}
+	defer transcript.Close() //nolint:errcheck
+	info, err := transcript.Stat()
+	if err != nil || info.IsDir() {
+		return 0, false
+	}
+	return info.ModTime().UnixNano(), true
 }
 
 // FindCodexSessionFile searches Codex's date-organized session directory
@@ -759,20 +869,17 @@ func FindCodexSessionFile(searchPaths []string, workDir string) string {
 	if workDir == "" {
 		return ""
 	}
+	searchRoots := mergeCodexSearchPaths(searchPaths)
 	var bestPath string
 	var bestTime int64
-	for _, root := range mergeCodexSearchPaths(searchPaths) {
-		path := findCodexSessionFileIn(root, workDir)
-		if path == "" {
+	for _, root := range searchRoots {
+		candidate := findCodexSessionFileCandidateIn(root, searchRoots, workDir)
+		if candidate == nil {
 			continue
 		}
-		info, err := os.Stat(path)
-		if err != nil {
-			continue
-		}
-		if mt := info.ModTime().UnixNano(); mt > bestTime {
+		if mt := candidate.ModTime.UnixNano(); mt > bestTime {
 			bestTime = mt
-			bestPath = path
+			bestPath = candidate.Path
 		}
 	}
 	return bestPath
@@ -829,8 +936,9 @@ func FindCodexSessionFileNearScan(searchPaths []string, workDir string, anchor t
 	var matches []string
 	seen := make(map[string]bool)
 	dirty := false
-	for _, root := range mergeCodexSearchPaths(searchPaths) {
-		collectCodexRolloutsNear(root, workDir, start, end, true, seen, &matches, &dirty)
+	searchRoots := mergeCodexSearchPaths(searchPaths)
+	for _, root := range searchRoots {
+		collectCodexRolloutsNear(root, searchRoots, workDir, start, end, true, seen, &matches, &dirty)
 		if len(matches) > 1 {
 			return "", true // ambiguous: a definitive refusal, independent of scan noise
 		}
@@ -845,24 +953,80 @@ func FindCodexSessionFileNearScan(searchPaths []string, workDir string, anchor t
 	return "", !dirty
 }
 
-// appendCodexRolloutMatch appends path to matches unless its physical
-// identity was already seen. One rollout is commonly reachable through two
-// lexical paths (a configured root holding the aimux symlink AND the
-// symlink's target listed directly); without physical dedup that single file
-// would trip the ambiguity refusal. EvalSymlinks is used for identity
-// comparison only — the FIRST lexical path is kept so the paired extractor's
-// lexical containment validation still passes. On resolve error the lexical
-// path itself is the identity.
+// appendCodexRolloutMatch appends path to matches unless its opened-file
+// identity was already seen. One rollout can be reachable through two lexical
+// roots; the first lexical path is kept so downstream containment checks pass.
 func appendCodexRolloutMatch(path string, seen map[string]bool, matches *[]string) {
-	key := path
-	if resolved, err := filepath.EvalSymlinks(path); err == nil {
-		key = resolved
+	key := codexTranscriptIdentity([]string{codexSearchRootForCandidate(path)}, path)
+	if key == "" {
+		return
 	}
 	if seen[key] {
 		return
 	}
 	seen[key] = true
 	*matches = append(*matches, path)
+}
+
+// codexTranscriptIdentity returns a physical identity only after opening and
+// statting the transcript through an authorized Codex root. The file identity
+// comes from the opened descriptor, so deduplication never resolves an
+// escaping candidate symlink by path.
+func codexTranscriptIdentity(searchPaths []string, path string) string {
+	transcript, err := OpenTranscript("codex", searchPaths, path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			// Some injected batch scanners provide a directory entry without
+			// materializing the file. Keep its lexical identity; any later CWD
+			// probe still opens beneath an authorized root and fails closed.
+			return filepath.Clean(path)
+		}
+		return ""
+	}
+	defer transcript.Close() //nolint:errcheck
+	info, err := transcript.Stat()
+	if err != nil {
+		return ""
+	}
+	if identity, ok := openedFileIdentity(info); ok {
+		return identity
+	}
+	return filepath.Clean(path)
+}
+
+func openedFileIdentity(info os.FileInfo) (string, bool) {
+	sys := info.Sys()
+	if sys == nil {
+		return "", false
+	}
+	value := reflect.ValueOf(sys)
+	if value.Kind() == reflect.Pointer {
+		value = value.Elem()
+	}
+	if !value.IsValid() || value.Kind() != reflect.Struct {
+		return "", false
+	}
+	dev := value.FieldByName("Dev")
+	ino := value.FieldByName("Ino")
+	if !dev.IsValid() || !ino.IsValid() || !dev.CanInterface() || !ino.CanInterface() {
+		return "", false
+	}
+	return fmt.Sprintf("%T:%v:%v", sys, dev.Interface(), ino.Interface()), true
+}
+
+// codexSearchRootForCandidate returns the provider root for a discovered
+// date-tree transcript. Codex stores files beneath YYYY/MM/DD, including
+// directly linked account roots. For legacy internal callers that pass a
+// non-date path, its containing directory is the narrowest safe root.
+func codexSearchRootForCandidate(path string) string {
+	clean := filepath.Clean(path)
+	dayDir := filepath.Dir(clean)
+	monthDir := filepath.Dir(dayDir)
+	yearDir := filepath.Dir(monthDir)
+	if len(filepath.Base(yearDir)) == 4 && len(filepath.Base(monthDir)) == 2 && len(filepath.Base(dayDir)) == 2 {
+		return filepath.Dir(yearDir)
+	}
+	return filepath.Dir(clean)
 }
 
 // collectCodexRolloutsNear appends in-window cwd-matching rollouts under one
@@ -885,19 +1049,19 @@ func appendCodexRolloutMatch(path string, seen map[string]bool, matches *[]strin
 // midnight, and startOfLocalDay in zones whose DST transition falls AT
 // midnight (e.g. America/Santiago) can land on 23:00 of the previous day and
 // skip the final calendar day; ENOENT readdirs are free.
-func collectCodexRolloutsNear(root, workDir string, start, end time.Time, followExtraRoots bool, seen map[string]bool, matches *[]string, dirty *bool) {
+func collectCodexRolloutsNear(root string, searchPaths []string, workDir string, start, end time.Time, followExtraRoots bool, seen map[string]bool, matches *[]string, dirty *bool) {
 	tolStart := start.Add(-time.Hour)
 	tolEnd := end.Add(time.Hour)
 	firstDay := startOfLocalDay(start.In(time.Local)).AddDate(0, 0, -1)
 	lastDay := startOfLocalDay(end.In(time.Local)).AddDate(0, 0, 1)
 	for day := firstDay; !day.After(lastDay); day = day.AddDate(0, 0, 1) {
 		dayDir := filepath.Join(root, day.Format("2006"), day.Format("01"), day.Format("02"))
-		if scanCodexRolloutDay(dayDir, workDir, tolStart, tolEnd, seen, matches, dirty) {
+		if scanCodexRolloutDay(dayDir, searchPaths, workDir, tolStart, tolEnd, seen, matches, dirty) {
 			return // ambiguity reached: further scanning cannot change the refusal
 		}
 	}
 	if followExtraRoots {
-		collectCodexRolloutsInExtraRoots(root, workDir, start, end, seen, matches, dirty)
+		collectCodexRolloutsInExtraRoots(root, searchPaths, workDir, start, end, seen, matches, dirty)
 	}
 }
 
@@ -907,7 +1071,7 @@ func collectCodexRolloutsNear(root, workDir string, start, end time.Time, follow
 // cwd-probe open fault. A missing day dir is the normal case and stays clean. It
 // returns true once the ambiguity threshold (>1 match) is reached so the caller
 // stops scanning.
-func scanCodexRolloutDay(dayDir, workDir string, tolStart, tolEnd time.Time, seen map[string]bool, matches *[]string, dirty *bool) bool {
+func scanCodexRolloutDay(dayDir string, searchPaths []string, workDir string, tolStart, tolEnd time.Time, seen map[string]bool, matches *[]string, dirty *bool) bool {
 	entries, err := os.ReadDir(dayDir)
 	if err != nil {
 		// A missing day dir is the normal case (most days in the window hold no
@@ -927,7 +1091,7 @@ func scanCodexRolloutDay(dayDir, workDir string, tolStart, tolEnd time.Time, see
 			continue
 		}
 		path := filepath.Join(dayDir, e.Name())
-		match, clean := codexSessionCWDMatchesScan(path, workDir)
+		match, clean := codexSessionCWDMatchesScanWithin(searchPaths, path, workDir)
 		if !clean {
 			*dirty = true
 		}
@@ -946,7 +1110,7 @@ func scanCodexRolloutDay(dayDir, workDir string, tolStart, tolEnd time.Time, see
 // seen/matches/dirty scan state. Year-named (2000-2099) directories are skipped:
 // those are the date tree the caller already walked. A non-ENOENT readdir fault
 // on the root flags *dirty.
-func collectCodexRolloutsInExtraRoots(root, workDir string, start, end time.Time, seen map[string]bool, matches *[]string, dirty *bool) {
+func collectCodexRolloutsInExtraRoots(root string, searchPaths []string, workDir string, start, end time.Time, seen map[string]bool, matches *[]string, dirty *bool) {
 	rootEntries, err := os.ReadDir(root)
 	if err != nil {
 		if !os.IsNotExist(err) {
@@ -964,7 +1128,7 @@ func collectCodexRolloutsInExtraRoots(root, workDir string, start, end time.Time
 		}
 		// os.ReadDir follows the symlink on its own; non-directory or
 		// dangling links simply fail every ReadDir in the recursion.
-		collectCodexRolloutsNear(filepath.Join(root, name), workDir, start, end, false, seen, matches, dirty)
+		collectCodexRolloutsNear(filepath.Join(root, name), searchPaths, workDir, start, end, false, seen, matches, dirty)
 		if len(*matches) > 1 {
 			return
 		}
@@ -1054,8 +1218,9 @@ func FindCodexSessionFileByIDNoWindow(searchPaths []string, workDir, sessionID s
 	}
 	suffix := "-" + sessionID + ".jsonl"
 	seen := make(map[string]bool)
-	for _, root := range mergeCodexSearchPaths(searchPaths) {
-		if path := findCodexRolloutBySuffixIn(root, workDir, suffix, seen); path != "" {
+	searchRoots := mergeCodexSearchPaths(searchPaths)
+	for _, root := range searchRoots {
+		if path := findCodexRolloutBySuffixIn(root, searchRoots, workDir, suffix, seen); path != "" {
 			return path
 		}
 	}
@@ -1066,7 +1231,7 @@ func FindCodexSessionFileByIDNoWindow(searchPaths []string, workDir, sessionID s
 // returns the first "rollout-*<suffix>" transcript whose session_meta cwd
 // matches workDir. It recurses into symlinked non-date roots (aimux account
 // roots) like findCodexSessionFileIn, guarding against symlink cycles via seen.
-func findCodexRolloutBySuffixIn(sessDir, workDir, suffix string, seen map[string]bool) string {
+func findCodexRolloutBySuffixIn(sessDir string, searchPaths []string, workDir, suffix string, seen map[string]bool) string {
 	cleaned := filepath.Clean(sessDir)
 	if seen[cleaned] {
 		return ""
@@ -1079,7 +1244,7 @@ func findCodexRolloutBySuffixIn(sessDir, workDir, suffix string, seen map[string
 		for _, month := range listDirsReverse(yearDir) {
 			monthDir := filepath.Join(yearDir, month)
 			for _, day := range listDirsReverse(monthDir) {
-				if path := findCodexRolloutBySuffixInDir(filepath.Join(monthDir, day), workDir, suffix); path != "" {
+				if path := findCodexRolloutBySuffixInDir(filepath.Join(monthDir, day), searchPaths, workDir, suffix); path != "" {
 					return path
 				}
 			}
@@ -1090,7 +1255,7 @@ func findCodexRolloutBySuffixIn(sessDir, workDir, suffix string, seen map[string
 		if err != nil {
 			continue
 		}
-		if path := findCodexRolloutBySuffixIn(resolved, workDir, suffix, seen); path != "" {
+		if path := findCodexRolloutBySuffixIn(resolved, searchPaths, workDir, suffix, seen); path != "" {
 			return path
 		}
 	}
@@ -1099,7 +1264,7 @@ func findCodexRolloutBySuffixIn(sessDir, workDir, suffix string, seen map[string
 
 // findCodexRolloutBySuffixInDir returns the first rollout in dir whose name
 // carries suffix and whose session_meta cwd matches workDir.
-func findCodexRolloutBySuffixInDir(dir, workDir, suffix string) string {
+func findCodexRolloutBySuffixInDir(dir string, searchPaths []string, workDir, suffix string) string {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return ""
@@ -1110,7 +1275,7 @@ func findCodexRolloutBySuffixInDir(dir, workDir, suffix string) string {
 			continue
 		}
 		path := filepath.Join(dir, name)
-		if codexSessionCWD(path) == workDir {
+		if codexSessionCWDWithin(searchPaths, path) == workDir {
 			return path
 		}
 	}
@@ -1143,8 +1308,9 @@ func FindCodexSessionFileInTimeWindow(searchPaths []string, workDir string, star
 	}
 	var candidates []CodexSessionCandidate
 	seen := make(map[string]bool)
-	for _, root := range mergeCodexSearchPaths(searchPaths) {
-		collectCodexCandidatesInDays(root, workDir, firstDay, lastDay, true, seen, &candidates)
+	searchRoots := mergeCodexSearchPaths(searchPaths)
+	for _, root := range searchRoots {
+		collectCodexCandidatesInDays(root, searchRoots, workDir, firstDay, lastDay, true, seen, &candidates)
 	}
 	windowStart := start.Add(-2 * time.Second)
 	match := ""
@@ -1170,12 +1336,12 @@ func FindCodexSessionFileInTimeWindow(searchPaths []string, workDir string, star
 // Physical duplicates (symlink aliases across merged roots) are dropped via
 // seen. followExtraRoots permits one level of recursion into symlinked non-date
 // roots, mirroring collectCodexRolloutsByID.
-func collectCodexCandidatesInDays(root, workDir string, firstDay, lastDay time.Time, followExtraRoots bool, seen map[string]bool, out *[]CodexSessionCandidate) {
+func collectCodexCandidatesInDays(root string, searchPaths []string, workDir string, firstDay, lastDay time.Time, followExtraRoots bool, seen map[string]bool, out *[]CodexSessionCandidate) {
 	scanned := 0
 	for day := lastDay; !day.Before(firstDay) && scanned < codexByIDDayDirCap; day = day.AddDate(0, 0, -1) {
 		scanned++
 		dayDir := filepath.Join(root, day.Format("2006"), day.Format("01"), day.Format("02"))
-		appendCodexCandidatesFromDir(dayDir, workDir, seen, out)
+		appendCodexCandidatesFromDir(dayDir, searchPaths, workDir, seen, out)
 	}
 	if !followExtraRoots {
 		return
@@ -1186,14 +1352,14 @@ func collectCodexCandidatesInDays(root, workDir string, firstDay, lastDay time.T
 		if err != nil {
 			continue
 		}
-		collectCodexCandidatesInDays(resolved, workDir, firstDay, lastDay, false, seen, out)
+		collectCodexCandidatesInDays(resolved, searchPaths, workDir, firstDay, lastDay, false, seen, out)
 	}
 }
 
 // appendCodexCandidatesFromDir appends every Codex transcript in dir whose
 // session_meta cwd matches workDir, deduplicated by physical file identity via
 // seen so a rollout reachable through more than one root is counted once.
-func appendCodexCandidatesFromDir(dir, workDir string, seen map[string]bool, out *[]CodexSessionCandidate) {
+func appendCodexCandidatesFromDir(dir string, searchPaths []string, workDir string, seen map[string]bool, out *[]CodexSessionCandidate) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return
@@ -1203,15 +1369,15 @@ func appendCodexCandidatesFromDir(dir, workDir string, seen map[string]bool, out
 			continue
 		}
 		path := filepath.Join(dir, e.Name())
-		key := path
-		if resolved, err := filepath.EvalSymlinks(path); err == nil {
-			key = resolved
-		}
-		if seen[key] {
+		candidate, ok, _ := codexSessionCandidateScanWithin(searchPaths, path)
+		if !ok || candidate.WorkDir != workDir {
 			continue
 		}
-		candidate, ok := codexSessionCandidate(path)
-		if !ok || candidate.WorkDir != workDir {
+		key := codexTranscriptIdentity(searchPaths, path)
+		if key == "" {
+			continue
+		}
+		if seen[key] {
 			continue
 		}
 		seen[key] = true
@@ -1254,12 +1420,20 @@ func splitCodexSessionRoots(dir string) (yearDirs, extraRoots []string) {
 // chronological order for efficiency. Also recurses into symlinked
 // subdirectories that aren't date components (e.g., aimux session roots).
 func findCodexSessionFileIn(sessDir, workDir string) string {
+	candidate := findCodexSessionFileCandidateIn(sessDir, []string{sessDir}, workDir)
+	if candidate == nil {
+		return ""
+	}
+	return candidate.Path
+}
+
+func findCodexSessionFileCandidateIn(sessDir string, searchPaths []string, workDir string) *CodexSessionCandidate {
 	yearDirs, extraRoots := splitCodexSessionRoots(sessDir)
 
 	// Scan year dirs in reverse chronological order.
 	sort.Sort(sort.Reverse(sort.StringSlice(yearDirs)))
-	if path := scanYearDirs(sessDir, yearDirs, workDir); path != "" {
-		return path
+	if candidate := scanYearDirsForCandidate(sessDir, yearDirs, searchPaths, workDir); candidate != nil {
+		return candidate
 	}
 
 	// Scan symlinked session roots (aimux-managed accounts).
@@ -1268,15 +1442,14 @@ func findCodexSessionFileIn(sessDir, workDir string) string {
 		if err != nil {
 			continue
 		}
-		if path := findCodexSessionFileIn(resolved, workDir); path != "" {
-			return path
+		if candidate := findCodexSessionFileCandidateIn(resolved, searchPaths, workDir); candidate != nil {
+			return candidate
 		}
 	}
-	return ""
+	return nil
 }
 
-// scanYearDirs scans YYYY/MM/DD date tree for matching Codex sessions.
-func scanYearDirs(base string, years []string, workDir string) string {
+func scanYearDirsForCandidate(base string, years []string, searchPaths []string, workDir string) *CodexSessionCandidate {
 	for _, year := range years {
 		yearDir := filepath.Join(base, year)
 		months := listDirsReverse(yearDir)
@@ -1285,52 +1458,46 @@ func scanYearDirs(base string, years []string, workDir string) string {
 			days := listDirsReverse(monthDir)
 			for _, day := range days {
 				dayDir := filepath.Join(monthDir, day)
-				if path := findCodexSessionInDir(dayDir, workDir); path != "" {
-					return path
+				if candidate := findCodexSessionCandidateInDir(dayDir, searchPaths, workDir); candidate != nil {
+					return candidate
 				}
 			}
 		}
 	}
-	return ""
+	return nil
 }
 
-// findCodexSessionInDir searches a single day directory for the most
-// recently modified Codex session file matching workDir.
-func findCodexSessionInDir(dir, workDir string) string {
+// findCodexSessionCandidateInDir inspects each candidate through an authorized
+// descriptor, using that same descriptor for the session_meta read and mtime.
+func findCodexSessionCandidateInDir(dir string, searchPaths []string, workDir string) *CodexSessionCandidate {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return ""
+		return nil
 	}
 
 	// Sort by mod time descending so we check newest first.
-	type fileInfo struct {
-		path    string
-		modTime int64
-	}
-	var files []fileInfo
+	var candidates []CodexSessionCandidate
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
 			continue
 		}
-		info, err := e.Info()
-		if err != nil {
+		path := filepath.Join(dir, e.Name())
+		candidate, ok, _ := codexSessionCandidateScanWithin(searchPaths, path)
+		if !ok {
 			continue
 		}
-		files = append(files, fileInfo{
-			path:    filepath.Join(dir, e.Name()),
-			modTime: info.ModTime().UnixNano(),
-		})
+		candidates = append(candidates, candidate)
 	}
-	sort.Slice(files, func(i, j int) bool {
-		return files[i].modTime > files[j].modTime
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].ModTime.After(candidates[j].ModTime)
 	})
 
-	for _, f := range files {
-		if codexSessionCWDMatches(f.path, workDir) {
-			return f.path
+	for i := range candidates {
+		if pathutil.SamePath(candidates[i].WorkDir, workDir) {
+			return &candidates[i]
 		}
 	}
-	return ""
+	return nil
 }
 
 // codexSessionCWD reads the first line of a Codex JSONL session file and
@@ -1338,6 +1505,14 @@ func findCodexSessionInDir(dir, workDir string) string {
 // can't be read or doesn't contain a session_meta entry.
 func codexSessionCWD(path string) string {
 	candidate, ok := codexSessionCandidate(path)
+	if !ok {
+		return ""
+	}
+	return candidate.WorkDir
+}
+
+func codexSessionCWDWithin(searchPaths []string, path string) string {
+	candidate, ok, _ := codexSessionCandidateScanWithin(searchPaths, path)
 	if !ok {
 		return ""
 	}
@@ -1356,13 +1531,27 @@ func codexSessionCandidate(path string) (CodexSessionCandidate, bool) {
 // that is genuinely not a codex rollout (empty, malformed, or non-session_meta —
 // all clean) or a file that vanished between readdir and open (ENOENT — clean).
 func codexSessionCandidateScan(path string) (candidate CodexSessionCandidate, ok bool, clean bool) {
-	f, err := os.Open(path)
-	if err != nil {
-		return CodexSessionCandidate{}, false, os.IsNotExist(err)
-	}
-	defer f.Close() //nolint:errcheck // read-only
+	return codexSessionCandidateScanWithin([]string{codexSearchRootForCandidate(path)}, path)
+}
 
-	scanner := bufio.NewScanner(f)
+// codexSessionCandidateScanWithin performs candidate inspection beneath the
+// configured Codex roots. The first-line read and modification-time lookup use
+// the descriptor authorized by OpenTranscript.
+func codexSessionCandidateScanWithin(searchPaths []string, path string) (candidate CodexSessionCandidate, ok bool, clean bool) {
+	transcript, err := OpenTranscript("codex", searchPaths, path)
+	if err != nil {
+		return CodexSessionCandidate{}, false, codexCandidateOpenErrorIsClean(err)
+	}
+	defer transcript.Close() //nolint:errcheck
+	return codexSessionCandidateScanFrom(path, transcript.ReadSeeker(), transcript.Stat)
+}
+
+func codexCandidateOpenErrorIsClean(err error) bool {
+	return errors.Is(err, os.ErrNotExist) || strings.Contains(err.Error(), "path escapes from parent") || strings.Contains(err.Error(), "outside configured search paths")
+}
+
+func codexSessionCandidateScanFrom(path string, source io.Reader, stat func() (os.FileInfo, error)) (candidate CodexSessionCandidate, ok bool, clean bool) {
+	scanner := bufio.NewScanner(source)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	if !scanner.Scan() {
 		return CodexSessionCandidate{}, false, true
@@ -1381,11 +1570,11 @@ func codexSessionCandidateScan(path string) (candidate CodexSessionCandidate, ok
 	if meta.Type != "session_meta" {
 		return CodexSessionCandidate{}, false, true
 	}
-	info, _ := os.Stat(path)
-	var modTime time.Time
-	if info != nil {
-		modTime = info.ModTime()
+	info, err := stat()
+	if err != nil {
+		return CodexSessionCandidate{}, false, false
 	}
+	modTime := info.ModTime()
 	startedAt := parseCodexSessionTime(meta.Payload.Timestamp)
 	if startedAt.IsZero() {
 		startedAt = parseCodexSessionTime(meta.Timestamp)
@@ -1412,25 +1601,15 @@ func parseCodexSessionTime(raw string) time.Time {
 	return time.Time{}
 }
 
-func codexSessionCWDMatches(path, workDir string) bool {
-	match, _ := codexSessionCWDMatchesScan(path, workDir)
-	return match
-}
-
-// codexSessionCWDMatchesScan is codexSessionCWDMatches with a clean-scan signal:
-// clean is false only when the cwd probe's file open failed with a non-ENOENT IO
-// fault (see codexSessionCandidateScan), so a scanner can distinguish a transient
-// probe failure from a genuine cwd mismatch.
-func codexSessionCWDMatchesScan(path, workDir string) (match bool, clean bool) {
-	candidate, ok, clean := codexSessionCandidateScan(path)
+func codexSessionCWDMatchesScanWithin(searchPaths []string, path, workDir string) (match bool, clean bool) {
+	candidate, ok, clean := codexSessionCandidateScanWithin(searchPaths, path)
 	if !ok {
 		return false, clean
 	}
-	cwd := candidate.WorkDir
-	if cwd == "" || workDir == "" {
+	if candidate.WorkDir == "" || workDir == "" {
 		return false, clean
 	}
-	return pathutil.SamePath(cwd, workDir), clean
+	return pathutil.SamePath(candidate.WorkDir, workDir), clean
 }
 
 // listDirsReverse returns directory names sorted in reverse lexicographic

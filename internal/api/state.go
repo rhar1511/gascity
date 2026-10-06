@@ -16,6 +16,8 @@ import (
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/orderdispatch"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/qualification"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/rollout"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/supervisor"
@@ -46,6 +48,44 @@ type MaintenanceProvider interface {
 	// is held it returns *supervisor.MaintenanceInProgressError so the
 	// POST handler can translate to 409 Conflict.
 	TriggerNow(ctx context.Context) (supervisor.MaintenanceRun, error)
+}
+
+// QualificationProvider is an optional controller capability used by the
+// per-city health endpoint. Keeping it separate from State leaves existing
+// State implementations compatible; absence is reported as unavailable.
+type QualificationProvider interface {
+	QualificationReport() qualification.ControllerReport
+}
+
+// CompatibilityRuntimeIdentity is one published controller generation used
+// by API materialization gates. The authority is captured by trusted server
+// startup and is never selected by city, pack, provider, or worker config.
+type CompatibilityRuntimeIdentity struct {
+	Config    *config.City
+	Snapshot  qualification.Snapshot
+	Build     qualification.BuildIdentity
+	Authority qualification.CompatibilityAuthority
+
+	// GraphStore, GraphStoreRef, and GraphStoreGeneration identify the exact
+	// published graph route the formula action will mutate. A zero generation
+	// means the state implementation does not expose a pinned route identity.
+	GraphStore           beads.Store
+	GraphStoreRef        string
+	GraphStoreGeneration uint64
+}
+
+// CompatibilityRuntimeIdentityProvider optionally exposes the complete
+// compatibility identity under one state lock. Returning the trust handle with
+// config and build identity prevents a reload from mixing generations.
+type CompatibilityRuntimeIdentityProvider interface {
+	CompatibilityRuntimeIdentity() (CompatibilityRuntimeIdentity, error)
+}
+
+// CompatibilityActionLeaseProvider pins a published graph route until the
+// caller releases the lease. Updates and runtime shutdown wait for outstanding
+// leases before publishing or closing the route.
+type CompatibilityActionLeaseProvider interface {
+	AcquireFormulaActionLease(store beads.Store, storeRef string, generation uint64) (func(), error)
 }
 
 // State provides read access to controller-managed state.
@@ -196,11 +236,15 @@ type State interface {
 	// Returns nil if orders are not configured.
 	OrdersAll() []orders.Order
 
-	// Poke signals the controller to trigger an immediate reconciler tick.
-	// Used after sling assigns work so WakeWork wakes the target without
-	// waiting for the next patrol interval. Best-effort: no-op if poke
-	// is not available (e.g., in tests).
-	Poke()
+	// Enqueue asks the controller to reconcile the given keys promptly
+	// instead of waiting for the next patrol interval. Callers pass the most
+	// specific key they know (a session they just created or changed, the
+	// control dispatcher after a workflow launch); a call with no keys means
+	// the city-wide allocator. Under the legacy reconciler every key maps to
+	// the existing poke (control-dispatch keys to the control-dispatcher
+	// signal), so one call is at most one tick. Best-effort and non-blocking:
+	// a no-op when the controller signal is unavailable (e.g., in tests).
+	Enqueue(keys ...reconcilekey.Key)
 
 	// ServiceRegistry returns the workspace service registry, or nil when
 	// workspace services are not enabled for this city.
@@ -436,16 +480,19 @@ type FormulaMutator interface {
 	DeleteFormula(name string) error
 }
 
-// ConfigWriteSerializer is an optional State extension that runs fn under the
-// per-city config write lock. Pack import add/remove mutate city config files
-// (pack.toml, packs.lock, and sometimes city.toml) outside the
+// ConfigWriteSerializer is an optional State extension that runs fn as one
+// per-city config transaction. Pack import add/remove mutate several city
+// config files (pack.toml, packs.lock, and sometimes city.toml) outside the
 // configedit.Editor callback shape, so running them through this seam
 // serializes them against the agent/rig/provider/formula mutations that take
 // the same Editor lock — otherwise two concurrent net/http goroutines could
 // interleave load→mutate→write and lose an update or desync manifest and
-// lockfile. Like StateMutator it is type-asserted by handlers; a State that
-// does not implement it runs the mutation without extra serialization.
+// lockfile. The controller implementation also keeps its runtime config
+// reload from reading the files while fn is mid-write, restores them when fn
+// fails, and publishes the finished generation. Like StateMutator it is
+// type-asserted by handlers; a State that does not implement it runs the
+// mutation without extra serialization.
 type ConfigWriteSerializer interface {
-	// SerializeConfigWrite runs fn while holding the per-city config write lock.
+	// SerializeConfigWrite runs fn as one per-city config transaction.
 	SerializeConfigWrite(fn func() error) error
 }

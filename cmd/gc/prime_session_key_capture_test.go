@@ -15,6 +15,7 @@ import (
 func primeCaptureTestStore(t *testing.T) (cityDir string, store beads.Store) {
 	t.Helper()
 	cityDir = t.TempDir()
+	writeMinimalCityToml(t, cityDir)
 	t.Setenv("GC_BEADS", "file")
 	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
 		t.Fatalf("ensureScopedFileStoreLayout: %v", err)
@@ -264,5 +265,43 @@ func TestPersistPrimeHookProviderSessionKey_QuietWithoutDebug(t *testing.T) {
 	}
 	if out := stderr.String(); out != "" {
 		t.Errorf("hook wrote to stderr without GC_DEBUG, which reaches the agent terminal: %q", out)
+	}
+}
+
+// A caller that already resolved its city hands that path to the provider-key
+// write, which must use it without resolving the ambient city again — here
+// ambient resolution is made impossible, so only the supplied path can work.
+func TestPersistPrimeHookProviderSessionKeyAtCityUsesSuppliedPath(t *testing.T) {
+	isolateProviderSessionEnv(t)
+	cityDir, store := primeCaptureTestStore(t)
+	sessionID := createCaptureSessionBead(t, store, "claude")
+	t.Setenv("GC_SESSION_ID", sessionID)
+	for _, key := range []string{"GC_CITY", "GC_CITY_PATH", "GC_CITY_ROOT", "GC_DIR", "GC_RIG", "GC_RIG_ROOT"} {
+		t.Setenv(key, "")
+	}
+	if resolved, err := resolveCity(); err == nil {
+		t.Fatalf("test requires ambient city resolution to fail, resolved %q", resolved)
+	}
+
+	var stderr bytes.Buffer
+	persistPrimeHookProviderSessionKeyAtCity("11111111-2222-3333-4444-555555555555", cityDir, &stderr)
+	if stderr.Len() != 0 {
+		t.Fatalf("persist stderr = %q, want empty", stderr.String())
+	}
+
+	updated, err := store.Get(sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(updated.Metadata["session_key"]); got != "11111111-2222-3333-4444-555555555555" {
+		t.Fatalf("session_key = %q, want the hook id persisted through the supplied city path", got)
+	}
+
+	// The ambient wrapper still resolves the city itself, so with nothing to
+	// resolve it reports that rather than writing anywhere.
+	stderr.Reset()
+	persistPrimeHookProviderSessionKey("11111111-2222-3333-4444-555555555555", &stderr)
+	if !strings.Contains(stderr.String(), "resolving city") {
+		t.Fatalf("ambient persist stderr = %q, want a city-resolution diagnostic", stderr.String())
 	}
 }

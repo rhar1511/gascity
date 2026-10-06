@@ -152,53 +152,43 @@ func (e *bindingOrphanReconcileEnv) get(t *testing.T, id string) beads.Bead {
 	return got
 }
 
-// TestSessionReconcilerOrphanCloseReleasesBindingResidentWorkThroughAlignedStores
-// is the end-to-end repair. The controller tick already knows which leg it read
-// each assigned-work row through; carrying that leg to the orphan-close
-// tie-break is what lets a binding-resident claim be released at all.
-//
-// Without it the tie-break asks the rig ledger named by gc.routed_to, gets "no
-// such bead", skips the release, and the close guard — which reads the binding —
-// keeps refusing. The seat then wedges for as long as the city runs (ga-jrnou,
-// 86 hours in the case that surfaced it).
-func TestSessionReconcilerOrphanCloseReleasesBindingResidentWorkThroughAlignedStores(t *testing.T) {
+// An aligned owning-store observation does not grant Q56 replacement authority
+// or widen ReleaseIfCurrent to open assigned work. The controller must hold
+// this binding-resident claim even after confirming its runtime is absent.
+func TestSessionReconcilerOrphanCloseHoldsBindingResidentOpenWorkThroughAlignedStores(t *testing.T) {
 	env := newBindingOrphanReconcileEnv(t)
 
 	env.tick(t)
 
 	work := env.get(t, env.work.ID)
-	if work.Assignee != "" || work.Status != "open" {
-		t.Fatalf("claim = status %q assignee %q, want open/unassigned — a confirmed-orphaned seat must not keep holding a binding-resident claim", work.Status, work.Assignee)
+	if work.Assignee != env.work.Assignee || work.Status != "open" {
+		t.Fatalf("claim = status %q assignee %q, want original open assignment %q", work.Status, work.Assignee, env.work.Assignee)
 	}
 	session := env.get(t, env.session.ID)
-	if session.Status != "closed" {
-		t.Fatalf("session bead status = %q, want closed — once the held work is released the close guard stops refusing, so the orphan closes in the same tick", session.Status)
+	if session.Status != env.session.Status {
+		t.Fatalf("session bead status = %q, want original %q while its work remains held", session.Status, env.session.Status)
 	}
 }
 
-// TestSessionReconcilerOrphanCloseWithAlignedStoresOptionReleasesHeldWork pins
-// the option itself, independent of the controller wiring above: the reconciler
-// releases through the supplied leg and closes the seat in the same pass.
-func TestSessionReconcilerOrphanCloseWithAlignedStoresOptionReleasesHeldWork(t *testing.T) {
+// The option itself must preserve the same recovery fence as controller wiring.
+func TestSessionReconcilerOrphanCloseWithAlignedStoresOptionHoldsOpenWork(t *testing.T) {
 	env := newBindingOrphanReconcileEnv(t)
 
 	env.reconcile(t, withAssignedWorkStores([]beads.Store{env.binding}))
 
 	work := env.get(t, env.work.ID)
-	if work.Assignee != "" || work.Status != "open" {
-		t.Fatalf("claim = status %q assignee %q, want open/unassigned", work.Status, work.Assignee)
+	if work.Assignee != env.work.Assignee || work.Status != "open" {
+		t.Fatalf("claim = status %q assignee %q, want original open assignment %q", work.Status, work.Assignee, env.work.Assignee)
 	}
 	session := env.get(t, env.session.ID)
-	if session.Status != "closed" {
-		t.Fatalf("session bead status = %q, want closed", session.Status)
+	if session.Status != env.session.Status {
+		t.Fatalf("session bead status = %q, want original %q while work remains held", session.Status, env.session.Status)
 	}
 }
 
 // TestSessionReconcilerOrphanCloseWithoutAlignedStoresLeavesBindingResidentWorkHeld
-// is the mutation probe: it documents the behavior every caller that supplies
-// no aligned stores still gets, and it is exactly the wedge. If this test ever
-// starts releasing, the tie-break has grown a second owner-store resolver and
-// the aligned leg is no longer what the tests above are measuring.
+// is the missing-owner observation control: neither an unavailable owning leg
+// nor a confirmed open assignment may become an unconditional release.
 func TestSessionReconcilerOrphanCloseWithoutAlignedStoresLeavesBindingResidentWorkHeld(t *testing.T) {
 	env := newBindingOrphanReconcileEnv(t)
 

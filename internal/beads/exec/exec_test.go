@@ -1,6 +1,7 @@
 package exec //nolint:revive // internal package, always imported with alias
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -9,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
@@ -69,6 +71,35 @@ esac
 `
 }
 
+func TestDeleteProtectsAttemptArchive(t *testing.T) {
+	dir := t.TempDir()
+	archive := beads.Bead{ID: "EX-archive", Status: "closed", Metadata: beads.StringMap{
+		beadmeta.AttemptEvidenceArchiveAttemptIDMetadataKey: "attempt-1",
+		beadmeta.AttemptEvidenceArchiveOwnerIDMetadataKey:   "work-1",
+		beadmeta.AttemptEvidenceArchivePayloadMetadataKey:   "{}",
+	}}
+	data, err := json.Marshal(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "archive.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	script := writeScript(t, dir, `
+case "$1" in
+  get) cat "$(dirname "$0")/archive.json" ;;
+  delete) touch "$(dirname "$0")/deleted" ;;
+  *) exit 2 ;;
+esac
+`)
+	if err := NewStore(script).Delete(archive.ID); !errors.Is(err, beads.ErrProtectedAttemptEvidenceArchive) {
+		t.Fatalf("Delete archive = %v, want protected archive", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "deleted")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("archive deletion reached script: %v", err)
+	}
+}
+
 func TestCreate(t *testing.T) {
 	dir := t.TempDir()
 	script := writeScript(t, dir, allOpsScript())
@@ -89,31 +120,39 @@ func TestCreate(t *testing.T) {
 	}
 }
 
-func TestDeleteSuppliesInspectedRevision(t *testing.T) {
+func TestCreateRejectsControllerReservedMetadata(t *testing.T) {
 	dir := t.TempDir()
-	argsFile := filepath.Join(dir, "delete.args")
+	invoked := filepath.Join(dir, "create-invoked")
 	script := writeScript(t, dir, `
-op="$1"; shift
-case "$op" in
-  get)
-    echo '{"id":"EX-1","title":"found","status":"closed","type":"task","revision":17,"created_at":"2026-02-27T10:00:00Z"}'
-    ;;
-  delete)
-    printf '%s\n' "$*" > "`+argsFile+`"
+case "$1" in
+  create)
+    touch "`+invoked+`"
+    cat > /dev/null
+    echo '{"id":"EX-1","title":"test","status":"open","type":"task"}'
     ;;
   *) exit 2 ;;
 esac
 `)
-	s := NewStore(script)
-	if err := s.Delete("EX-1"); err != nil {
-		t.Fatalf("Delete: %v", err)
-	}
-	args, err := os.ReadFile(argsFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := strings.TrimSpace(string(args)); got != "EX-1 17" {
-		t.Fatalf("delete args = %q, want revision-fenced protocol", got)
+	for _, tc := range []struct {
+		name string
+		key  string
+		want error
+	}{
+		{name: "lifecycle transition head", key: beadmeta.LifecycleTransitionHeadMetadataKey, want: beads.ErrLifecycleMutationBlocked},
+		{name: "decision frontier record", key: beadmeta.DecisionFrontierRecordMetadataKey, want: beads.ErrDecisionFrontierMutationBlocked},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := NewStore(script).Create(beads.Bead{
+				Title: "forged controller record", Type: "task",
+				Metadata: map[string]string{tc.key: "forged"},
+			})
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("Create(metadata[%q]) = %v, want %v", tc.key, err, tc.want)
+			}
+			if _, err := os.Stat(invoked); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("Create(metadata[%q]) reached exec script: %v", tc.key, err)
+			}
+		})
 	}
 }
 
@@ -1094,13 +1133,16 @@ func TestSetMetadata(t *testing.T) {
 
 	script := writeScript(t, dir, `
 case "$1" in
+  get)
+    echo '{"id":"EX-1","title":"test","status":"open","type":"task","created_at":"2026-01-01T00:00:00Z"}'
+    ;;
   set-metadata) cat > "`+outFile+`" ;;
   *) exit 2 ;;
 esac
 `)
 	s := NewStore(script)
 
-	if err := s.SetMetadata("EX-1", "merge_strategy", "mr"); err != nil {
+	if err := s.SetMetadata("EX-1", "ordinary_key", "mr"); err != nil {
 		t.Fatalf("SetMetadata: %v", err)
 	}
 
@@ -1110,6 +1152,178 @@ esac
 	}
 	if string(data) != "mr" {
 		t.Errorf("metadata value = %q, want %q", string(data), "mr")
+	}
+}
+
+func TestLifecycleRouteMetadataMutationIsCheckedBeforeScriptWrite(t *testing.T) {
+	dir := t.TempDir()
+	writeMarker := filepath.Join(dir, "write-called")
+	script := writeScript(t, dir, `
+case "$1" in
+  get)
+    echo '{"id":"EX-1","title":"enrolled","status":"open","type":"task","created_at":"2026-01-01T00:00:00Z","metadata":{"gc.lifecycle.admission_receipt.v2":"durable admission evidence"}}'
+    ;;
+  update|set-metadata)
+    touch "`+writeMarker+`"
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	store := NewStore(script)
+	for _, mutation := range []struct {
+		name string
+		fn   func() error
+	}{
+		{"Update", func() error {
+			return store.Update("EX-1", beads.UpdateOpts{Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "pool/worker"}})
+		}},
+		{"SetMetadata", func() error {
+			return store.SetMetadata("EX-1", beadmeta.WorkflowIDMetadataKey, "workflow-1")
+		}},
+	} {
+		t.Run(mutation.name, func(t *testing.T) {
+			if err := mutation.fn(); !errors.Is(err, beads.ErrLifecycleMutationBlocked) {
+				t.Fatalf("mutation error = %v, want ErrLifecycleMutationBlocked", err)
+			}
+		})
+	}
+	if _, err := os.Stat(writeMarker); !os.IsNotExist(err) {
+		t.Fatalf("delegate mutation ran; marker stat error = %v", err)
+	}
+}
+
+func TestProtectedMetadataNamespacesAreCheckedBeforeExecWrites(t *testing.T) {
+	for _, mutation := range []struct {
+		name string
+		fn   func(*Store, string) error
+	}{
+		{"Update", func(store *Store, key string) error {
+			return store.Update("EX-1", beads.UpdateOpts{Metadata: map[string]string{key: "forged"}})
+		}},
+		{"SetMetadata", func(store *Store, key string) error {
+			return store.SetMetadata("EX-1", key, "forged")
+		}},
+		{"SetMetadataBatch", func(store *Store, key string) error {
+			return store.SetMetadataBatch("EX-1", map[string]string{key: "forged"})
+		}},
+	} {
+		t.Run(mutation.name, func(t *testing.T) {
+			for _, protected := range []struct {
+				name string
+				key  string
+				want error
+			}{
+				{name: "decision frontier namespace", key: beadmeta.DecisionFrontierMetadataPrefix + "caller_forged", want: beads.ErrDecisionFrontierMutationBlocked},
+				{name: "lifecycle transition head", key: beadmeta.LifecycleTransitionHeadMetadataKey, want: beads.ErrLifecycleMutationBlocked},
+			} {
+				t.Run(protected.name, func(t *testing.T) {
+					dir := t.TempDir()
+					writeMarker := filepath.Join(dir, "write-called")
+					script := writeScript(t, dir, `
+case "$1" in
+  get)
+    echo '{"id":"EX-1","title":"ordinary","status":"open","type":"task","created_at":"2026-01-01T00:00:00Z"}'
+    ;;
+  update|set-metadata)
+    touch "`+writeMarker+`"
+    cat > /dev/null
+    ;;
+  *) exit 2 ;;
+esac
+`)
+					if err := mutation.fn(NewStore(script), protected.key); !errors.Is(err, protected.want) {
+						t.Fatalf("protected metadata write = %v, want %v", err, protected.want)
+					}
+					if _, err := os.Stat(writeMarker); !errors.Is(err, os.ErrNotExist) {
+						t.Fatalf("protected metadata write reached exec script: %v", err)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestOrdinaryMetadataWritesRemainCompatibleAcrossExecPaths(t *testing.T) {
+	dir := t.TempDir()
+	operations := filepath.Join(dir, "operations")
+	script := writeScript(t, dir, `
+op="$1"
+shift
+printf '%s\n' "$op" >> "`+operations+`"
+case "$op" in
+  get)
+    echo '{"id":"EX-1","title":"ordinary","status":"open","type":"task","created_at":"2026-01-01T00:00:00Z"}'
+    ;;
+  update|set-metadata)
+    cat > /dev/null
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	store := NewStore(script)
+	if err := store.Update("EX-1", beads.UpdateOpts{Metadata: map[string]string{"ordinary_update": "value"}}); err != nil {
+		t.Fatalf("Update ordinary metadata: %v", err)
+	}
+	if err := store.SetMetadata("EX-1", "ordinary_single", "value"); err != nil {
+		t.Fatalf("SetMetadata ordinary metadata: %v", err)
+	}
+	if err := store.SetMetadataBatch("EX-1", map[string]string{
+		"ordinary_batch_a": "value-a",
+		"ordinary_batch_b": "value-b",
+	}); err != nil {
+		t.Fatalf("SetMetadataBatch ordinary metadata: %v", err)
+	}
+
+	data, err := os.ReadFile(operations)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Fields(string(data))
+	if len(lines) != 4 || lines[0] != "update" || lines[1] != "set-metadata" || lines[2] != "set-metadata" || lines[3] != "set-metadata" {
+		t.Fatalf("exec operations = %v, want update followed by three metadata writes without a preflight read", lines)
+	}
+}
+
+func TestLifecycleSensitiveExecWritesRefuseWithoutConditionalCapability(t *testing.T) {
+	dir := t.TempDir()
+	writeMarker := filepath.Join(dir, "write-called")
+	script := writeScript(t, dir, `
+case "$1" in
+  get)
+    echo '{"id":"EX-1","title":"open","status":"open","type":"task","created_at":"2026-01-01T00:00:00Z"}'
+    ;;
+  update|set-metadata)
+    touch "`+writeMarker+`"
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	store := NewStore(script)
+	status := "in_progress"
+	for _, mutation := range []struct {
+		name string
+		fn   func() error
+	}{
+		{"Update status", func() error { return store.Update("EX-1", beads.UpdateOpts{Status: &status}) }},
+		{"Update legacy workflow id", func() error {
+			return store.Update("EX-1", beads.UpdateOpts{Metadata: map[string]string{beadmeta.LegacyWorkflowIDMetadataKey: "wf-1"}})
+		}},
+		{"SetMetadata", func() error { return store.SetMetadata("EX-1", beadmeta.WorkflowIDMetadataKey, "wf-1") }},
+		{"SetMetadataBatch", func() error {
+			return store.SetMetadataBatch("EX-1", map[string]string{
+				"ordinary":                   "value",
+				beadmeta.RoutedToMetadataKey: "pool/worker",
+			})
+		}},
+	} {
+		t.Run(mutation.name, func(t *testing.T) {
+			if err := mutation.fn(); !errors.Is(err, beads.ErrConditionalWriteUnsupported) {
+				t.Fatalf("mutation error = %v, want ErrConditionalWriteUnsupported", err)
+			}
+		})
+	}
+	if _, err := os.Stat(writeMarker); !os.IsNotExist(err) {
+		t.Fatalf("unguarded exec write reached script; marker stat error = %v", err)
 	}
 }
 
@@ -1523,5 +1737,46 @@ esac
 	// script-side limit would cut rows before the Go-side seek filter runs.
 	if strings.Contains(argsText, "--limit=7") {
 		t.Fatalf("list args should not limit before seek filtering: %s", argsText)
+	}
+}
+
+func TestListAbsentMetadataKeyFiltersBeforeLimit(t *testing.T) {
+	script := writeScript(t, t.TempDir(), `
+for arg in "$@"; do
+  case "$arg" in --limit=*) exit 3 ;; esac
+done
+echo '[{"id":"private","title":"private","status":"open","type":"task","metadata":{"private":""}},{"id":"public","title":"public","status":"open","type":"task"}]'
+`)
+	rows, err := NewStore(script).List(beads.ListQuery{Type: "task", Limit: 1, AbsentMetadataKey: "private"})
+	if err != nil || len(rows) != 1 || rows[0].ID != "public" {
+		t.Fatalf("private prefix consumed exec public page: %+v err=%v", rows, err)
+	}
+}
+
+func TestDeleteSuppliesInspectedRevision(t *testing.T) {
+	dir := t.TempDir()
+	argsFile := filepath.Join(dir, "delete.args")
+	script := writeScript(t, dir, `
+op="$1"; shift
+case "$op" in
+  get)
+    echo '{"id":"EX-1","title":"found","status":"closed","type":"task","revision":17,"created_at":"2026-02-27T10:00:00Z"}'
+    ;;
+  delete)
+    printf '%s\n' "$*" > "`+argsFile+`"
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	s := NewStore(script)
+	if err := s.Delete("EX-1"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	args, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(args)); got != "EX-1 17" {
+		t.Fatalf("delete args = %q, want revision-fenced protocol", got)
 	}
 }

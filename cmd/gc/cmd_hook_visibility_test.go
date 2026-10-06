@@ -2,7 +2,10 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -46,6 +49,46 @@ func TestHookRouteIdentitiesEqual(t *testing.T) {
 				t.Errorf("hookRouteIdentitiesEqual(%q, %q) = %v, want %v (reversed)", tc.b, tc.a, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestDoHookRefusesFormulaCandidateWhenCompatibilityCheckFails(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	candidate := map[string]any{
+		"id":     "work-1",
+		"status": "open",
+		"metadata": map[string]string{
+			beadmeta.FormulaSourceMetadataKey: "/packs/required/formulas/work.formula.toml",
+		},
+	}
+	raw, err := json.Marshal([]any{candidate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	checks := 0
+	runner := func(string, string) (string, error) { return string(raw), nil }
+	check := func(_ context.Context, bead beads.Bead) (formulaActionCandidate, error) {
+		checks++
+		if bead.ID != "work-1" {
+			t.Fatalf("checked bead id = %q, want work-1", bead.ID)
+		}
+		return formulaActionCandidate{Bead: bead}, errors.New("release approval unavailable")
+	}
+	code := doHook("gc ready", ".", false, runner, &stdout, &stderr, hookVisibility{
+		CheckFormulaAction:                 check,
+		RequireStructuredFormulaCandidates: true,
+	})
+	if code == 0 {
+		t.Fatal("doHook succeeded, want compatibility refusal")
+	}
+	if checks != 1 {
+		t.Fatalf("compatibility checks = %d, want 1", checks)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout exposed controlled candidate: %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "formula compatibility check failed") {
+		t.Fatalf("stderr = %q, want compatibility diagnostic", stderr.String())
 	}
 }
 

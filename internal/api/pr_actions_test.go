@@ -506,6 +506,26 @@ func TestPRActionPreparePersistsWorkTransitionBeforeReportingSuccess(t *testing.
 	}
 }
 
+func TestPRRepairLookupDoesNotAuthorizeRawV2ReceiptPresence(t *testing.T) {
+	fx := newPRActionFixture(t, false)
+	queue, err := fx.service.Queue(context.Background())
+	if err != nil || len(queue.Items) != 1 {
+		t.Fatalf("queue = %+v, err=%v", queue, err)
+	}
+	monitor := fx.state.cfg.GitHub.PRMonitors[0]
+	work, err := ensurePRRepairWork(fx.store, monitor, queue.Items[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	work.Labels = []string{"github", "ci", "repair", "pr-monitor"}
+	work.Metadata[beadmeta.RoutedToMetadataKey] = monitor.RepairRoute
+	work.Metadata[beadmeta.LifecycleAdmissionReceiptV2MetadataKey] = "malformed-but-present"
+
+	if validPRRepairWork(work, monitor, queue.Items[0]) {
+		t.Fatal("raw v2 metadata presence and a serving route authorized an unheld repair row")
+	}
+}
+
 func TestPRActionExecuteKeepsLedgerAndPreparedWorkOnMonitorRig(t *testing.T) {
 	fx := newPRActionFixture(t, false)
 	fx.forge.pullRequests[0].MergeStateStatus = "BEHIND"
@@ -569,7 +589,7 @@ func TestPRActionPrepareDifferentIdempotencyKeysShareOneSemanticWorkRecord(t *te
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := createPRActionIntent(fx.store, request, actor, fingerprint, fx.now); err != nil {
+		if _, err := createPRActionIntent(fx.store, request, actor, fingerprint, fx.now, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -667,7 +687,7 @@ func TestPRActionPrepareResumesPendingIntentAfterDurableWorkWasCreated(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	intent, err := createPRActionIntent(fx.store, request, actor, fingerprint, fx.now)
+	intent, err := createPRActionIntent(fx.store, request, actor, fingerprint, fx.now, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -809,13 +829,14 @@ func TestPRActionMergeClaimRejectsStalePendingReadAfterUnknownReservation(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := createPRActionIntent(fx.store, request, actor, fingerprint, fx.now); err != nil {
+	if _, err := createPRActionIntent(fx.store, request, actor, fingerprint, fx.now, nil); err != nil {
 		t.Fatal(err)
 	}
 	blockedStore := &prActionStaleSnapshotStore{
 		Store: fx.store, target: fx.store, idempotencyKey: request.IdempotencyKey,
 		read: make(chan struct{}), release: make(chan struct{}),
 	}
+	// Share the exact city and ledger, not fakeState's synchronization fields.
 	stateB := newFakeState(t)
 	stateB.cfg = fx.state.cfg
 	stateB.cityName = fx.state.cityName
@@ -1193,27 +1214,4 @@ func (f *fakePRActionEvidence) Read(_ beads.Store, workID, attemptID string) (PR
 		}
 	}
 	return PRActionAttemptEvidence{}, ErrPRActionEvidenceMissing
-}
-
-func TestPRRepairLookupRejectsUnverifiedLifecycleReceipt(t *testing.T) {
-	for _, key := range []string{beadmeta.LifecycleAdmissionReceiptMetadataKey, "gc.lifecycle.admission_receipt.v2"} {
-		t.Run(key, func(t *testing.T) {
-			fx := newPRActionFixture(t, false)
-			queue, err := fx.service.Queue(context.Background())
-			if err != nil || len(queue.Items) != 1 {
-				t.Fatalf("queue=%+v err=%v", queue, err)
-			}
-			monitor := fx.state.cfg.GitHub.PRMonitors[0]
-			work, err := ensurePRRepairWork(fx.store, monitor, queue.Items[0])
-			if err != nil {
-				t.Fatal(err)
-			}
-			work.Labels = []string{"github", "ci", "repair", "pr-monitor"}
-			work.Metadata[beadmeta.RoutedToMetadataKey] = monitor.RepairRoute
-			work.Metadata[key] = "malformed-but-present"
-			if validPRRepairWork(work, monitor, queue.Items[0]) {
-				t.Fatal("unverified lifecycle receipt authorized an unheld repair row")
-			}
-		})
-	}
 }

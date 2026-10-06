@@ -744,6 +744,162 @@ func TestWorkflowDeleteIncludesClosedDescendantsAndDeletesBeads(t *testing.T) {
 	}
 }
 
+func TestWorkflowDeleteSQLiteConnectedRowsKeepCheckedRevisions(t *testing.T) {
+	state := newFakeState(t)
+	state.cityName = "test-city"
+	store, err := beads.OpenSQLiteStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.(*beads.SQLiteStore).CloseStore() })
+	state.cityBeadStore = store
+	root, err := store.Create(beads.Bead{Title: "root", Metadata: map[string]string{
+		beadmeta.KindMetadataKey: beadmeta.KindWorkflow, "gc.formula_contract": "graph.v2", "gc.workflow_id": "wf_sqlite_delete",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := store.Create(beads.Bead{
+		Title: "child", ParentID: root.ID,
+		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID, "gc.step_ref": "demo.closed"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Fresh SQLite rows legitimately have no usable revision. Qualify terminal
+	// rows produced by the normal close lifecycle, not an unversioned seed.
+	for _, id := range []string{root.ID, child.ID} {
+		if err := store.Close(id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	req := httptest.NewRequest(http.MethodDelete, cityURL(state, "/workflow/")+root.ID+"?scope_kind=city&scope_ref=test-city&delete=true", nil)
+	req.Header.Set("X-GC-Request", "test")
+	rec := httptest.NewRecorder()
+	newTestCityHandler(t, state).ServeHTTP(rec, req)
+	var result workflowDeleteResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil || rec.Code != http.StatusOK || result.Deleted != 2 || result.Partial {
+		t.Fatalf("checked SQLite deletion partially failed: status=%d body=%s error=%v", rec.Code, rec.Body.String(), err)
+	}
+	for _, id := range []string{root.ID, child.ID} {
+		if _, err := store.Get(id); !errors.Is(err, beads.ErrNotFound) {
+			t.Fatalf("selected row %s survived successful purge: %v", id, err)
+		}
+	}
+}
+
+func TestWorkflowDeleteStopsBeforeAncestorWhenDependentReopens(t *testing.T) {
+	for _, tc := range []struct {
+		name                                           string
+		parentField, initialEdge, lateEdge, lateParent bool
+	}{
+		{name: "existing explicit edge", initialEdge: true},
+		{name: "parent field without edge", parentField: true},
+		{name: "edge added after verification", lateEdge: true},
+		{name: "parent added after verification", lateParent: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := newFakeState(t)
+			state.cityName = "test-city"
+			store := &workflowDeleteInterleavingStore{MemStore: beads.NewMemStore()}
+			state.cityBeadStore = store
+			root, err := store.Create(beads.Bead{Title: "root", Metadata: map[string]string{
+				beadmeta.KindMetadataKey: beadmeta.KindWorkflow, "gc.formula_contract": "graph.v2", "gc.workflow_id": "wf_preserve_reopened",
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			parentID := ""
+			if tc.parentField {
+				parentID = root.ID
+			}
+			child, err := store.Create(beads.Bead{
+				Title: "child", ParentID: parentID,
+				Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID, "gc.step_ref": "demo.child"},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.initialEdge {
+				if err := store.DepAdd(child.ID, root.ID, "parent-child"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			raced := false
+			store.beforeDelete = func(id string) {
+				lateReference := tc.lateEdge || tc.lateParent
+				if ((lateReference && id == root.ID) || (!lateReference && id == child.ID)) && !raced {
+					raced = true
+					if tc.lateEdge {
+						if err := store.DepAdd(child.ID, root.ID, "parent-child"); err != nil {
+							t.Fatal(err)
+						}
+					}
+					if tc.lateParent {
+						if err := store.Update(child.ID, beads.UpdateOpts{ParentID: &root.ID}); err != nil {
+							t.Fatal(err)
+						}
+					}
+					if err := store.Reopen(child.ID); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			req := httptest.NewRequest(http.MethodDelete, cityURL(state, "/workflow/")+root.ID+"?scope_kind=city&scope_ref=test-city&delete=true", nil)
+			req.Header.Set("X-GC-Request", "test")
+			rec := httptest.NewRecorder()
+			newTestCityHandler(t, state).ServeHTTP(rec, req)
+			var result workflowDeleteResponse
+			if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil || !raced || result.Deleted != 0 || !result.Partial {
+				t.Fatalf("dependent refusal did not stop purge: status=%d body=%s race=%v error=%v", rec.Code, rec.Body.String(), raced, err)
+			}
+			if _, err := store.Get(root.ID); err != nil {
+				t.Fatalf("purge deleted ancestor after dependent refusal: %v", err)
+			}
+			current, err := store.Get(child.ID)
+			if err != nil || current.Status != "open" {
+				t.Fatalf("reopened dependent not preserved: %+v %v", current, err)
+			}
+			deps, err := store.DepList(child.ID, "down")
+			if tc.parentField || tc.lateParent {
+				if err != nil || current.ParentID != root.ID {
+					t.Fatalf("purge lost the live parent reference: %+v %v", current, err)
+				}
+			} else if err != nil || len(deps) != 1 || deps[0].DependsOnID != root.ID {
+				t.Fatalf("purge removed the live dependent's root edge: %+v %v", deps, err)
+			}
+		})
+	}
+}
+
+func TestWorkflowDeleteRejectsReopenedVerification(t *testing.T) {
+	state := newFakeState(t)
+	state.cityName = "test-city"
+	store := &workflowDeleteInterleavingStore{MemStore: beads.NewMemStore()}
+	state.cityBeadStore = store
+	root, err := store.Create(beads.Bead{Title: "root", Metadata: map[string]string{
+		beadmeta.KindMetadataKey: beadmeta.KindWorkflow, "gc.formula_contract": "graph.v2", "gc.workflow_id": "wf_reopened_before_verify",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.afterCloseAll = func() {
+		if err := store.Reopen(root.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	req := httptest.NewRequest(http.MethodDelete, cityURL(state, "/workflow/")+root.ID+"?scope_kind=city&scope_ref=test-city&delete=true", nil)
+	req.Header.Set("X-GC-Request", "test")
+	rec := httptest.NewRecorder()
+	newTestCityHandler(t, state).ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("reopened verification authorized purge: %d %s", rec.Code, rec.Body.String())
+	}
+	if current, err := store.Get(root.ID); err != nil || current.Status != "open" {
+		t.Fatalf("reopened target not preserved: %+v %v", current, err)
+	}
+}
+
 func TestWorkflowDeleteRefusesReceiptEvidenceWithoutPartialPurge(t *testing.T) {
 	state := newFakeState(t)
 	state.cityName = "test-city"

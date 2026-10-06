@@ -98,6 +98,10 @@ func parseGitHubTreeURL(s string) (source, subpath, ref string) {
 // resolvePackRef resolves a pack reference to a local directory.
 // Handles local paths, GitHub tree URLs, and git source//sub#ref URLs.
 func resolvePackRef(ref, declDir, cityRoot string, nonBlocking bool) (string, error) {
+	return resolvePackRefWithQualification(ref, declDir, cityRoot, nonBlocking, nil)
+}
+
+func resolvePackRefWithQualification(ref, declDir, cityRoot string, nonBlocking bool, capture *qualificationCapture) (string, error) {
 	if isGitHubTreeURL(ref) || isRemoteInclude(ref) {
 		// parseRemoteInclude handles GitHub tree/blob URLs too
 		// (remotesource.Parse short-circuits to ParseGitHubTreeOrBlob),
@@ -122,9 +126,12 @@ func resolvePackRef(ref, declDir, cityRoot string, nonBlocking bool) (string, er
 			lockKeys = append(lockKeys, source)
 		}
 		for _, key := range lockKeys {
-			if cacheDir, ok, err := resolveLockedRemoteImport(key, cityRoot, nonBlocking); err != nil {
+			if cacheDir, ok, pin, err := resolveLockedRemoteImportWithQualification(key, cityRoot, nonBlocking, capture); err != nil {
 				return "", err
 			} else if ok {
+				if capture != nil {
+					capture.recordPackRoot(cacheDir, source, pin, "locked")
+				}
 				if subpath != "" {
 					return filepath.Join(cacheDir, subpath), nil
 				}
@@ -135,12 +142,19 @@ func resolvePackRef(ref, declDir, cityRoot string, nonBlocking bool) (string, er
 		if err != nil {
 			return "", err
 		}
+		if capture != nil {
+			capture.recordPackRoot(cacheDir, source, "", "unbound")
+		}
 		if subpath != "" {
 			return filepath.Join(cacheDir, subpath), nil
 		}
 		return cacheDir, nil
 	}
-	return resolveConfigPath(ref, declDir, cityRoot), nil
+	resolved := resolveConfigPath(ref, declDir, cityRoot)
+	if capture != nil {
+		capture.recordPackRoot(resolved, "", "", "")
+	}
+	return resolved, nil
 }
 
 type remoteImportLockfile struct {
@@ -151,34 +165,42 @@ type remoteImportLockEntry struct {
 	Commit string `toml:"commit"`
 }
 
-func resolveLockedRemoteImport(source, cityRoot string, nonBlocking bool) (string, bool, error) {
+func resolveLockedRemoteImport(source, cityRoot string) (string, bool, error) {
+	path, ok, _, err := resolveLockedRemoteImportWithQualification(source, cityRoot, false, nil)
+	return path, ok, err
+}
+
+func resolveLockedRemoteImportWithQualification(source, cityRoot string, nonBlocking bool, capture *qualificationCapture) (string, bool, string, error) {
 	lockPath := filepath.Join(cityRoot, "packs.lock")
 	data, err := os.ReadFile(lockPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return "", false, nil
+			return "", false, "", nil
 		}
-		return "", false, fmt.Errorf("reading packs.lock: %w", err)
+		return "", false, "", fmt.Errorf("reading packs.lock: %w", err)
+	}
+	if capture != nil {
+		capture.recordRead(lockPath, data)
 	}
 
 	var lock remoteImportLockfile
 	if _, err := toml.Decode(string(data), &lock); err != nil {
-		return "", false, fmt.Errorf("parsing packs.lock: %w", err)
+		return "", false, "", fmt.Errorf("parsing packs.lock: %w", err)
 	}
 	entry, ok := lock.Packs[source]
 	if !ok || entry.Commit == "" {
-		return "", false, nil
+		return "", false, "", nil
 	}
 
 	cacheRoot, err := GlobalRepoCacheRoot()
 	if err != nil {
-		return "", false, err
+		return "", false, "", err
 	}
 	cacheDir := filepath.Join(cacheRoot, RepoCacheKey(source, entry.Commit))
 	if err := validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, entry.Commit, nonBlocking); err != nil {
-		return "", false, err
+		return "", false, "", err
 	}
-	return cacheDir, true, nil
+	return cacheDir, true, entry.Commit, nil
 }
 
 // BundledSourcePinnedVersion returns the canonical pinned version for a
@@ -320,7 +342,15 @@ func resolveBundledSourceWithoutLock(source, declaredVersion string, nonBlocking
 	return cacheDir, true, nil
 }
 
-func resolveInstalledRemoteImport(source, declaredVersion, cityRoot string, nonBlocking bool) (string, error) {
+func resolveInstalledRemoteImport(source, declaredVersion, cityRoot string) (string, error) {
+	return resolveInstalledRemoteImportWithQualification(source, declaredVersion, cityRoot, false, nil)
+}
+
+func resolveInstalledRemoteImportWithQualification(source, declaredVersion, cityRoot string, nonBlocking bool, capture *qualificationCapture) (string, error) {
+	rootSource := source
+	if isRemoteRef(source) {
+		rootSource, _, _ = parseRemoteInclude(source)
+	}
 	lockPath := filepath.Join(cityRoot, "packs.lock")
 	data, err := os.ReadFile(lockPath)
 	if err != nil {
@@ -329,11 +359,17 @@ func resolveInstalledRemoteImport(source, declaredVersion, cityRoot string, nonB
 				if err != nil {
 					return "", fmt.Errorf("resolving remote import %s without lock: %w", source, err)
 				}
+				if capture != nil {
+					capture.recordPackRoot(cacheDir, rootSource, BundledSourcePinnedVersion(rootSource), "bundled")
+				}
 				return cacheDir, nil
 			}
 			return "", fmt.Errorf("remote import %s is not installed (missing packs.lock); %s", source, notCachedRemediation(source, declaredVersion))
 		}
 		return "", fmt.Errorf("reading packs.lock: %w", err)
+	}
+	if capture != nil {
+		capture.recordRead(lockPath, data)
 	}
 
 	var lock remoteImportLockfile
@@ -345,6 +381,9 @@ func resolveInstalledRemoteImport(source, declaredVersion, cityRoot string, nonB
 		if cacheDir, ok, err := resolveBundledSourceWithoutLock(source, declaredVersion, nonBlocking); ok {
 			if err != nil {
 				return "", fmt.Errorf("resolving remote import %s without lock entry: %w", source, err)
+			}
+			if capture != nil {
+				capture.recordPackRoot(cacheDir, rootSource, BundledSourcePinnedVersion(rootSource), "bundled")
 			}
 			return cacheDir, nil
 		}
@@ -358,6 +397,9 @@ func resolveInstalledRemoteImport(source, declaredVersion, cityRoot string, nonB
 	cacheDir := filepath.Join(cacheRoot, RepoCacheKey(source, entry.Commit))
 	if err := validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, entry.Commit, nonBlocking); err != nil {
 		return "", err
+	}
+	if capture != nil {
+		capture.recordPackRoot(cacheDir, rootSource, entry.Commit, "locked")
 	}
 	return cacheDir, nil
 }

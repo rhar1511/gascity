@@ -24,10 +24,14 @@ INSTALL_DIR := $(BIN_DIR)
 VERSION    := $(shell tag=$$(git describe --tags --exact-match 2>/dev/null || true); if [ -n "$$tag" ]; then printf '%s' "$$tag" | sed 's/^v//'; else echo "dev"; fi)
 COMMIT     := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 DIRTY      := $(shell test -n "$$(git status --porcelain 2>/dev/null)" && echo "-dirty" || true)
+SOURCE_REVISION := $(shell git rev-parse --verify HEAD^{commit} 2>/dev/null || echo "unknown")
+SOURCE_DIRTY    := $(shell status=$$(git status --porcelain 2>/dev/null); result=$$?; if [ $$result -ne 0 ]; then echo "unknown"; elif [ -n "$$status" ]; then echo "true"; else echo "false"; fi)
 BUILD_TIME := $(shell git show -s --format=%cI HEAD 2>/dev/null || echo unknown)
 
 LDFLAGS := -X main.version=$(VERSION) \
            -X main.commit=$(COMMIT)$(DIRTY) \
+           -X main.sourceRevision=$(SOURCE_REVISION) \
+           -X main.sourceDirty=$(SOURCE_DIRTY) \
            -X main.date=$(BUILD_TIME)
 
 unique_words = $(if $1,$(firstword $1) $(call unique_words,$(filter-out $(firstword $1),$1)))
@@ -305,6 +309,8 @@ LINT_BASE ?= origin/main
 LINT_CHANGED_REF ?= HEAD
 LINT_CHANGED_SCOPE ?= worktree
 LINT_FLAGS ?=
+LINT_GOMEMLIMIT ?= 6GiB
+LINT_ENV = GOFLAGS="$(QUALITY_GATE_GOFLAGS)" GOMEMLIMIT=$(LINT_GOMEMLIMIT)
 QUALITY_GATE_GOFLAGS = $$(go env GOFLAGS | sed -E 's/(^|[[:space:]])-mod=[^[:space:]]+//g') -mod=readonly
 CI_STATIC_SELECT := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))scripts/ci-static-select
 CI_STATIC_GO ?= go
@@ -314,15 +320,16 @@ lint: lint-full
 
 ## lint-full: run golangci-lint across all packages
 lint-full: $(GOLANGCI_LINT)
-	GOFLAGS="$(QUALITY_GATE_GOFLAGS)" $(GOLANGCI_LINT) run $(LINT_FLAGS) ./...
+	$(LINT_ENV) $(GOLANGCI_LINT) run $(LINT_FLAGS) ./...
 
 ## lint-new: run golangci-lint for issues introduced since LINT_BASE
 lint-new: $(GOLANGCI_LINT)
-	GOFLAGS="$(QUALITY_GATE_GOFLAGS)" $(GOLANGCI_LINT) run $(LINT_FLAGS) --new-from-merge-base=$(LINT_BASE) --whole-files ./...
+	$(LINT_ENV) $(GOLANGCI_LINT) run $(LINT_FLAGS) --new-from-merge-base=$(LINT_BASE) --whole-files ./...
 
 ## lint-changed: run golangci-lint only for packages touched by changed Go files
 lint-changed: $(GOLANGCI_LINT)
 	@export GOFLAGS="$(QUALITY_GATE_GOFLAGS)"; \
+	export GOMEMLIMIT="$(LINT_GOMEMLIMIT)"; \
 	case "$(LINT_CHANGED_SCOPE)" in \
 		staged) \
 			files="$$(git diff --cached --name-only --diff-filter=ACMRT -- '*.go')"; \
@@ -364,19 +371,19 @@ lint-changed: $(GOLANGCI_LINT)
 
 ## lint-affected: lint packages affected by changed Go build inputs or embedded files
 lint-affected: $(GOLANGCI_LINT)
-	@GOFLAGS="$(QUALITY_GATE_GOFLAGS)" "$(CI_STATIC_SELECT)" lint-affected "$(GOLANGCI_LINT)" "$(CI_STATIC_GO)" $(LINT_FLAGS)
+	@$(LINT_ENV) "$(CI_STATIC_SELECT)" lint-affected "$(GOLANGCI_LINT)" "$(CI_STATIC_GO)" $(LINT_FLAGS)
 
 ## fmt-check: fail if formatting would change files
 fmt-check: $(GOLANGCI_LINT)
-	GOFLAGS="$(QUALITY_GATE_GOFLAGS)" $(GOLANGCI_LINT) fmt --diff ./...
+	$(LINT_ENV) $(GOLANGCI_LINT) fmt --diff ./...
 
 ## fmt-check-changed: fail if formatting would change a regular changed Go file
 fmt-check-changed: $(GOLANGCI_LINT)
-	@GOFLAGS="$(QUALITY_GATE_GOFLAGS)" "$(CI_STATIC_SELECT)" fmt-check-changed "$(GOLANGCI_LINT)"
+	@$(LINT_ENV) "$(CI_STATIC_SELECT)" fmt-check-changed "$(GOLANGCI_LINT)"
 
 ## fmt: auto-fix formatting
 fmt: $(GOLANGCI_LINT)
-	$(GOLANGCI_LINT) fmt ./...
+	GOMEMLIMIT=$(LINT_GOMEMLIMIT) $(GOLANGCI_LINT) fmt ./...
 
 ## vet: run go vet
 vet:
@@ -400,6 +407,7 @@ GOCACHE_VAL   := $(shell go env GOCACHE)
 GOMODCACHE_VAL := $(shell go env GOMODCACHE)
 GOTMPDIR_VAL  := $(shell go env GOTMPDIR)
 GOROOT_VAL    := $(shell go env GOROOT)
+CGO_ENABLED_VAL := $(shell go env CGO_ENABLED)
 TEST_ENV = env -i \
 	PATH="$$PATH" \
 	HOME="$$HOME" \
@@ -420,6 +428,9 @@ TEST_ENV = env -i \
 	GOTMPDIR="$(GOTMPDIR_VAL)" \
 	GOROOT="$${GOROOT:-$(GOROOT_VAL)}" \
 	GOENV="$${GOENV-}" \
+	CGO_ENABLED="$(CGO_ENABLED_VAL)" \
+	GOMEMLIMIT="$${GOMEMLIMIT-}" \
+	GOMAXPROCS="$${GOMAXPROCS-}" \
 	GOFLAGS="$${GOFLAGS-}" \
 	GO111MODULE="$${GO111MODULE-}" \
 	GOEXPERIMENT="$${GOEXPERIMENT-}" \
@@ -431,6 +442,8 @@ TEST_ENV = env -i \
 	GOINSECURE="$${GOINSECURE-}" \
 	GOVCS="$${GOVCS-}" \
 	GOWORK="$${GOWORK-}" \
+	BEADS_TEST_BD_BINARY="$${BEADS_TEST_BD_BINARY-}" \
+	BEADS_TEST_DOLT_BINARY="$${BEADS_TEST_DOLT_BINARY-}" \
 	ANTHROPIC_BASE_URL="$${ANTHROPIC_BASE_URL-}" \
 	ANTHROPIC_API_KEY="$${ANTHROPIC_API_KEY-}" \
 	ANTHROPIC_AUTH_TOKEN="$${ANTHROPIC_AUTH_TOKEN-}" \
@@ -456,6 +469,7 @@ TEST_ENV = env -i \
 test-ci-policy:
 	$(TEST_ENV) PYTHONDONTWRITEBYTECODE=1 python3 -S -m unittest discover -s .github/workflows/scripts -p 'test_runner_policy.py'
 	$(TEST_ENV) PYTHONDONTWRITEBYTECODE=1 python3 -S -m unittest discover -s .github/workflows/scripts -p 'test_ci_suite_coverage.py'
+	$(TEST_ENV) PYTHONDONTWRITEBYTECODE=1 python3 -S -m unittest discover -s .github/workflows/scripts -p 'test_codeql_workflow.py'
 	$(TEST_ENV) GOFLAGS= GOENV=off GOWORK=off go test -count=1 ./scripts/cipolicy
 	$(TEST_ENV) GOFLAGS= GOENV=off GOWORK=off go test -count=1 ./scripts/prwatchdog/...
 	$(TEST_ENV) GOFLAGS= GOENV=off GOWORK=off go test -count=1 -run '^(TestPreflightStaticScopesOrdinaryPRsWithoutWeakeningProtectedRuns|TestFullStaticLintExplicitlyOwnsConfiguredGolangCIGovet|TestChangedStaticTargetsScopeLintAndFormattingToTheDiff|TestCIStaticScopeClassifierFailsClosedOutsideValidatedPullRequestMerge)$$' ./scripts

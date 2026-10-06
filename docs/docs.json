@@ -232,6 +232,7 @@
               "reference/config",
               "reference/beads-local-config",
               "reference/trust-boundaries",
+              "reference/session-authority-profiles",
               "reference/rsi-trusted-evaluation",
               "reference/api",
               "reference/session-request-receipts",

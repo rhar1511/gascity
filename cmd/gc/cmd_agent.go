@@ -17,6 +17,8 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/sessionauthority"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/spf13/cobra"
 )
 
@@ -38,7 +40,46 @@ Describe what this agent should do here.
 // in cmd_config.go and cmd_start.go that intentionally use config.Load to
 // discover remote packs before fetching them.
 func loadCityConfig(cityPath string, warningWriter ...io.Writer) (*config.City, error) {
+	if sessionauthority.EnforcementEnabled() {
+		return loadSessionAuthorityCityConfig(cityPath, warningWriter...)
+	}
 	return loadCityConfigFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), warningWriter...)
+}
+
+// loadSessionAuthorityCityConfig captures the same effective identity the
+// controller publishes: exact loader inputs, registered runtime name, and
+// absolute rig paths. Direct CLI launch paths must not verify a grant against
+// an earlier, differently normalized config snapshot.
+func loadSessionAuthorityCityConfig(cityPath string, warningWriter ...io.Writer) (*config.City, error) {
+	loadCityConfigCalls.Add(1)
+	fs := fsys.OSFS{}
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	warnings := resolveLoadCityConfigWarningWriter(warningWriter...)
+	if err := ensureBuiltinPacksForConfigLoad(fs, tomlPath, warnings); err != nil {
+		return nil, err
+	}
+	// Qualification needs the exact loader inputs, but this CLI discards the
+	// full revision snapshot. Keep those independent choices explicit.
+	loadOptions := config.LoadOptions{SkipRevisionSnapshot: true, CaptureQualificationInputs: true}
+	cfg, prov, err := config.LoadWithIncludesOptions(fs, tomlPath, loadOptions)
+	if err != nil {
+		return nil, err
+	}
+	emitLoadCityConfigWarnings(warnings, prov)
+	warnMissingRequiredBuiltinImports(fs, cfg, tomlPath, warnings)
+	if err := validatePackRuntimeRegistrations(cfg); err != nil {
+		return nil, err
+	}
+	applyFeatureFlags(cfg)
+	cityName := loadedCityName(cfg, cityPath)
+	if entry, registered, err := registeredCityEntry(cityPath); err != nil {
+		return nil, fmt.Errorf("resolve registered city identity for session authority: %w", err)
+	} else if registered {
+		cityName = entry.EffectiveName()
+	}
+	applyRuntimeCityIdentity(cfg, cityName)
+	resolveRigPathsAndRefreshQualification(cityPath, cfg, prov)
+	return cfg, nil
 }
 
 // skipRevisionSnapshot is the load option shared by the loaders in this file.
@@ -561,7 +602,12 @@ func doAgentList(fs fsys.FS, cityPath string, jsonOutput bool, stdout, stderr io
 		fmt.Fprintf(stderr, "gc agent list: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	items := agentListItems(cfg, cityQueryTopology(cityPath, cfg))
+	st, err := loadSuspensionState(fs, cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc agent list: loading suspension state: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	items := agentListItems(cfg, cityQueryTopology(cityPath, cfg), cityPath, st)
 	if jsonOutput {
 		if err := writeCLIJSONLine(stdout, AgentListJSON{
 			SchemaVersion: "1",
@@ -586,7 +632,7 @@ func doAgentList(fs fsys.FS, cityPath string, jsonOutput bool, stdout, stderr io
 	return 0
 }
 
-func agentListItems(cfg *config.City, topo config.QueryTopology) []AgentListItem {
+func agentListItems(cfg *config.City, topo config.QueryTopology, cityPath string, st suspensionstate.State) []AgentListItem {
 	if cfg == nil {
 		return nil
 	}
@@ -601,7 +647,7 @@ func agentListItems(cfg *config.City, topo config.QueryTopology) []AgentListItem
 			WorkDir:              a.WorkDir,
 			Provider:             a.Provider,
 			Session:              a.Session,
-			Suspended:            a.Suspended,
+			Suspended:            isAgentEffectivelySuspendedWith(cfg, cityPath, &a, st),
 			WorkQuery:            a.EffectiveWorkQueryFor(topo),
 			SlingQuery:           a.EffectiveSlingQuery(),
 			ConfiguredWorkQuery:  a.WorkQuery,

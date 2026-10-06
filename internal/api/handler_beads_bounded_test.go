@@ -10,8 +10,31 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
+
+func TestBeadListPrivatePayloadRowsDoNotConsumePublicPages(t *testing.T) {
+	fs := newFakeState(t)
+	seed, _ := seedMoleculeStore("gc", 5)
+	// Both a populated payload and a partially formed empty payload must be
+	// excluded before Count and LIMIT. They sort ahead of the visible records.
+	seed[4].Metadata = map[string]string{beadmeta.AttemptEvidenceArchivePayloadMetadataKey: "private"}
+	seed[3].Metadata = map[string]string{beadmeta.AttemptEvidenceArchivePayloadMetadataKey: ""}
+	store := &countingListStore{Store: beads.NewMemStoreFrom(5, seed, nil)}
+	fs.stores["myrig"] = store
+	first := fetchBoundedBeads(t, fs, "?type=molecule&all=true&limit=2")
+	if first.Total != 3 || len(first.Items) != 2 || first.NextCursor == "" || !store.countCalled || store.maxListLim != 3 {
+		t.Fatalf("private rows corrupted bounded page: %+v count=%v limit=%d", first, store.countCalled, store.maxListLim)
+	}
+	if first.Items[0].ID != seed[2].ID || first.Items[1].ID != seed[1].ID {
+		t.Fatalf("wrong first public page: %+v", first.Items)
+	}
+	second := fetchBoundedBeads(t, fs, "?type=molecule&all=true&limit=2&cursor="+first.NextCursor)
+	if second.Total != 3 || len(second.Items) != 1 || second.Items[0].ID != seed[0].ID || second.NextCursor != "" {
+		t.Fatalf("private rows corrupted cursor continuation: %+v", second)
+	}
+}
 
 // boundedListBody mirrors the bead-list response fields this test inspects.
 type boundedListBody struct {

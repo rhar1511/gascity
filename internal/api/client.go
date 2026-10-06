@@ -345,6 +345,16 @@ type SessionSubmitResponse struct {
 	Intent session.SubmitIntent `json:"intent"`
 }
 
+// LifecycleClaimResult is the controller-confirmed result of one enrolled
+// lifecycle claim and its reciprocal session stamp.
+type LifecycleClaimResult struct {
+	WorkID          string
+	Actor           string
+	ClaimGeneration string
+	ReceiptID       string
+	Replayed        bool
+}
+
 // sseEvent is a parsed SSE frame from the event stream.
 type sseEvent struct {
 	Event string
@@ -607,23 +617,41 @@ func payloadMatchesRequest(raw json.RawMessage, requestID, operation string) (bo
 	return p.RequestID == requestID && p.Operation == operation, nil
 }
 
+// ClientOption configures the generated API transport while preserving the
+// constructor's timeout and redirect policies.
+type ClientOption struct {
+	transport http.RoundTripper
+}
+
+// WithHTTPTransport supplies an HTTP transport, including an in-process handler
+// transport. Request construction and authentication editors remain unchanged.
+// A nil transport retains the constructor's network transport.
+func WithHTTPTransport(transport http.RoundTripper) ClientOption {
+	return ClientOption{transport: transport}
+}
+
 // NewClient creates a new supervisor-scope API client targeting the
 // given base URL (e.g., "http://127.0.0.1:8080"). Supervisor-scope
 // operations (ListCities, ListServices-via-city, etc.) work through
 // this client; per-city calls require NewCityScopedClient.
-func NewClient(baseURL string) *Client {
-	return newClient(baseURL, "")
+func NewClient(baseURL string, opts ...ClientOption) *Client {
+	return newClient(baseURL, "", opts...)
 }
 
 // NewCityScopedClient creates a client that targets per-city operations
 // at "/v0/city/<cityName>/...". The generated client produces those
 // paths natively — no prefix rewrite or path editor needed.
-func NewCityScopedClient(baseURL, cityName string) *Client {
-	return newClient(baseURL, cityName)
+func NewCityScopedClient(baseURL, cityName string, opts ...ClientOption) *Client {
+	return newClient(baseURL, cityName, opts...)
 }
 
-func newClient(baseURL, cityName string) *Client {
+func newClient(baseURL, cityName string, opts ...ClientOption) *Client {
 	httpClient := &http.Client{Timeout: defaultClientTimeout}
+	for _, opt := range opts {
+		if opt.transport != nil {
+			httpClient.Transport = opt.transport
+		}
+	}
 	cw, err := genclient.NewClientWithResponses(
 		baseURL,
 		genclient.WithHTTPClient(httpClient),
@@ -1990,4 +2018,43 @@ func extmsgBindingRecordFromWire(record genclient.SessionBindingRecord) extmsg.S
 		BindingGeneration: record.BindingGeneration,
 		Metadata:          record.Metadata,
 	}
+}
+
+// ClaimLifecycleWork asks the controller to atomically claim one already-v2-
+// admitted work item for the authenticated managed session incarnation. Its
+// source_store_ref must name the city or a rig; relocated class-store refs are
+// not supported by this Q54 endpoint. It never falls back to a local generic
+// status or identity write.
+func (c *Client) ClaimLifecycleWork(parent context.Context, request LifecycleClaimSubmitRequest) (LifecycleClaimResult, error) {
+	if err := c.requireCityScope(); err != nil {
+		return LifecycleClaimResult{}, err
+	}
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, defaultClientTimeout)
+	defer cancel()
+	body := genclient.ClaimAdmittedLifecycleWorkJSONRequestBody{
+		WorkId: request.WorkID, SourceStoreRef: request.SourceStoreRef,
+		ExpectedRevision: request.ExpectedRevision, ExpectedTransitionHead: request.ExpectedTransitionHead,
+		SessionId: request.SessionID, InstanceToken: request.InstanceToken, RuntimeEpoch: request.RuntimeEpoch,
+	}
+	resp, err := c.cw.ClaimAdmittedLifecycleWorkWithResponse(ctx, c.cityName, nil, body)
+	if err != nil {
+		return LifecycleClaimResult{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return LifecycleClaimResult{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
+		return LifecycleClaimResult{}, err
+	}
+	if resp.JSON200 == nil {
+		return LifecycleClaimResult{}, fmt.Errorf("API returned %d with no body", resp.StatusCode())
+	}
+	return LifecycleClaimResult{
+		WorkID: resp.JSON200.WorkId, Actor: resp.JSON200.Actor,
+		ClaimGeneration: resp.JSON200.ClaimGeneration, ReceiptID: resp.JSON200.ReceiptId,
+		Replayed: resp.JSON200.Replayed,
+	}, nil
 }

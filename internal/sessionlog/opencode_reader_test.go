@@ -213,3 +213,24 @@ func TestFindOpenCodeSessionFileMatchesExportDirectory(t *testing.T) {
 		t.Fatalf("FindOpenCodeSessionFile() = %q, want %q", got, newPath)
 	}
 }
+
+func TestFindOpenCodeSessionFileRejectsCandidateSymlinkEscape(t *testing.T) {
+	root := t.TempDir()
+	workDir := filepath.Join(t.TempDir(), "project")
+	outsideExport := filepath.Join(t.TempDir(), "outside-export.json")
+	encodedWorkDir, err := json.Marshal(workDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := `{"info":{"id":"outside","directory":` + string(encodedWorkDir) + `},"messages":[]}`
+	if err := os.WriteFile(outsideExport, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outsideExport, filepath.Join(root, "session-escape.json")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	if got := FindOpenCodeSessionFile([]string{root}, workDir); got != "" {
+		t.Fatalf("FindOpenCodeSessionFile() = %q, want no match for escaping candidate symlink", got)
+	}
+}

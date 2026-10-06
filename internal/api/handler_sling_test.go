@@ -21,6 +21,7 @@ import (
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/molecule"
+	"github.com/gastownhall/gascity/internal/sling"
 )
 
 type getErrStore struct {
@@ -98,6 +99,217 @@ func TestSlingWithBead(t *testing.T) {
 	}
 	if got := updated.Metadata["gc.routed_to"]; got != "myrig/worker" {
 		t.Fatalf("gc.routed_to = %q, want myrig/worker", got)
+	}
+}
+
+func TestAPIBeadRouterRefusesLifecycleEnrollmentBeforeCustomQuery(t *testing.T) {
+	state := newFakeMutatorState(t)
+	store := state.stores["myrig"]
+	bead, err := store.Create(beads.Bead{
+		ID: "LIFE-API-CUSTOM", Type: "task", Status: "open",
+		Metadata: map[string]string{beadmeta.LifecycleAdmissionReceiptMetadataKey: "durable admission evidence"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.cfg.Agents[0].SlingQuery = "custom-dispatch {}"
+	server := New(state)
+	runnerCalls := 0
+	server.SlingRunnerFunc = func(string, string, map[string]string) (string, error) {
+		runnerCalls++
+		return "", nil
+	}
+	router := apiBeadRouter{server: server, cfg: state.cfg, store: store}
+	err = router.Route(t.Context(), sling.RouteRequest{BeadID: bead.ID, Target: "myrig/worker"})
+	if !errors.Is(err, beads.ErrLifecycleMutationBlocked) {
+		t.Fatalf("Route error = %v, want lifecycle routing refusal", err)
+	}
+	if runnerCalls != 0 {
+		t.Fatalf("custom sling query called %d times, want 0", runnerCalls)
+	}
+	after, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Metadata[beadmeta.RoutedToMetadataKey] != "" {
+		t.Fatalf("refused route wrote gc.routed_to=%q", after.Metadata[beadmeta.RoutedToMetadataKey])
+	}
+}
+
+func TestAPIBeadRouterRefusesLifecycleEnrollmentBeforeBuiltInRoute(t *testing.T) {
+	state := newFakeMutatorState(t)
+	store := state.stores["myrig"]
+	bead, err := store.Create(beads.Bead{
+		ID: "LIFE-API-BUILTIN", Type: "task", Status: "open",
+		Metadata: map[string]string{"gc.lifecycle.admission_receipt.v2": "durable v2 admission evidence"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	router := apiBeadRouter{server: New(state), cfg: state.cfg, store: store}
+	err = router.Route(t.Context(), sling.RouteRequest{BeadID: bead.ID, Target: "myrig/worker"})
+	if !errors.Is(err, beads.ErrLifecycleMutationBlocked) {
+		t.Fatalf("Route error = %v, want lifecycle routing refusal", err)
+	}
+	after, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Metadata[beadmeta.RoutedToMetadataKey] != "" {
+		t.Fatalf("refused route wrote gc.routed_to=%q", after.Metadata[beadmeta.RoutedToMetadataKey])
+	}
+}
+
+func TestAPIBeadRouterBuiltInRouteRequiresConditionalWriter(t *testing.T) {
+	state := newFakeMutatorState(t)
+	base := state.stores["myrig"]
+	created, err := base.Create(beads.Bead{ID: "ROUTE-API-UNSUPPORTED", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	router := apiBeadRouter{server: New(state), cfg: state.cfg, store: apiRouteNoConditionalStore{Store: base}}
+	err = router.Route(t.Context(), sling.RouteRequest{BeadID: created.ID, Target: "myrig/worker"})
+	if err == nil || !strings.Contains(err.Error(), "conditional") {
+		t.Fatalf("Route error = %v, want conditional-writer refusal", err)
+	}
+	after, err := base.Get(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Metadata[beadmeta.RoutedToMetadataKey] != "" {
+		t.Fatalf("unsupported route wrote gc.routed_to=%q", after.Metadata[beadmeta.RoutedToMetadataKey])
+	}
+}
+
+func TestAPIBeadRouterAndAdmissionCASHaveOneWinner(t *testing.T) {
+	state := newFakeMutatorState(t)
+	base := state.stores["myrig"]
+	created, err := base.Create(beads.Bead{ID: "ROUTE-API-RACE", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseWriter, ok := beads.ConditionalWriterFor(base)
+	if !ok {
+		t.Fatal("test store lacks ConditionalWriter")
+	}
+	entered := make(chan struct{}, 2)
+	release := make(chan struct{})
+	store := &apiRouteBarrierStore{
+		Store:  base,
+		writer: &apiRouteBarrierWriter{ConditionalWriter: baseWriter, entered: entered, release: release},
+	}
+	routeResult := make(chan error, 1)
+	go func() {
+		routeResult <- (apiBeadRouter{server: New(state), cfg: state.cfg, store: store}).Route(t.Context(), sling.RouteRequest{BeadID: created.ID, Target: "myrig/worker"})
+	}()
+	admissionResult := make(chan error, 1)
+	go func() {
+		writer, ok := beads.ConditionalWriterFor(store)
+		if !ok {
+			admissionResult <- errors.New("route barrier store lost ConditionalWriter")
+			return
+		}
+		admissionResult <- writer.UpdateIfMatch(created.ID, created.Revision, beads.UpdateOpts{Metadata: map[string]string{
+			beadmeta.LifecycleAdmissionReceiptV2MetadataKey: "attached admission",
+		}})
+	}()
+	<-entered
+	<-entered
+	close(release)
+	routeErr, admissionErr := <-routeResult, <-admissionResult
+	if (routeErr == nil) == (admissionErr == nil) {
+		t.Fatalf("route/admission CAS results = (%v, %v), want exactly one winner", routeErr, admissionErr)
+	}
+	after, err := base.Get(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	routed := after.Metadata[beadmeta.RoutedToMetadataKey] != ""
+	enrolled := beads.HasLifecycleEvidence(after)
+	if routed == enrolled {
+		t.Fatalf("final row has routed=%v enrolled=%v; route and admission must not both win", routed, enrolled)
+	}
+}
+
+func TestAPIBeadRouterRefusesCustomQueryWhenLifecycleAdmissionEnabled(t *testing.T) {
+	state := newFakeMutatorState(t)
+	base := state.stores["myrig"]
+	created, err := base.Create(beads.Bead{ID: "ROUTE-API-CUSTOM-GATED", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.cfg.Lifecycle.AdmissionEnabled = true
+	state.cfg.Agents[0].SlingQuery = "custom-dispatch {}"
+	server := New(state)
+	runnerCalls := 0
+	server.SlingRunnerFunc = func(string, string, map[string]string) (string, error) { runnerCalls++; return "", nil }
+	router := apiBeadRouter{server: server, cfg: state.cfg, store: base}
+	err = router.Route(t.Context(), sling.RouteRequest{BeadID: created.ID, Target: "myrig/worker"})
+	if err == nil || !strings.Contains(err.Error(), "admission is enabled") {
+		t.Fatalf("Route error = %v, want custom-routing refusal while admission is enabled", err)
+	}
+	if runnerCalls != 0 {
+		t.Fatalf("custom query called %d times, want 0", runnerCalls)
+	}
+	after, err := base.Get(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Metadata[beadmeta.RoutedToMetadataKey] != "" {
+		t.Fatalf("refused custom route wrote gc.routed_to=%q", after.Metadata[beadmeta.RoutedToMetadataKey])
+	}
+}
+
+type apiRouteNoConditionalStore struct{ beads.Store }
+
+type apiRouteBarrierStore struct {
+	beads.Store
+	writer beads.ConditionalWriter
+}
+
+func (s *apiRouteBarrierStore) ConditionalWriterHandle() (beads.ConditionalWriter, bool) {
+	return s.writer, s.writer != nil
+}
+
+type apiRouteBarrierWriter struct {
+	beads.ConditionalWriter
+	entered chan struct{}
+	release <-chan struct{}
+}
+
+func (w *apiRouteBarrierWriter) UpdateIfMatch(id string, revision int64, opts beads.UpdateOpts) error {
+	w.entered <- struct{}{}
+	<-w.release
+	return w.ConditionalWriter.UpdateIfMatch(id, revision, opts)
+}
+
+func TestSlingRefusesLifecycleEnrolledWork(t *testing.T) {
+	h, state := newSlingTestServer(t)
+	store := state.stores["myrig"]
+	bead, err := store.Create(beads.Bead{
+		Title:    "Protected task",
+		Type:     "task",
+		Metadata: map[string]string{beadmeta.LifecycleAdmissionReceiptMetadataKey: "persisted admission evidence"},
+	})
+	if err != nil {
+		t.Fatalf("Create(): %v", err)
+	}
+
+	body := `{"target":"myrig/worker","bead":"` + bead.ID + `"}`
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/sling"), strings.NewReader(body)))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "generic mutation lacks current session, claim, and row-revision proof") {
+		t.Fatalf("response = %s, want enrolled-work fence reason", rec.Body.String())
+	}
+	current, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get(%q): %v", bead.ID, err)
+	}
+	if current.Metadata[beadmeta.RoutedToMetadataKey] != "" {
+		t.Fatalf("refused sling changed routed_to: %q", current.Metadata[beadmeta.RoutedToMetadataKey])
 	}
 }
 

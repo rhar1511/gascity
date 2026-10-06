@@ -48,6 +48,29 @@ func TestFindAntigravitySessionFileByID(t *testing.T) {
 	}
 }
 
+func TestFindAntigravitySessionFileByIDRejectsEscapingTranscriptSymlink(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	brainRoot := filepath.Join(t.TempDir(), "brain")
+	const sessionID = "18e4eb9f-1b1d-4dbc-966b-c06e3646f3c4"
+	transcriptPath := filepath.Join(brainRoot, sessionID, ".system_generated", "logs", "transcript.jsonl")
+	if err := os.MkdirAll(filepath.Dir(transcriptPath), 0o755); err != nil {
+		t.Fatalf("mkdir transcript directory: %v", err)
+	}
+
+	outsideTranscript := filepath.Join(t.TempDir(), "transcript.jsonl")
+	if err := os.WriteFile(outsideTranscript, []byte("outside transcript\n"), 0o600); err != nil {
+		t.Fatalf("write outside transcript: %v", err)
+	}
+	if err := os.Symlink(outsideTranscript, transcriptPath); err != nil {
+		t.Fatalf("symlink outside transcript: %v", err)
+	}
+
+	if got := FindAntigravitySessionFileByID([]string{brainRoot}, "/work/project", sessionID); got != "" {
+		t.Fatalf("FindAntigravitySessionFileByID() = %q, want empty for escaping transcript symlink", got)
+	}
+}
+
 func TestFindAntigravitySessionFileByIDRejectsTraversalSessionID(t *testing.T) {
 	parent := t.TempDir()
 	base := filepath.Join(parent, "brain")
@@ -184,6 +207,126 @@ func TestFindAntigravitySessionFileUsesLastConversationsCache(t *testing.T) {
 	got := FindAntigravitySessionFile([]string{brainRoot}, workDir)
 	if got != transcriptPath {
 		t.Fatalf("FindAntigravitySessionFile() = %q, want %q", got, transcriptPath)
+	}
+}
+
+func TestFindAntigravitySessionFileRejectsEscapingLastConversationsSymlink(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	cliRoot := t.TempDir()
+	brainRoot := filepath.Join(cliRoot, "brain")
+	const convID = "18e4eb9f-1b1d-4dbc-966b-c06e3646f3c4"
+	transcriptPath := filepath.Join(brainRoot, convID, ".system_generated", "logs", "transcript.jsonl")
+	if err := os.MkdirAll(filepath.Dir(transcriptPath), 0o755); err != nil {
+		t.Fatalf("mkdir transcript directory: %v", err)
+	}
+	if err := os.WriteFile(transcriptPath, []byte("transcript\n"), 0o600); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+
+	workDir := filepath.Join(t.TempDir(), "project")
+	outsideCache := filepath.Join(t.TempDir(), "last_conversations.json")
+	cache, err := json.Marshal(map[string]string{workDir: convID})
+	if err != nil {
+		t.Fatalf("marshal cache: %v", err)
+	}
+	if err := os.WriteFile(outsideCache, cache, 0o600); err != nil {
+		t.Fatalf("write outside cache: %v", err)
+	}
+	cachePath := filepath.Join(cliRoot, "cache", "last_conversations.json")
+	if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err != nil {
+		t.Fatalf("mkdir cache directory: %v", err)
+	}
+	if err := os.Symlink(outsideCache, cachePath); err != nil {
+		t.Fatalf("symlink outside cache: %v", err)
+	}
+
+	if got := FindAntigravitySessionFile([]string{brainRoot}, workDir); got != "" {
+		t.Fatalf("FindAntigravitySessionFile() = %q, want empty when cache escapes configured root", got)
+	}
+}
+
+func TestFindAntigravitySessionFileRejectsEscapingHistorySymlink(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	cliRoot := t.TempDir()
+	brainRoot := filepath.Join(cliRoot, "brain")
+	const convID = "18e4eb9f-1b1d-4dbc-966b-c06e3646f3c4"
+	transcriptPath := filepath.Join(brainRoot, convID, ".system_generated", "logs", "transcript.jsonl")
+	if err := os.MkdirAll(filepath.Dir(transcriptPath), 0o755); err != nil {
+		t.Fatalf("mkdir transcript directory: %v", err)
+	}
+	if err := os.WriteFile(transcriptPath, []byte("transcript\n"), 0o600); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+
+	workDir := filepath.Join(t.TempDir(), "project")
+	outsideHistory := filepath.Join(t.TempDir(), "history.jsonl")
+	entry, err := json.Marshal(AntigravityHistoryEntry{Workspace: workDir, Timestamp: 1})
+	if err != nil {
+		t.Fatalf("marshal history row: %v", err)
+	}
+	if err := os.WriteFile(outsideHistory, append(entry, '\n'), 0o600); err != nil {
+		t.Fatalf("write outside history: %v", err)
+	}
+	if err := os.Symlink(outsideHistory, filepath.Join(cliRoot, "history.jsonl")); err != nil {
+		t.Fatalf("symlink outside history: %v", err)
+	}
+
+	if got := FindAntigravitySessionFile([]string{brainRoot}, workDir); got != "" {
+		t.Fatalf("FindAntigravitySessionFile() = %q, want empty when history escapes configured root", got)
+	}
+}
+
+func TestFindAntigravitySessionFileSupportsSymlinkedConfiguredBrainRoot(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	for _, sidecar := range []string{"cache", "history"} {
+		t.Run(sidecar, func(t *testing.T) {
+			cliRoot := t.TempDir()
+			brainRoot := filepath.Join(cliRoot, "brain")
+			configuredParent := t.TempDir()
+			configuredBrainRoot := filepath.Join(configuredParent, "brain")
+			const conversationID = "18e4eb9f-1b1d-4dbc-966b-c06e3646f3c4"
+			transcriptPath := filepath.Join(brainRoot, conversationID, ".system_generated", "logs", "transcript.jsonl")
+			if err := os.MkdirAll(filepath.Dir(transcriptPath), 0o755); err != nil {
+				t.Fatalf("mkdir transcript directory: %v", err)
+			}
+			if err := os.WriteFile(transcriptPath, []byte("transcript\n"), 0o600); err != nil {
+				t.Fatalf("write transcript: %v", err)
+			}
+			if err := os.Symlink(brainRoot, configuredBrainRoot); err != nil {
+				t.Skipf("symlinks unavailable: %v", err)
+			}
+			workDir := filepath.Join(t.TempDir(), "project")
+			switch sidecar {
+			case "cache":
+				cachePath := filepath.Join(cliRoot, "cache", "last_conversations.json")
+				if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				cache, err := json.Marshal(map[string]string{workDir: conversationID})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(cachePath, cache, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case "history":
+				entry, err := json.Marshal(AntigravityHistoryEntry{Workspace: workDir, ConversationID: conversationID, Timestamp: 1})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(cliRoot, "history.jsonl"), append(entry, '\n'), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			got := FindAntigravitySessionFile([]string{configuredBrainRoot}, workDir)
+			want := filepath.Join(configuredBrainRoot, conversationID, ".system_generated", "logs", "transcript.jsonl")
+			if got != want {
+				t.Fatalf("FindAntigravitySessionFile() = %q, want %q", got, want)
+			}
+		})
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math/rand/v2"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -21,20 +22,43 @@ import (
 )
 
 const (
-	sqliteStoreFilename               = "beads.sqlite"
-	sqliteDefaultPrefix               = "gc"
-	sqliteGraphPrefix                 = "gcg"
-	sqliteGraphSequenceFloorFilename  = "graph.seqfloor"
-	sqliteClaimFenceKVPrefix          = "gascity.claim-fence.v1/"
-	sqliteDefaultRetentionPeriod      = 4 * time.Hour
-	sqliteDefaultRetentionSweepPeriod = 30 * time.Second
+	sqliteStoreFilename                     = "beads.sqlite"
+	sqliteDefaultPrefix                     = "gc"
+	sqliteGraphPrefix                       = "gcg"
+	sqliteGraphSequenceFloorFilename        = "graph.seqfloor"
+	sqliteClaimFenceKVPrefix                = "gascity.claim-fence.v1/"
+	sqliteDefaultRetentionPeriod            = 4 * time.Hour
+	sqliteDefaultRetentionSweepPeriod       = 30 * time.Second
+	sqliteInitialRevision             int64 = 1
 
 	// sqliteBusyRetryAttempts is the number of application-level retries after
-	// the per-connection busy_timeout is exhausted. Each retry backs off by
-	// sqliteBusyRetryDelay before re-attempting, giving competing writers time
-	// to release the WAL write lock.
-	sqliteBusyRetryAttempts = 3
-	sqliteBusyRetryDelay    = 150 * time.Millisecond
+	// the per-connection busy_timeout is exhausted. Retry n sleeps a jittered
+	// sqliteBusyRetryBaseDelay<<n, capped at sqliteBusyRetryMaxDelay, so a
+	// herd of CLI processes behind one busy controller spreads out instead of
+	// re-colliding in lockstep. Worst case is 5.1 s of sleep in total, on top
+	// of the busy_timeout each attempt already waits.
+	sqliteBusyRetryAttempts  = 6
+	sqliteBusyRetryBaseDelay = 100 * time.Millisecond
+	sqliteBusyRetryMaxDelay  = 2 * time.Second
+
+	// sqliteMintProbesBeforeReseed is how many consecutive occupied ids
+	// mintUniqueIDTx steps over with point lookups before paying for one
+	// whole-table reseed scan. A floor that is stale because another process
+	// minted a handful of ids since this one opened is the common case, and it
+	// costs one indexed lookup per id; the scan is for a floor that is stale by
+	// a lot, and it runs while this transaction holds the write lock.
+	sqliteMintProbesBeforeReseed = 64
+
+	// sqliteSequenceCeiling is the largest sequence value the id allocator
+	// hands out. The top of the int64 range is reserved so the allocator can
+	// never overflow: nextID is an atomic int64 Add, and one id pinned near
+	// math.MaxInt64 (a deployed graph holds gcg-9223372036854775806) used to
+	// reseed the sequence there, after which Add wrapped to math.MinInt64 and
+	// every cook walked a growing block of "gcg--9223…" ids one point lookup at
+	// a time. An id whose suffix is above the ceiling (or negative) can never
+	// be minted, so it cannot collide with a minted id and never moves the
+	// floor; reaching the ceiling is an explicit exhaustion error, not a wrap.
+	sqliteSequenceCeiling int64 = 1 << 62
 )
 
 // SQLiteStoreOptions configures the SQLite bead store.
@@ -72,6 +96,8 @@ var (
 		return os.Open(path)
 	}
 	observeSQLiteSequenceFloorBoundary = func(string) {}
+	observeSQLiteSequenceReseed        = func() {}
+	sqliteBusySleep                    = time.Sleep
 )
 
 // SQLiteStoreOption customizes OpenSQLiteStore.
@@ -156,16 +182,30 @@ func isSQLiteBusy(err error) bool {
 }
 
 // retryOnBusy retries fn up to sqliteBusyRetryAttempts times when it returns
-// a SQLITE_BUSY error, backing off by sqliteBusyRetryDelay between attempts.
+// a SQLITE_BUSY error, backing off by sqliteBusyBackoff between attempts.
 // The busy_timeout PRAGMA already retries at the C layer for 5 s per call, so
 // each application-level retry is an additional 5 s+ window for the lock.
 func retryOnBusy(fn func() error) error {
 	err := fn()
 	for attempt := 0; attempt < sqliteBusyRetryAttempts && isSQLiteBusy(err); attempt++ {
-		time.Sleep(sqliteBusyRetryDelay)
+		sqliteBusySleep(sqliteBusyBackoff(attempt))
 		err = fn()
 	}
 	return err
+}
+
+// sqliteBusyBackoff is the jittered exponential delay before busy retry
+// number attempt (0-based): uniformly in [d/2, d] for
+// d = min(sqliteBusyRetryBaseDelay<<attempt, sqliteBusyRetryMaxDelay).
+func sqliteBusyBackoff(attempt int) time.Duration {
+	d := sqliteBusyRetryMaxDelay
+	if attempt >= 0 && attempt < 16 {
+		if shifted := sqliteBusyRetryBaseDelay << attempt; shifted < d {
+			d = shifted
+		}
+	}
+	half := d / 2
+	return half + time.Duration(rand.Int64N(int64(half)+1))
 }
 
 // SQLiteStore is a pure-Go SQLite-backed Store using modernc.org/sqlite.
@@ -262,8 +302,14 @@ func OpenSQLiteStore(dir string, opts ...SQLiteStoreOption) (Store, error) {
 		dsn = sqliteStorePrivateRecoveryDSN(dbPath)
 	}
 
-	// Write connection: single connection serializes all mutations.
-	db, err := sql.Open("sqlite", dsn)
+	// Write connection: single connection serializes all mutations. Every
+	// transaction on it is a read-modify-write, so it begins IMMEDIATE (see
+	// sqliteStoreWriterDSN); the read pool keeps the shared deferred DSN.
+	writerDSN := dsn
+	if !cfg.readOnly && !cfg.privateRecovery {
+		writerDSN = sqliteStoreWriterDSN(dbPath)
+	}
+	db, err := sql.Open("sqlite", writerDSN)
 	if err != nil {
 		return nil, fmt.Errorf("opening sqlite store %s: %w", dbPath, err)
 	}
@@ -346,6 +392,31 @@ func sqliteStoreDSN(path string, readOnly bool) string {
 		mode = sqliteStoreDSNReadOnlyMode
 	}
 	return sqliteStoreDSNWithMode(path, mode)
+}
+
+// sqliteStoreWriterDSN is the read-write DSN for the single write connection:
+// the shared DSN plus _txlock=immediate, so BeginTx issues BEGIN IMMEDIATE.
+//
+// Every transaction on the write handle reads before it writes (id collision
+// checks, current-row loads, claim-fence clears). Under the default DEFERRED
+// begin the first read pins a WAL snapshot, and if another process — the
+// controller — commits before this transaction's first write, the read->write
+// upgrade fails with SQLITE_BUSY_SNAPSHOT (517). busy_timeout cannot wait that
+// out: the snapshot is already stale, so the whole transaction has to restart.
+// BEGIN IMMEDIATE takes the write lock before the first read, where
+// busy_timeout does wait for it, so no snapshot can go stale underneath us.
+// It is a begin mode, not a pragma, so it does not ride the per-connection
+// pragma budget, and it is deliberately off the read pool and read-only DSN.
+func sqliteStoreWriterDSN(path string) string {
+	dsn := sqliteStoreDSNWithMode(path, "")
+	parsed, err := url.Parse(dsn)
+	if err != nil {
+		return dsn
+	}
+	query := parsed.Query()
+	query.Set("_txlock", "immediate")
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
 }
 
 func sqliteStorePrivateRecoveryDSN(path string) string {
@@ -458,18 +529,8 @@ func (s *SQLiteStore) recoverSequence(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("recovering sqlite sequence: %w", err)
 	}
-	defer rows.Close() //nolint:errcheck
-	var maxSeq int64
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return err
-		}
-		if n := int64(numericIDSuffix(id)); n > maxSeq {
-			maxSeq = n
-		}
-	}
-	if err := rows.Err(); err != nil {
+	maxSeq, err := s.maxSequenceFromRows(rows)
+	if err != nil {
 		return err
 	}
 	if s.prefix == sqliteGraphPrefix {
@@ -477,12 +538,71 @@ func (s *SQLiteStore) recoverSequence(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("recovering sqlite graph sequence floor: %w", err)
 		}
-		if floor > maxSeq {
+		if floor > maxSeq && floor <= sqliteSequenceCeiling {
 			maxSeq = floor
 		}
 	}
 	s.seq.Store(maxSeq)
 	return nil
+}
+
+// maxSequenceFromRows returns the largest allocatable sequence value among
+// the ids in rows (a single id column), or 0 when none carries one. It closes
+// rows.
+func (s *SQLiteStore) maxSequenceFromRows(rows *sql.Rows) (int64, error) {
+	defer rows.Close() //nolint:errcheck
+	var maxSeq int64
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return 0, err
+		}
+		if n, ok := s.sequenceOfID(id); ok && n > maxSeq {
+			maxSeq = n
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	return maxSeq, nil
+}
+
+// sequenceOfID returns the allocator sequence value an id occupies, if any.
+// Only values in (0, sqliteSequenceCeiling] count: the allocator never mints
+// anything else, so no other id can collide with a minted one.
+//
+// An id in this store's own namespace is "<prefix>-<n>" as nextID formats it,
+// so the whole remainder parses as an int64; that is what keeps the "-N" of a
+// legacy wrapped id ("gcg--9223372036854775808") from reading as the positive
+// N. Any other id (a foreign prefix, or a non-numeric own-prefix id) counts
+// its trailing digit run, as numericIDSuffix always did, but only when the
+// run parses as an int64: numericIDSuffix discarded strconv.Atoi's range error
+// and clamped an overlong run to math.MaxInt64.
+func (s *SQLiteStore) sequenceOfID(id string) (int64, bool) {
+	n, ok := int64(0), false
+	if rest, own := strings.CutPrefix(id, s.prefix+"-"); own && rest != "" && rest[0] != '+' {
+		if parsed, err := strconv.ParseInt(rest, 10, 64); err == nil {
+			n, ok = parsed, true
+		}
+	}
+	if !ok {
+		i := len(id)
+		for i > 0 && id[i-1] >= '0' && id[i-1] <= '9' {
+			i--
+		}
+		if i == len(id) {
+			return 0, false
+		}
+		parsed, err := strconv.ParseInt(id[i:], 10, 64)
+		if err != nil {
+			return 0, false
+		}
+		n = parsed
+	}
+	if n <= 0 || n > sqliteSequenceCeiling {
+		return 0, false
+	}
+	return n, true
 }
 
 // StoreHealthPath returns the SQLite database file path.
@@ -578,7 +698,13 @@ func (s *SQLiteStore) CreateWithForeignID(b Bead) (Bead, error) {
 	if strings.TrimSpace(b.ID) == "" {
 		return Bead{}, fmt.Errorf("creating bead with foreign id: empty id")
 	}
-	return s.create(b, true)
+	if err := ValidateDecisionFrontierCreate(b); err != nil {
+		return Bead{}, err
+	}
+	if err := rejectAttemptEvidencePayloadMetadataWrite(b.Metadata); err != nil {
+		return Bead{}, err
+	}
+	return s.create(b, true, false)
 }
 
 // Create persists a new bead, minting a prefixed sequential id when the
@@ -586,15 +712,65 @@ func (s *SQLiteStore) CreateWithForeignID(b Bead) (Bead, error) {
 // duplicate-id error, provided it carries one of the store's reserved
 // namespaces when the store is fenced (WithSQLiteStoreReservedIDPrefixes).
 func (s *SQLiteStore) Create(b Bead) (Bead, error) {
-	return s.create(b, false)
+	if err := ValidateDecisionFrontierCreate(b); err != nil {
+		return Bead{}, err
+	}
+	if err := rejectAttemptEvidencePayloadMetadataWrite(b.Metadata); err != nil {
+		return Bead{}, err
+	}
+	return s.create(b, false, false)
+}
+
+// CreateDecisionFrontierRecord is the narrow controller-only creation path.
+// Generic Create and migration copies reject this metadata namespace.
+func (s *SQLiteStore) CreateDecisionFrontierRecord(b Bead) (Bead, error) {
+	if err := s.ensureOpen(); err != nil {
+		return Bead{}, err
+	}
+	if err := validateDecisionFrontierRecordCreate(b); err != nil {
+		return Bead{}, err
+	}
+	return s.create(b, false, true)
+}
+
+// CreatePrivatePayloadValue creates one digest-addressed payload row or
+// returns the row already occupying that deterministic ID. The dedicated
+// capability does not alter ordinary Create ID or namespace semantics.
+func (s *SQLiteStore) CreatePrivatePayloadValue(b Bead) (Bead, error) {
+	if err := s.ensureOpen(); err != nil {
+		return Bead{}, err
+	}
+	if err := validatePrivatePayloadCreate(b); err != nil {
+		return Bead{}, err
+	}
+	if existing, err := s.Get(b.ID); err == nil {
+		return existing, nil
+	} else if !errors.Is(err, ErrNotFound) {
+		return Bead{}, err
+	}
+	created, err := s.create(b, true, false)
+	if err == nil {
+		return created, nil
+	}
+	if existing, readErr := s.Get(b.ID); readErr == nil {
+		return existing, nil
+	} else if !errors.Is(readErr, ErrNotFound) {
+		return Bead{}, errors.Join(err, readErr)
+	}
+	return Bead{}, err
 }
 
 // create is the shared body. allowForeign is the CreateWithForeignID
 // exemption: the store-migration copy path carries preserved ids across, and
 // refusing them there would leave the beads nowhere at all.
-func (s *SQLiteStore) create(b Bead, allowForeign bool) (Bead, error) {
+func (s *SQLiteStore) create(b Bead, allowForeign, allowDecisionFrontier bool) (Bead, error) {
 	if err := s.ensureOpen(); err != nil {
 		return Bead{}, err
+	}
+	if !allowDecisionFrontier {
+		if err := ValidateDecisionFrontierCreate(b); err != nil {
+			return Bead{}, err
+		}
 	}
 	if !allowForeign {
 		if err := s.checkPinnedIDNamespace(b.ID); err != nil {
@@ -630,7 +806,7 @@ func (s *SQLiteStore) create(b Bead, allowForeign bool) (Bead, error) {
 			return err
 		}
 		for _, dep := range depsFromBeadFields(stored) {
-			if err := s.depAddTx(ctx, tx, dep.IssueID, dep.DependsOnID, dep.Type); err != nil {
+			if err := s.depAddForCreatedBeadTx(ctx, tx, stored.ID, dep); err != nil {
 				return err
 			}
 		}
@@ -661,10 +837,16 @@ func (s *SQLiteStore) checkPinnedIDNamespace(id string) error {
 
 func (s *SQLiteStore) normalizeCreate(b Bead) Bead {
 	b = cloneBead(b)
+	// A revision belongs to the destination row, not the caller or a migrated
+	// source. Legacy layouts without the column remain explicitly unversioned.
+	b.Revision = 0
+	if s.hasRevisionColumn {
+		b.Revision = sqliteInitialRevision
+	}
 	if b.ID == "" {
 		b.ID = s.nextID()
-	} else if n := numericIDSuffix(b.ID); n > 0 {
-		s.ensureSequenceAtLeast(int64(n))
+	} else if n, ok := s.sequenceOfID(b.ID); ok {
+		s.ensureSequenceAtLeast(n)
 	}
 	if b.Status == "" {
 		b.Status = "open"
@@ -837,7 +1019,13 @@ func writeSQLiteSequenceFloor(path string, floor int64) (returnErr error) {
 	return nil
 }
 
+// ensureSequenceAtLeast lifts the allocator to n. It never moves the
+// allocator back, and ignores n above sqliteSequenceCeiling: a floor there
+// would only make the next Add overflow.
 func (s *SQLiteStore) ensureSequenceAtLeast(n int64) {
+	if n > sqliteSequenceCeiling {
+		return
+	}
 	for {
 		cur := s.seq.Load()
 		if n <= cur {
@@ -883,22 +1071,13 @@ func (s *SQLiteStore) ensureCreateDoesNotExist(ctx context.Context, tx *sql.Tx, 
 // scan but reads through tx so it sees IDs minted by other processes since this
 // store opened — the stale-seq self-heal in one step.
 func (s *SQLiteStore) reseedSeqFromTx(ctx context.Context, tx *sql.Tx) error {
+	observeSQLiteSequenceReseed()
 	rows, err := tx.QueryContext(ctx, `SELECT id FROM beads WHERE id LIKE ?`, s.prefix+"-%")
 	if err != nil {
 		return fmt.Errorf("reseeding sqlite sequence: %w", err)
 	}
-	defer rows.Close() //nolint:errcheck
-	var maxSeq int64
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return err
-		}
-		if n := int64(numericIDSuffix(id)); n > maxSeq {
-			maxSeq = n
-		}
-	}
-	if err := rows.Err(); err != nil {
+	maxSeq, err := s.maxSequenceFromRows(rows)
+	if err != nil {
 		return err
 	}
 	s.ensureSequenceAtLeast(maxSeq)
@@ -911,14 +1090,19 @@ const mintUniqueIDMaxAttempts = 100000
 
 // mintUniqueIDTx returns a store-generated bead ID that is free within the open
 // transaction and unclaimed by seen. It starts from candidate (an
-// already-normalized auto id); on the first collision it reseeds the sequence
-// floor once (lifting a stale floor past concurrently-minted IDs in one step),
-// then mints fresh ids until one is free. seen lets a single batch avoid
+// already-normalized auto id) and steps to fresh ids with indexed point
+// lookups; only after sqliteMintProbesBeforeReseed consecutive collisions does
+// it reseed the sequence floor once with a whole-table scan (lifting a badly
+// stale floor past concurrently-minted IDs in one step), then keeps minting
+// until one is free. seen lets a single batch avoid
 // minting the same fresh id twice; callers may pass nil for a standalone mint.
 func (s *SQLiteStore) mintUniqueIDTx(ctx context.Context, tx *sql.Tx, candidate string, seen map[string]bool) (string, error) {
 	id := candidate
 	reseeded := false
 	for attempt := 0; attempt < mintUniqueIDMaxAttempts; attempt++ {
+		if _, ok := s.sequenceOfID(id); !ok {
+			return "", fmt.Errorf("minting unique sqlite bead id: sequence exhausted at %q (ceiling %d)", id, sqliteSequenceCeiling)
+		}
 		taken := seen[id]
 		if !taken {
 			exists, err := s.idExistsTx(ctx, tx, id)
@@ -933,7 +1117,7 @@ func (s *SQLiteStore) mintUniqueIDTx(ctx context.Context, tx *sql.Tx, candidate 
 			}
 			return id, nil
 		}
-		if !reseeded {
+		if !reseeded && attempt+1 >= sqliteMintProbesBeforeReseed {
 			if err := s.reseedSeqFromTx(ctx, tx); err != nil {
 				return "", err
 			}
@@ -971,15 +1155,22 @@ func (s *SQLiteStore) upsertBeadTx(ctx context.Context, tx *sql.Tx, b Bead) erro
 			 ref=excluded.ref,
 			 description=excluded.description,
 			 bead_json=excluded.bead_json`
+	columns := "id,tier,title,status,issue_type,priority,created_at,updated_at,assignee,from_agent,parent_id,ref,description,bead_json"
+	placeholders := "?,?,?,?,?,?,?,?,?,?,?,?,?,?"
+	args := []any{
+		b.ID, tier, b.Title, b.Status, b.Type, priority, b.CreatedAt.UnixNano(), sqliteUnixNanoOrZero(b.UpdatedAt),
+		b.Assignee, b.From, b.ParentID, b.Ref, b.Description, string(payload),
+	}
 	if s.hasRevisionColumn {
+		columns += ",revision"
+		placeholders += ",?"
+		args = append(args, sqliteInitialRevision)
 		update += `, revision=beads.revision+1`
 	}
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO beads(id,tier,title,status,issue_type,priority,created_at,updated_at,assignee,from_agent,parent_id,ref,description,bead_json)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-		ON CONFLICT(id) DO UPDATE SET `+update,
-		b.ID, tier, b.Title, b.Status, b.Type, priority, b.CreatedAt.UnixNano(), sqliteUnixNanoOrZero(b.UpdatedAt),
-		b.Assignee, b.From, b.ParentID, b.Ref, b.Description, string(payload))
+		INSERT INTO beads(`+columns+`)
+		VALUES(`+placeholders+`)
+		ON CONFLICT(id) DO UPDATE SET `+update, args...)
 	if err != nil {
 		return fmt.Errorf("sqlite upsert bead %q: %w", b.ID, err)
 	}
@@ -1034,7 +1225,11 @@ func (s *SQLiteStore) Get(id string) (Bead, error) {
 	if err != nil {
 		return Bead{}, fmt.Errorf("getting bead %q: %w", id, err)
 	}
-	return b, nil
+	items := []Bead{b}
+	if err := hydrateSQLiteDeps(context.Background(), s.readDB, items); err != nil {
+		return Bead{}, fmt.Errorf("getting bead %q: %w", id, err)
+	}
+	return items[0], nil
 }
 
 func (s *SQLiteStore) revisionSelectExpr(tableAlias string) string {
@@ -1144,6 +1339,9 @@ func applySQLiteUpdateOpts(b Bead, opts UpdateOpts) Bead {
 
 // Update modifies fields of an existing bead.
 func (s *SQLiteStore) Update(id string, opts UpdateOpts) error {
+	if err := rejectAttemptEvidencePayloadMetadataWrite(opts.Metadata); err != nil {
+		return err
+	}
 	if err := s.ensureOpen(); err != nil {
 		return err
 	}
@@ -1158,7 +1356,13 @@ func (s *SQLiteStore) Update(id string, opts UpdateOpts) error {
 		if err != nil {
 			return err
 		}
+		if err := protectAttemptEvidenceUpdate(b, opts); err != nil {
+			return err
+		}
 		before := b
+		if err := ValidateLifecycleMutation(b, opts); err != nil {
+			return fmt.Errorf("updating lifecycle bead %q: %w", id, err)
+		}
 		b = applySQLiteUpdateOpts(b, opts)
 		b.UpdatedAt = time.Now()
 		if err := s.upsertBeadTx(ctx, tx, b); err != nil {
@@ -1195,6 +1399,12 @@ func (s *SQLiteStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error
 		if b.Status != "in_progress" || b.Assignee != expectedAssignee {
 			return nil
 		}
+		if HasDecisionFrontierHold(b) {
+			return ErrDecisionFrontierMutationBlocked
+		}
+		if err := protectAttemptEvidenceRecordMutation(b); err != nil {
+			return err
+		}
 		before := b
 		b.Status = "open"
 		b.Assignee = ""
@@ -1220,7 +1430,14 @@ func (s *SQLiteStore) getTx(ctx context.Context, tx *sql.Tx, id string) (Bead, e
 	if errors.Is(err, sql.ErrNoRows) {
 		return Bead{}, fmt.Errorf("getting bead %q: %w", id, ErrNotFound)
 	}
-	return b, err
+	if err != nil {
+		return b, err
+	}
+	items := []Bead{b}
+	if err := hydrateSQLiteDeps(ctx, tx, items); err != nil {
+		return Bead{}, fmt.Errorf("getting bead %q: %w", id, err)
+	}
+	return items[0], nil
 }
 
 // Close sets a bead's status to closed.
@@ -1251,8 +1468,25 @@ func (s *SQLiteStore) Reopen(id string) error {
 
 // CloseAll closes multiple beads and applies metadata to each closed bead.
 func (s *SQLiteStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	if err := rejectAttemptEvidencePayloadMetadataWrite(metadata); err != nil {
+		return 0, err
+	}
 	if err := s.ensureOpen(); err != nil {
 		return 0, err
+	}
+	closedStatus := "closed"
+	preflight := UpdateOpts{Status: &closedStatus, Metadata: maps.Clone(metadata)}
+	for _, id := range ids {
+		b, err := s.Get(id)
+		if errors.Is(err, ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return 0, err
+		}
+		if err := ValidateLifecycleMutation(b, preflight); err != nil {
+			return 0, fmt.Errorf("batch closing lifecycle bead %q: %w", id, err)
+		}
 	}
 	closed := 0
 	for _, id := range ids {
@@ -1307,32 +1541,51 @@ func (s *SQLiteStore) List(query ListQuery) ([]Bead, error) {
 	if query.Limit > 0 && len(result) > query.Limit {
 		result = result[:query.Limit]
 	}
+	if err := hydrateSQLiteDeps(context.Background(), s.readDB, result); err != nil {
+		return nil, fmt.Errorf("listing sqlite beads: %w", err)
+	}
 	return result, nil
 }
 
 func sqliteListSQL(q ListQuery, projection string) (string, []any) {
 	where := []string{}
 	args := []any{}
+	// A metadata equality is the selective predicate whenever one is present
+	// (source ids, root ids, session names), and it is served by
+	// idx_metadata_key_value -> beads primary key. With no sqlite_stat1 (the
+	// exact-schema preflight forbids ANALYZE), the planner instead rates
+	// tier='main' on idx_beads_tier_status as cheaper and walks every
+	// main-tier row, fetching each from the table to test id IN (...): a full
+	// read of a 1.4 GB graph per metadata lookup. The unary + keeps these
+	// low-selectivity column filters as residual checks so they cannot claim
+	// the index. It is a value no-op on these TEXT columns compared to TEXT
+	// values. parent_id and id lists stay indexable: they are selective too.
+	residual := func(column string) string {
+		if len(q.Metadata) > 0 {
+			return "+" + column
+		}
+		return column
+	}
 	switch q.TierMode {
 	case TierWisps:
 		// NoHistory rows live in SQLite's main tier but remain part of the
 		// logical wisp tier, so final tier filtering happens after decode.
 	case TierBoth:
 	default:
-		where = append(where, "b.tier='main'")
+		where = append(where, residual("b.tier")+"='main'")
 	}
 	if q.Status != "" {
-		where = append(where, "b.status=?")
+		where = append(where, residual("b.status")+"=?")
 		args = append(args, q.Status)
 	} else if !q.IncludeClosed {
-		where = append(where, "b.status <> 'closed'")
+		where = append(where, residual("b.status")+" <> 'closed'")
 	}
 	if q.Type != "" {
-		where = append(where, "b.issue_type=?")
+		where = append(where, residual("b.issue_type")+"=?")
 		args = append(args, q.Type)
 	}
 	if q.Assignee != "" {
-		where = append(where, "b.assignee=?")
+		where = append(where, residual("b.assignee")+"=?")
 		args = append(args, q.Assignee)
 	}
 	if q.ParentID != "" {
@@ -1378,6 +1631,10 @@ func sqliteListSQL(q ListQuery, projection string) (string, []any) {
 		where = append(where, "b.id IN (SELECT m.bead_id FROM metadata m WHERE m.meta_key=? AND m.meta_value=?)")
 		args = append(args, k, v)
 	}
+	if q.AbsentMetadataKey != "" {
+		where = append(where, "NOT EXISTS (SELECT 1 FROM metadata m WHERE m.bead_id=b.id AND m.meta_key=?)")
+		args = append(args, q.AbsentMetadataKey)
+	}
 	sqlText := "SELECT " + projection + " FROM beads b"
 	if len(where) > 0 {
 		sqlText += " WHERE " + strings.Join(where, " AND ")
@@ -1412,12 +1669,10 @@ func (s *SQLiteStore) ListOpen(status ...string) ([]Bead, error) {
 	return s.List(query)
 }
 
-// Ready returns open, unblocked actionable beads from the requested tier.
+// Ready returns open, unblocked actionable beads from the requested tier in
+// the canonical (priority, created_at, id) ready order.
 func (s *SQLiteStore) Ready(query ...ReadyQuery) ([]Bead, error) {
-	if err := s.ensureOpen(); err != nil {
-		return nil, err
-	}
-	return s.readyRows(context.Background(), readyQueryFromArgs(query))
+	return s.ReadyContext(context.Background(), query...)
 }
 
 // ReadyContext implements ContextReadyReader for the SQLite store. The context
@@ -1436,7 +1691,14 @@ func (s *SQLiteStore) ReadyContext(ctx context.Context, query ...ReadyQuery) ([]
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return s.readyRows(ctx, readyQueryFromArgs(query))
+	rows, err := s.readyRows(ctx, readyQueryFromArgs(query))
+	if err != nil {
+		return rows, err
+	}
+	if err := hydrateSQLiteDeps(ctx, s.readDB, rows); err != nil {
+		return nil, fmt.Errorf("listing sqlite ready beads: %w", err)
+	}
+	return rows, nil
 }
 
 // readyRows is the single ready read shared by Ready and ReadyContext, so both
@@ -1480,9 +1742,6 @@ func (s *SQLiteStore) readyRows(ctx context.Context, q ReadyQuery) ([]Bead, erro
 			continue
 		}
 		result = append(result, b)
-		if q.Limit > 0 && len(result) >= q.Limit {
-			break
-		}
 	}
 	if err := rows.Err(); err != nil {
 		if ctxErr := contextErr(); ctxErr != nil {
@@ -1493,32 +1752,27 @@ func (s *SQLiteStore) readyRows(ctx context.Context, q ReadyQuery) ([]Bead, erro
 	if err := contextErr(); err != nil {
 		return nil, err
 	}
+	// Cut the Limit prefix only after the canonical sort, so a bounded read
+	// takes the same rows a cache-served read over this store takes (#3208).
+	if err := sortBeadsReadyOrderContext(ctx, result); err != nil {
+		return nil, err
+	}
+	if q.Limit > 0 && len(result) > q.Limit {
+		result = result[:q.Limit]
+	}
 	return result, nil
 }
 
-// sqliteReadySQL builds the ready projection query for q. Tier and limit
-// filtering is partly residual: wisp-tier reads decide tier membership after
-// decode, so the source-side LIMIT is only safe for the other tier modes.
+// sqliteReadySQL builds the ready projection query for q. It carries no ORDER
+// BY or LIMIT: readyRows filters after decode (wisp-tier membership, deferral,
+// excluded labels) and then sorts into the canonical ready order, so a
+// source-side LIMIT would cut the wrong prefix.
 func sqliteReadySQL(q ReadyQuery, projection string) (string, []any) {
 	args := []any{}
 	where := []string{
 		"b.status='open'",
 		`b.issue_type NOT IN ('merge-request','gate','molecule','step','message','session','agent','role','rig')`,
-		fmt.Sprintf(`NOT EXISTS (
-			SELECT 1 FROM deps d
-			LEFT JOIN beads blocker ON blocker.id=d.depends_on_id
-			WHERE d.issue_id=b.id
-			  AND d.dep_type IN ('blocks','waits-for','conditional-blocks')
-			  AND (
-			    COALESCE(blocker.status, '') <> 'closed'
-			    OR EXISTS (
-			         SELECT 1 FROM metadata m
-			         WHERE m.bead_id = blocker.id
-			           AND m.meta_key = '%s'
-			           AND m.meta_value = '%s'
-			       )
-			  )
-		  )`, beadmeta.WorkOutcomeMetadataKey, beadmeta.WorkOutcomeBlocked),
+		"NOT " + sqliteReadyBlockerExists("b.id"),
 	}
 	switch q.TierMode {
 	case TierWisps:
@@ -1533,11 +1787,31 @@ func sqliteReadySQL(q ReadyQuery, projection string) (string, []any) {
 		sqlText += " AND b.assignee=?"
 		args = append(args, q.Assignee)
 	}
-	sqlText += " ORDER BY b.created_at ASC, b.id ASC"
-	if q.Limit > 0 && q.TierMode != TierWisps {
-		sqlText += fmt.Sprintf(" LIMIT %d", q.Limit)
-	}
 	return sqlText, args
+}
+
+// sqliteReadyBlockerExists is SQLite's one statement of "blocked": an EXISTS
+// over issueCol's blocks/waits-for/conditional-blocks edges whose target is not
+// closed, or closed with gc.work_outcome=blocked. A target missing from this
+// store (deleted, or another store's id) has no status and so blocks. Ready
+// negates it and enrichReadyProjectionForCache selects it, so the store and a
+// cache over it cannot disagree about which rows are blocked.
+func sqliteReadyBlockerExists(issueCol string) string {
+	return fmt.Sprintf(`EXISTS (
+			SELECT 1 FROM deps d
+			LEFT JOIN beads blocker ON blocker.id=d.depends_on_id
+			WHERE d.issue_id=%s
+			  AND d.dep_type IN ('blocks','waits-for','conditional-blocks')
+			  AND (
+			    COALESCE(blocker.status, '') <> 'closed'
+			    OR EXISTS (
+			         SELECT 1 FROM metadata m
+			         WHERE m.bead_id = blocker.id
+			           AND m.meta_key = '%s'
+			           AND m.meta_value = '%s'
+			       )
+			  )
+		  )`, issueCol, beadmeta.WorkOutcomeMetadataKey, beadmeta.WorkOutcomeBlocked)
 }
 
 // Children returns all non-closed beads whose ParentID matches the given ID.
@@ -1591,6 +1865,9 @@ func (s *SQLiteStore) SetMetadata(id, key, value string) error {
 
 // SetMetadataBatch atomically sets multiple metadata keys on a bead.
 func (s *SQLiteStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if err := rejectAttemptEvidencePayloadMetadataWrite(kvs); err != nil {
+		return err
+	}
 	if err := s.ensureOpen(); err != nil {
 		return err
 	}
@@ -1679,6 +1956,12 @@ type sqliteStoreTx struct {
 // the exemption runs through CreateWithForeignID on the store, not inside a
 // caller's transaction, so adding one would open a bypass nothing asks for.
 func (t *sqliteStoreTx) Create(b Bead) (Bead, error) {
+	if err := ValidateDecisionFrontierCreate(b); err != nil {
+		return Bead{}, err
+	}
+	if err := rejectAttemptEvidencePayloadMetadataWrite(b.Metadata); err != nil {
+		return Bead{}, err
+	}
 	if err := t.store.checkPinnedIDNamespace(b.ID); err != nil {
 		return Bead{}, err
 	}
@@ -1699,7 +1982,7 @@ func (t *sqliteStoreTx) Create(b Bead) (Bead, error) {
 		return Bead{}, err
 	}
 	for _, dep := range depsFromBeadFields(stored) {
-		if err := t.store.depAddTx(t.ctx, t.tx, dep.IssueID, dep.DependsOnID, dep.Type); err != nil {
+		if err := t.store.depAddForCreatedBeadTx(t.ctx, t.tx, stored.ID, dep); err != nil {
 			return Bead{}, err
 		}
 	}
@@ -1707,9 +1990,18 @@ func (t *sqliteStoreTx) Create(b Bead) (Bead, error) {
 }
 
 func (t *sqliteStoreTx) Update(id string, opts UpdateOpts) error {
+	if err := rejectAttemptEvidencePayloadMetadataWrite(opts.Metadata); err != nil {
+		return err
+	}
 	b, err := t.store.getTx(t.ctx, t.tx, id)
 	if err != nil {
 		return err
+	}
+	if err := protectAttemptEvidenceUpdate(b, opts); err != nil {
+		return err
+	}
+	if err := ValidateLifecycleMutation(b, opts); err != nil {
+		return fmt.Errorf("updating lifecycle bead %q: %w", id, err)
 	}
 	before := b
 	b = applySQLiteUpdateOpts(b, opts)
@@ -1721,6 +2013,9 @@ func (t *sqliteStoreTx) Update(id string, opts UpdateOpts) error {
 }
 
 func (t *sqliteStoreTx) SetMetadataBatch(id string, kvs map[string]string) error {
+	if err := rejectAttemptEvidencePayloadMetadataWrite(kvs); err != nil {
+		return err
+	}
 	if len(kvs) == 0 {
 		return nil
 	}
@@ -1732,8 +2027,14 @@ func (t *sqliteStoreTx) Close(id string) error {
 	if err != nil {
 		return err
 	}
+	if err := protectAttemptEvidencePayloadMutation(b); err != nil {
+		return err
+	}
 	if b.Status == "closed" {
 		return nil
+	}
+	if err := ValidateLifecycleClose(b); err != nil {
+		return fmt.Errorf("closing lifecycle bead %q: %w", id, err)
 	}
 	before := b
 	b.Status = "closed"
@@ -1755,6 +2056,29 @@ func (s *SQLiteStore) Delete(id string) error {
 			return fmt.Errorf("sqlite delete: begin tx: %w", err)
 		}
 		defer tx.Rollback() //nolint:errcheck
+		current, err := s.getTx(context.Background(), tx, id)
+		if err != nil {
+			return fmt.Errorf("deleting bead %q: %w", id, err)
+		}
+		protected, err := sqliteProtectedAttemptEvidenceRecordIDTx(context.Background(), tx, id)
+		if err != nil {
+			return fmt.Errorf("deleting bead %q: checking evidence protection: %w", id, err)
+		}
+		if protected {
+			return fmt.Errorf("deleting bead %q: %w", id, ErrProtectedAttemptEvidenceArchive)
+		}
+		if err := ValidateDecisionFrontierDelete(current); err != nil {
+			return fmt.Errorf("deleting bead %q: %w", id, err)
+		}
+		if err := protectRetainedEvidenceDelete(current); err != nil {
+			return err
+		}
+		if err := ValidateLifecycleDelete(current); err != nil {
+			return fmt.Errorf("deleting lifecycle bead %q: %w", id, err)
+		}
+		if err := s.guardAndFenceIncomingDependenciesTx(context.Background(), tx, []string{id}, []string{id}, nil); err != nil {
+			return fmt.Errorf("deleting bead %q incoming dependencies: %w", id, err)
+		}
 		res, err := tx.Exec(`DELETE FROM beads WHERE id=?`, id)
 		if err != nil {
 			return fmt.Errorf("deleting bead %q: %w", id, err)
@@ -1779,6 +2103,22 @@ func (s *SQLiteStore) Delete(id string) error {
 		return fmt.Errorf("deleting bead %q: cleaning up local strings: %w", id, err)
 	}
 	return nil
+}
+
+func sqliteProtectedAttemptEvidenceRecordIDTx(ctx context.Context, tx *sql.Tx, id string) (bool, error) {
+	var found int
+	err := tx.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM metadata m
+			WHERE m.bead_id=? AND m.meta_key IN (?, ?, ?, ?, ?, ?)
+		)`, id,
+		beadmeta.AttemptEvidenceArchiveAttemptIDMetadataKey,
+		beadmeta.AttemptEvidenceArchiveOwnerIDMetadataKey,
+		beadmeta.AttemptEvidenceArchivePayloadMetadataKey,
+		beadmeta.AttemptEvidenceArchiveDigestMetadataKey,
+		beadmeta.AttemptEvidencePayloadDigestMetadataKey,
+		beadmeta.AttemptEvidencePayloadDataMetadataKey).Scan(&found)
+	return found != 0, err
 }
 
 // DepAdd records a dependency edge.
@@ -1825,11 +2165,45 @@ func (s *SQLiteStore) depAddTx(ctx context.Context, tx *sql.Tx, issueID, depends
 	return s.depAddWithMetadataTx(ctx, tx, issueID, dependsOnID, depType, "")
 }
 
-// depAddWithMetadataTx adds one dependency and transactionally replaces its
-// Graph-only opaque metadata sidecar. The sidecar lives in kv because the
-// deployed deps schemas have no metadata column; direct DepAdd calls carry no
-// metadata and therefore clear a previously graph-applied value.
+// depAddInitialTx adds an edge that is part of a row being created in this
+// transaction. The new source row has no prior snapshot to fence, so its
+// initial revision remains unchanged.
+func (s *SQLiteStore) depAddInitialTx(ctx context.Context, tx *sql.Tx, issueID, dependsOnID, depType string) error {
+	return s.depAddInitialWithMetadataTx(ctx, tx, issueID, dependsOnID, depType, "")
+}
+
+// depAddWithMetadataTx applies an actual source-edge or edge-metadata change
+// under the existing frontier hold and advances the source revision in the
+// same transaction. Idempotent re-adds do not consume a revision.
 func (s *SQLiteStore) depAddWithMetadataTx(ctx context.Context, tx *sql.Tx, issueID, dependsOnID, depType, metadata string) error {
+	if depType == "" {
+		depType = "blocks"
+	}
+	existingType, edgeExists, err := s.dependencyStateTx(ctx, tx, issueID, dependsOnID)
+	if err != nil {
+		return err
+	}
+	metadataMatches, err := s.graphEdgeMetadataMatchesTx(ctx, tx, issueID, dependsOnID, depType, metadata)
+	if err != nil {
+		return err
+	}
+	if edgeExists && existingType == depType && metadataMatches {
+		return nil
+	}
+	sourceExists, err := s.guardDependencySourceMutationTx(ctx, tx, issueID)
+	if err != nil {
+		return err
+	}
+	if err := s.depAddInitialWithMetadataTx(ctx, tx, issueID, dependsOnID, depType, metadata); err != nil {
+		return err
+	}
+	return s.bumpDependencySourceRevisionTx(ctx, tx, issueID, sourceExists)
+}
+
+// depAddInitialWithMetadataTx adds one edge and transactionally replaces its
+// Graph-only opaque metadata sidecar. Use this only for an edge that belongs to
+// a newly created source row; existing rows must use depAddWithMetadataTx.
+func (s *SQLiteStore) depAddInitialWithMetadataTx(ctx context.Context, tx *sql.Tx, issueID, dependsOnID, depType, metadata string) error {
 	if depType == "" {
 		depType = "blocks"
 	}
@@ -1883,11 +2257,29 @@ func (s *SQLiteStore) DepRemove(issueID, dependsOnID string) error {
 			return fmt.Errorf("sqlite dep remove: begin tx: %w", err)
 		}
 		defer tx.Rollback() //nolint:errcheck
+		existingType, edgeExists, err := s.dependencyStateTx(ctx, tx, issueID, dependsOnID)
+		if err != nil {
+			return err
+		}
+		metadataMatches, err := s.graphEdgeMetadataMatchesTx(ctx, tx, issueID, dependsOnID, existingType, "")
+		if err != nil {
+			return err
+		}
+		if !edgeExists && metadataMatches {
+			return tx.Commit()
+		}
+		sourceExists, err := s.guardDependencySourceMutationTx(ctx, tx, issueID)
+		if err != nil {
+			return err
+		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM deps WHERE issue_id=? AND depends_on_id=?`, issueID, dependsOnID); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM kv WHERE key GLOB ?`, sqliteGraphEdgeMetadataPairPrefix(issueID, dependsOnID)+"*"); err != nil {
 			return fmt.Errorf("clearing Graph dependency metadata %s -> %s: %w", issueID, dependsOnID, err)
+		}
+		if err := s.bumpDependencySourceRevisionTx(ctx, tx, issueID, sourceExists); err != nil {
+			return err
 		}
 		return tx.Commit()
 	})
@@ -1956,8 +2348,32 @@ func (s *SQLiteStore) purgeTerminal(ctx context.Context, olderThan time.Duration
 		WHERE tier='main'
 		  AND status IN ('closed','cancelled','canceled','expired')
 		  AND COALESCE(NULLIF(updated_at,0), created_at) < ?
+		  AND NOT EXISTS (
+			SELECT 1 FROM metadata m
+			WHERE m.bead_id=beads.id AND m.meta_key IN (?, ?, ?, ?, ?, ?)
+		  )
+		  AND NOT EXISTS (
+			SELECT 1 FROM metadata m
+			WHERE m.bead_id=beads.id AND m.meta_key LIKE ?
+		  )
+		  AND NOT EXISTS (
+			SELECT 1 FROM metadata m
+			WHERE m.bead_id=beads.id
+			  AND m.meta_key IN (?,?,?)
+			  AND TRIM(m.meta_value) <> ''
+		  )
 		ORDER BY updated_at ASC
-		LIMIT 1000`, cutoff)
+		LIMIT 1000`, cutoff,
+		beadmeta.AttemptEvidenceArchiveAttemptIDMetadataKey,
+		beadmeta.AttemptEvidenceArchiveOwnerIDMetadataKey,
+		beadmeta.AttemptEvidenceArchivePayloadMetadataKey,
+		beadmeta.AttemptEvidenceArchiveDigestMetadataKey,
+		beadmeta.AttemptEvidencePayloadDigestMetadataKey,
+		beadmeta.AttemptEvidencePayloadDataMetadataKey,
+		beadmeta.SessionRequestReceiptPrefix+"%",
+		beadmeta.LifecycleRecoveryStateMetadataKey,
+		beadmeta.LifecycleRecoveryIntentMetadataKey,
+		beadmeta.LifecycleRecoveryIntentDigestKey)
 	if err != nil {
 		return 0, fmt.Errorf("sqlite purge terminal query: %w", err)
 	}

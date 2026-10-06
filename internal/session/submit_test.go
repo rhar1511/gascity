@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/sessionlog"
 )
 
 // TestProviderKind_PreferenceOrder exercises the metadata preference
@@ -1499,6 +1500,73 @@ func TestSubmitInterruptNowHardRestartsAndTruncatesPiPendingTurn(t *testing.T) {
 	}
 	if string(mirrored) != string(truncated) {
 		t.Fatalf("pi mirror differs from native transcript:\nmirror:\n%s\nnative:\n%s", mirrored, truncated)
+	}
+}
+
+func TestSubmitInterruptNowDoesNotDiscoverEscapingPiTranscriptSymlink(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(store, sp)
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "pi --session escaped-session", WorkDir: t.TempDir(), Provider: "pi", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	sessionDir := t.TempDir()
+	outsideDir := t.TempDir()
+	outsidePath := filepath.Join(outsideDir, "escaped-session.jsonl")
+	outsideSession := strings.Join([]string{
+		fmt.Sprintf(`{"type":"session","id":"escaped-session","cwd":%q}`, info.WorkDir),
+		`{"type":"message","id":"u1","message":{"role":"user","content":"outside-only secret"}}`,
+		`{"type":"message","id":"a1","parentId":"u1","message":{"role":"assistant","content":"stable response","stopReason":"stop"}}`,
+		`{"type":"message","id":"u2","parentId":"a1","message":{"role":"user","content":"interrupted prompt"}}`,
+		`{"type":"message","id":"a2","parentId":"u2","message":{"role":"assistant","content":"partial output"}}`,
+		"",
+	}, "\n")
+	if err := os.WriteFile(outsidePath, []byte(outsideSession), 0o600); err != nil {
+		t.Fatalf("WriteFile outside pi session: %v", err)
+	}
+	linkedPath := filepath.Join(sessionDir, "escaped-session.jsonl")
+	if err := os.Symlink(outsidePath, linkedPath); err != nil {
+		t.Fatalf("Symlink escaping pi session: %v", err)
+	}
+	mirrorDir := t.TempDir()
+	discoveredPath, discoveryErr := sessionlog.FindPiSessionFileStrict([]string{sessionDir}, info.WorkDir)
+
+	hints := runtime.Config{
+		WorkDir: info.WorkDir,
+		Env: map[string]string{
+			"PI_CODING_AGENT_SESSION_DIR": sessionDir,
+			"GC_PI_TRANSCRIPT_DIR":        mirrorDir,
+		},
+	}
+	outcome, err := mgr.Submit(context.Background(), info.ID, "replace the current turn", BuildResumeCommand(info), hints, SubmitIntentInterruptNow)
+	if err != nil {
+		t.Fatalf("Submit(interrupt_now): %v", err)
+	}
+	if outcome.Queued {
+		t.Fatal("Submit(interrupt_now) unexpectedly queued")
+	}
+	if discoveryErr != nil {
+		t.Fatalf("FindPiSessionFileStrict: %v", discoveryErr)
+	}
+	if discoveredPath != "" {
+		t.Fatalf("FindPiSessionFileStrict discovered escaping transcript %q", discoveredPath)
+	}
+
+	gotOutside, err := os.ReadFile(outsidePath)
+	if err != nil {
+		t.Fatalf("ReadFile outside pi session: %v", err)
+	}
+	if string(gotOutside) != outsideSession {
+		t.Fatalf("outside transcript changed through escaping symlink:\n%s", gotOutside)
+	}
+	mirrorPath := filepath.Join(mirrorDir, "escaped-session.jsonl")
+	if mirrored, err := os.ReadFile(mirrorPath); err == nil {
+		t.Fatalf("escaping transcript was copied into mirror:\n%s", mirrored)
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("ReadFile Pi mirror: %v", err)
 	}
 }
 

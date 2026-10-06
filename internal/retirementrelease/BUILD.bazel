@@ -1,0 +1,53 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "retirementrelease",
+    srcs = [
+        "adapter.go",
+        "http_envelope.go",
+        "manifest.go",
+        "policy.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/retirementrelease",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/citywriteauth",
+        "//internal/qualification",
+        "//internal/selectorattestation",
+        "//internal/selectorinventory",
+        "//internal/selectorwriter",
+    ],
+)
+
+go_test(
+    name = "retirementrelease_test",
+    srcs = [
+        "adapter_test.go",
+        "external_test.go",
+        "http_envelope_test.go",
+        "policy_test.go",
+        "signed_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":retirementrelease"],
+    deps = [
+        "//internal/citywriteauth",
+        "//internal/qualification",
+        "//internal/selectorattestation",
+        "//internal/selectorinventory",
+        "//internal/selectorwriter",
+        "//internal/testenv",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

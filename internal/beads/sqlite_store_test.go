@@ -281,6 +281,61 @@ func TestSQLiteStoreCreatesAndGets(t *testing.T) {
 	}
 }
 
+// A new row owns a new destination revision, including migration copies.
+// Caller revisions are not tokens for the destination store. Legacy persisted
+// rows remain covered by TestSQLiteStoreReadOnlyReadsLegacySchemaWithoutRevision.
+func TestSQLiteStoreCreateReturnsPersistedRevision(t *testing.T) {
+	for _, operation := range []string{"create", "foreign-id", "transaction"} {
+		t.Run(operation, func(t *testing.T) {
+			opened, err := OpenSQLiteStore(t.TempDir())
+			if err != nil {
+				t.Fatalf("OpenSQLiteStore: %v", err)
+			}
+			store := opened.(*SQLiteStore)
+			t.Cleanup(func() { _ = store.CloseStore() })
+			input := Bead{ID: "foreign-42", Title: "new row", Revision: 99}
+			var created Bead
+			switch operation {
+			case "create":
+				created, err = store.Create(input)
+			case "foreign-id":
+				created, err = store.CreateWithForeignID(input)
+			case "transaction":
+				err = store.Tx("new row", func(tx Tx) error {
+					var createErr error
+					created, createErr = tx.Create(input)
+					return createErr
+				})
+			}
+			if err != nil {
+				t.Fatalf("%s: %v", operation, err)
+			}
+			persisted, err := store.Get(created.ID)
+			if err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			if created.Revision != 1 || persisted.Revision != created.Revision {
+				t.Fatalf("new row revisions: returned=%d persisted=%d, want destination token 1", created.Revision, persisted.Revision)
+			}
+			title := "changed under creation token"
+			if err := store.UpdateIfMatch(created.ID, created.Revision, UpdateOpts{Title: &title}); err != nil {
+				t.Fatalf("UpdateIfMatch: %v", err)
+			}
+			var stale *PreconditionFailedError
+			if err := store.UpdateIfMatch(created.ID, created.Revision, UpdateOpts{Title: &input.Title}); !errors.As(err, &stale) {
+				t.Fatalf("stale creation token: %v, want PreconditionFailedError", err)
+			}
+			persisted, err = store.Get(created.ID)
+			if err != nil {
+				t.Fatalf("Get updated: %v", err)
+			}
+			if persisted.Revision != 2 || persisted.Title != title {
+				t.Fatalf("updated row = %+v, want revision 2 and fenced title", persisted)
+			}
+		})
+	}
+}
+
 func TestSQLiteStorePersistsLocalStringsOutsideDatabase(t *testing.T) {
 	dir := t.TempDir()
 	opened, err := OpenSQLiteStore(dir)
@@ -823,6 +878,11 @@ func TestIsSQLiteBusy(t *testing.T) {
 }
 
 func TestRetryOnBusy(t *testing.T) {
+	var slept []time.Duration
+	prevSleep := sqliteBusySleep
+	sqliteBusySleep = func(d time.Duration) { slept = append(slept, d) }
+	t.Cleanup(func() { sqliteBusySleep = prevSleep })
+
 	t.Run("succeeds_immediately", func(t *testing.T) {
 		calls := 0
 		err := retryOnBusy(func() error {
@@ -867,6 +927,26 @@ func TestRetryOnBusy(t *testing.T) {
 		}
 		if calls != 1+sqliteBusyRetryAttempts {
 			t.Fatalf("expected %d calls, got %d", 1+sqliteBusyRetryAttempts, calls)
+		}
+	})
+
+	t.Run("backs_off_exponentially_with_bounded_jitter", func(t *testing.T) {
+		slept = nil
+		busyErr := errors.New("database is locked (517)")
+		_ = retryOnBusy(func() error { return busyErr })
+		if len(slept) != sqliteBusyRetryAttempts {
+			t.Fatalf("slept %d times, want %d", len(slept), sqliteBusyRetryAttempts)
+		}
+		var total time.Duration
+		for attempt, d := range slept {
+			ceiling := min(sqliteBusyRetryBaseDelay<<attempt, sqliteBusyRetryMaxDelay)
+			if d < ceiling/2 || d > ceiling {
+				t.Fatalf("retry %d slept %v, want within [%v, %v]", attempt, d, ceiling/2, ceiling)
+			}
+			total += d
+		}
+		if total > 5100*time.Millisecond {
+			t.Fatalf("total backoff %v exceeds the 5.1s budget", total)
 		}
 	})
 

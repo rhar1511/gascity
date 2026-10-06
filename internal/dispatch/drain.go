@@ -1446,9 +1446,11 @@ func ensureDrainItemRoot(store beads.Store, control, unit, member beads.Bead, co
 		}
 	}
 	result, err := molecule.Instantiate(context.Background(), store, recipe, molecule.Options{
-		Vars:             runtimeVars,
-		ExternalDeps:     drainWorkflowExternalDeps(recipe, blockerIDs),
-		PriorityOverride: member.Priority,
+		Vars:              runtimeVars,
+		ExternalDeps:      drainWorkflowExternalDeps(recipe, blockerIDs),
+		PriorityOverride:  member.Priority,
+		ActionGate:        opts.FormulaActionGate,
+		RequireActionGate: opts.RequireFormulaActionGate,
 	})
 	if err != nil {
 		if cleanupErr := closeFailedDrainItemRoots(store, control.ID, row.ItemRootKey); cleanupErr != nil {

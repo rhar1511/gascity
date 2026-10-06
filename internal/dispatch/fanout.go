@@ -106,14 +106,7 @@ func processFanout(store beads.Store, bead beads.Bead, opts ProcessOptions) (Con
 	if mode == "" {
 		mode = "parallel"
 	}
-	if strings.TrimSpace(bead.Metadata[beadmeta.FanoutStateMetadataKey]) == "" {
-		if err := store.SetMetadataBatch(bead.ID, map[string]string{beadmeta.FanoutStateMetadataKey: beadmeta.SpawnStateSpawning}); err != nil {
-			if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
-				return ControlResult{}, ErrControlPending
-			}
-			return ControlResult{}, fmt.Errorf("%s: recording fanout spawn start: %w", bead.ID, err)
-		}
-	}
+	spawnStateRecorded := strings.TrimSpace(bead.Metadata[beadmeta.FanoutStateMetadataKey]) != ""
 	fanoutSinkBlockers := fanoutSinkBlockerIDs(blockerIDs, source.ID)
 
 	var previousSinkIDs []string
@@ -157,15 +150,24 @@ func processFanout(store beads.Store, bead beads.Bead, opts ProcessOptions) (Con
 			return ControlResult{}, fmt.Errorf("%s: resuming fragment %d: %w", bead.ID, index+1, err)
 		}
 
+		fragmentOpts := molecule.FragmentOptions{
+			RootID:            rootID,
+			Vars:              itemVars,
+			ExternalDeps:      externalDeps,
+			ActionGate:        opts.FormulaActionGate,
+			RequireActionGate: opts.RequireFormulaActionGate,
+		}
 		var idMapping map[string]string
 		if len(existingMapping) > 0 {
+			if err := molecule.ValidateExistingFragmentAction(context.Background(), store, fragment, fragmentOpts); err != nil {
+				if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
+					return ControlResult{}, ErrControlPending
+				}
+				return ControlResult{}, fmt.Errorf("%s: validating reused fragment %d: %w", bead.ID, index+1, err)
+			}
 			idMapping = existingMapping
 		} else {
-			inst, err := molecule.InstantiateFragment(context.Background(), store, fragment, molecule.FragmentOptions{
-				RootID:       rootID,
-				Vars:         itemVars,
-				ExternalDeps: externalDeps,
-			})
+			inst, err := molecule.InstantiateFragment(context.Background(), store, fragment, fragmentOpts)
 			if err != nil {
 				if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
 					return ControlResult{}, ErrControlPending
@@ -174,6 +176,18 @@ func processFanout(store beads.Store, bead beads.Bead, opts ProcessOptions) (Con
 			}
 			totalCreated += inst.Created
 			idMapping = inst.IDMapping
+		}
+		if !spawnStateRecorded {
+			if err := store.SetMetadataBatch(bead.ID, map[string]string{beadmeta.FanoutStateMetadataKey: beadmeta.SpawnStateSpawning}); err != nil {
+				// Fragment creation or reuse has already succeeded. A terminal
+				// controller_error here would strand those children behind a
+				// closed fanout; blank-state recovery can find them on the next pass.
+				if IsTransientControllerError(err) && !isPartialAttemptAttachError(err) {
+					markControllerSpawnError(store, bead.ID, err, opts)
+				}
+				return ControlResult{}, fmt.Errorf("%w: %s: recording fanout spawn start: %w", ErrControlPending, bead.ID, err)
+			}
+			spawnStateRecorded = true
 		}
 
 		sinkIDs := mapStepIDs(fragment.Sinks, idMapping)

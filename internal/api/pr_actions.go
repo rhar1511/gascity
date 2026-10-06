@@ -434,6 +434,27 @@ func (s *PRActionService) Queue(ctx context.Context) (PRActionQueue, error) {
 	return queue, nil
 }
 
+// Review queueing is distinct from merge readiness: known non-conflict states
+// like BLOCKED and UNSTABLE can still be routed for human review. Conflicts,
+// missing state, and unrecognized states fail closed.
+func prActionQueueReviewVerdict(mergeState string) PRActionOption {
+	option := PRActionOption{Action: PRActionQueueReview}
+	switch strings.ToUpper(strings.TrimSpace(mergeState)) {
+	case "DIRTY":
+		option.Reason = "merge conflicts are reported (merge state DIRTY); resolve conflicts before queueing review"
+	case "CLEAN", "BEHIND", "BLOCKED", "UNSTABLE", "HAS_HOOKS":
+		option.Available = true
+		option.Reason = "server verified immutable evidence for the current revision"
+	default:
+		state := strings.ToUpper(strings.TrimSpace(mergeState))
+		if state == "" {
+			state = "UNKNOWN"
+		}
+		option.Reason = fmt.Sprintf("merge state %s is unknown or unsupported; refresh PR state before queueing review", state)
+	}
+	return option
+}
+
 // Execute persists and runs a revision-bound action under a durable idempotency
 // claim, revalidating the exact selected work and attempt before any effect.
 func (s *PRActionService) Execute(ctx context.Context, request PRActionRequest, actor PRActionActor) (PRActionResult, error) {
@@ -539,7 +560,7 @@ func (s *PRActionService) Execute(ctx context.Context, request PRActionRequest, 
 		return PRActionResult{}, ErrPRActionEvidenceMissing
 	}
 	if !found {
-		prior, err = createPRActionIntent(store, request, actor, fingerprint, s.now().UTC())
+		prior, err = createPRActionIntent(store, request, actor, fingerprint, s.now().UTC(), capturePRActionVerdict(item, request, monitor))
 		if err != nil {
 			return PRActionResult{}, fmt.Errorf("persist PR action intent: %w", err)
 		}
@@ -617,6 +638,13 @@ func (s *PRActionService) Execute(ctx context.Context, request PRActionRequest, 
 	}
 	if err := verifyPRActionRecordClaim(store, prior.ID, claimToken, s.now().UTC()); err != nil {
 		return prior, err
+	}
+	// Keep the admission decision unchanged and persist the latest successful
+	// pre-execution check separately before performing the action. Older records
+	// without an admission snapshot remain explicitly unavailable for that fact.
+	prior.ExecutionVerdict = capturePRActionVerdict(freshItem, request, monitor)
+	if err := persistPRActionResultClaimed(store, &prior, claimToken, s.now().UTC()); err != nil {
+		return prior, ErrPRActionOutcomeUnknown
 	}
 
 	switch request.Action {
@@ -722,28 +750,30 @@ type PRActionRequest struct {
 
 // PRActionResult is the durable, idempotent result for one PR action request.
 type PRActionResult struct {
-	ID             string       `json:"id"`
-	Action         PRActionKind `json:"action"`
-	Status         string       `json:"status"`
-	Outcome        string       `json:"outcome,omitempty"`
-	MergeCommitSHA string       `json:"merge_commit_sha,omitempty"`
-	Detail         string       `json:"detail,omitempty"`
-	IdempotencyKey string       `json:"idempotency_key"`
-	Fingerprint    string       `json:"-"`
-	Monitor        string       `json:"monitor"`
-	Owner          string       `json:"owner"`
-	Repo           string       `json:"repo"`
-	PullRequest    int          `json:"pull_request"`
-	WorkID         string       `json:"work_id,omitempty"`
-	AttemptID      string       `json:"attempt_id,omitempty"`
-	HeadSHA        string       `json:"head_sha"`
-	BaseSHA        string       `json:"base_sha"`
-	PolicyVersion  string       `json:"policy_version"`
-	ActorKeyID     string       `json:"actor_key_id"`
-	ActorIssuer    string       `json:"actor_issuer,omitempty"`
-	ActorSubject   string       `json:"actor_subject,omitempty"`
-	CreatedAt      time.Time    `json:"created_at"`
-	VerifiedAt     time.Time    `json:"verified_at,omitzero"`
+	ID               string                 `json:"id"`
+	Action           PRActionKind           `json:"action"`
+	Status           string                 `json:"status"`
+	Outcome          string                 `json:"outcome,omitempty"`
+	MergeCommitSHA   string                 `json:"merge_commit_sha,omitempty"`
+	Detail           string                 `json:"detail,omitempty"`
+	IdempotencyKey   string                 `json:"idempotency_key"`
+	Fingerprint      string                 `json:"-"`
+	Monitor          string                 `json:"monitor"`
+	Owner            string                 `json:"owner"`
+	Repo             string                 `json:"repo"`
+	PullRequest      int                    `json:"pull_request"`
+	WorkID           string                 `json:"work_id,omitempty"`
+	AttemptID        string                 `json:"attempt_id,omitempty"`
+	HeadSHA          string                 `json:"head_sha"`
+	BaseSHA          string                 `json:"base_sha"`
+	PolicyVersion    string                 `json:"policy_version"`
+	ActorKeyID       string                 `json:"actor_key_id"`
+	ActorIssuer      string                 `json:"actor_issuer,omitempty"`
+	ActorSubject     string                 `json:"actor_subject,omitempty"`
+	CreatedAt        time.Time              `json:"created_at"`
+	VerifiedAt       time.Time              `json:"verified_at,omitzero"`
+	AdmissionVerdict *PRActionPolicyVerdict `json:"admission_verdict,omitempty"`
+	ExecutionVerdict *PRActionPolicyVerdict `json:"execution_verdict,omitempty"`
 }
 
 func (s *PRActionService) attemptEvidenceFor(store beads.Store, rig, workID string, pr githubmonitor.PullRequest) ([]PRActionAttemptReference, string) {
@@ -937,7 +967,7 @@ func prActionFingerprint(request PRActionRequest, actor PRActionActor) (string, 
 	return hex.EncodeToString(digest[:]), nil
 }
 
-func createPRActionIntent(store beads.Store, request PRActionRequest, actor PRActionActor, fingerprint string, now time.Time) (PRActionResult, error) {
+func createPRActionIntent(store beads.Store, request PRActionRequest, actor PRActionActor, fingerprint string, now time.Time, verdict *PRActionPolicyVerdict) (PRActionResult, error) {
 	result := PRActionResult{
 		ID:     prActionRecordBeadID(request.IdempotencyKey),
 		Action: request.Action, Status: PRActionStatusPending, IdempotencyKey: request.IdempotencyKey,
@@ -945,6 +975,7 @@ func createPRActionIntent(store beads.Store, request PRActionRequest, actor PRAc
 		PullRequest: request.PullRequest, WorkID: request.WorkID, AttemptID: request.AttemptID,
 		HeadSHA: request.HeadSHA, BaseSHA: request.BaseSHA, PolicyVersion: request.PolicyVersion,
 		ActorKeyID: actor.CityWrite.KeyID, CreatedAt: now.UTC(),
+		AdmissionVerdict: verdict,
 	}
 	if actor.Human != nil {
 		result.ActorKeyID, result.ActorIssuer, result.ActorSubject = actor.Human.KeyID, actor.Human.Issuer, actor.Human.Subject
@@ -1001,11 +1032,13 @@ func findPRActionRecord(store beads.Store, idempotencyKey string) (PRActionResul
 	if rows[0].ID != prActionRecordBeadID(idempotencyKey) || rows[0].Type != "gate" {
 		return PRActionResult{}, false, fmt.Errorf("PR action ledger lacks its unique non-runnable durable ID")
 	}
-	result, err := decodePRActionReceipt(rows[0])
-	if err != nil {
-		return PRActionResult{}, false, err
+	var result PRActionResult
+	if err := json.Unmarshal([]byte(rows[0].Metadata[prActionRecordMetadataKey]), &result); err != nil {
+		return PRActionResult{}, false, fmt.Errorf("decode durable action record %s: %w", rows[0].ID, err)
 	}
-	if result.IdempotencyKey != idempotencyKey {
+	result.ID = rows[0].ID
+	result.Fingerprint = rows[0].Metadata[prActionFingerprintMetadataKey]
+	if result.IdempotencyKey != idempotencyKey || result.Fingerprint == "" || !validPRActionStatus(result.Status) || !validPRActionKind(result.Action) {
 		return PRActionResult{}, false, fmt.Errorf("durable action record %s failed its request identity check", rows[0].ID)
 	}
 	return result, true, nil
@@ -1040,6 +1073,29 @@ func listPRActionReceipts(store beads.Store, monitor, owner, repo string, pullRe
 		return receipts[i].ID < receipts[j].ID
 	})
 	return receipts, nil
+}
+
+// decodePRActionReceipt validates the durable identity without consulting the
+// current policy or forge. Historical readers use the same checks as Queue.
+func decodePRActionReceipt(row beads.Bead) (PRActionResult, error) {
+	if row.Type != "gate" || row.Metadata[prActionSourceMetadataKey] != prActionRecordSource {
+		return PRActionResult{}, fmt.Errorf("action receipt %q failed its durable source check", row.ID)
+	}
+	var receipt PRActionResult
+	if err := json.Unmarshal([]byte(row.Metadata[prActionRecordMetadataKey]), &receipt); err != nil {
+		return PRActionResult{}, fmt.Errorf("decode action receipt %q: %w", row.ID, err)
+	}
+	if receipt.ID != row.ID || receipt.ID != prActionRecordBeadID(receipt.IdempotencyKey) || prActionQueueIndexKey(receipt.Monitor, receipt.Owner, receipt.Repo, receipt.PullRequest) != row.Metadata[prActionQueueIndexMetadataKey] {
+		return PRActionResult{}, fmt.Errorf("action receipt %q does not match its durable queue index", row.ID)
+	}
+	receipt.Fingerprint = row.Metadata[prActionFingerprintMetadataKey]
+	if receipt.Fingerprint == "" || !validPRActionStatus(receipt.Status) || !validPRActionKind(receipt.Action) || receipt.IdempotencyKey != row.Metadata[prActionIdempotencyMetadataKey] {
+		return PRActionResult{}, fmt.Errorf("action receipt %q has incomplete authority or status", row.ID)
+	}
+	if receipt.Action != PRActionPrepare && (strings.TrimSpace(receipt.WorkID) == "" || strings.TrimSpace(receipt.AttemptID) == "") {
+		return PRActionResult{}, fmt.Errorf("action receipt %q has incomplete work or attempt identity", row.ID)
+	}
+	return receipt, nil
 }
 
 func validPRActionStatus(status string) bool {
@@ -1306,43 +1362,4 @@ func validPRDiffSHA(value string) bool {
 	}
 	_, err := hex.DecodeString(value)
 	return err == nil
-}
-
-func prActionQueueReviewVerdict(mergeState string) PRActionOption {
-	option := PRActionOption{Action: PRActionQueueReview}
-	switch strings.ToUpper(strings.TrimSpace(mergeState)) {
-	case "DIRTY":
-		option.Reason = "merge conflicts are reported (merge state DIRTY); resolve conflicts before queueing review"
-	case "CLEAN", "BEHIND", "BLOCKED", "UNSTABLE", "HAS_HOOKS":
-		option.Available = true
-		option.Reason = "server verified immutable evidence for the current revision"
-	default:
-		state := strings.ToUpper(strings.TrimSpace(mergeState))
-		if state == "" {
-			state = "UNKNOWN"
-		}
-		option.Reason = fmt.Sprintf("merge state %s is unknown or unsupported; refresh PR state before queueing review", state)
-	}
-	return option
-}
-
-func decodePRActionReceipt(row beads.Bead) (PRActionResult, error) {
-	if row.Type != "gate" || row.Metadata[prActionSourceMetadataKey] != prActionRecordSource {
-		return PRActionResult{}, fmt.Errorf("action receipt %q failed its durable source check", row.ID)
-	}
-	var receipt PRActionResult
-	if err := json.Unmarshal([]byte(row.Metadata[prActionRecordMetadataKey]), &receipt); err != nil {
-		return PRActionResult{}, fmt.Errorf("decode action receipt %q: %w", row.ID, err)
-	}
-	if receipt.ID != row.ID || receipt.ID != prActionRecordBeadID(receipt.IdempotencyKey) || prActionQueueIndexKey(receipt.Monitor, receipt.Owner, receipt.Repo, receipt.PullRequest) != row.Metadata[prActionQueueIndexMetadataKey] {
-		return PRActionResult{}, fmt.Errorf("action receipt %q does not match its durable queue index", row.ID)
-	}
-	receipt.Fingerprint = row.Metadata[prActionFingerprintMetadataKey]
-	if receipt.Fingerprint == "" || !validPRActionStatus(receipt.Status) || !validPRActionKind(receipt.Action) || receipt.IdempotencyKey != row.Metadata[prActionIdempotencyMetadataKey] {
-		return PRActionResult{}, fmt.Errorf("action receipt %q has incomplete authority or status", row.ID)
-	}
-	if receipt.Action != PRActionPrepare && (strings.TrimSpace(receipt.WorkID) == "" || strings.TrimSpace(receipt.AttemptID) == "") {
-		return PRActionResult{}, fmt.Errorf("action receipt %q has incomplete work or attempt identity", row.ID)
-	}
-	return receipt, nil
 }

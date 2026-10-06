@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/githubmonitor"
 )
 
 func TestGitHubPRActionForgeRefusesHeadOnlyMergeWithoutBasePrecondition(t *testing.T) {
@@ -32,11 +34,9 @@ func TestGitHubPRActionForgeRefusesHeadOnlyMergeWithoutBasePrecondition(t *testi
 			http.NotFound(w, r)
 		}
 	})
-	endpoint := "https://github.test"
-	forge := NewGitHubPRActionForge("controller-token",
-		WithGitHubPRActionEndpoints(endpoint, endpoint+"/graphql"),
-		WithGitHubPRActionHTTPClient(inProcessHandlerClient(handler)),
-	)
+	httpClient := &http.Client{Transport: loopbackTransport{h: handler}}
+	forge := NewGitHubPRActionForge("controller-token", WithGitHubPRActionEndpoints("http://forge.test", "http://forge.test/graphql"), WithGitHubPRActionHTTPClient(httpClient))
+	forge.graphql = githubmonitor.NewGraphQLClient("controller-token", githubmonitor.WithEndpoint("http://forge.test/graphql"), githubmonitor.WithHTTPClient(httpClient))
 	if forge.SupportsAtomicBaseBoundMerge() {
 		t.Fatal("GitHub head-only merge API was advertised as an atomic base-bound action")
 	}

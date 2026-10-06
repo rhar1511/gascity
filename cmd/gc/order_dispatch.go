@@ -293,9 +293,10 @@ type orderSetSnapshot struct {
 //
 // inflightN + inflightDone together track dispatchOne goroutines so
 // drain can select on either completion or ctx.Done without spawning an
-// orphaned waiter goroutine. dispatch is only ever called from the tick
-// goroutine, so addInflight's check-and-create happens-before any
-// concurrent drain call on the same instance.
+// orphaned waiter goroutine. dispatch is only ever called under the
+// orders lane's passMu (orders_lane.go), and every drain of a lane-owned
+// instance runs under that lock too, so addInflight's check-and-create
+// happens-before any drain call on the same instance.
 //
 // dispatchCtx is the parent context for every dispatchOne goroutine. The
 // per-goroutine ctx is derived to cancel when EITHER the caller's tick
@@ -313,21 +314,22 @@ type memoryOrderDispatcher struct {
 	// work ledger; neither class belongs there on a split city. A nil value
 	// relocates nothing, so graphStoreFor/ordersStoreFor hand back the caller's
 	// own store and the dispatch is byte-identical to the single-store path.
-	storageRoutes        *storageRoutes
-	ep                   events.Provider
-	execRun              ExecRunner
-	rec                  events.Recorder
-	stderr               io.Writer
-	maxTimeout           time.Duration
-	maxDispatchesPerTick int
-	nextDispatchStart    int
-	cfg                  *config.City
-	cityName             string
-	cityPath             string
-	cacheMu              sync.Mutex
-	lastRunCache         map[string]time.Time
-	gateBackoffUntil     map[string]time.Time
-	openWorkSuppression  map[string]orderOpenWorkSuppression
+	storageRoutes             *storageRoutes
+	ep                        events.Provider
+	execRun                   ExecRunner
+	rec                       events.Recorder
+	stderr                    io.Writer
+	maxTimeout                time.Duration
+	maxDispatchesPerTick      int
+	nextDispatchStart         int
+	cfg                       *config.City
+	cityName                  string
+	cityPath                  string
+	formulaActionGateForStore func(*config.City, string, beads.Store, beads.Store) func(beads.Store) molecule.FormulaActionGate
+	cacheMu                   sync.Mutex
+	lastRunCache              map[string]time.Time
+	gateBackoffUntil          map[string]time.Time
+	openWorkSuppression       map[string]orderOpenWorkSuppression
 
 	dispatchCtx    context.Context
 	dispatchCancel context.CancelFunc
@@ -335,6 +337,16 @@ type memoryOrderDispatcher struct {
 	inflightMu   sync.Mutex
 	inflightN    int
 	inflightDone chan struct{} // closed when inflightN returns to 0; nil when idle
+	// inflightIdentityRegistry is shared across this controller execution's
+	// scheduled and webhook dispatchers. It is observation-only and does not
+	// participate in dispatch gates.
+	inflightIdentityRegistry *orderDispatchIdentityRegistry
+	// afterIdentityPromotion is a narrow test seam for the ownership boundary
+	// between synchronous tracking creation and asynchronous launch.
+	afterIdentityPromotion func()
+	// orderFrontDoorForFn is a narrow test seam for failures while preparing
+	// the tracking store, before CreateRun establishes the next owner.
+	orderFrontDoorForFn func(beads.Store) *orders.Store
 }
 
 type orderDispatchTrackingIndex struct {
@@ -500,18 +512,19 @@ func newMemoryOrderDispatcher(routes *storageRoutes, aa []orders.Order, cityPath
 			// every scope target (ga-237xpr).
 			return openStoreAtForCityWithConfig(target.ScopeRoot, cityPath, cfg)
 		},
-		storageRoutes:        routes,
-		ep:                   ep,
-		execRun:              shellExecRunner,
-		rec:                  rec,
-		stderr:               lockedStderr(stderr),
-		maxTimeout:           cfg.Orders.MaxTimeoutDuration(),
-		maxDispatchesPerTick: maxDispatchesPerTick,
-		cfg:                  cfg,
-		cityName:             loadedCityName(cfg, cityPath),
-		cityPath:             cityPath,
-		dispatchCtx:          dispatchCtx,
-		dispatchCancel:       dispatchCancel,
+		storageRoutes:            routes,
+		ep:                       ep,
+		execRun:                  shellExecRunner,
+		rec:                      rec,
+		stderr:                   lockedStderr(stderr),
+		maxTimeout:               cfg.Orders.MaxTimeoutDuration(),
+		maxDispatchesPerTick:     maxDispatchesPerTick,
+		cfg:                      cfg,
+		cityName:                 loadedCityName(cfg, cityPath),
+		cityPath:                 cityPath,
+		dispatchCtx:              dispatchCtx,
+		dispatchCancel:           dispatchCancel,
+		inflightIdentityRegistry: newOrderDispatchIdentityRegistry(),
 	}
 }
 
@@ -987,7 +1000,7 @@ func (m *memoryOrderDispatcher) fireCandidate(ctx context.Context, cand *orderDi
 		// distinctly (normal "condition false" is not logged) so a check
 		// outgrowing its budget is diagnosable instead of invisible
 		// (ga-ocypq2). Raise the order's check_timeout to fix.
-		if a.Trigger == "condition" && strings.Contains(result.Reason, orders.ConditionCheckTimedOutMarker) {
+		if a.Trigger == "condition" && result.TimedOut {
 			logDispatchError(m.stderr, "gc: order dispatch: %s %s — raise check_timeout if the check needs a slow store read", a.ScopedName(), result.Reason)
 		}
 		return false
@@ -1020,15 +1033,15 @@ func (m *memoryOrderDispatcher) fireCandidate(ctx context.Context, cand *orderDi
 	// same launchResolvedDispatch → dispatchOne path through the exported
 	// seam, so a tick dispatch and a webhook dispatch run the identical core,
 	// not two implementations. inFlight (this tick's WaitGroup) is reserved
-	// before the launch and released via onDone; on a create failure nothing
-	// launched, so it is released immediately to balance the reservation.
+	// before the launch and released via onDone; if preparation or tracking
+	// creation fails, nothing launched, so it is released immediately.
 	//
 	// Auto-triggered orders carry no args channel: vars/execEnv are nil.
 	inFlight.Add(1)
 	trackingBead, err := m.launchResolvedDispatch(ctx, store, target, a, cityPath, nil, nil, inFlight.Done)
 	if err != nil {
 		inFlight.Done()
-		logDispatchError(m.stderr, "gc: order dispatch: creating tracking bead for %s: %v", scoped, err)
+		logDispatchError(m.stderr, "gc: order dispatch: starting %s: %v", scoped, err)
 		return false
 	}
 	m.rememberLastRun(scoped, storeKeysForGate, trackingBead.CreatedAt)
@@ -1043,14 +1056,14 @@ func (m *memoryOrderDispatcher) fireCandidate(ctx context.Context, cand *orderDi
 // once after dispatchOne returns — i.e. after this goroutine's final store
 // call — so the caller can hold per-tick store handles open until the
 // goroutine releases them (gascity#3157). A nil onDone is treated as a no-op.
-func (m *memoryOrderDispatcher) launchDispatchOne(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string, vars, execEnv map[string]string, onDone func()) {
+func (m *memoryOrderDispatcher) launchDispatchOne(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string, identityLease orderDispatchIdentityLease, vars, execEnv map[string]string, onDone func()) {
 	if onDone == nil {
 		onDone = func() {}
 	}
 	if m.dispatchCtx == nil {
 		go func() {
 			defer onDone()
-			m.runDispatchGuarded(ctx, store, target, a, cityPath, trackingID, vars, execEnv)
+			m.runDispatchGuarded(ctx, store, target, a, cityPath, trackingID, vars, execEnv, identityLease)
 		}()
 		return
 	}
@@ -1063,7 +1076,7 @@ func (m *memoryOrderDispatcher) launchDispatchOne(ctx context.Context, store bea
 		defer onDone()
 		defer stopAfter()
 		defer cancelMerged()
-		m.runDispatchGuarded(mergedCtx, store, target, a, cityPath, trackingID, vars, execEnv)
+		m.runDispatchGuarded(mergedCtx, store, target, a, cityPath, trackingID, vars, execEnv, identityLease)
 	}()
 }
 
@@ -1074,13 +1087,13 @@ func (m *memoryOrderDispatcher) launchDispatchOne(ctx context.Context, store bea
 // webhook-derived args) would otherwise crash the whole supervisor. dispatchOne's
 // own defers close the tracking bead as the stack unwinds before recovery here;
 // this boundary logs the panic and contains it to the single dispatch.
-func (m *memoryOrderDispatcher) runDispatchGuarded(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string, vars, execEnv map[string]string) {
+func (m *memoryOrderDispatcher) runDispatchGuarded(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string, vars, execEnv map[string]string, identityLeases ...orderDispatchIdentityLease) {
 	defer func() {
 		if p := recover(); p != nil {
 			logDispatchError(m.stderr, "gc: order %s: dispatch goroutine panic (tracking %s): %v", a.ScopedName(), trackingID, p)
 		}
 	}()
-	m.dispatchOne(ctx, store, target, a, cityPath, trackingID, vars, execEnv)
+	m.dispatchOne(ctx, store, target, a, cityPath, trackingID, vars, execEnv, identityLeases...)
 }
 
 // launchResolvedDispatch is the single fire path shared by the controller tick
@@ -1094,13 +1107,89 @@ func (m *memoryOrderDispatcher) runDispatchGuarded(ctx context.Context, store be
 // A caller tracking its own WaitGroup must register it before calling and
 // release it in onDone (and, on a returned error, itself — nothing launched).
 func (m *memoryOrderDispatcher) launchResolvedDispatch(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath string, vars, execEnv map[string]string, onDone func()) (orders.OrderRun, error) {
-	trackingRun, err := m.orderFrontDoorFor(store).CreateRun(a.ScopedName(), orders.RunOpts{})
+	if err := m.preauthorizeRequiredOrderFormula(ctx, store, target, a, cityPath, vars); err != nil {
+		return orders.OrderRun{}, fmt.Errorf("preparing required order formula before tracking: %w", err)
+	}
+	workKind := "formula_root"
+	if a.IsExec() {
+		workKind = "exec"
+	}
+	var reservation orderDispatchIdentityReservation
+	if m.inflightIdentityRegistry != nil {
+		reservation = m.inflightIdentityRegistry.reserve(a.ScopedName())
+	}
+	reservationOwned := reservation.reserved
+	defer func() {
+		if reservationOwned {
+			reservation.cancel()
+		}
+	}()
+
+	trackingStore := m.orderFrontDoorFor(store)
+	trackingRun, err := trackingStore.CreateRun(a.ScopedName(), orders.RunOpts{})
 	if err != nil {
 		return orders.OrderRun{}, err
 	}
+	identityLease := reservation.promote(trackingRun.ID, workKind)
+	reservationOwned = false
+	identityLeaseOwned := identityLease.registered
+	defer func() {
+		if identityLeaseOwned {
+			identityLease.complete()
+		}
+	}()
+	if m.afterIdentityPromotion != nil {
+		m.afterIdentityPromotion()
+	}
 	m.addInflight()
-	m.launchDispatchOne(ctx, store, target, a, cityPath, trackingRun.ID, vars, execEnv, onDone)
+	m.launchDispatchOne(ctx, store, target, a, cityPath, trackingRun.ID, identityLease, vars, execEnv, onDone)
+	identityLeaseOwned = false
 	return trackingRun, nil
+}
+
+// preauthorizeRequiredOrderFormula checks formula eligibility before the
+// order-tracking bead is written. A denied required-pack action must leave no
+// tracking side effect. Preparation and authorization errors return without a
+// tracking write. Instantiate still performs its own fresh
+// authorization/revalidation before materialization, so this check only moves
+// the first authorization earlier.
+func (m *memoryOrderDispatcher) preauthorizeRequiredOrderFormula(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath string, vars map[string]string) error {
+	if a.IsExec() || m.cfg == nil || !m.cfg.HasRequiredCompatibilityPacks() {
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	searchPaths := orderFormulaSearchPaths(m.cfg, a)
+	recipe, effectiveVars, err := prepareOrderWispRecipe(ctx, store, a, searchPaths, vars)
+	if err != nil {
+		return err
+	}
+	if err := molecule.ValidateRecipeRuntimeVars(recipe, molecule.Options{Vars: effectiveVars}); err != nil {
+		return err
+	}
+	var pool string
+	if a.Pool != "" {
+		pool, err = qualifyOrderPool(a, m.cfg)
+		if err != nil {
+			return err
+		}
+	}
+	graphStore := m.graphStoreFor(store)
+	if err := applyOrderRecipeRouting(recipe, pool, vars, target, graphStore, m.cityName, cityPath, m.cfg); err != nil {
+		return err
+	}
+	stampOrderWispRuntimeVars(recipe, effectiveVars)
+	actionGateForStore := controllerFormulaActionGateForStore(cityPath, m.cfg, target.ScopeRoot, store, graphStore)
+	if m.formulaActionGateForStore != nil {
+		actionGateForStore = m.formulaActionGateForStore(m.cfg, target.ScopeRoot, store, graphStore)
+	}
+	_, _, err = molecule.PrepareFormulaAction(ctx, graphStore, recipe, molecule.Options{
+		Vars:               effectiveVars,
+		ActionGateForStore: actionGateForStore,
+		RequireActionGate:  true,
+	})
+	return err
 }
 
 // cancel signals all in-flight dispatchOne goroutines to terminate. Safe
@@ -1114,7 +1203,7 @@ func (m *memoryOrderDispatcher) cancel() {
 }
 
 // addInflight increments the in-flight count and lazily creates the done
-// signal. Called synchronously from dispatch on the tick goroutine.
+// signal. Called synchronously from dispatch, under the orders lane's passMu.
 func (m *memoryOrderDispatcher) addInflight() {
 	m.inflightMu.Lock()
 	m.inflightN++
@@ -1686,10 +1775,15 @@ func orderTriggerUsesLastRun(a orders.Order) bool {
 // namespaced execEnv (GC_WEBHOOK_ARG_*) so an untrusted payload can never shadow
 // a controller-owned or static [order.env] key (R4); the tick loop and CLI pass
 // nil (raw overlay), preserving existing semantics.
-func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string, vars, execEnv map[string]string) {
+func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string, vars, execEnv map[string]string, identityLeases ...orderDispatchIdentityLease) {
+	var identityLease orderDispatchIdentityLease
+	if len(identityLeases) > 0 {
+		identityLease = identityLeases[0]
+	}
 	// Defer order matters: doneInflight runs last, after Close makes the
 	// tracking bead outcome observable to a waiting drain.
 	defer m.doneInflight()
+	defer identityLease.complete()
 	defer func() {
 		// The tracking bead was born in the orders store, so its close has to
 		// address that store: closing through the target scope on a split city
@@ -1740,7 +1834,7 @@ func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Sto
 		}
 		m.dispatchExec(childCtx, front, target, a, cityPath, trackingID, execOverlay)
 	} else {
-		m.dispatchWisp(childCtx, store, target, a, cityPath, trackingID, vars)
+		m.dispatchWisp(childCtx, store, target, a, cityPath, trackingID, vars, identityLease)
 	}
 }
 
@@ -1901,6 +1995,9 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, front *orders.
 	env, err := orderExecEnvWithError(cityPath, m.cfg, target, a, vars)
 	var output []byte
 	var execErrMsg string
+	// declared is the outcome file of a run that exited 0; its skipped/partial
+	// declaration (if any) is reported after order.completed.
+	var declared *orderOutcomeFile
 	if err != nil {
 		redactionEnv := append(os.Environ(), env...)
 		redacted := redactOrderEnvError(err, redactionEnv)
@@ -1908,7 +2005,22 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, front *orders.
 		outcome = orders.RunOutcomeExecEnvFailed
 		logDispatchError(m.stderr, "gc: order exec %s env failed: %s", scoped, redacted)
 	} else {
+		outcomeFile, outcomeErr := newOrderOutcomeFile()
+		if outcomeErr != nil {
+			// The order still runs; it just has nowhere to declare a skip.
+			logDispatchError(m.stderr, "gc: order %s: %v", scoped, outcomeErr)
+		} else {
+			env = append(env, outcomeFile.envEntry())
+			defer func() {
+				if err := outcomeFile.remove(); err != nil {
+					logDispatchError(m.stderr, "gc: order %s: %v", scoped, err)
+				}
+			}()
+		}
 		output, err = m.execRun(ctx, a.Exec, target.ScopeRoot, env)
+		if err == nil {
+			declared = outcomeFile
+		}
 		if err != nil {
 			redactionEnv := append(os.Environ(), env...)
 			execErrMsg = execenv.RedactText(err.Error(), redactionEnv)
@@ -1957,6 +2069,9 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, front *orders.
 		Actor:   "controller",
 		Subject: scoped,
 	})
+	if declared != nil {
+		recordOrderOutcome(m.rec, m.stderr, scoped, declared)
+	}
 }
 
 // prepareOrderWispRecipe compiles an order's formula into a recipe and returns
@@ -2122,6 +2237,9 @@ func (m *memoryOrderDispatcher) ordersStoreFor(store beads.Store) beads.Store {
 // are the same bead in the same database by construction rather than by each
 // call site remembering to route.
 func (m *memoryOrderDispatcher) orderFrontDoorFor(store beads.Store) *orders.Store {
+	if m.orderFrontDoorForFn != nil {
+		return m.orderFrontDoorForFn(store)
+	}
 	return orders.NewStore(beads.OrdersStore{Store: m.ordersStoreFor(store)})
 }
 
@@ -2247,7 +2365,11 @@ func sweepStoreListContains(stores []beads.Store, want beads.Store) bool {
 }
 
 // dispatchWisp instantiates a wisp from the order's formula.
-func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string, vars map[string]string) {
+func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string, vars map[string]string, identityLeases ...orderDispatchIdentityLease) {
+	var identityLease orderDispatchIdentityLease
+	if len(identityLeases) > 0 {
+		identityLease = identityLeases[0]
+	}
 	scoped := a.ScopedName()
 
 	if err := ctx.Err(); err != nil {
@@ -2372,7 +2494,15 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 	// the created bead text instead of the caller's value (#4668).
 	stampOrderWispRuntimeVars(recipe, effectiveVars)
 
-	cookResult, err := molecule.Instantiate(ctx, graphStore, recipe, molecule.Options{Vars: effectiveVars})
+	actionGateForStore := controllerFormulaActionGateForStore(cityPath, m.cfg, target.ScopeRoot, store, graphStore)
+	if m.formulaActionGateForStore != nil {
+		actionGateForStore = m.formulaActionGateForStore(m.cfg, target.ScopeRoot, store, graphStore)
+	}
+	cookResult, err := molecule.Instantiate(ctx, graphStore, recipe, molecule.Options{
+		Vars:               effectiveVars,
+		ActionGateForStore: actionGateForStore,
+		RequireActionGate:  true,
+	})
 	if err != nil {
 		m.rec.Record(events.Event{
 			Type:    events.OrderFailed,
@@ -2384,6 +2514,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 		return
 	}
 	rootID := cookResult.RootID
+	identityLease.bindWork(rootID)
 	if cookResult.GraphWorkflow {
 		// Two classes, two stores: the graph store owns the root and its steps,
 		// the work store owns the tracks edges of any input convoy the root

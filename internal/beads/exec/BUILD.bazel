@@ -28,6 +28,7 @@ go_test(
     ],
     embed = [":exec"],
     deps = [
+        "//internal/beadmeta",
         "//internal/beads",
         "//internal/beads/beadstest",
         "//internal/testenv",

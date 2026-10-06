@@ -16,6 +16,14 @@ type FragmentRecipe struct {
 	Vars    map[string]*VarDef
 	Entries []string
 	Sinks   []string
+
+	// FormulaSources preserves the exact parsed files contributing to this
+	// dynamic fragment, including its inherited and composed expansions. It is
+	// process-local provenance used by controller action gates; it is never
+	// serialized as user-facing formula data.
+	FormulaSource  string           `json:"-" toml:"-"`
+	ContentHash    string           `json:"-" toml:"-"`
+	FormulaSources []SourceIdentity `json:"-" toml:"-"`
 }
 
 // CompileExpansionFragment compiles an expansion formula into a rootless graph
@@ -189,10 +197,13 @@ func stripFragmentRecipe(recipe *Recipe) *FragmentRecipe {
 	}
 
 	return &FragmentRecipe{
-		Name:  recipe.Name,
-		Steps: steps,
-		Deps:  deps,
-		Vars:  recipe.Vars,
+		Name:           recipe.Name,
+		Steps:          steps,
+		Deps:           deps,
+		Vars:           recipe.Vars,
+		FormulaSource:  recipe.FormulaSource,
+		ContentHash:    recipe.ContentHash,
+		FormulaSources: append([]SourceIdentity(nil), recipe.FormulaSources...),
 	}
 }
 

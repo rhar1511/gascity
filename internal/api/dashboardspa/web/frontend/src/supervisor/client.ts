@@ -1,10 +1,12 @@
 import { createClient, type Client as GeneratedSupervisorClient } from '@hey-api/client-fetch';
 import {
   createBead as postSupervisorBead,
+  executePrAction,
   getHealth,
   getV0Cities,
   getV0CityByCityNameAgents,
   getV0CityByCityNameBeadById,
+  getV0CityByCityNameBeadByIdAttemptsBySessionIdHistory,
   getV0CityByCityNameBeads,
   getV0CityByCityNameEvents,
   getV0CityByCityNameFormulasByName,
@@ -14,18 +16,23 @@ import {
   getV0CityByCityNameMailThreadById,
   getV0CityByCityNameRigs,
   getV0CityByCityNameRunsCensus,
+  getV0CityByCityNamePrActionsQueue,
+  getV0CityByCityNameBeadByIdAttemptEvidenceByAttemptId,
   getV0CityByCityNameSessionByIdPending,
+  getV0CityByCityNameSessionByIdRequestsByRequestId,
   getV0CityByCityNameSessionByIdTranscript,
   getV0CityByCityNameSessions,
   getV0CityByCityNameStatus,
   getV0CityByCityNameUsage,
   getV0CityByCityNameWorkflowByWorkflowId,
+  listV0CityByCityNameBeadByIdAttemptEvidence,
   patchV0CityByCityNameBeadById,
   postV0CityByCityNameBeadByIdClose,
   postV0CityByCityNameSling,
   postV0CityByCityNameMailByIdArchive,
   postV0CityByCityNameMailByIdMarkUnread,
   postV0CityByCityNameMailByIdRead,
+  postV0CityByCityNameSessionByIdRequests,
   replyMail as postSupervisorMailReply,
   respondSession as postSupervisorSessionRespond,
   sendMail as postSupervisorMail,
@@ -34,6 +41,9 @@ import type {
   Bead,
   BeadCreateInputBody,
   BeadUpdateBody,
+  AttemptEvidenceRead,
+  AttemptInspection,
+  Evidence,
   FormulaFeedBody,
   GetV0CityByCityNameBeadsData,
   GetV0CityByCityNameEventsData,
@@ -56,6 +66,9 @@ import type {
   Message,
   ListBodySessionResponse,
   OkResponseBody,
+  PrActionExecuteBody,
+  PrActionQueue,
+  PrActionResult,
   PostV0CityByCityNameMailByIdArchiveData,
   PostV0CityByCityNameMailByIdMarkUnreadData,
   PostV0CityByCityNameMailByIdReadData,
@@ -64,6 +77,8 @@ import type {
   RunsCensusOutputBody,
   SessionTranscriptGetResponse,
   SessionPendingResponse,
+  SessionRequestSubmitInputBody,
+  RequestReceipt,
   SessionRespondInputBody,
   SlingInputBody,
   SlingResponse,
@@ -79,7 +94,6 @@ import {
   resolveSupervisorBaseUrl,
   supervisorUrl,
 } from './url';
-import type { ExecutePRActionRequest, PRActionQueue, PRActionResult } from './prActions';
 
 export const SUPERVISOR_REQUEST_TIMEOUT_MS = 60_000;
 export const GC_MUTATION_HEADERS = {
@@ -92,6 +106,10 @@ type SessionStreamFormat = NonNullable<NonNullable<StreamSessionData['query']>['
 type SessionTranscriptFormat = NonNullable<
   NonNullable<GetV0CityByCityNameSessionByIdTranscriptData['query']>['format']
 >;
+
+export type WorkbenchPRActionBody = Omit<PrActionExecuteBody, 'action' | 'human_grant'> & {
+  action: 'prepare' | 'queue_review';
+};
 
 export interface SupervisorApi {
   readonly baseUrl: string;
@@ -113,6 +131,12 @@ export interface SupervisorApi {
     query?: NonNullable<GetV0CityByCityNameEventsData['query']>,
   ): Promise<ListBodyWireEvent>;
   getBead(cityName: string, id: string): Promise<Bead>;
+  attemptHistory(
+    cityName: string,
+    beadID: string,
+    sessionID: string,
+    signal?: AbortSignal,
+  ): Promise<AttemptInspection>;
   createBead(cityName: string, body: BeadCreateInputBody): Promise<Bead>;
   updateBead(cityName: string, id: string, body: BeadUpdateBody): Promise<OkResponseBody>;
   closeBead(cityName: string, id: string): Promise<OkResponseBody>;
@@ -167,6 +191,29 @@ export interface SupervisorApi {
     sessionId: string,
     format?: SessionTranscriptFormat,
   ): Promise<SessionTranscriptGetResponse>;
+  prActionQueue(cityName: string, signal?: AbortSignal): Promise<PrActionQueue>;
+  listAttemptEvidence(cityName: string, workID: string, signal?: AbortSignal): Promise<Evidence[]>;
+  getAttemptEvidence(
+    cityName: string,
+    workID: string,
+    attemptID: string,
+    signal?: AbortSignal,
+  ): Promise<AttemptEvidenceRead>;
+  executePRAction(
+    cityName: string,
+    body: WorkbenchPRActionBody,
+    idempotencyKey: string,
+  ): Promise<PrActionResult>;
+  submitSessionRequest(
+    cityName: string,
+    sessionId: string,
+    body: SessionRequestSubmitInputBody,
+  ): Promise<RequestReceipt>;
+  getSessionRequest(
+    cityName: string,
+    sessionId: string,
+    requestId: string,
+  ): Promise<RequestReceipt>;
   workflowRun(
     cityName: string,
     workflowId: string,
@@ -177,8 +224,6 @@ export interface SupervisorApi {
     name: string,
     query: GetV0CityByCityNameFormulasByNameData['query'],
   ): Promise<FormulaDetailResponse>;
-  prActionQueue(cityName: string, signal?: AbortSignal): Promise<PRActionQueue>;
-  executePRAction(cityName: string, body: ExecutePRActionRequest): Promise<PRActionResult>;
   mutationHeaders(): Record<keyof typeof GC_MUTATION_HEADERS, string>;
 }
 
@@ -212,23 +257,6 @@ export function createSupervisorApi(options: CreateSupervisorApiOptions = {}): S
       ...clientOptions,
       fetch: requestFetch,
     });
-
-  const requestJSON = async <T>(
-    path: string,
-    init: RequestInit,
-    emptyMessage: string,
-  ): Promise<T> => {
-    const response = await requestFetch(supervisorUrl(baseUrl, path), init);
-    let result: SupervisorResult<T> = { response };
-    try {
-      const body: unknown = await response.json();
-      if (response.ok) result = { response, data: body as T };
-      else result = { response, error: body };
-    } catch (error) {
-      if (response.ok) result = { response, error };
-    }
-    return unwrapSupervisorResult(Promise.resolve(result), emptyMessage);
-  };
 
   return {
     baseUrl,
@@ -327,6 +355,16 @@ export function createSupervisorApi(options: CreateSupervisorApiOptions = {}): S
           path: { cityName, id },
         }) as Promise<SupervisorResult<Bead>>,
         'gc supervisor bead response was empty',
+      );
+    },
+    attemptHistory(cityName, beadID, sessionID, signal) {
+      return unwrapSupervisorResult<AttemptInspection>(
+        getV0CityByCityNameBeadByIdAttemptsBySessionIdHistory({
+          client,
+          path: { cityName, id: beadID, sessionID },
+          ...(signal === undefined ? {} : { signal }),
+        }) as Promise<SupervisorResult<AttemptInspection>>,
+        'gc supervisor historical attempt response was empty',
       );
     },
     createBead(cityName, body) {
@@ -541,6 +579,84 @@ export function createSupervisorApi(options: CreateSupervisorApiOptions = {}): S
         'gc supervisor transcript response was empty',
       );
     },
+    prActionQueue(cityName, signal) {
+      return unwrapSupervisorResult<PrActionQueue>(
+        getV0CityByCityNamePrActionsQueue({
+          client,
+          path: { cityName },
+          ...(signal === undefined ? {} : { signal }),
+        }) as Promise<SupervisorResult<PrActionQueue>>,
+        'gc supervisor PR action queue response was empty',
+      );
+    },
+    async listAttemptEvidence(cityName, workID, signal) {
+      const rows = await unwrapSupervisorResult<Evidence[] | null>(
+        listV0CityByCityNameBeadByIdAttemptEvidence({
+          client,
+          path: { cityName, id: workID },
+          ...(signal === undefined ? {} : { signal }),
+        }) as Promise<SupervisorResult<Evidence[] | null>>,
+        'gc supervisor attempt-evidence list response was empty',
+      );
+      if (!Array.isArray(rows)) {
+        throw new SupervisorApiError(
+          undefined,
+          'gc supervisor attempt-evidence list was malformed',
+          undefined,
+        );
+      }
+      return rows;
+    },
+    getAttemptEvidence(cityName, workID, attemptID, signal) {
+      return unwrapSupervisorResult<AttemptEvidenceRead>(
+        getV0CityByCityNameBeadByIdAttemptEvidenceByAttemptId({
+          client,
+          path: { cityName, id: workID, attemptID },
+          ...(signal === undefined ? {} : { signal }),
+        }) as Promise<SupervisorResult<AttemptEvidenceRead>>,
+        'gc supervisor exact attempt-evidence response was empty',
+      );
+    },
+    executePRAction(cityName, body, idempotencyKey) {
+      if ((body as PrActionExecuteBody).action === 'merge') {
+        throw new Error('Workbench does not support PR merge actions');
+      }
+      if (body.action !== 'prepare' && body.action !== 'queue_review') {
+        throw new Error('Workbench supports only prepare and queue_review actions');
+      }
+      if (Object.prototype.hasOwnProperty.call(body, 'human_grant')) {
+        throw new Error('Workbench does not submit human approval grants');
+      }
+      return unwrapSupervisorResult<PrActionResult>(
+        executePrAction({
+          client,
+          path: { cityName },
+          headers: { ...GC_MUTATION_HEADERS, 'Idempotency-Key': idempotencyKey },
+          body: body as PrActionExecuteBody,
+        }) as Promise<SupervisorResult<PrActionResult>>,
+        'gc supervisor PR action response was empty',
+      );
+    },
+    submitSessionRequest(cityName, sessionId, body) {
+      return unwrapSupervisorResult<RequestReceipt>(
+        postV0CityByCityNameSessionByIdRequests({
+          client,
+          path: { cityName, id: sessionId },
+          headers: GC_MUTATION_HEADERS,
+          body,
+        }) as Promise<SupervisorResult<RequestReceipt>>,
+        'gc supervisor session request response was empty',
+      );
+    },
+    getSessionRequest(cityName, sessionId, requestId) {
+      return unwrapSupervisorResult<RequestReceipt>(
+        getV0CityByCityNameSessionByIdRequestsByRequestId({
+          client,
+          path: { cityName, id: sessionId, request_id: requestId },
+        }) as Promise<SupervisorResult<RequestReceipt>>,
+        'gc supervisor session request receipt was empty',
+      );
+    },
     workflowRun(cityName, workflowId, query) {
       return unwrapSupervisorResult<WorkflowSnapshotResponse>(
         getV0CityByCityNameWorkflowByWorkflowId({
@@ -559,33 +675,6 @@ export function createSupervisorApi(options: CreateSupervisorApiOptions = {}): S
           query,
         }) as Promise<SupervisorResult<FormulaDetailResponse>>,
         'gc supervisor formula detail response was empty',
-      );
-    },
-    prActionQueue(cityName, signal) {
-      return requestJSON<PRActionQueue>(
-        `/v0/city/${encodeURIComponent(cityName)}/pr-actions/queue`,
-        {
-          headers: { Accept: 'application/json' },
-          ...(signal === undefined ? {} : { signal }),
-        },
-        'gc supervisor PR action queue response was empty',
-      );
-    },
-    executePRAction(cityName, body) {
-      const { idempotency_key: idempotencyKey, ...requestBody } = body;
-      return requestJSON<PRActionResult>(
-        `/v0/city/${encodeURIComponent(cityName)}/pr-actions`,
-        {
-          method: 'POST',
-          headers: {
-            Accept: 'application/json',
-            'Content-Type': 'application/json',
-            ...GC_MUTATION_HEADERS,
-            'Idempotency-Key': idempotencyKey,
-          },
-          body: JSON.stringify(requestBody),
-        },
-        'gc supervisor PR action response was empty',
       );
     },
     mutationHeaders() {

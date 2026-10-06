@@ -30,6 +30,8 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/hooks"
 	"github.com/gastownhall/gascity/internal/logutil"
+	"github.com/gastownhall/gascity/internal/qualification"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/sdnotify"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -1367,6 +1369,18 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc supervisor: supervisor already running (PID %d)\n", pid) //nolint:errcheck
 		return 1
 	}
+	beadsPermitResolver, err := loadHostBeadsPermitResolverFromEnv()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc supervisor: protected Beads authority: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	if beadsPermitResolver != nil {
+		defer func() {
+			if err := beadsPermitResolver.close(); err != nil {
+				fmt.Fprintf(stderr, "gc supervisor: close protected Beads authority: %v\n", err) //nolint:errcheck
+			}
+		}()
+	}
 
 	// Ensure ~/.gc/ exists. doSupervisorStart does this when invoked
 	// manually (mkdir + open log file before spawning the child), but the
@@ -1430,6 +1444,7 @@ func runSupervisor(stdout, stderr io.Writer) int {
 	// Track managed cities via atomic-snapshot registry. API reads are
 	// lock-free (atomic pointer load); mutations go through citiesMu.
 	registry := newCityRegistry()
+	registry.beadsPermitResolver = beadsPermitResolver
 	supEvPath := filepath.Join(supervisor.RuntimeDir(), "events.jsonl")
 	if supFR, supErr := newFileEventsRecorder(supEvPath, config.EventsConfig{}, stderr); supErr == nil {
 		registry.SetSupervisorRecorder(supFR)
@@ -1463,6 +1478,15 @@ func runSupervisor(stdout, stderr io.Writer) int {
 	if err != nil {
 		fmt.Fprintf(stderr, "gc supervisor: config: %v\n", err) //nolint:errcheck
 		return 1
+	}
+	compatibilityAuthority, compatibilitySource := supervisorCompatibilityAuthorityFromEnvironment(stderr)
+	registry.compatibilityAuthority = compatibilityAuthority
+	if compatibilitySource != nil {
+		defer func() {
+			if err := compatibilitySource.Close(); err != nil {
+				fmt.Fprintf(stderr, "gc supervisor: closing host compatibility authority source: %v\n", err) //nolint:errcheck
+			}
+		}()
 	}
 
 	reg := supervisor.NewRegistry(supervisor.RegistryPath())
@@ -1684,7 +1708,7 @@ func runSupervisor(stdout, stderr io.Writer) int {
 			snap := registry.Snapshot()
 			for _, v := range snap.all {
 				if v.Started && v.cs != nil {
-					v.cs.Poke()
+					v.cs.Enqueue(reconcilekey.Allocator()) // reload: re-plan each city
 				}
 			}
 			// Per sd_notify(3) a reload ends with READY=1.
@@ -2198,6 +2222,9 @@ func startOneCity(
 		recordInitFailure(cityName, fmt.Sprintf("init: %v", err))
 		return
 	}
+	// prepareCityForSupervisor resolves relative rig paths before the config is
+	// published to the per-city controller and health endpoint.
+	config.RefreshQualificationSnapshot(cfg, prov)
 
 	runPostPrepareStep := func(status string, fn func() error) error {
 		cr.BatchUpdate(func(
@@ -2306,10 +2333,11 @@ func startOneCity(
 			ConfigRev:               configRev,
 			ConfigDirty:             configDirty,
 			Cfg:                     cfg,
+			CompatibilityAuthority:  cr.compatibilityAuthority,
 			SP:                      sp,
 			Publication:             publication,
-			BuildFn:                 supervisorBuildAgentsFn(path, cityName, stderr),
-			BuildFnWithSessionBeads: supervisorBuildAgentsFnWithSessionBeads(path, cityName, stderr),
+			BuildFn:                 supervisorBuildAgentsFn(path, cityName, stderr, cr.compatibilityAuthority),
+			BuildFnWithSessionBeads: supervisorBuildAgentsFnWithSessionBeads(path, cityName, stderr, cr.compatibilityAuthority),
 			Dops:                    dops,
 			Rec:                     rec,
 			PoolSessions:            poolSessions,
@@ -2347,6 +2375,10 @@ func startOneCity(
 	var cs *controllerState
 	if err := runPostPrepareStep("opening_controller_state", func() error {
 		cs = newControllerStateWithRoutes(cityCtx, cityRuntime.storageRoutes, cfg, sp, eventProv, cityName, path)
+		if err := configureControllerProtectedDecisionFrontierStores(cs, cfg, cr.beadsPermitResolver); err != nil {
+			return fmt.Errorf("configure protected Beads authority: %w", err)
+		}
+		cs.setCompatibilityAuthority(cityRuntime.compatibilityAuthority)
 		return nil
 	}); err != nil {
 		// The runtime is already built, and it holds this city's storage
@@ -2354,6 +2386,9 @@ func startOneCity(
 		// here would leave the engine open for the life of the supervisor —
 		// including across the next attempt to start this same city.
 		cityCancel()
+		if cs != nil {
+			closeUnpublishedControllerStores(cs.cityBeadStore, cs.beadStores)
+		}
 		cityRuntime.shutdown()
 		if fr != nil {
 			fr.Close() //nolint:errcheck
@@ -2363,7 +2398,7 @@ func startOneCity(
 		return
 	}
 	cs.ct = cityRuntime.crashTrack()
-	cs.pokeCh = pokeCh
+	wireControllerWakeSignals(cs, pokeCh, controlDispatcherCh)
 	cs.configDirty = configDirty
 	cs.services = cityRuntime.svc
 	cityRuntime.setControllerState(cs)
@@ -2766,7 +2801,7 @@ func publishManagedCity(cr *cityRegistry, path string, mc *managedCity) bool {
 }
 
 func loadSupervisorCityConfig(cityPath string) (*config.City, *config.Provenance, error) {
-	return loadCityConfigWithBuiltinPacks(cityPath)
+	return loadCityConfigWithBuiltinPacksOptions(cityPath, config.LoadOptions{CaptureQualificationInputs: true})
 }
 
 // prepareCityForSupervisor runs the critical city initialization steps
@@ -2928,14 +2963,22 @@ func effectiveProviderName(configured string) string {
 
 // supervisorBuildAgentsFn returns a buildFn suitable for CityRuntimeParams.
 // It delegates to buildDesiredState with a stable beacon timestamp.
-func supervisorBuildAgentsFn(cityPath, cityName string, stderr io.Writer) func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+func supervisorBuildAgentsFn(cityPath, cityName string, stderr io.Writer, authorities ...qualification.CompatibilityAuthority) func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+	var authority qualification.CompatibilityAuthority
+	if len(authorities) > 0 {
+		authority = authorities[0]
+	}
 	beaconTime := time.Now()
 	return func(c *config.City, sp runtime.Provider, store beads.Store) DesiredStateResult {
-		return buildDesiredState(cityName, cityPath, beaconTime, c, sp, store, stderr)
+		return buildDesiredState(cityName, cityPath, beaconTime, c, sp, store, stderr, authority)
 	}
 }
 
-func supervisorBuildAgentsFnWithSessionBeads(cityPath, cityName string, stderr io.Writer) func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult {
+func supervisorBuildAgentsFnWithSessionBeads(cityPath, cityName string, stderr io.Writer, authorities ...qualification.CompatibilityAuthority) func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult {
+	var authority qualification.CompatibilityAuthority
+	if len(authorities) > 0 {
+		authority = authorities[0]
+	}
 	beaconTime := time.Now()
 	return func(c *config.City, sp runtime.Provider, store beads.Store, rigStores map[string]beads.Store, sessionBeads *sessionBeadSnapshot, trace *sessionReconcilerTraceCycle) DesiredStateResult {
 		return buildDesiredStateWithSessionBeadsAt(
@@ -2950,6 +2993,7 @@ func supervisorBuildAgentsFnWithSessionBeads(cityPath, cityName string, stderr i
 			sessionBeads,
 			trace,
 			stderr,
+			authority,
 		)
 	}
 }

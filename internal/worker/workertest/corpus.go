@@ -63,7 +63,7 @@ func DiscoverStructuredCorpus(root string) ([]CorpusCapture, error) {
 // the real provider adapter, so corpus captures exercise the same path as live
 // sessions.
 func LoadCorpusHistory(capture CorpusCapture) (*worker.HistorySnapshot, error) {
-	return (worker.SessionLogAdapter{}).LoadHistory(worker.LoadRequest{
+	return (worker.SessionLogAdapter{SearchPaths: []string{filepath.Dir(capture.Path)}}).LoadHistory(worker.LoadRequest{
 		Provider:       capture.Provider,
 		TranscriptPath: capture.Path,
 		GCSessionID:    "corpus-" + capture.Provider,

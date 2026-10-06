@@ -118,11 +118,33 @@ func cloneBead(b Bead) Bead {
 // Create persists a new bead in memory with a sequential ID, or with the
 // caller's own ID when HonorExplicitIDs is set and the ID is free.
 func (m *MemStore) Create(b Bead) (Bead, error) {
+	if err := ValidateDecisionFrontierCreate(b); err != nil {
+		return Bead{}, err
+	}
+	if err := rejectAttemptEvidencePayloadMetadataWrite(b.Metadata); err != nil {
+		return Bead{}, err
+	}
+	return m.create(b)
+}
+
+func (m *MemStore) create(b Bead) (Bead, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.createLocked(b, m.HonorExplicitIDs, false)
+}
 
+func (m *MemStore) createWithExplicitID(b Bead) (Bead, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if strings.TrimSpace(b.ID) == "" {
+		return Bead{}, fmt.Errorf("creating bead with explicit id: empty id")
+	}
+	return m.createLocked(b, true, true)
+}
+
+func (m *MemStore) createLocked(b Bead, honorExplicit, preserveStatus bool) (Bead, error) {
 	explicit := strings.TrimSpace(b.ID)
-	if m.HonorExplicitIDs && explicit != "" {
+	if honorExplicit && explicit != "" {
 		if m.beadExistsLocked(explicit) {
 			return Bead{}, fmt.Errorf("creating bead %q: duplicate id", explicit)
 		}
@@ -139,7 +161,9 @@ func (m *MemStore) Create(b Bead) (Bead, error) {
 	// Set directly rather than through setBeadStatus: create is not a status
 	// transition over an existing bead, so a caller-supplied
 	// IndefinitelyDeferred must survive into the store instead of being cleared.
-	b.Status = "open"
+	if !preserveStatus || b.Status == "" {
+		b.Status = "open"
+	}
 	if b.Type == "" {
 		b.Type = "task"
 	}
@@ -286,11 +310,20 @@ func (m *MemStore) applyUpdateLocked(i int, opts UpdateOpts) {
 // Update modifies fields of an existing bead. Only non-nil fields in opts
 // are applied. Returns a wrapped ErrNotFound if the ID does not exist.
 func (m *MemStore) Update(id string, opts UpdateOpts) error {
+	if err := rejectAttemptEvidencePayloadMetadataWrite(opts.Metadata); err != nil {
+		return err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	i := m.indexOfLocked(id)
 	if i < 0 {
 		return fmt.Errorf("updating bead %q: %w", id, ErrNotFound)
+	}
+	if err := protectAttemptEvidenceUpdate(m.beads[i], opts); err != nil {
+		return err
+	}
+	if err := ValidateLifecycleMutation(m.beads[i], opts); err != nil {
+		return fmt.Errorf("updating lifecycle bead %q: %w", id, err)
 	}
 	m.applyUpdateLocked(i, opts)
 	return nil
@@ -307,6 +340,12 @@ func (m *MemStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error) {
 		}
 		if m.beads[i].Status != "in_progress" || m.beads[i].Assignee != expectedAssignee {
 			return false, nil
+		}
+		if HasDecisionFrontierHold(m.beads[i]) {
+			return false, ErrDecisionFrontierMutationBlocked
+		}
+		if err := protectAttemptEvidenceRecordMutation(m.beads[i]); err != nil {
+			return false, err
 		}
 		setBeadStatus(&m.beads[i], "open")
 		m.beads[i].Assignee = ""
@@ -325,8 +364,14 @@ func (m *MemStore) Close(id string) error {
 	defer m.mu.Unlock()
 	for i := range m.beads {
 		if m.beads[i].ID == id {
+			if err := protectAttemptEvidencePayloadMutation(m.beads[i]); err != nil {
+				return err
+			}
 			if m.beads[i].Status == "closed" {
 				return nil
+			}
+			if err := ValidateLifecycleClose(m.beads[i]); err != nil {
+				return fmt.Errorf("closing lifecycle bead %q: %w", id, err)
 			}
 			setBeadStatus(&m.beads[i], "closed")
 			m.beads[i].UpdatedAt = time.Now()
@@ -344,8 +389,15 @@ func (m *MemStore) Reopen(id string) error {
 	defer m.mu.Unlock()
 	for i := range m.beads {
 		if m.beads[i].ID == id {
+			if err := protectAttemptEvidenceRecordMutation(m.beads[i]); err != nil {
+				return err
+			}
 			if m.beads[i].Status == "open" && !m.beads[i].IndefinitelyDeferred {
 				return nil
+			}
+			open := "open"
+			if err := ValidateLifecycleMutation(m.beads[i], UpdateOpts{Status: &open}); err != nil {
+				return fmt.Errorf("reopening lifecycle bead %q: %w", id, err)
 			}
 			wasClosed := m.beads[i].Status == "closed"
 			setBeadStatus(&m.beads[i], "open")
@@ -365,11 +417,29 @@ func (m *MemStore) Reopen(id string) error {
 
 // CloseAll closes multiple beads in a single batch and sets metadata on each.
 func (m *MemStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	if err := rejectAttemptEvidencePayloadMetadataWrite(metadata); err != nil {
+		return 0, err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	idSet := make(map[string]bool, len(ids))
 	for _, id := range ids {
 		idSet[id] = true
+	}
+	for i := range m.beads {
+		if !idSet[m.beads[i].ID] || m.beads[i].Status == "closed" {
+			continue
+		}
+		closedStatus := "closed"
+		if err := protectAttemptEvidenceUpdate(m.beads[i], UpdateOpts{Status: &closedStatus, Metadata: metadata}); err != nil {
+			return 0, err
+		}
+		if err := ValidateLifecycleClose(m.beads[i]); err != nil {
+			return 0, fmt.Errorf("closing lifecycle bead %q: %w", m.beads[i].ID, err)
+		}
+		if err := ValidateLifecycleMutation(m.beads[i], UpdateOpts{Status: &closedStatus, Metadata: metadata}); err != nil {
+			return 0, fmt.Errorf("closing lifecycle bead %q: %w", m.beads[i].ID, err)
+		}
 	}
 	closed := 0
 	for i := range m.beads {
@@ -578,10 +648,19 @@ func (m *MemStore) ListByMetadata(filters map[string]string, limit int, opts ...
 // SetMetadata sets a key-value metadata pair on a bead. Returns a wrapped
 // ErrNotFound if the bead does not exist.
 func (m *MemStore) SetMetadata(id, key, value string) error {
+	if err := rejectAttemptEvidencePayloadMetadataKeyWrite(key); err != nil {
+		return err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for i, b := range m.beads {
 		if b.ID == id {
+			if err := protectAttemptEvidenceRecordMutation(b); err != nil {
+				return err
+			}
+			if err := ValidateLifecycleMutation(b, UpdateOpts{Metadata: map[string]string{key: value}}); err != nil {
+				return fmt.Errorf("setting lifecycle metadata on %q: %w", id, err)
+			}
 			if b.Metadata == nil {
 				m.beads[i].Metadata = make(map[string]string)
 			}
@@ -596,6 +675,9 @@ func (m *MemStore) SetMetadata(id, key, value string) error {
 
 // SetMetadataBatch atomically sets multiple key-value metadata pairs on a bead.
 func (m *MemStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if err := rejectAttemptEvidencePayloadMetadataWrite(kvs); err != nil {
+		return err
+	}
 	if len(kvs) == 0 {
 		return nil
 	}
@@ -603,6 +685,12 @@ func (m *MemStore) SetMetadataBatch(id string, kvs map[string]string) error {
 	defer m.mu.Unlock()
 	for i, b := range m.beads {
 		if b.ID == id {
+			if err := protectAttemptEvidenceRecordMutation(b); err != nil {
+				return err
+			}
+			if err := ValidateLifecycleMutation(b, UpdateOpts{Metadata: kvs}); err != nil {
+				return fmt.Errorf("setting lifecycle metadata batch on %q: %w", id, err)
+			}
 			if b.Metadata == nil {
 				m.beads[i].Metadata = make(map[string]string)
 			}
@@ -671,12 +759,66 @@ func (m *MemStore) Delete(id string) error {
 	defer m.mu.Unlock()
 	for i, b := range m.beads {
 		if b.ID == id {
+			if err := ValidateDecisionFrontierDelete(b); err != nil {
+				return err
+			}
+			if err := protectRetainedEvidenceDelete(b); err != nil {
+				return err
+			}
+			if err := ValidateLifecycleDelete(b); err != nil {
+				return fmt.Errorf("deleting lifecycle bead %q: %w", id, err)
+			}
 			m.beads = append(m.beads[:i], m.beads[i+1:]...)
 			delete(m.localStrings, id)
 			return nil
 		}
 	}
 	return fmt.Errorf("deleting bead %q: %w", id, ErrNotFound)
+}
+
+// deleteDependencyReferencesLocked implements conditional deletion's atomic
+// cascade. Guard every surviving source before changing any of its edges.
+// Ordinary Delete retains its historical dangling-reference behavior.
+func (m *MemStore) deleteDependencyReferencesLocked(target Bead) error {
+	id := target.ID
+	owners := make(map[string]struct{})
+	for _, dep := range m.deps {
+		if dep.DependsOnID == id && dep.IssueID != id {
+			if err := m.checkDependencySourceMutationLocked(dep.IssueID); err != nil {
+				return err
+			}
+			owners[dep.IssueID] = struct{}{}
+		}
+	}
+	for _, row := range m.beads {
+		if row.ParentID == id && row.ID != id {
+			owners[row.ID] = struct{}{}
+		}
+	}
+	for owner := range owners {
+		if err := m.checkDependencySourceMutationLocked(owner); err != nil {
+			return err
+		}
+		if i := m.indexOfLocked(owner); i >= 0 {
+			if err := validateTerminalDeleteReferenceOwner(target, m.beads[i]); err != nil {
+				return err
+			}
+		}
+	}
+	remaining := make([]Dep, 0, len(m.deps))
+	for _, dep := range m.deps {
+		if dep.IssueID != id && dep.DependsOnID != id {
+			remaining = append(remaining, dep)
+		}
+	}
+	m.deps = remaining
+	for owner := range owners {
+		if i := m.indexOfLocked(owner); i >= 0 && m.beads[i].ParentID == id {
+			m.beads[i].ParentID = ""
+		}
+		m.bumpDependencySourceRevisionLocked(owner)
+	}
+	return nil
 }
 
 // Ping always succeeds for MemStore (in-memory, always available).
@@ -693,15 +835,23 @@ func (m *MemStore) DepAdd(issueID, dependsOnID, depType string) error {
 			return nil
 		}
 		if d.IssueID == issueID && d.DependsOnID == dependsOnID && d.Type != "parent-child" && depType != "parent-child" {
+			if err := m.checkDependencySourceMutationLocked(issueID); err != nil {
+				return err
+			}
 			m.deps[i].Type = depType
+			m.bumpDependencySourceRevisionLocked(issueID)
 			return nil
 		}
+	}
+	if err := m.checkDependencySourceMutationLocked(issueID); err != nil {
+		return err
 	}
 	m.deps = append(m.deps, Dep{
 		IssueID:     issueID,
 		DependsOnID: dependsOnID,
 		Type:        depType,
 	})
+	m.bumpDependencySourceRevisionLocked(issueID)
 	return nil
 }
 
@@ -711,11 +861,33 @@ func (m *MemStore) DepRemove(issueID, dependsOnID string) error {
 	defer m.mu.Unlock()
 	for i, d := range m.deps {
 		if d.IssueID == issueID && d.DependsOnID == dependsOnID {
+			if err := m.checkDependencySourceMutationLocked(issueID); err != nil {
+				return err
+			}
 			m.deps = append(m.deps[:i], m.deps[i+1:]...)
+			m.bumpDependencySourceRevisionLocked(issueID)
 			return nil
 		}
 	}
 	return nil // removing nonexistent dep is a no-op
+}
+
+func (m *MemStore) checkDependencySourceMutationLocked(issueID string) error {
+	index := m.indexOfLocked(issueID)
+	if index >= 0 {
+		if HasDecisionFrontierHold(m.beads[index]) || IsDecisionFrontierRecord(m.beads[index]) {
+			return ErrDecisionFrontierMutationBlocked
+		}
+	}
+	return nil
+}
+
+func (m *MemStore) bumpDependencySourceRevisionLocked(issueID string) {
+	index := m.indexOfLocked(issueID)
+	if index < 0 {
+		return
+	}
+	m.beads[index].Revision++
 }
 
 // DepList returns dependencies for a bead. Direction "down" (default)

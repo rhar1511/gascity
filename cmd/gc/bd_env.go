@@ -316,7 +316,7 @@ func bdStoreForCityWithConfig(dir, cityPath string, cfg *config.City) *beads.BdS
 		dir,
 		bdCommandRunnerForCity(cityPath),
 		issuePrefixForScope(dir, cityPath, cfg),
-		bdStoreOptionsForConfig(cfg)...,
+		append(bdStoreOptionsForConfig(cfg), privateEvidenceOptionsForStore(cfg, dir, cityPath)...)...,
 	)
 }
 
@@ -338,7 +338,7 @@ func bdStoreForRig(rigDir, cityPath string, cfg *config.City, knownPrefix ...str
 		rigDir,
 		bdCommandRunnerForRig(cityPath, cfg, rigDir),
 		prefix,
-		bdStoreOptionsForConfig(cfg)...,
+		append(bdStoreOptionsForConfig(cfg), privateEvidenceOptionsForStore(cfg, rigDir, cityPath)...)...,
 	)
 }
 
@@ -355,6 +355,21 @@ func bdStoreOptionsForConfig(cfg *config.City) []beads.BdStoreOption {
 		opts = append(opts, beads.WithBdStoreRelocatedClasses(relocated...))
 	}
 	return opts
+}
+
+func privateEvidenceOptionsForStore(cfg *config.City, storeDir, cityPath string) []beads.BdStoreOption {
+	if cfg == nil || len(cfg.Beads.PrivateEvidence) == 0 {
+		return nil
+	}
+	storeRef := workflowStoreRefForDir(storeDir, cityPath, loadedCityName(cfg, cityPath), cfg)
+	entry, ok := cfg.Beads.PrivateEvidence[storeRef]
+	if !ok {
+		return nil
+	}
+	return []beads.BdStoreOption{beads.WithBdStorePrivateEvidenceHTTP(beads.PrivateEvidenceHTTPConfig{
+		Endpoint: entry.Endpoint, ProjectID: entry.ProjectID, Database: entry.Database,
+		ScopeRef: storeRef, TokenFile: entry.TokenFile, RevisionTransitions: entry.RevisionTransitions,
+	})}
 }
 
 // reapStaleBdExportJSONL removes .beads/issues.jsonl best-effort when the
@@ -443,26 +458,18 @@ func controlBdStoreForCity(dir, cityPath string, cfg *config.City) *beads.BdStor
 		dir,
 		controlBdCommandRunnerForCity(cityPath),
 		issuePrefixForScope(dir, cityPath, cfg),
-		bdStoreOptionsForConfig(cfg)...,
+		append(bdStoreOptionsForConfig(cfg), privateEvidenceOptionsForStore(cfg, dir, cityPath)...)...,
 	)
 }
 
-func controlBdStoreForRig(rigDir, cityPath string, cfg *config.City, knownPrefix ...string) *beads.BdStore {
+func controlBdStoreForRig(rigDir, cityPath string, cfg *config.City) *beads.BdStore {
 	prefix := issuePrefixForScope(rigDir, cityPath, cfg)
-	if prefix == "" {
-		for _, candidate := range knownPrefix {
-			if strings.TrimSpace(candidate) != "" {
-				prefix = candidate
-				break
-			}
-		}
-	}
 	reapStaleBdExportJSONL(rigDir)
 	return beads.NewBdStoreWithPrefix(
 		rigDir,
 		controlBdCommandRunnerForRig(cityPath, cfg, rigDir),
 		prefix,
-		bdStoreOptionsForConfig(cfg)...,
+		append(bdStoreOptionsForConfig(cfg), privateEvidenceOptionsForStore(cfg, rigDir, cityPath)...)...,
 	)
 }
 
@@ -1257,6 +1264,51 @@ func applyProxiedDoltEnv(env map[string]string) {
 	env["BEADS_DOLT_PROXIED_SERVER"] = "1"
 }
 
+// applyProxiedSharedServerOptOut keeps a gc-owned proxied scope out of bd's
+// user-level shared-server mode.
+//
+// bd resolves dolt.shared-server through its layered config (env >
+// BEADS_DIR/project .beads/config.yaml > ~/.config/bd/config.yaml >
+// ~/.beads/config.yaml). A user-level `dolt.shared-server: true` therefore
+// relocates every proxied scope that does not say otherwise into
+// ~/.beads/shared-server — silently, and with one Dolt root for every city on
+// the host, so two cities' `hq` stores become one database. gc never supported
+// that topology (v1.4.2 refused it loudly), so every bd process gc spawns for a
+// proxied scope gc OWNS (gcOwnsProxiedScope) pins the mode off:
+//
+//   - BD_DOLT_SHARED_SERVER=false is bd's viper env binding for the key and
+//     outranks every config file layer;
+//   - BEADS_DOLT_SHARED_SERVER is bd's separate env switch, checked BEFORE the
+//     config layer and only for "1"/"true". Deleting it from the projection is
+//     not enough when the parent process carries it (the runners layer this map
+//     over the inherited environment), so it is pinned to "0" — a value bd
+//     reads as "not forced on" and then falls through to the BD_ override.
+//
+// The scope's own config.yaml carries the same pin (see
+// ensureGCOwnedProxiedScopeSharedServerOff) for the bd processes gc does not
+// spawn — an agent running `bd` in its shell. A proxied scope gc merely found
+// gets neither, so gc's bd and an agent's bd resolve it the same way.
+func applyProxiedSharedServerOptOut(env map[string]string) {
+	env[proxiedSharedServerModeEnv] = "0"
+	env[proxiedSharedServerConfigEnv] = "false"
+}
+
+// clearProxiedSharedServerOptOut drops the projection applyProxiedSharedServerOptOut
+// adds, for a scope that is not a gc-owned proxied one.
+func clearProxiedSharedServerOptOut(env map[string]string) {
+	delete(env, proxiedSharedServerModeEnv)
+	delete(env, proxiedSharedServerConfigEnv)
+}
+
+const (
+	// proxiedSharedServerModeEnv is bd's shared-server env switch
+	// (doltserver.IsSharedServerMode); only "1"/"true" turn it on.
+	proxiedSharedServerModeEnv = "BEADS_DOLT_SHARED_SERVER"
+	// proxiedSharedServerConfigEnv is bd's viper env binding for the
+	// dolt.shared-server config key (prefix BD_, "." and "-" -> "_").
+	proxiedSharedServerConfigEnv = "BD_DOLT_SHARED_SERVER"
+)
+
 var projectedBeadsBackendEnvKeys = []string{
 	"GC_BEADS_BACKEND",
 	"BEADS_BACKEND",
@@ -1791,6 +1843,10 @@ func bdRuntimeEnvForRigWithErrorRecoveryContext(ctx context.Context, cityPath st
 		return cached, nil
 	}
 	env, cityErr := bdRuntimeEnvWithErrorRecoveryContext(ctx, cityPath, allowRecovery)
+	// The city projection carries the shared-server opt-out when the CITY is
+	// proxied. It belongs to the rig only if the rig is proxied too (re-added
+	// below); a direct or external rig keeps bd's own resolution.
+	clearProxiedSharedServerOptOut(env)
 	rigPath = normalizePathForCompare(rigPath)
 	// Pin the rig store explicitly. The gc-beads-bd provider derives its Dolt
 	// data root from GC_CITY_PATH unless BEADS_DIR is set, so cwd-based
@@ -1817,6 +1873,9 @@ func bdRuntimeEnvForRigWithErrorRecoveryContext(ctx context.Context, cityPath st
 	// own binding rather than inheriting the city's endpoint.
 	if scopeUsesProxiedDoltMode(cityPath, rigPath) {
 		if err := applyProxiedScopeRuntimeEnvFn(env, rigPath); err != nil {
+			return env, err
+		}
+		if err := applyGCOwnedScopeSharedServerOptOut(env, cityPath, rigPath); err != nil {
 			return env, err
 		}
 		if cityErr != nil {
@@ -1995,6 +2054,9 @@ func bdRuntimeEnvWithErrorRecoveryContext(ctx context.Context, cityPath string, 
 	// every bd command gc makes. See bd_env_proxied.go.
 	if scopeUsesProxiedDoltMode(cityPath, cityPath) {
 		if err := applyProxiedScopeRuntimeEnvFn(env, cityPath); err != nil {
+			return env, err
+		}
+		if err := applyGCOwnedScopeSharedServerOptOut(env, cityPath, cityPath); err != nil {
 			return env, err
 		}
 		return rememberProxiedScopeRuntimeEnv(cityPath, cityPath, stamp, env), nil

@@ -3,7 +3,6 @@ package sessionlog
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -13,8 +12,12 @@ var kimiCodeSlugInvalid = regexp.MustCompile(`[^a-z0-9._-]+`)
 
 // kimiCodeWorkDirKey follows Kimi Code's encodeWorkDirKey, including slug
 // truncation and the SHA-256 suffix. Kimi Code resolves the workspace root
-// before persisting it; the legacy CLI's MD5 key remains lexical.
+// before persisting it.
 func kimiCodeWorkDirKey(workDir string) string {
+	workDir = strings.TrimSpace(workDir)
+	if workDir == "" {
+		return ""
+	}
 	if resolved, err := filepath.EvalSymlinks(workDir); err == nil {
 		workDir = resolved
 	}
@@ -33,44 +36,41 @@ func kimiCodeWorkDirKey(workDir string) string {
 }
 
 func kimiTranscriptPath(workRoot, sessionID string) string {
-	if strings.HasPrefix(filepath.Base(workRoot), "wd_") {
-		return filepath.Join(workRoot, sessionID, "agents", "main", "wire.jsonl")
-	}
-	return filepath.Join(workRoot, sessionID, "context.jsonl")
+	return filepath.Join(workRoot, sessionID, "agents", "main", "wire.jsonl")
 }
 
 func kimiSessionCandidates(searchPaths []string, workDir string) []kimiContextCandidate {
+	workKey := kimiCodeWorkDirKey(workDir)
+	if workKey == "" {
+		return nil
+	}
 	var candidates []kimiContextCandidate
 	for _, root := range mergeKimiSearchPaths(searchPaths) {
-		for _, key := range []string{kimiWorkDirHash(workDir), kimiCodeWorkDirKey(workDir)} {
-			candidates = append(candidates, findKimiSessionFilesIn(root, key)...)
-		}
+		candidates = append(candidates, findKimiSessionFilesIn(root, workKey)...)
 	}
 	return candidates
 }
 
-// A missing bucket in one account is normal when another account or CLI
-// layout owns the session. Diagnose the workdir only after discovery fails.
+// A missing bucket in one account is normal when another account owns the
+// session. Diagnose the workdir only after discovery fails.
 func logKimiMissingWorkDir(searchPaths []string, workDir string) {
-	legacyKey, codeKey := kimiWorkDirHash(workDir), kimiCodeWorkDirKey(workDir)
+	workKey := kimiCodeWorkDirKey(workDir)
+	if workKey == "" {
+		return
+	}
 	for _, root := range mergeKimiSearchPaths(searchPaths) {
-		if kimiDirectoryExists(filepath.Join(root, legacyKey)) || kimiDirectoryExists(filepath.Join(root, codeKey)) {
+		if kimiDirectoryExists(root, workKey) {
 			return
 		}
 	}
-	// Report the key belonging to the layout the populated root actually uses:
-	// naming the other CLI's key sends triage after a bucket that CLI never
-	// mints, which is the opposite of the message's own hashing advice.
 	for _, root := range mergeKimiSearchPaths(searchPaths) {
-		entries, err := os.ReadDir(root)
+		entries, err := readKimiDirectory(root, ".")
 		if err != nil {
 			continue
 		}
-		for _, key := range []string{legacyKey, codeKey} {
-			if hasKimiSessionRootEntries(entries, key) {
-				logKimiMissingWorkHash(root, key)
-				return
-			}
+		if hasKimiSessionRootEntries(entries) {
+			logKimiMissingWorkKey(root, workKey)
+			return
 		}
 	}
 }

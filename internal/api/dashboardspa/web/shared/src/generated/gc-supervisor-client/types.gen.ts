@@ -243,6 +243,25 @@ export type AnnotatedProviderResponse = {
     ready_delay_ms?: number;
 };
 
+export type AnswerSubmission = {
+    proof: string;
+    question_version: string;
+    resolution: string;
+    text: string;
+    ticket_id: string;
+    work_revision: string;
+};
+
+export type AnswerView = {
+    digest: string;
+    id: string;
+    issuer: string;
+    key_id: string;
+    resolution: string;
+    subject: string;
+    text: string;
+};
+
 export type ArtifactAvailability = {
     reason?: string;
     state: string;
@@ -274,12 +293,84 @@ export type AsyncAcceptedResponse = {
     request_id: string;
 };
 
+export type AttemptActionRecords = {
+    reason?: string;
+    records: Array<HistoricalPrActionRecord> | null;
+    status: string;
+};
+
+export type AttemptEvidenceRead = {
+    acknowledgements: Facet;
+    actions: Facet;
+    artifacts?: Array<PayloadArtifact> | null;
+    attempt_id: string;
+    base_reason?: string;
+    base_sha?: string;
+    base_status: string;
+    candidate_reason?: string;
+    candidate_sha?: string;
+    candidate_status: string;
+    captured_at: string;
+    diff: DiffSnapshot;
+    identity: Identity;
+    outcome?: string;
+    permission_scope: PermissionScope;
+    policy: Facet;
+    redaction: Facet;
+    related_records: AttemptRelatedRecords;
+    schema_version: number;
+    source_reason?: string;
+    source_status: string;
+    store_ref?: string;
+    working_tree_status: string;
+    workspace_diff: DiffSnapshot;
+};
+
 export type AttemptInspection = {
     association: ArtifactAvailability;
     bead_id: string;
     diff: HistoricalDiff;
     pull_request: HistoricalPullRequest;
     session_id: string;
+};
+
+export type AttemptRelatedRecords = {
+    acknowledgements: AttemptRequestRecords;
+    actions: AttemptActionRecords;
+};
+
+export type AttemptRequestRecords = {
+    reason?: string;
+    records?: Array<RequestReceipt> | null;
+    status: string;
+    unattributed_requests?: number;
+};
+
+export type Authorization = {
+    identity_sha256?: string;
+    reason?: string;
+    record_id?: string;
+    release_request_sha256?: string;
+    status: string;
+};
+
+export type AuthorizedAnswer = {
+    answer_id: string;
+    issuer: string;
+    key_id: string;
+    resolution: string;
+    subject: string;
+    ticket_id: string;
+};
+
+export type AuthorizedFrontier = {
+    answers: Array<AuthorizedAnswer> | null;
+    frontier: Frontier;
+    physical_revision: string;
+    release?: RevisionTransitionReceipt;
+    reservation: RevisionTransitionReceipt;
+    rounds: Array<SessionEvidence> | null;
+    session: SessionEvidence;
 };
 
 export type BackendCredentialResolvedPayload = {
@@ -491,6 +582,17 @@ export type BoundEventPayload = {
     conversation_id: string;
     provider: string;
     session_id: string;
+};
+
+export type BuildIdentity = {
+    artifact_sha256?: string;
+    artifact_status: string;
+    build_id?: string;
+    reason?: string;
+    source_dirty: boolean;
+    source_revision?: string;
+    status: string;
+    version?: string;
 };
 
 export type CityCreateRequest = {
@@ -840,6 +942,14 @@ export type Cursors = {
     main: number;
 };
 
+export type DecisionFrontierEnsureRequest = {
+    proposal: Proposal;
+    /**
+     * Exact source work revision token.
+     */
+    work_revision: string;
+};
+
 export type DeliveryContextRecord = {
     BindingGeneration: number;
     Conversation: ConversationRef;
@@ -867,6 +977,16 @@ export type Diff = {
     text?: string;
     truncated: boolean;
     worktree: string;
+};
+
+export type DiffSnapshot = {
+    encoding?: string;
+    payload?: string;
+    reason?: string;
+    sha256?: string;
+    source: string;
+    status: string;
+    uncompressed_bytes?: number;
 };
 
 export type ErrorDetail = {
@@ -941,7 +1061,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BackendCredentialResolvedPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlDispatcherScopeGapPayload | ControlRootSettleFailedPayload | ControlStalledPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | GroupCreatedEventPayload | HookClaimReclaimedStalePayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionPoolSlotRetiredAtDrainDeadlinePayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BackendCredentialResolvedPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlDispatcherScopeGapPayload | ControlRootSettleFailedPayload | ControlStalledPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | GroupCreatedEventPayload | HookClaimReclaimedStalePayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OrderSkippedPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionPoolSlotRetiredAtDrainDeadlinePayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -1009,6 +1129,32 @@ export type EventStreamEnvelope = {
     ts: string;
     type: string;
     workflow?: WorkflowEventProjection;
+};
+
+export type Evidence = {
+    acknowledgements: Facet;
+    actions: Facet;
+    artifacts?: Array<PayloadArtifact> | null;
+    attempt_id: string;
+    base_reason?: string;
+    base_sha?: string;
+    base_status: string;
+    candidate_reason?: string;
+    candidate_sha?: string;
+    candidate_status: string;
+    captured_at: string;
+    diff: DiffSnapshot;
+    identity: Identity;
+    outcome?: string;
+    permission_scope: PermissionScope;
+    policy: Facet;
+    redaction: Facet;
+    schema_version: number;
+    source_reason?: string;
+    source_status: string;
+    store_ref?: string;
+    working_tree_status: string;
+    workspace_diff: DiffSnapshot;
 };
 
 export type ExecutionClaimWindowExpiredPayload = {
@@ -1277,6 +1423,12 @@ export type ExtmsgAdapterInfo = {
     provider: string;
 };
 
+export type Facet = {
+    reason?: string;
+    refs?: Array<string> | null;
+    status: string;
+};
+
 export type FanoutPolicy = {
     AllowUntargetedPublication: boolean;
     Enabled: boolean;
@@ -1421,6 +1573,24 @@ export type FormulaVarDefResponse = {
     type: string;
 };
 
+export type Frontier = {
+    city_ref: string;
+    delivery_contract?: string;
+    map_id: string;
+    open_questions: Array<QuestionView> | null;
+    prompt: PromptView;
+    questions: Array<QuestionView> | null;
+    source_issue?: SourceIssueRef;
+    source_links?: {
+        [key: string]: string;
+    };
+    state: string;
+    store_ref: string;
+    work_digest: string;
+    work_id: string;
+    work_revision: string;
+};
+
 export type GitStatus = {
     ahead: number;
     behind: number;
@@ -1446,6 +1616,18 @@ export type HealthOutputBody = {
      * City name.
      */
     city?: string;
+    /**
+     * Source and running artifact identity; values are unavailable when the process cannot prove them.
+     */
+    controller_build: BuildIdentity;
+    /**
+     * Versioned hash identity for the effective loaded config and input closure. Unavailable when provenance is incomplete.
+     */
+    qualification: Snapshot;
+    /**
+     * Result from a trusted release authority. Unavailable when no authority is configured.
+     */
+    release_authorization: Authorization;
     /**
      * Health status.
      */
@@ -1476,6 +1658,12 @@ export type HistoricalDiff = {
     truncated?: boolean;
 };
 
+export type HistoricalPrActionRecord = {
+    admission_policy: Facet;
+    execution_policy: Facet;
+    receipt: PrActionResult;
+};
+
 export type HistoricalPullRequest = {
     reason?: string;
     state: string;
@@ -1487,6 +1675,36 @@ export type HookClaimReclaimedStalePayload = {
     bead_id: string;
     new_assignee: string;
     previous_owner: string;
+};
+
+export type HumanSourceEnsureRequest = {
+    preparation_token: string;
+};
+
+export type HumanSourcePreparation = {
+    binding: PromptBinding;
+    city_ref: string;
+    delivery_contract: string;
+    expires_at: string;
+    preparation_token: string;
+    store_ref: string;
+    target_name: string;
+    work_id: string;
+    work_revision: string;
+};
+
+export type HumanSourceResumeRequest = {
+    frontier_revision: string;
+    physical_revision: string;
+};
+
+export type Identity = {
+    claim_generation?: string;
+    execution_bead_id: string;
+    kind: string;
+    owner_bead_id: string;
+    session_generation?: string;
+    session_id?: string;
 };
 
 export type InboundEventPayload = {
@@ -1504,6 +1722,62 @@ export type InboundResult = {
     TargetAgentName: string;
     TargetSessionID: string;
     TranscriptEntry: ConversationTranscriptRecord;
+};
+
+export type InputRoot = {
+    id: string;
+    input_count: number;
+    inputs_sha256: string;
+    kind: string;
+    pin?: string;
+    pin_status: string;
+    resolved_path_sha256: string;
+    unavailable_reason?: string;
+};
+
+export type LifecycleClaimSubmitOutputBody = {
+    actor: string;
+    claim_generation: string;
+    receipt_id: string;
+    replayed: boolean;
+    work_id: string;
+};
+
+export type LifecycleClaimSubmitRequest = {
+    /**
+     * Source revision observed by the claim candidate query.
+     */
+    expected_revision: number;
+    /**
+     * Lifecycle transition head observed by the claim candidate query.
+     */
+    expected_transition_head: string;
+    /**
+     * Current managed runtime instance token.
+     */
+    instance_token: string;
+    /**
+     * Canonical positive managed runtime epoch.
+     */
+    runtime_epoch: string;
+    /**
+     * Managed session bead ID.
+     */
+    session_id: string;
+    /**
+     * Q54 source scope accepted by this endpoint: city:<city_name> for the city work store or rig:<rig_name> for a rig store. Relocated class:<classes> references are not supported.
+     */
+    source_store_ref: string;
+    /**
+     * Exact admitted work bead ID.
+     */
+    work_id: string;
+};
+
+export type LifecycleRecoverySubmitOutputBody = {
+    intent_id: string;
+    request_id: string;
+    status: string;
 };
 
 export type ListBodyAgentPatch = {
@@ -2209,6 +2483,18 @@ export type OrderRunOutputBody = {
     tracking_id?: string;
 };
 
+export type OrderSkippedPayload = {
+    order_name: string;
+    outcome: string;
+    reason: string;
+    scopes: Array<OrderSkippedScope> | null;
+};
+
+export type OrderSkippedScope = {
+    reason: string;
+    scope: string;
+};
+
 export type OrderSuppressedPayload = {
     consecutive: number;
     first_suppressed: string;
@@ -2310,6 +2596,23 @@ export type PrActionOption = {
     requires_human_approval: boolean;
 };
 
+export type PrActionPolicyVerdict = {
+    action: PrActionOption;
+    attempt?: PrActionAttemptReference;
+    base_sha: string;
+    evidence_state: string;
+    fresh_until: string;
+    head_sha: string;
+    monitor: string;
+    observed_at: string;
+    owner: string;
+    policy_version: string;
+    pull_request: number;
+    repo: string;
+    required_checks: Array<string> | null;
+    store_ref: string;
+};
+
 export type PrActionQueue = {
     availability: string;
     fresh_until: string;
@@ -2349,10 +2652,12 @@ export type PrActionResult = {
     actor_issuer?: string;
     actor_key_id: string;
     actor_subject?: string;
+    admission_verdict?: PrActionPolicyVerdict;
     attempt_id?: string;
     base_sha: string;
     created_at: string;
     detail?: string;
+    execution_verdict?: PrActionPolicyVerdict;
     head_sha: string;
     id: string;
     idempotency_key: string;
@@ -2487,6 +2792,23 @@ export type PatchOkResponseBody = {
     status: string;
 };
 
+export type PayloadArtifact = {
+    bytes?: number;
+    media_type: string;
+    name: string;
+    reason?: string;
+    sha256?: string;
+    status: string;
+};
+
+export type PayloadRead = {
+    bytes: number;
+    content: string;
+    reason?: string;
+    sha256: string;
+    status: string;
+};
+
 export type PendingInteraction = {
     kind: string;
     metadata?: {
@@ -2495,6 +2817,13 @@ export type PendingInteraction = {
     options?: Array<string> | null;
     prompt?: string;
     request_id: string;
+};
+
+export type PermissionScope = {
+    repository_root?: string;
+    store_ref: string;
+    work_id: string;
+    workspace_root?: string;
 };
 
 export type PoolOverride = {
@@ -2512,6 +2841,26 @@ export type ProjectIdentityStampedPayload = {
     old_id?: string;
     scope_root: string;
     source: string;
+};
+
+export type PromptBinding = {
+    execution_generation: number;
+    request_id: string;
+    session_id: string;
+};
+
+export type PromptView = {
+    id: string;
+    reason?: string;
+    status: string;
+};
+
+export type Proposal = {
+    questions: Array<Question> | null;
+    source_issue?: SourceIssueRef;
+    source_links?: {
+        [key: string]: string;
+    };
 };
 
 export type ProviderCreateInputBody = {
@@ -2816,6 +3165,29 @@ export type PublishReceipt = {
     RetryAfter: number;
 };
 
+export type Question = {
+    depends_on?: Array<string> | null;
+    id: string;
+    prompt: string;
+    recommendations?: Array<string> | null;
+    source_links?: Array<string> | null;
+    title: string;
+};
+
+export type QuestionView = {
+    answer?: AnswerView;
+    depends_on?: Array<string> | null;
+    id: string;
+    prompt: string;
+    recommendations?: Array<string> | null;
+    source_issue?: SourceIssueRef;
+    source_links?: Array<string> | null;
+    status: string;
+    ticket_id: string;
+    title: string;
+    version: string;
+};
+
 export type ReadinessItem = {
     detail?: string;
     display_name: string;
@@ -2845,6 +3217,64 @@ export type Record = {
     source_pid?: number;
 };
 
+export type RecoveryRequest = {
+    action: string;
+    authorized_by: string;
+    claim_generation: string;
+    expected_revision: number;
+    expires_at: string;
+    issued_at: string;
+    message: string;
+    owner: string;
+    request_id: string;
+    scope: string;
+    session_generation: string;
+    session_id: string;
+    signature: string;
+    version: number;
+    work_item_id: string;
+};
+
+export type Request = {
+    gate: string;
+    manifest_json: string;
+    request_sha256: string;
+    retained_base64: string;
+};
+
+export type RequestAttemptAttribution = {
+    reason?: string;
+    reference?: RequestAttemptReference;
+    status: string;
+};
+
+export type RequestAttemptBinding = {
+    attempt_id: string;
+    identity: Identity;
+    store_ref: string;
+    work_revision: string;
+};
+
+export type RequestAttemptReference = {
+    attempt_id: string;
+    store_ref: string;
+    work_id: string;
+    work_revision: string;
+};
+
+export type RequestEvent = {
+    at: string;
+    attempt_attribution?: RequestAttemptAttribution;
+    delivery?: string;
+    generation: number;
+    kind: string;
+    message_digest: string;
+    request_id: string;
+    sequence: number;
+    session_id: string;
+    transcript_evidence?: RequestTranscriptEvidence;
+};
+
 export type RequestFailedPayload = {
     /**
      * Machine-readable error code.
@@ -2864,17 +3294,76 @@ export type RequestFailedPayload = {
     request_id: string;
 };
 
+export type RequestLedger = {
+    attempt_attribution?: RequestAttemptAttribution;
+    digest?: string;
+    events?: Array<RequestEvent> | null;
+    status: string;
+    transcript_evidence?: RequestTranscriptEvidence;
+    unavailable_reason?: string;
+};
+
+export type RequestLedgerProjection = {
+    digest?: string;
+    requests: Array<RequestReceipt> | null;
+    session_id: string;
+    status: string;
+    unavailable_reason?: string;
+};
+
 export type RequestReceipt = {
     accepted_at: string;
     acknowledged_at?: string;
+    attempt?: RequestAttemptBinding;
     delivery: string;
     delivery_attempted_at?: string;
     effect: string;
     generation: number;
+    ledger?: RequestLedger;
     message_digest: string;
     provider_result_at?: string;
     request_id: string;
     session_id: string;
+};
+
+export type RequestTranscriptEvidence = {
+    references?: Array<RequestTranscriptReference> | null;
+    status: string;
+    tool_status: string;
+    tool_unavailable_reason?: string;
+    transcript_generation_id?: string;
+    transcript_stream_id?: string;
+    unavailable_reason?: string;
+};
+
+export type RequestTranscriptReference = {
+    entry_id: string;
+    generation: number;
+    kind: string;
+    request_id: string;
+    session_id: string;
+    tool_id?: string;
+    transcript_generation_id: string;
+    transcript_stream_id: string;
+};
+
+export type ResumeEligibility = {
+    eligible: boolean;
+    frontier_revision: string;
+    map_id: string;
+    physical_revision: string;
+    reason?: string;
+};
+
+export type RevisionTransitionReceipt = {
+    city_ref: string;
+    from_revision: number;
+    id: string;
+    map_id: string;
+    operation: string;
+    store_ref: string;
+    to_revision: number;
+    work_id: string;
 };
 
 export type RigActionBody = {
@@ -3407,6 +3896,13 @@ export type SessionDrainAckedWithAssignedWorkPayload = {
     template?: string;
 };
 
+export type SessionEvidence = {
+    binding: PromptBinding;
+    effect: string;
+    receipt?: RequestReceipt;
+    status: string;
+};
+
 export type SessionInfo = {
     attached: boolean;
     last_activity?: string;
@@ -3471,6 +3967,22 @@ export type SessionPendingResponse = {
 
 export type SessionPermissionModeBody = {
     /**
+     * Provider-independent launch authority profile.
+     */
+    authority_profile?: 'design' | 'router' | 'worker' | 'operator';
+    /**
+     * Dedicated signed session-authority grant for this exact transition.
+     */
+    authorization?: string;
+    /**
+     * Exact effective loaded configuration identity.
+     */
+    effective_config_sha256?: string;
+    /**
+     * Exact current session execution generation.
+     */
+    expected_generation?: number;
+    /**
      * Provider schema value for the permission_mode option.
      */
     permission_mode: string;
@@ -3522,6 +4034,10 @@ export type SessionRequestAcknowledgementInputBody = {
 
 export type SessionRequestSubmitInputBody = {
     /**
+     * Optional Workbench attempt selector. Provide with work_id; the server verifies both against the current session claim.
+     */
+    claim_generation?: string;
+    /**
      * Exact intended execution generation.
      */
     generation: number;
@@ -3533,6 +4049,10 @@ export type SessionRequestSubmitInputBody = {
      * Durable idempotency identity for this request.
      */
     request_id: string;
+    /**
+     * Optional Workbench attempt selector. Provide with claim_generation; the server verifies both against the current session claim.
+     */
+    work_id?: string;
 };
 
 export type SessionResetStalledPayload = {
@@ -3585,6 +4105,7 @@ export type SessionResponse = {
     context_window?: number;
     created_at: string;
     display_name?: string;
+    execution_generation?: number;
     id: string;
     kind?: string;
     last_active?: string;
@@ -3843,6 +4364,10 @@ export type SessionStructuredHistory = {
     generation: SessionStructuredGeneration;
     logical_conversation_id?: string;
     provider_session_id?: string;
+    /**
+     * Current durable session request status and append-only lifecycle transcript. Availability is explicit for legacy records or unavailable storage.
+     */
+    request_ledger?: RequestLedgerProjection;
     tail_state: SessionStructuredTailState;
     transcript_stream_id: string;
 };
@@ -4892,6 +5417,24 @@ export type SlingResponse = {
     workflow_id?: string;
 };
 
+export type Snapshot = {
+    effective_config_identity_sha256?: string;
+    effective_config_input_closure_sha256?: string;
+    effective_config_sha256?: string;
+    input_environment_sha256?: string;
+    input_roots: Array<InputRoot> | null;
+    reason?: string;
+    schema_version: number;
+    status: string;
+};
+
+export type SourceIssueRef = {
+    canonical_url: string;
+    issue_id: string;
+    repository: string;
+    tracker_kind: string;
+};
+
 export type Status = {
     allow_websockets?: boolean;
     hostname?: string;
@@ -5612,6 +6155,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeOrderFailed) | ({
     type: 'order.fired';
 } & TypedEventStreamEnvelopeOrderFired) | ({
+    type: 'order.skipped';
+} & TypedEventStreamEnvelopeOrderSkipped) | ({
     type: 'order.suppressed';
 } & TypedEventStreamEnvelopeOrderSuppressed) | ({
     type: 'project.identity.stamped';
@@ -6730,6 +7275,24 @@ export type TypedEventStreamEnvelopeOrderFired = {
 };
 
 /**
+ * TypedEventStreamEnvelope order.skipped
+ */
+export type TypedEventStreamEnvelopeOrderSkipped = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: OrderSkippedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'order.skipped';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope order.suppressed
  */
 export type TypedEventStreamEnvelopeOrderSuppressed = {
@@ -7639,6 +8202,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeOrderFailed) | ({
     type: 'order.fired';
 } & TypedTaggedEventStreamEnvelopeOrderFired) | ({
+    type: 'order.skipped';
+} & TypedTaggedEventStreamEnvelopeOrderSkipped) | ({
     type: 'order.suppressed';
 } & TypedTaggedEventStreamEnvelopeOrderSuppressed) | ({
     type: 'project.identity.stamped';
@@ -8814,6 +9379,25 @@ export type TypedTaggedEventStreamEnvelopeOrderFired = {
 };
 
 /**
+ * TypedTaggedEventStreamEnvelope order.skipped
+ */
+export type TypedTaggedEventStreamEnvelopeOrderSkipped = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: OrderSkippedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'order.skipped';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedTaggedEventStreamEnvelope order.suppressed
  */
 export type TypedTaggedEventStreamEnvelopeOrderSuppressed = {
@@ -9777,6 +10361,13 @@ export type UsageTotals = {
      * Compute wall-clock seconds.
      */
     wall_seconds: number;
+};
+
+export type Verdict = {
+    assurance: string;
+    reason: string;
+    request_sha256: string;
+    status: string;
 };
 
 export type WaitListBody = {
@@ -11438,6 +12029,168 @@ export type PostV0CityByCityNameBeadByIdAssignResponses = {
 
 export type PostV0CityByCityNameBeadByIdAssignResponse = PostV0CityByCityNameBeadByIdAssignResponses[keyof PostV0CityByCityNameBeadByIdAssignResponses];
 
+export type ListV0CityByCityNameBeadByIdAttemptEvidenceData = {
+    body?: never;
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Work bead ID that owns the captured execution attempts.
+         */
+        id: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/bead/{id}/attempt-evidence';
+};
+
+export type ListV0CityByCityNameBeadByIdAttemptEvidenceErrors = {
+    /**
+     * Forbidden
+     */
+    403: ErrorModel;
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type ListV0CityByCityNameBeadByIdAttemptEvidenceError = ListV0CityByCityNameBeadByIdAttemptEvidenceErrors[keyof ListV0CityByCityNameBeadByIdAttemptEvidenceErrors];
+
+export type ListV0CityByCityNameBeadByIdAttemptEvidenceResponses = {
+    /**
+     * OK
+     */
+    200: Array<Evidence> | null;
+};
+
+export type ListV0CityByCityNameBeadByIdAttemptEvidenceResponse = ListV0CityByCityNameBeadByIdAttemptEvidenceResponses[keyof ListV0CityByCityNameBeadByIdAttemptEvidenceResponses];
+
+export type GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdData = {
+    body?: never;
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Work bead ID that owns the captured execution attempt.
+         */
+        id: string;
+        /**
+         * Exact immutable attempt ID.
+         */
+        attemptID: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/bead/{id}/attempt-evidence/{attemptID}';
+};
+
+export type GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdErrors = {
+    /**
+     * Forbidden
+     */
+    403: ErrorModel;
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdError = GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdErrors[keyof GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdErrors];
+
+export type GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdResponses = {
+    /**
+     * OK
+     */
+    200: AttemptEvidenceRead;
+};
+
+export type GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdResponse = GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdResponses[keyof GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdResponses];
+
+export type GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdArtifactBySha256Data = {
+    body?: never;
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Work bead ID that owns the captured execution attempt.
+         */
+        id: string;
+        /**
+         * Exact immutable attempt ID.
+         */
+        attemptID: string;
+        /**
+         * Exact content digest listed by this attempt.
+         */
+        sha256: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/bead/{id}/attempt-evidence/{attemptID}/artifact/{sha256}';
+};
+
+export type GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdArtifactBySha256Errors = {
+    /**
+     * Forbidden
+     */
+    403: ErrorModel;
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdArtifactBySha256Error = GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdArtifactBySha256Errors[keyof GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdArtifactBySha256Errors];
+
+export type GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdArtifactBySha256Responses = {
+    /**
+     * OK
+     */
+    200: PayloadRead;
+};
+
+export type GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdArtifactBySha256Response = GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdArtifactBySha256Responses[keyof GetV0CityByCityNameBeadByIdAttemptEvidenceByAttemptIdArtifactBySha256Responses];
+
 export type GetV0CityByCityNameBeadByIdAttemptsDiffData = {
     body?: never;
     path: {
@@ -11593,6 +12346,578 @@ export type PostV0CityByCityNameBeadByIdCloseResponses = {
 };
 
 export type PostV0CityByCityNameBeadByIdCloseResponse = PostV0CityByCityNameBeadByIdCloseResponses[keyof PostV0CityByCityNameBeadByIdCloseResponses];
+
+export type GetDecisionFrontierData = {
+    body?: never;
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Source work bead ID.
+         */
+        id: string;
+    };
+    query: {
+        /**
+         * Exact source work revision token.
+         */
+        work_revision: string;
+    };
+    url: '/v0/city/{cityName}/bead/{id}/decision-frontier';
+};
+
+export type GetDecisionFrontierErrors = {
+    /**
+     * Bad Request
+     */
+    400: ErrorModel;
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type GetDecisionFrontierError = GetDecisionFrontierErrors[keyof GetDecisionFrontierErrors];
+
+export type GetDecisionFrontierResponses = {
+    /**
+     * OK
+     */
+    200: Frontier;
+};
+
+export type GetDecisionFrontierResponse = GetDecisionFrontierResponses[keyof GetDecisionFrontierResponses];
+
+export type EnsureDecisionFrontierData = {
+    body: DecisionFrontierEnsureRequest;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+        /**
+         * Stable key for retries of this exact proposal.
+         */
+        'Idempotency-Key': string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Source work bead ID.
+         */
+        id: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/bead/{id}/decision-frontier';
+};
+
+export type EnsureDecisionFrontierErrors = {
+    /**
+     * Bad Request
+     */
+    400: ErrorModel;
+    /**
+     * Forbidden
+     */
+    403: ErrorModel;
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type EnsureDecisionFrontierError = EnsureDecisionFrontierErrors[keyof EnsureDecisionFrontierErrors];
+
+export type EnsureDecisionFrontierResponses = {
+    /**
+     * OK
+     */
+    200: Frontier;
+};
+
+export type EnsureDecisionFrontierResponse = EnsureDecisionFrontierResponses[keyof EnsureDecisionFrontierResponses];
+
+export type AnswerDecisionFrontierData = {
+    body: AnswerSubmission;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+        /**
+         * Stable key for retries of this exact answer.
+         */
+        'Idempotency-Key': string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Source work bead ID.
+         */
+        id: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/bead/{id}/decision-frontier/answers';
+};
+
+export type AnswerDecisionFrontierErrors = {
+    /**
+     * Bad Request
+     */
+    400: ErrorModel;
+    /**
+     * Forbidden
+     */
+    403: ErrorModel;
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type AnswerDecisionFrontierError = AnswerDecisionFrontierErrors[keyof AnswerDecisionFrontierErrors];
+
+export type AnswerDecisionFrontierResponses = {
+    /**
+     * OK
+     */
+    200: Frontier;
+};
+
+export type AnswerDecisionFrontierResponse = AnswerDecisionFrontierResponses[keyof AnswerDecisionFrontierResponses];
+
+export type ReadAuthorizedHumanSourceFrontierData = {
+    body?: never;
+    headers: {
+        /**
+         * Fresh request-bound grant verified by the configured city authority. Network position and caller success fields are insufficient.
+         */
+        'X-GC-City-Read': string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Source work bead ID.
+         */
+        id: string;
+    };
+    query: {
+        /**
+         * Exact source work revision token.
+         */
+        work_revision: string;
+    };
+    url: '/v0/city/{cityName}/bead/{id}/decision-frontier/authorized';
+};
+
+export type ReadAuthorizedHumanSourceFrontierErrors = {
+    /**
+     * Bad Request
+     */
+    400: ErrorModel;
+    /**
+     * Unauthorized
+     */
+    401: ErrorModel;
+    /**
+     * Forbidden
+     */
+    403: ErrorModel;
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Request Entity Too Large
+     */
+    413: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type ReadAuthorizedHumanSourceFrontierError = ReadAuthorizedHumanSourceFrontierErrors[keyof ReadAuthorizedHumanSourceFrontierErrors];
+
+export type ReadAuthorizedHumanSourceFrontierResponses = {
+    /**
+     * OK
+     */
+    200: AuthorizedFrontier;
+};
+
+export type ReadAuthorizedHumanSourceFrontierResponse = ReadAuthorizedHumanSourceFrontierResponses[keyof ReadAuthorizedHumanSourceFrontierResponses];
+
+export type SubmitHumanSourceAnswerData = {
+    body: AnswerSubmission;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+        /**
+         * Fresh request-bound grant verified by the configured city authority. Network position and caller success fields are insufficient.
+         */
+        'X-GC-City-Write': string;
+        /**
+         * Stable key for retries of this exact answer.
+         */
+        'Idempotency-Key': string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Source work bead ID.
+         */
+        id: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/bead/{id}/decision-frontier/authorized/answers';
+};
+
+export type SubmitHumanSourceAnswerErrors = {
+    /**
+     * Bad Request
+     */
+    400: ErrorModel;
+    /**
+     * Unauthorized
+     */
+    401: ErrorModel;
+    /**
+     * Forbidden
+     */
+    403: ErrorModel;
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Request Entity Too Large
+     */
+    413: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type SubmitHumanSourceAnswerError = SubmitHumanSourceAnswerErrors[keyof SubmitHumanSourceAnswerErrors];
+
+export type SubmitHumanSourceAnswerResponses = {
+    /**
+     * OK
+     */
+    200: AuthorizedFrontier;
+};
+
+export type SubmitHumanSourceAnswerResponse = SubmitHumanSourceAnswerResponses[keyof SubmitHumanSourceAnswerResponses];
+
+export type CheckHumanSourceResumeData = {
+    body: HumanSourceResumeRequest;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+        /**
+         * Fresh request-bound grant verified by the configured city authority. Network position and caller success fields are insufficient.
+         */
+        'X-GC-City-Write': string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        id: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/bead/{id}/decision-frontier/check-resume';
+};
+
+export type CheckHumanSourceResumeErrors = {
+    /**
+     * Bad Request
+     */
+    400: ErrorModel;
+    /**
+     * Unauthorized
+     */
+    401: ErrorModel;
+    /**
+     * Forbidden
+     */
+    403: ErrorModel;
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Request Entity Too Large
+     */
+    413: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type CheckHumanSourceResumeError = CheckHumanSourceResumeErrors[keyof CheckHumanSourceResumeErrors];
+
+export type CheckHumanSourceResumeResponses = {
+    /**
+     * OK
+     */
+    200: ResumeEligibility;
+};
+
+export type CheckHumanSourceResumeResponse = CheckHumanSourceResumeResponses[keyof CheckHumanSourceResumeResponses];
+
+export type PrepareHumanSourceProposalData = {
+    body: DecisionFrontierEnsureRequest;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+        /**
+         * Fresh request-bound grant verified by the configured city authority. Network position and caller success fields are insufficient.
+         */
+        'X-GC-City-Write': string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        id: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/bead/{id}/decision-frontier/prepare';
+};
+
+export type PrepareHumanSourceProposalErrors = {
+    /**
+     * Bad Request
+     */
+    400: ErrorModel;
+    /**
+     * Unauthorized
+     */
+    401: ErrorModel;
+    /**
+     * Forbidden
+     */
+    403: ErrorModel;
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Request Entity Too Large
+     */
+    413: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type PrepareHumanSourceProposalError = PrepareHumanSourceProposalErrors[keyof PrepareHumanSourceProposalErrors];
+
+export type PrepareHumanSourceProposalResponses = {
+    /**
+     * OK
+     */
+    200: HumanSourcePreparation;
+};
+
+export type PrepareHumanSourceProposalResponse = PrepareHumanSourceProposalResponses[keyof PrepareHumanSourceProposalResponses];
+
+export type EnsurePreparedHumanSourceProposalData = {
+    body: HumanSourceEnsureRequest;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+        /**
+         * Fresh request-bound grant verified by the configured city authority. Network position and caller success fields are insufficient.
+         */
+        'X-GC-City-Write': string;
+        'Idempotency-Key': string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        id: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/bead/{id}/decision-frontier/prepared';
+};
+
+export type EnsurePreparedHumanSourceProposalErrors = {
+    /**
+     * Bad Request
+     */
+    400: ErrorModel;
+    /**
+     * Unauthorized
+     */
+    401: ErrorModel;
+    /**
+     * Forbidden
+     */
+    403: ErrorModel;
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Request Entity Too Large
+     */
+    413: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type EnsurePreparedHumanSourceProposalError = EnsurePreparedHumanSourceProposalErrors[keyof EnsurePreparedHumanSourceProposalErrors];
+
+export type EnsurePreparedHumanSourceProposalResponses = {
+    /**
+     * OK
+     */
+    200: Frontier;
+};
+
+export type EnsurePreparedHumanSourceProposalResponse = EnsurePreparedHumanSourceProposalResponses[keyof EnsurePreparedHumanSourceProposalResponses];
 
 export type GetV0CityByCityNameBeadByIdDepsData = {
     body?: never;
@@ -14352,6 +15677,126 @@ export type GetV0CityByCityNameHealthResponses = {
 
 export type GetV0CityByCityNameHealthResponse = GetV0CityByCityNameHealthResponses[keyof GetV0CityByCityNameHealthResponses];
 
+export type ClaimAdmittedLifecycleWorkData = {
+    body: LifecycleClaimSubmitRequest;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/lifecycle/claims';
+};
+
+export type ClaimAdmittedLifecycleWorkErrors = {
+    /**
+     * Bad Request
+     */
+    400: ErrorModel;
+    /**
+     * Forbidden
+     */
+    403: ErrorModel;
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type ClaimAdmittedLifecycleWorkError = ClaimAdmittedLifecycleWorkErrors[keyof ClaimAdmittedLifecycleWorkErrors];
+
+export type ClaimAdmittedLifecycleWorkResponses = {
+    /**
+     * OK
+     */
+    200: LifecycleClaimSubmitOutputBody;
+};
+
+export type ClaimAdmittedLifecycleWorkResponse = ClaimAdmittedLifecycleWorkResponses[keyof ClaimAdmittedLifecycleWorkResponses];
+
+export type SubmitLifecycleRecoveryRequestData = {
+    body: RecoveryRequest;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/lifecycle/recovery-requests';
+};
+
+export type SubmitLifecycleRecoveryRequestErrors = {
+    /**
+     * Bad Request
+     */
+    400: ErrorModel;
+    /**
+     * Forbidden
+     */
+    403: ErrorModel;
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type SubmitLifecycleRecoveryRequestError = SubmitLifecycleRecoveryRequestErrors[keyof SubmitLifecycleRecoveryRequestErrors];
+
+export type SubmitLifecycleRecoveryRequestResponses = {
+    /**
+     * Accepted
+     */
+    202: LifecycleRecoverySubmitOutputBody;
+};
+
+export type SubmitLifecycleRecoveryRequestResponse = SubmitLifecycleRecoveryRequestResponses[keyof SubmitLifecycleRecoveryRequestResponses];
+
 export type GetV0CityByCityNameMailData = {
     body?: never;
     path: {
@@ -17024,6 +18469,74 @@ export type GetV0CityByCityNameReadinessResponses = {
 
 export type GetV0CityByCityNameReadinessResponse = GetV0CityByCityNameReadinessResponses[keyof GetV0CityByCityNameReadinessResponses];
 
+export type VerifyRetirementReleaseSourceData = {
+    body: Request;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+        /**
+         * Fresh request-bound grant verified by the configured city authority. Network position and caller success fields are insufficient.
+         */
+        'X-GC-City-Write': string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/retirement-release/verify';
+};
+
+export type VerifyRetirementReleaseSourceErrors = {
+    /**
+     * Bad Request
+     */
+    400: ErrorModel;
+    /**
+     * Unauthorized
+     */
+    401: ErrorModel;
+    /**
+     * Forbidden
+     */
+    403: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Request Entity Too Large
+     */
+    413: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type VerifyRetirementReleaseSourceError = VerifyRetirementReleaseSourceErrors[keyof VerifyRetirementReleaseSourceErrors];
+
+export type VerifyRetirementReleaseSourceResponses = {
+    /**
+     * OK
+     */
+    200: Verdict;
+};
+
+export type VerifyRetirementReleaseSourceResponse = VerifyRetirementReleaseSourceResponses[keyof VerifyRetirementReleaseSourceResponses];
+
 export type DeleteV0CityByCityNameRigByNameData = {
     body?: never;
     headers: {
@@ -18110,6 +19623,10 @@ export type SendSessionMessageData = {
          * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
          */
         'X-GC-Request': string;
+        /**
+         * Idempotency key for safe retries.
+         */
+        'Idempotency-Key'?: string;
     };
     path: {
         /**
@@ -18551,6 +20068,70 @@ export type PostV0CityByCityNameSessionByIdRequestsByRequestIdAckResponses = {
 
 export type PostV0CityByCityNameSessionByIdRequestsByRequestIdAckResponse = PostV0CityByCityNameSessionByIdRequestsByRequestIdAckResponses[keyof PostV0CityByCityNameSessionByIdRequestsByRequestIdAckResponses];
 
+export type PostV0CityByCityNameSessionByIdResetData = {
+    body?: never;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Session ID, alias, or runtime session_name.
+         */
+        id: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/session/{id}/reset';
+};
+
+export type PostV0CityByCityNameSessionByIdResetErrors = {
+    /**
+     * Unauthorized
+     */
+    401: ErrorModel;
+    /**
+     * Forbidden
+     */
+    403: ErrorModel;
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type PostV0CityByCityNameSessionByIdResetError = PostV0CityByCityNameSessionByIdResetErrors[keyof PostV0CityByCityNameSessionByIdResetErrors];
+
+export type PostV0CityByCityNameSessionByIdResetResponses = {
+    /**
+     * OK
+     */
+    200: OkWithIdResponseBody;
+};
+
+export type PostV0CityByCityNameSessionByIdResetResponse = PostV0CityByCityNameSessionByIdResetResponses[keyof PostV0CityByCityNameSessionByIdResetResponses];
+
 export type RespondSessionData = {
     body: SessionRespondInputBody;
     headers: {
@@ -18558,6 +20139,10 @@ export type RespondSessionData = {
          * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
          */
         'X-GC-Request': string;
+        /**
+         * Idempotency key for safe retries.
+         */
+        'Idempotency-Key'?: string;
     };
     path: {
         /**
@@ -18843,6 +20428,10 @@ export type SubmitSessionData = {
          * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
          */
         'X-GC-Request': string;
+        /**
+         * Idempotency key for safe retries.
+         */
+        'Idempotency-Key'?: string;
     };
     path: {
         /**

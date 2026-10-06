@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -113,6 +114,61 @@ func newFactory(manager *sessionpkg.Manager, cfg FactoryConfig) (*Factory, error
 // session manager.
 func (f *Factory) Catalog() (*SessionCatalog, error) {
 	return NewSessionCatalog(f.manager)
+}
+
+// ResolveID resolves a persisted session identity without probing or starting
+// its runtime. Together with the receipt reads below, this is the tracked
+// request port for controller-owned delivery adapters.
+func (f *Factory) ResolveID(identifier string) (string, error) {
+	if f == nil || f.manager == nil {
+		return "", fmt.Errorf("%w: session manager is required", ErrHandleConfig)
+	}
+	return f.manager.PersistedStore().ResolveID(identifier)
+}
+
+// GetPersistedResponse reads the exact session generation without a live
+// overlay or the read-path type repair used by interactive session discovery.
+func (f *Factory) GetPersistedResponse(id string) (sessionpkg.Info, sessionpkg.PersistedResponse, error) {
+	if f == nil || f.manager == nil {
+		return sessionpkg.Info{}, sessionpkg.PersistedResponse{}, fmt.Errorf("%w: session manager is required", ErrHandleConfig)
+	}
+	return f.manager.PersistedStore().GetPersistedResponse(id)
+}
+
+// GetRequest reads one exact durable request receipt without provider I/O.
+func (f *Factory) GetRequest(sessionID, requestID string) (sessionpkg.RequestReceipt, error) {
+	if f == nil || f.manager == nil {
+		return sessionpkg.RequestReceipt{}, fmt.Errorf("%w: session manager is required", ErrHandleConfig)
+	}
+	return f.manager.PersistedStore().GetRequest(sessionID, requestID)
+}
+
+// SubmitRequest preserves the manager's generation-fenced, live-only delivery
+// reservation. It never starts, wakes, or resets the target runtime.
+func (f *Factory) SubmitRequest(ctx context.Context, sessionID, requestID string, generation int, message string) (sessionpkg.RequestReceipt, error) {
+	if f == nil || f.manager == nil {
+		return sessionpkg.RequestReceipt{}, fmt.Errorf("%w: session manager is required", ErrHandleConfig)
+	}
+	return f.manager.SubmitRequest(ctx, sessionID, requestID, generation, message)
+}
+
+// SubmitRequestForAttempt submits controller-verified, attributed input
+// through the worker boundary. The session manager reserves delivery before
+// provider I/O and never wakes or restarts a runtime. Callers must establish
+// the work/store/session binding before invoking this method; the session
+// layer rechecks generation and reciprocal claim.
+func (f *Factory) SubmitRequestForAttempt(
+	ctx context.Context,
+	sessionID string,
+	requestID string,
+	generation int,
+	message string,
+	binding sessionpkg.RequestAttemptBinding,
+) (sessionpkg.RequestReceipt, error) {
+	if f == nil || f.manager == nil {
+		return sessionpkg.RequestReceipt{}, fmt.Errorf("%w: session manager is required", ErrHandleConfig)
+	}
+	return f.manager.SubmitRequestForAttemptExact(ctx, sessionID, requestID, generation, message, binding)
 }
 
 // UsageSink returns the usage-fact sink the factory threads into every handle it
@@ -259,7 +315,7 @@ func (f *Factory) RuntimeHandle(sessionName, providerName, transport string, pro
 // Adapter returns a transcript adapter configured with the factory's search
 // paths for callers that need transcript reads outside a session handle.
 func (f *Factory) Adapter() SessionLogAdapter {
-	return SessionLogAdapter{SearchPaths: append([]string(nil), f.searchPaths...), activity: f.activityMemo}
+	return SessionLogAdapter{SearchPaths: append([]string(nil), f.searchPaths...), requireRoots: true, activity: f.activityMemo}
 }
 
 // DiscoverTranscript returns the best available transcript path for a worker.

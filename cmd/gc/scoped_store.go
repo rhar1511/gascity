@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"reflect"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -20,9 +22,19 @@ import (
 // recovery would multiply exactly the load a read-storm mitigation exists
 // to bound. Skips the managed-retry wrapper for the same reason (gascity
 // ga-cdmx6x).
-func scopedBdStoreForCity(ctx context.Context, cityPath string) (*beads.BdStore, error) {
+func scopedBdStoreForCity(ctx context.Context, cityPath string, cityConfigs ...*config.City) (*beads.BdStore, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	var cfg *config.City
+	if len(cityConfigs) > 0 {
+		cfg = cityConfigs[0]
+	} else {
+		loaded, err := loadCityConfig(cityPath, io.Discard)
+		if err != nil {
+			return nil, fmt.Errorf("loading city config for scoped bead store: %w", err)
+		}
+		cfg = loaded
 	}
 	env, err := bdRuntimeEnvWithErrorRecoveryContext(ctx, cityPath, false)
 	if err != nil {
@@ -32,7 +44,8 @@ func scopedBdStoreForCity(ctx context.Context, cityPath string) (*beads.BdStore,
 	if err != nil {
 		return nil, err
 	}
-	return beads.NewBdStore(cityPath, runner), nil
+	options := append(bdStoreOptionsForConfig(cfg), privateEvidenceOptionsForStore(cfg, cityPath, cityPath)...)
+	return beads.NewBdStore(cityPath, runner, options...), nil
 }
 
 // scopedBdStoreForRig is scopedBdStoreForCity for a rig-scoped store.
@@ -48,7 +61,8 @@ func scopedBdStoreForRig(ctx context.Context, cityPath string, cfg *config.City,
 	if err != nil {
 		return nil, err
 	}
-	return beads.NewBdStore(rigDir, runner), nil
+	options := append(bdStoreOptionsForConfig(cfg), privateEvidenceOptionsForStore(cfg, rigDir, cityPath)...)
+	return beads.NewBdStore(rigDir, runner, options...), nil
 }
 
 func beadsCommandRunnerWithContextForHostedCity(ctx context.Context, cityPath string, env map[string]string) (beads.CommandRunner, error) {
@@ -169,7 +183,7 @@ func scopedStoreLike(ctx context.Context, cityPath string, cfg *config.City, exi
 	var scoped beads.Store
 	var err error
 	if samePath(dir, cityPath) {
-		scoped, err = scopedBdStoreForCity(ctx, cityPath)
+		scoped, err = scopedBdStoreForCity(ctx, cityPath, cfg)
 	} else {
 		scoped, err = scopedBdStoreForRig(ctx, cityPath, cfg, dir)
 	}

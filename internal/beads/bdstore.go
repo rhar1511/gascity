@@ -247,13 +247,13 @@ func recordBDExecTelemetry(name, dir string, args []string, start time.Time, out
 // rather than a bare "exit status 1".
 func classifyBDExecResult(parent, ctx context.Context, name string, timeout time.Duration, start time.Time, out []byte, stderr string, runErr error) (status string, traceErr, resultErr error) {
 	if runErr == nil && name == "bd" && bdOutputIndicatesSilentFallback(stderr) {
-		fallbackErr := fmt.Errorf("%w: %s", ErrBDSilentFallback, strings.TrimSpace(stderr))
+		fallbackErr := fmt.Errorf("%w: %s", ErrBDSilentFallback, redactPrivateEvidenceDiagnostic(strings.TrimSpace(stderr)))
 		return "error", fallbackErr, fallbackErr
 	}
 	if ctx.Err() == context.DeadlineExceeded {
 		timeoutErr := bdExecTimeoutError(parent, timeout, start)
 		if stderr != "" {
-			return "timeout", timeoutErr, fmt.Errorf("%w: %s", timeoutErr, stderr)
+			return "timeout", timeoutErr, fmt.Errorf("%w: %s", timeoutErr, redactPrivateEvidenceDiagnostic(stderr))
 		}
 		return "timeout", timeoutErr, timeoutErr
 	}
@@ -285,6 +285,12 @@ func bdFailureDetail(name string, out []byte, stderr string) string {
 	detail := strings.TrimSpace(stderr)
 	if name != "bd" {
 		return detail
+	}
+	if redacted := redactPrivateEvidenceDiagnostic(string(out)); redacted != string(out) {
+		return redacted
+	}
+	if redacted := redactPrivateEvidenceDiagnostic(detail); redacted != detail {
+		return redacted
 	}
 	if detail == "" {
 		// bd writes structured errors to stdout under --json while stderr is
@@ -491,6 +497,19 @@ type BdStore struct {
 	inlineDeps inlineDependencyProjection
 
 	localStrings *localSidecar // clone-local data; see Store.SetLocalString
+
+	// privateEvidenceHTTP is an explicitly configured, context-verified body
+	// transport for attempt-evidence values. It is separate from the bd argv
+	// runner because evidence payloads must never be placed in process args.
+	privateEvidenceHTTP           *privateEvidenceHTTPClient
+	privateEvidenceHTTPInitErr    error
+	privateEvidenceHTTPConfigured bool
+
+	// decisionFrontierRecordWriter is supplied only by an explicit trusted
+	// constructor option. It remains unavailable when the remote adapter is
+	// missing any create, link, exact-read, metadata-CAS, or durable-receipt
+	// dependency.
+	decisionFrontierRecordWriter *RemoteDecisionFrontierRecordWriter
 }
 
 const (
@@ -1170,6 +1189,43 @@ func isBdNotFound(err error) bool {
 		strings.Contains(msg, "no issues found")
 }
 
+// bdInfraNotFoundMarkers are "not found" phrasings that describe the bd
+// binary, the Dolt server, or the workspace — not a missing bead. They
+// appear when bd cannot run or its database is mid-restart, which says
+// nothing about whether a given bead exists.
+var bdInfraNotFoundMarkers = []string{
+	"executable file not found",
+	"command not found",
+	"exec: \"bd\"",
+	"exec: bd",
+	"database not found",
+	"database path not found",
+	"table not found",
+	"column not found",
+	"workspace not found",
+	"branch not found",
+	"page not found",
+	"no such file or directory",
+}
+
+// isBdBeadNotFound reports whether err is bd saying the requested bead does
+// not exist, as opposed to isBdNotFound's loose "not found anywhere in the
+// text" match, which also fires on infrastructure failures (a missing bd
+// binary, a Dolt "database not found" during a server restart). Get uses it
+// so only a bead-level miss becomes ErrNotFound.
+func isBdBeadNotFound(err error) bool {
+	if !isBdNotFound(err) {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, marker := range bdInfraNotFoundMarkers {
+		if strings.Contains(msg, marker) {
+			return false
+		}
+	}
+	return true
+}
+
 // isBdOperationUnsupported reports whether err is bd telling us a backend
 // does not implement the attempted operation at all (e.g. the Postgres
 // backend's "IssueRelations" gap behind `bd dep list`, ga-7i7ts) as opposed
@@ -1266,12 +1322,24 @@ func (s *BdStore) Create(b Bead) (Bead, error) {
 // CreateWithStorage persists a new bead via bd create using a storage tier
 // selected by policy middleware.
 func (s *BdStore) CreateWithStorage(b Bead, storage StorageClass) (Bead, error) {
+	if err := ValidateDecisionFrontierCreate(b); err != nil {
+		return Bead{}, err
+	}
 	effectiveEphemeral, effectiveNoHistory, err := effectiveStorageFlags(b, storage)
 	if err != nil {
 		return Bead{}, fmt.Errorf("bd create: %w", err)
 	}
 	if effectiveEphemeral && effectiveNoHistory {
 		return Bead{}, fmt.Errorf("bd create: ephemeral and no-history storage are mutually exclusive")
+	}
+	if hasPrivateEvidenceValueMetadata(b.Metadata) {
+		if _, ownerIndex := b.Metadata[beadmeta.AttemptEvidenceArchivePayloadMetadataKey]; !ownerIndex {
+			return Bead{}, fmt.Errorf("bd create: owner-index evidence must use the dedicated metadata CAS")
+		}
+		if s.privateEvidenceHTTP == nil || s.privateEvidenceHTTPInitErr != nil {
+			return Bead{}, ErrPrivateEvidenceHTTPUnavailable
+		}
+		return s.privateEvidenceHTTP.createEvidenceArchive(context.Background(), b, effectiveEphemeral, effectiveNoHistory)
 	}
 	typ := b.Type
 	if typ == "" {
@@ -1375,6 +1443,12 @@ func effectiveStorageFlags(b Bead, storage StorageClass) (ephemeral bool, noHist
 
 // Get retrieves a bead by ID via bd show.
 func (s *BdStore) Get(id string) (Bead, error) {
+	if s.privateEvidenceHTTPConfigured {
+		if s.privateEvidenceHTTP == nil || s.privateEvidenceHTTPInitErr != nil {
+			return Bead{}, ErrPrivateEvidenceHTTPUnavailable
+		}
+		return s.privateEvidenceHTTP.getBead(context.Background(), id)
+	}
 	// Read via the transient-retry wrapper so a Get that races a managed-Dolt
 	// restart (SIGKILL + port rebind) recovers instead of surfacing a one-shot
 	// "invalid connection"/"i/o timeout" transport error. The runner performs a
@@ -1383,7 +1457,11 @@ func (s *BdStore) Get(id string) (Bead, error) {
 	// BdStore read/write path (ga-gellq1).
 	out, err := s.runBDTransientRead("show", "--json", id)
 	if err != nil {
-		if !isBdNotFound(err) {
+		// Only a bead-level miss may become ErrNotFound. Callers treat
+		// ErrNotFound as "confirmed absent" (the process-table orphan sweep
+		// SIGTERMs a live runtime on it), so an infrastructure failure whose
+		// text happens to say "not found" must surface as itself.
+		if !isBdBeadNotFound(err) {
 			return Bead{}, fmt.Errorf("getting bead %q: %w", id, err)
 		}
 		// bd show only queries the issues table; ephemeral beads live in the
@@ -1395,12 +1473,16 @@ func (s *BdStore) Get(id string) (Bead, error) {
 		// must not leak into a supplemental wisp query.
 		if isWispQueryableID(id) {
 			wisps, queryErr := s.getEphemeralByID(id)
-			if queryErr == nil {
-				for _, b := range wisps {
-					if b.ID == id {
-						return b, nil
-					}
+			for _, b := range wisps {
+				if b.ID == id {
+					return b, nil
 				}
+			}
+			// The wisp lookup is half of the "absent" verdict: if it failed,
+			// absence is unproven. Return the real error so callers can tell
+			// a transient read failure from a missing bead.
+			if queryErr != nil && !isBdBeadNotFound(queryErr) {
+				return Bead{}, fmt.Errorf("getting bead %q: %w", id, queryErr)
 			}
 		}
 		return Bead{}, fmt.Errorf("getting bead %q: %w", id, ErrNotFound)
@@ -1479,9 +1561,28 @@ func bdUpdateArgs(id string, opts UpdateOpts) []string {
 
 // Update modifies fields of an existing bead via bd update.
 func (s *BdStore) Update(id string, opts UpdateOpts) error {
+	if err := rejectPrivateEvidenceArgvMetadata("bd update", opts.Metadata); err != nil {
+		return err
+	}
 	args := bdUpdateArgs(id, opts)
 	// No fields to update — no-op (bd errors on empty update).
 	if len(args) == 3 {
+		return nil
+	}
+	if bdUpdateMayReopenOrClearLifecycleEvidence(opts) {
+		current, err := s.Get(id)
+		if err != nil {
+			return err
+		}
+		if err := ValidateLifecycleMutation(current, opts); err != nil {
+			return fmt.Errorf("updating lifecycle bead %q: %w", id, err)
+		}
+		if current.Revision <= 0 {
+			return fmt.Errorf("updating lifecycle bead %q: %w", id, ErrConditionalWriteUnsupported)
+		}
+		if err := s.updateIfMatchAtRevision(id, current.Revision, opts); err != nil {
+			return fmt.Errorf("updating lifecycle bead %q: %w", id, err)
+		}
 		return nil
 	}
 	// Internal store callers supply canonical full IDs; the exact-ID collision
@@ -1505,7 +1606,7 @@ func (s *BdStore) Update(id string, opts UpdateOpts) error {
 // nothing (bdstore_conditional_release.go). The raw `bd sql` path below is the
 // fallback for any bd predating the flags (beads#5008) — which means the
 // contract-tested minimum, deps.env BD_PREV_VERSION (1.0.4), and not the
-// installable default: deps.env BD_VERSION is v1.3.0, cut past
+// installable default: deps.env BD_VERSION is v1.3.1-rc.2, cut past
 // beads#5008, so a stock install takes the verb. This path is the floor's, not
 // the live one, and it stays reachable only because deps.env holds
 // BD_PREV_VERSION below beads#5008. On that path the sqlite backend refuses
@@ -1870,6 +1971,23 @@ func (s *BdStore) UpdateAll(ids []string, opts UpdateOpts) (int, error) {
 	if len(ids) == 0 {
 		return 0, nil
 	}
+	if err := rejectPrivateEvidenceArgvMetadata("bd update all", opts.Metadata); err != nil {
+		return 0, err
+	}
+	if bdUpdateMayReopenOrClearLifecycleEvidence(opts) {
+		for _, id := range ids {
+			current, err := s.Get(id)
+			if err != nil {
+				return 0, err
+			}
+			if err := ValidateLifecycleMutation(current, opts); err != nil {
+				return 0, fmt.Errorf("batch updating lifecycle bead %q: %w", id, err)
+			}
+		}
+		// The public conditional API fences one row at a time. Do not send a
+		// lifecycle-sensitive multi-row update through bd's unfenced batch verb.
+		return 0, ErrConditionalWriteUnsupported
+	}
 	args := append([]string{"update", "--json"}, ids...)
 	baseLen := len(args)
 	if opts.Title != nil {
@@ -1994,6 +2112,26 @@ func beadSliceContains(items []Bead, id string) bool {
 
 // SetMetadata sets a key-value metadata pair on a bead via bd update.
 func (s *BdStore) SetMetadata(id, key, value string) error {
+	metadata := map[string]string{key: value}
+	if err := rejectPrivateEvidenceArgvMetadata("bd set metadata", metadata); err != nil {
+		return err
+	}
+	if bdUpdateMayReopenOrClearLifecycleEvidence(UpdateOpts{Metadata: metadata}) {
+		current, err := s.Get(id)
+		if err != nil {
+			return err
+		}
+		if err := ValidateLifecycleMutation(current, UpdateOpts{Metadata: metadata}); err != nil {
+			return fmt.Errorf("setting lifecycle metadata on %q: %w", id, err)
+		}
+		if current.Revision <= 0 {
+			return fmt.Errorf("setting lifecycle metadata on %q: %w", id, ErrConditionalWriteUnsupported)
+		}
+		if err := s.updateIfMatchAtRevision(id, current.Revision, UpdateOpts{Metadata: metadata}); err != nil {
+			return fmt.Errorf("setting lifecycle metadata on %q: %w", id, err)
+		}
+		return nil
+	}
 	err := s.runBDTransientWrite("update", "--json", id,
 		"--set-metadata", key+"="+value)
 	if err != nil {
@@ -2010,6 +2148,25 @@ func (s *BdStore) SetMetadata(id, key, value string) error {
 // but each individual call is idempotent.
 func (s *BdStore) SetMetadataBatch(id string, kvs map[string]string) error {
 	if len(kvs) == 0 {
+		return nil
+	}
+	if err := rejectPrivateEvidenceArgvMetadata("bd set metadata batch", kvs); err != nil {
+		return err
+	}
+	if bdUpdateMayReopenOrClearLifecycleEvidence(UpdateOpts{Metadata: kvs}) {
+		current, err := s.Get(id)
+		if err != nil {
+			return err
+		}
+		if err := ValidateLifecycleMutation(current, UpdateOpts{Metadata: kvs}); err != nil {
+			return fmt.Errorf("setting lifecycle metadata batch on %q: %w", id, err)
+		}
+		if current.Revision <= 0 {
+			return fmt.Errorf("setting lifecycle metadata batch on %q: %w", id, ErrConditionalWriteUnsupported)
+		}
+		if err := s.updateIfMatchAtRevision(id, current.Revision, UpdateOpts{Metadata: kvs}); err != nil {
+			return fmt.Errorf("setting lifecycle metadata batch on %q: %w", id, err)
+		}
 		return nil
 	}
 	args := []string{"update", "--json", id}
@@ -2133,6 +2290,9 @@ func (tx *bdStoreTx) Update(id string, opts UpdateOpts) error {
 	if err != nil {
 		return err
 	}
+	if err := ValidateLifecycleMutation(item.current, opts); err != nil {
+		return fmt.Errorf("updating lifecycle bead %q: %w", id, err)
+	}
 	item.current = applyUpdateOptsToBead(item.current, opts)
 	item.touched.note(opts)
 	item.updated = true
@@ -2150,6 +2310,9 @@ func (tx *bdStoreTx) Close(id string) error {
 	item, err := tx.item(id)
 	if err != nil {
 		return err
+	}
+	if err := ValidateLifecycleClose(item.current); err != nil {
+		return fmt.Errorf("closing lifecycle bead %q: %w", id, err)
 	}
 	setBeadStatus(&item.current, "closed")
 	item.closed = true
@@ -2529,6 +2692,12 @@ func (s *BdStore) CloseAll(ids []string, metadata map[string]string) (int, error
 	if len(ids) == 0 {
 		return 0, nil
 	}
+	if err := rejectPrivateEvidenceArgvMetadata("bd close all", metadata); err != nil {
+		return 0, err
+	}
+	if err := s.validateLifecycleCloseTargets(ids, metadata); err != nil {
+		return 0, err
+	}
 
 	// Set metadata on all beads first (before closing, since some stores
 	// prevent metadata writes on closed beads).
@@ -2565,6 +2734,9 @@ func (s *BdStore) setMetadataBatchAll(ids []string, kvs map[string]string) error
 	if len(ids) == 0 || len(kvs) == 0 {
 		return nil
 	}
+	if err := rejectPrivateEvidenceArgvMetadata("bd set metadata batch", kvs); err != nil {
+		return err
+	}
 	args := []string{"update", "--json"}
 	args = append(args, ids...)
 	keys := make([]string, 0, len(kvs))
@@ -2596,6 +2768,9 @@ func (s *BdStore) setMetadataBatchAll(ids []string, kvs map[string]string) error
 func (s *BdStore) CloseAllWithReason(ids []string, reason string) (int, error) {
 	if len(ids) == 0 {
 		return 0, nil
+	}
+	if err := s.validateLifecycleCloseTargets(ids, nil); err != nil {
+		return 0, err
 	}
 	reason = strings.TrimSpace(reason)
 	err := s.runBDTransientWrite(bdCloseArgs(reason, ids...)...)
@@ -2634,16 +2809,20 @@ func (s *BdStore) CloseAllWithReason(ids []string, reason string) (int, error) {
 // the supplied reason; it forwards what the caller set, or omits
 // --reason entirely when no metadata is set.
 func (s *BdStore) Close(id string) error {
-	reason := ""
-	if b, err := s.Get(id); err == nil {
-		reason = strings.TrimSpace(b.Metadata["close_reason"])
+	b, err := s.Get(id)
+	if err != nil {
+		return fmt.Errorf("closing bead %q: %w", id, err)
 	}
-	return s.close(id, reason)
+	if err := ValidateLifecycleClose(b); err != nil {
+		return fmt.Errorf("closing lifecycle bead %q: %w", id, err)
+	}
+	return s.closeWithCurrent(id, strings.TrimSpace(b.Metadata["close_reason"]))
 }
 
-// CloseWithReason closes a bead with an explicit reason without first reading
-// the bead metadata. Callers that need close_reason persisted for audit trails
-// should write metadata before calling this method.
+// CloseWithReason closes a bead with an explicit reason. It reads the current
+// row to enforce lifecycle source-close restrictions; callers that need
+// close_reason persisted for audit trails should write metadata before calling
+// this method.
 func (s *BdStore) CloseWithReason(id, reason string) error {
 	return s.close(id, strings.TrimSpace(reason))
 }
@@ -2657,6 +2836,20 @@ func bdCloseArgs(reason string, ids ...string) []string {
 }
 
 func (s *BdStore) close(id, reason string) error {
+	current, err := s.Get(id)
+	if err != nil {
+		return fmt.Errorf("closing bead %q: %w", id, err)
+	}
+	if err := ValidateLifecycleClose(current); err != nil {
+		return fmt.Errorf("closing lifecycle bead %q: %w", id, err)
+	}
+	return s.closeWithCurrent(id, reason)
+}
+
+// closeWithCurrent performs the close and its honesty readback after the
+// caller has validated the current row. Close uses this to avoid a second
+// pre-close read between reading close_reason and issuing the same close.
+func (s *BdStore) closeWithCurrent(id, reason string) error {
 	// Internal callers supply canonical full IDs; exact-ID guard lives at the
 	// CLI/API entry points (gcy-g4o).
 	err := s.runBDTransientWrite(bdCloseArgs(reason, id)...)
@@ -2685,7 +2878,15 @@ func (s *BdStore) close(id, reason string) error {
 
 // Reopen sets a closed bead's status to open via bd reopen.
 func (s *BdStore) Reopen(id string) error {
-	err := s.runBDTransientWrite("reopen", "--json", id)
+	current, err := s.Get(id)
+	if err != nil {
+		return fmt.Errorf("reopening bead %q: %w", id, err)
+	}
+	open := "open"
+	if err := ValidateLifecycleMutation(current, UpdateOpts{Status: &open}); err != nil {
+		return fmt.Errorf("reopening lifecycle bead %q: %w", id, err)
+	}
+	err = s.runBDTransientWrite("reopen", "--json", id)
 	if err != nil {
 		if isBdNotFound(err) {
 			return fmt.Errorf("reopening bead %q: %w", id, ErrNotFound)
@@ -2695,10 +2896,58 @@ func (s *BdStore) Reopen(id string) error {
 	return nil
 }
 
+func bdUpdateMayReopenOrClearLifecycleEvidence(opts UpdateOpts) bool {
+	return LifecycleMutationNeedsValidation(opts)
+}
+
+func (s *BdStore) validateLifecycleCloseTargets(ids []string, metadata map[string]string) error {
+	for _, id := range ids {
+		current, err := s.Get(id)
+		if err != nil {
+			return fmt.Errorf("checking close target %q: %w", id, err)
+		}
+		closedStatus := "closed"
+		if err := ValidateLifecycleMutation(current, UpdateOpts{Status: &closedStatus, Metadata: metadata}); err != nil {
+			return fmt.Errorf("closing lifecycle bead %q: %w", id, err)
+		}
+	}
+	return nil
+}
+
+// preflightLifecycleDelete refuses lifecycle records whose durable authorization
+// or recovery budget would be erased. BdStore's read and delete are separate
+// CLI commands, so this is a conservative guard, not a revision fence: a writer
+// racing between the two commands can still change the row. The deployed bd
+// CLI does not expose a conditional delete revision flag, so callers must not
+// treat this provider as enforcing an atomic lifecycle delete boundary.
+func (s *BdStore) preflightLifecycleDelete(id string) error {
+	current, err := s.Get(id)
+	if err != nil {
+		if errors.Is(err, ErrIDCollision) {
+			return fmt.Errorf("checking lifecycle delete target %q: %w", id, err)
+		}
+		if errors.Is(err, ErrNotFound) {
+			// Preserve bd's existing delete behavior for an already absent row.
+			return nil
+		}
+		return fmt.Errorf("checking lifecycle delete target %q: %w", id, err)
+	}
+	if err := protectRetainedEvidenceDelete(current); err != nil {
+		return fmt.Errorf("deleting bead %q: %w", id, err)
+	}
+	if err := ValidateLifecycleDelete(current); err != nil {
+		return fmt.Errorf("deleting lifecycle bead %q: %w", id, err)
+	}
+	return nil
+}
+
 // Delete permanently removes a bead from the store via bd delete.
 func (s *BdStore) Delete(id string) error {
 	// Internal callers supply canonical full IDs; exact-ID guard lives at the
 	// CLI/API entry points (gcy-g4o).
+	if err := s.preflightLifecycleDelete(id); err != nil {
+		return err
+	}
 	err := s.runBDTransientWrite("delete", "--force", "--json", id)
 	if err != nil {
 		if isBdNotFound(err) {
@@ -2733,6 +2982,13 @@ const bdDeleteBatchChunk = 256
 // returns a *BatchDeleteError carrying the ids from the fully-committed earlier
 // chunks, letting a caching layer reconcile exactly those instead of treating
 // the whole batch as untouched.
+//
+// Each chunk is preflighted with `bd show` before its delete command. These are
+// separate subprocesses and are not atomic: the bd backend cannot fence the
+// delete to the revision returned by show. Protected rows are refused when
+// observed, but a concurrent writer can change a row between preflight and
+// delete. This path therefore does not certify backend-enforced lifecycle
+// deletion.
 func (s *BdStore) DeleteBatch(ids []string) error {
 	for start := 0; start < len(ids); start += bdDeleteBatchChunk {
 		end := start + bdDeleteBatchChunk
@@ -2740,6 +2996,14 @@ func (s *BdStore) DeleteBatch(ids []string) error {
 			end = len(ids)
 		}
 		chunk := ids[start:end]
+		for _, id := range chunk {
+			if err := s.preflightLifecycleDelete(id); err != nil {
+				return &BatchDeleteError{
+					Committed: append([]string(nil), ids[:start]...),
+					Err:       fmt.Errorf("preflighting batch delete of %q: %w", id, err),
+				}
+			}
+		}
 		args := make([]string, 0, len(chunk)+2)
 		args = append(args, "delete")
 		args = append(args, chunk...)
@@ -2879,7 +3143,7 @@ func bdListRequiresClientLimit(query, serverQuery ListQuery, clientFilteredAssig
 	// resolved Go-side (identical tie-break to the in-memory sort), so a
 	// bd-side limit would cut rows before that filter runs — fetch unbounded
 	// and let applyListQuery filter then limit.
-	if serverQuery.SeekAfter != nil {
+	if serverQuery.SeekAfter != nil || serverQuery.AbsentMetadataKey != "" {
 		return true
 	}
 	// IDs is a Go-side-only residual filter (see ListQuery.Matches): bd list
@@ -3002,7 +3266,7 @@ func isWispQueryableID(id string) bool {
 func (s *BdStore) getEphemeralByID(id string) ([]Bead, error) {
 	clause := "ephemeral=true AND id=" + id
 	args := []string{"query", "--json", clause, "--all", "--limit", "1"}
-	out, err := s.runner(s.dir, "bd", args...)
+	out, err := s.runBDTransientRead(args...)
 	if err != nil {
 		if isBdQueryUnsupported(err) {
 			return nil, nil
@@ -3041,6 +3305,7 @@ func canApplyWispsServerLimit(query ListQuery) bool {
 		query.CreatedBefore.IsZero() &&
 		query.UpdatedBefore.IsZero() &&
 		len(query.Metadata) == 0 &&
+		query.AbsentMetadataKey == "" &&
 		query.SeekAfter == nil
 }
 

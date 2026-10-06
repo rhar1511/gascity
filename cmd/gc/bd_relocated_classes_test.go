@@ -428,9 +428,33 @@ dolt.auto-start: false
 	// with that body and exit 0 — which is how a projection's confident empty
 	// answer (`[]`, exit 0) is reproduced without a real ledger. It exits 0
 	// explicitly so an unset BD_STUB_STDOUT does not leak the test's exit code.
-	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"${CAPTURE_PATH}\"\nif [ -n \"${BD_STUB_STDOUT}\" ]; then printf '%s\\n' \"${BD_STUB_STDOUT}\"; fi\nexit 0\n"), 0o755); err != nil {
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "$CAPTURE_PATH"
+if [ "$BD_STUB_CONDITIONAL_WRITES" = "1" ]; then
+  case "$1:$2" in
+    update:--help|close:--help|assign:--help|delete:--help)
+      printf '%s\n' '--if-revision'
+      exit 0 ;;
+  esac
+  if [ "$1" = "update" ]; then
+    revision=""; previous=""
+    for argument in "$@"; do
+      [ "$previous" = "--if-revision" ] && revision="$argument"
+      previous="$argument"
+    done
+    if [ "$revision" != "1" ]; then
+      echo 'conditional fixture requires revision 1' >&2
+      exit 13
+    fi
+  fi
+fi
+if [ -n "$BD_STUB_STDOUT" ]; then printf '%s\n' "$BD_STUB_STDOUT"; fi
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("BD_STUB_CONDITIONAL_WRITES", "")
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("CAPTURE_PATH", capture)
 	t.Setenv("GC_CITY_PATH", cityDir)
@@ -1373,6 +1397,12 @@ func TestGcBdOnARefusedCitySeparatesWorkFromClassOwnedIDs(t *testing.T) {
 		capture := bdSQLRefusalCity(t, bdUnservableStorage)
 		resetCLIStorageRoutes(t)
 		captureCLIStorageStderr(t)
+		// The capture barrier must classify the target as an ordinary work
+		// row before the passthrough. Model a successful `bd show` rather than
+		// an unreadable store: unreadable close targets are intentionally
+		// fail-closed by the evidence gate.
+		t.Setenv("BD_STUB_CONDITIONAL_WRITES", "1")
+		t.Setenv("BD_STUB_STDOUT", `[{"id":"demo-abc123","title":"ordinary task","status":"open","issue_type":"task","revision":1}]`)
 
 		args := []string{"update", "demo-abc123", "--status", "closed"}
 		var stdout, stderr bytes.Buffer
@@ -1383,8 +1413,11 @@ func TestGcBdOnARefusedCitySeparatesWorkFromClassOwnedIDs(t *testing.T) {
 		if err != nil {
 			t.Fatalf("bd was not invoked for a work mutation: %v", err)
 		}
-		if !strings.Contains(string(data), strings.Join(args, " ")) {
-			t.Fatalf("bd received %q, want the work mutation forwarded verbatim", data)
+		if !strings.Contains(string(data), "update --json demo-abc123 --status closed --if-revision 1") {
+			t.Fatalf("bd received %q, want the work mutation forwarded with JSON output and its observed revision fence", data)
+		}
+		if !strings.Contains(string(data), "--if-revision 1") {
+			t.Fatalf("bd received %q, want the observed revision preserved as a write fence", data)
 		}
 	})
 
@@ -1406,46 +1439,37 @@ func TestGcBdOnARefusedCitySeparatesWorkFromClassOwnedIDs(t *testing.T) {
 	})
 }
 
-// TestGcBdSQLOverrideRunsTheQueryLoudly pins the escape hatch. The matcher
-// cannot tell an id-scoped predicate from a work-ledger query that legitimately
-// references a relocated id in a JSON or text column, so an operator must be
-// able to say "I know, run it" — and gc must say so on stderr rather than
-// letting the override be silent.
-func TestGcBdSQLOverrideRunsTheQueryLoudly(t *testing.T) {
+// A class-residency override does not grant private ledger presentation access.
+func TestGcBdSQLOverrideCannotBypassPrivatePresentation(t *testing.T) {
 	capture := bdSQLRefusalCity(t, bdSQLRefusalSplitStorage)
 	t.Setenv(bdRelocatedClassOverrideEnvVar, "1")
 
 	var stdout, stderr bytes.Buffer
-	if code := doBd([]string{"sql", "select id from issues where id = 'gcg-abc123'"}, &stdout, &stderr); code != 0 {
-		t.Fatalf("doBd = %d with the override set; stderr=%q", code, stderr.String())
+	if code := doBd([]string{"sql", "select id from issues where id = 'gcg-abc123'"}, &stdout, &stderr); code == 0 {
+		t.Fatalf("raw SQL was allowed with residency override; stdout=%q", stdout.String())
 	}
 	data, err := os.ReadFile(capture)
-	if err != nil {
-		t.Fatalf("bd was not invoked with the override set: %v", err)
+	if err == nil && strings.Contains(string(data), "select id") {
+		t.Fatalf("unprojectable SQL reached bd: %q", data)
 	}
-	if !strings.Contains(string(data), "gcg-abc123") {
-		t.Fatalf("bd received %q, want the unmodified query", data)
-	}
-	if !strings.Contains(stderr.String(), bdRelocatedClassOverrideEnvVar) {
-		t.Errorf("override was honored silently; stderr=%q", stderr.String())
+	if !strings.Contains(stderr.String(), "private-safe presentation") {
+		t.Errorf("missing presentation refusal; stderr=%q", stderr.String())
 	}
 }
 
-// TestGcBdSQLIsUnchangedOnASingleStoreCity is the mutation counterpart: the
-// same query, the same city, with the [storage] split removed, still reaches bd.
-func TestGcBdSQLIsUnchangedOnASingleStoreCity(t *testing.T) {
+func TestGcBdSQLRequiresPrivatePresentationOnSingleStoreCity(t *testing.T) {
 	capture := bdSQLRefusalCity(t, "")
 
 	var stdout, stderr bytes.Buffer
-	if code := doBd([]string{"sql", "select id, status from issues where id = 'gcg-abc123'"}, &stdout, &stderr); code != 0 {
-		t.Fatalf("doBd = %d on a single-store city; stderr=%q", code, stderr.String())
+	if code := doBd([]string{"sql", "select id, status from issues where id = 'gcg-abc123'"}, &stdout, &stderr); code == 0 {
+		t.Fatalf("raw SQL was allowed on a single-store city; stdout=%q", stdout.String())
 	}
 	data, err := os.ReadFile(capture)
-	if err != nil {
-		t.Fatalf("bd was not invoked on a single-store city: %v", err)
+	if err == nil && strings.Contains(string(data), "select id") {
+		t.Fatalf("unprojectable SQL reached bd: %q", data)
 	}
-	if !strings.Contains(string(data), "gcg-abc123") {
-		t.Fatalf("bd received %q, want the unmodified query", data)
+	if !strings.Contains(stderr.String(), "private-safe presentation") {
+		t.Fatalf("missing presentation refusal: %s", &stderr)
 	}
 }
 

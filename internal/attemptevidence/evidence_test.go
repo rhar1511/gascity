@@ -1,0 +1,1284 @@
+package attemptevidence
+
+import (
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"math/rand"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/testutil"
+)
+
+func TestLargeDiffUsesContentAddressedPayloadAndExactReadHydrates(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "beads.json")
+	store, err := beads.OpenFileStore(fsys.OSFS{}, storePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, err := store.Create(beads.Bead{Title: "large evidence source", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence := largeDiffEvidence(t, owner.ID)
+	wantPayload := append([]byte(nil), evidence.WorkspaceDiff.Payload...)
+	wantDigest := evidence.WorkspaceDiff.SHA256
+
+	sealed, err := Seal(store, evidence)
+	if err != nil {
+		t.Fatalf("Seal large diff: %v", err)
+	}
+	if !samePayload(evidence, sealed) {
+		t.Fatal("Seal did not return the exact captured diff content")
+	}
+
+	ownerRow, err := store.Get(owner.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	indexed, err := decodeEvidence([]byte(ownerRow.Metadata[ownerIndexKey(sealed.AttemptID)]))
+	if err != nil {
+		t.Fatalf("decode owner index: %v", err)
+	}
+	if len(indexed.WorkspaceDiff.Payload) != 0 || indexed.WorkspaceDiff.SHA256 != wantDigest {
+		t.Fatalf("owner index stored %d payload bytes or lost digest", len(indexed.WorkspaceDiff.Payload))
+	}
+
+	archives, err := store.ListByMetadata(map[string]string{beadmeta.AttemptEvidenceArchiveOwnerIDMetadataKey: owner.ID}, 0, beads.IncludeClosed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(archives) != 1 {
+		t.Fatalf("archive count = %d, want 1", len(archives))
+	}
+	archived, err := evidenceFromArchive(archives[0])
+	if err != nil {
+		t.Fatalf("decode archive: %v", err)
+	}
+	if len(archived.WorkspaceDiff.Payload) != 0 || archived.WorkspaceDiff.SHA256 != wantDigest {
+		t.Fatalf("archive stored %d payload bytes or lost digest", len(archived.WorkspaceDiff.Payload))
+	}
+
+	payloadRows, err := store.ListByMetadata(map[string]string{beadmeta.AttemptEvidencePayloadDigestMetadataKey: wantDigest}, 0, beads.IncludeClosed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(payloadRows) != 1 || !beads.IsAttemptEvidencePayload(payloadRows[0]) {
+		t.Fatalf("content-addressed payload rows = %#v, want one protected payload", payloadRows)
+	}
+	storedPayload, err := base64.StdEncoding.DecodeString(payloadRows[0].Metadata[beadmeta.AttemptEvidencePayloadDataMetadataKey])
+	if err != nil || string(storedPayload) != string(wantPayload) {
+		t.Fatalf("stored payload decode/match: err=%v, bytes=%d want=%d", err, len(storedPayload), len(wantPayload))
+	}
+
+	otherOwner, err := store.Create(beads.Bead{Title: "second large evidence source", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := largeDiffEvidence(t, otherOwner.ID)
+	second.Identity.ExecutionBeadID = "second-large-attempt"
+	second.AttemptID, err = AttemptID(second.Identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Seal(store, second); err != nil {
+		t.Fatalf("Seal second attempt with identical content: %v", err)
+	}
+	payloadRows, err = store.ListByMetadata(map[string]string{beadmeta.AttemptEvidencePayloadDigestMetadataKey: wantDigest}, 0, beads.IncludeClosed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(payloadRows) != 1 {
+		t.Fatalf("same content created %d payload rows across attempts, want one", len(payloadRows))
+	}
+	listed, err := List(store, owner.ID)
+	if err != nil {
+		t.Fatalf("List compact attempts: %v", err)
+	}
+	if len(listed) != 1 || len(listed[0].WorkspaceDiff.Payload) != 0 || listed[0].WorkspaceDiff.SHA256 != wantDigest {
+		t.Fatalf("List hydrated payload bytes or lost its digest: %#v", listed)
+	}
+
+	if err := store.Delete(owner.ID); err != nil {
+		t.Fatalf("delete source owner: %v", err)
+	}
+	store, err = beads.OpenFileStore(fsys.OSFS{}, storePath)
+	if err != nil {
+		t.Fatalf("reopen FileStore: %v", err)
+	}
+	got, err := Read(store, owner.ID, sealed.AttemptID)
+	if err != nil {
+		t.Fatalf("Read after owner deletion and reopen: %v", err)
+	}
+	if string(got.WorkspaceDiff.Payload) != string(wantPayload) || got.WorkspaceDiff.Status != StatusAvailable {
+		t.Fatalf("rehydrated diff status=%q bytes=%d want=%d", got.WorkspaceDiff.Status, len(got.WorkspaceDiff.Payload), len(wantPayload))
+	}
+	if _, _, err := DecodeDiff(got.WorkspaceDiff); err != nil {
+		t.Fatalf("DecodeDiff after reopen: %v", err)
+	}
+}
+
+func TestConcurrentSameDigestPayloadWritesCreateOneVerifiedRow(t *testing.T) {
+	store := newAttemptEvidenceStore(t)
+	content := []byte(strings.Repeat("same immutable payload\n", 1024))
+	digest := payloadDigest(content)
+	const writers = 12
+	start := make(chan struct{})
+	errs := make(chan error, writers)
+	var wg sync.WaitGroup
+	for range writers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			errs <- storePayloadBytes(store, digest, content)
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent payload write: %v", err)
+		}
+	}
+	rows, err := store.ListByMetadata(map[string]string{beadmeta.AttemptEvidencePayloadDigestMetadataKey: digest}, 0, beads.IncludeClosed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].ID != beads.AttemptEvidencePayloadID(digest) {
+		t.Fatalf("payload rows = %#v, want one deterministic row", rows)
+	}
+	read, err := ReadPayload(store, PayloadReference{Status: StatusAvailable, SHA256: digest, Bytes: int64(len(content))})
+	if err != nil || read.Status != StatusAvailable || string(read.Content) != string(content) {
+		t.Fatalf("verified concurrent payload = status %q bytes %d error %v", read.Status, len(read.Content), err)
+	}
+}
+
+func TestExistingCanonicalPayloadDoesNotMaskCorruptDuplicateOnWrite(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "beads.json")
+	store, err := beads.OpenFileStore(fsys.OSFS{}, storePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := []byte("immutable payload")
+	digest := payloadDigest(content)
+	if err := storePayloadBytes(store, digest, content); err != nil {
+		t.Fatalf("initial payload write: %v", err)
+	}
+	appendCorruptFilePayloadDuplicate(t, storePath, digest)
+	store, err = beads.OpenFileStore(fsys.OSFS{}, storePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := storePayloadBytes(store, digest, content); err == nil || !strings.Contains(err.Error(), "corrupt") {
+		t.Fatalf("repeat payload write error = %v, want corrupt duplicate rejection", err)
+	}
+}
+
+func TestLargeDiffMissingAndCorruptPayloadAreExplicit(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		corrupt   bool
+		wantState string
+		wantWhy   string
+	}{
+		{name: "missing", wantState: StatusUnavailable, wantWhy: "payload_missing"},
+		{name: "corrupt", corrupt: true, wantState: StatusCorrupt, wantWhy: "payload_digest_mismatch"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			storePath := filepath.Join(t.TempDir(), "beads.json")
+			store, err := beads.OpenFileStore(fsys.OSFS{}, storePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			owner, err := store.Create(beads.Bead{Title: "large evidence source", Type: "task"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			sealed, err := Seal(store, largeDiffEvidence(t, owner.ID))
+			if err != nil {
+				t.Fatalf("Seal: %v", err)
+			}
+			rewriteFilePayload(t, storePath, sealed.WorkspaceDiff.SHA256, tc.corrupt)
+			store, err = beads.OpenFileStore(fsys.OSFS{}, storePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := Read(store, owner.ID, sealed.AttemptID)
+			if err != nil {
+				t.Fatalf("Read: %v", err)
+			}
+			if got.WorkspaceDiff.Status != tc.wantState || got.WorkspaceDiff.Reason != tc.wantWhy || len(got.WorkspaceDiff.Payload) != 0 {
+				t.Fatalf("diff state=%q reason=%q payload bytes=%d, want %q/%q/empty", got.WorkspaceDiff.Status, got.WorkspaceDiff.Reason, len(got.WorkspaceDiff.Payload), tc.wantState, tc.wantWhy)
+			}
+		})
+	}
+}
+
+func TestRepeatedCaptureFailsWhenSealedPayloadIsUnavailable(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "beads.json")
+	store, err := beads.OpenFileStore(fsys.OSFS{}, storePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, err := store.Create(beads.Bead{Title: "capture owner", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo, baseSHA := newEvidenceRepo(t)
+	if err := os.WriteFile(filepath.Join(repo, "tracked.txt"), []byte("changed after base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	spec := CaptureSpec{
+		Identity: Identity{Kind: KindRetry, OwnerBeadID: owner.ID, ExecutionBeadID: "attempt-with-payload"},
+		StoreRef: "rig:test", WorkDir: repo, BaseSHA: baseSHA,
+	}
+	sealed, err := Capture(context.Background(), store, spec)
+	if err != nil {
+		t.Fatalf("first Capture: %v", err)
+	}
+	if sealed.WorkspaceDiff.Status != StatusAvailable || sealed.WorkspaceDiff.SHA256 == "" {
+		t.Fatalf("first capture did not seal workspace content: %#v", sealed.WorkspaceDiff)
+	}
+	rewriteFilePayload(t, storePath, sealed.WorkspaceDiff.SHA256, false)
+	store, err = beads.OpenFileStore(fsys.OSFS{}, storePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Capture(context.Background(), store, spec); err == nil || !strings.Contains(err.Error(), "unavailable workspace diff payload") {
+		t.Fatalf("repeat Capture error = %v, want unavailable sealed payload", err)
+	}
+}
+
+func TestAttemptArtifactsStoreRawLogsAndSARIFAsExactDigestReferences(t *testing.T) {
+	store := newAttemptEvidenceStore(t)
+	owner, err := store.Create(beads.Bead{Title: "artifact evidence source", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence := largeDiffEvidence(t, owner.ID)
+	stdout := []byte(strings.Repeat("check output line\n", 12<<10))
+	sarif := []byte(`{"version":"2.1.0","runs":[{"results":[]}]}`)
+	binary := []byte{0x00, 0xff, 0x7f, 0x10}
+	evidence.Artifacts = []PayloadArtifact{
+		{Name: "stdout", MediaType: "text/plain", Status: StatusAvailable, Content: stdout},
+		{Name: "sarif", MediaType: "application/sarif+json", Status: StatusAvailable, Content: sarif},
+		{Name: "binary", MediaType: "application/octet-stream", Status: StatusAvailable, Content: binary},
+	}
+	sealed, err := Seal(store, evidence)
+	if err != nil {
+		t.Fatalf("Seal artifacts: %v", err)
+	}
+	if len(sealed.Artifacts) != 3 {
+		t.Fatalf("sealed artifacts = %#v, want three", sealed.Artifacts)
+	}
+	for _, artifact := range sealed.Artifacts {
+		if artifact.Status != StatusAvailable || artifact.SHA256 == "" || artifact.Bytes <= 0 || len(artifact.Content) != 0 {
+			t.Fatalf("Seal returned non-reference artifact: %#v", artifact)
+		}
+	}
+
+	got, err := Read(store, owner.ID, sealed.AttemptID)
+	if err != nil {
+		t.Fatalf("Read artifacts: %v", err)
+	}
+	if len(got.Artifacts) != 3 || got.Identity.ExecutionBeadID != evidence.Identity.ExecutionBeadID {
+		t.Fatalf("attempt artifact refs lost their exact execution identity: %#v", got)
+	}
+	wantByName := map[string][]byte{"stdout": stdout, "sarif": sarif, "binary": binary}
+	for _, artifact := range got.Artifacts {
+		read, err := ReadPayload(store, PayloadReference{
+			Name: artifact.Name, MediaType: artifact.MediaType,
+			SHA256: artifact.SHA256, Bytes: artifact.Bytes,
+		})
+		if err != nil {
+			t.Fatalf("ReadPayload(%s): %v", artifact.Name, err)
+		}
+		if read.Status != StatusAvailable || string(read.Content) != string(wantByName[artifact.Name]) {
+			t.Fatalf("payload %s state=%q bytes=%d, want available/%d", artifact.Name, read.Status, len(read.Content), len(wantByName[artifact.Name]))
+		}
+	}
+
+	ownerRow, err := store.Get(owner.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	indexed, err := decodeEvidence([]byte(ownerRow.Metadata[ownerIndexKey(sealed.AttemptID)]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, artifact := range indexed.Artifacts {
+		if len(artifact.Content) != 0 || artifact.SHA256 == "" {
+			t.Fatalf("attempt record embedded artifact contents: %#v", artifact)
+		}
+	}
+}
+
+func rewriteFilePayload(t *testing.T, path, digest string, corrupt bool) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(data, &document); err != nil {
+		t.Fatal(err)
+	}
+	var rows []beads.Bead
+	if err := json.Unmarshal(document["beads"], &rows); err != nil {
+		t.Fatal(err)
+	}
+	kept := rows[:0]
+	for _, row := range rows {
+		if row.Metadata[beadmeta.AttemptEvidencePayloadDigestMetadataKey] != digest {
+			kept = append(kept, row)
+			continue
+		}
+		if corrupt {
+			row.Metadata[beadmeta.AttemptEvidencePayloadDataMetadataKey] = base64.StdEncoding.EncodeToString([]byte("wrong content"))
+			kept = append(kept, row)
+		}
+	}
+	document["beads"], err = json.Marshal(kept)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err = json.MarshalIndent(document, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func appendCorruptFilePayloadDuplicate(t *testing.T, path, digest string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(data, &document); err != nil {
+		t.Fatal(err)
+	}
+	var rows []beads.Bead
+	if err := json.Unmarshal(document["beads"], &rows); err != nil {
+		t.Fatal(err)
+	}
+	rows = append(rows, beads.Bead{
+		ID:     "legacy-duplicate",
+		Title:  "corrupt duplicate",
+		Type:   "molecule",
+		Status: "closed",
+		Metadata: beads.StringMap{
+			beadmeta.AttemptEvidencePayloadDigestMetadataKey: digest,
+			beadmeta.AttemptEvidencePayloadDataMetadataKey:   base64.StdEncoding.EncodeToString([]byte("wrong content")),
+		},
+	})
+	document["beads"], err = json.Marshal(rows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err = json.MarshalIndent(document, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func largeDiffEvidence(t *testing.T, ownerID string) Evidence {
+	t.Helper()
+	raw := make([]byte, 256<<10)
+	if _, err := rand.New(rand.NewSource(42)).Read(raw); err != nil {
+		t.Fatal(err)
+	}
+	diff, err := compressDiff(diffBundle{TrackedPatch: raw}, DiffSourceWorkingTree)
+	if err != nil {
+		t.Fatalf("compress large diff: %v", err)
+	}
+	identity := Identity{Kind: KindRetry, OwnerBeadID: ownerID, ExecutionBeadID: "large-attempt"}
+	attemptID, err := AttemptID(identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return Evidence{
+		SchemaVersion: SchemaVersion, AttemptID: attemptID, Identity: identity,
+		StoreRef: "rig:test", Permission: PermissionScope{StoreRef: "rig:test", WorkID: ownerID},
+		CapturedAt:   time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC),
+		SourceStatus: StatusAvailable, BaseStatus: StatusUnavailable, BaseReason: "base_revision_not_recorded",
+		CandidateStatus: StatusAvailable, CandidateSHA: strings.Repeat("a", 40),
+		WorkingTreeStatus: WorkingTreeDirty, CandidateReason: "",
+		Diff:          DiffSnapshot{Status: StatusUnavailable, Reason: "base_revision_not_recorded"},
+		WorkspaceDiff: diff,
+		Policy:        unavailableFacet("not_linked"), Actions: unavailableFacet("not_linked"),
+		Acknowledgements: unavailableFacet("not_linked"), Redaction: unavailableFacet("not_performed"),
+	}
+}
+
+func TestCapturePreservesExactAttemptAfterOwnerDeleteAndStoreRestart(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "beads.json")
+	store, err := beads.OpenFileStore(fsys.OSFS{}, storePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, err := store.Create(beads.Bead{Title: "source work", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo, baseSHA := newEvidenceRepo(t)
+	if err := os.WriteFile(filepath.Join(repo, "tracked.txt"), []byte("candidate\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "new.txt"), []byte("untracked bytes\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	spec := CaptureSpec{
+		Identity: Identity{
+			Kind: KindWorkbench, OwnerBeadID: owner.ID, ExecutionBeadID: owner.ID,
+			SessionID: "session-1", SessionGeneration: "4", ClaimGeneration: "9",
+		},
+		StoreRef: "rig:pilot", WorkDir: repo, BaseSHA: baseSHA, Outcome: "failed",
+		Now: func() time.Time { return time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC) },
+	}
+	first, err := Capture(context.Background(), store, spec)
+	if err != nil {
+		t.Fatalf("Capture: %v", err)
+	}
+	if first.SourceStatus != StatusAvailable || first.BaseSHA != baseSHA || first.CandidateSHA == "" {
+		t.Fatalf("capture revision/status facts = %#v", first)
+	}
+	tracked, untracked, err := DecodeDiff(first.WorkspaceDiff)
+	if err != nil {
+		t.Fatalf("DecodeDiff: %v", err)
+	}
+	if !strings.Contains(string(tracked), "+candidate") || !strings.Contains(string(tracked), "-base") {
+		t.Fatalf("tracked patch did not preserve exact change: %s", tracked)
+	}
+	if len(untracked) != 1 || untracked[0].Path != "new.txt" || string(untracked[0].Bytes) != "untracked bytes\n" || untracked[0].Mode&0o777 != 0o600 {
+		t.Fatalf("untracked snapshot = %#v", untracked)
+	}
+	archives, err := store.ListByMetadata(map[string]string{beadmeta.AttemptEvidenceArchiveOwnerIDMetadataKey: owner.ID}, 0, beads.IncludeClosed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(archives) != 1 || !IsArchiveRecord(archives[0]) {
+		t.Fatalf("archive rows = %#v", archives)
+	}
+	ready, err := store.Ready()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range ready {
+		if row.ID == archives[0].ID {
+			t.Fatal("attempt archive appeared in actionable Ready work")
+		}
+	}
+
+	// A later branch/worktree state cannot replace the first attempt snapshot.
+	if err := os.WriteFile(filepath.Join(repo, "tracked.txt"), []byte("later branch\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	second, err := Capture(context.Background(), store, spec)
+	if err != nil {
+		t.Fatalf("idempotent Capture: %v", err)
+	}
+	if !samePayload(first, second) {
+		t.Fatal("a later workspace state replaced the first sealed attempt")
+	}
+	if err := store.Delete(owner.ID); err != nil {
+		t.Fatalf("delete source owner after archive: %v", err)
+	}
+
+	store, err = beads.OpenFileStore(fsys.OSFS{}, storePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := Read(store, owner.ID, first.AttemptID)
+	if err != nil {
+		t.Fatalf("Read after owner deletion/reopen: %v", err)
+	}
+	if !samePayload(first, got) {
+		t.Fatal("reopened archive did not return the exact sealed payload")
+	}
+	canonicalRepo := canonicalEvidenceTestPath(t, repo)
+	if first.Permission.StoreRef != spec.StoreRef || first.Permission.WorkID != owner.ID ||
+		first.Permission.RepositoryRoot != filepath.Join(canonicalRepo, ".git") || first.Permission.WorkspaceRoot != canonicalRepo {
+		t.Fatalf("captured permission scope = %+v, want exact repo/work/store scope", first.Permission)
+	}
+	backupDir := filepath.Join(t.TempDir(), "backup")
+	if err := os.MkdirAll(backupDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	backupBytes, err := os.ReadFile(storePath)
+	if err != nil {
+		t.Fatalf("read quiescent FileStore backup source: %v", err)
+	}
+	backupPath := filepath.Join(backupDir, "beads.json")
+	if err := os.WriteFile(backupPath, backupBytes, 0o600); err != nil {
+		t.Fatalf("write FileStore backup copy: %v", err)
+	}
+	backupStore, err := beads.OpenFileStore(fsys.OSFS{}, backupPath)
+	if err != nil {
+		t.Fatalf("open FileStore backup copy: %v", err)
+	}
+	backupEvidence, err := Read(backupStore, owner.ID, first.AttemptID)
+	if err != nil {
+		t.Fatalf("read evidence from FileStore backup copy: %v", err)
+	}
+	if !samePayload(first, backupEvidence) || backupEvidence.Diff.SHA256 != first.Diff.SHA256 || backupEvidence.Permission != first.Permission {
+		t.Fatal("FileStore backup/restore lost the exact diff digest or original permission scope")
+	}
+	refs, err := References(store, "rig:pilot", owner.ID)
+	if err != nil {
+		t.Fatalf("References after owner deletion: %v", err)
+	}
+	if len(refs) != 1 || refs[0].AttemptID != first.AttemptID || refs[0].WorkID != owner.ID || refs[0].DiffSHA256 != first.Diff.SHA256 {
+		t.Fatalf("exact references = %#v", refs)
+	}
+}
+
+func TestFileStoreReadsArchivedAttemptsAfterOwnerDeletion(t *testing.T) {
+	store := newAttemptEvidenceStore(t)
+	owner, err := store.Create(beads.Bead{Title: "disposable owner", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := Identity{Kind: KindRetry, OwnerBeadID: owner.ID, ExecutionBeadID: "gc-attempt"}
+	attemptID, err := AttemptID(identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence := Evidence{
+		SchemaVersion: SchemaVersion, AttemptID: attemptID, Identity: identity,
+		StoreRef: "rig:fixture", CapturedAt: time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC),
+		Permission:   PermissionScope{StoreRef: "rig:fixture", WorkID: owner.ID},
+		SourceStatus: StatusUnavailable, SourceReason: "source_unavailable",
+		BaseStatus: StatusUnavailable, BaseReason: "base_unavailable",
+		CandidateStatus: StatusUnavailable, CandidateReason: "candidate_unavailable",
+		WorkingTreeStatus: WorkingTreeUnknown,
+		Diff:              DiffSnapshot{Status: StatusUnavailable, Reason: "base_unavailable"},
+		WorkspaceDiff:     DiffSnapshot{Status: StatusUnavailable, Reason: "workspace_unavailable"},
+		Policy:            unavailableFacet("not_linked"), Actions: unavailableFacet("not_linked"),
+		Acknowledgements: unavailableFacet("not_linked"), Redaction: unavailableFacet("not_performed"),
+	}
+	sealed, err := Seal(store, evidence)
+	if err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	if !samePayload(sealed, evidence) {
+		t.Fatal("Seal returned a different archive than the proposed evidence")
+	}
+	if err := store.Delete(owner.ID); err != nil {
+		t.Fatalf("delete owner before archive read: %v", err)
+	}
+
+	listed, err := List(store, identity.OwnerBeadID)
+	if err != nil {
+		t.Fatalf("List after owner deletion: %v", err)
+	}
+	if len(listed) != 1 || !samePayload(listed[0], evidence) {
+		t.Fatalf("List after owner deletion = %#v, want exact archive %s", listed, attemptID)
+	}
+	read, err := Read(store, identity.OwnerBeadID, attemptID)
+	if err != nil {
+		t.Fatalf("Read after owner deletion: %v", err)
+	}
+	if !samePayload(read, evidence) {
+		t.Fatalf("Read after owner deletion = %#v, want exact archived attempt", read)
+	}
+}
+
+func TestSQLiteColdCopyBackupPreservesExactArchiveAfterOwnerDeletion(t *testing.T) {
+	sourceDir := filepath.Join(t.TempDir(), "source")
+	opened, err := beads.OpenSQLiteStore(sourceDir)
+	if err != nil {
+		t.Fatalf("OpenSQLiteStore source: %v", err)
+	}
+	store := opened.(*beads.SQLiteStore)
+	t.Cleanup(func() { _ = store.CloseStore() })
+	owner, err := store.Create(beads.Bead{Title: "source work", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create owner: %v", err)
+	}
+	repo, baseSHA := newEvidenceRepo(t)
+	if err := os.WriteFile(filepath.Join(repo, "tracked.txt"), []byte("candidate\n"), 0o644); err != nil {
+		t.Fatalf("write candidate: %v", err)
+	}
+	spec := CaptureSpec{
+		Identity: Identity{Kind: KindRetry, OwnerBeadID: owner.ID, ExecutionBeadID: "sqlite-attempt"},
+		StoreRef: "city:test-city", WorkDir: repo, BaseSHA: baseSHA,
+	}
+	want, err := Capture(context.Background(), store, spec)
+	if err != nil {
+		t.Fatalf("Capture: %v", err)
+	}
+	if err := store.Delete(owner.ID); err != nil {
+		t.Fatalf("delete source owner after archive: %v", err)
+	}
+	if err := store.CloseStore(); err != nil {
+		t.Fatalf("close source SQLite store before cold copy: %v", err)
+	}
+	backupDir := filepath.Join(t.TempDir(), "backup")
+	if err := os.MkdirAll(backupDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	backupBytes, err := os.ReadFile(filepath.Join(sourceDir, "beads.sqlite"))
+	if err != nil {
+		t.Fatalf("read quiescent SQLite backup source: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(backupDir, "beads.sqlite"), backupBytes, 0o600); err != nil {
+		t.Fatalf("write SQLite backup copy: %v", err)
+	}
+	backupOpened, err := beads.OpenSQLiteStore(backupDir)
+	if err != nil {
+		t.Fatalf("restore SQLite backup copy: %v", err)
+	}
+	backupStore := backupOpened.(*beads.SQLiteStore)
+	t.Cleanup(func() { _ = backupStore.CloseStore() })
+	got, err := Read(backupStore, owner.ID, want.AttemptID)
+	if err != nil {
+		t.Fatalf("read restored archive: %v", err)
+	}
+	if !samePayload(want, got) || got.Diff.SHA256 != want.Diff.SHA256 || got.Permission != want.Permission {
+		t.Fatal("SQLite backup/restore lost the exact diff digest or original permission scope")
+	}
+}
+
+func TestCaptureMissingSourceIsExplicitButCaptureFailureIsNotSealed(t *testing.T) {
+	store := newAttemptEvidenceStore(t)
+	owner, err := store.Create(beads.Bead{Title: "source work", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := CaptureSpec{
+		Identity: Identity{Kind: KindRetry, OwnerBeadID: owner.ID, ExecutionBeadID: "attempt-1"},
+		StoreRef: "rig:pilot", WorkDir: filepath.Join(t.TempDir(), "already-removed"),
+	}
+	evidence, err := Capture(context.Background(), store, spec)
+	if err != nil {
+		t.Fatalf("missing source should be explicitly sealed: %v", err)
+	}
+	if evidence.SourceStatus != StatusMissing || evidence.Diff.Status != StatusUnavailable {
+		t.Fatalf("missing source was not explicit: %#v", evidence)
+	}
+
+	spec.Identity.ExecutionBeadID = "attempt-2"
+	spec.WorkDir = t.TempDir() // Exists but is not a git repository.
+	if _, err := Capture(context.Background(), store, spec); err == nil {
+		t.Fatal("capture failure was treated as an unavailable source")
+	}
+	secondID, err := AttemptID(spec.Identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Read(store, owner.ID, secondID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("failed capture left an evidence record: %v", err)
+	}
+}
+
+func TestMissingWorkspaceKeepsOnlyCanonicalRepositoryPermissionScope(t *testing.T) {
+	repo, _ := newEvidenceRepo(t)
+	store := newAttemptEvidenceStore(t)
+	owner, err := store.Create(beads.Bead{Title: "retired worktree", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	missingWorkspace := filepath.Join(t.TempDir(), "removed-worktree")
+	evidence, err := Capture(context.Background(), store, CaptureSpec{
+		Identity: Identity{
+			Kind: KindWorkbench, OwnerBeadID: owner.ID, ExecutionBeadID: owner.ID,
+			SessionID: "session-1", SessionGeneration: "3", ClaimGeneration: "5",
+		},
+		StoreRef: "rig:pilot", WorkDir: missingWorkspace,
+		Permission: PermissionScope{StoreRef: "rig:pilot", WorkID: owner.ID, RepositoryRoot: repo},
+	})
+	if err != nil {
+		t.Fatalf("Capture missing worktree: %v", err)
+	}
+	if evidence.SourceStatus != StatusMissing || evidence.Permission.RepositoryRoot != filepath.Join(canonicalEvidenceTestPath(t, repo), ".git") || evidence.Permission.WorkspaceRoot != missingWorkspace {
+		t.Fatalf("missing-source status/scope = %q %+v", evidence.SourceStatus, evidence.Permission)
+	}
+}
+
+func TestCandidateDiffUsesOnlyResolvedCommitTreesWhileWorkspaceDiffPreservesLocalChanges(t *testing.T) {
+	repo, baseSHA := newEvidenceRepo(t)
+	runEvidenceGit(t, repo, "checkout", "-b", "candidate")
+	if err := os.WriteFile(filepath.Join(repo, "tracked.txt"), []byte("committed candidate\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runEvidenceGit(t, repo, "add", "tracked.txt")
+	runEvidenceGit(t, repo, "commit", "-q", "-m", "candidate")
+	if err := os.WriteFile(filepath.Join(repo, "tracked.txt"), []byte("local uncommitted edit\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "untracked.txt"), []byte("untracked local file\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store := newAttemptEvidenceStore(t)
+	owner, err := store.Create(beads.Bead{Title: "candidate work", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := CaptureSpec{
+		Identity: Identity{Kind: KindRetry, OwnerBeadID: owner.ID, ExecutionBeadID: "attempt-commit-delta"},
+		StoreRef: "rig:pilot", WorkDir: repo, BaseSHA: baseSHA,
+	}
+	evidence, err := Capture(context.Background(), store, spec)
+	if err != nil {
+		t.Fatalf("Capture: %v", err)
+	}
+	if evidence.Diff.Source != DiffSourceCandidateCommitDelta || evidence.WorkingTreeStatus != WorkingTreeDirty {
+		t.Fatalf("candidate/worktree provenance = diff %q, worktree %q", evidence.Diff.Source, evidence.WorkingTreeStatus)
+	}
+	commitPatch, commitFiles, err := DecodeDiff(evidence.Diff)
+	if err != nil {
+		t.Fatalf("decode candidate commit delta: %v", err)
+	}
+	if len(commitFiles) != 0 || !strings.Contains(string(commitPatch), "+committed candidate") || strings.Contains(string(commitPatch), "local uncommitted edit") {
+		t.Fatalf("candidate diff included mutable worktree content: patch=%q files=%#v", commitPatch, commitFiles)
+	}
+	workspacePatch, workspaceFiles, err := DecodeDiff(evidence.WorkspaceDiff)
+	if err != nil {
+		t.Fatalf("decode workspace diff: %v", err)
+	}
+	if !strings.Contains(string(workspacePatch), "+local uncommitted edit") || len(workspaceFiles) != 1 || workspaceFiles[0].Path != "untracked.txt" {
+		t.Fatalf("workspace diff lost local changes: patch=%q files=%#v", workspacePatch, workspaceFiles)
+	}
+	ref := EvidenceReference(evidence, "rig:pilot")
+	if ref.DiffSource != DiffSourceCandidateCommitDelta || ref.DiffSHA256 != evidence.Diff.SHA256 {
+		t.Fatalf("reference did not identify immutable candidate diff: %#v", ref)
+	}
+}
+
+func TestGitCaptureDisablesConfiguredFSMonitorWithoutExecutingIt(t *testing.T) {
+	repo, baseSHA := newEvidenceRepo(t)
+	marker := filepath.Join(t.TempDir(), "fsmonitor-ran")
+	helper := filepath.Join(t.TempDir(), "fsmonitor.sh")
+	if err := os.WriteFile(helper, []byte("#!/bin/sh\nprintf ran > \""+marker+"\"\nprintf ''\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runEvidenceGit(t, repo, "config", "core.fsmonitor", helper)
+	store := newAttemptEvidenceStore(t)
+	owner, err := store.Create(beads.Bead{Title: "fsmonitor work", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence, err := Capture(context.Background(), store, CaptureSpec{
+		Identity: Identity{Kind: KindRetry, OwnerBeadID: owner.ID, ExecutionBeadID: "fsmonitor-attempt"},
+		StoreRef: "rig:pilot", WorkDir: repo, BaseSHA: baseSHA,
+	})
+	if err != nil {
+		t.Fatalf("Capture with configured fsmonitor: %v", err)
+	}
+	if evidence.SourceStatus != StatusAvailable {
+		t.Fatalf("capture source status = %q", evidence.SourceStatus)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("configured fsmonitor ran or marker check failed: %v", err)
+	}
+}
+
+func TestGitCaptureRejectsConfiguredFilterWithoutExecutingIt(t *testing.T) {
+	repo, baseSHA := newEvidenceRepo(t)
+	marker := filepath.Join(t.TempDir(), "filter-ran")
+	helper := filepath.Join(t.TempDir(), "filter.sh")
+	if err := os.WriteFile(helper, []byte("#!/bin/sh\nprintf ran > \""+marker+"\"\ncat\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runEvidenceGit(t, repo, "config", "filter.probe.clean", helper)
+	if err := os.WriteFile(filepath.Join(repo, ".gitattributes"), []byte("tracked.txt filter=probe\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store := newAttemptEvidenceStore(t)
+	owner, err := store.Create(beads.Bead{Title: "filter work", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = Capture(context.Background(), store, CaptureSpec{
+		Identity: Identity{Kind: KindRetry, OwnerBeadID: owner.ID, ExecutionBeadID: "filter-attempt"},
+		StoreRef: "rig:pilot", WorkDir: repo, BaseSHA: baseSHA,
+	})
+	if err == nil || !strings.Contains(err.Error(), "external content filter") {
+		t.Fatalf("Capture with configured content filter = %v, want fail-closed configuration error", err)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("configured content filter ran or marker check failed: %v", err)
+	}
+}
+
+func TestGitCaptureRejectsIncludedConfigBeforeExecutingIncludedHelpers(t *testing.T) {
+	repo, baseSHA := newEvidenceRepo(t)
+	marker := filepath.Join(t.TempDir(), "included-helper-ran")
+	helper := filepath.Join(t.TempDir(), "included-fsmonitor.sh")
+	if err := os.WriteFile(helper, []byte("#!/bin/sh\nprintf ran > \""+marker+"\"\nprintf ''\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	included := filepath.Join(t.TempDir(), "included.gitconfig")
+	if err := os.WriteFile(included, []byte("[core]\n\tfsmonitor = "+helper+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runEvidenceGit(t, repo, "config", "include.path", included)
+	store := newAttemptEvidenceStore(t)
+	owner, err := store.Create(beads.Bead{Title: "included config work", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = Capture(context.Background(), store, CaptureSpec{
+		Identity: Identity{Kind: KindRetry, OwnerBeadID: owner.ID, ExecutionBeadID: "included-config-attempt"},
+		StoreRef: "rig:pilot", WorkDir: repo, BaseSHA: baseSHA,
+	})
+	if err == nil || !strings.Contains(err.Error(), "included Git configuration") {
+		t.Fatalf("Capture with included helper config = %v, want fail-closed config error", err)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("helper from included config ran or marker check failed: %v", err)
+	}
+}
+
+func TestGitCaptureIgnoresReplacementObjectsAndBindsCandidateSHA(t *testing.T) {
+	repo, baseSHA := newEvidenceRepo(t)
+	if err := os.WriteFile(filepath.Join(repo, "tracked.txt"), []byte("actual candidate\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runEvidenceGit(t, repo, "add", "tracked.txt")
+	runEvidenceGit(t, repo, "commit", "-q", "-m", "actual candidate")
+	candidateSHA := runEvidenceGit(t, repo, "rev-parse", "HEAD")
+	if err := os.WriteFile(filepath.Join(repo, "tracked.txt"), []byte("replacement tree\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runEvidenceGit(t, repo, "add", "tracked.txt")
+	runEvidenceGit(t, repo, "commit", "-q", "-m", "replacement object")
+	replacementSHA := runEvidenceGit(t, repo, "rev-parse", "HEAD")
+	runEvidenceGit(t, repo, "replace", candidateSHA, replacementSHA)
+	runEvidenceGit(t, repo, "checkout", "--detach", candidateSHA)
+	store := newAttemptEvidenceStore(t)
+	owner, err := store.Create(beads.Bead{Title: "replacement work", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence, err := Capture(context.Background(), store, CaptureSpec{
+		Identity: Identity{Kind: KindRetry, OwnerBeadID: owner.ID, ExecutionBeadID: "replace-attempt"},
+		StoreRef: "rig:pilot", WorkDir: repo, BaseSHA: baseSHA,
+	})
+	if err != nil {
+		t.Fatalf("Capture with replacement ref: %v", err)
+	}
+	if evidence.CandidateSHA != candidateSHA {
+		t.Fatalf("candidate SHA = %q, want original commit %q", evidence.CandidateSHA, candidateSHA)
+	}
+	patch, _, err := DecodeDiff(evidence.Diff)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(patch), "+actual candidate") || strings.Contains(string(patch), "replacement tree") {
+		t.Fatalf("commit delta followed replacement object: %s", patch)
+	}
+}
+
+func TestPermissionScopeUsesCanonicalSeparateGitDirectory(t *testing.T) {
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	commonDir := filepath.Join(t.TempDir(), "git-common")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runEvidenceGit(t, workspace, "init", "-q", "--separate-git-dir", commonDir)
+	runEvidenceGit(t, workspace, "config", "user.email", "evidence-test@example.invalid")
+	runEvidenceGit(t, workspace, "config", "user.name", "Evidence Test")
+	if err := os.WriteFile(filepath.Join(workspace, "tracked.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runEvidenceGit(t, workspace, "add", "tracked.txt")
+	runEvidenceGit(t, workspace, "commit", "-q", "-m", "base")
+	baseSHA := runEvidenceGit(t, workspace, "rev-parse", "HEAD")
+	store := newAttemptEvidenceStore(t)
+	owner, err := store.Create(beads.Bead{Title: "separate git dir work", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence, err := Capture(context.Background(), store, CaptureSpec{
+		Identity: Identity{Kind: KindRetry, OwnerBeadID: owner.ID, ExecutionBeadID: "separate-git-dir"},
+		StoreRef: "rig:pilot", WorkDir: workspace, BaseSHA: baseSHA,
+		Permission: PermissionScope{StoreRef: "rig:pilot", WorkID: owner.ID, RepositoryRoot: workspace},
+	})
+	if err != nil {
+		t.Fatalf("Capture separate git directory: %v", err)
+	}
+	resolvedCommonDir := canonicalEvidenceTestPath(t, commonDir)
+	canonicalWorkspace := canonicalEvidenceTestPath(t, workspace)
+	if evidence.Permission.RepositoryRoot != resolvedCommonDir || evidence.Permission.WorkspaceRoot != canonicalWorkspace {
+		t.Fatalf("permission scope = %+v, want canonical common dir %q and worktree %q", evidence.Permission, resolvedCommonDir, canonicalWorkspace)
+	}
+}
+
+func TestPermissionScopeMapsConfiguredRepositoryRootToLinkedWorktree(t *testing.T) {
+	repo, baseSHA := newEvidenceRepo(t)
+	workspace := filepath.Join(t.TempDir(), "attempt-worktree")
+	runEvidenceGit(t, repo, "worktree", "add", "--detach", workspace, baseSHA)
+	store := newAttemptEvidenceStore(t)
+	owner, err := store.Create(beads.Bead{Title: "linked worktree scope", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence, err := Capture(context.Background(), store, CaptureSpec{
+		Identity: Identity{Kind: KindRetry, OwnerBeadID: owner.ID, ExecutionBeadID: "linked-worktree"},
+		StoreRef: "rig:pilot", WorkDir: workspace, BaseSHA: baseSHA,
+		Permission: PermissionScope{StoreRef: "rig:pilot", WorkID: owner.ID, RepositoryRoot: repo},
+	})
+	if err != nil {
+		t.Fatalf("Capture linked worktree: %v", err)
+	}
+	canonicalRepo := canonicalEvidenceTestPath(t, repo)
+	canonicalWorkspace := canonicalEvidenceTestPath(t, workspace)
+	if evidence.Permission.RepositoryRoot != filepath.Join(canonicalRepo, ".git") || evidence.Permission.WorkspaceRoot != canonicalWorkspace {
+		t.Fatalf("permission scope = %+v, want shared common dir %q and linked worktree %q", evidence.Permission, filepath.Join(canonicalRepo, ".git"), canonicalWorkspace)
+	}
+}
+
+func TestSnapshotRejectsHeadMovementDuringCapture(t *testing.T) {
+	repo, baseSHA := newEvidenceRepo(t)
+	if err := os.WriteFile(filepath.Join(repo, "tracked.txt"), []byte("other commit\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runEvidenceGit(t, repo, "add", "tracked.txt")
+	runEvidenceGit(t, repo, "commit", "-q", "-m", "other")
+	otherSHA := runEvidenceGit(t, repo, "rev-parse", "HEAD")
+	runEvidenceGit(t, repo, "checkout", "--detach", baseSHA)
+	spec := CaptureSpec{
+		Identity: Identity{Kind: KindRetry, OwnerBeadID: "work-1", ExecutionBeadID: "attempt-1"},
+		StoreRef: "rig:pilot", WorkDir: repo, BaseSHA: baseSHA,
+	}
+	_, err := snapshotWithProbe(context.Background(), spec, mustAttemptID(t, spec.Identity), func() error {
+		testutil.RunGit(t, repo, "checkout", "--detach", otherSHA)
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "changed during evidence capture") {
+		t.Fatalf("capture after HEAD movement = %v, want fail-closed movement error", err)
+	}
+}
+
+func TestGitOutputAndUntrackedReadsAreBoundedAndRootConfined(t *testing.T) {
+	repo, baseSHA := newEvidenceRepo(t)
+	if err := os.WriteFile(filepath.Join(repo, "tracked.txt"), []byte(strings.Repeat("oversized patch\n", 40)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gitOutputLimit(context.Background(), repo, 32, "diff", "--binary", "--no-ext-diff", "--no-textconv", "--no-color", baseSHA, "--"); !errors.Is(err, ErrCaptureTooLarge) {
+		t.Fatalf("oversized git output error = %v, want ErrCaptureTooLarge", err)
+	}
+
+	root, err := os.OpenRoot(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close() //nolint:errcheck
+	if err := os.WriteFile(filepath.Join(repo, "large.txt"), []byte(strings.Repeat("x", 64)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := snapshotUntrackedPaths(root, [][]byte{[]byte("large.txt")}, 16); !errors.Is(err, ErrCaptureTooLarge) {
+		t.Fatalf("oversized untracked read error = %v, want ErrCaptureTooLarge", err)
+	}
+
+	outside := t.TempDir()
+	secret := "must-not-be-read-from-outside-worktree"
+	if err := os.WriteFile(filepath.Join(outside, "secret.txt"), []byte(secret), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(repo, "escape")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := snapshotUntrackedPaths(root, [][]byte{[]byte("escape/secret.txt")}, maxDiffInputBytes); err == nil {
+		t.Fatal("root-confined read through an escaping parent symlink succeeded")
+	}
+	if err := os.Symlink(filepath.Join(outside, "secret.txt"), filepath.Join(repo, "secret-link")); err != nil {
+		t.Fatal(err)
+	}
+	links, err := snapshotUntrackedPaths(root, [][]byte{[]byte("secret-link")}, maxDiffInputBytes)
+	if err != nil {
+		t.Fatalf("capture symlink itself: %v", err)
+	}
+	if len(links) != 1 || !links[0].Symlink || string(links[0].Bytes) == secret || strings.Contains(string(links[0].Bytes), secret) {
+		t.Fatalf("symlink capture read or misrepresented outside file: %#v", links)
+	}
+}
+
+func TestConcurrentSealHasOneImmutableWinner(t *testing.T) {
+	store := newAttemptEvidenceStore(t)
+	owner, err := store.Create(beads.Bead{Title: "source work", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := Identity{Kind: KindRetry, OwnerBeadID: owner.ID, ExecutionBeadID: "attempt-1"}
+	id, err := AttemptID(identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+	makeEvidence := func(outcome string) Evidence {
+		diff, err := compressDiff(diffBundle{TrackedPatch: []byte(outcome)}, DiffSourceWorkingTree)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return Evidence{
+			SchemaVersion: SchemaVersion, AttemptID: id, Identity: identity,
+			StoreRef: "rig:pilot", CapturedAt: now, Outcome: outcome,
+			SourceStatus: StatusAvailable,
+			BaseStatus:   StatusUnavailable, BaseReason: "base_unknown",
+			CandidateStatus: StatusAvailable, CandidateSHA: strings.Repeat("a", 40),
+			WorkingTreeStatus: WorkingTreeDirty,
+			Diff:              DiffSnapshot{Status: StatusUnavailable, Reason: "base_unknown"},
+			WorkspaceDiff:     diff,
+			Policy:            unavailableFacet("not_linked"), Actions: unavailableFacet("not_linked"),
+			Acknowledgements: unavailableFacet("not_linked"), Redaction: unavailableFacet("not_performed"),
+		}
+	}
+	proposals := []Evidence{makeEvidence("first"), makeEvidence("second")}
+	var wg sync.WaitGroup
+	results := make(chan Evidence, 2)
+	errs := make(chan error, 2)
+	for _, proposal := range proposals {
+		proposal := proposal
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sealed, err := Seal(store, proposal)
+			if err != nil {
+				errs <- err
+				return
+			}
+			results <- sealed
+		}()
+	}
+	wg.Wait()
+	close(results)
+	close(errs)
+	for err := range errs {
+		t.Fatalf("concurrent Seal: %v", err)
+	}
+	var winner Evidence
+	for result := range results {
+		if winner.AttemptID == "" {
+			winner = result
+		} else if !samePayload(winner, result) {
+			t.Fatal("concurrent seal callers received different winners")
+		}
+	}
+	got, err := Read(store, owner.ID, id)
+	if err != nil {
+		t.Fatalf("Read winner: %v", err)
+	}
+	if !samePayload(winner, got) {
+		t.Fatal("read returned a payload different from the CAS winner")
+	}
+	if _, err := store.Create(beads.Bead{Title: "sanity"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestUnsupportedMetadataCASRefusesToSeal(t *testing.T) {
+	base := newAttemptEvidenceStore(t)
+	owner, err := base.Create(beads.Bead{Title: "source", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := noMetadataCASStore{Store: base}
+	identity := Identity{Kind: KindRetry, OwnerBeadID: owner.ID, ExecutionBeadID: "attempt-1"}
+	id, err := AttemptID(identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence := MakeUnavailable(CaptureSpec{Identity: identity, StoreRef: "rig:pilot"}, id, "workspace_absent")
+	if _, err := Seal(store, evidence); !errors.Is(err, beads.ErrConditionalWriteUnsupported) {
+		t.Fatalf("Seal unsupported CAS error = %v", err)
+	}
+}
+
+func TestUnsupportedBdEvidenceReadsRefuseBeforeRunnerForWrappers(t *testing.T) {
+	for _, config := range []struct {
+		name   string
+		option beads.BdStoreOption
+	}{
+		{name: "unconfigured"},
+		{
+			name: "misconfigured",
+			option: beads.WithBdStorePrivateEvidenceHTTP(beads.PrivateEvidenceHTTPConfig{
+				Endpoint: "http://127.0.0.1:1", ProjectID: "project-a", Database: "gc_fixture",
+				ScopeRef: "rig:fixture", TokenFile: filepath.Join(t.TempDir(), "missing-token"),
+			}),
+		},
+	} {
+		for _, wrap := range []struct {
+			name string
+			fn   func(beads.Store) beads.Store
+		}{
+			{name: "direct", fn: func(store beads.Store) beads.Store { return store }},
+			{name: "typed", fn: func(store beads.Store) beads.Store { return beads.WorkStore{Store: store} }},
+			{name: "cached", fn: func(store beads.Store) beads.Store { return beads.NewCachingStore(store, nil) }},
+		} {
+			t.Run(config.name+"/"+wrap.name, func(t *testing.T) {
+				var calls atomic.Int32
+				base := beads.NewBdStore(t.TempDir(), func(_, _ string, _ ...string) ([]byte, error) {
+					calls.Add(1)
+					return []byte(`{"id":"gc-owner","metadata":{"gc.attempt_evidence.index.a1":"private-value"}}`), nil
+				}, config.option)
+				store := wrap.fn(base)
+				identity := Identity{Kind: KindRetry, OwnerBeadID: "gc-owner", ExecutionBeadID: "gc-attempt"}
+				spec := CaptureSpec{Identity: identity, StoreRef: "rig:fixture"}
+				operations := []struct {
+					name string
+					run  func() error
+				}{
+					{name: "Capture", run: func() error { _, err := Capture(context.Background(), store, spec); return err }},
+					{name: "Read", run: func() error { _, err := Read(store, "gc-owner", "attempt-1"); return err }},
+					{name: "List", run: func() error { _, err := List(store, "gc-owner"); return err }},
+				}
+				for _, operation := range operations {
+					t.Run(operation.name, func(t *testing.T) {
+						if err := operation.run(); !errors.Is(err, ErrPrivatePayloadTransportUnsupported) {
+							t.Errorf("%s error = %v, want unsupported private transport", operation.name, err)
+						}
+						if calls.Load() != 0 {
+							t.Errorf("%s invoked bd runner %d times", operation.name, calls.Load())
+						}
+					})
+				}
+			})
+		}
+	}
+}
+
+func TestUnsafePayloadTransportDoesNotDowngradePresentDiffOrWriteIndex(t *testing.T) {
+	base := beads.NewMemStore()
+	owner, err := base.Create(beads.Bead{Title: "source", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo, baseSHA := newEvidenceRepo(t)
+	if err := os.WriteFile(filepath.Join(repo, "tracked.txt"), []byte("private diff\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store := noMetadataCASStore{Store: base}
+	spec := CaptureSpec{
+		Identity: Identity{Kind: KindRetry, OwnerBeadID: owner.ID, ExecutionBeadID: "attempt-1"},
+		StoreRef: "rig:pilot", WorkDir: repo, BaseSHA: baseSHA,
+	}
+	if _, err := Capture(context.Background(), store, spec); !errors.Is(err, ErrPrivatePayloadTransportUnsupported) {
+		t.Fatalf("Capture on unsafe payload transport = %v, want explicit refusal", err)
+	}
+	id, err := AttemptID(spec.Identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Read(base, owner.ID, id); !errors.Is(err, ErrPrivatePayloadTransportUnsupported) {
+		t.Fatalf("unsafe capture read = %v, want explicit transport refusal", err)
+	}
+	archives, err := base.ListByMetadata(map[string]string{beadmeta.AttemptEvidenceArchiveOwnerIDMetadataKey: owner.ID}, 0, beads.IncludeClosed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(archives) != 0 {
+		t.Fatalf("unsafe capture created archive rows: %#v", archives)
+	}
+}
+
+func TestArchiveRecordsAreNotReadyOrWorkflowCandidates(t *testing.T) {
+	store := newAttemptEvidenceStore(t)
+	owner, err := store.Create(beads.Bead{Title: "source", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo, baseSHA := newEvidenceRepo(t)
+	spec := CaptureSpec{Identity: Identity{Kind: KindRalph, OwnerBeadID: owner.ID, ExecutionBeadID: "iteration-1"}, StoreRef: "city:pilot", WorkDir: repo, BaseSHA: baseSHA}
+	evidence, err := Capture(context.Background(), store, spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	archive, found, err := readArchive(store, owner.ID, evidence.AttemptID)
+	if err != nil || !found {
+		t.Fatalf("archive read = %#v, found=%v, err=%v", archive, found, err)
+	}
+	rows, err := store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range rows {
+		if IsArchiveRecord(row) && row.Type != "molecule" {
+			t.Fatalf("archive type %q can enter normal work routing", row.Type)
+		}
+	}
+	ready, err := store.Ready()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range ready {
+		if IsArchiveRecord(row) {
+			t.Fatalf("archive %s entered Ready", row.ID)
+		}
+	}
+}
+
+func canonicalEvidenceTestPath(t *testing.T, path string) string {
+	t.Helper()
+	canonical, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatalf("canonicalize fixture path %q: %v", path, err)
+	}
+	return canonical
+}
+
+func newEvidenceRepo(t *testing.T) (string, string) {
+	t.Helper()
+	root := t.TempDir()
+	git := func(args ...string) string {
+		t.Helper()
+		return testutil.RunGit(t, root, args...)
+	}
+	git("init", "-q")
+	git("config", "user.email", "evidence-test@example.invalid")
+	git("config", "user.name", "Evidence Test")
+	if err := os.WriteFile(filepath.Join(root, "tracked.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git("add", "tracked.txt")
+	git("commit", "-q", "-m", "base")
+	return root, git("rev-parse", "HEAD")
+}
+
+func newAttemptEvidenceStore(t *testing.T) *beads.FileStore {
+	t.Helper()
+	store, err := beads.OpenFileStore(fsys.OSFS{}, filepath.Join(t.TempDir(), "beads.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return store
+}
+
+func runEvidenceGit(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	return testutil.RunGit(t, dir, args...)
+}
+
+func mustAttemptID(t *testing.T, identity Identity) string {
+	t.Helper()
+	id, err := AttemptID(identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+type noMetadataCASStore struct{ beads.Store }
+
+func (s noMetadataCASStore) PrivatePayloadValueTransportTarget() beads.Store { return s.Store }

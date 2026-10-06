@@ -2,8 +2,6 @@ package worker
 
 import (
 	"context"
-	"crypto/md5" //nolint:gosec // Kimi keys its session store by workdir MD5.
-	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strings"
@@ -931,15 +929,14 @@ func TestInvocationTelemetrySkipsUnsupportedFamilies(t *testing.T) {
 	reader := setupInvocationMetricsReader(t)
 	handle, _, searchBase, workDir := newFamilyTelemetryHandle(t, ProfileKimiTmuxCLI, "kimi", "kimi", nil)
 
-	// A kimi context transcript discoverable by workdir hashing. If the gate
-	// ever admits kimi with generic claude-style wiring, this usage entry
-	// leaks into the metrics.
-	workHash := md5.Sum([]byte(filepath.Clean(workDir)))
-	sessDir := filepath.Join(searchBase, hex.EncodeToString(workHash[:]), "sess-1")
+	// A native Kimi Code transcript exists for this workdir. If the gate ever
+	// admits kimi with generic claude-style wiring, this usage entry leaks into
+	// the metrics.
+	sessDir := filepath.Join(searchBase, "sessions", kimiTestWorkDirKey(workDir), "sess-1", "agents", "main")
 	if err := os.MkdirAll(sessDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll(%q): %v", sessDir, err)
 	}
-	writeWorkerTestJSONL(t, filepath.Join(sessDir, "context.jsonl"), []map[string]any{
+	writeWorkerTestJSONL(t, filepath.Join(sessDir, "wire.jsonl"), []map[string]any{
 		usageEntry("k1", "kimi-model", 100, 50, 0, 0),
 	})
 

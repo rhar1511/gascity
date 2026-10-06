@@ -86,10 +86,9 @@ var providerCredentialEnvKeys = map[string]bool{
 }
 
 // ControllerOnlyEnvKeys are controller-scope variables that must never reach a
-// session. Today that is the controller token (convergence.TokenEnvVar), which
-// authorizes writes to the protected convergence.*/var.* metadata an agent is
-// deliberately not allowed to set for itself; an agent holding it can drive its
-// own convergence loop.
+// session. They include the controller token, which authorizes protected
+// convergence metadata writes, and the host authority directory, which binds
+// protected Beads policy to its local signing-key broker.
 //
 // These are SEEDED EMPTY rather than omitted, because the map this package
 // returns is an overlay on an environment the child already inherits, not the
@@ -105,7 +104,9 @@ var providerCredentialEnvKeys = map[string]bool{
 // Exact names, never a prefix: a GC_ prefix match would swallow the identity
 // anchors and the Dolt vars that agents legitimately need.
 var ControllerOnlyEnvKeys = []string{
+	"GC_BEADS_PROTECTED_MUTATION_AUTHORITY_DIR",
 	"GC_CONTROLLER_TOKEN",
+	"GC_SESSION_AUTHORITY_TRUST_FILE",
 }
 
 // ControllerOnlyEnvOverlay returns ControllerOnlyEnvKeys pinned to the empty

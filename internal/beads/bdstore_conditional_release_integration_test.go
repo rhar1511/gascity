@@ -96,12 +96,7 @@ func TestBdStoreReleaseIfCurrentAgainstRealBd(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	if err := store.Update(created.ID, beads.UpdateOpts{
-		Status:   strPtr("in_progress"),
-		Assignee: strPtr("worker-1"),
-	}); err != nil {
-		t.Fatalf("Update to in_progress: %v", err)
-	}
+	seedConditionalReleaseAssignment(t, scope, created.ID)
 
 	assertHeld := func(t *testing.T, wantStatus, wantAssignee string) {
 		t.Helper()
@@ -158,12 +153,7 @@ func TestBdStoreReleaseIfCurrentAgainstRealBd(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Create ephemeral: %v", err)
 		}
-		if err := store.Update(wisp.ID, beads.UpdateOpts{
-			Status:   strPtr("in_progress"),
-			Assignee: strPtr("worker-1"),
-		}); err != nil {
-			t.Fatalf("Update ephemeral to in_progress: %v", err)
-		}
+		seedConditionalReleaseAssignment(t, scope, wisp.ID)
 		released, err := store.ReleaseIfCurrent(wisp.ID, "worker-1")
 		if err != nil {
 			t.Fatalf("ReleaseIfCurrent(ephemeral): %v", err)
@@ -199,12 +189,7 @@ func TestBdStoreReleaseIfCurrentAgainstRealBd(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Create: %v", err)
 		}
-		if err := store.Update(held.ID, beads.UpdateOpts{
-			Status:   strPtr("in_progress"),
-			Assignee: strPtr("worker-1"),
-		}); err != nil {
-			t.Fatalf("Update to in_progress: %v", err)
-		}
+		seedConditionalReleaseAssignment(t, scope, held.ID)
 		truncated := held.ID[:len(held.ID)-1]
 		if _, getErr := store.Get(truncated); !errors.Is(getErr, beads.ErrIDCollision) {
 			conditionalReleaseUnprovable(t, "bd did not prefix-resolve %q to another bead (Get: %v); "+
@@ -228,6 +213,19 @@ func TestBdStoreReleaseIfCurrentAgainstRealBd(t *testing.T) {
 	})
 }
 
+// Seed through the isolated real CLI, not BdStore's generic lifecycle update:
+// the latter deliberately requires the broader revision-write capability that
+// this release-only contract does not promise. All release and readback legs
+// still exercise the production store against the same embedded ledger.
+func seedConditionalReleaseAssignment(t *testing.T, scope, id string) {
+	t.Helper()
+	out, err := newConditionalIntegrationRunner(t, scope)(scope, "bd", "update", id,
+		"--status", "in_progress", "--assignee", "worker-1")
+	if err != nil {
+		t.Fatalf("seed conditional release assignment: %v\n%s", err, out)
+	}
+}
+
 // bdParsesConditionalReleaseFlags reports whether the installed bd advertises
 // both conditional-release preconditions.
 //
@@ -240,7 +238,7 @@ func TestBdStoreReleaseIfCurrentAgainstRealBd(t *testing.T) {
 // and the row hard-fails instead of skipping.
 func bdParsesConditionalReleaseFlags(t *testing.T, scope string) bool {
 	t.Helper()
-	out, err := newConditionalIntegrationRunner(scope)(scope, "bd", "update", "--help")
+	out, err := newConditionalIntegrationRunner(t, scope)(scope, "bd", "update", "--help")
 	if err != nil {
 		// The probe's OWN failure is not evidence about the flags — a bd that
 		// dropped the `update` verb errors here rather than reporting the flags

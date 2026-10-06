@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -201,17 +202,20 @@ func (f *failAgentTomlRenameOSFS) Rename(oldpath, newpath string) error {
 
 func TestControllerStateReadAccess(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
+	cityDir := t.TempDir()
+	rigDir := t.TempDir()
+	writeSchema2RigCity(t, cityDir, "test-city", "[workspace]\n[beads]\nprovider = \"file\"\n[[rigs]]\nname = \"rig1\"\n", fmt.Sprintf("workspace_name = \"test-city\"\n[rigs.rig1]\npath = %q\n", rigDir))
 
 	sp := runtime.NewFake()
 	ep := events.NewFake()
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Rigs: []config.Rig{
-			{Name: "rig1", Path: t.TempDir()},
+			{Name: "rig1", Path: rigDir},
 		},
 	}
 
-	cs := newControllerState(context.Background(), cfg, sp, ep, "test-city", t.TempDir())
+	cs := newControllerState(context.Background(), cfg, sp, ep, "test-city", cityDir)
 
 	if got := cs.CityName(); got != "test-city" {
 		t.Errorf("CityName() = %q, want %q", got, "test-city")
@@ -283,17 +287,21 @@ func TestControllerStateConcurrentAccess(t *testing.T) {
 
 func TestControllerStateUpdate(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
+	cityDir := t.TempDir()
+	rig1Dir := t.TempDir()
+	rig2Dir := t.TempDir()
+	writeSchema2RigCity(t, cityDir, "city1", "[workspace]\n[beads]\nprovider = \"file\"\n[[rigs]]\nname = \"rig1\"\nprefix = \"r1\"\n", fmt.Sprintf("workspace_name = \"city1\"\n[rigs.rig1]\npath = %q\n", rig1Dir))
 
 	sp := runtime.NewFake()
 	ep := events.NewFake()
 	cfg1 := &config.City{
 		Workspace: config.Workspace{Name: "city1"},
 		Rigs: []config.Rig{
-			{Name: "rig1", Path: t.TempDir()},
+			{Name: "rig1", Path: rig1Dir, Prefix: "r1"},
 		},
 	}
 
-	cs := newControllerState(context.Background(), cfg1, sp, ep, "city1", t.TempDir())
+	cs := newControllerState(context.Background(), cfg1, sp, ep, "city1", cityDir)
 
 	if len(cs.BeadStores()) != 2 {
 		t.Fatalf("initial stores = %d, want 2 (city + rig)", len(cs.BeadStores()))
@@ -303,13 +311,16 @@ func TestControllerStateUpdate(t *testing.T) {
 	cfg2 := &config.City{
 		Workspace: config.Workspace{Name: "city1"},
 		Rigs: []config.Rig{
-			{Name: "rig1", Path: t.TempDir()},
-			{Name: "rig2", Path: t.TempDir()},
+			{Name: "rig1", Path: rig1Dir, Prefix: "r1"},
+			{Name: "rig2", Path: rig2Dir, Prefix: "r2"},
 		},
 	}
 
 	sp2 := runtime.NewFake()
-	cs.update(cfg2, sp2)
+	writeSchema2RigCity(t, cityDir, "city1", "[workspace]\n[beads]\nprovider = \"file\"\n[[rigs]]\nname = \"rig1\"\nprefix = \"r1\"\n[[rigs]]\nname = \"rig2\"\nprefix = \"r2\"\n", fmt.Sprintf("workspace_name = \"city1\"\n[rigs.rig1]\npath = %q\n[rigs.rig2]\npath = %q\n", rig1Dir, rig2Dir))
+	if err := cs.update(cfg2, sp2); err != nil {
+		t.Fatalf("update: %v", err)
+	}
 
 	if len(cs.BeadStores()) != 3 {
 		t.Errorf("updated stores = %d, want 3 (city + 2 rigs)", len(cs.BeadStores()))
@@ -332,7 +343,7 @@ func TestControllerStateRawConfigCachedFromGateBasis(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 
 	cityDir := t.TempDir()
-	cityToml := "[workspace]\nname = \"city1\"\n\n[beads]\nprovider = \"file\"\n\n[[agent]]\nname = \"mayor\"\nprovider = \"claude\"\n"
+	cityToml := "[workspace]\nname = \"city1\"\n\n[beads]\nprovider = \"file\"\n\n[providers.claude]\nbase = \"builtin:claude\"\n\n[[agent]]\nname = \"mayor\"\nprovider = \"claude\"\n"
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
@@ -358,7 +369,9 @@ func TestControllerStateRawConfigCachedFromGateBasis(t *testing.T) {
 	}
 
 	// After an update, the snapshot refreshes from disk and stays non-nil.
-	cs.update(&config.City{Workspace: config.Workspace{Name: "city1"}}, runtime.NewFake())
+	if err := cs.update(&config.City{Workspace: config.Workspace{Name: "city1"}}, runtime.NewFake()); err != nil {
+		t.Fatalf("update: %v", err)
+	}
 	if cs.RawConfig() == nil {
 		t.Error("RawConfig() = nil after update; the cache must refresh, not clear")
 	}
@@ -368,21 +381,26 @@ func TestControllerStateRuntimeUpdateDoesNotDropPendingMutationRigs(t *testing.T
 	t.Setenv("GC_BEADS", "file")
 
 	cityDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"city1\"\n\n[beads]\nprovider = \"file\"\n"), 0o644); err != nil {
-		t.Fatalf("write city.toml: %v", err)
-	}
+	rigDir := t.TempDir()
+	writeSchema2RigCity(t, cityDir, "city1", "[workspace]\n[beads]\nprovider = \"file\"\n[[rigs]]\nname = \"alpha\"\nprefix = \"al\"\n", fmt.Sprintf("workspace_name = \"city1\"\n[rigs.alpha]\npath = %q\n", rigDir))
 	current := &config.City{
 		Workspace: config.Workspace{Name: "city1"},
-		Rigs:      []config.Rig{{Name: "alpha", Path: t.TempDir()}},
+		Rigs:      []config.Rig{{Name: "alpha", Path: rigDir, Prefix: "al"}},
 	}
 	stale := &config.City{
 		Workspace: config.Workspace{Name: "city1"},
 	}
 
 	cs := newControllerState(context.Background(), current, runtime.NewFake(), events.NewFake(), "city1", cityDir)
-	cs.markConfigMutationPending("current-rev")
+	currentRev, err := cs.currentConfigRevision()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs.markConfigMutationPending(currentRev)
 
-	cs.updateFromRuntime(stale, runtime.NewFake(), "stale-rev")
+	if accepted, err := cs.updateFromRuntime(stale, runtime.NewFake(), "stale-rev"); err != nil || accepted {
+		t.Fatal("stale runtime update reported acceptance")
+	}
 
 	if got := cs.Config(); got != current {
 		t.Fatalf("Config() = %+v, want pending mutation config with rig alpha", got)
@@ -391,7 +409,9 @@ func TestControllerStateRuntimeUpdateDoesNotDropPendingMutationRigs(t *testing.T
 		t.Fatal("pending mutation marker cleared by stale runtime update")
 	}
 
-	cs.updateFromRuntime(current, runtime.NewFake(), "current-rev")
+	if accepted, err := cs.updateFromRuntime(current, runtime.NewFake(), currentRev); err != nil || !accepted {
+		t.Fatal("matching runtime update reported rejection")
+	}
 
 	if cs.configMutationPending.Load() {
 		t.Fatal("pending mutation marker not cleared after matching runtime update")
@@ -402,13 +422,20 @@ func TestControllerStateRuntimeUpdateDoesNotDropPendingMutationAgents(t *testing
 	t.Setenv("GC_BEADS", "file")
 
 	cityDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"city1\"\n\n[beads]\nprovider = \"file\"\n"), 0o644); err != nil {
-		t.Fatalf("write city.toml: %v", err)
-	}
 	rigDir := t.TempDir()
+	writeSchema2RigCity(t, cityDir, "city1", "[workspace]\n[beads]\nprovider = \"file\"\n[providers.bash]\ncommand = \"bash\"\n[[rigs]]\nname = \"alpha\"\nprefix = \"al\"\n", fmt.Sprintf("workspace_name = \"city1\"\n[rigs.alpha]\npath = %q\n", rigDir))
+	for _, name := range []string{"worker", "helper"} {
+		dir := filepath.Join(rigDir, "agents", name)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "agent.toml"), []byte("provider = \"bash\"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	current := &config.City{
 		Workspace: config.Workspace{Name: "city1"},
-		Rigs:      []config.Rig{{Name: "alpha", Path: rigDir}},
+		Rigs:      []config.Rig{{Name: "alpha", Path: rigDir, Prefix: "al"}},
 		Agents: []config.Agent{
 			{Name: "worker", Dir: "alpha", Provider: "bash"},
 			{Name: "helper", Dir: "alpha", Provider: "bash"},
@@ -416,14 +443,20 @@ func TestControllerStateRuntimeUpdateDoesNotDropPendingMutationAgents(t *testing
 	}
 	stale := &config.City{
 		Workspace: config.Workspace{Name: "city1"},
-		Rigs:      []config.Rig{{Name: "alpha", Path: rigDir}},
+		Rigs:      []config.Rig{{Name: "alpha", Path: rigDir, Prefix: "al"}},
 		Agents:    []config.Agent{{Name: "worker", Dir: "alpha", Provider: "bash"}},
 	}
 
 	cs := newControllerState(context.Background(), current, runtime.NewFake(), events.NewFake(), "city1", cityDir)
-	cs.markConfigMutationPending("current-rev")
+	currentRev, err := cs.currentConfigRevision()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs.markConfigMutationPending(currentRev)
 
-	cs.updateFromRuntime(stale, runtime.NewFake(), "stale-rev")
+	if accepted, err := cs.updateFromRuntime(stale, runtime.NewFake(), "stale-rev"); err != nil || accepted {
+		t.Fatal("stale runtime update reported acceptance")
+	}
 
 	if got := cs.Config(); got != current {
 		t.Fatalf("Config() = %+v, want pending mutation config with helper agent", got)
@@ -432,7 +465,9 @@ func TestControllerStateRuntimeUpdateDoesNotDropPendingMutationAgents(t *testing
 		t.Fatal("pending mutation marker cleared by stale runtime update")
 	}
 
-	cs.updateFromRuntime(current, runtime.NewFake(), "current-rev")
+	if accepted, err := cs.updateFromRuntime(current, runtime.NewFake(), currentRev); err != nil || !accepted {
+		t.Fatalf("matching update=%v %v", accepted, err)
+	}
 
 	if got := cs.Config(); got != current {
 		t.Fatalf("Config() = %+v, want matching runtime config applied", got)
@@ -485,7 +520,9 @@ func TestControllerStateCreatedAgentVisibleAfterStaleRuntimeInterleaving(t *test
 		Rigs:   []config.Rig{{Name: "alpha", Path: rigDir}},
 		Agents: []config.Agent{{Name: "worker", Dir: "alpha", Provider: "bash"}},
 	}
-	cs.updateFromRuntime(stale, runtime.NewFake(), pendingRev)
+	if accepted, err := cs.updateFromRuntime(stale, runtime.NewFake(), pendingRev); err != nil || !accepted {
+		t.Fatalf("runtime update = %t, %v, want accepted", accepted, err)
+	}
 	if got := cs.Config(); configHasAgent(got, "alpha/helper") {
 		t.Fatalf("stale runtime update did not hide alpha/helper; agents = %+v", got.Agents)
 	}
@@ -513,7 +550,9 @@ func TestControllerStateCreatedAgentVisibleAfterStaleRuntimeInterleaving(t *test
 	if err != nil {
 		t.Fatalf("load fresh config snapshot: %v", err)
 	}
-	cs.updateFromRuntime(fresh, runtime.NewFake(), freshRev)
+	if accepted, err := cs.updateFromRuntime(fresh, runtime.NewFake(), freshRev); err != nil || !accepted {
+		t.Fatalf("fresh runtime update = %t, %v, want accepted", accepted, err)
+	}
 
 	if err := <-waitErr; err != nil {
 		t.Fatalf("WaitForAgentVisibility after stale runtime update: %v", err)
@@ -561,7 +600,9 @@ func TestControllerStateRuntimeUpdateIgnoresEmptyRevisionDuringPendingMutation(t
 	cs := newControllerState(context.Background(), current, runtime.NewFake(), events.NewFake(), "city1", cityDir)
 	cs.markConfigMutationPending("current-rev")
 
-	cs.updateFromRuntime(stale, runtime.NewFake(), "")
+	if accepted, err := cs.updateFromRuntime(stale, runtime.NewFake(), ""); err != nil || accepted {
+		t.Fatalf("empty-revision runtime update = %t, %v, want refused without error", accepted, err)
+	}
 
 	if got := cs.Config(); got != current {
 		t.Fatalf("Config() = %+v, want pending mutation config with helper agent", got)
@@ -603,7 +644,9 @@ func TestControllerStateRuntimeUpdateAcceptsBuiltinAwareRevision(t *testing.T) {
 	}
 	applyRuntimeCityIdentity(reloaded.Cfg, "test")
 
-	cs.updateFromRuntime(reloaded.Cfg, runtime.NewFake(), reloaded.Revision)
+	if accepted, err := cs.updateFromRuntime(reloaded.Cfg, runtime.NewFake(), reloaded.Revision); err != nil || !accepted {
+		t.Fatalf("reloaded runtime update = %t, %v, want accepted", accepted, err)
+	}
 
 	if got := cs.Config().Rigs; len(got) != 1 || got[0].Name != "alpha" {
 		t.Fatalf("runtime update was not accepted; rigs = %#v", got)
@@ -645,7 +688,9 @@ func TestControllerStateMutationRefreshKeepsBuiltinOrdersAndClearsPending(t *tes
 		t.Fatalf("tryReloadConfig after mutation: %v", err)
 	}
 	applyRuntimeCityIdentity(reloaded.Cfg, "test")
-	cs.updateFromRuntime(reloaded.Cfg, runtime.NewFake(), reloaded.Revision)
+	if accepted, err := cs.updateFromRuntime(reloaded.Cfg, runtime.NewFake(), reloaded.Revision); err != nil || !accepted {
+		t.Fatalf("reloaded runtime update = %t, %v, want accepted", accepted, err)
+	}
 
 	if cs.configMutationPending.Load() {
 		t.Fatal("pending mutation marker was not cleared by matching runtime update")
@@ -667,6 +712,7 @@ func requireControllerStateOrder(t *testing.T, cs *controllerState, want string)
 func TestControllerStateRuntimeUpdateAfterMutationPreservesCurrentStores(t *testing.T) {
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "alpha")
+	writeSchema2RigCity(t, cityDir, "city1", "[workspace]\n[beads]\nprovider = \"file\"\n[[rigs]]\nname = \"alpha\"\nprefix = \"al\"\n", "workspace_name = \"city1\"\n[rigs.alpha]\npath = \"alpha\"\n")
 	current := &config.City{
 		Workspace: config.Workspace{Name: "city1"},
 		Rigs: []config.Rig{{
@@ -685,7 +731,11 @@ func TestControllerStateRuntimeUpdateAfterMutationPreservesCurrentStores(t *test
 		cityName:      "city1",
 		cityPath:      cityDir,
 	}
-	cs.markConfigMutationPending("next-rev")
+	nextRev, err := cs.currentConfigRevision()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs.markConfigMutationPending(nextRev)
 
 	next := &config.City{
 		Workspace: config.Workspace{Name: "city1"},
@@ -695,7 +745,9 @@ func TestControllerStateRuntimeUpdateAfterMutationPreservesCurrentStores(t *test
 			Prefix: "al",
 		}},
 	}
-	cs.updateFromRuntime(next, runtime.NewFake(), "next-rev")
+	if accepted, err := cs.updateFromRuntime(next, runtime.NewFake(), nextRev); err != nil || !accepted {
+		t.Fatalf("matching update=%v %v", accepted, err)
+	}
 
 	if got := cs.BeadStore("alpha"); got != rigStore {
 		t.Fatalf("BeadStore(alpha) = %T %p, want original store %T %p", got, got, rigStore, rigStore)
@@ -742,7 +794,9 @@ func TestControllerStateRuntimeUpdatePreservesCurrentStoresWithoutPendingMutatio
 		}},
 	}
 	nextProvider := runtime.NewFake()
-	cs.updateFromRuntime(next, nextProvider, "")
+	if accepted, err := cs.updateFromRuntime(next, nextProvider, ""); err != nil || !accepted {
+		t.Fatalf("runtime update = %t, %v, want accepted", accepted, err)
+	}
 
 	if got := cs.BeadStore("alpha"); got != rigStore {
 		t.Fatalf("BeadStore(alpha) = %T %p, want original store %T %p", got, got, rigStore, rigStore)
@@ -762,6 +816,9 @@ func TestControllerStateRuntimeUpdateRebuildsStoresWhenBackendMetadataChanges(t 
 	t.Setenv("GC_BEADS", "file")
 
 	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"city1\"\n\n[beads]\nprovider = \"file\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	writeBackendMetadata(t, cityDir, `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`)
 
 	current := &config.City{
@@ -786,7 +843,9 @@ func TestControllerStateRuntimeUpdateRebuildsStoresWhenBackendMetadataChanges(t 
 
 	writeBackendMetadata(t, cityDir, `{"database":"beads","backend":"postgres","storage_endpoint":"postgres://bd@db.example.test:5432","storage_database":"beads_pg"}`)
 	nextProvider := runtime.NewFake()
-	cs.updateFromRuntime(current, nextProvider, "")
+	if accepted, err := cs.updateFromRuntime(current, nextProvider, ""); err != nil || !accepted {
+		t.Fatalf("metadata reload accepted=%t: %v", accepted, err)
+	}
 
 	if got := cs.CityBeadStore(); got == oldStore {
 		t.Fatal("CityBeadStore() reused stale store after backend metadata changed")
@@ -810,6 +869,106 @@ func writeBackendMetadata(t *testing.T, scopeRoot, data string) {
 	}
 }
 
+func TestControllerStateRuntimeUpdateRebuildsStoresWhenPrivateEvidenceChanges(t *testing.T) {
+	cityDir := t.TempDir()
+	current := &config.City{
+		Workspace: config.Workspace{Name: "city1"},
+		Beads: config.BeadsConfig{PrivateEvidence: map[string]config.PrivateEvidenceTransportConfig{
+			"city:city1": {
+				Endpoint: "https://beads.example.test", ProjectID: "project-1",
+				Database: "city1", TokenFile: "/run/gc/beads-token", RevisionTransitions: true,
+			},
+		}},
+	}
+	cs := &controllerState{
+		cfg:                    current,
+		beadStores:             map[string]beads.Store{},
+		cityBeadStore:          beads.NewMemStore(),
+		cityName:               "city1",
+		cityPath:               cityDir,
+		storeMetadataSignature: storeMetadataSignature(cityDir, current),
+	}
+	if !cs.runtimeUpdateCanReuseCurrentStores(current) {
+		t.Fatal("precondition: unchanged private-evidence transport should allow store reuse")
+	}
+
+	next := *current
+	next.Beads = current.Beads
+	next.Beads.PrivateEvidence = maps.Clone(current.Beads.PrivateEvidence)
+	transport := next.Beads.PrivateEvidence["city:city1"]
+	transport.Database = "city1-next"
+	next.Beads.PrivateEvidence["city:city1"] = transport
+	if cs.runtimeUpdateCanReuseCurrentStores(&next) {
+		t.Fatal("changed private-evidence transport reused stores without authority revalidation")
+	}
+}
+
+func TestPreparedRuntimeReuseKeepsNewerPendingMutation(t *testing.T) {
+	cityDir := t.TempDir()
+	current := &config.City{Workspace: config.Workspace{Name: "city1"}}
+	cs := &controllerState{
+		cfg: current, sp: runtime.NewFake(), cityPath: cityDir,
+		cityBeadStore: beads.NewMemStore(), beadStores: map[string]beads.Store{},
+		storeMetadataSignature: storeMetadataSignature(cityDir, current),
+	}
+	staged := &config.City{Workspace: config.Workspace{Name: "city1"}}
+	prepared, err := cs.prepareUpdateFromRuntime(staged, runtime.NewFake(), "")
+	if err != nil {
+		t.Fatalf("prepare runtime reuse: %v", err)
+	}
+	if !prepared.reuse || !prepared.holdsUpdateLock {
+		t.Fatalf("prepared reuse = %+v, want serialized reuse update", prepared)
+	}
+
+	newer := &config.City{Workspace: config.Workspace{Name: "city1"}, Usage: config.UsageConfig{Provider: "local"}}
+	started := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		close(started)
+		cs.updateConfigAndProviderOnly(newer, runtime.NewFake())
+		cs.markConfigMutationPending("newer-revision")
+		close(done)
+	}()
+	<-started
+	select {
+	case <-done:
+		t.Fatal("newer config update bypassed the prepared reload serializer")
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	prepared.commit()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("newer config update remained blocked after staged commit")
+	}
+	if cs.Config() != newer {
+		t.Fatal("staged reuse overwrote the newer config update")
+	}
+	if !cs.configMutationPending.Load() || cs.pendingConfigRevision() != "newer-revision" {
+		t.Fatal("staged reuse cleared the newer config mutation marker")
+	}
+}
+
+func TestControllerStatePendingRevisionStillRejectsNewerDisk(t *testing.T) {
+	cityDir := t.TempDir()
+	tomlPath := filepath.Join(cityDir, "city.toml")
+	writeCityRuntimeConfig(t, tomlPath, "fake")
+	current, revision := loadCityRuntimeControllerConfig(t, cityDir)
+	provider := runtime.NewFake()
+	cs := newControllerState(context.Background(), current, provider, events.NewFake(), "test-city", cityDir)
+	cs.markConfigMutationPending(revision)
+	if err := os.WriteFile(tomlPath, []byte(supersedingCityConfig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if accepted, err := cs.updateFromRuntime(current, runtime.NewFake(), revision); err != nil || accepted {
+		t.Fatalf("stale matching-pending revision accepted=%v err=%v", accepted, err)
+	}
+	if cs.Config() != current || cs.SessionProvider() != provider || !cs.configMutationPending.Load() {
+		t.Fatal("stale candidate changed state or cleared pending mutation")
+	}
+}
+
 func TestControllerStateRuntimeUpdateIgnoresStaleRevisionWithoutPendingMutation(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 
@@ -820,6 +979,9 @@ name = "city1"
 
 [beads]
 provider = "file"
+
+[providers.bash]
+command = "bash"
 
 [[rigs]]
 name = "alpha"
@@ -856,7 +1018,9 @@ provider = "bash"
 	originalProvider := runtime.NewFake()
 	cs := newControllerState(context.Background(), current, originalProvider, events.NewFake(), "city1", cityDir)
 
-	cs.updateFromRuntime(stale, runtime.NewFake(), "stale-rev")
+	if accepted, err := cs.updateFromRuntime(stale, runtime.NewFake(), "stale-rev"); err != nil || accepted {
+		t.Fatal("stale runtime update reported acceptance")
+	}
 
 	if got := cs.Config(); got != current {
 		t.Fatalf("Config() = %+v, want current config with worker agent", got)
@@ -2366,7 +2530,9 @@ func TestControllerStateUpdateClosesReplacedCityStore(t *testing.T) {
 		beadStores:    map[string]beads.Store{},
 	}
 
-	cs.update(&config.City{}, runtime.NewFake())
+	if err := cs.update(&config.City{}, runtime.NewFake()); err != nil {
+		t.Fatalf("update: %v", err)
+	}
 
 	if cs.CityBeadStore() == oldStore {
 		t.Fatal("city bead store was not replaced")
@@ -2389,7 +2555,9 @@ func TestControllerStateUpdateClosesReplacedRigStores(t *testing.T) {
 		beadStores: map[string]beads.Store{"frontend": oldStore},
 	}
 
-	cs.update(&config.City{}, runtime.NewFake())
+	if err := cs.update(&config.City{}, runtime.NewFake()); err != nil {
+		t.Fatalf("update: %v", err)
+	}
 
 	if _, ok := cs.BeadStores()["frontend"]; ok {
 		t.Fatal("frontend rig store was not replaced")
@@ -2430,7 +2598,9 @@ func TestControllerStateUpdateKeepsStaleRigStoreUsableDuringReload(t *testing.T)
 	}
 
 	stale := cs.BeadStore("frontend")
-	cs.update(&config.City{}, runtime.NewFake())
+	if err := cs.update(&config.City{}, runtime.NewFake()); err != nil {
+		t.Fatalf("update: %v", err)
+	}
 
 	got, err := stale.Get(created.ID)
 	if err != nil {
@@ -2462,7 +2632,9 @@ func TestControllerStateUpdateReturnsTypedStoreClosedAfterReloadDrain(t *testing
 	}
 
 	stale := cs.BeadStore("frontend")
-	cs.update(&config.City{}, runtime.NewFake())
+	if err := cs.update(&config.City{}, runtime.NewFake()); err != nil {
+		t.Fatalf("update: %v", err)
+	}
 	waitForCloseStoreSpy(t, oldStore)
 
 	if _, err := stale.Get(created.ID); !errors.Is(err, beads.ErrStoreClosed) {
@@ -2601,6 +2773,7 @@ func TestControllerStateBuildStoresUsesScopeLocalFileStores(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 
 	cityDir := t.TempDir()
+	writeMinimalCityToml(t, cityDir)
 	rigDir := filepath.Join(t.TempDir(), "rig1")
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -2620,7 +2793,7 @@ func TestControllerStateBuildStoresUsesScopeLocalFileStores(t *testing.T) {
 		Rigs:      []config.Rig{{Name: "rig1", Path: rigDir}},
 	}
 
-	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "test-city", cityDir)
+	cs := newFileStoreControllerState(context.Background(), t, cfg, runtime.NewFake(), events.NewFake(), cityDir)
 
 	rigStore := cs.BeadStore("rig1")
 	if rigStore == nil {
@@ -2733,6 +2906,7 @@ func TestControllerStateBuildStoresFileStoresUseLockFiles(t *testing.T) {
 
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(t.TempDir(), "rig1")
+	writeSchema2RigCity(t, cityDir, "test-city", "[workspace]\n[beads]\nprovider = \"file\"\n[[rigs]]\nname = \"rig1\"\n", fmt.Sprintf("workspace_name = \"test-city\"\n[rigs.rig1]\npath = %q\n", rigDir))
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -2751,7 +2925,7 @@ func TestControllerStateBuildStoresFileStoresUseLockFiles(t *testing.T) {
 		Rigs:      []config.Rig{{Name: "rig1", Path: rigDir}},
 	}
 
-	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "test-city", cityDir)
+	cs := newFileStoreControllerState(context.Background(), t, cfg, runtime.NewFake(), events.NewFake(), cityDir)
 
 	rigStore := cs.BeadStore("rig1")
 	if rigStore == nil {
@@ -2781,6 +2955,7 @@ func TestControllerStateFileRigStoreReloadsAcrossConcurrentHandles(t *testing.T)
 
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(t.TempDir(), "rig1")
+	writeSchema2RigCity(t, cityDir, "test-city", "[workspace]\n[beads]\nprovider = \"file\"\n[[rigs]]\nname = \"rig1\"\n", fmt.Sprintf("workspace_name = \"test-city\"\n[rigs.rig1]\npath = %q\n", rigDir))
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -2799,7 +2974,7 @@ func TestControllerStateFileRigStoreReloadsAcrossConcurrentHandles(t *testing.T)
 		Rigs:      []config.Rig{{Name: "rig1", Path: rigDir}},
 	}
 
-	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "test-city", cityDir)
+	cs := newFileStoreControllerState(context.Background(), t, cfg, runtime.NewFake(), events.NewFake(), cityDir)
 	rigStore := cs.BeadStore("rig1")
 	if rigStore == nil {
 		t.Fatal("BeadStore(rig1) = nil")
@@ -2846,6 +3021,7 @@ func TestControllerStateLegacyFileProviderUsesSharedCityStoreWithoutCreatingRigS
 
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(t.TempDir(), "rig1")
+	writeSchema2RigCity(t, cityDir, "test-city", "[workspace]\n[beads]\nprovider = \"file\"\n[[rigs]]\nname = \"rig1\"\n", fmt.Sprintf("workspace_name = \"test-city\"\n[rigs.rig1]\npath = %q\n", rigDir))
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -2862,7 +3038,7 @@ func TestControllerStateLegacyFileProviderUsesSharedCityStoreWithoutCreatingRigS
 		Workspace: config.Workspace{Name: "test-city"},
 		Rigs:      []config.Rig{{Name: "rig1", Path: rigDir}},
 	}
-	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "test-city", cityDir)
+	cs := newFileStoreControllerState(context.Background(), t, cfg, runtime.NewFake(), events.NewFake(), cityDir)
 
 	rigStore := cs.BeadStore("rig1")
 	if rigStore == nil {
@@ -2893,6 +3069,7 @@ func TestControllerStateLegacyFileProviderSharesRigStoreHandle(t *testing.T) {
 	if err := os.MkdirAll(rigTwo, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	writeSchema2RigCity(t, cityDir, "test-city", "[workspace]\n[beads]\nprovider = \"file\"\n[[rigs]]\nname = \"rig1\"\n[[rigs]]\nname = \"rig2\"\n", fmt.Sprintf("workspace_name = \"test-city\"\n[rigs.rig1]\npath = %q\n[rigs.rig2]\npath = %q\n", rigOne, rigTwo))
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Rigs: []config.Rig{
@@ -2901,6 +3078,9 @@ func TestControllerStateLegacyFileProviderSharesRigStoreHandle(t *testing.T) {
 		},
 	}
 	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "test-city", cityDir)
+	if fileStoreUsesScopedRoots(cityDir) {
+		t.Fatal("legacy sharing fixture unexpectedly enabled scope-local file stores")
+	}
 
 	rigStoreOne := cs.BeadStore("rig1")
 	rigStoreTwo := cs.BeadStore("rig2")
@@ -4818,4 +4998,26 @@ func TestControllerStateUpdateRigPathDetachesProviderOwnershipBeforeConfigWrite(
 	if key, _, owned, err := providerScopeOwnershipRecord(cs2.cityPath, cfg2.Rigs[0].Path); err != nil || !owned || key != "rig:rig1" {
 		t.Fatalf("ownership after prefix-only update = (%q, %t, %v), want attached rig label", key, owned, err)
 	}
+}
+
+// newFileStoreControllerState seeds the real city config required by scoped
+// file stores. An existing config is retained so malformed-config tests still
+// exercise their explicit fixture rather than silently receiving a replacement.
+func newFileStoreControllerState(ctx context.Context, t *testing.T, cfg *config.City, sp runtime.Provider, ep events.Provider, cityPath string) *controllerState {
+	t.Helper()
+	const cityName = "test-city"
+	if _, err := os.Stat(filepath.Join(cityPath, "city.toml")); os.IsNotExist(err) {
+		fixture := *cfg
+		if fixture.Workspace.Name == "" {
+			fixture.Workspace.Name = cityName
+		}
+		contents, marshalErr := fixture.Marshal()
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		if writeErr := os.WriteFile(filepath.Join(cityPath, "city.toml"), contents, 0o644); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+	}
+	return newControllerState(ctx, cfg, sp, ep, cityName, cityPath)
 }

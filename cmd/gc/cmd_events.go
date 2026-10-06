@@ -17,6 +17,7 @@ import (
 
 	gcapi "github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/api/genclient"
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/spf13/cobra"
@@ -812,7 +813,12 @@ func eventsSinceCutoff(sinceFlag string) (time.Time, error) {
 	return time.Now().Add(-d), nil
 }
 
-func localWireEvent(e events.Event, _ io.Writer) cliWireEvent {
+func localWireEvent(e events.Event, stderr io.Writer) cliWireEvent {
+	var projectionErr error
+	e.Payload, e.Message, projectionErr = beads.PublicBeadEvent(e.Type, e.Payload, e.Message)
+	if projectionErr != nil {
+		fmt.Fprintf(stderr, "gc events: private projection seq=%d: %v\n", e.Seq, projectionErr) //nolint:errcheck
+	}
 	item := cliWireEvent{
 		Actor:            e.Actor,
 		Seq:              int64(e.Seq),

@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/attemptevidence"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/featureflags"
 	"github.com/gastownhall/gascity/internal/rollout"
@@ -55,6 +56,11 @@ type Server struct {
 	mux      *http.ServeMux
 	readOnly bool // mirrors supervisor's read-only flag for /svc/ enforcement
 
+	// Attempt evidence is private payload. The reader may access server-owned
+	// archives, but public routes require the exact-scope authorizer below.
+	attemptEvidenceReaderPort     attemptevidence.Reader
+	attemptEvidenceReadAuthorizer AttemptEvidenceReadAuthorizer
+
 	// bootFlags is the rollout-gate snapshot latched at Server construction —
 	// from the State's boot latch when it implements RolloutFlagsProvider, else
 	// resolved once from Config(). Immutable for the Server lifetime, mirroring
@@ -75,6 +81,11 @@ type Server struct {
 
 	// idem caches responses for Idempotency-Key replay on create endpoints.
 	idem *idempotencyCache
+
+	// Human proposal preparation is ephemeral transport state, never authority.
+	// Every use revalidates the durable backend and current target composition.
+	humanPreparationsMu sync.Mutex
+	humanPreparations   map[string]humanPreparation
 
 	// rigIdem is the in-process live index + request_id state machine backing
 	// async server-side rig-create (POST /v0/city/{n}/rigs with a git_url). It
@@ -186,7 +197,8 @@ type Server struct {
 
 	// prHumanVerifier is built from host-managed trust configuration, separately
 	// from city-write keys. Nil keeps human PR actions unavailable.
-	prHumanVerifier *PRHumanGrantVerifier
+	prHumanVerifier        *PRHumanGrantVerifier
+	decisionAnswerVerifier *DecisionAnswerGrantVerifier
 
 	// prActionService is lazily built per cached city server from controller
 	// credentials and optional immutable evidence support on State.
@@ -275,14 +287,18 @@ func NewReadOnly(state State) *Server {
 func newServer(state State, readOnly bool) *Server {
 	mux := http.NewServeMux()
 	s := &Server{
-		state:          state,
-		mux:            mux,
-		readOnly:       readOnly,
-		idem:           newIdempotencyCache(30 * time.Minute),
-		rigIdem:        newRigIdemIndex(),
-		webhookDedup:   newWebhookDedupCache(defaultWebhookDedupTTL),
-		webhookLimiter: newWebhookRateLimiter(),
-		activityMemo:   worker.NewDerivedActivityMemo(),
+		state:                     state,
+		mux:                       mux,
+		readOnly:                  readOnly,
+		attemptEvidenceReaderPort: attemptevidence.StoreReader{},
+		idem:                      newIdempotencyCache(30 * time.Minute),
+		rigIdem:                   newRigIdemIndex(),
+		webhookDedup:              newWebhookDedupCache(defaultWebhookDedupTTL),
+		webhookLimiter:            newWebhookRateLimiter(),
+		activityMemo:              worker.NewDerivedActivityMemo(),
+	}
+	if provider, ok := state.(AttemptEvidenceReadAuthorizerProvider); ok {
+		s.attemptEvidenceReadAuthorizer = provider.AttemptEvidenceReadAuthorizer()
 	}
 	// Latch the rollout snapshot once: prefer the State's boot latch (the
 	// production controllerState); fall back to resolving from Config() for

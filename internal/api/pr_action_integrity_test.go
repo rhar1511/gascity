@@ -54,7 +54,7 @@ func TestPRActionResultRequiresExactPersistedReadback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := createPRActionIntent(fx.store, request, fx.workerActor(), fingerprint, fx.now)
+	result, err := createPRActionIntent(fx.store, request, fx.workerActor(), fingerprint, fx.now, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

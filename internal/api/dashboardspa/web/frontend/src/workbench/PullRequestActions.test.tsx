@@ -20,6 +20,9 @@ const item: PRActionQueueItem = {
   observed_at: '2026-09-29T00:00:00Z',
   fresh_until: '2026-09-29T00:00:30Z',
   evidence_state: 'verified',
+  work_records: null,
+  attempt_evidence: null,
+  action_receipts: null,
   actions: [],
 };
 

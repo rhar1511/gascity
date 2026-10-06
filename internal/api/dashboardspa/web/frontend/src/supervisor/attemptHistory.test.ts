@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { fetchHistoricalAttemptInspection } from './attemptHistory';
+import { resetSupervisorApiForTests } from './client';
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -9,6 +10,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 afterEach(() => {
+  resetSupervisorApiForTests();
   vi.unstubAllGlobals();
 });
 
@@ -21,16 +23,18 @@ describe('fetchHistoricalAttemptInspection', () => {
       diff: { state: 'unavailable', reason: 'historical_diff_not_recorded' },
       pull_request: { state: 'unavailable', reason: 'attempt_pr_state_not_recorded' },
     };
-    const fetchMock = vi.fn(async () => jsonResponse(inspection));
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL) => jsonResponse(inspection));
     vi.stubGlobal('fetch', fetchMock);
 
     await expect(fetchHistoricalAttemptInspection('bead/one', 'session two')).resolves.toEqual(
       inspection,
     );
-    expect(fetchMock).toHaveBeenCalledWith(
+    const request = fetchMock.mock.calls[0]?.[0] as Request;
+    expect(request.url).toBe(
       'http://127.0.0.1/v0/city/test-city/bead/bead%2Fone/attempts/session%20two/history',
-      expect.objectContaining({ headers: { Accept: 'application/json' } }),
     );
+    expect(request.headers.get('Accept')).toBe('application/json');
+    expect(fetchMock).toHaveBeenCalledOnce();
   });
 
   it('surfaces an API failure instead of falling back to the current attempt diff', async () => {

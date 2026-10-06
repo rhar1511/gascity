@@ -4,8 +4,11 @@ import (
 	"context"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
+	"github.com/gastownhall/gascity/internal/sling"
 )
 
 // TestBeadPolicyStoreResolvesConditionalWritesThroughWrapper pins the stage-3
@@ -35,5 +38,25 @@ func TestBeadPolicyStoreResolvesConditionalWritesThroughWrapper(t *testing.T) {
 	}
 	if writer == nil {
 		t.Fatal("resolve through policy wrapper returned no writer: the require stamp was hidden by interface embedding")
+	}
+}
+
+func TestCliBeadRouterRoutesThroughPolicyWrappedStoreCAS(t *testing.T) {
+	base := beads.NewMemStore()
+	created, err := base.Create(beads.Bead{Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatalf("seed bead: %v", err)
+	}
+	wrapped := wrapStoreWithBeadPolicies(base, &config.City{})
+	router := cliBeadRouter{deps: &slingDeps{Store: wrapped}}
+	if err := router.Route(context.Background(), sling.RouteRequest{BeadID: created.ID, Target: "pool/worker"}); err != nil {
+		t.Fatalf("route through policy wrapper: %v", err)
+	}
+	got, err := base.Get(created.ID)
+	if err != nil {
+		t.Fatalf("read routed bead: %v", err)
+	}
+	if got.Metadata[beadmeta.RoutedToMetadataKey] != "pool/worker" {
+		t.Fatalf("gc.routed_to = %q, want pool/worker", got.Metadata[beadmeta.RoutedToMetadataKey])
 	}
 }

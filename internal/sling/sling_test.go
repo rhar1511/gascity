@@ -6,10 +6,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/agentutil"
@@ -19,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/molecule"
@@ -1243,6 +1247,62 @@ func TestDoSlingFormulaToAgent(t *testing.T) {
 	}
 }
 
+func TestDoSlingGraphOnlyMaterializationLeavesSourceUntouched(t *testing.T) {
+	formulaDir := t.TempDir()
+	workflow := "lifecycle-simple"
+	formulaText := "formula = \"lifecycle-simple\"\nversion = 1\nphase = \"vapor\"\n\n[[steps]]\nid = \"review\"\ntitle = \"Review\"\n"
+	if err := os.WriteFile(filepath.Join(formulaDir, workflow+".toml"), []byte(formulaText), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	agentCfg := config.Agent{Name: "worker", MaxActiveSessions: intPtr(1), DefaultSlingFormula: &workflow}
+	cfg := &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		FormulaLayers: config.FormulaLayers{City: []string{formulaDir}},
+		Agents:        []config.Agent{agentCfg},
+	}
+	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	source, err := deps.Store.Create(beads.Bead{Title: "admitted work", Type: "task", Status: "open", Metadata: map[string]string{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := deps.Store.Get(source.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineage := `{"version":1,"state":"lineage_pending","scope":"city:test-city/city:test-city","contract":"digest","route":"worker","workflow":"lifecycle-simple","merge_strategy":"mr","token":"stable","source_id":"` + source.ID + `","source_store_ref":"city:test-city","workflow_store_ref":"city:test-city","admission_receipt":"receipt"}`
+	deps.LifecycleRecipeMetadata = map[string]string{
+		beadmeta.LifecycleMaterializationMetadataKey: lineage,
+		beadmeta.MergeStrategyMetadataKey:            "mr",
+		beadmeta.IdempotencyKeyMetadataKey:           "lifecycle-materialization-stable",
+	}
+	result, err := DoSling(SlingOpts{
+		Target: agentCfg, BeadOrFormula: source.ID, RequireFormulaAttach: true,
+		GraphOnlyMaterialization: true, MaterializationID: "lifecycle-materialization-stable",
+		Merge: "mr",
+	}, deps, deps.Store)
+	if err != nil {
+		t.Fatalf("graph-only DoSling: %v", err)
+	}
+	if result.WispRootID == "" {
+		t.Fatalf("graph-only DoSling returned no workflow root: %+v", result)
+	}
+	after, err := deps.Store.Get(source.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(before, after) {
+		t.Fatalf("graph-only materialization mutated source:\nbefore=%+v\nafter=%+v", before, after)
+	}
+	root, err := deps.Store.Get(result.WispRootID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if root.Metadata[beadmeta.LifecycleMaterializationMetadataKey] != lineage ||
+		root.Metadata[beadmeta.IdempotencyKeyMetadataKey] != "lifecycle-materialization-stable" {
+		t.Fatalf("workflow root lost lifecycle lineage/idempotency metadata: %+v", root.Metadata)
+	}
+}
+
 func TestDoSlingFormulaToPoolRejectsLegacyMoleculeRoot(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
@@ -2129,6 +2189,156 @@ func (r *fakeBeadRouter) Route(_ context.Context, req RouteRequest) error {
 	return nil
 }
 
+var errFormulaActionRouteChanged = errors.New("formula action route changed")
+
+type reentrantFormulaActionLease struct {
+	routeMu    sync.RWMutex
+	stateMu    sync.Mutex
+	active     bool
+	generation uint64
+	expected   uint64
+}
+
+func (l *reentrantFormulaActionLease) Acquire() error {
+	l.stateMu.Lock()
+	defer l.stateMu.Unlock()
+	if l.active {
+		return nil
+	}
+	l.routeMu.RLock()
+	if l.generation != l.expected {
+		l.routeMu.RUnlock()
+		return errFormulaActionRouteChanged
+	}
+	l.active = true
+	return nil
+}
+
+func (l *reentrantFormulaActionLease) Release() {
+	l.stateMu.Lock()
+	if l.active {
+		l.active = false
+		l.routeMu.RUnlock()
+	}
+	l.stateMu.Unlock()
+}
+
+func (l *reentrantFormulaActionLease) publish() {
+	l.routeMu.Lock()
+	l.generation++
+	l.routeMu.Unlock()
+}
+
+type callbackAwareFormulaStore struct {
+	beads.Store
+	mu                         sync.Mutex
+	callbackComplete           bool
+	postCallbackMetadataWrites int
+}
+
+func (s *callbackAwareFormulaStore) SetMetadata(id, key, value string) error {
+	s.mu.Lock()
+	if s.callbackComplete {
+		s.postCallbackMetadataWrites++
+	}
+	s.mu.Unlock()
+	return s.Store.SetMetadata(id, key, value)
+}
+
+func (s *callbackAwareFormulaStore) markCallbackComplete() {
+	s.mu.Lock()
+	s.callbackComplete = true
+	s.mu.Unlock()
+}
+
+func (s *callbackAwareFormulaStore) postCallbackWrites() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.postCallbackMetadataWrites
+}
+
+type reentrantFormulaRouter struct {
+	lease   *reentrantFormulaActionLease
+	store   *callbackAwareFormulaStore
+	entered chan struct{}
+}
+
+func (r reentrantFormulaRouter) Route(context.Context, RouteRequest) error {
+	close(r.entered)
+	r.lease.publish()
+	r.store.markCallbackComplete()
+	return nil
+}
+
+type ordinaryFormulaActionGate struct{}
+
+func (ordinaryFormulaActionGate) AuthorizeRecipe(context.Context, *formula.Recipe, beads.Store) (molecule.FormulaActionAuthorization, error) {
+	return molecule.FormulaActionAuthorization{}, nil
+}
+
+func (ordinaryFormulaActionGate) AuthorizeFragment(context.Context, *formula.FragmentRecipe, beads.Store) (molecule.FormulaActionAuthorization, error) {
+	return molecule.FormulaActionAuthorization{}, nil
+}
+
+func (ordinaryFormulaActionGate) RevalidateRecipe(context.Context, *formula.Recipe, beads.Store, molecule.FormulaActionAuthorization) error {
+	return nil
+}
+
+func (ordinaryFormulaActionGate) RevalidateFragment(context.Context, *formula.FragmentRecipe, beads.Store, molecule.FormulaActionAuthorization) error {
+	return nil
+}
+
+func (ordinaryFormulaActionGate) RevalidateBead(context.Context, beads.Bead, beads.Store) error {
+	return nil
+}
+
+func TestFormulaActionRouteCallbackCanPublishAndStopsStaleFollowupWrites(t *testing.T) {
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
+	base := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	store := &callbackAwareFormulaStore{Store: base.Store}
+	lease := &reentrantFormulaActionLease{generation: 1, expected: 1}
+	router := reentrantFormulaRouter{lease: lease, store: store, entered: make(chan struct{})}
+	base.Store = store
+	base.Router = router
+	base.FormulaActionGate = ordinaryFormulaActionGate{}
+	base.RequireFormulaActionGate = true
+	base.FormulaActionLease = lease
+
+	type result struct {
+		sling SlingResult
+		err   error
+	}
+	done := make(chan result, 1)
+	go func() {
+		slung, err := DoSling(SlingOpts{
+			Target:        config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)},
+			BeadOrFormula: "test-formula",
+			IsFormula:     true,
+			Merge:         "mr",
+		}, base, base.Store)
+		done <- result{sling: slung, err: err}
+	}()
+
+	select {
+	case <-router.entered:
+	case outcome := <-done:
+		t.Fatalf("formula action returned before entering its route callback: result=%+v err=%v", outcome.sling, outcome.err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("formula action did not reach its route callback")
+	}
+	select {
+	case outcome := <-done:
+		if !errors.Is(outcome.err, errFormulaActionRouteChanged) {
+			t.Fatalf("DoSling() error = %v, want stale route refusal", outcome.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("route callback could not publish while formula action was active; lease was held across the callback")
+	}
+	if got := store.postCallbackWrites(); got != 0 {
+		t.Fatalf("post-callback store metadata writes = %d, want none after stale-route refusal", got)
+	}
+}
+
 func TestSlingRouteBeadWithTypedRouter(t *testing.T) {
 	router := &fakeBeadRouter{}
 	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
@@ -2633,6 +2843,48 @@ func TestSlingAttachGraphFormulaCreatesConvoyFirstRoot(t *testing.T) {
 	}
 	if got := sourceAfter.Metadata[beadmeta.RoutedToMetadataKey]; got != "" {
 		t.Fatalf("source gc.routed_to = %q, want empty (must not be set on graph.v2 work bead)", got)
+	}
+}
+
+func TestDefaultGraphWorkflowRecordsSignedMergeStrategy(t *testing.T) {
+	formulaDir := t.TempDir()
+	writeGraphV2ConvoyFormula(t, formulaDir)
+	cfg := graphV2SlingTestConfig(t, formulaDir)
+	workflow := "graph-work"
+	cfg.Agents = append(cfg.Agents, config.Agent{
+		Name: "mayor", MaxActiveSessions: intPtr(1), DefaultSlingFormula: &workflow,
+	})
+	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	source, err := deps.Store.Create(beads.Bead{Title: "work", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := DoSling(SlingOpts{
+		Target:        config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1), DefaultSlingFormula: &workflow},
+		BeadOrFormula: source.ID, RequireFormulaAttach: true, Merge: "mr",
+	}, deps, deps.Store)
+	if err != nil {
+		t.Fatalf("DoSling default graph workflow: %v", err)
+	}
+	if result.WorkflowID == "" {
+		t.Fatalf("DoSling returned no workflow root: %+v", result)
+	}
+	attached, err := deps.Store.Get(source.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := attached.Metadata[beadmeta.ExecutionRoutedToMetadataKey]; got != "mayor" {
+		t.Fatalf("execution route = %q, want mayor", got)
+	}
+	if got := attached.Metadata[beadmeta.MergeStrategyMetadataKey]; got != "mr" {
+		t.Fatalf("merge strategy = %q, want mr", got)
+	}
+	root, err := deps.Store.Get(result.WorkflowID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := root.Metadata[beadmeta.FormulaNameMetadataKey]; got != workflow {
+		t.Fatalf("workflow formula = %q, want %q", got, workflow)
 	}
 }
 
@@ -5152,7 +5404,10 @@ func TestCheckBeadStateRoutedPoolSiblingPrefixIsCurrentlyOverMatched(t *testing.
 // target+"-" never matches it. The target+"-" anchor therefore only
 // fires for Dir-less pools. This is a lost fix, not a regression: the
 // pre-fix behavior for this shape is unchanged. Asserted so the gap is
-// visible until a session->pool ownership lookup replaces the prefix.
+// visible. Current claims are recorded under the session bead ID, which
+// assigneeIsOwnPoolSession resolves to the pool for rig-qualified pools too
+// (TestCheckBeadStateRoutedPoolClaimedBySessionBeadIDIsIdempotent); only this
+// legacy sanitized session_name spelling stays unmatched.
 func TestCheckBeadStateRoutedRigQualifiedPoolSessionIsNotMatched(t *testing.T) {
 	store := beads.NewMemStore()
 	a := config.Agent{
@@ -5180,5 +5435,113 @@ func TestCheckBeadStateRoutedRigQualifiedPoolSessionIsNotMatched(t *testing.T) {
 	}
 	if len(result.Warnings) == 0 {
 		t.Fatalf("expected the conflict warning for an unmatched pool-session claim, got none")
+	}
+}
+
+// createPoolSessionBead creates a session bead as the reconciler stamps it for
+// an unaliased pool worker (template = the pool's qualified name).
+func createPoolSessionBead(t *testing.T, store beads.Store, template, status string) beads.Bead {
+	t.Helper()
+	sb, err := store.Create(beads.Bead{
+		Title:    "pool session",
+		Type:     "session",
+		Status:   "open",
+		Labels:   []string{"gc:session"},
+		Metadata: map[string]string{"template": template, "pool_managed": "true"},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(session): %v", err)
+	}
+	if status == "closed" {
+		if err := store.Close(sb.ID); err != nil {
+			t.Fatalf("store.Close(session): %v", err)
+		}
+	}
+	return sb
+}
+
+// Since #6324 an unaliased pool worker claims under its session bead ID, which
+// carries no "<pool>-" prefix. A re-sling of a bead that such a worker already
+// claimed must still read as idempotent (the #4785 double-mint), for Dir-less
+// and rig-qualified pools alike; a claim by another pool's session, or by a
+// closed session, must still warn.
+func TestCheckBeadStateRoutedPoolClaimedBySessionBeadIDIsIdempotent(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		dir             string
+		sessionTemplate func(target string) string
+		sessionStatus   string
+		wantIdempotent  bool
+	}{
+		{name: "own pool session", sessionTemplate: func(target string) string { return target }, sessionStatus: "open", wantIdempotent: true},
+		{name: "own rig-qualified pool session", dir: "myrig", sessionTemplate: func(target string) string { return target }, sessionStatus: "open", wantIdempotent: true},
+		{name: "other pool session", sessionTemplate: func(string) string { return "novices" }, sessionStatus: "open", wantIdempotent: false},
+		{name: "closed own pool session", sessionTemplate: func(target string) string { return target }, sessionStatus: "closed", wantIdempotent: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			a := config.Agent{
+				Name:              "smiths",
+				Dir:               tc.dir,
+				MinActiveSessions: intPtr(1),
+				MaxActiveSessions: intPtr(4),
+			}
+			target := agentutil.RoutedToIdentity(&a)
+			sb := createPoolSessionBead(t, store, tc.sessionTemplate(target), tc.sessionStatus)
+			convoy, err := store.Create(beads.Bead{Title: "auto convoy", Type: "convoy", Status: "open"})
+			if err != nil {
+				t.Fatalf("store.Create(convoy): %v", err)
+			}
+			bead, err := store.Create(beads.Bead{
+				Title:    "pool work",
+				Type:     "task",
+				Status:   "in_progress",
+				Assignee: sb.ID,
+				Metadata: map[string]string{"gc.routed_to": target},
+			})
+			if err != nil {
+				t.Fatalf("store.Create(bead): %v", err)
+			}
+			if err := store.DepAdd(convoy.ID, bead.ID, "tracks"); err != nil {
+				t.Fatalf("store.DepAdd(tracks): %v", err)
+			}
+
+			result := CheckBeadState(store, bead.ID, a, SlingDeps{Store: store})
+
+			if result.Idempotent != tc.wantIdempotent {
+				t.Fatalf("Idempotent = %v, want %v (assignee %q, target %q); result %+v", result.Idempotent, tc.wantIdempotent, sb.ID, target, result)
+			}
+			if !tc.wantIdempotent && len(result.Warnings) == 0 {
+				t.Fatalf("expected a warning naming the conflicting assignee, got none")
+			}
+		})
+	}
+}
+
+// The undeliverable-hand-off warning shares the ownership predicate: a bead held
+// by one of the target pool's own sessions under its session bead ID is not
+// stranded, while one held by another pool's session is.
+func TestUndeliverableHandoffWarningRecognizesPoolSessionBeadID(t *testing.T) {
+	store := beads.NewMemStore()
+	a := config.Agent{Name: "smiths", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(4)}
+	target := agentutil.RoutedToIdentity(&a)
+	molErr := &MoleculeAttachedError{Label: "molecule", AttachmentID: "mol-1"}
+
+	own := createPoolSessionBead(t, store, target, "open")
+	held, err := store.Create(beads.Bead{Title: "held", Type: "task", Status: "in_progress", Assignee: own.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg, warn := undeliverableHandoffWarning(store, SlingDeps{Store: store}, held.ID, a, molErr); warn {
+		t.Fatalf("own pool session claim reported undeliverable: %s", msg)
+	}
+
+	other := createPoolSessionBead(t, store, "novices", "open")
+	foreign, err := store.Create(beads.Bead{Title: "foreign", Type: "task", Status: "in_progress", Assignee: other.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, warn := undeliverableHandoffWarning(store, SlingDeps{Store: store}, foreign.ID, a, molErr); !warn {
+		t.Fatalf("another pool's session claim was not reported undeliverable")
 	}
 }

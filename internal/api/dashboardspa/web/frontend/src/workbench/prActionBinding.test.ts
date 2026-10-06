@@ -15,6 +15,7 @@ const activeAttempt: ExecutionAttempt = {
   active: true,
   startedAt: '2026-09-28T00:00:00Z',
   lastActive: '2026-09-29T00:00:00Z',
+  executionGeneration: 7,
 };
 const bead = {
   id: 'work-1',
@@ -81,7 +82,20 @@ function queue(overrides: Partial<PRActionQueue> = {}): PRActionQueue {
 
 describe('bindPRActions', () => {
   it('offers only server-authorized prepare/review actions bound to exact attempt evidence', () => {
-    const result = bindPRActions(queue(), bead, activeAttempt, now);
+    const result = bindPRActions(queue(), bead, activeAttempt, now, {
+      attempt_id: 'session-1',
+      store_ref: 'rig:app',
+      base_sha: baseSHA,
+      candidate_sha: headSHA,
+      identity: {
+        kind: 'workbench',
+        owner_bead_id: bead.id,
+        execution_bead_id: 'execution-1',
+        session_id: activeAttempt.sessionId,
+        session_generation: '7',
+        claim_generation: 'claim-7',
+      },
+    });
     expect(result.state).toBe('ready');
     if (result.state !== 'ready') return;
     expect(result.actions.item.pull_request).toBe(42);
@@ -125,6 +139,67 @@ describe('bindPRActions', () => {
     }
   });
 
+  it('does not turn a session ID into an immutable attempt ID without archive attribution', () => {
+    const result = bindPRActions(queue(), bead, activeAttempt, now);
+    expect(result.state).toBe('ready');
+    if (result.state !== 'ready') throw new Error('expected a fresh queue fixture');
+    expect(result.actions.prepare?.available).toBe(true);
+    expect(result.actions.queueReview?.available).toBe(false);
+    expect(result.actions.attemptId).toBeNull();
+  });
+
+  it('uses the archived attempt ID rather than the session ID', () => {
+    const snapshot = queue();
+    snapshot.items![0]!.attempt_evidence![0]!.attempt_id = 'immutable-attempt-9';
+    const result = bindPRActions(snapshot, bead, activeAttempt, now, {
+      attempt_id: 'immutable-attempt-9',
+      store_ref: 'rig:app',
+      base_sha: baseSHA,
+      candidate_sha: headSHA,
+      identity: {
+        kind: 'workbench',
+        owner_bead_id: bead.id,
+        execution_bead_id: 'execution-1',
+        session_id: activeAttempt.sessionId,
+        session_generation: '7',
+        claim_generation: 'claim-7',
+      },
+    });
+    expect(result.state).toBe('ready');
+    if (result.state !== 'ready') throw new Error('expected a fresh queue fixture');
+    expect(result.actions.queueReview?.available).toBe(true);
+    expect(result.actions.attemptId).toBe('immutable-attempt-9');
+  });
+
+  it.each([
+    { owner_bead_id: 'foreign-work' },
+    { session_id: 'foreign-session' },
+    { session_generation: '8' },
+    { execution_bead_id: '' },
+    { claim_generation: '' },
+  ])('refuses archive attribution with a mismatched incarnation: %j', (changed) => {
+    const result = bindPRActions(queue(), bead, activeAttempt, now, {
+      attempt_id: 'session-1',
+      store_ref: 'rig:app',
+      base_sha: baseSHA,
+      candidate_sha: headSHA,
+      identity: {
+        kind: 'workbench',
+        owner_bead_id: bead.id,
+        execution_bead_id: 'execution-1',
+        session_id: activeAttempt.sessionId,
+        session_generation: '7',
+        claim_generation: 'claim-7',
+        ...changed,
+      },
+    });
+    expect(result.state).toBe('ready');
+    if (result.state !== 'ready') throw new Error('expected a fresh queue fixture');
+    expect(result.actions.prepare?.available).toBe(true);
+    expect(result.actions.queueReview?.available).toBe(false);
+    expect(result.actions.attemptId).toBeNull();
+  });
+
   it('fails closed on ambiguous pull requests for the same revision', () => {
     const snapshot = queue();
     const item = snapshot.items?.[0];
@@ -132,6 +207,28 @@ describe('bindPRActions', () => {
     expect(bindPRActions(snapshot, bead, activeAttempt, now)).toMatchObject({
       state: 'unavailable',
     });
+  });
+
+  it('refuses archive attribution from a different physical store', () => {
+    const result = bindPRActions(queue(), bead, activeAttempt, now, {
+      attempt_id: 'session-1',
+      store_ref: 'rig:foreign',
+      base_sha: baseSHA,
+      candidate_sha: headSHA,
+      identity: {
+        kind: 'workbench',
+        owner_bead_id: bead.id,
+        execution_bead_id: 'execution-1',
+        session_id: activeAttempt.sessionId,
+        session_generation: '7',
+        claim_generation: 'claim-7',
+      },
+    });
+    expect(result.state).toBe('ready');
+    if (result.state !== 'ready') throw new Error('expected a fresh queue fixture');
+    expect(result.actions.prepare?.available).toBe(true);
+    expect(result.actions.queueReview?.available).toBe(false);
+    expect(result.actions.attemptId).toBeNull();
   });
 
   it('fails closed when the server execute endpoint cannot accept the commit SHA length', () => {

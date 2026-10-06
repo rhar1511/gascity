@@ -257,6 +257,13 @@ func startBeadsLifecycle(cityPath, _ string, cfg *config.City, stderr io.Writer)
 	}
 	if cityProviderOwned {
 		if cityState.State == providerScopeReady {
+			// The provider script pins a ready scope out of bd's shared-server
+			// mode by reading this pin, so it has to be in place before the
+			// start op runs bd (a city initialized by a build that did not
+			// write it is repaired here).
+			if err := ensureGCOwnedProxiedScopeSharedServerOff(cityPath, cityPath); err != nil {
+				return err
+			}
 			if err := ensureBeadsProvider(cityPath); err != nil {
 				return fmt.Errorf("provider-owned bead store: %w", err)
 			}
@@ -855,8 +862,19 @@ func initAndHookDir(cityPath, dir, prefix string) error {
 		if !strings.HasPrefix(provider, "exec:") {
 			return fmt.Errorf("provider-owned scope %q requires an exec beads provider", dir)
 		}
+		// A ready scope's init op is the provider `start` (a bd ping), and the
+		// script pins bd's shared-server mode off from this pin: write it first
+		// so a scope initialized by a build that wrote none is never pinged
+		// unpinned. No-op for an unmaterialized scope; re-applied after init,
+		// which rewrites config.yaml.
+		if err := ensureGCOwnedProxiedScopeSharedServerOff(cityPath, dir); err != nil {
+			return err
+		}
 		pending, err := runProviderOwnedScopeInit(cityPath, dir, prefix, strings.TrimPrefix(provider, "exec:"))
 		if err != nil {
+			return err
+		}
+		if err := ensureGCOwnedProxiedScopeSharedServerOff(cityPath, dir); err != nil {
 			return err
 		}
 		registerProviderOwnedScopeCustomTypes(cityPath, dir)
@@ -887,6 +905,9 @@ func initAndHookDir(cityPath, dir, prefix string) error {
 		return err
 	}
 	if err := normalizeCanonicalBdScopeFilesForInit(cityPath, dir, prefix, doltDatabase); err != nil {
+		return err
+	}
+	if err := ensureGCOwnedProxiedScopeSharedServerOff(cityPath, dir); err != nil {
 		return err
 	}
 	if cityUsesBdStoreContract(cityPath) && currentResolvableManagedDoltPort(cityPath) != "" {
@@ -1165,6 +1186,18 @@ func resolveRigPaths(cityPath string, rigs []config.Rig) {
 			rigs[i].Path = filepath.Join(cityPath, rigs[i].Path)
 		}
 	}
+}
+
+// resolveRigPathsAndRefreshQualification seals the effective config only after
+// runtime path normalization. Relative rig paths are part of the loaded
+// controller config and must not leave the snapshot bound to their raw TOML
+// spelling when the published config holds absolute paths.
+func resolveRigPathsAndRefreshQualification(cityPath string, cfg *config.City, prov *config.Provenance) {
+	if cfg == nil {
+		return
+	}
+	resolveRigPaths(cityPath, cfg.Rigs)
+	config.RefreshQualificationSnapshot(cfg, prov)
 }
 
 // ── Low-level provider operations ────────────────────────────────────────
@@ -2000,6 +2033,10 @@ func initDefaultRigBdStore(cityPath, dir, prefix, doltDatabase string) error {
 	args := []string{"init", "-p", prefix, "--skip-hooks"}
 	if scopeInitUsesProxiedDoltMode(cityPath, dir) {
 		env["BEADS_DOLT_PROXIED_SERVER"] = "1"
+		// bd init under a user-level dolt.shared-server: true would root the
+		// new proxy in ~/.beads/shared-server and persist that choice into the
+		// scope's config.yaml. See applyProxiedSharedServerOptOut.
+		applyProxiedSharedServerOptOut(env)
 		// Idle-never is not an optimization, it is D3: without it bd retires
 		// the proxy and its Dolt child after 30s quiet and every later command
 		// pays a cold start. It also has to be passed for bd to write the
@@ -2051,7 +2088,7 @@ func finalizeCanonicalBdScopeInit(cityPath, dir, prefix, doltDatabase string) er
 	// that path can run direct SQL preflight and would either fail before the
 	// proxy is ready or accidentally create a second managed server.
 	if scopeInitUsesProxiedDoltMode(cityPath, dir) {
-		return nil
+		return ensureGCOwnedProxiedScopeSharedServerOff(cityPath, dir)
 	}
 	store, err := openStoreAtForCity(dir, cityPath)
 	if err != nil {
@@ -2540,7 +2577,7 @@ func validDoltRuntimeStateIdentity(state doltRuntimeState, cityPath string) (man
 }
 
 func managedDoltRuntimeProcessOwned(state doltRuntimeState, layout managedDoltRuntimeLayout) bool {
-	holderPID := findPortHolderPID(strconv.Itoa(state.Port))
+	holderPID := findPortHolderPID(strconv.Itoa(state.Port), state.PID)
 	if holderPID > 0 && holderPID != state.PID {
 		return false
 	}
@@ -3526,6 +3563,8 @@ func providerLifecycleProcessEnvFromBase(cityPath, provider string, env []string
 		}
 		if entry.Intent.Transport == "proxied" {
 			applyProxiedDoltEnv(envMap)
+			// A journaled, initializing scope is gc-owned by construction.
+			applyProxiedSharedServerOptOut(envMap)
 		}
 		return mergeRuntimeEnv(nil, envMap), nil
 	}

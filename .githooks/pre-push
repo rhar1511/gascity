@@ -44,8 +44,19 @@ while read -r _local_ref local_sha _remote_ref remote_sha; do
     go_changed=1
     continue
   fi
-  if git diff --name-only "$remote_sha" "$local_sha" -- '*.go' 2>/dev/null | grep -q .; then
-    go_changed=1
+  # --quiet distinguishes changed sources from scan errors without an early
+  # pipe consumer turning a successful large diff into SIGPIPE under pipefail.
+  # Presentation helpers must not decide whether the full suite is required.
+  if git diff --no-ext-diff --no-textconv --quiet "$remote_sha" "$local_sha" -- '*.go'; then
+    continue
+  else
+    diff_status=$?
+    if [ "$diff_status" -eq 1 ]; then
+      go_changed=1
+    else
+      printf 'pre-push: unable to determine Go changes (git diff exit %s); refusing push\n' "$diff_status" >&2
+      exit "$diff_status"
+    fi
   fi
 done < <(replay_refs)
 
