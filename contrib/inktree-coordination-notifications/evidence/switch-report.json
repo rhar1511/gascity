@@ -1,0 +1,8 @@
+{
+  "deliver": false,
+  "live_dispatch": "off",
+  "mode": "replay",
+  "notification_dispatch": "off",
+  "render_allowed": false,
+  "unknown_values_fail_closed": true
+}

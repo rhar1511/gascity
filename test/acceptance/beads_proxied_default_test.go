@@ -1101,6 +1101,11 @@ func TestBeadsProxiedDefault(t *testing.T) {
 		}
 		makeCityLookLegacyManaged(t, env, bdPath, legacyRoot)
 
+		// This fixture owns the throwaway managed Dolt server, so consent to
+		// bd's remote-schema migration during legacy city startup and rig add.
+		// Without it, bd may stop partway through old-way init and refuse the
+		// next operation against the half-migrated shared-server schema.
+		legacy.Env = helpers.LegacyInitEnv(env)
 		legacy.StartWithSupervisor()
 
 		// gc, not bd, owns the Dolt process: its runtime state is written and
@@ -1132,7 +1137,7 @@ func TestBeadsProxiedDefault(t *testing.T) {
 		// migration consent as legacy init; CI can otherwise time out during
 		// bd's upgrade and the shared-server safety gate refuses the add. Only
 		// this command receives that consent.
-		if out, err := helpers.RunGC(helpers.LegacyInitEnv(env), legacyRoot, "rig", "add", legacyRig); err != nil {
+		if out, err := helpers.RunGC(legacy.Env, legacyRoot, "rig", "add", legacyRig); err != nil {
 			t.Fatalf("gc rig add on a grandfathered city: %v\n%s", err, out)
 		}
 		var journal scopeOwnershipDoc

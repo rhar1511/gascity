@@ -1,0 +1,10 @@
+[pack]
+name = "inktree-coordination-notifications"
+schema = 2
+version = "0.1.0"
+
+[coordination_notifications]
+policy_file = "policy.json"
+live_dispatch = "off"
+notification_dispatch = "off"
+mode = "replay"

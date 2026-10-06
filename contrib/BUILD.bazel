@@ -1,7 +1,9 @@
 package(default_visibility = ["//visibility:public"])
 
 # Docs/contrib trees are consumed as runfiles by repo-lint tests (test/docsync,
-# scripts, k8s runtime tests). No Go sources live here.
+# scripts, k8s runtime tests). Go packages under this tree own their Bazel
+# targets in package-local Gazelle-generated BUILD files.
+
 exports_files(glob(
     ["**"],
     exclude = ["BUILD.bazel"],
@@ -12,7 +14,11 @@ filegroup(
     srcs = glob(
         ["**"],
         exclude = ["BUILD.bazel"],
-    ),
+    ) + [
+        "//contrib/inktree-coordination-notifications:bazel_repo_srcs",
+        "//contrib/inktree-coordination-notifications/cmd/evidence:bazel_repo_srcs",
+        "//contrib/inktree-coordination-notifications/cmd/forgejo-canary:bazel_repo_srcs",
+    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
