@@ -1,0 +1,7 @@
+{
+  "member_identifier_present": false,
+  "member_text_present": false,
+  "model_rationale_present": false,
+  "redaction": "no_member_content",
+  "rendered": "A human decision is needed before this work can proceed.\nReason: hold.ambiguous_rig\nBead: gc bd show inktree-syn0003\nDecision: go run ./contrib/inktree-coordination-notifications/cmd/evidence --corpus contrib/inktree-coordination-notifications/replay/corpus.v1.json --policy contrib/inktree-coordination-notifications/policy.json --out contrib/inktree-coordination-notifications/evidence"
+}

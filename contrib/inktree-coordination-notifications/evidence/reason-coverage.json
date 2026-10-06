@@ -1,0 +1,17 @@
+{
+  "policy_version": "coordination-policy-v1",
+  "reason_count": 11,
+  "keys": [
+    "abstain/unsupported_class",
+    "hard_failure/deterministic_control_plane_guard",
+    "hard_failure/policy_violation",
+    "hold/__insufficient_evidence__",
+    "hold/ambiguous_rig",
+    "hold/irreversible_risk",
+    "hold/jev_selected_hold",
+    "hold/missing_evidence",
+    "hold/safety_class_security",
+    "route/multi_rig_dag",
+    "route/single_rig"
+  ]
+}
