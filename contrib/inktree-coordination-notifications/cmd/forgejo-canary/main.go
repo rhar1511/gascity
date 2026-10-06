@@ -18,10 +18,12 @@ import (
 	"os/user"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
+	"unsafe"
 
 	inktreecoordinationnotifications "github.com/gastownhall/gascity/contrib/inktree-coordination-notifications"
 	"github.com/gastownhall/gascity/internal/coordinationnotify"
@@ -623,7 +625,7 @@ func readReviewedEvidenceFile(ctx context.Context, config canaryConfig, path, la
 	if config.SourceHead != "" {
 		return io.ReadAll(io.LimitReader(file, 1<<20))
 	}
-	physical, err := filepath.EvalSymlinks(fmt.Sprintf("/proc/self/fd/%d", file.Fd()))
+	physical, err := resolveOpenedDescriptorPath(file)
 	if err != nil {
 		return nil, fmt.Errorf("resolve opened %s: %w", label, err)
 	}
@@ -647,6 +649,22 @@ func readReviewedEvidenceFile(ctx context.Context, config canaryConfig, path, la
 	return io.ReadAll(io.LimitReader(file, 1<<20))
 }
 
+func resolveOpenedDescriptorPath(file *os.File) (string, error) {
+	if runtime.GOOS == "darwin" {
+		buf := make([]byte, 1024)
+		_, _, errno := syscall.Syscall(syscall.SYS_FCNTL, file.Fd(), 50 /* F_GETPATH */, uintptr(unsafe.Pointer(&buf[0])))
+		if errno != 0 {
+			return "", errno
+		}
+		n := bytes.IndexByte(buf, 0)
+		if n < 0 {
+			n = len(buf)
+		}
+		return filepath.EvalSymlinks(string(buf[:n]))
+	}
+	return filepath.EvalSymlinks(fmt.Sprintf("/proc/self/fd/%d", file.Fd()))
+}
+
 func openStableOutputDirectory(ctx context.Context, config canaryConfig) (*os.File, error) {
 	absolute, err := filepath.Abs(config.Output)
 	if err != nil {
@@ -666,40 +684,40 @@ func openStableOutputDirectory(ctx context.Context, config canaryConfig) (*os.Fi
 			_ = directory.Close()
 		}
 	}()
-	if err := validateStableOutputDirectory(ctx, config, directory); err != nil {
+	if _, err := validateStableOutputDirectory(ctx, config, directory); err != nil {
 		return nil, err
 	}
 	failed = false
 	return directory, nil
 }
 
-func validateStableOutputDirectory(ctx context.Context, config canaryConfig, directory *os.File) error {
+func validateStableOutputDirectory(ctx context.Context, config canaryConfig, directory *os.File) (string, error) {
 	info, err := directory.Stat()
 	if err != nil || !info.IsDir() {
-		return errors.New("stable canary output parent is not a directory")
+		return "", errors.New("stable canary output parent is not a directory")
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || stat.Uid != uint32(os.Getuid()) || info.Mode().Perm()&0o077 != 0 {
-		return errors.New("stable canary output parent must be private and owned by the current user")
+		return "", errors.New("stable canary output parent must be private and owned by the current user")
 	}
-	openedPath, err := filepath.EvalSymlinks(fmt.Sprintf("/proc/self/fd/%d", directory.Fd()))
+	openedPath, err := resolveOpenedDescriptorPath(directory)
 	if err != nil {
-		return fmt.Errorf("resolve stable canary output directory: %w", err)
+		return "", fmt.Errorf("resolve stable canary output directory: %w", err)
 	}
 	rootCommand := gitCommand(ctx, config.WorkDir, "rev-parse", "--show-toplevel")
 	rootData, err := rootCommand.Output()
 	if err != nil {
-		return err
+		return "", err
 	}
 	physicalRoot, err := filepath.EvalSymlinks(strings.TrimSpace(string(rootData)))
 	if err != nil {
-		return err
+		return "", err
 	}
 	relative, err := filepath.Rel(physicalRoot, openedPath)
 	if err != nil || (relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))) {
-		return errors.New("stable canary output directory resolves inside the reviewed worktree")
+		return "", errors.New("stable canary output directory resolves inside the reviewed worktree")
 	}
-	return nil
+	return openedPath, nil
 }
 
 func validateRunningBuild(reviewedHead string) error {
@@ -1068,10 +1086,15 @@ func writeJSON(ctx context.Context, config canaryConfig, path string, stableDire
 	data = append(data, '\n')
 	directory := filepath.Dir(path)
 	if stableDirectory != nil {
-		if err := validateStableOutputDirectory(ctx, config, stableDirectory); err != nil {
+		openedPath, err := validateStableOutputDirectory(ctx, config, stableDirectory)
+		if err != nil {
 			return err
 		}
-		directory = fmt.Sprintf("/proc/self/fd/%d", stableDirectory.Fd())
+		if runtime.GOOS == "darwin" {
+			directory = openedPath
+		} else {
+			directory = fmt.Sprintf("/proc/self/fd/%d", stableDirectory.Fd())
+		}
 	}
 	temp, err := os.CreateTemp(directory, ".forgejo-canary-*.tmp")
 	if err != nil {
