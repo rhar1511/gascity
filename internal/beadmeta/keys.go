@@ -244,6 +244,7 @@ const (
 	PackWorkspaceMetadataKey              = "gc.pack_workspace"
 	PerDispatchModelMetadataKey           = "gc.per_dispatch_model"
 	RalphStepIDMetadataKey                = "gc.ralph_step_id"
+	RSIStoryRequiredMetadataKey           = "gc.rsi_story_benchmark_required"
 	RSIRoleMetadataKey                    = "gc.rsi_role"
 	RSIAuthorityClassMetadataKey          = "gc.rsi_authority_class"
 	RSIExecutionBindingMetadataKey        = "gc.rsi_execution_binding"
@@ -759,6 +760,7 @@ var KnownMetadataKeys = []string{
 	PackWorkspaceMetadataKey,
 	PerDispatchModelMetadataKey,
 	RalphStepIDMetadataKey,
+	RSIStoryRequiredMetadataKey,
 	RSIRoleMetadataKey,
 	RSIAuthorityClassMetadataKey,
 	RSICandidateInputMetadataKey,

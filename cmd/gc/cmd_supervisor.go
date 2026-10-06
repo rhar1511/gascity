@@ -2279,17 +2279,38 @@ func startOneCity(
 	rec := events.Discard
 	var eventProv events.Provider
 	evPath := filepath.Join(path, ".gc", "events.jsonl")
-	fr, frErr := newFileEventsRecorder(evPath, cfg.Events, stderr)
+	var fr *events.FileRecorder
+	frErr := runPostPrepareStep("opening_event_recorder", func() error {
+		var err error
+		fr, err = newFileEventsRecorder(evPath, cfg.Events, stderr)
+		return err
+	})
 	if frErr == nil {
 		rec = fr
 		eventProv = fr
 	}
 
 	dops := newDrainOps(sp)
-	poolSessions := computePoolSessions(cfg, cityName, path, sp)
-	poolDeathHandlers := computePoolDeathHandlers(cfg, cityName, path, sp, stderr)
-	watchTargets := config.WatchTargets(prov, cfg, path)
-	configRev := config.Revision(fsys.OSFS{}, prov, cfg, path)
+	var poolSessions map[string]time.Duration
+	_ = runPostPrepareStep("computing_pool_sessions", func() error {
+		poolSessions = computePoolSessions(cfg, cityName, path, sp)
+		return nil
+	})
+	var poolDeathHandlers map[string]poolDeathInfo
+	_ = runPostPrepareStep("computing_pool_death_handlers", func() error {
+		poolDeathHandlers = computePoolDeathHandlers(cfg, cityName, path, sp, stderr)
+		return nil
+	})
+	var watchTargets []config.WatchTarget
+	_ = runPostPrepareStep("computing_config_watch_targets", func() error {
+		watchTargets = config.WatchTargets(prov, cfg, path)
+		return nil
+	})
+	var configRev string
+	_ = runPostPrepareStep("computing_config_revision", func() error {
+		configRev = config.Revision(fsys.OSFS{}, prov, cfg, path)
+		return nil
+	})
 	pokeCh := make(chan struct{}, 1)
 	configDirty := &atomic.Bool{}
 	forceShutdown := &atomic.Bool{}

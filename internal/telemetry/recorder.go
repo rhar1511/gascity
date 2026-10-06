@@ -12,7 +12,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/gastownhall/gascity/internal/beadmeta"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	otellog "go.opentelemetry.io/otel/log"
@@ -265,11 +264,7 @@ func sanitizeBDArgs(args []string) []string {
 }
 
 func logStringSlice(key string, values []string) attribute.KeyValue {
-	otelValues := make([]attribute.Value, 0, len(values))
-	for _, value := range values {
-		otelValues = append(otelValues, attribute.StringValue(value))
-	}
-	return attribute.Slice(key, otelValues...)
+	return attribute.StringSlice(key, values)
 }
 
 // RecordAgentStart records an agent session start (metrics + log event).
@@ -516,21 +511,11 @@ func RecordBDCall(ctx context.Context, args []string, durationMs float64, err er
 	// stdout/stderr are opt-in: they may contain tokens or PII returned by bd.
 	if os.Getenv("GC_LOG_BD_OUTPUT") == "true" {
 		kvs = append(kvs,
-			attribute.String("stdout", truncateOutput(redactPrivateEvidenceBDOutput(stdout), maxStdoutLog)),
-			attribute.String("stderr", truncateOutput(redactPrivateEvidenceBDOutput([]byte(stderr)), maxStderrLog)),
+			attribute.String("stdout", truncateOutput(string(stdout), maxStdoutLog)),
+			attribute.String("stderr", truncateOutput(stderr, maxStderrLog)),
 		)
 	}
 	emit(ctx, "bd.call", severity(err), kvs...)
-}
-
-func redactPrivateEvidenceBDOutput(output []byte) string {
-	if strings.Contains(string(output), beadmeta.AttemptEvidenceArchivePayloadMetadataKey) ||
-		strings.Contains(string(output), beadmeta.AttemptEvidenceIndexPrefix) {
-		// Fail closed even when `bd` output is malformed or truncated: parsing a
-		// partial document here could expose an opaque payload in diagnostic logs.
-		return "[private attempt-evidence output redacted]"
-	}
-	return string(output)
 }
 
 // RecordBDSlow records a bd CLI invocation that is still running after the

@@ -74,7 +74,9 @@ func TestActivityLive(t *testing.T) {
 	// working → continuously active: successive reads advance and stay ~now.
 	report("working")
 	waitActivity(t, p, "act-a", 5*time.Second, func(got time.Time) bool {
-		return !got.IsZero() && time.Since(got) < 100*time.Millisecond
+		// The idle seed is also fresh. Require activity to advance so this
+		// wait cannot finish before the tracker observes the working report.
+		return got.After(first) && time.Since(got) < 100*time.Millisecond
 	})
 	w1 := lastActivity(t, p, "act-a")
 	time.Sleep(30 * time.Millisecond)

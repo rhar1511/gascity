@@ -1,0 +1,186 @@
+# Configurable software-factory workflow.
+#
+# The formula mirrors Builder's factory phases while keeping Gas City's
+# execution primitives: each work-producing step has an explicit target,
+# bead-scoped worktree, durable JSON evidence, and independent gates.
+formula = "mol-software-factory"
+
+[requires]
+formula_compiler = ">=2.0.0"
+
+[vars]
+[vars.objective]
+description = "Bounded objective and stop condition"
+required = true
+
+[vars.work_dir]
+description = "Fresh bead-specific worktree path"
+required = true
+
+[vars.rig_root]
+description = "Clean rig root that workers must never target"
+required = true
+
+[vars.repository]
+description = "Configured repository id from .agent-factory/config.yaml"
+required = true
+
+[vars.sources]
+description = "Configured source ids to collect"
+required = true
+
+[vars.collect_target]
+description = "Read-only intake worker target"
+required = true
+
+[vars.lookback_target]
+description = "Bounded history worker target"
+required = true
+
+[vars.digest_target]
+description = "Human-decision digest worker target"
+required = true
+
+[vars.improver_target]
+description = "Implementation worker target"
+required = true
+
+[vars.reviewer_target]
+description = "Independent review worker target"
+required = true
+
+[vars.gate_target]
+description = "Promotion and shipping policy gate target"
+required = true
+
+[vars.ship_target]
+description = "Optional delivery worker target"
+required = true
+
+[vars.ship_authorized]
+description = "Explicitly authorized delivery action: never, publish, merge, or deploy"
+default = "never"
+
+[[steps]]
+id = "collect-signals"
+title = "Collect and triage configured signals"
+metadata = { "gc.factory.phase" = "collect", "gc.run_target" = "{{collect_target}}", "gc.factory.sources" = "{{sources}}", "gc.output_json_schema" = "factory.intake.v1", "gc.output_json_required" = "true" }
+description = """
+Read only the sources named by `{{sources}}` from the configured
+`.agent-factory/config.yaml`. Record scope, time window, pagination coverage,
+source counts, links, and the distinction between empty, unavailable, and
+truncated reads. Classify each item and retain unresolved questions. Do not
+reply, close, approve, merge, publish, deploy, or change code in this step.
+Persist intake evidence as `gc.output_json`.
+"""
+
+[steps.retry]
+max_attempts = 2
+on_exhausted = "soft_fail"
+
+[[steps]]
+id = "bounded-lookback"
+title = "Look back for recurring patterns"
+needs = ["collect-signals"]
+metadata = { "gc.factory.phase" = "lookback", "gc.run_target" = "{{lookback_target}}", "gc.output_json_schema" = "factory.lookback.v1", "gc.output_json_required" = "true" }
+description = """
+Compare the configured bounded history with its comparison window. Cluster
+recurring symptoms across sources, inspect prior fixes, and propose systemic
+changes only when evidence supports them. A partial source read is not a
+complete lookback. Do not edit code or evaluation criteria. Persist findings
+and coverage evidence as `gc.output_json`.
+"""
+
+[steps.retry]
+max_attempts = 1
+on_exhausted = "soft_fail"
+
+[[steps]]
+id = "human-digest"
+title = "Assemble the human decision queue"
+needs = ["collect-signals", "bounded-lookback"]
+metadata = { "gc.factory.phase" = "human-digest", "gc.run_target" = "{{digest_target}}", "gc.output_json_schema" = "factory.human-digest.v1", "gc.output_json_required" = "true" }
+description = """
+Aggregate items held for human judgment: unclear intent, sensitive
+interpretation, evaluator or safety changes, and delivery actions without
+separate authorization. Preserve source links and exact next decisions. This
+step is read-only and must not convert a digest item into permission to act.
+Persist the digest as `gc.output_json`.
+"""
+
+[steps.retry]
+max_attempts = 1
+on_exhausted = "soft_fail"
+
+[[steps]]
+id = "implement-candidate"
+title = "Implement an eligible change in an isolated worktree"
+needs = ["human-digest"]
+metadata = { "gc.factory.phase" = "implement", "gc.run_target" = "{{improver_target}}", "gc.factory.repository" = "{{repository}}", "gc.factory.work_dir" = "{{work_dir}}", "gc.factory.rig_root" = "{{rig_root}}", "gc.output_json_schema" = "factory.candidate.v1", "gc.output_json_required" = "true" }
+description = """
+Implement only an item whose configured fix policy allows it. Work exclusively
+in bead-specific worktree `{{work_dir}}`; fail closed if it equals the rig root
+`{{rig_root}}`. Use `gc worktree verify` before editing and `gc worktree verify`
+after tests. Preserve unrelated work, commit the candidate, and record the
+exact commit SHA, checks, changed paths, and rollback point. Do not modify
+policy, evaluation criteria, or delivery permissions. Persist candidate
+provenance as `gc.output_json`.
+"""
+
+[steps.retry]
+max_attempts = 3
+on_exhausted = "hard_fail"
+
+[[steps]]
+id = "independent-review"
+title = "Review the candidate under separate approval rules"
+needs = ["implement-candidate"]
+metadata = { "gc.factory.phase" = "review", "gc.run_target" = "{{reviewer_target}}", "gc.factory.read_only" = "true", "gc.output_json_schema" = "factory.review.v1", "gc.output_json_required" = "true" }
+description = """
+Review the candidate from a read-only checkout. Verify ownership, current
+head, worktree isolation, tests, regression evidence, and policy scope. The
+reviewer must be independent of the implementer and must not edit the
+candidate, thresholds, evaluation criteria, or shipping policy. Record a
+structured pass, findings, fail, or blocked result as `gc.output_json`.
+"""
+
+[steps.retry]
+max_attempts = 2
+on_exhausted = "soft_fail"
+
+[[steps]]
+id = "factory-gate"
+title = "Apply separate approval and delivery gates"
+needs = ["independent-review"]
+metadata = { "gc.factory.phase" = "gate", "gc.run_target" = "{{gate_target}}", "gc.factory.ship_authorized" = "{{ship_authorized}}", "gc.output_json_schema" = "factory.gate.v1", "gc.output_json_required" = "true" }
+description = """
+Load the candidate and review evidence. Promote only when the configured
+criteria pass, the current head still matches the reviewed head, and all
+safety, latency, cost, dependency, and worktree invariants hold. Keep publish,
+approve, merge, deploy, close, and notify decisions independent. For
+world-model, evaluator, safety, clinical, or deployment-policy changes, stop
+for human approval even when the implementation review passes. Persist the
+decision and rollback target as `gc.output_json`.
+"""
+
+[steps.retry]
+max_attempts = 1
+on_exhausted = "hard_fail"
+
+[[steps]]
+id = "deliver-authorized-change"
+title = "Deliver only the explicitly authorized action"
+needs = ["factory-gate"]
+metadata = { "gc.factory.phase" = "ship", "gc.run_target" = "{{ship_target}}", "gc.factory.authorization" = "{{ship_authorized}}", "gc.output_json_schema" = "factory.delivery.v1", "gc.output_json_required" = "true" }
+description = """
+Read the gate decision and the live repository state again. If
+`{{ship_authorized}}` is `never`, record a held result and stop. Otherwise
+perform only the named action under its own configured policy, with a current
+head match and required checks. A successful implementation never authorizes a
+reply, approval, merge, deploy, or issue closure by itself. Persist delivery
+and post-delivery verification evidence as `gc.output_json`.
+"""
+
+[steps.retry]
+max_attempts = 1
+on_exhausted = "hard_fail"

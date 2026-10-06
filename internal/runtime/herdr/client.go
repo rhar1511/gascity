@@ -10,8 +10,8 @@
 // Model: one shared herdr *session* per city (≈ the tmux `-L gc` server). Within
 // that session agents are grouped one *workspace* per rig (or per town) and one
 // *tab* per agent, so each gascity session is its own switchable space rather
-// than a tiled pane. Agents are addressable by name, 1:1 with gascity session
-// names.
+// than a tiled pane. Gas City session names resolve through persisted pane
+// bindings; Herdr's detected agent kind may be shared by multiple panes.
 package herdr
 
 import (
@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -279,6 +280,8 @@ func (c *client) runWithSecrets(ctx context.Context, declared []string, args ...
 // agentInfo mirrors herdr's agent object. Verified live against herdr 0.7.3:
 // the per-entry name field is emitted under the JSON key "agent", not "name"
 // (`herdr agent list` → {"agents":[{"agent":"act-a","agent_status":"idle",...}]}).
+// Detection-based releases can put a shared kind such as "codex" in that field;
+// it is not ownership evidence. Managed sessions resolve through bound pane IDs.
 type agentInfo struct {
 	Name        string `json:"agent"`
 	PaneID      string `json:"pane_id"`
@@ -909,24 +912,23 @@ func (c *client) ensurePlacement(ctx context.Context, wsLabel, tabLabel, cwd str
 // ── shared session-server lifecycle ──────────────────────────────────────────
 
 // socketPath is the unix socket for this client's herdr session. Must match
-// wherever the herdr binary itself resolves its config/state directory —
-// confirmed empirically (`XDG_CONFIG_HOME=X herdr --help` prints
-// "Config: X/herdr/config.toml" regardless of $HOME; with XDG_CONFIG_HOME
-// unset it falls back to "$HOME/.config/herdr/…") to be standard XDG Base
-// Directory precedence, i.e. exactly os.UserConfigDir() on this platform. A
-// plain os.UserHomeDir()+".config" join (the prior implementation) silently
-// ignores XDG_CONFIG_HOME, so it diverges from herdr's own resolution in any
-// environment that sets XDG_CONFIG_HOME while pointing $HOME elsewhere —
-// this fleet's agent sandboxes do exactly that. The result: this client
-// dials a socket no herdr process ever binds, so serverAlive() reads false
-// against a perfectly healthy server ("did not become ready"), and every
-// retry launches a redundant herdr server contending for the same pane
-// ("agent_pane_busy") — ga-nqlb8q.
+// wherever the herdr binary itself resolves its config/state directory.
+// On Unix, herdr uses XDG_CONFIG_HOME or $HOME/.config on both Linux and
+// macOS. os.UserConfigDir() differs on macOS (Library/Application Support),
+// which makes serverAlive report a healthy server as not ready. On Windows,
+// retain the platform config directory until herdr's Windows path is verified.
 func (c *client) socketPath() string {
 	if c.sockPath != "" {
 		return c.sockPath
 	}
 	configDir, _ := os.UserConfigDir()
+	if runtime.GOOS != "windows" {
+		if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+			configDir = xdg
+		} else if home, err := os.UserHomeDir(); err == nil {
+			configDir = filepath.Join(home, ".config")
+		}
+	}
 	if c.session == "" || c.session == "default" {
 		return filepath.Join(configDir, "herdr", "herdr.sock")
 	}

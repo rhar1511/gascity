@@ -50,6 +50,24 @@ herdr's side cannot fail the build. After a herdr upgrade, run
 `make test-herdr-live` and then put a session through a full work cycle before
 trusting it.
 
+## Session ownership
+
+Gas City enumerates and controls sessions through its persisted pane bindings.
+Herdr's detected `agent` value can be a kind such as `codex` shared by several
+panes; it does not identify a Gas City worker. Foreign or manually created panes
+without a Gas City binding are excluded from worker enumeration and orphan
+cleanup. Name-based stop and interrupt operations cannot target them.
+
+For managed workers, liveness resolves the bound pane directly. A stop closes
+only that pane, rejects conflicting owners, and retains its binding if the close
+fails. An explicit `pane_not_found` response permits idempotent cleanup. A
+name-collision recovery may adopt or reap a holder only when its pane is already
+bound to that same Gas City session. Where the stored exact session name is
+present, aliases that share its sanitized directory cannot control or replace
+the owner. Registry failures are reported as errors rather than an empty list.
+Existing unbound panes require an explicit
+ownership decision before they can become managed workers.
+
 ## Enabling herdr
 
 `herdr` is selected with the same runtime selector used for every other
@@ -152,17 +170,20 @@ path:
 - Once agents are on herdr, their workspaces and tabs are visible through
   herdr's own UI (`herdr` lists the per-rig/town workspaces and per-agent tabs).
 
-## What is not wired yet
+## Session events and reconciliation
 
-**The controller does not consume herdr's session-event stream.** herdr pushes
-session events and the provider implements the stream
-(`runtime.SessionEventProvider`), but the only consumer today is the provider's
-own activity reporting. The reconciler discovers session state on its periodic
-pass, so a session that goes away is noticed on the next pass rather than when the
-event arrives. That costs latency rather than correctness, because each pass reads
-live state rather than trusting an event. The delay is bounded by the reconcile
-interval only while the controller keeps up: ticks run one at a time, so a busy
-controller stretches it. That is the thing to watch during a pilot.
+The controller subscribes to herdr's session-event stream. An attributed pane
+exit or close pokes the reconciler immediately; a reconnect or subscription
+change schedules a delayed resync. Gas City attributes managed raw-command
+panes through persisted pane bindings, even when herdr has no agent-registry
+entry for them. The reconciler always reads live session state on the resulting
+tick; events are hints, not the source of truth.
+
+Periodic patrol remains the fallback when a stream is unavailable, an event
+cannot be attributed, or the controller is busy. Ticks run one at a time, so
+event delivery does not guarantee a fixed recovery time during a long tick.
+Watch the controller's session-event diagnostics and patrol interval during a
+pilot.
 
 ## Layout
 

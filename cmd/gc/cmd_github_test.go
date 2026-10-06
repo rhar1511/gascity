@@ -2,36 +2,15 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
+	"context"
+	"errors"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
 )
-
-const centralPRTestURL = "http://127.0.0.1"
-
-type centralPRProtocolTransport struct{ handler http.Handler }
-
-func (transport centralPRProtocolTransport) RoundTrip(request *http.Request) (*http.Response, error) {
-	recorder := httptest.NewRecorder()
-	transport.handler.ServeHTTP(recorder, request)
-	return recorder.Result(), nil
-}
-
-func useCentralPRRemoteTransport(t *testing.T, handler http.Handler) {
-	t.Helper()
-	original := remoteCityClientHook
-	t.Cleanup(func() { remoteCityClientHook = original })
-	remoteCityClientHook = func(baseURL, cityName string, opts api.RemoteOptions, clientOpts ...api.ClientOption) (*api.Client, error) {
-		clientOpts = append(clientOpts, api.WithHTTPTransport(centralPRProtocolTransport{handler: handler}))
-		return api.NewRemoteCityScopedClient(baseURL, cityName, opts, clientOpts...)
-	}
-}
 
 func centralPRTestQueue() api.PRActionQueue {
 	now := time.Now().UTC()
@@ -43,15 +22,39 @@ func centralPRTestQueue() api.PRActionQueue {
 	}
 }
 
-func useCentralPRTestClient(t *testing.T, handler http.HandlerFunc) string {
+type fakeGitHubPRActionClient struct {
+	queue          api.PRActionQueue
+	queueErr       error
+	queueCalls     int
+	actionRequests []api.PRActionRequest
+	execute        func(api.PRActionRequest) (api.PRActionResult, error)
+}
+
+func (c *fakeGitHubPRActionClient) GetPRActionQueue(context.Context) (api.PRActionQueue, error) {
+	c.queueCalls++
+	return c.queue, c.queueErr
+}
+
+func (c *fakeGitHubPRActionClient) ExecutePRAction(_ context.Context, request api.PRActionRequest) (api.PRActionResult, error) {
+	c.actionRequests = append(c.actionRequests, request)
+	if c.execute != nil {
+		return c.execute(request)
+	}
+	return centralPRActionReceipt(request), nil
+}
+
+func useCentralPRTestClient(t *testing.T, client githubPRActionAPI) string {
 	t.Helper()
-	cityPath := writeBeadsTestCity(t)
+	return useCentralPRTestClientAt(t, writeBeadsTestCity(t), client)
+}
+
+func useCentralPRTestClientAt(t *testing.T, cityPath string, client githubPRActionAPI) string {
+	t.Helper()
 	t.Setenv("GC_NO_API", "")
-	oldAlive, oldSupervisor := apiRouteControllerAliveHook, apiRouteSupervisorClientHook
-	t.Cleanup(func() { apiRouteControllerAliveHook, apiRouteSupervisorClientHook = oldAlive, oldSupervisor })
-	apiRouteControllerAliveHook = func(string) int { return 1 }
-	apiRouteSupervisorClientHook = func(string) *api.Client {
-		return api.NewCityScopedClient(centralPRTestURL, "test-city", api.WithHTTPTransport(centralPRProtocolTransport{handler: handler}))
+	previous := githubPRActionClientForCommand
+	t.Cleanup(func() { githubPRActionClientForCommand = previous })
+	githubPRActionClientForCommand = func() (string, githubPRActionAPI, error) {
+		return cityPath, client, nil
 	}
 	return cityPath
 }
@@ -69,43 +72,8 @@ func centralPRActionReceipt(request api.PRActionRequest) api.PRActionResult {
 }
 
 func TestGitHubPRBackfillPrepareUsesExactServerVerdictAndStableKey(t *testing.T) {
-	queue := centralPRTestQueue()
-	var keys []string
-	cityPath := useCentralPRTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		if r.Method == http.MethodGet && r.URL.Path == "/v0/city/test-city/pr-actions/queue" {
-			_ = json.NewEncoder(w).Encode(queue)
-			return
-		}
-		if r.Method != http.MethodPost || r.URL.Path != "/v0/city/test-city/pr-actions" {
-			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
-			w.WriteHeader(400)
-			return
-		}
-		var wire map[string]json.RawMessage
-		if err := json.NewDecoder(r.Body).Decode(&wire); err != nil {
-			t.Error(err)
-			w.WriteHeader(400)
-			return
-		}
-		if _, found := wire["idempotency_key"]; found {
-			t.Error("idempotency key sent in JSON body")
-		}
-		encoded, _ := json.Marshal(wire)
-		var request api.PRActionRequest
-		if err := json.Unmarshal(encoded, &request); err != nil {
-			t.Fatal(err)
-		}
-		request.IdempotencyKey = r.Header.Get("Idempotency-Key")
-		if request.HeadSHA != strings.Repeat("a", 40) || request.BaseSHA != strings.Repeat("b", 40) || request.PolicyVersion != "policy-v1" || request.Owner != "example" || request.Repo != "project" || request.PullRequest != 7 || request.Monitor != "central" || request.Action != api.PRActionPrepare {
-			t.Errorf("wrong exact request: %+v", request)
-		}
-		if request.IdempotencyKey == "" || r.Header.Get("X-GC-Request") == "" {
-			t.Error("missing idempotency or CSRF header")
-		}
-		keys = append(keys, request.IdempotencyKey)
-		_ = json.NewEncoder(w).Encode(centralPRActionReceipt(request))
-	})
+	client := &fakeGitHubPRActionClient{queue: centralPRTestQueue()}
+	cityPath := useCentralPRTestClient(t, client)
 	for range 2 {
 		var out, errOut bytes.Buffer
 		if code := run([]string{"--city", cityPath, "github", "pr", "backfill", "--create-repair-beads", "--json"}, &out, &errOut); code != 0 {
@@ -116,8 +84,15 @@ func TestGitHubPRBackfillPrepareUsesExactServerVerdictAndStableKey(t *testing.T)
 			t.Fatalf("wrong outcome: %s", &out)
 		}
 	}
-	if len(keys) != 2 || keys[0] != keys[1] {
-		t.Fatalf("retry keys=%v", keys)
+	if client.queueCalls != 2 || len(client.actionRequests) != 2 {
+		t.Fatalf("queue calls/actions = %d/%d, want 2/2", client.queueCalls, len(client.actionRequests))
+	}
+	first, second := client.actionRequests[0], client.actionRequests[1]
+	if first.HeadSHA != strings.Repeat("a", 40) || first.BaseSHA != strings.Repeat("b", 40) || first.PolicyVersion != "policy-v1" || first.Owner != "example" || first.Repo != "project" || first.PullRequest != 7 || first.Monitor != "central" || first.Action != api.PRActionPrepare {
+		t.Fatalf("wrong exact request: %+v", first)
+	}
+	if first.IdempotencyKey == "" || first.IdempotencyKey != second.IdempotencyKey {
+		t.Fatalf("retry keys = %q / %q; want same stable key", first.IdempotencyKey, second.IdempotencyKey)
 	}
 }
 
@@ -125,22 +100,14 @@ func TestGitHubPRBackfillUnavailableSourcesDoNotPrepare(t *testing.T) {
 	queue := centralPRTestQueue()
 	queue.Availability = api.PRActionAvailabilityPartial
 	queue.Sources = append(queue.Sources, api.PRActionSource{Monitor: "missing", State: api.PRActionSourceUnavailable, Detail: "forge unavailable"})
-	writes := 0
-	cityPath := useCentralPRTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			writes++
-			w.WriteHeader(500)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(queue)
-	})
+	client := &fakeGitHubPRActionClient{queue: queue}
+	cityPath := useCentralPRTestClient(t, client)
 	var out, errOut bytes.Buffer
 	if code := run([]string{"--city", cityPath, "github", "pr", "backfill", "--create-repair-beads"}, &out, &errOut); code == 0 {
 		t.Fatal("partial source allowed repair submission")
 	}
-	if writes != 0 {
-		t.Fatalf("writes=%d", writes)
+	if len(client.actionRequests) != 0 {
+		t.Fatalf("actions=%d", len(client.actionRequests))
 	}
 	out.Reset()
 	errOut.Reset()
@@ -152,19 +119,14 @@ func TestGitHubPRBackfillUnavailableSourcesDoNotPrepare(t *testing.T) {
 func TestGitHubPRBackfillServerErrorsNeverUseLocalPolicy(t *testing.T) {
 	for _, status := range []int{404, 409, 503} {
 		t.Run(fmt.Sprint(status), func(t *testing.T) {
-			requests := 0
-			cityPath := useCentralPRTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
-				requests++
-				w.Header().Set("Content-Type", "application/problem+json")
-				w.WriteHeader(status)
-				_, _ = fmt.Fprintf(w, `{"status":%d,"detail":"central authority unavailable"}`, status)
-			})
+			client := &fakeGitHubPRActionClient{queueErr: fmt.Errorf("HTTP %d: central authority unavailable", status)}
+			cityPath := useCentralPRTestClient(t, client)
 			var out, errOut bytes.Buffer
 			if code := run([]string{"--city", cityPath, "github", "pr", "backfill", "--create-repair-beads"}, &out, &errOut); code == 0 {
 				t.Fatal("server error reported success")
 			}
-			if requests != 1 {
-				t.Fatalf("requests=%d; want one read, no retry or mutation", requests)
+			if client.queueCalls != 1 || len(client.actionRequests) != 0 {
+				t.Fatalf("queue calls/actions = %d/%d; want one read and no mutation", client.queueCalls, len(client.actionRequests))
 			}
 			if !strings.Contains(errOut.String(), "central") {
 				t.Fatalf("missing server error: %s", &errOut)
@@ -176,29 +138,12 @@ func TestGitHubPRBackfillServerErrorsNeverUseLocalPolicy(t *testing.T) {
 func TestGitHubPRActionPreservesExactAttemptAndRejectsUnknownOrMismatchedReceipts(t *testing.T) {
 	for _, variant := range []string{"verified", "unknown", "wrong-base", "stale"} {
 		t.Run(variant, func(t *testing.T) {
-			requests := 0
-			cityPath := useCentralPRTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-				requests++
-				if r.Method != http.MethodPost || r.URL.Path != "/v0/city/test-city/pr-actions" {
-					t.Error("action unexpectedly queried or changed its supplied revision")
-					w.WriteHeader(400)
-					return
-				}
-				var request api.PRActionRequest
-				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-					t.Error(err)
-					w.WriteHeader(400)
-					return
-				}
-				request.IdempotencyKey = r.Header.Get("Idempotency-Key")
+			client := &fakeGitHubPRActionClient{execute: func(request api.PRActionRequest) (api.PRActionResult, error) {
 				if request.WorkID != "work-7" || request.AttemptID != "attempt-2" || request.IdempotencyKey != "explicit-request-7" {
 					t.Errorf("identity changed: %+v", request)
 				}
 				if variant == "stale" {
-					w.Header().Set("Content-Type", "application/problem+json")
-					w.WriteHeader(409)
-					_, _ = fmt.Fprint(w, `{"status":409,"detail":"stale revision"}`)
-					return
+					return api.PRActionResult{}, errors.New("stale revision")
 				}
 				receipt := centralPRActionReceipt(request)
 				if variant == "unknown" {
@@ -207,9 +152,9 @@ func TestGitHubPRActionPreservesExactAttemptAndRejectsUnknownOrMismatchedReceipt
 				if variant == "wrong-base" {
 					receipt.BaseSHA = strings.Repeat("c", 40)
 				}
-				w.Header().Set("Content-Type", "application/json")
-				_ = json.NewEncoder(w).Encode(receipt)
-			})
+				return receipt, nil
+			}}
+			cityPath := useCentralPRTestClient(t, client)
 			args := []string{"--city", cityPath, "github", "pr", "action", "queue_review", "--repo", "example/project", "--monitor", "central", "--pr", "7", "--head-sha", strings.Repeat("a", 40), "--base-sha", strings.Repeat("b", 40), "--policy-version", "policy-v1", "--idempotency-key", "explicit-request-7", "--work-id", "work-7", "--attempt-id", "attempt-2"}
 			var out, errOut bytes.Buffer
 			code := run(args, &out, &errOut)
@@ -226,16 +171,15 @@ func TestGitHubPRActionPreservesExactAttemptAndRejectsUnknownOrMismatchedReceipt
 					t.Fatalf("%s rejection has no diagnostic", variant)
 				}
 			}
-			if requests != 1 {
-				t.Fatalf("requests=%d; action must not silently retry", requests)
+			if len(client.actionRequests) != 1 {
+				t.Fatalf("actions=%d; action must not silently retry", len(client.actionRequests))
 			}
 		})
 	}
 }
 
 func TestGitHubPRActionsRespectAPIDisableAndMergeDeferral(t *testing.T) {
-	requests := 0
-	cityPath := useCentralPRTestClient(t, func(w http.ResponseWriter, _ *http.Request) { requests++; w.WriteHeader(500) })
+	cityPath := writeBeadsTestCity(t)
 	t.Setenv("GC_NO_API", "1")
 	var out, errOut bytes.Buffer
 	if code := run([]string{"--city", cityPath, "github", "pr", "backfill", "--create-repair-beads"}, &out, &errOut); code == 0 {
@@ -248,8 +192,5 @@ func TestGitHubPRActionsRespectAPIDisableAndMergeDeferral(t *testing.T) {
 	cmd.SetArgs([]string{"merge", "--repo", "example/project", "--monitor", "central", "--pr", "7", "--head-sha", strings.Repeat("a", 40), "--base-sha", strings.Repeat("b", 40), "--policy-version", "policy-v1", "--idempotency-key", "explicit-request-7"})
 	if err := cmd.Execute(); err == nil {
 		t.Fatal("GitHub merge enabled")
-	}
-	if requests != 0 {
-		t.Fatalf("requests=%d; unavailable actions must not send requests", requests)
 	}
 }

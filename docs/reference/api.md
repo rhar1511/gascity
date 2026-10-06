@@ -33,8 +33,7 @@ The spec is the full reference. A brief summary of the surfaces:
 - **Agents.** `GET/POST/DELETE` under `/v0/city/{cityName}/agents`
   plus SSE `/v0/city/{cityName}/agents/{agent}/output/stream`.
 - **Beads (work units).** CRUD under `/v0/city/{cityName}/beads`,
-  query + hook operations, dependencies, labels, and exact-revision
-  decision-frontier reads and operations.
+  query + hook operations, dependencies, labels.
 - **Sessions.** CRUD under `/v0/city/{cityName}/sessions`, submit,
   prompt, resume, interaction response, transcript, SSE stream.
 - **Connected-client external messaging.** `POST /v0/extmsg/clients`
@@ -59,80 +58,6 @@ The spec is the full reference. A brief summary of the surfaces:
   prepares repair work, records an exact revision for review, or merges after
   separate human approval. See the trust requirements below.
 
-### Decision frontiers
-
-`GET /v0/city/{cityName}/bead/{id}/decision-frontier?work_revision=...`
-reads one question map for the exact Beads revision. `POST` to the same path
-idempotently persists a proposed question map and places a controller-owned
-hold on that source revision. `POST /v0/city/{cityName}/bead/{id}/decision-frontier/answers` submits a proof
-envelope for one exact ticket and question version. Both writes require an
-`Idempotency-Key`; callers cannot choose the city, physical store, authenticated
-subject, verifier, or delivery provider.
-
-The question map is proposal state, not a human decision. Only an explicitly
-composed trusted answer verifier can record a resolution and release the
-controller's hold. Missing verifiers or unsupported atomic store capabilities
-return unavailable; no caller field, city-write identity, prompt delivery, or
-session acknowledgement substitutes for verified human authorization. Prompt
-intent is persisted separately, and no prompt is sent unless a trusted delivery
-provider is configured. This source slice does not install an authority,
-delivery provider, or mayor runtime, so those operations remain unavailable by
-default.
-
-### Historical attempt reads
-
-`GET /v0/city/{cityName}/bead/{id}/attempt-evidence/{attemptID}` reads one
-immutable attempt; omitting the final attempt ID lists retained attempts.
-These routes use the archived original store, work, repository, and workspace
-scope even after the owner is deleted. They never resolve a latest-attempt alias.
-
-The default authorizer requires a verified `X-GC-City-Read` grant with a nonempty
-`sub` identifying the authenticated reader and a `read_scopes` array covering
-every returned attempt. A city-only grant is insufficient. The existing
-permission authority must authenticate the reader and check inherited access
-against trusted original permission records before signing. Caller-supplied
-paths, account names, or scope hashes are not permission evidence. Keep the
-issuer's private key out of worker environments; the controller verifies only.
-
-Each array entry is `gc-attempt-read.v1:` followed by the lowercase hexadecimal
-SHA-256 of these exact UTF-8 fields joined by NUL: `gc-attempt-read.v1`, archived
-store reference, work ID, repository root, workspace root, and attempt ID.
-Fields must be nonempty and contain no NUL. The controller's
-`attemptevidence.ReadGrantScope` helper implements this contract. Use the exact
-archived spellings, including the original scope when current ownership changes.
-A list grant must cover all listed archives; partial permission returns no list.
-
-The envelope retains `aud=gc-city-read`, exact method/path/query binding,
-single-use `jti`, the two-minute maximum lifetime, and the configured epoch floor.
-Retries require fresh grants. Set `GC_CITY_READ_CID` to the deployment's
-tenant-specific city identity when signers are shared across tenants; grants
-with missing or different CID are then rejected. An unbound CID claim is not
-proof of tenancy. `GC_CITY_READ_PUBKEY` or `read_auth_verify_key` installs the
-trusted read authority, and `GC_CITY_READ_REQUIRED=1` makes absent trust a startup
-error. Without verified read identity the historical routes remain unavailable.
-
-An explicitly composed `AttemptEvidenceReadAuthorizerProvider` can enforce a
-deployment's permission integration; returning no authorizer keeps reads disabled.
-The bundled clients do not mint grants. Their deployment must supply them through
-the permission authority. Configuring verification alone does not install or
-validate that issuer, backups, or the release's inherited-permission integration.
-
-### Lifecycle claims
-
-`POST /v0/city/{cityName}/lifecycle/claims` performs the Q54 lifecycle claim
-transition for an admitted work item and its authenticated managed session.
-`source_store_ref` accepts `city:<city_name>` or `rig:<rig_name>`. Relocated
-`class:<classes>` references are not supported by this endpoint. Graph-v2
-lifecycle descendants in a relocated graph store remain held until a separate
-descendant transition proof is available. Before a fresh claim, the controller
-re-reads the source and requires it to remain open, unassigned, outside dispatch
-and time-based holds, and in the live ready set. The managed session's
-configured agent must resolve to the same canonical route named by the signed
-admission receipt; pool slots resolve to their base pool route. Dependency
-readiness reflects the state visible to the final live ready-set read. That read
-does not atomically fence independent changes to dependency rows. Exact claim
-retries remain idempotent.
-
 ### Pull-request action trust
 
 The central controller computes the permitted actions; clients cannot submit a
@@ -148,10 +73,15 @@ and does not repeat an effect.
 repository, PR, base SHA, and candidate SHA, even if concurrent callers use
 different idempotency keys. The repair bead is a held triage candidate with
 `hold:external`; its route is recorded only as a proposal. It is not runnable
-until the separate signed lifecycle-admission path removes that hold and
-installs a serving route. PR review or merge authority does not grant admission.
+until a separately qualified lifecycle-admission path removes that hold and
+installs a serving route. This component has no proof-aware admission verifier
+and recognizes only held triage records when recovering prepared work; a route
+or receipt string alone never establishes admission. PR review or merge authority
+does not grant admission.
 `queue_review` records that the exact revision is ready for review only when an
-immutable attempt reference matches its current head and base. `merge` also
+immutable attempt reference matches its current head and base, and its merge
+state is known and conflict-free. Conflict, missing, or unrecognized state
+remains unavailable and is rechecked before execution. `merge` also
 requires successful checks and a signed human grant. Queueing for review never
 authorizes a merge. The GitHub adapter currently advertises merge as unavailable
 and sends no merge request because GitHub's merge API cannot atomically require
@@ -212,21 +142,6 @@ idempotency key. A public key or key ID shared with the city-write grant set is
 rejected. Missing human trust disables merge approval. Host isolation, signing
 key custody, and evidence-provider permissions still require deployment
 verification before any live promotion or merge release.
-
-Decision-frontier answers are opt-in under the separate `decision.answer`
-scope in the same trust document. Their signed JSON payload has `protocol`,
-`kid`, `iss`, `sub`, `scope`, `challenge`, `iat`, `exp`, and `jti` fields;
-`protocol` must be `gascity.decision-answer.v1`, and `challenge` must exactly
-match the current city/store, source work, revision, map, ticket, question, and
-answer digest. The Ed25519 signing input is the bytes
-`gascity.decision-answer.v1\0` followed by the canonical JSON payload. The
-opaque `proof` is the unpadded base64url payload and signature separated by a
-dot. Grants require a nonempty JTI and last at most two minutes. Replaying the
-same grant for the same challenge is allowed and returns the same durable
-answer; JTI is not consumed as a one-time nonce. The challenge binds source
-work identity and the immutable frontier map, but does not include external
-`SourceIssue` or `SourceLinks` values. When a state-owned verifier is absent,
-missing supervisor-managed human trust leaves answers unavailable.
 
 ## Request and response headers
 

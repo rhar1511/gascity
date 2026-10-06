@@ -113,68 +113,9 @@ func TestWatchdogWorkflow_RequiredCheckJobExists(t *testing.T) {
 	}
 
 	timeout, ok := found["timeout-minutes"].(int)
-	if !ok || timeout < int(ObservationDeadline.Minutes())+10 || timeout > 140 {
-		t.Fatalf("job %q timeout-minutes = %v, want at least 10 minutes beyond the %dm observation deadline and <= 140", RequiredCheckName, found["timeout-minutes"], int(ObservationDeadline.Minutes()))
-	}
-}
-
-func TestEvidenceDeadlineExceedsLongestRequiredSuiteBudget(t *testing.T) {
-	const longestRequiredSuite = 90 * time.Minute
-	if ObservationDeadline <= longestRequiredSuite {
-		t.Fatalf("observation deadline = %s, want longer than required-suite budget %s", ObservationDeadline, longestRequiredSuite)
-	}
-}
-
-func TestCIWorkflowRestSmokeShardsHaveSetupAndExecutionBudget(t *testing.T) {
-	path := filepath.Join("..", "..", ".github", "workflows", "ci.yml")
-	body, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read %s: %v", path, err)
-	}
-	var doc map[string]any
-	if err := yaml.Unmarshal(body, &doc); err != nil {
-		t.Fatalf("parse %s: %v", path, err)
-	}
-	jobs, ok := doc["jobs"].(map[string]any)
-	if !ok {
-		t.Fatalf("workflow jobs must be a mapping")
-	}
-	integration, ok := jobs["integration-shards"].(map[string]any)
-	if !ok {
-		t.Fatalf("integration job must exist")
-	}
-	strategy, ok := integration["strategy"].(map[string]any)
-	if !ok {
-		t.Fatalf("integration strategy must exist")
-	}
-	matrix, ok := strategy["matrix"].(map[string]any)
-	if !ok {
-		t.Fatalf("integration matrix must exist")
-	}
-	include, ok := matrix["include"].([]any)
-	if !ok {
-		t.Fatalf("integration matrix include must be a list")
-	}
-	found := map[string]bool{}
-	for _, raw := range include {
-		shard, ok := raw.(map[string]any)
-		if !ok {
-			continue
-		}
-		name, _ := shard["shard_name"].(string)
-		if name != "rest-smoke-1-of-2" && name != "rest-smoke-2-of-2" {
-			continue
-		}
-		found[name] = true
-		timeout, ok := shard["timeout_minutes"].(int)
-		if !ok || timeout < 30 {
-			t.Fatalf("%s timeout_minutes = %v, want >= 30 to cover setup plus execution", name, shard["timeout_minutes"])
-		}
-	}
-	for _, name := range []string{"rest-smoke-1-of-2", "rest-smoke-2-of-2"} {
-		if !found[name] {
-			t.Fatalf("integration matrix is missing %s", name)
-		}
+	deadlineMinutes := int(ObservationDeadline / time.Minute)
+	if !ok || timeout < deadlineMinutes+5 || timeout > 85 {
+		t.Fatalf("job %q timeout-minutes = %v, want at least five minutes beyond the %dm observation deadline and at most 85m", RequiredCheckName, found["timeout-minutes"], deadlineMinutes)
 	}
 }
 

@@ -111,6 +111,9 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 // separated so tests can drive it against a fake herdr CLI without booting a
 // real session-server socket (mirroring tmux's Start/doStartSession split).
 func (p *Provider) start(ctx context.Context, name string, cfg runtime.Config) error {
+	if _, err := p.ownedBoundPane(name); err != nil {
+		return err
+	}
 	if p.IsRunning(name) {
 		return runtime.ErrSessionExists
 	}
@@ -555,25 +558,32 @@ func (p *Provider) runSetupCommand(ctx context.Context, cmd string, env map[stri
 	return nil
 }
 
-// Stop closes the agent's pane and clears its metadata sidecar. Idempotent.
-// The pane resolves through the sidecar binding when the name is gone — the
-// earlier "sleep leak" was exactly this gap: name lost ⇒ pane never found ⇒
-// closePane never issued ⇒ panes piled up across witness sleep cycles.
+// Stop closes only the session's persisted pane and then clears its metadata.
+// An absent binding is an idempotent no-op. Conflicting owners and failed
+// closes retain the binding; an explicit pane-not-found answer confirms cleanup.
 func (p *Provider) Stop(name string) error {
 	ctx := context.Background()
-	pid, err := p.paneID(ctx, name)
-	if err == nil && pid != "" {
-		_ = p.c.closePane(ctx, pid)
+	pane, err := p.ownedBoundPane(name)
+	if err != nil {
+		return err
 	}
-	_ = p.clearMeta(name)
-	return nil
+	if pane == "" {
+		return nil
+	}
+	if err := p.c.closePane(ctx, pane); err != nil && herdrAnswerCode(err) != "pane_not_found" {
+		return err
+	}
+	return p.clearMeta(name)
 }
 
 // Interrupt sends a soft ctrl+c to the agent (herdr exposes no signal API).
 func (p *Provider) Interrupt(name string) error {
 	ctx := context.Background()
 	pid, err := p.paneID(ctx, name)
-	if err != nil || pid == "" {
+	if err != nil {
+		return err
+	}
+	if pid == "" {
 		return nil
 	}
 	return p.c.sendKeys(ctx, pid, "ctrl+c") // herdr has no signal API; ctrl+c is the soft interrupt
@@ -595,7 +605,14 @@ func (p *Provider) IsAttached(_ string) bool { return false }
 
 // Attach runs `herdr agent attach`, blocking until the user detaches.
 func (p *Provider) Attach(name string) error {
-	cmd := exec.Command(p.c.bin, "--session", p.c.session, "agent", "attach", herdrAgentName(name))
+	pid, err := p.paneID(context.Background(), name)
+	if err != nil {
+		return err
+	}
+	if pid == "" {
+		return fmt.Errorf("herdr: no owned pane for %q", name)
+	}
+	cmd := exec.Command(p.c.bin, "--session", p.c.session, "agent", "attach", pid)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	return cmd.Run() // blocks until the user detaches
 }
@@ -661,7 +678,16 @@ func (p *Provider) startAgentAdopting(ctx context.Context, name, kind, paneID st
 	hn := herdrAgentName(name) // herdr ≥0.7.5 rejects raw gc session names (invalid_agent_name)
 	started, startErr := p.c.startAgentKind(ctx, hn, kind, paneID, args)
 	return resolveAgentNameTaken(started, startErr, agentStartOps{
-		getAgent: func() (agentInfo, bool, error) { return p.c.getAgent(ctx, herdrAgentName(name)) },
+		getAgent: func() (agentInfo, bool, error) {
+			holder, present, err := p.c.getAgent(ctx, herdrAgentName(name))
+			if err != nil || !present {
+				return holder, present, err
+			}
+			if p.boundPaneNames().names[holder.PaneID] != name {
+				return agentInfo{}, false, fmt.Errorf("herdr: contested pane %q is not owned by %q", holder.PaneID, name)
+			}
+			return holder, true, nil
+		},
 		paneAlive: func(holderPane string) bool {
 			probe, perr := p.probePane(ctx, holderPane)
 			return perr == nil && probe.Exists && probe.Busy
@@ -788,7 +814,7 @@ func (p *Provider) ObserveLiveness(name string, _ []string) runtime.Liveness {
 		return runtime.Liveness{}
 	}
 	ctx := context.Background()
-	info, present, err := p.c.getAgent(ctx, herdrAgentName(name))
+	info, present, err := p.lookupOps(ctx, name).getAgent()
 	if err == nil && !present {
 		// Name absent — fall back to the bound pane before declaring the
 		// session gone: raw shell sessions never register a name at all, and
@@ -859,36 +885,34 @@ func (p *Provider) Peek(name string, lines int) (string, error) {
 	return p.c.paneRead(ctx, pid, "visible", lines)
 }
 
-// ListRunning returns the names of running sessions whose names start with
-// prefix. The sidecar bindings are the primary source (they hold the exact
-// gc names — herdr's registry stores the mapped herdrAgentName forms, and
-// never sees raw shell sessions at all); each bound candidate is verified
-// running before it is listed. Registry agents that don't correspond to any
-// bound gc session (foreign/manual agents) are appended under their own
-// names.
+// ListRunning returns owned running session names whose names start with
+// prefix. Sidecar bindings hold the exact Gas City names, including raw shell
+// sessions that have no detected agent. Each bound candidate is verified
+// running before it is listed. Detected agent kinds in the shared registry do
+// not establish Gas City ownership and must not become orphan-cleanup targets.
 func (p *Provider) ListRunning(prefix string) ([]string, error) {
 	ctx := context.Background()
-	agents, err := p.c.listAgents(ctx)
-	if err != nil {
-		return nil, err
-	}
-	seen := make(map[string]bool)   // gc names already listed
-	mapped := make(map[string]bool) // herdr-side names owned by bound gc sessions
+	seen := make(map[string]bool)
+	bindings := p.boundPaneNames()
 	var out []string
 	for _, name := range p.boundSessionNames() {
-		mapped[herdrAgentName(name)] = true
 		if !strings.HasPrefix(name, prefix) || seen[name] {
 			continue
 		}
-		if _, running, err := resolveBinding(p.lookupOps(ctx, name)); err == nil && running {
+		pane, err := p.GetMeta(name, metaBoundPane)
+		if err != nil {
+			return nil, err
+		}
+		if bindings.conflicts[pane] {
+			continue
+		}
+		_, running, err := resolveBinding(p.lookupOps(ctx, name))
+		if err != nil {
+			return nil, fmt.Errorf("herdr: list owned session %q: %w", name, err)
+		}
+		if running {
 			seen[name] = true
 			out = append(out, name)
-		}
-	}
-	for _, a := range agents {
-		if !mapped[a.Name] && strings.HasPrefix(a.Name, prefix) && !seen[a.Name] {
-			seen[a.Name] = true
-			out = append(out, a.Name)
 		}
 	}
 	return out, nil
@@ -948,7 +972,7 @@ func (p *Provider) CopyTo(name, src, relDst string) error {
 	if _, err := os.Stat(src); err != nil {
 		return nil // best-effort: missing src
 	}
-	a, ok, err := p.c.getAgent(context.Background(), herdrAgentName(name))
+	a, ok, err := p.lookupOps(context.Background(), name).getAgent()
 	if err != nil || !ok || a.Cwd == "" {
 		return nil
 	}
@@ -1063,9 +1087,8 @@ func (p *Provider) clearMeta(name string) error {
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 // paneID resolves a gascity session name to its herdr pane id (or "" if
-// absent): registry name lookup first, then the sidecar pane binding Start
-// persisted — the only handle for raw shell sessions and for agents whose
-// registry name herdr cleared (see panebinding.go). The pane resolves
+// absent): the sidecar pane binding Start persisted is the ownership handle,
+// verified through the pane's registry entry or foreground processes. The pane resolves
 // whenever it still exists, even for an exited agent, so Stop/keys/read keep
 // working on it.
 func (p *Provider) paneID(ctx context.Context, name string) (string, error) {

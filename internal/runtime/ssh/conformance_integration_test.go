@@ -93,13 +93,9 @@ func buildSSHConformanceFixture(t *testing.T) Endpoint {
 		t.Fatalf("writing fake ssh fixture: %v", err)
 	}
 	t.Setenv("PATH", fixtureDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	// tmux binds its server socket at $TMUX_TMPDIR/tmux-<uid>/default, and a
-	// Unix socket path is capped at 104 bytes on macOS. There t.TempDir()
-	// nests the subtest name under the long per-user /var/folders temp root,
-	// so the socket path overran the cap, the server never started, and every
-	// subtest failed with "tmux new-session exited 1". ShortTempDir roots the
-	// directory at /tmp on macOS.
-	t.Setenv("TMUX_TMPDIR", testutil.ShortTempDir(t, "gcssh"))
+	// macOS's default test directory plus tmux's socket suffix can exceed
+	// sockaddr_un.sun_path even though the temporary directory itself is valid.
+	t.Setenv("TMUX_TMPDIR", testutil.ShortTempDir(t, "gcssh-"))
 
 	prevTMUX, hadTMUX := os.LookupEnv("TMUX")
 	if err := os.Unsetenv("TMUX"); err != nil {

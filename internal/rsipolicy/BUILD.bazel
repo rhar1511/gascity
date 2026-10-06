@@ -4,11 +4,15 @@ go_library(
     name = "rsipolicy",
     srcs = [
         "policy.go",
+        "story.go",
         "trusted.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/rsipolicy",
     visibility = ["//:__subpackages__"],
-    deps = ["//internal/reviewquorum"],
+    deps = [
+        "//internal/reviewquorum",
+        "//internal/storybench",
+    ],
 )
 
 go_test(
@@ -20,6 +24,7 @@ go_test(
     embed = [":rsipolicy"],
     deps = [
         "//internal/reviewquorum",
+        "//internal/storybench",
         "//internal/testenv",
     ],
 )

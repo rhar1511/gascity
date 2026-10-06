@@ -33,6 +33,7 @@ func processRSIPromotionGate(store beads.Store, bead beads.Bead, opts ProcessOpt
 
 	var candidate rsipolicy.CandidateRecord
 	var candidateCount int
+	var benchmark *rsipolicy.BenchmarkRecord
 	var judges []rsipolicy.JudgeRecord
 	for _, dep := range deps {
 		if dep.Type != "blocks" && dep.Type != "" {
@@ -99,6 +100,19 @@ func processRSIPromotionGate(store beads.Store, bead beads.Bead, opts ProcessOpt
 			lane.Outcome = strings.TrimSpace(actual.Metadata[beadmeta.OutcomeMetadataKey])
 			lane.RawOutput = rawOutput
 			judges = append(judges, lane)
+		case beadmeta.RSIRoleBenchmark:
+			if benchmark != nil {
+				return closeRSIPromotionGate(store, bead, rsiReject("rsi_benchmark_evidence_ambiguous"), beadmeta.OutcomeFail, "rsi-reject")
+			}
+			actual, resolveErr := resolveRSIWorkerExecution(store, dependency)
+			if resolveErr != nil || dependency.Metadata[beadmeta.OutputJSONMetadataKey] != actual.Metadata[beadmeta.OutputJSONMetadataKey] {
+				return closeRSIPromotionGate(store, bead, rsiReject(rsiTrustedEvaluationUnavailable), beadmeta.OutcomeFail, "rsi-reject")
+			}
+			binding, bindErr := rsipolicy.ParseExecutionBinding(actual.Metadata[beadmeta.RSIExecutionBindingMetadataKey])
+			if bindErr != nil {
+				return closeRSIPromotionGate(store, bead, rsiReject(rsiTrustedEvaluationUnavailable), beadmeta.OutcomeFail, "rsi-reject")
+			}
+			benchmark = &rsipolicy.BenchmarkRecord{BeadID: actual.ID, BeadRevision: actual.Revision, ControlBeadID: dependency.ID, ControlRevision: dependency.Revision, ActorID: binding.ActorID, SessionID: binding.SessionID, Status: actual.Status, Outcome: actual.Metadata[beadmeta.OutcomeMetadataKey], RawOutput: actual.Metadata[beadmeta.OutputJSONMetadataKey]}
 		default:
 			return closeRSIPromotionGate(store, bead, rsiReject(rsiEvidenceRoleUnknown), beadmeta.OutcomeFail, "rsi-reject")
 		}
@@ -110,7 +124,11 @@ func processRSIPromotionGate(store beads.Store, bead beads.Bead, opts ProcessOpt
 	if opts.ResolveRSIEvaluation == nil {
 		return closeRSIPromotionGate(store, bead, rsiReject(rsiTrustedEvaluationUnavailable), beadmeta.OutcomeFail, "rsi-reject")
 	}
-	request := rsipolicy.ResolveRequest{Context: opts.RSIEvaluationContext, Candidate: candidate, Judges: judges}
+	requirement := strings.TrimSpace(bead.Metadata[beadmeta.RSIStoryRequiredMetadataKey])
+	if requirement != "" && requirement != "true" && requirement != "false" {
+		return closeRSIPromotionGate(store, bead, rsiReject("rsi_benchmark_requirement_invalid"), beadmeta.OutcomeFail, "rsi-reject")
+	}
+	request := rsipolicy.ResolveRequest{Context: opts.RSIEvaluationContext, Candidate: candidate, Judges: judges, Benchmark: benchmark, StoryBenchmarkRequired: requirement == "true" || benchmark != nil}
 	request.Context.ProtocolVersion = rsipolicy.ProtocolVersionV1
 	request.Context.WorkflowRootID = strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
 	request.Context.GateID = bead.ID
@@ -120,6 +138,9 @@ func processRSIPromotionGate(store beads.Store, bead beads.Bead, opts ProcessOpt
 		if errors.Is(err, rsipolicy.ErrTrustedEvaluationPending) {
 			return ControlResult{}, fmt.Errorf("%w: %w", ErrControlPending, err)
 		}
+		return closeRSIPromotionGate(store, bead, rsiReject(rsiTrustedEvaluationUnavailable), beadmeta.OutcomeFail, "rsi-reject")
+	}
+	if request.StoryBenchmarkRequired && (!trusted.Input.StoryBenchmarkRequired || trusted.Input.StoryBenchmark == nil) {
 		return closeRSIPromotionGate(store, bead, rsiReject(rsiTrustedEvaluationUnavailable), beadmeta.OutcomeFail, "rsi-reject")
 	}
 	trusted.Input.HumanApprovalVerified = trusted.HumanApprovalVerified

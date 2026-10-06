@@ -4,12 +4,12 @@ import (
 	"context"
 	"errors"
 	"reflect"
-	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
+
 	otellog "go.opentelemetry.io/otel/log"
 	otellogglobal "go.opentelemetry.io/otel/log/global"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
@@ -182,22 +182,6 @@ func TestRecordBDCall_TruncatesLongOutput(t *testing.T) {
 	bigStdout := make([]byte, maxStdoutLog+100)
 	bigStderr := string(make([]byte, maxStderrLog+100))
 	RecordBDCall(ctx, []string{"cmd"}, 1.0, nil, bigStdout, bigStderr)
-}
-
-func TestRedactPrivateEvidenceBDOutputFailsClosedForValidAndMalformedJSON(t *testing.T) {
-	for _, output := range []string{
-		`{"metadata":{"gc.attempt_evidence.archive_payload.v1":"secret evidence"}}`,
-		`truncated {"gc.attempt_evidence.index.a1":"secret evidence"`,
-	} {
-		got := redactPrivateEvidenceBDOutput([]byte(output))
-		if strings.Contains(got, "secret evidence") || !strings.Contains(got, "redacted") {
-			t.Fatalf("redacted output = %q, want fail-closed marker without payload", got)
-		}
-	}
-	ordinary := `{"metadata":{"gc.routed_to":"worker"}}`
-	if got := redactPrivateEvidenceBDOutput([]byte(ordinary)); got != ordinary {
-		t.Fatalf("ordinary output = %q, want unchanged %q", got, ordinary)
-	}
 }
 
 func TestSanitizeBDArgsRedactsSecretFlags(t *testing.T) {
@@ -389,10 +373,5 @@ func recordAttrs(rec sdklog.Record) map[string]attribute.Value {
 }
 
 func logValueStringSlice(value attribute.Value) []string {
-	values := value.AsSlice()
-	out := make([]string, 0, len(values))
-	for _, item := range values {
-		out = append(out, item.AsString())
-	}
-	return out
+	return value.AsStringSlice()
 }

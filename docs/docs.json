@@ -230,6 +230,7 @@
               "reference/cli",
               "reference/gastown-command-map",
               "reference/config",
+              "reference/beads-local-config",
               "reference/trust-boundaries",
               "reference/session-authority-profiles",
               "reference/rsi-trusted-evaluation",
@@ -239,11 +240,11 @@
               "reference/events",
               "reference/schema/index",
               "reference/system-packs",
-              "reference/software-factory",
               "reference/exec-session-provider",
               "reference/exec-beads-provider",
               "reference/tmux-agent-slice",
-              "reference/herdr-provider"
+              "reference/herdr-provider",
+              "reference/software-factory"
             ]
           },
           {
@@ -261,7 +262,8 @@
             "group": "Internal",
             "pages": [
               "reference/internal/index",
-              "reference/internal/beads-topology"
+              "reference/internal/beads-topology",
+              "research/2026-09-24-builderio-software-factory"
             ]
           }
         ]

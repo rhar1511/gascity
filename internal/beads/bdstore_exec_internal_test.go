@@ -14,8 +14,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gastownhall/gascity/internal/processgroup/processgrouptest"
 	"go.opentelemetry.io/otel/attribute"
+
+	"github.com/gastownhall/gascity/internal/processgroup/processgrouptest"
 	otellogglobal "go.opentelemetry.io/otel/log/global"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 )
@@ -376,10 +377,5 @@ func beadsRecordAttrs(rec sdklog.Record) map[string]attribute.Value {
 }
 
 func beadsLogValueStringSlice(value attribute.Value) []string {
-	values := value.AsSlice()
-	out := make([]string, 0, len(values))
-	for _, item := range values {
-		out = append(out, item.AsString())
-	}
-	return out
+	return value.AsStringSlice()
 }

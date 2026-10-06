@@ -58,7 +58,7 @@
         },
         "read_auth_verify_key": {
           "type": "string",
-          "description": "ReadAuthVerifyKey, when set, requires every read (GET/HEAD) of an\nalready-registered city on the typed per-city API — the routes under\n/v0/city/{cityName} — to carry a signed read grant from a configured\ntrusted authority. It is the read-side twin of WriteAuthVerifyKey, adding\nin-process, grant-based admission control to the typed city read surface\n(beads, mail, sessions, agent transcripts) instead of trusting network\nposition.\n\nScope boundary: this gate covers ONLY the typed /v0/city/{cityName} read\nroutes. It does NOT cover other surfaces on the same listener that can also\nexpose per-city data: the supervisor-scope aggregate event feed (/v0/events\nand /v0/events/stream, which multiplex every running city's events), the\ndefault-on dashboard host plane (/api/*, including its /api/city/{cityName}/*\nsamplers, run detail, run diff, and config reads), and the supervisor-scope\nroutes /v0/cities, /health, /v0/readiness, /v0/provider-readiness, the\nOpenAPI document, and the dashboard SPA shell. On a non-localhost bind, the\nonly complete mitigation is to front the whole listener with the\ngrant-minting authority/edge (the intended deployment), which protects\nevery surface above. Disabling the dashboard host plane with\nGC_SUPERVISOR_DASHBOARD=0 is additive, not a substitute: it closes /api/*\nonly, while the supervisor-scope event feed /v0/events and\n/v0/events/stream stays readable by network position until the follow-up\nsupervisor-scope grant lands. Gating those feeds is tracked as that\nfollow-up work.\n\nBuilt-in callers (the bundled gc API client and dashboard SPA) mint no\ngrant, so enabling this gate turns their direct /v0/city reads away with a\nclear 401; such deployments front reads through the authority that mints\ngrants. The value is one or more \"kid:base64-ed25519-pubkey\" entries, comma\nseparated. The GC_CITY_READ_PUBKEY env var overrides this. Grant revocation\nvia an epoch floor is an ops-plane control set only through the\nGC_CITY_READ_EPOCH_FLOOR env var; it has no config field.\nGC_CITY_READ_CID binds grants to the deployment's tenant-specific city\nidentity; set it when signing keys are shared across tenants. Retained\nattempt evidence additionally requires the signed authenticated subject\nand exact original-scope read grants from that permission authority."
+          "description": "ReadAuthVerifyKey, when set, requires every read (GET/HEAD) of an\nalready-registered city on the typed per-city API — the routes under\n/v0/city/{cityName} — to carry a signed read grant from a configured\ntrusted authority. It is the read-side twin of WriteAuthVerifyKey, adding\nin-process, grant-based admission control to the typed city read surface\n(beads, mail, sessions, agent transcripts) instead of trusting network\nposition.\n\nScope boundary: this gate covers ONLY the typed /v0/city/{cityName} read\nroutes. It does NOT cover other surfaces on the same listener that can also\nexpose per-city data: the supervisor-scope aggregate event feed (/v0/events\nand /v0/events/stream, which multiplex every running city's events), the\ndefault-on dashboard host plane (/api/*, including its /api/city/{cityName}/*\nsamplers, run detail, run diff, and config reads), and the supervisor-scope\nroutes /v0/cities, /health, /v0/readiness, /v0/provider-readiness, the\nOpenAPI document, and the dashboard SPA shell. On a non-localhost bind, the\nonly complete mitigation is to front the whole listener with the\ngrant-minting authority/edge (the intended deployment), which protects\nevery surface above. Disabling the dashboard host plane with\nGC_SUPERVISOR_DASHBOARD=0 is additive, not a substitute: it closes /api/*\nonly, while the supervisor-scope event feed /v0/events and\n/v0/events/stream stays readable by network position until the follow-up\nsupervisor-scope grant lands. Gating those feeds is tracked as that\nfollow-up work.\n\nBuilt-in callers (the bundled gc API client and dashboard SPA) mint no\ngrant, so enabling this gate turns their direct /v0/city reads away with a\nclear 401; such deployments front reads through the authority that mints\ngrants. The value is one or more \"kid:base64-ed25519-pubkey\" entries, comma\nseparated. The GC_CITY_READ_PUBKEY env var overrides this. Grant revocation\nvia an epoch floor is an ops-plane control set only through the\nGC_CITY_READ_EPOCH_FLOOR env var; it has no config field."
         },
         "read_auth_required": {
           "type": "boolean",
@@ -1094,13 +1094,6 @@
           ],
           "description": "GuardedRelease selects the ownership-release discipline for work beads:\n\"off\" (legacy, owner-blind bd update/unclaim), \"auto\" (fence-guarded\nrelease verbs where the bd binary is capable, loud degrade otherwise), or\n\"require\" (guarded release or a typed refusal). Empty defaults to \"off\".\nAny other value fails config load."
         },
-        "private_evidence": {
-          "additionalProperties": {
-            "$ref": "#/$defs/PrivateEvidenceTransportConfig"
-          },
-          "type": "object",
-          "description": "PrivateEvidence opts selected canonical city/rig Beads scopes into the\ncontroller-only HTTP body transport for attempt evidence. An absent map\nkeeps the capability disabled. Keys are canonical refs such as\n\"city:town\" and \"rig:api\"; tokens stay in protected files."
-        },
         "policies": {
           "additionalProperties": {
             "$ref": "#/$defs/BeadPolicyConfig"
@@ -1227,17 +1220,9 @@
           "$ref": "#/$defs/DaemonConfig",
           "description": "Daemon configures controller daemon settings."
         },
-        "lifecycle": {
-          "$ref": "#/$defs/LifecycleConfig",
-          "description": "Lifecycle configures the opt-in, evidence-backed work admission and\nrecovery contract. Both gates default to disabled; see LifecycleConfig."
-        },
         "rsi": {
           "$ref": "#/$defs/RSIConfig",
           "description": "RSI points the controller at trusted signed evaluation and human\napproval records. An unset evaluator leaves promotion fail-closed."
-        },
-        "decision_frontier": {
-          "$ref": "#/$defs/DecisionFrontierConfig",
-          "description": "DecisionFrontier configures optional delivery of persisted human-decision\nprompts. An empty target leaves prompt delivery disabled."
         },
         "orders": {
           "$ref": "#/$defs/OrdersConfig",
@@ -1500,17 +1485,6 @@
       "additionalProperties": false,
       "type": "object",
       "description": "DaemonConfig holds controller daemon settings."
-    },
-    "DecisionFrontierConfig": {
-      "properties": {
-        "prompt_target": {
-          "type": "string",
-          "description": "PromptTarget is a config-facing identity for one configured named session.\nThe controller resolves it to the canonical identity and requires persisted\nevidence for that exact session execution before delivery."
-        }
-      },
-      "additionalProperties": false,
-      "type": "object",
-      "description": "DecisionFrontierConfig configures the optional human prompt target for decision-frontier records."
     },
     "DoctorConfig": {
       "properties": {
@@ -1933,92 +1907,6 @@
       "type": "object",
       "description": "K8sConfig holds native K8s session provider settings."
     },
-    "LifecycleConfig": {
-      "properties": {
-        "admission_enabled": {
-          "type": "boolean",
-          "description": "AdmissionEnabled requires a signed admission receipt for work carrying\nexplicit lifecycle admission intent. It also disables direct custom\nsling_query routing for the city because an arbitrary runner has no atomic\nguard against a concurrent admission attachment. Defaults to false."
-        },
-        "recovery_enabled": {
-          "type": "boolean",
-          "description": "RecoveryEnabled permits the controller lifecycle recovery policy. It is\nseparately gated because an admission authority does not grant permission\nto recover work. Defaults to false."
-        },
-        "admission_authorities": {
-          "additionalProperties": {
-            "type": "string"
-          },
-          "type": "object",
-          "description": "AdmissionAuthorities maps historical v1 admission identities to their\nEd25519 public keys. V2 admission verification does not use this map."
-        },
-        "admission_v2_primary_authority": {
-          "type": "string",
-          "description": "AdmissionV2PrimaryAuthority names the single initial v2 admission signer.\nSet it to Ricky's exact configured identity for the initial rollout.\nAdditional signer identities require a separately implemented and\nverified delegation-grant path and are rejected by this release."
-        },
-        "admission_v2_authorities": {
-          "additionalProperties": {
-            "type": "string"
-          },
-          "type": "object",
-          "description": "AdmissionV2Authorities contains exactly the primary v2 admission signer\nand its purpose-specific Ed25519 public key. The key must differ from v1\nadmission and acceptance keys. Private keys stay outside city config and\nthe bead store."
-        },
-        "acceptance_authorities": {
-          "additionalProperties": {
-            "type": "string"
-          },
-          "type": "object",
-          "description": "AcceptanceAuthorities maps trusted completion authorities to their\nEd25519 public keys. Keys are base64-encoded 32-byte public keys."
-        },
-        "recovery_authorities": {
-          "additionalProperties": {
-            "$ref": "#/$defs/LifecycleRecoveryAuthority"
-          },
-          "type": "object",
-          "description": "RecoveryAuthorities maps separately authorized recovery identities to\npublic keys and exact action/store scopes. These keys must differ from\nadmission and acceptance keys. Private recovery keys stay outside city\nconfiguration and the bead store."
-        },
-        "escalation_target": {
-          "type": "string",
-          "description": "EscalationTarget is the configured recipient for one exhaustion\nescalation per work item. Empty deliberately leaves recovery disabled."
-        },
-        "completion_receipt_max_age": {
-          "type": "string",
-          "description": "CompletionReceiptMaxAge bounds how long after signing an acceptance\nreceipt may close work. Operators must choose this from their acceptance\nand rollout policy; no default is inferred. Empty disables completion\nreconciliation."
-        },
-        "completion_clock_skew": {
-          "type": "string",
-          "description": "CompletionClockSkew is the largest accepted future timestamp allowance.\nOperators must choose this from expected signer/controller clock drift.\nIt must be set with CompletionReceiptMaxAge; empty disables completion\nreconciliation rather than choosing a controller-specific default."
-        }
-      },
-      "additionalProperties": false,
-      "type": "object",
-      "description": "LifecycleConfig controls controller-owned admission and recovery."
-    },
-    "LifecycleRecoveryAuthority": {
-      "properties": {
-        "public_key": {
-          "type": "string"
-        },
-        "actions": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "scopes": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        }
-      },
-      "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "public_key",
-        "actions",
-        "scopes"
-      ],
-      "description": "LifecycleRecoveryAuthority grants one signing identity exact recovery actions in exact city/store scopes."
-    },
     "LocalDoctorCheck": {
       "properties": {
         "name": {
@@ -2288,7 +2176,7 @@
         },
         "max_dispatches_per_tick": {
           "type": "integer",
-          "description": "MaxDispatchesPerTick caps how many clock-driven orders (cooldown, cron\nand event triggers) the supervisor dispatches per orders-lane pass, in\na rotation that resumes where the previous pass stopped. The key keeps\nits historical name from when order dispatch ran once per controller\ntick. Unset keeps the built-in default of 4; set to 1 to drain overdue\ncooldown orders one per pass at cold start instead of firing several\nconcurrent goroutines at once. Condition-triggered orders are outside\nthis budget: a passing check means work is pending right now, so they\ndispatch on the pass that observes it. The open-tracking and open-work\ngates still run for them (unless the order sets no_work_gate), but\nthose gates are keyed per order and only hold back a redispatch of an\norder whose previous run is still moving, so they do not bound the pass\nas a whole: a pass launches at most this budget plus one dispatch per\ncondition order whose check passed on that pass. That second term grows\nwith how many condition orders a city defines, not with this setting,\nand at cold start, before any tracking bead exists, neither gate holds\na simultaneously-due set back."
+          "description": "MaxDispatchesPerTick caps how many clock-driven orders (cooldown, cron\nand event triggers) the supervisor dispatches per tick, in a rotation\nthat resumes where the previous tick stopped. Unset keeps the built-in\ndefault of 4; set to 1 to drain overdue cooldown orders one-per-tick at\ncold start instead of firing several concurrent goroutines at once.\nCondition-triggered orders are outside this budget: a passing check\nmeans work is pending right now, so they dispatch on the tick that\nobserves it. The open-tracking and open-work gates still run for them\n(unless the order sets no_work_gate), but those gates are keyed per\norder and only hold back a redispatch of an order whose previous run\nis still moving, so they do not bound the tick as a whole: a tick\nlaunches at most this budget plus one dispatch per condition order\nwhose check passed on that tick. That second term grows with how many\ncondition orders a city defines, not with this setting, and at cold\nstart, before any tracking bead exists, neither gate holds a\nsimultaneously-due set back."
         },
         "overrides": {
           "items": {
@@ -2399,35 +2287,6 @@
       "additionalProperties": false,
       "type": "object",
       "description": "PoolOverride modifies legacy [pool] fields that map to session scaling."
-    },
-    "PrivateEvidenceTransportConfig": {
-      "properties": {
-        "endpoint": {
-          "type": "string"
-        },
-        "project_id": {
-          "type": "string"
-        },
-        "database": {
-          "type": "string"
-        },
-        "token_file": {
-          "type": "string"
-        },
-        "revision_transitions": {
-          "type": "boolean",
-          "description": "RevisionTransitions opts this exact store scope into the Q43 transition\nand immutable-receipt routes. It defaults to false."
-        }
-      },
-      "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "endpoint",
-        "project_id",
-        "database",
-        "token_file"
-      ],
-      "description": "PrivateEvidenceTransportConfig opts one canonical Beads store scope into the controller-only HTTP transport for immutable attempt evidence."
     },
     "ProviderOption": {
       "properties": {

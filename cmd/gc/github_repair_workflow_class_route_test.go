@@ -2,14 +2,11 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
-	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
 
-	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/splittest"
 	"github.com/gastownhall/gascity/internal/config"
@@ -47,29 +44,14 @@ func TestGitHubPRPreparePreservesLocalWorkAndGraphStores(t *testing.T) {
 			marker := filepath.Join(t.TempDir(), "child.env")
 			t.Setenv(productMetricsDirectChildEnvSpyPath, marker)
 			installProductMetricsDirectChildSpyCommand(t, "gc")
-			writes := 0
-			useCentralPRTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("Content-Type", "application/json")
-				if r.Method == http.MethodGet {
-					_ = json.NewEncoder(w).Encode(centralPRTestQueue())
-					return
-				}
-				writes++
-				var request api.PRActionRequest
-				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-					t.Error(err)
-					w.WriteHeader(http.StatusBadRequest)
-					return
-				}
-				request.IdempotencyKey = r.Header.Get("Idempotency-Key")
-				_ = json.NewEncoder(w).Encode(centralPRActionReceipt(request))
-			})
+			client := &fakeGitHubPRActionClient{queue: centralPRTestQueue()}
+			useCentralPRTestClientAt(t, cityDir, client)
 			var out, errOut bytes.Buffer
 			if code := run([]string{"--city", cityDir, "github", "pr", "backfill", "--create-repair-beads", "--json"}, &out, &errOut); code != 0 {
 				t.Fatalf("exit=%d stderr=%s", code, &errOut)
 			}
-			if writes != 1 {
-				t.Fatalf("server actions=%d, want one prepare", writes)
+			if len(client.actionRequests) != 1 {
+				t.Fatalf("prepare actions=%d, want one", len(client.actionRequests))
 			}
 			if !reflect.DeepEqual(allBeads(t, work), beforeWork) {
 				t.Fatal("CLI changed the local work store")

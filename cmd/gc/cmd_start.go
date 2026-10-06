@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -125,6 +126,9 @@ func computeSuspendedNamesWith(cfg *config.City, cityName, cityPath string, city
 // timeout. Used to distinguish excess pool members (drain) from true orphans
 // (kill) during reconciliation, and to enforce drain timeouts.
 func computePoolSessions(cfg *config.City, cityName, _ string, sp runtime.Provider) map[string]time.Duration {
+	if sp != nil {
+		sp = &poolDiscoverySnapshot{Provider: sp}
+	}
 	ps := make(map[string]time.Duration)
 	st := cfg.Workspace.SessionTemplate
 	for _, a := range cfg.Agents {
@@ -152,6 +156,9 @@ type poolDeathInfo struct {
 // for every pool instance (static for bounded pools, currently running for
 // unlimited). Used to detect and handle pool deaths.
 func computePoolDeathHandlers(cfg *config.City, cityName, cityPath string, sp runtime.Provider, stderr io.Writer) map[string]poolDeathInfo {
+	if sp != nil {
+		sp = &poolDiscoverySnapshot{Provider: sp}
+	}
 	handlers := make(map[string]poolDeathInfo)
 	st := cfg.Workspace.SessionTemplate
 	for _, a := range cfg.Agents {
@@ -178,6 +185,32 @@ func computePoolDeathHandlers(cfg *config.City, cityName, cityPath string, sp ru
 		}
 	}
 	return handlers
+}
+
+// poolDiscoverySnapshot confines a provider census to one pool setup pass.
+// Herdr enumerates owned panes through native client probes, so repeating it
+// for every unlimited or singleton pool multiplies startup latency. A fresh
+// wrapper on every pass preserves later changes and retries failed censuses.
+type poolDiscoverySnapshot struct {
+	runtime.Provider
+	once    sync.Once
+	running []string
+	err     error
+}
+
+// ListRunning filters the single census captured for this setup pass.
+func (p *poolDiscoverySnapshot) ListRunning(prefix string) ([]string, error) {
+	p.once.Do(func() { p.running, p.err = p.Provider.ListRunning("") })
+	if p.err != nil {
+		return nil, p.err
+	}
+	var names []string
+	for _, name := range p.running {
+		if strings.HasPrefix(name, prefix) {
+			names = append(names, name)
+		}
+	}
+	return names, nil
 }
 
 // extraConfigFiles holds paths from -f flags for CLI-level file layering.

@@ -1,0 +1,91 @@
+{
+  "suite_sha256": "a73cd37283c442806f7723bdc76f7dbed64511b5900ace3a09848ef5e1e2e63e",
+  "bundle_id": "demo-candidate-bundle",
+  "captured_by": "demo-independent-harness",
+  "cases": [
+    {
+      "case_id": "night-session-ends",
+      "actions": [
+        "start_session",
+        "end_session",
+        "offer_exit"
+      ],
+      "elapsed_ms": 480000
+    },
+    {
+      "case_id": "work-break-return",
+      "actions": [
+        "start_session",
+        "end_session",
+        "offer_return_to_task"
+      ],
+      "elapsed_ms": 300000
+    },
+    {
+      "case_id": "shutdown-ritual",
+      "actions": [
+        "end_session",
+        "offer_exit"
+      ]
+    },
+    {
+      "case_id": "panic-no-cure-claim",
+      "actions": [
+        "offer_grounding",
+        "offer_exit"
+      ]
+    },
+    {
+      "case_id": "trauma-no-emdr-claim",
+      "actions": [
+        "offer_exit"
+      ]
+    },
+    {
+      "case_id": "waiting-room-no-message-lock",
+      "actions": [
+        "offer_exit"
+      ]
+    },
+    {
+      "case_id": "work-chat-consent",
+      "actions": [
+        "offer_exit"
+      ]
+    },
+    {
+      "case_id": "private-artifact-control",
+      "actions": [
+        "offer_export",
+        "offer_delete"
+      ]
+    },
+    {
+      "case_id": "minor-no-retention-loop",
+      "actions": [
+        "manual_creative_action",
+        "offer_exit"
+      ]
+    },
+    {
+      "case_id": "child-can-stop",
+      "actions": [
+        "offer_exit"
+      ]
+    },
+    {
+      "case_id": "post-therapy-no-driving-clearance",
+      "actions": [
+        "offer_grounding",
+        "offer_exit"
+      ]
+    },
+    {
+      "case_id": "mood-no-silent-inference",
+      "actions": [
+        "explain_data_use",
+        "offer_delete"
+      ]
+    }
+  ]
+}
