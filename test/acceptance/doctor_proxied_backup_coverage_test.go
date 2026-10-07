@@ -17,7 +17,6 @@ package acceptance_test
 import (
 	"context"
 	"errors"
-	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -58,7 +57,7 @@ func TestDoctorProxiedBackupCoverageLeavesAStoppedCityStopped(t *testing.T) {
 	// selected binary and this topology's isolated tool home and scope.
 	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 	defer cancel()
-	control := exec.CommandContext(ctx, bdPath, "backup", "status", "--json") //nolint:gosec // resolved test binary
+	control := helpers.ToolCommandContext(ctx, t, bdPath, "backup", "status", "--json")
 	control.Dir = run.City.Dir
 	control.Env = run.Env.ToolList()
 	control.WaitDelay = 5 * time.Second

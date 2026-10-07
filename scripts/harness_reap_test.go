@@ -208,8 +208,21 @@ echo $$ > %q
 exec sleep %d
 `, pidFile, fixtureLifetimeSeconds))
 
-	cmd := fixture.start(t)
+	// Observe the watchdog's own sleep as well as the product descendant.
+	// The selected 1m timeout plus 1m grace cannot fire during this assertion.
+	watchdogPIDFile := filepath.Join(pidDir, "watchdog.pid")
+	writeExecutable(t, filepath.Join(fixture.binDir, "sleep"), fmt.Sprintf(`#!/bin/sh
+if [ "${1:-}" = "120" ]; then echo $$ > %q; fi
+exec /bin/sleep "$@"
+`, watchdogPIDFile))
+	cmd := fixture.start(t, "GO_TEST_WATCHDOG_GRACE=1m")
 	descendant := waitForPIDFile(t, pidFile, 30*time.Second)
+	watchdog := waitForPIDFile(t, watchdogPIDFile, 30*time.Second)
+	watchdogPGID, err := syscall.Getpgid(watchdog)
+	if err != nil || watchdogPGID <= 1 || watchdogPGID == cmd.Process.Pid {
+		t.Fatalf("watchdog does not own a separate fixture group: pgid=%d err=%v", watchdogPGID, err)
+	}
+	t.Cleanup(func() { _ = syscall.Kill(-watchdogPGID, syscall.SIGKILL) })
 
 	// Kill only the runner, the way a dead driver, a closed session, or a
 	// killed parent chain does. Its descendants must not survive it.
@@ -219,6 +232,9 @@ exec sleep %d
 
 	if !processGone(descendant, 20*time.Second) {
 		t.Fatalf("descendant pid %d survived the runner's termination: the shard runner orphaned its test process tree", descendant)
+	}
+	if !processGone(watchdog, 20*time.Second) {
+		t.Fatalf("watchdog sleep pid %d survived the runner's termination", watchdog)
 	}
 }
 

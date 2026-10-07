@@ -104,7 +104,10 @@ const (
 	// same job, env, secrets and runner. Then the Beads v1.3.0 -> v1.3.1-rc.2
 	// pin: the workflow and job BD_VERSION env values only.
 	expectedNightlyExecutionHash = "95cdfa034e95e92beb2e1d01d29b7a6e4ccd323614caa4e8c2932f3ebe3de243"
-	expectedSetupActionHash      = "8f2d6b3a57f11d4f33a41211b1d3d5362d1437ba40c7b6db068abb98e731e5ac"
+	// Reviewed setup delta: export the exact installed public bd path for
+	// integration input provenance, refusing unsafe or PATH-shadowed inputs.
+	// Version pins, provider installation, permissions and gates stay pinned.
+	expectedSetupActionHash = "4b3b4999a61373c0c3c3c37f84b0f436380e108cddc09c6c900195aee85ddf45"
 )
 
 var requiredFilterPaths = map[string][]string{

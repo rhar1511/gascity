@@ -1,6 +1,7 @@
 package acceptancehelpers
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -52,11 +53,18 @@ func (e *Env) ToolList() []string {
 // under a fresh per-test directory.
 func ToolCommand(t *testing.T, bin string, args ...string) *exec.Cmd {
 	t.Helper()
+	return ToolCommandContext(context.Background(), t, bin, args...)
+}
+
+// ToolCommandContext is ToolCommand with a caller-owned cancellation context.
+// Callers running inside an Env must replace cmd.Env with that Env's ToolList.
+func ToolCommandContext(ctx context.Context, t *testing.T, bin string, args ...string) *exec.Cmd {
+	t.Helper()
 	home := filepath.Join(TempDir(t), "tool-home")
 	if err := os.MkdirAll(home, 0o755); err != nil {
 		t.Fatalf("create tool home: %v", err)
 	}
-	cmd := exec.Command(bin, args...) //nolint:gosec // resolved test binary
+	cmd := exec.CommandContext(ctx, bin, args...) //nolint:gosec // resolved test binary
 	cmd.Env = toolhome.Environ(os.Environ(), home)
 	return cmd
 }
