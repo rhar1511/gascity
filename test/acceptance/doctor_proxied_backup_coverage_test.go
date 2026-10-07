@@ -15,7 +15,9 @@
 package acceptance_test
 
 import (
+	"context"
 	"errors"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -51,12 +53,24 @@ func TestDoctorProxiedBackupCoverageLeavesAStoppedCityStopped(t *testing.T) {
 	}
 	stopCity("after init")
 
-	// Positive control: bd itself wakes the stopped store.
-	if out, err := run.GC("bd", "backup", "status", "--json"); err != nil {
-		if strings.Contains(out, "proxy.backup.unsupported") {
+	// Positive control: bd itself wakes the stopped store. This probes bd's
+	// lifecycle, not gc bd's private-safe presentation allowlist. Keep the
+	// selected binary and this topology's isolated tool home and scope.
+	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+	defer cancel()
+	control := exec.CommandContext(ctx, bdPath, "backup", "status", "--json") //nolint:gosec // resolved test binary
+	control.Dir = run.City.Dir
+	control.Env = run.Env.ToolList()
+	control.WaitDelay = 5 * time.Second
+	out, err := control.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("control bd backup status exceeded its deadline: %v\n%s", ctx.Err(), out)
+	}
+	if err != nil {
+		if strings.Contains(string(out), "proxy.backup.unsupported") {
 			t.Skipf("bd at %s refuses proxied backup; the control needs one that supports it", bdPath)
 		}
-		t.Fatalf("control gc bd backup status: %v\n%s", err, out)
+		t.Fatalf("control bd backup status: %v\n%s", err, out)
 	}
 	if started := helpers.DoltProcessesUnder(t, run.Root); len(started) == 0 {
 		t.Fatal("control: bd backup status started nothing, so the scan cannot prove doctor started nothing")

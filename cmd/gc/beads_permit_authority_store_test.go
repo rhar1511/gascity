@@ -211,19 +211,6 @@ func assertControllerDecisionFrontierWriter(t *testing.T, store beads.Store) {
 	}
 }
 
-func controllerPermitTestResolver(t *testing.T, entry hostBeadsPermitAuthorityEntry, key []byte) *hostBeadsPermitResolver {
-	t.Helper()
-	directory := t.TempDir()
-	_ = key
-	writeHostBeadsPermitAuthority(t, directory, []hostBeadsPermitAuthorityEntry{entry})
-	resolver, err := loadHostBeadsPermitResolver(directory)
-	if err != nil {
-		t.Fatalf("load host permit resolver: %v", err)
-	}
-	t.Cleanup(func() { _ = resolver.close() })
-	return resolver
-}
-
 func controllerPermitTestTransport(t *testing.T) (*httptest.Server, config.PrivateEvidenceTransportConfig) {
 	t.Helper()
 	const projectID = "project-alpha"
