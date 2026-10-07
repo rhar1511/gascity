@@ -54,7 +54,6 @@ func NewEnv(gcBinary, gcHome, runtimeDir string) *Env {
 		// runner's real global config, which has no beads.role, so `gc doctor`
 		// failed its beads-role check on any host that had never opted in.
 		"GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM",
-		"CLAUDE_CONFIG_DIR", // Claude Code reads OAuth credentials from here
 		"ANTHROPIC_AUTH_TOKEN",
 		"ANTHROPIC_API_KEY",
 		"ANTHROPIC_BASE_URL",
@@ -135,6 +134,10 @@ func NewEnv(gcBinary, gcHome, runtimeDir string) *Env {
 		}
 	}
 	e.vars["GC_HOME"] = gcHome
+	// The supervisor needs the OS user's HOME, but fixture onboarding state
+	// must not modify that user's Claude profile or race another test shard.
+	// Live suites stage their authorized profile and explicitly override this.
+	e.vars["CLAUDE_CONFIG_DIR"] = filepath.Join(gcHome, ".claude")
 
 	// gc carries its environment into every bd it forks, including ones that
 	// reach a bd not wrapped by the tool-home wrapper (a raw BD_BIN). Pin bd's
