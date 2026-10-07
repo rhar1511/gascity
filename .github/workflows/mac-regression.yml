@@ -244,7 +244,8 @@ jobs:
       - name: Lint
         env:
           GOLANGCI_LINT_CACHE: ${{ github.workspace }}/.cache/golangci-lint
-        run: make lint
+        # Expose phase diagnostics while retaining the full gate and deadline.
+        run: make lint LINT_FLAGS=--verbose
       - name: Format
         run: make fmt-check
       - name: Vet
@@ -316,7 +317,9 @@ jobs:
       - gate
     if: needs.gate.outputs.run_smoke == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
-    timeout-minutes: 25
+    # Job cancelled at 25m05s after both test commands passed.
+    # Leave bounded outer headroom without changing either test deadline.
+    timeout-minutes: 26
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
