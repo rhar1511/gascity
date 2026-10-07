@@ -11,7 +11,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -186,10 +185,7 @@ func TestStatusIsByteForByteReadOnlyAcrossAbsentCorruptAndUnsafeStates(t *testin
 }
 
 func TestOpenProductionAndPreparationAreLazyAndNonCreating(t *testing.T) {
-	trustedTempRoot := "/tmp"
-	if runtime.GOOS == "darwin" {
-		trustedTempRoot = "/private/tmp"
-	}
+	trustedTempRoot := metricsTestTempRoot(t)
 	t.Setenv("GOTMPDIR", trustedTempRoot)
 	t.Setenv("TMPDIR", trustedTempRoot)
 	parent := t.TempDir()

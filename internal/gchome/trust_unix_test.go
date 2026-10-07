@@ -256,12 +256,26 @@ func TestInspectProductUsageHomeRejectsSymlinkWithoutResolvingIt(t *testing.T) {
 
 func trustedTemporaryDirectory(t *testing.T) string {
 	t.Helper()
-	tempRoot, err := filepath.EvalSymlinks("/tmp")
+	tempRoot := "/tmp"
+	override := os.Getenv("GC_TEST_TRUSTED_TMPDIR")
+	if override != "" {
+		if !filepath.IsAbs(override) || filepath.Clean(override) != override {
+			t.Fatalf("GC_TEST_TRUSTED_TMPDIR must be an absolute clean path: %q", override)
+		}
+		tempRoot = override
+	}
+	tempRoot, err := filepath.EvalSymlinks(tempRoot)
 	if err != nil {
+		if override != "" {
+			t.Fatalf("cannot resolve declared trusted temporary root: %v", err)
+		}
 		t.Skipf("cannot resolve system temporary root for trust smoke test: %v", err)
 	}
 	directory, err := os.MkdirTemp(tempRoot, "gchome-trust-test-*")
 	if err != nil {
+		if override != "" {
+			t.Fatalf("cannot create declared trust smoke-test directory: %v", err)
+		}
 		t.Skipf("cannot create trust smoke-test directory: %v", err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(directory) })

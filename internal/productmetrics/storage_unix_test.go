@@ -38,15 +38,27 @@ func TestValidateAncestorDirectoryAcceptsNamespaceOverflowOnlyAtRoot(t *testing.
 	}
 }
 
+// metricsTestTempRoot lets sandboxed runners declare a trusted temporary
+// ancestor while retaining the normal platform defaults and production checks.
+func metricsTestTempRoot(t testing.TB) string {
+	t.Helper()
+	if root := os.Getenv("GC_TEST_TRUSTED_TMPDIR"); root != "" {
+		if !filepath.IsAbs(root) || filepath.Clean(root) != root {
+			t.Fatalf("GC_TEST_TRUSTED_TMPDIR must be an absolute clean path: %q", root)
+		}
+		return root
+	}
+	if runtime.GOOS == "darwin" {
+		return "/private/tmp"
+	}
+	return "/tmp"
+}
+
 func inspectStorageTestHome(t *testing.T, createRoot bool) gchome.ProductUsageHome {
 	t.Helper()
-	// The shared workspace lives below a deliberately group-writable /data.
-	// Put this trust-boundary fixture below the supported root-owned sticky
-	// ancestor instead.
-	trustedTempRoot := "/tmp"
-	if runtime.GOOS == "darwin" {
-		trustedTempRoot = "/private/tmp"
-	}
+	// Keep the fixture below the declared trusted ancestor or the normal
+	// platform temporary root; every production trust check still applies.
+	trustedTempRoot := metricsTestTempRoot(t)
 	// Go 1.26's testing.T.TempDir prefers GOTMPDIR over TMPDIR. Set both so
 	// repository test runners may keep their build scratch space below /data
 	// without moving this trust-boundary fixture below that unsafe ancestor.
@@ -1016,10 +1028,7 @@ func TestStorageReadOnlyExistingDescendantOpenDoesNotRepair(t *testing.T) {
 }
 
 func TestStorageRootCreationRetryRecoversMissingIntermediateParentSync(t *testing.T) {
-	trustedTempRoot := "/tmp"
-	if runtime.GOOS == "darwin" {
-		trustedTempRoot = "/private/tmp"
-	}
+	trustedTempRoot := metricsTestTempRoot(t)
 	t.Setenv("GOTMPDIR", trustedTempRoot)
 	t.Setenv("TMPDIR", trustedTempRoot)
 	privateAncestor := t.TempDir()

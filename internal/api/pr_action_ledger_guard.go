@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/api/apierr"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -13,6 +14,15 @@ import (
 func rejectPRActionLedgerMutation(b beads.Bead) error {
 	if strings.HasPrefix(b.ID, "gc-pr-action-") && b.Metadata[prActionSourceMetadataKey] == prActionRecordSource {
 		return apierr.Forbidden.Msg("PR action ledger records are controller managed")
+	}
+	return nil
+}
+
+func validatePRActionMetadata(metadata map[string]string) error {
+	for key := range metadata {
+		if strings.HasPrefix(key, beadmeta.PRActionMetadataPrefix) {
+			return apierr.Forbidden.Msg("PR action ledger metadata is reserved for the controller")
+		}
 	}
 	return nil
 }
