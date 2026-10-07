@@ -1451,6 +1451,17 @@ command = "/bin/echo"
 }
 
 func TestWorkerObserveSessionTargetWithConfigFallsBackToRunningRuntimeHandle(t *testing.T) {
+	// This proof uses a fake runtime and no ledger. Expected-name setup must
+	// not open a real store or start a provider-owned server.
+	cliStoreCache.mu.Lock()
+	priorPath, priorStore := cliStoreCache.path, cliStoreCache.store
+	cliStoreCache.path, cliStoreCache.store = "", nil
+	cliStoreCache.mu.Unlock()
+	t.Cleanup(func() {
+		cliStoreCache.mu.Lock()
+		cliStoreCache.path, cliStoreCache.store = priorPath, priorStore
+		cliStoreCache.mu.Unlock()
+	})
 	sp := runtime.NewFake()
 	if err := sp.Start(context.Background(), "mayor", runtime.Config{Command: "echo"}); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -1463,13 +1474,19 @@ func TestWorkerObserveSessionTargetWithConfigFallsBackToRunningRuntimeHandle(t *
 		},
 	}
 
-	target := cliSessionName("/home/user/city", cfg.Workspace.Name, "mayor", cfg.Workspace.SessionTemplate)
+	target := sessionName(nil, cfg.Workspace.Name, "mayor", cfg.Workspace.SessionTemplate)
 	obs, err := workerObserveSessionTargetWithConfig("/home/user/city", nil, sp, cfg, target)
 	if err != nil {
 		t.Fatalf("workerObserveSessionTargetWithConfig: %v", err)
 	}
 	if !obs.Running {
 		t.Fatalf("obs.Running = false, want true for %q", target)
+	}
+	cliStoreCache.mu.Lock()
+	openedPath, openedStore := cliStoreCache.path, cliStoreCache.store
+	cliStoreCache.mu.Unlock()
+	if openedPath != "" || openedStore != nil {
+		t.Fatalf("runtime-only observation opened the CLI ledger cache for %q", openedPath)
 	}
 }
 
@@ -1486,7 +1503,7 @@ func TestWorkerObserveSessionTargetWithConfigIgnoresStoreLookupFailuresForRuntim
 		},
 	}
 
-	target := cliSessionName("/home/user/city", cfg.Workspace.Name, "mayor", cfg.Workspace.SessionTemplate)
+	target := sessionName(nil, cfg.Workspace.Name, "mayor", cfg.Workspace.SessionTemplate)
 	store := &failingSessionLookupStore{err: fmt.Errorf("store lookup failed")}
 	obs, err := workerObserveSessionTargetWithConfig("/home/user/city", store, sp, cfg, target)
 	if err != nil {

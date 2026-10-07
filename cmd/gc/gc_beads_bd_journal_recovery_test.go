@@ -3,11 +3,13 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -165,6 +167,27 @@ func TestRunWithTimeoutCapturedOutputDoesNotWaitForWatchdogSleep(t *testing.T) {
 	}
 	runWithTimeout := extractShellFunction(t, string(scriptBytes), "run_with_timeout")
 
+	for _, tc := range []struct {
+		name       string
+		timeout    string
+		exitCode   int
+		timerFires bool
+	}{
+		{"success", "120", 0, false},
+		{"failure", "120", 7, false},
+		{"fallback-success", "invalid", 0, false},
+		{"fallback-failure", "invalid", 7, false},
+		{"timeout", "120", 143, true},
+		{"fallback-timeout", "invalid", 143, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runWithTimeoutCapturedOutputCase(t, runWithTimeout, tc.timeout, tc.exitCode, tc.timerFires)
+		})
+	}
+}
+
+func runWithTimeoutCapturedOutputCase(t *testing.T, runWithTimeout, timeout string, exitCode int, timerFires bool) {
+	t.Helper()
 	newPipe := func(name string) (*os.File, *os.File) {
 		r, w, err := os.Pipe()
 		if err != nil {
@@ -181,23 +204,30 @@ func TestRunWithTimeoutCapturedOutputDoesNotWaitForWatchdogSleep(t *testing.T) {
 	commandGateR, commandGateW := newPipe("command-gate")
 
 	binDir := t.TempDir()
-	writeExecutable(t, filepath.Join(binDir, "sleep"), `#!/bin/sh
+	writeExecutable(t, filepath.Join(binDir, "sleep"), fmt.Sprintf(`#!/bin/sh
 set -u
-[ "$#" -eq 1 ] && [ "$1" = "120" ] || exit 64
+[ "$#" -eq 1 ] || exit 64
+case "$1" in 120|1) ;; *) exit 64 ;; esac
 : "${SLEEP_SIGNAL_FD:?}"
 : "${SLEEP_RELEASE_FD:?}"
 : "${COMMAND_GATE_WRITE_FD:?}"
-printf 'started\n' >&"$SLEEP_SIGNAL_FD"
-printf 'go\n' >&"$COMMAND_GATE_WRITE_FD"
+trap 'printf "terminated\n" >&"$SLEEP_SIGNAL_FD"; exit 0' TERM HUP INT
+printf 'started %%s\n' "$$" >&"$SLEEP_SIGNAL_FD"
+if [ "%t" = false ]; then
+    printf 'go\n' >&"$COMMAND_GATE_WRITE_FD"
+fi
 IFS= read -r release <&"$SLEEP_RELEASE_FD"
 [ "$release" = "release" ] || exit 65
 printf 'finished\n' >&"$SLEEP_SIGNAL_FD"
-`)
+`, timerFires))
 
-	harness := "#!/usr/bin/env bash\nset -u\n" + runWithTimeout + `
-result=$(run_with_timeout 120 sh -c 'IFS= read -r gate <&"$COMMAND_GATE_READ_FD"; [ "$gate" = go ]; printf command-output')
-printf 'result=%s\n' "$result"
-`
+	harness := "#!/usr/bin/env bash\nset -u\n" + runWithTimeout + fmt.Sprintf(`
+result=$(run_with_timeout %s sh -c 'IFS= read -r gate <&"$COMMAND_GATE_READ_FD"; [ "$gate" = go ]; printf command-output; exit %d')
+status=$?
+printf 'result=%%s\n' "$result"
+exit "$status"
+`, timeout, exitCode)
+
 	env := journalRecoveryEnv{binDir: binDir}
 	cmd := env.command(harness,
 		"SLEEP_SIGNAL_FD=3",
@@ -275,11 +305,30 @@ printf 'result=%s\n' "$result"
 		t.Fatal(err)
 	}
 
-	completedBeforeRelease := waitCommand()
-	releaseControls()
-	if err := readSignal("watchdog sleep finished signal", "finished"); err != nil {
-		t.Fatal(err)
+	var sleepPID int
+	if _, err := fmt.Fscan(signalReader, &sleepPID); err != nil || sleepPID <= 1 {
+		t.Fatalf("watchdog sleep PID = %d, want owned positive PID: %v", sleepPID, err)
 	}
+	if timerFires {
+		// Release only the timer: the timed command stays at its gate until
+		// the watchdog cancels it, so no wall-clock sleep determines the test.
+		_, _ = fmt.Fprintln(releaseW, "release")
+		_ = releaseW.Close()
+	}
+	completedBeforeRelease := waitCommand()
+	if completedBeforeRelease {
+		wantSignal := "terminated"
+		if timerFires {
+			wantSignal = "finished"
+		}
+		if err := readSignal("watchdog sleep exit signal", wantSignal); err != nil {
+			t.Fatalf("watchdog sleep survived completed command before emergency release: %v", err)
+		}
+		if err := syscall.Kill(sleepPID, 0); !errors.Is(err, syscall.ESRCH) {
+			t.Fatalf("watchdog sleep PID %d was not reaped before harness completion: %v", sleepPID, err)
+		}
+	}
+	releaseControls()
 	blockedByWatchdogPipe := !completedBeforeRelease
 	if blockedByWatchdogPipe {
 		if !waitCommand() {
@@ -287,11 +336,22 @@ printf 'result=%s\n' "$result"
 		}
 	}
 
-	if runErr != nil {
-		t.Errorf("run_with_timeout harness failed: %v\nstderr: %s", runErr, stderr.String())
+	if exitCode == 0 {
+		if runErr != nil {
+			t.Errorf("run_with_timeout harness failed: %v\nstderr: %s", runErr, stderr.String())
+		}
+	} else {
+		var exitError *exec.ExitError
+		if !errors.As(runErr, &exitError) || exitError.ExitCode() != exitCode {
+			t.Errorf("harness exit = %v, want command exit %d", runErr, exitCode)
+		}
 	}
-	if got, want := stdout.String(), "result=command-output\n"; got != want {
-		t.Errorf("harness output = %q, want %q", got, want)
+	wantOutput := "result=command-output\n"
+	if timerFires {
+		wantOutput = "result=\n"
+	}
+	if got := stdout.String(); got != wantOutput {
+		t.Errorf("harness output = %q, want %q", got, wantOutput)
 	}
 	if got := stderr.String(); got != "" {
 		t.Errorf("harness stderr = %q, want empty", got)

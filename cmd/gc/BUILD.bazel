@@ -678,6 +678,25 @@ go_binary(
     visibility = ["//visibility:public"],
 )
 
+# Fixed identities for integration drift tests; preserve the real gc build.
+# keep
+go_binary(
+    name = "gc_drift_old",
+    testonly = True,
+    embed = [":gc_lib"],
+    visibility = ["//test/integration:__pkg__"],
+    x_defs = {"commit": "deadbeefcafe1111"},
+)
+
+# keep
+go_binary(
+    name = "gc_drift_new",
+    testonly = True,
+    embed = [":gc_lib"],
+    visibility = ["//test/integration:__pkg__"],
+    x_defs = {"commit": "facefeed02222222"},
+)
+
 go_test(
     name = "gc_test",
     size = "large",

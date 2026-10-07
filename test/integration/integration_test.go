@@ -1860,6 +1860,7 @@ func newIsolatedEnvRoot(t *testing.T, useDolt bool) (string, string, []string) {
 		t.Fatalf("writing isolated dolt config: %v", err)
 	}
 	env := integrationEnvFor(gcHome, runtimeDir, useDolt)
+	env = replaceEnv(env, "TMPDIR", root)
 	return gcHome, runtimeDir, env
 }
 
@@ -2902,18 +2903,42 @@ mode = "on_demand"
 }
 
 func TestNewIsolatedToolEnvSeedsLocalDoltIdentity(t *testing.T) {
-	env := newIsolatedToolEnv(t, true)
-	got := parseEnvList(env)
-	cfgPath := filepath.Join(got["DOLT_ROOT_PATH"], ".dolt", "config_global.json")
-	data, err := os.ReadFile(cfgPath)
-	if err != nil {
-		t.Fatalf("read isolated dolt config: %v", err)
-	}
-	if !strings.Contains(string(data), `"user.name":"gc-test"`) {
-		t.Fatalf("isolated dolt config missing user.name: %s", string(data))
-	}
-	if !strings.Contains(string(data), `"user.email":"gc-test@test.local"`) {
-		t.Fatalf("isolated dolt config missing user.email: %s", string(data))
+	var scratchPath string
+	t.Cleanup(func() {
+		if scratchPath != "" {
+			_ = os.Remove(scratchPath)
+		}
+	})
+	t.Run("owned scratch lifetime", func(t *testing.T) {
+		env := newIsolatedToolEnv(t, true)
+		got := parseEnvList(env)
+		cfgPath := filepath.Join(got["DOLT_ROOT_PATH"], ".dolt", "config_global.json")
+		data, err := os.ReadFile(cfgPath)
+		if err != nil {
+			t.Fatalf("read isolated dolt config: %v", err)
+		}
+		if !strings.Contains(string(data), `"user.name":"gc-test"`) {
+			t.Fatalf("isolated dolt config missing user.name: %s", string(data))
+		}
+		if !strings.Contains(string(data), `"user.email":"gc-test@test.local"`) {
+			t.Fatalf("isolated dolt config missing user.email: %s", string(data))
+		}
+		if got["TMPDIR"] == "" {
+			t.Fatal("isolated environment has no scratch directory")
+		}
+		scratch, err := os.CreateTemp(got["TMPDIR"], "isolated-scratch-*")
+		if err != nil {
+			t.Fatalf("create isolated child scratch: %v", err)
+		}
+		scratchPath = scratch.Name()
+		if err := scratch.Close(); err != nil {
+			t.Fatalf("close isolated child scratch: %v", err)
+		}
+	})
+	if scratchPath != "" {
+		if _, err := os.Stat(scratchPath); !os.IsNotExist(err) {
+			t.Errorf("isolated child scratch survived fixture cleanup: %s: %v", scratchPath, err)
+		}
 	}
 }
 

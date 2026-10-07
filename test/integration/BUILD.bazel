@@ -59,6 +59,8 @@ go_test(
         exclude = ["BUILD.bazel"],
     ) + [
         "//cmd/gc",
+        "//cmd/gc:gc_drift_old",
+        "//cmd/gc:gc_drift_new",
         "//examples/bd",
         "//test/integration/filebdshim",
         "//:go.mod",

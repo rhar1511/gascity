@@ -3,6 +3,7 @@
 package integration
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -212,30 +213,39 @@ func writeMultiRigAgentPack(t *testing.T, cityDir string, agents map[string]gasT
 	}
 }
 
-func installFakeBDForCity(t *testing.T, cityDir string) {
+func installFakeBDForCity(t *testing.T, cityDir, expectedTitle string) {
 	t.Helper()
+	titleJSON, err := json.Marshal(expectedTitle)
+	require.NoError(t, err)
+	// Encode the real declared title rather than approximating provider JSON.
+	shellQuote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'" }
 
 	shimDir := t.TempDir()
 	script := filepath.Join(shimDir, "bd")
 	content := `#!/bin/sh
 set -eu
+expected_title=` + shellQuote(expectedTitle) + `
+title_json=` + shellQuote(string(titleJSON)) + `
 store="${BEADS_DIR:?}/fake-beads"
 mkdir -p "$store"
 case "${1:-}" in
   create)
     title="${2:?missing title}"
-    id="${GC_BEADS_PREFIX:-bd}-fake"
-    printf '%s' "$title" > "$store/$id"
-    printf 'Created issue: %s\n' "$id"
+    [ "$title" = "$expected_title" ] || { printf 'unexpected fixture title\n' >&2; exit 2; }
+    prefix="${GC_BEADS_PREFIX:-bd}"
+    case "$prefix" in ''|*[!A-Za-z0-9_-]*) exit 2 ;; esac
+    id="$prefix-fake"
+    printf '{"id":"%s","title":%s,"status":"open"}\n' "$id" "$title_json" > "$store/$id"
+    cat "$store/$id"
     ;;
   show)
     id="${2:?missing id}"
+    case "$id" in ''|*[!A-Za-z0-9_-]*) exit 2 ;; esac
     if [ ! -f "$store/$id" ]; then
       printf 'Error: issue not found: %s\n' "$id" >&2
       exit 1
     fi
-    printf 'ID: %s\n' "$id"
-    printf 'Title: %s\n' "$(cat "$store/$id")"
+    cat "$store/$id"
     ;;
   *)
     printf 'unsupported fake bd command: %s\n' "$*" >&2
@@ -375,7 +385,8 @@ func TestGastown_MultiRig_BeadIsolation(t *testing.T) {
 		{Name: "worker", StartCommand: "sleep 3600"},
 	}
 	writeMultiRigToml(t, cityDir, cityName, rigDirs, agents)
-	installFakeBDForCity(t, cityDir)
+	const title = "multi-rig bead test alpha"
+	installFakeBDForCity(t, cityDir, title)
 
 	// Seed bd store markers after city.toml exists, then exercise only
 	// Gas City's configured rig route rather than direct cwd-based bd calls.
@@ -386,7 +397,7 @@ func TestGastown_MultiRig_BeadIsolation(t *testing.T) {
 	assert.NotEqual(t, prefix0, prefix1, "rig bead prefixes should differ")
 
 	// Create a bead through Gas City's configured rig route.
-	out, err := gc(cityDir, "bd", "--rig", "rig-0", "create", "multi-rig bead test alpha")
+	out, err := gc(cityDir, "bd", "--rig", "rig-0", "create", title)
 	require.NoError(t, err, "bd create in rig-0: %s", out)
 	beadID := extractBeadID(t, out)
 
