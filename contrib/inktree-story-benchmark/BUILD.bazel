@@ -6,6 +6,7 @@ go_test(
         "formula_test.go",
         "testenv_import_test.go",
     ],
+    data = glob(["testdata/**"]),
     embedsrcs = [
         "formulas/mol-rsi-story-candidate.toml",
         "testdata/mol-rsi-candidate.toml",
