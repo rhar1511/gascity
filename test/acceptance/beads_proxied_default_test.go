@@ -326,6 +326,11 @@ func assertDoctorGreen(t *testing.T, city *helpers.City, label string) {
 	out, err := city.GC("doctor", "--json")
 	var report doctorReport
 	lastJSONLine(t, out, &report)
+	for _, check := range report.Results {
+		if diagnostics := helpers.OrderFailureDiagnostics(city.Dir, check.Name, check.Status); diagnostics != "" {
+			t.Logf("order failure diagnostics: %s", diagnostics)
+		}
+	}
 	if err != nil {
 		t.Fatalf("gc doctor --json exited non-zero on %s: %v\n%s", label, err, out)
 	}
