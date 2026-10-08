@@ -11,6 +11,221 @@ import (
 	"time"
 )
 
+func TestOrderFailureDiagnosticsWithSupervisorLogPrivacy(t *testing.T) {
+	city, home := t.TempDir(), t.TempDir()
+	writeOrderDiagnosticFixture(t, home, "supervisor.log", "gc: order dispatch: per-tick budget 4 spent; the rotation did not reach 2 more order(s) this tick (due-ness not evaluated): dolt-health, beads-health\n"+
+		"gc supervisor: startup phase=startup-orders elapsed=7.25s\n"+
+		"gc: order dispatch: checking open work for dolt-health: SECRET_GATE_TOKEN\n"+
+		"unrelated actor=SECRET_ACTOR argv=SECRET_ARGV credentials=SECRET_CREDENTIAL\n")
+	out := OrderFailureDiagnosticsWithSupervisorLog(city, home, "order-firing-current", "error")
+	if !json.Valid([]byte(out)) || strings.Contains(out, "SECRET_") {
+		t.Fatalf("invalid or unsanitized supervisor diagnostics: %s", out)
+	}
+	var result struct {
+		SupervisorCoverage string `json:"supervisor_coverage"`
+		Supervisor         []struct {
+			Kind       string   `json:"kind"`
+			Budget     int      `json:"budget"`
+			Unreached  int      `json:"unreached"`
+			Orders     []string `json:"orders"`
+			DurationMS int64    `json:"duration_ms"`
+		} `json:"supervisor"`
+	}
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.SupervisorCoverage != "UNVALIDATED_PRIVATE_SUPERVISOR_LOG_WINDOW" || len(result.Supervisor) != 3 {
+		t.Fatalf("missing passive evidence or unsupported correlation claim: %+v", result)
+	}
+	budget, startup, gate := result.Supervisor[0], result.Supervisor[1], result.Supervisor[2]
+	if budget.Kind != "budget_unreached" || budget.Budget != 4 || budget.Unreached != 2 || strings.Join(budget.Orders, ",") != "dolt-health,beads-health" {
+		t.Fatalf("budget sample changed into due-order evidence: %+v", budget)
+	}
+	if startup.Kind != "startup_orders" || startup.DurationMS != 7250 || gate.Kind != "open_work_gate_error" || strings.Join(gate.Orders, ",") != "dolt-health" {
+		t.Fatalf("startup or gate metadata missing: %+v", result.Supervisor)
+	}
+}
+
+func TestOrderFailureDiagnosticsWithSupervisorLogOwnershipAndBounds(t *testing.T) {
+	city, home, outside := t.TempDir(), t.TempDir(), t.TempDir()
+	writeOrderDiagnosticFixture(t, outside, "supervisor.log", "SECRET_OUTSIDE\n")
+	if err := os.Symlink(filepath.Join(outside, "supervisor.log"), filepath.Join(home, "supervisor.log")); err != nil {
+		t.Fatal(err)
+	}
+	out := OrderFailureDiagnosticsWithSupervisorLog(city, home, "order-firing-current", "error")
+	if strings.Contains(out, "SECRET_") || !strings.Contains(out, `"source":"supervisor"`) || !strings.Contains(out, `"status":"rejected"`) {
+		t.Fatalf("foreign source not rejected: %s", out)
+	}
+	if err := os.Remove(filepath.Join(home, "supervisor.log")); err != nil {
+		t.Fatal(err)
+	}
+	line := "gc: order dispatch: per-tick budget 4 spent; the rotation did not reach 1 more order(s) this tick (due-ness not evaluated): dolt-health\n"
+	writeOrderDiagnosticFixture(t, home, "supervisor.log", strings.Repeat(line, orderDiagnosticRows+1)+"SECRET_PARTIAL")
+	out = OrderFailureDiagnosticsWithSupervisorLog(city, home, "order-firing-current", "error")
+	var result struct {
+		Inputs     []orderDiagnosticInput `json:"inputs"`
+		Supervisor []json.RawMessage      `json:"supervisor"`
+	}
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Supervisor) != orderDiagnosticRows || strings.Contains(out, "SECRET_") {
+		t.Fatalf("supervisor row or partial-tail bound failed: %s", out)
+	}
+	found := false
+	for _, input := range result.Inputs {
+		if input.Source == "supervisor" {
+			found = input.RowLimit && input.PartialRow
+		}
+	}
+	if !found {
+		t.Fatalf("bounded evidence was presented as complete: %s", out)
+	}
+	if got := OrderFailureDiagnosticsWithSupervisorLog(city, outside, "order-firing-current", "ok"); got != "" {
+		t.Fatalf("successful doctor caused evidence read: %s", got)
+	}
+}
+
+func TestOrderFailureDiagnosticsWithSupervisorLogPrivateHome(t *testing.T) {
+	city, home := t.TempDir(), t.TempDir()
+	writeOrderDiagnosticFixture(t, home, "supervisor.log", "SECRET_HOME\n")
+	link := filepath.Join(t.TempDir(), "linked-home")
+	if err := os.Symlink(home, link); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct{ name, home, status string }{
+		{"undeclared", "", "not_declared"},
+		{"missing", filepath.Join(t.TempDir(), "absent"), "rejected"},
+		{"symlink", link, "rejected"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			out := OrderFailureDiagnosticsWithSupervisorLog(city, c.home, "order-firing-current", "error")
+			if !json.Valid([]byte(out)) || strings.Contains(out, "SECRET_") || !strings.Contains(out, `"source":"supervisor"`) || !strings.Contains(out, `"status":"`+c.status+`"`) {
+				t.Fatalf("private home boundary not explicit: %s", out)
+			}
+		})
+	}
+}
+
+func TestOrderFailureDiagnosticsWithSupervisorLogSizeBounds(t *testing.T) {
+	line := "gc: order dispatch: per-tick budget 4 spent; the rotation did not reach 1 more order(s) this tick (due-ness not evaluated): dolt-health\n"
+	for _, c := range []struct {
+		name, data string
+		byteLimit  bool
+		invalid    bool
+		rows       int
+	}{
+		{"tail", strings.Repeat("x", orderDiagnosticTailBytes) + "\n" + line, true, false, 1},
+		{"row", strings.Repeat("x", orderDiagnosticRowBytes+1) + "SECRET_ROW\n", false, true, 0},
+		{"identifier", strings.Replace(line, "dolt-health", strings.Repeat("x", orderDiagnosticValueBytes+1), 1), false, true, 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			city, home := t.TempDir(), t.TempDir()
+			writeOrderDiagnosticFixture(t, home, "supervisor.log", c.data)
+			out := OrderFailureDiagnosticsWithSupervisorLog(city, home, "order-firing-current", "error")
+			var result struct {
+				Inputs     []orderDiagnosticInput `json:"inputs"`
+				Supervisor []json.RawMessage      `json:"supervisor"`
+			}
+			if err := json.Unmarshal([]byte(out), &result); err != nil {
+				t.Fatal(err)
+			}
+			if len(result.Supervisor) != c.rows || strings.Contains(out, "SECRET_") || strings.Contains(out, strings.Repeat("x", orderDiagnosticValueBytes+1)) {
+				t.Fatalf("supervisor size or privacy boundary failed: %s", out)
+			}
+			found := false
+			for _, input := range result.Inputs {
+				if input.Source == "supervisor" {
+					found = input.ByteLimit == c.byteLimit && (input.InvalidRows > 0) == c.invalid
+				}
+			}
+			if !found {
+				t.Fatalf("incomplete size-bound evidence hidden: %s", out)
+			}
+		})
+	}
+}
+
+func TestOrderFailureDiagnosticsWithSupervisorLogSharedBudget(t *testing.T) {
+	city, home := t.TempDir(), t.TempDir()
+	writeOrderDiagnosticFixture(t, home, "supervisor.log", "gc supervisor: startup phase=startup-orders elapsed=7.25s\n")
+	base, calls := time.Date(2026, 10, 8, 0, 0, 0, 0, time.UTC), 0
+	now := func() time.Time {
+		calls++
+		if calls == 1 {
+			return base
+		}
+		return base.Add(orderDiagnosticBudget + time.Second)
+	}
+	out := orderFailureDiagnosticsWithSupervisorLog(city, home, "order-firing-current", "error", now)
+	var result struct {
+		Inputs     []orderDiagnosticInput `json:"inputs"`
+		Supervisor []json.RawMessage      `json:"supervisor"`
+	}
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Supervisor) != 0 {
+		t.Fatalf("supervisor collector reset the shared deadline: %s", out)
+	}
+	found := false
+	for _, input := range result.Inputs {
+		if input.Source == "supervisor" {
+			found = input.Status == "budget_exhausted"
+		}
+	}
+	if !found {
+		t.Fatalf("shared budget exhaustion hidden: %s", out)
+	}
+}
+
+func TestOrderFailureDiagnosticsSupervisorProjectionEdges(t *testing.T) {
+	budget := func(count, names string) string {
+		return "gc: order dispatch: per-tick budget 4 spent; the rotation did not reach " + count + " more order(s) this tick (due-ness not evaluated): " + names
+	}
+	eight := "a, b, c, d, e, f, g, h"
+	for _, c := range []struct {
+		name, line, kind string
+		valid            bool
+		orders, omitted  int
+		durationMS       int64
+	}{
+		{"eight-orders", budget("8", eight), "budget_unreached", true, 8, 0, 0},
+		{"omitted-orders", budget("11", eight+", (+3 more)"), "budget_unreached", true, 8, 3, 0},
+		{"inconsistent-count", budget("10", eight+", (+3 more)"), "budget_unreached", false, 0, 0, 0},
+		{"early-omission", budget("4", "a, (+3 more)"), "budget_unreached", false, 0, 0, 0},
+		{"zero-omission", budget("8", eight+", (+0 more)"), "budget_unreached", false, 0, 0, 0},
+		{"ninth-order", budget("9", eight+", i"), "budget_unreached", false, 0, 0, 0},
+		{"zero-count", budget("0", "a"), "budget_unreached", false, 0, 0, 0},
+		{"negative-count", budget("-1", "a"), "", false, 0, 0, 0},
+		{"oversized-count", budget("1000000000", "a"), "", false, 0, 0, 0},
+		{"compound-duration", "startup phase=startup-orders elapsed=1m2.5s", "startup_orders", true, 0, 0, 62500},
+		{"negative-duration", "startup phase=startup-orders elapsed=-1s", "startup_orders", false, 0, 0, 0},
+		{"malformed-duration", "startup phase=startup-orders elapsed=SECRET_DURATION", "startup_orders", false, 0, 0, 0},
+		{"overflow-duration", "startup phase=startup-orders elapsed=999999999999999999999h", "startup_orders", false, 0, 0, 0},
+		{"outside-duration-window", "startup phase=startup-orders elapsed=25h", "startup_orders", false, 0, 0, 0},
+		{"scoped-gate", "gc: order dispatch: checking open work for rig:health: SECRET_GATE", "open_work_gate_error", true, 1, 0, 0},
+		{"empty-gate-error", "gc: order dispatch: checking open work for health: ", "open_work_gate_error", false, 0, 0, 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			row, valid := projectOrderSupervisorLine(c.line)
+			if valid != c.valid || row.Kind != c.kind {
+				t.Fatalf("projection validity = %v, kind = %q; want %v, %q", valid, row.Kind, c.valid, c.kind)
+			}
+			if !valid {
+				return
+			}
+			if len(row.Orders) != c.orders || row.Omitted != c.omitted || row.DurationMS != c.durationMS {
+				t.Fatalf("projected bounds changed: %+v", row)
+			}
+			data, err := json.Marshal(row)
+			if err != nil || strings.Contains(string(data), "SECRET_") {
+				t.Fatalf("projection leaked raw evidence: %s (%v)", data, err)
+			}
+		})
+	}
+}
+
 func writeOrderDiagnosticFixture(t *testing.T, root, name, data string) {
 	t.Helper()
 	path := filepath.Join(root, name)

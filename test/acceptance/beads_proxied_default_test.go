@@ -327,7 +327,7 @@ func assertDoctorGreen(t *testing.T, city *helpers.City, label string) {
 	var report doctorReport
 	lastJSONLine(t, out, &report)
 	for _, check := range report.Results {
-		if diagnostics := helpers.OrderFailureDiagnostics(city.Dir, check.Name, check.Status); diagnostics != "" {
+		if diagnostics := helpers.OrderFailureDiagnosticsWithSupervisorLog(city.Dir, city.Env.Get("GC_HOME"), check.Name, check.Status); diagnostics != "" {
 			t.Logf("order failure diagnostics: %s", diagnostics)
 		}
 	}

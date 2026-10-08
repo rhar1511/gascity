@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -24,7 +25,20 @@ const (
 	orderDiagnosticTraceRoot  = ".gc/runtime/session-reconciler-trace/"
 )
 
-var orderDiagnosticSegment = regexp.MustCompile(`^segments/[0-9]{4}/[0-9]{2}/[0-9]{2}/segment-[0-9]{6,}\.jsonl$`)
+var (
+	orderDiagnosticSegment           = regexp.MustCompile(`^segments/[0-9]{4}/[0-9]{2}/[0-9]{2}/segment-[0-9]{6,}\.jsonl$`)
+	orderDiagnosticSupervisorBudget  = regexp.MustCompile(`(?:^| )gc: order dispatch: per-tick budget ([0-9]{1,9}) spent; the rotation did not reach ([0-9]{1,9}) more order\(s\) this tick \(due-ness not evaluated\): (.+)$`)
+	orderDiagnosticSupervisorOmitted = regexp.MustCompile(`^\(\+([0-9]{1,9}) more\)$`)
+)
+
+type orderDiagnosticSupervisor struct {
+	Kind       string   `json:"kind"`
+	Budget     int      `json:"budget,omitempty"`
+	Unreached  int      `json:"unreached,omitempty"`
+	Orders     []string `json:"orders,omitempty"`
+	Omitted    int      `json:"omitted,omitempty"`
+	DurationMS int64    `json:"duration_ms,omitempty"`
+}
 
 type orderDiagnosticInput struct {
 	Source      string `json:"source"`
@@ -80,6 +94,21 @@ func OrderFailureDiagnostics(cityDir, checkName, checkStatus string) string {
 }
 
 func orderFailureDiagnostics(cityDir, checkName, checkStatus string, now func() time.Time) string {
+	return orderFailureDiagnosticSources(cityDir, "", false, checkName, checkStatus, now)
+}
+
+// OrderFailureDiagnosticsWithSupervisorLog also projects bounded metadata from
+// the explicitly supplied private fixture home. An empty home never falls back
+// to the operator's environment. Its log window is not controller correlation.
+func OrderFailureDiagnosticsWithSupervisorLog(cityDir, fixtureHome, checkName, checkStatus string) string {
+	return orderFailureDiagnosticsWithSupervisorLog(cityDir, fixtureHome, checkName, checkStatus, time.Now)
+}
+
+func orderFailureDiagnosticsWithSupervisorLog(cityDir, fixtureHome, checkName, checkStatus string, now func() time.Time) string {
+	return orderFailureDiagnosticSources(cityDir, fixtureHome, true, checkName, checkStatus, now)
+}
+
+func orderFailureDiagnosticSources(cityDir, fixtureHome string, includeSupervisor bool, checkName, checkStatus string, now func() time.Time) string {
 	if checkName != "order-firing-current" || checkStatus != "error" {
 		return ""
 	}
@@ -87,14 +116,22 @@ func orderFailureDiagnostics(cityDir, checkName, checkStatus string, now func() 
 	observed := started.UTC()
 	deadline := started.Add(orderDiagnosticBudget)
 	result := struct {
-		ObservedAt   time.Time              `json:"observed_at"`
-		Coverage     string                 `json:"coverage"`
-		StartupPhase string                 `json:"startup_phase"`
-		Inputs       []orderDiagnosticInput `json:"inputs"`
-		Events       []orderDiagnosticEvent `json:"events"`
-		Trace        []orderDiagnosticTrace `json:"trace"`
+		ObservedAt         time.Time                   `json:"observed_at"`
+		Coverage           string                      `json:"coverage"`
+		StartupPhase       string                      `json:"startup_phase"`
+		Inputs             []orderDiagnosticInput      `json:"inputs"`
+		Events             []orderDiagnosticEvent      `json:"events"`
+		Trace              []orderDiagnosticTrace      `json:"trace"`
+		SupervisorCoverage string                      `json:"supervisor_coverage,omitempty"`
+		Supervisor         []orderDiagnosticSupervisor `json:"supervisor,omitempty"`
 	}{ObservedAt: observed, Coverage: "UNVALIDATED_PARTIAL_ACTIVE_SEGMENT", StartupPhase: "STARTUP_ORDERS_NOT_TRACED"}
 	finish := func() string {
+		if includeSupervisor {
+			result.SupervisorCoverage = "UNVALIDATED_PRIVATE_SUPERVISOR_LOG_WINDOW"
+			rows, input := readOrderSupervisorDiagnostics(fixtureHome, deadline, now)
+			result.Supervisor = rows
+			result.Inputs = append(result.Inputs, input)
+		}
 		data, err := json.Marshal(result)
 		if err != nil {
 			return `{"coverage":"incomplete","status":"encoding_error"}`
@@ -260,6 +297,117 @@ func orderDiagnosticIdentifier(value string) bool {
 		}
 	}
 	return true
+}
+
+func readOrderSupervisorDiagnostics(home string, deadline time.Time, now func() time.Time) ([]orderDiagnosticSupervisor, orderDiagnosticInput) {
+	input := orderDiagnosticInput{Source: "supervisor"}
+	if home == "" {
+		input.Status = "not_declared"
+		return nil, input
+	}
+	if !now().Before(deadline) {
+		input.Status = "budget_exhausted"
+		return nil, input
+	}
+	info, err := os.Lstat(home)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		input.Status = "rejected"
+		return nil, input
+	}
+	root, err := os.OpenRoot(home)
+	if err != nil {
+		input.Status = "unavailable"
+		return nil, input
+	}
+	defer root.Close() //nolint:errcheck // read-only private fixture handle
+	opened, err := root.Stat(".")
+	if err != nil || !os.SameFile(info, opened) {
+		input.Status = "changed"
+		return nil, input
+	}
+	data, input := readOrderDiagnosticTail(root, "supervisor.log", "supervisor", orderDiagnosticTailBytes, deadline, now)
+	var rows []orderDiagnosticSupervisor
+	for _, line := range orderDiagnosticLines(data, &input) {
+		if !now().Before(deadline) {
+			input.Status = "budget_exhausted"
+			break
+		}
+		if len(line) > orderDiagnosticRowBytes {
+			input.InvalidRows++
+			continue
+		}
+		row, valid := projectOrderSupervisorLine(string(line))
+		if !valid {
+			if row.Kind != "" {
+				input.InvalidRows++
+			}
+			continue
+		}
+		rows = append(rows, row)
+		if len(rows) > orderDiagnosticRows {
+			input.RowLimit = true
+			rows = rows[1:]
+		}
+	}
+	return rows, input
+}
+
+func projectOrderSupervisorLine(line string) (orderDiagnosticSupervisor, bool) {
+	if match := orderDiagnosticSupervisorBudget.FindStringSubmatch(line); match != nil {
+		row := orderDiagnosticSupervisor{Kind: "budget_unreached"}
+		row.Budget, _ = strconv.Atoi(match[1]) // bounded decimal regex
+		row.Unreached, _ = strconv.Atoi(match[2])
+		if row.Budget == 0 || row.Unreached == 0 {
+			return row, false
+		}
+		parts := strings.Split(match[3], ", ")
+		if len(parts) > 9 {
+			return row, false
+		}
+		for i, part := range parts {
+			if omitted := orderDiagnosticSupervisorOmitted.FindStringSubmatch(part); omitted != nil {
+				if i != len(parts)-1 || i != 8 {
+					return row, false
+				}
+				row.Omitted, _ = strconv.Atoi(omitted[1])
+				if row.Omitted == 0 {
+					return row, false
+				}
+			} else {
+				if !orderDiagnosticIdentifier(part) || len(row.Orders) == 8 {
+					return row, false
+				}
+				row.Orders = append(row.Orders, part)
+			}
+		}
+		return row, len(row.Orders)+row.Omitted == row.Unreached
+	}
+	const startup = "startup phase=startup-orders elapsed="
+	if at := strings.Index(line, startup); at >= 0 {
+		row := orderDiagnosticSupervisor{Kind: "startup_orders"}
+		value := strings.TrimSpace(line[at+len(startup):])
+		if len(value) > orderDiagnosticValueBytes {
+			return row, false
+		}
+		duration, err := time.ParseDuration(value)
+		if err != nil || duration < 0 || duration > 24*time.Hour {
+			return row, false
+		}
+		row.DurationMS = duration.Milliseconds()
+		return row, true
+	}
+	const gate = "gc: order dispatch: checking open work for "
+	if at := strings.Index(line, gate); at >= 0 {
+		row := orderDiagnosticSupervisor{Kind: "open_work_gate_error"}
+		value := line[at+len(gate):]
+		end := strings.Index(value, ": ")
+		if end < 0 || !orderDiagnosticIdentifier(value[:end]) || end+2 == len(value) {
+			return row, false
+		}
+		row.Orders = []string{value[:end]}
+		return row, true
+	}
+	return orderDiagnosticSupervisor{}, false
 }
 
 func readOrderDiagnosticTail(root *os.Root, name, source string, limit int64, deadline time.Time, now func() time.Time) ([]byte, orderDiagnosticInput) {
