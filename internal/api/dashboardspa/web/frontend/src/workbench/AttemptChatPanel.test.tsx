@@ -161,63 +161,82 @@ describe('AttemptChatPanel city scoping', () => {
     );
   });
 
-  it('keeps a delayed receipt saved without displaying it under a newer claim', async () => {
-    const response = deferred<Response>();
-    let requestId: string | undefined;
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-        const request = input instanceof Request ? input : new Request(input, init);
-        requestId = (await request.clone().json()).request_id;
-        return response.promise;
-      }),
-    );
-    const { rerender } = render(
-      <AttemptChatPanel attempt={attempt} workId="work-1" claimGeneration="claim-7" />,
-    );
-    fireEvent.change(screen.getByLabelText('Message'), { target: { value: 'old in flight' } });
-    fireEvent.click(screen.getByRole('button', { name: /send/i }));
-    await waitFor(() => expect(requestId).toBeDefined());
-    rerender(<AttemptChatPanel attempt={attempt} workId="work-1" claimGeneration="claim-8" />);
-    await act(async () => {
-      response.resolve(
-        new Response(
-          JSON.stringify({
-            request_id: requestId,
-            session_id: attempt.sessionId,
-            generation: 7,
-            accepted_at: '2026-09-27T00:01:00Z',
-            delivery: 'pending',
-            effect: 'pending',
-            message_digest: 'sha256:abc',
-            attempt: {
-              attempt_id: 'ae-exact',
-              store_ref: 'city:city-a',
-              work_revision: '1',
-              identity: {
-                kind: 'workbench',
-                owner_bead_id: 'work-1',
-                execution_bead_id: 'work-1',
-                session_id: attempt.sessionId,
-                session_generation: '7',
-                claim_generation: 'claim-7',
+  it.each([
+    { label: 'a newer claim', nextAttempt: attempt, claimGeneration: 'claim-8', city: 'city-a' },
+    {
+      label: 'another session',
+      nextAttempt: { ...attempt, sessionId: 'session-new' },
+      claimGeneration: 'claim-7',
+      city: 'city-a',
+    },
+    { label: 'another city', nextAttempt: attempt, claimGeneration: 'claim-7', city: 'city-b' },
+  ])(
+    'keeps a delayed receipt saved without displaying it under $label',
+    async ({ nextAttempt, claimGeneration, city }) => {
+      const response = deferred<Response>();
+      let requestId: string | undefined;
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+          const request = input instanceof Request ? input : new Request(input, init);
+          requestId = (await request.clone().json()).request_id;
+          return response.promise;
+        }),
+      );
+      const { rerender } = render(
+        <AttemptChatPanel attempt={attempt} workId="work-1" claimGeneration="claim-7" />,
+      );
+      fireEvent.change(screen.getByLabelText('Message'), { target: { value: 'old in flight' } });
+      fireEvent.click(screen.getByRole('button', { name: /send/i }));
+      await waitFor(() => expect(requestId).toBeDefined());
+      setActiveCity(city);
+      rerender(
+        <AttemptChatPanel
+          attempt={nextAttempt}
+          workId="work-1"
+          claimGeneration={claimGeneration}
+        />,
+      );
+      await act(async () => {
+        response.resolve(
+          new Response(
+            JSON.stringify({
+              request_id: requestId,
+              session_id: attempt.sessionId,
+              generation: 7,
+              accepted_at: '2026-09-27T00:01:00Z',
+              delivery: 'pending',
+              effect: 'pending',
+              message_digest: 'sha256:abc',
+              attempt: {
+                attempt_id: 'ae-exact',
+                store_ref: 'city:city-a',
+                work_revision: '1',
+                identity: {
+                  kind: 'workbench',
+                  owner_bead_id: 'work-1',
+                  execution_bead_id: 'work-1',
+                  session_id: attempt.sessionId,
+                  session_generation: '7',
+                  claim_generation: 'claim-7',
+                },
               },
-            },
-          }),
-          { status: 202, headers: { 'Content-Type': 'application/json' } },
+            }),
+            { status: 202, headers: { 'Content-Type': 'application/json' } },
+          ),
+        );
+        await response.promise;
+      });
+      await waitFor(() =>
+        expect(window.localStorage.getItem(window.localStorage.key(0)!)).toContain(
+          '2026-09-27T00:01:00Z',
         ),
       );
-      await response.promise;
-    });
-    await waitFor(() =>
-      expect(window.localStorage.getItem(window.localStorage.key(0)!)).toContain(
-        '2026-09-27T00:01:00Z',
-      ),
-    );
-    expect(screen.getByLabelText('Session request receipts').textContent).not.toContain(
-      'old in flight',
-    );
-  });
+      expect(screen.getByLabelText('Session request receipts').textContent).not.toContain(
+        'old in flight',
+      );
+    },
+  );
 
   it('does not show a delayed same-session receipt in a different city', async () => {
     const cityAResponse = deferred<Response>();

@@ -36,7 +36,14 @@ export function AttemptChatPanel({
       setIntents(
         readSessionRequestIntents(window.localStorage, cityName, attempt.sessionId).filter(
           (intent) =>
-            matchesSelectedAttempt(intent, workId, claimGeneration, attempt.executionGeneration),
+            matchesSelectedAttempt(
+              intent,
+              workId,
+              claimGeneration,
+              attempt.executionGeneration,
+              cityName,
+              attempt.sessionId,
+            ),
         ),
       );
       setStorageError(null);
@@ -153,7 +160,14 @@ export function AttemptChatPanel({
     cityName !== null && attempt.executionGeneration !== null && claimGeneration !== null;
   const canSend = canCompose && draft.trim().length > 0;
   const selectedIntents = intents.filter((intent) =>
-    matchesSelectedAttempt(intent, workId, claimGeneration, attempt.executionGeneration),
+    matchesSelectedAttempt(
+      intent,
+      workId,
+      claimGeneration,
+      attempt.executionGeneration,
+      cityName,
+      attempt.sessionId,
+    ),
   );
   return (
     <section aria-label="Attempt chat" className="mt-3 space-y-2">
@@ -243,8 +257,12 @@ function matchesSelectedAttempt(
   workId: string,
   claimGeneration: string | null,
   generation: number | null,
+  cityName: string | null,
+  sessionId: string,
 ): boolean {
   return (
+    intent.city === cityName &&
+    intent.sessionId === sessionId &&
     intent.workId === workId &&
     intent.claimGeneration === claimGeneration &&
     intent.generation === generation &&
