@@ -148,6 +148,7 @@ beforeEach(() => {
                   identity: {
                     kind: 'workbench',
                     owner_bead_id: body.work_id,
+                    execution_bead_id: body.work_id,
                     session_id: sessionId,
                     session_generation: String(body.generation),
                     claim_generation: body.claim_generation,

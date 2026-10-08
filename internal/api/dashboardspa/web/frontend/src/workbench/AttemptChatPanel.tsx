@@ -8,6 +8,7 @@ import {
   createSessionRequestIntent,
   readSessionRequestIntents,
   saveSessionRequestIntent,
+  sessionRequestReceiptMatchesIntent,
   type SessionRequestIntent,
 } from './sessionRequestIntent';
 
@@ -27,18 +28,22 @@ export function AttemptChatPanel({
   const [storageError, setStorageError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (cityName === null) return;
+    if (cityName === null || attempt.executionGeneration === null || claimGeneration === null) {
+      setIntents([]);
+      return;
+    }
     try {
       setIntents(
         readSessionRequestIntents(window.localStorage, cityName, attempt.sessionId).filter(
-          (intent) => intent.workId === workId,
+          (intent) =>
+            matchesSelectedAttempt(intent, workId, claimGeneration, attempt.executionGeneration),
         ),
       );
       setStorageError(null);
     } catch (cause) {
       setStorageError(errorText(cause));
     }
-  }, [cityName, attempt.sessionId, workId]);
+  }, [cityName, attempt.sessionId, attempt.executionGeneration, workId, claimGeneration]);
 
   const updateIntent = useCallback((updated: SessionRequestIntent) => {
     try {
@@ -80,7 +85,7 @@ export function AttemptChatPanel({
           work_id: intent.workId,
           claim_generation: intent.claimGeneration,
         });
-        if (!receiptMatchesIntent(receipt, intent)) {
+        if (!sessionRequestReceiptMatchesIntent(receipt, intent)) {
           throw new Error('The supervisor returned a receipt for a different session request.');
         }
         updateIntent({ ...submitting, receipt, submissionError: undefined });
@@ -103,7 +108,7 @@ export function AttemptChatPanel({
           attempt.sessionId,
           intent.requestId,
         );
-        if (!receiptMatchesIntent(receipt, intent)) {
+        if (!sessionRequestReceiptMatchesIntent(receipt, intent)) {
           throw new Error('The supervisor returned a receipt for a different session request.');
         }
         updateIntent({ ...intent, receipt, submissionError: undefined });
@@ -147,6 +152,9 @@ export function AttemptChatPanel({
   const canCompose =
     cityName !== null && attempt.executionGeneration !== null && claimGeneration !== null;
   const canSend = canCompose && draft.trim().length > 0;
+  const selectedIntents = intents.filter((intent) =>
+    matchesSelectedAttempt(intent, workId, claimGeneration, attempt.executionGeneration),
+  );
   return (
     <section aria-label="Attempt chat" className="mt-3 space-y-2">
       {attempt.executionGeneration === null ? (
@@ -171,7 +179,7 @@ export function AttemptChatPanel({
         </p>
       ) : null}
       <ul aria-label="Session request receipts" className="space-y-2">
-        {intents.map((intent) => (
+        {selectedIntents.map((intent) => (
           <li key={intent.requestId} className="rounded-sm border border-rule p-2 space-y-1">
             <p className="text-label text-fg">{intent.message}</p>
             <p className="text-label text-fg-faint">
@@ -230,6 +238,20 @@ export function AttemptChatPanel({
   );
 }
 
+function matchesSelectedAttempt(
+  intent: SessionRequestIntent,
+  workId: string,
+  claimGeneration: string | null,
+  generation: number | null,
+): boolean {
+  return (
+    intent.workId === workId &&
+    intent.claimGeneration === claimGeneration &&
+    intent.generation === generation &&
+    (intent.receipt === undefined || sessionRequestReceiptMatchesIntent(intent.receipt, intent))
+  );
+}
+
 function ReceiptFacets({ receipt }: { receipt: RequestReceipt }) {
   return (
     <dl className="grid gap-x-2 text-label text-fg-faint sm:grid-cols-[max-content_1fr]">
@@ -245,16 +267,6 @@ function ReceiptFacets({ receipt }: { receipt: RequestReceipt }) {
       <dt>Verified effect</dt>
       <dd>{receipt.effect || 'not verified'}</dd>
     </dl>
-  );
-}
-
-function receiptMatchesIntent(receipt: RequestReceipt, intent: SessionRequestIntent): boolean {
-  return (
-    receipt.request_id === intent.requestId &&
-    receipt.session_id === intent.sessionId &&
-    receipt.generation === intent.generation &&
-    receipt.attempt?.identity.owner_bead_id === intent.workId &&
-    receipt.attempt?.identity.claim_generation === intent.claimGeneration
   );
 }
 

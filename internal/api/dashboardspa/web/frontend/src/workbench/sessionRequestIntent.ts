@@ -78,6 +78,44 @@ export function readSessionRequestIntents(
   return intents.sort((a, b) => a.requestId.localeCompare(b.requestId));
 }
 
+/** Verify the receipt's durable attempt binding before displaying acceptance. */
+export function sessionRequestReceiptMatchesIntent(
+  receipt: RequestReceipt,
+  intent: Pick<
+    SessionRequestIntent,
+    'requestId' | 'sessionId' | 'generation' | 'workId' | 'claimGeneration'
+  >,
+): boolean {
+  if (typeof receipt !== 'object' || receipt === null || !intent.workId || !intent.claimGeneration)
+    return false;
+  const binding = receipt.attempt;
+  if (
+    !binding ||
+    typeof binding.attempt_id !== 'string' ||
+    typeof binding.store_ref !== 'string' ||
+    typeof binding.work_revision !== 'string' ||
+    typeof binding.identity !== 'object' ||
+    binding.identity === null
+  ) {
+    return false;
+  }
+  const identity = binding.identity;
+  return (
+    receipt.request_id === intent.requestId &&
+    receipt.session_id === intent.sessionId &&
+    receipt.generation === intent.generation &&
+    binding.attempt_id.trim() !== '' &&
+    validStoreRef(binding.store_ref) &&
+    isCanonicalNonzeroSignedInt64(binding.work_revision) &&
+    identity.kind === 'workbench' &&
+    identity.owner_bead_id === intent.workId &&
+    identity.execution_bead_id === intent.workId &&
+    identity.session_id === intent.sessionId &&
+    identity.session_generation === String(intent.generation) &&
+    identity.claim_generation === intent.claimGeneration
+  );
+}
+
 export function saveSessionRequestIntent(
   storage: SessionRequestStorage,
   intent: SessionRequestIntent,
@@ -128,6 +166,23 @@ function decodeIntent(encoded: string): SessionRequestIntent {
     throw new Error('Stored session request has an unsafe execution generation.');
   }
   return value as SessionRequestIntent;
+}
+
+function validStoreRef(value: string): boolean {
+  return (
+    (value.startsWith('city:') || value.startsWith('rig:')) &&
+    value.slice(value.indexOf(':') + 1).trim() !== ''
+  );
+}
+
+function isCanonicalNonzeroSignedInt64(value: string): boolean {
+  const negative = value.startsWith('-');
+  const magnitude = negative ? value.slice(1) : value;
+  if (!/^(0|[1-9][0-9]*)$/.test(magnitude) || magnitude === '0') return false;
+  const limit = negative ? '9223372036854775808' : '9223372036854775807';
+  return (
+    magnitude.length < limit.length || (magnitude.length === limit.length && magnitude <= limit)
+  );
 }
 
 function newRequestId(): string {
