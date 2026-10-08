@@ -207,7 +207,8 @@ type terminationGroup struct {
 
 // refresh may extend membership only while a previously captured identity
 // still belongs to the group. An unfamiliar group after every witness has
-// disappeared is ambiguous: refuse rather than claim death or signal it.
+// disappeared is ambiguous while runnable members remain. A complete, freshly
+// validated zombie-only census confirms death without adopting or signaling it.
 func (g *terminationGroup) refresh() (bool, error) {
 	members, err := g.census(g.root.PGID)
 	if err != nil {
@@ -230,7 +231,26 @@ func (g *terminationGroup) refresh() (bool, error) {
 		}
 	}
 	if len(members) > 0 && !anchored {
-		return false, fmt.Errorf("proctable: group %d has no original identity witness", g.root.PGID)
+		witnessErr := fmt.Errorf("proctable: group %d has no original identity witness", g.root.PGID)
+		for _, member := range members {
+			if member.PID <= 1 || member.PGID != g.root.PGID || member.Start == "" || member.Runnable {
+				return false, witnessErr
+			}
+			if start, known := g.known[member.PID]; known && start != member.Start {
+				return false, witnessErr
+			}
+			current, readErr := g.read(member.PID)
+			if errors.Is(readErr, ErrProcessGone) {
+				continue
+			}
+			if readErr != nil {
+				return false, readErr
+			}
+			if current.PID != member.PID || current.PGID != member.PGID || current.Start != member.Start || current.Runnable {
+				return false, witnessErr
+			}
+		}
+		return false, nil
 	}
 	live := false
 	for _, member := range members {

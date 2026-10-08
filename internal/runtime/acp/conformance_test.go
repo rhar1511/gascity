@@ -107,7 +107,10 @@ func prepareACPConformanceFixture(ownerT *testing.T, fixture *acpConformanceFixt
 			return
 		}
 		fixture.command = filepath.Join(fixtureRoot, "fakeacp")
-		cmd := exec.Command("go", "build", "-o", fixture.command, "./testdata/fakeacp")
+		// This disposable protocol fixture needs no release stamp. As with the
+		// Makefile build, avoid stamping an enclosing repository when Go walks
+		// past a linked worktree's .git file.
+		cmd := exec.Command("go", "build", "-buildvcs=false", "-o", fixture.command, "./testdata/fakeacp")
 		cmd.Dir = filepath.Join(modRoot, "internal", "runtime", "acp")
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
