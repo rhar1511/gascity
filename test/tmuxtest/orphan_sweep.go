@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -69,6 +70,58 @@ func HoldAliveSentinel(dir string) (*os.File, error) {
 		return nil, fmt.Errorf("locking alive sentinel in %q: %w", dir, err)
 	}
 	return f, nil
+}
+
+// ReapOwnedSocketParentDir reaps sockets only inside the caller's private
+// PID-named parent, while retaining its matching alive-sentinel lock. Ownership
+// refusal leaves the directory untouched. Server cleanup remains best-effort;
+// diagnostics and the test runner's process census report survivors.
+func ReapOwnedSocketParentDir(dir string, sentinel *os.File, diagnostics io.Writer) error {
+	return reapOwnedSocketParentDir(dir, sentinel, diagnostics, killTmuxServersUnder)
+}
+
+func reapOwnedSocketParentDir(dir string, sentinel *os.File, diagnostics io.Writer, reap func(string, io.Writer)) error {
+	if diagnostics == nil {
+		diagnostics = io.Discard
+	}
+	if sentinel == nil {
+		return fmt.Errorf("socket parent %q has no held sentinel", dir)
+	}
+	defer runtime.KeepAlive(sentinel)
+	pid, ok := pidFromPrefixedDirName(filepath.Base(dir), SocketParentDirPrefix)
+	if !ok || pid != os.Getpid() {
+		return fmt.Errorf("socket parent %q is not owned by this process", dir)
+	}
+	dirInfo, err := os.Lstat(dir)
+	if err != nil {
+		return fmt.Errorf("checking socket parent: %w", err)
+	}
+	dirStat, ok := dirInfo.Sys().(*syscall.Stat_t)
+	if !ok || !dirInfo.IsDir() || dirInfo.Mode().Perm()&0o077 != 0 || dirStat.Uid != uint32(os.Getuid()) {
+		return fmt.Errorf("socket parent %q is not a private owned directory", dir)
+	}
+	pathInfo, err := os.Lstat(filepath.Join(dir, socketParentAliveSentinelName))
+	if err != nil {
+		return fmt.Errorf("checking sentinel path: %w", err)
+	}
+	fdInfo, err := sentinel.Stat()
+	if err != nil {
+		return fmt.Errorf("checking held sentinel: %w", err)
+	}
+	pathStat, pathOK := pathInfo.Sys().(*syscall.Stat_t)
+	fdStat, fdOK := fdInfo.Sys().(*syscall.Stat_t)
+	if !pathOK || !fdOK || !pathInfo.Mode().IsRegular() || !fdInfo.Mode().IsRegular() ||
+		pathStat.Uid != uint32(os.Getuid()) || fdStat.Uid != uint32(os.Getuid()) ||
+		pathStat.Dev != fdStat.Dev || pathStat.Ino != fdStat.Ino {
+		return fmt.Errorf("socket parent %q does not match its held sentinel", dir)
+	}
+	// Probe the caller's existing descriptor, never another open description:
+	// retaining this lock protects the parent throughout cleanup.
+	if err := syscall.Flock(int(sentinel.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		return fmt.Errorf("retaining sentinel lock: %w", err)
+	}
+	reap(dir, diagnostics)
+	return nil
 }
 
 // aliveSentinelHeld probes <dir>'s alive sentinel. exists reports whether

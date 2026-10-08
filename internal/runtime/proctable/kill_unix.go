@@ -14,29 +14,47 @@ import (
 
 // KillByPID terminates pid with SIGTERM, then SIGKILL after
 // runtime.ManagedProcessStopGrace, then waits (bounded by
-// runtime.ManagedProcessReapGrace) for the process to be confirmed dead — gone
-// or a zombie — before returning. Already-gone processes are success. A process
+// runtime.ManagedProcessReapGrace) for the process and its owned process group
+// to be confirmed dead — gone or zombies — before returning. Already-gone processes are success. A process
 // that survives its own SIGKILL past the reap grace (e.g. wedged in D-state
 // under I/O) yields an error so callers can refuse to start a name-reused
 // replacement that would race it for the same work.
 func KillByPID(pid int) error {
-	// Capture the target's start-time identity BEFORE signaling. During the
-	// post-SIGKILL reap wait the PID can be reaped and recycled to an unrelated
-	// process; without this, a recycled PID reads as "still alive" and we would
-	// wrongly report a target that is actually gone as not-confirmed-dead,
-	// spuriously refusing a legitimate Start. StartTime reads /proc where it
-	// exists and falls back to ps elsewhere, so it is empty only when neither
-	// mechanism can answer, in which case runLive falls back to plain liveness
-	// — current behavior preserved.
+	if pid <= 1 {
+		return fmt.Errorf("proctable: refusing to kill PID %d", pid)
+	}
+	root, err := readTerminationProcess(pid)
+	if errors.Is(err, ErrProcessGone) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if root.PGID == pid {
+		group := terminationGroup{root: root, known: map[int]string{pid: root.Start}, read: readTerminationProcess, census: censusTerminationGroup, kill: syscall.Kill}
+		return terminatePIDWith(pid, group.signal, group.live, group.live, runtime.ManagedProcessStopGrace, runtime.ManagedProcessReapGrace)
+	}
+	// An inherited group belongs to somebody else. Only the captured process
+	// may receive a signal, even if its numeric PID later names another group.
 	termLive, runLive := killLivenessFuncsForPID(pid)
-	return killByPID(
-		pid,
-		syscall.Kill,
-		termLive,
-		runLive,
-		runtime.ManagedProcessStopGrace,
-		runtime.ManagedProcessReapGrace,
-	)
+	signal := func(sig syscall.Signal) error {
+		current, err := readTerminationProcess(pid)
+		if errors.Is(err, ErrProcessGone) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if current.Start != root.Start {
+			return nil
+		}
+		err = syscall.Kill(pid, sig)
+		if errors.Is(err, syscall.ESRCH) {
+			return nil
+		}
+		return err
+	}
+	return terminatePIDWith(pid, signal, termLive, runLive, runtime.ManagedProcessStopGrace, runtime.ManagedProcessReapGrace)
 }
 
 // killLivenessFuncsForPID builds the two liveness probes KillByPID signals
@@ -97,13 +115,17 @@ func killByPID(
 	runLive func(int) bool,
 	grace, reapGrace time.Duration,
 ) error {
+	return terminatePIDWith(pid, func(sig syscall.Signal) error { return signalPIDWith(pid, sig, kill) }, termLive, runLive, grace, reapGrace)
+}
+
+func terminatePIDWith(pid int, signal func(syscall.Signal) error, termLive, runLive func(int) bool, grace, reapGrace time.Duration) error {
 	if pid <= 1 {
 		return fmt.Errorf("proctable: refusing to kill PID %d", pid)
 	}
 	if !termLive(pid) {
 		return nil
 	}
-	if err := signalPIDWith(pid, syscall.SIGTERM, kill); err != nil {
+	if err := signal(syscall.SIGTERM); err != nil {
 		return fmt.Errorf("signal PID %d with SIGTERM: %w", pid, err)
 	}
 	if waitUntil(func() bool { return !termLive(pid) }, grace) {
@@ -117,7 +139,7 @@ func killByPID(
 	if !termLive(pid) {
 		return nil
 	}
-	if err := signalPIDWith(pid, syscall.SIGKILL, kill); err != nil {
+	if err := signal(syscall.SIGKILL); err != nil {
 		return fmt.Errorf("signal PID %d with SIGKILL: %w", pid, err)
 	}
 	if waitUntil(func() bool { return !runLive(pid) }, reapGrace) {
@@ -163,4 +185,120 @@ func signalPIDWith(pid int, sig syscall.Signal, kill func(int, syscall.Signal) e
 func pidAlive(pid int) bool {
 	err := syscall.Kill(pid, 0)
 	return err == nil || errors.Is(err, syscall.EPERM)
+}
+
+// terminationProcess keeps state and identity from the same kernel record.
+// These teardown readers do not enrich records with comm/environment data or
+// silently omit unreadable processes as the read-only discovery snapshot does.
+type terminationProcess struct {
+	PID, PGID int
+	Start     string
+	Runnable  bool
+}
+
+type terminationGroup struct {
+	root   terminationProcess
+	known  map[int]string
+	read   func(int) (terminationProcess, error)
+	census func(int) ([]terminationProcess, error)
+	kill   func(int, syscall.Signal) error
+	err    error
+}
+
+// refresh may extend membership only while a previously captured identity
+// still belongs to the group. An unfamiliar group after every witness has
+// disappeared is ambiguous: refuse rather than claim death or signal it.
+func (g *terminationGroup) refresh() (bool, error) {
+	members, err := g.census(g.root.PGID)
+	if err != nil {
+		return false, err
+	}
+	anchored := false
+	for _, member := range members {
+		if member.Start != "" && member.PGID == g.root.PGID && g.known[member.PID] == member.Start {
+			current, readErr := g.read(member.PID)
+			if errors.Is(readErr, ErrProcessGone) {
+				continue
+			}
+			if readErr != nil {
+				return false, readErr
+			}
+			if current.Start == member.Start && current.PGID == g.root.PGID {
+				anchored = true
+				break
+			}
+		}
+	}
+	if len(members) > 0 && !anchored {
+		return false, fmt.Errorf("proctable: group %d has no original identity witness", g.root.PGID)
+	}
+	live := false
+	for _, member := range members {
+		if member.PID <= 1 || member.PGID != g.root.PGID || member.Start == "" {
+			return false, fmt.Errorf("proctable: incomplete identity in group %d", g.root.PGID)
+		}
+		g.known[member.PID] = member.Start
+		live = live || member.Runnable
+	}
+	return live, nil
+}
+
+// The grace polls read only captured PIDs. Before reporting completion, take a
+// complete group census; a leader's exit alone can never establish success.
+func (g *terminationGroup) live(int) bool {
+	if g.err != nil {
+		return true
+	}
+	for pid, start := range g.known {
+		member, err := g.read(pid)
+		if errors.Is(err, ErrProcessGone) {
+			continue
+		}
+		if err != nil {
+			g.err = err
+			return true
+		}
+		if member.Start == start && member.PGID == g.root.PGID && member.Runnable {
+			return true
+		}
+	}
+	live, err := g.refresh()
+	g.err = err
+	return live || err != nil
+}
+
+func (g *terminationGroup) signal(sig syscall.Signal) error {
+	if g.err != nil {
+		return g.err
+	}
+	live, err := g.refresh()
+	if err != nil || !live {
+		return err
+	}
+	// Fence each wave with a fresh identity AND group read. The remaining
+	// witness can be a child after its original leader has been reaped.
+	for pid, start := range g.known {
+		member, err := g.read(pid)
+		if errors.Is(err, ErrProcessGone) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if member.Start != start || member.PGID != g.root.PGID {
+			continue
+		}
+		err = g.kill(-g.root.PGID, sig)
+		if err == nil || errors.Is(err, syscall.ESRCH) {
+			return nil
+		}
+		// A failed group signal may fall back only to the original root,
+		// never the reused numeric PID of a departed leader.
+		root, readErr := g.read(g.root.PID)
+		if readErr != nil || root.Start != g.root.Start {
+			return fmt.Errorf("signal group %d: %w", g.root.PGID, err)
+		}
+		return g.kill(g.root.PID, sig)
+	}
+	return fmt.Errorf("proctable: group %d lost every original identity witness before signal", g.root.PGID)
 }
