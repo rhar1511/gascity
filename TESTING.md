@@ -543,6 +543,19 @@ completion/wakeup signals instead of adding fixed sleeps.
 the externally installed `bd` CLI; its process call remains visible in the
 all-source audit while staying outside untagged and Small debt.
 
+The native vulnerability-verdict regression,
+`scripts.TestVulnerabilityVerdictRunsWithoutReportingDirectory`, owns three
+top-level Bash launches and their fixture scanner/subcommands. Each case uses
+an isolated working directory and explicit environment, proves scanner
+invocation without an existing reporting directory, and preserves native exits
+0, 3, and 7. `gp-olwhg.9.7` owns this retained boundary and its timing evidence,
+with manual ownership review due 2026-10-31. The shared `testCommand` and
+`shardTestCommand` constructors remain process-bearing; consolidating their
+identical construction removes a duplicate source call site without reducing
+runtime launches. The new test's direct call remains visible in Small debt;
+this manual-review record grants no Medium exemption, hermetic classification,
+checked-ledger waiver, or increased ceiling.
+
 <!-- BEGIN CHECKED TEST RESOURCE LEDGER -->
 | Ledger kind | Source scope | Resource baseline | Tracking owner | Invariant / resource owner | Migration | Expiry |
 | --- | --- | --- | --- | --- | --- | --- |

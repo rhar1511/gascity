@@ -1485,6 +1485,8 @@ func TestVulnerabilityReportingPreservesRawAndIndependentVerdict(t *testing.T) {
 	}
 }
 
+// TestVulnerabilityVerdictRunsWithoutReportingDirectory owns three real Bash
+// launches and their fixture children to prove scanner invocation and exits.
 func TestVulnerabilityVerdictRunsWithoutReportingDirectory(t *testing.T) {
 	bash, err := exec.LookPath("bash")
 	if err != nil {
