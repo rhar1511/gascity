@@ -1396,10 +1396,18 @@ func TestMacQualityRetainsBoundedLintFailureDiagnostics(t *testing.T) {
 	if upload.TimeoutMinutes.Value != "3" {
 		t.Error("the diagnostics upload must fit inside its reserved budget")
 	}
+	// GitHub evaluates job env before a runner exists; runner context is only
+	// available to steps. Publish the step-scoped directory for later steps.
+	if strings.Contains(job.Env["MAC_LINT_DIR"], "runner.") {
+		t.Error("the profile directory must not use runner context in job env")
+	}
 	for _, identity := range []string{"${{ runner.temp }}", "${{ github.run_id }}", "${{ github.run_attempt }}"} {
-		if !strings.Contains(job.Env["MAC_LINT_DIR"], identity) {
-			t.Errorf("the profile directory must be unique per run/attempt: missing %q", identity)
+		if !strings.Contains(job.Steps[0].Env["MAC_LINT_DIR"], identity) {
+			t.Errorf("the step-scoped profile directory must be unique per run/attempt: missing %q", identity)
 		}
+	}
+	if !strings.Contains(job.Steps[0].Run, `echo "MAC_LINT_DIR=$MAC_LINT_DIR" >> "$GITHUB_ENV"`) {
+		t.Error("the profile directory must be published for lint and artifact steps")
 	}
 	for _, workflow := range []string{"ci.yml", "mac-regression.yml"} {
 		wf := readCriticalPathWorkflow(t, workflow)

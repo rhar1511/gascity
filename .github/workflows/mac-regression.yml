@@ -206,12 +206,13 @@ jobs:
     # A cold golangci-lint cache exceeded 35 minutes on hosted macOS. Give
     # the full lint gate time to finish and report a verdict.
     timeout-minutes: 75
-    env:
-      MAC_LINT_DIR: ${{ runner.temp }}/mac-lint-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - name: Start Mac lint deadline
+        env:
+          MAC_LINT_DIR: ${{ runner.temp }}/mac-lint-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           python3 -c 'import time; print(f"MAC_LINT_DEADLINE={time.monotonic() + 65*60}")' >> "$GITHUB_ENV"
+          echo "MAC_LINT_DIR=$MAC_LINT_DIR" >> "$GITHUB_ENV"
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           repository: ${{ inputs.head_repo || github.repository }}
