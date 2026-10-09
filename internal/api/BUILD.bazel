@@ -419,6 +419,7 @@ go_test(
         "pr_action_archive_test.go",
         "pr_action_auth_test.go",
         "pr_action_forge_test.go",
+        "pr_action_integrity_test.go",
         "pr_action_ledger_guard_test.go",
         "pr_action_policy_test.go",
         "pr_action_routes_test.go",
