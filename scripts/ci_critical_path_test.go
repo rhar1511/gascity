@@ -2,11 +2,14 @@ package scripts_test
 
 import (
 	"encoding/json"
+	"errors"
 	"maps"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1435,5 +1438,99 @@ func TestMacQualityRetainsBoundedLintFailureDiagnostics(t *testing.T) {
 		if !strings.Contains(upload.With["name"], identity) {
 			t.Errorf("lint artifact must bind revision and attempt: missing %q", identity)
 		}
+	}
+}
+
+func TestVulnerabilityReportingPreservesRawAndIndependentVerdict(t *testing.T) {
+	job := readCriticalPathWorkflow(t, "govulncheck.yml").Jobs["govulncheck"]
+	var install, normalize, upload, rawArtifact, uploadArtifact, gate ciCriticalPathStep
+	for _, step := range job.Steps {
+		switch step.Name {
+		case "Install govulncheck":
+			install = step
+		case "Normalize SARIF duplicate stacks":
+			normalize = step
+		case "Upload SARIF results":
+			upload = step
+		case "Upload SARIF artifact":
+			rawArtifact = step
+		case "Upload normalized SARIF artifact":
+			uploadArtifact = step
+		case "Summarize findings and enforce reachable vulnerability policy":
+			gate = step
+		}
+	}
+	if install.ID != "install-govulncheck" {
+		t.Fatal("scanner availability must be identified independently of report generation")
+	}
+	if normalize.ID != "normalize-sarif" || normalize.ContinueOnError ||
+		!strings.Contains(normalize.Run, "python3 scripts/normalize-govulncheck-sarif.py") {
+		t.Error("the SARIF upload must use the owning lossless normalization")
+	}
+	if upload.With["sarif_file"] != "govulncheck-results/govulncheck.upload.sarif" ||
+		!strings.Contains(upload.If, "steps.normalize-sarif.outcome == 'success'") {
+		t.Error("upload must require successfully normalized SARIF")
+	}
+	if rawArtifact.With["path"] != "govulncheck-results/govulncheck.sarif" {
+		t.Error("the unmodified scanner SARIF must remain a separate artifact")
+	}
+	if !strings.Contains(uploadArtifact.With["path"], "govulncheck.upload.sarif") ||
+		!strings.Contains(uploadArtifact.With["path"], "normalization.json") {
+		t.Error("the normalized artifact must include transformation provenance")
+	}
+	if gate.If != "${{ always() && steps.install-govulncheck.outcome == 'success' }}" ||
+		gate.ContinueOnError || !strings.Contains(gate.Run, "govulncheck -show verbose ./...") ||
+		!strings.Contains(gate.Run, "exit \"$status\"") {
+		t.Error("native reachability verdict must run after reporting failures and retain its exit")
+	}
+}
+
+func TestVulnerabilityVerdictRunsWithoutReportingDirectory(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("requires bash for the GitHub runner shell")
+	}
+	var gate ciCriticalPathStep
+	for _, step := range readCriticalPathWorkflow(t, "govulncheck.yml").Jobs["govulncheck"].Steps {
+		if step.Name == "Summarize findings and enforce reachable vulnerability policy" {
+			gate = step
+		}
+	}
+	for _, exit := range []int{0, 3, 7} {
+		t.Run(strconv.Itoa(exit), func(t *testing.T) {
+			dir := t.TempDir()
+			bin := filepath.Join(dir, "bin")
+			if err := os.Mkdir(bin, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			scanner := "#!/bin/sh\nprintf 'called' > \"$SCAN_MARKER\"\nprintf 'fixture scanner output\\n'\nexit \"$SCAN_EXIT\"\n"
+			if err := os.WriteFile(filepath.Join(bin, "govulncheck"), []byte(scanner), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			marker := filepath.Join(dir, "called")
+			cmd := exec.Command(bash, "-c", gate.Run)
+			cmd.Dir = dir
+			cmd.Env = []string{
+				"PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH"),
+				"GITHUB_STEP_SUMMARY=" + filepath.Join(dir, "summary"),
+				"SCAN_MARKER=" + marker,
+				"SCAN_EXIT=" + strconv.Itoa(exit),
+			}
+			output, runErr := cmd.CombinedOutput()
+			got, err := os.ReadFile(marker)
+			if err != nil || string(got) != "called" {
+				t.Fatalf("reporting setup must not prevent scanner execution: %v; output=%s", err, output)
+			}
+			if exit == 0 {
+				if runErr != nil {
+					t.Fatalf("successful scan: %v; output=%s", runErr, output)
+				}
+			} else {
+				var failure *exec.ExitError
+				if !errors.As(runErr, &failure) || failure.ExitCode() != exit {
+					t.Fatalf("must retain native scanner exit %d: %v; output=%s", exit, runErr, output)
+				}
+			}
+		})
 	}
 }
