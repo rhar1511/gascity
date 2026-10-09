@@ -89,7 +89,9 @@ const (
 	// Bumped again for the Beads v1.3.0 -> v1.3.1-rc.2 pin: every job's
 	// BD_VERSION env value moves to the new tag. Reviewed delta: that value
 	// only, no new job, step, trigger or permission.
-	expectedCIExecutionHash     = "34406797d3049bdbb9ff8d03b96e04fee46609f129c7ed04c058d4e9081dceec"
+	// Reviewed PR43 diagnostic delta: preflight-static adds the portable lint
+	// deadline contract. No existing step, trigger, permission or gate changes.
+	expectedCIExecutionHash     = "e0b4518f31fbeecf865230bd2ced6d8a60819c5a67556a72b9d97ce691d7963e"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,

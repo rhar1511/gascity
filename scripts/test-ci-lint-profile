@@ -1,0 +1,137 @@
+#!/usr/bin/env python3
+"""Owning proofs for the portable lint deadline and diagnostic receipt."""
+import json
+import os
+import select
+import signal
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+
+SCRIPT = Path(__file__).with_name("ci-lint-profile")
+
+
+class LintDeadlineTests(unittest.TestCase):
+    def call(self, directory, command, budget=10):
+        return subprocess.run(
+            [sys.executable, str(SCRIPT), "--deadline", str(time.monotonic() + budget),
+             "--profile-dir", str(directory), "--", *command],
+            capture_output=True, text=True, timeout=15,
+        )
+
+    def receipt(self, directory):
+        return json.loads((directory / "result.json").read_text())
+
+    def assert_not_running(self, pid):
+        result = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)],
+                                capture_output=True, text=True, timeout=10)
+        self.assertIn(result.returncode, (0, 1), result.stderr)
+        state = result.stdout.strip()
+        # The supervisor is reaped by the wrapper. Orphan descendants are
+        # reaped by the OS; a zombie has terminated and holds no output pipe.
+        self.assertTrue(not state or state.startswith("Z"), f"command still running: {state}")
+
+    def test_failure_exit_is_preserved(self):
+        with tempfile.TemporaryDirectory(dir="/var/tmp") as temporary:
+            directory = Path(temporary)
+            result = self.call(directory, [sys.executable, "-c", "raise SystemExit(7)"])
+            self.assertEqual(result.returncode, 7, result.stderr)
+            self.assertEqual(self.receipt(directory)["exit_code"], 7)
+
+    def test_success_requires_complete_profiles(self):
+        with tempfile.TemporaryDirectory(dir="/var/tmp") as temporary:
+            directory = Path(temporary)
+            result = self.call(directory, [sys.executable, "-c", "pass"])
+            self.assertEqual(result.returncode, 125, result.stderr)
+            self.assertFalse(self.receipt(directory)["profiles_complete"])
+            (directory / "cpu.pprof").write_bytes(b"fixture cpu")
+            (directory / "mem.pprof").write_bytes(b"fixture heap")
+            result = self.call(directory, [sys.executable, "-c", "pass"])
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(self.receipt(directory)["profiles_complete"])
+
+    def test_expired_budget_does_not_launch(self):
+        with tempfile.TemporaryDirectory(dir="/var/tmp") as temporary:
+            directory = Path(temporary)
+            result = self.call(directory, ["/must-not-launch"], budget=-1)
+            self.assertEqual(result.returncode, 124, result.stderr)
+            self.assertFalse(self.receipt(directory)["launched"])
+
+    def test_hard_deadline_terminates_owned_command(self):
+        # This one-second timeout is the behavior under test, not a startup
+        # race deadline. The outer observer retains a separate 15-second cap.
+        with tempfile.TemporaryDirectory(dir="/var/tmp") as temporary:
+            directory = Path(temporary)
+            command = [
+                sys.executable, "-c",
+                "import os,signal; print(os.getpid(),flush=True); "
+                "signal.signal(signal.SIGTERM,signal.SIG_IGN); signal.pause()",
+            ]
+            result = self.call(directory, command, budget=1)
+            self.assertEqual(result.returncode, 124, result.stderr)
+            receipt = self.receipt(directory)
+            self.assertTrue(receipt["timed_out"])
+            self.assertTrue(receipt["launched"])
+            pid = int(result.stdout.strip())
+            self.assert_not_running(pid)
+
+    def test_root_exit_terminates_descendant_holding_output(self):
+        # The nested command models make exiting while a linter retains the
+        # pipeline. A readiness pipe ensures the descendant is alive first.
+        with tempfile.TemporaryDirectory(dir="/var/tmp") as temporary:
+            directory = Path(temporary)
+            lifetime = directory / "keep-child-alive"
+            lifetime.touch()
+            descendant = (
+                "import os,time; from pathlib import Path; "
+                "print(os.getpid(),flush=True); os.write(int(__import__('sys').argv[1]),b'R'); "
+                "os.close(int(__import__('sys').argv[1])); "
+                "path=Path(__import__('sys').argv[2]); "
+                "\nwhile path.exists(): time.sleep(.1)"
+            )
+            root = (
+                "import os,subprocess,sys; r,w=os.pipe(); "
+                "subprocess.Popen([sys.executable,'-c',sys.argv[1],str(w),sys.argv[2]],pass_fds=(w,)); "
+                "os.close(w); assert os.read(r,1)==b'R'; os.close(r); sys.exit(7)"
+            )
+            try:
+                result = self.call(directory, [sys.executable, "-c", root, descendant, str(lifetime)])
+                self.assertEqual(result.returncode, 7, result.stderr)
+                pid = int(result.stdout.strip())
+                self.assert_not_running(pid)
+                self.assertFalse(self.receipt(directory)["timed_out"])
+                self.assertEqual(self.receipt(directory)["cleanup"], "group-killed-leader-reaped")
+            finally:
+                # Retain a bounded exit even when testing the broken wrapper.
+                lifetime.unlink(missing_ok=True)
+
+    def test_cancellation_terminates_owned_command_and_records_signal(self):
+        with tempfile.TemporaryDirectory(dir="/var/tmp") as temporary:
+            directory = Path(temporary)
+            command = [sys.executable, "-c",
+                       "import os,signal; print(os.getpid(),flush=True); signal.pause()"]
+            process = subprocess.Popen(
+                [sys.executable, str(SCRIPT), "--deadline", str(time.monotonic() + 30),
+                 "--profile-dir", str(directory), "--", *command],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+            try:
+                ready, _, _ = select.select([process.stdout], [], [], 10)
+                self.assertTrue(ready, "fixture did not publish its PID")
+                pid = int(process.stdout.readline().strip())
+                process.send_signal(signal.SIGTERM)
+                _, stderr = process.communicate(timeout=10)
+                self.assertEqual(process.returncode, 143, stderr)
+                self.assertEqual(self.receipt(directory)["cleanup"], "group-killed-leader-reaped")
+                self.assert_not_running(pid)
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait(timeout=10)
+
+
+if __name__ == "__main__":
+    unittest.main()

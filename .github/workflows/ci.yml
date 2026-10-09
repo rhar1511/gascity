@@ -235,6 +235,8 @@ jobs:
           go-version-file: go.mod
       - name: CI workflow policy
         run: make test-ci-policy
+      - name: Lint deadline contract
+        run: python3 scripts/test-ci-lint-profile
       - name: Classify static-analysis scope
         id: static-scope
         env:
