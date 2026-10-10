@@ -531,7 +531,10 @@ The merged all-source subprocess audit includes the upstream baseline's
 717 calls in 210 files plus seven tagged call sites in three files: four in
 `source_snapshot_bd_integration_test.go`, one installed-Beads invocation in
 `private_evidence_installed_test.go`, and two kernel-peer/pidfd child-process
-invocations in `broker_linux_test.go`. These remain visible as Large resources;
+invocations in `broker_linux_test.go`. The ACP whole-process-group termination regression adds one tagged subprocess
+call and one directly process-owning file, `proctable_integration_test.go`;
+gp-olwhg.9 owns
+its FIFO-ready private group and identity-fenced cleanup. The tagged calls remain visible as Large resources;
 the audit update does not exempt them from integration qualification or raise
 untagged or Small debt. Readiness and broker cleanup now wait on their actual
 completion/wakeup signals instead of adding fixed sleeps.
@@ -540,12 +543,25 @@ completion/wakeup signals instead of adding fixed sleeps.
 the externally installed `bd` CLI; its process call remains visible in the
 all-source audit while staying outside untagged and Small debt.
 
+The native vulnerability-verdict regression,
+`scripts.TestVulnerabilityVerdictRunsWithoutReportingDirectory`, owns three
+top-level Bash launches and their fixture scanner/subcommands. Each case uses
+an isolated working directory and explicit environment, proves scanner
+invocation without an existing reporting directory, and preserves native exits
+0, 3, and 7. `gp-olwhg.9.7` owns this retained boundary and its timing evidence,
+with manual ownership review due 2026-10-31. The shared `testCommand` and
+`shardTestCommand` constructors remain process-bearing; consolidating their
+identical construction removes a duplicate source call site without reducing
+runtime launches. The new test's direct call remains visible in Small debt;
+this manual-review record grants no Medium exemption, hermetic classification,
+checked-ledger waiver, or increased ceiling.
+
 <!-- BEGIN CHECKED TEST RESOURCE LEDGER -->
 | Ledger kind | Source scope | Resource baseline | Tracking owner | Invariant / resource owner | Migration | Expiry |
 | --- | --- | --- | --- | --- | --- | --- |
 | Audit baseline | all tracked test source | fixed_sleep: 489 calls / 179 files (historical regex census: 447 / 157) | ga-cp3hwi | tracked test source totals remain visible as audit evidence; ga-cp3hwi owns this point-in-time source census | P0.4a | 2026-10-31 |
 | Audit baseline | all tracked test source | listener_helper: 58 calls / 23 files | ga-cp3hwi | all-source listener-helper call/file totals cannot drift without an explicit checked policy update; ga-cp3hwi owns this all-source audit; tagged calls stay Large and receive no Medium exemption | P0.4c-listener-helper | 2026-10-31 |
-| Audit baseline | all tracked test source | subprocess: 724 calls / 213 files (historical regex census: 495 / 135) | ga-cp3hwi | tracked test source totals remain visible as audit evidence; ga-cp3hwi owns this point-in-time source census | P0.4a | 2026-10-31 |
+| Audit baseline | all tracked test source | subprocess: 725 calls / 214 files (historical regex census: 495 / 135) | ga-cp3hwi | tracked test source totals remain visible as audit evidence; ga-cp3hwi owns this point-in-time source census | P0.4a | 2026-10-31 |
 | Medium owner | `cmd/gc` package `main` | TestGcBeadsBdProviderOwnedLifecycleUsesBdBoundary: subprocess | ga-p9iuv.30 | the provider-owned script boundary proof is a checked Medium subprocess owner; the test executes the copied provider script only with a test-owned BD executable and verifies its lifecycle delegation without a host service | GC6011 | 2026-10-31 |
 | Medium owner | `cmd/gc` package `main` | TestGcBeadsBdProviderOwnedRealLifecycleStopsOwnedProcesses: slow_process_gate, subprocess | ga-p9iuv.30 | the provider-owned BD lifecycle proof is a checked Medium process owner; the test runs the pinned real bd direct and proxied lifecycles under deadlines, records only provider-published identities, and stops its own scope before asserting those children are absent | GC6011 | 2026-10-31 |
 | Medium owner | `cmd/gc` package `main` | TestGcBeadsBdReadyScopeLifecycleReadsItsPersistedTopology: subprocess | ga-p9iuv.30 | the ready-scope topology boundary proof is a checked Medium subprocess owner; the test executes the shipped provider script once per init shape with a test-owned BD executable and a scope built from files alone, so no Dolt, no bd and no host service are involved | GC6011 | 2026-10-31 |

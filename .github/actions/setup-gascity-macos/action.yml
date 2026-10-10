@@ -124,6 +124,28 @@ runs:
       shell: bash
       run: ${{ github.action_path }}/../../scripts/install-bd-archive.sh "${{ inputs.bd-version }}" --cache
 
+    - name: Declare the installed bd integration-test executable
+      shell: bash
+      env:
+        BD_TEST_RELEASE_VERSION: ${{ inputs.bd-version }}
+      run: |
+        set -euo pipefail
+        case "$(uname -m)" in
+          arm64|aarch64) bd_test_arch=arm64 ;;
+          x86_64|amd64) bd_test_arch=amd64 ;;
+          *) echo "Unsupported architecture for the installed bd test executable" >&2; exit 1 ;;
+        esac
+        bd_expected_binary="${RUNNER_TOOL_CACHE:-$HOME/.local}/gascity-bd/${BD_TEST_RELEASE_VERSION}/darwin_${bd_test_arch}/bin/bd"
+        bd_test_binary="$(command -v bd)"
+        [[ "$bd_test_binary" = /* && -f "$bd_test_binary" && -x "$bd_test_binary" && "$bd_test_binary" == "$bd_expected_binary" ]] || {
+          echo "The selected bd executable must be the binary installed by this setup action" >&2
+          exit 1
+        }
+        case "$bd_test_binary" in
+          *$'\n'*|*$'\r'*) echo "bd test executable path contains a line break" >&2; exit 1 ;;
+        esac
+        printf 'BEADS_TEST_BD_BINARY=%s\n' "$bd_test_binary" >> "$GITHUB_ENV"
+
     - name: Install Claude CLI
       if: ${{ inputs.install-claude-cli == 'true' }}
       shell: bash

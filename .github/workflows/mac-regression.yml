@@ -207,6 +207,12 @@ jobs:
     # the full lint gate time to finish and report a verdict.
     timeout-minutes: 75
     steps:
+      - name: Start Mac lint deadline
+        env:
+          MAC_LINT_DIR: ${{ runner.temp }}/mac-lint-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          python3 -c 'import time; print(f"MAC_LINT_DEADLINE={time.monotonic() + 65*60}")' >> "$GITHUB_ENV"
+          echo "MAC_LINT_DIR=$MAC_LINT_DIR" >> "$GITHUB_ENV"
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           repository: ${{ inputs.head_repo || github.repository }}
@@ -241,10 +247,26 @@ jobs:
           # storm (ga-35qn7i, ga-v7x9vk, ga-l14mnf, ga-ndx34y). A miss now
           # forces a fully fresh, never-poisoned recompute.
           key: ${{ runner.os }}-golangci-lint-${{ steps.glint-version.outputs.version }}-${{ steps.glint-version.outputs.goversion }}-${{ hashFiles('go.sum', '.golangci.yml') }}
+      - name: Lint deadline contract
+        run: python3 scripts/test-ci-lint-profile
       - name: Lint
         env:
           GOLANGCI_LINT_CACHE: ${{ github.workspace }}/.cache/golangci-lint
-        run: make lint
+        # Retain the full gate. The outer deadline includes setup time;
+        # forced termination records incomplete profiles and fails the check.
+        run: |
+          set -o pipefail
+          mkdir -p "$MAC_LINT_DIR"
+          git rev-parse HEAD > "$MAC_LINT_DIR/revision.txt"
+          python3 scripts/ci-lint-profile --deadline "$MAC_LINT_DEADLINE" --profile-dir "$MAC_LINT_DIR" --sample-executable "$(go env GOPATH)/bin/golangci-lint" -- make lint LINT_FLAGS="--verbose --timeout=55m --cpu-profile-path=$MAC_LINT_DIR/cpu.pprof --mem-profile-path=$MAC_LINT_DIR/mem.pprof" 2>&1 | tee "$MAC_LINT_DIR/lint.log"
+      - name: Upload Mac lint diagnostics
+        if: ${{ always() }}
+        timeout-minutes: 3
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: mac-lint-${{ inputs.head_sha || github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.MAC_LINT_DIR }}
+          if-no-files-found: error
       - name: Format
         run: make fmt-check
       - name: Vet
@@ -316,7 +338,9 @@ jobs:
       - gate
     if: needs.gate.outputs.run_smoke == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
-    timeout-minutes: 25
+    # Job cancelled at 25m05s after both test commands passed.
+    # Leave bounded outer headroom without changing either test deadline.
+    timeout-minutes: 26
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:

@@ -128,18 +128,21 @@ close_with_result() {
     return 0
 }
 
+transient_once_marker() {
+    printf '%s/transient-once.%s' "$HARNESS_STATE_DIR" "$(sanitize_key "$1")"
+}
+
+# Deciding to inject must not spend the budget before its failing close lands.
 should_fail_transient_once() {
     local ref="$1"
-    local marker=""
     if ! ref_matches_suffix_list "$ref" "${GC_GRAPH_TRANSIENT_ONCE_SUFFIXES:-}"; then
         return 1
     fi
-    marker="$HARNESS_STATE_DIR/transient-once.$(sanitize_key "$ref")"
-    if [ -f "$marker" ]; then
-        return 1
-    fi
-    : > "$marker"
-    return 0
+    [ ! -f "$(transient_once_marker "$ref")" ]
+}
+
+commit_transient_once() {
+    : > "$(transient_once_marker "$1")"
 }
 
 should_fail_transient_always() {
@@ -638,6 +641,11 @@ while true; do
         status_after=$(show_status "$bead_id" 2>/dev/null || true)
         outcome_after=$(show_outcome "$bead_id" 2>/dev/null || true)
         trace "closed bead=$bead_id status=$status_after outcome=$outcome_after"
+        if [ "$status_after" = "closed" ] && [ "$outcome_after" = "fail" ]; then
+            commit_transient_once "$ref"
+        else
+            trace "transient-once-uncommitted bead=$bead_id ref=$ref status=$status_after outcome=$outcome_after"
+        fi
         continue
     fi
     if should_fail_transient_always "$ref"; then

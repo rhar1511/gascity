@@ -28,6 +28,11 @@ printf '\n'
 	if err := os.WriteFile(source, []byte("package main"), 0o644); err != nil {
 		t.Fatalf("write source: %v", err)
 	}
+	// Creation permissions are filtered by the caller's umask; set the fixture
+	// explicitly so this test verifies preservation of an actual 0644 file.
+	if err := os.Chmod(source, 0o644); err != nil {
+		t.Fatalf("set source mode: %v", err)
+	}
 
 	cmd := exec.Command(filepath.Join(repoRoot, "scripts", "precommit-format-staged-go"))
 	cmd.Dir = repoRoot

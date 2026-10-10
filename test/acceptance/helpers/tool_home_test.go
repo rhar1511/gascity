@@ -2,7 +2,9 @@ package acceptancehelpers
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -339,4 +341,22 @@ func TestRealBdProvisionLeavesTheHostHomeAlone(t *testing.T) {
 		t.Errorf("bd created the host's shared-server root\nbd output:\n%s", out.String())
 	}
 	untouched()
+}
+
+// A canceled fixture must refuse the launch before the real binary runs.
+func TestToolCommandContextRefusesCancelledLaunch(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	cmd := ToolCommandContext(ctx, t, exe, "-test.run=^$")
+	out, err := cmd.CombinedOutput()
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled tool launch error = %v, want context.Canceled; output: %s", err, out)
+	}
+	if len(out) != 0 || cmd.Process != nil {
+		t.Fatalf("canceled tool started a process: process=%v output=%s", cmd.Process, out)
+	}
 }

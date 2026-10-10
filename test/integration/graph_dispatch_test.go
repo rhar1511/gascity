@@ -1241,7 +1241,7 @@ func graphProcessFlag(args []string, flag string) (value string, found, valid bo
 		arg := args[i]
 		if arg == flag {
 			if found || i+1 >= len(args) || args[i+1] == "" {
-				return "", found, false
+				return "", false, false
 			}
 			found = true
 			value = args[i+1]
@@ -1250,7 +1250,7 @@ func graphProcessFlag(args []string, flag string) (value string, found, valid bo
 		}
 		if strings.HasPrefix(arg, flag+"=") {
 			if found || strings.TrimPrefix(arg, flag+"=") == "" {
-				return "", found, false
+				return "", false, false
 			}
 			found = true
 			value = strings.TrimPrefix(arg, flag+"=")

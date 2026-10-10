@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -253,8 +254,20 @@ func startWindowsTestDescendant(t *testing.T) *exec.Cmd {
 
 func writeWindowsTestPID(t *testing.T, path string, pid int) {
 	t.Helper()
-	if err := os.WriteFile(path, []byte(strconv.Itoa(pid)), 0o600); err != nil {
+	temporary, err := os.CreateTemp(filepath.Dir(path), ".descendant-pid-*")
+	if err != nil {
+		t.Fatalf("create descendant pid temporary file: %v", err)
+	}
+	defer os.Remove(temporary.Name())
+	if _, err := temporary.WriteString(strconv.Itoa(pid)); err != nil {
+		_ = temporary.Close()
 		t.Fatalf("write descendant pid: %v", err)
+	}
+	if err := temporary.Close(); err != nil {
+		t.Fatalf("close descendant pid temporary file: %v", err)
+	}
+	if err := os.Rename(temporary.Name(), path); err != nil {
+		t.Fatalf("publish descendant pid: %v", err)
 	}
 }
 

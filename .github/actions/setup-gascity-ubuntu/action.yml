@@ -58,6 +58,22 @@ runs:
       shell: bash
       run: ${{ github.action_path }}/../../scripts/install-bd-archive.sh "${{ inputs.bd-version }}"
 
+    - name: Declare the installed bd integration-test executable
+      if: ${{ inputs.bd-version != '' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        bd_expected_binary="${BD_INSTALL_BIN_DIR:-/usr/local/bin}/bd"
+        bd_test_binary="$(command -v bd)"
+        [[ "$bd_test_binary" = /* && -f "$bd_test_binary" && -x "$bd_test_binary" && "$bd_test_binary" == "$bd_expected_binary" ]] || {
+          echo "The selected bd executable must be the binary installed by this setup action" >&2
+          exit 1
+        }
+        case "$bd_test_binary" in
+          *$'\n'*|*$'\r'*) echo "bd test executable path contains a line break" >&2; exit 1 ;;
+        esac
+        printf 'BEADS_TEST_BD_BINARY=%s\n' "$bd_test_binary" >> "$GITHUB_ENV"
+
     - name: Install Claude CLI
       if: ${{ inputs.install-claude-cli == 'true' }}
       shell: bash

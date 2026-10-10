@@ -45,6 +45,11 @@ func parseBeadID(output string) (string, bool) {
 		if len(fields) == 0 {
 			continue
 		}
+		// Private-safe provider projection renders one labeled ID field.
+		// Match that complete line, rather than finding ID-shaped chatter.
+		if len(fields) == 2 && fields[0] == "id:" && isBeadIDToken(fields[1]) {
+			return fields[1], true
+		}
 		if isBeadIDToken(fields[0]) {
 			return fields[0], true
 		}
@@ -85,6 +90,10 @@ func TestParseBeadID(t *testing.T) {
 		{"shim created bead", "Created bead: gc-3", "gc-3", true},
 		{"real bd created issue", "✓ Created issue: qwerty-a1b — standalone bead", "qwerty-a1b", true},
 		{"multirig fake bd created issue", "Created issue: r0-1", "r0-1", true},
+		{"projected provider record", "gc bd: served in process from provider projection\nid:          r0-fake\ntitle:       fixture", "r0-fake", true},
+		{"projected invalid id", "id: gc-", "", false},
+		{"projected extra field", "id: gc-3 unexpected", "", false},
+		{"id in diagnostic chatter", "warning: id: gc-3", "", false},
 		{"created convoy", `Created convoy uw-19 "Sprint 1" tracking 2 issue(s)`, "uw-19", true},
 		{"mail inbox table row", "ID     FROM   SUBJECT     BODY\nth-16  human  archive me  archive me", "th-16", true},
 		{"no unread messages", "No unread messages for human", "", false},

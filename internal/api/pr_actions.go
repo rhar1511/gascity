@@ -1032,13 +1032,11 @@ func findPRActionRecord(store beads.Store, idempotencyKey string) (PRActionResul
 	if rows[0].ID != prActionRecordBeadID(idempotencyKey) || rows[0].Type != "gate" {
 		return PRActionResult{}, false, fmt.Errorf("PR action ledger lacks its unique non-runnable durable ID")
 	}
-	var result PRActionResult
-	if err := json.Unmarshal([]byte(rows[0].Metadata[prActionRecordMetadataKey]), &result); err != nil {
-		return PRActionResult{}, false, fmt.Errorf("decode durable action record %s: %w", rows[0].ID, err)
+	result, err := decodePRActionReceipt(rows[0])
+	if err != nil {
+		return PRActionResult{}, false, err
 	}
-	result.ID = rows[0].ID
-	result.Fingerprint = rows[0].Metadata[prActionFingerprintMetadataKey]
-	if result.IdempotencyKey != idempotencyKey || result.Fingerprint == "" || !validPRActionStatus(result.Status) || !validPRActionKind(result.Action) {
+	if result.IdempotencyKey != idempotencyKey {
 		return PRActionResult{}, false, fmt.Errorf("durable action record %s failed its request identity check", rows[0].ID)
 	}
 	return result, true, nil

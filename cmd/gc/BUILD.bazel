@@ -678,6 +678,25 @@ go_binary(
     visibility = ["//visibility:public"],
 )
 
+# Fixed identities for integration drift tests; preserve the real gc build.
+# keep
+go_binary(
+    name = "gc_drift_old",
+    testonly = True,
+    embed = [":gc_lib"],
+    visibility = ["//test/integration:__pkg__"],
+    x_defs = {"commit": "deadbeefcafe1111"},
+)
+
+# keep
+go_binary(
+    name = "gc_drift_new",
+    testonly = True,
+    embed = [":gc_lib"],
+    visibility = ["//test/integration:__pkg__"],
+    x_defs = {"commit": "facefeed02222222"},
+)
+
 go_test(
     name = "gc_test",
     size = "large",
@@ -731,7 +750,10 @@ go_test(
         "beads_config_overlay_test.go",
         "beads_doltlite_binding_test.go",
         "beads_endpoint_provider_owned_test.go",
+        "beads_permit_authority_host_linux_test.go",
         "beads_permit_authority_host_test.go",
+        "beads_permit_authority_store_linux_test.go",
+        "beads_permit_authority_store_other_test.go",
         "beads_permit_authority_store_test.go",
         "beads_provider_custom_types_env_test.go",
         "beads_provider_custom_types_test.go",
@@ -1713,13 +1735,14 @@ go_test(
         "@io_opentelemetry_go_otel_sdk_metric//:metric",
         "@io_opentelemetry_go_otel_sdk_metric//metricdata",
         "@org_golang_x_mod//semver",
-        "@org_golang_x_sys//unix",
     ] + select({
         "@rules_go//go/platform:android": [
             "//internal/pathdurability",
+            "@org_golang_x_sys//unix",
         ],
         "@rules_go//go/platform:linux": [
             "//internal/pathdurability",
+            "@org_golang_x_sys//unix",
         ],
         "//conditions:default": [],
     }),

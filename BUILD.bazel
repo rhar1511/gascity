@@ -443,6 +443,7 @@ filegroup(
         "//test/toolhome:bazel_repo_srcs",
         "//test/workflows:bazel_repo_srcs",
         ":go.mod",
+        ":go.sum",
         ":Makefile",
         ":TESTING.md",
         ":root_extras",

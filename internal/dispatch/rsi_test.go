@@ -488,8 +488,15 @@ func compileRSIRecipe(t *testing.T) *formula.Recipe {
 
 func rsiFormulaDir(t *testing.T) string {
 	t.Helper()
-	formulaDir, err := filepath.Abs(filepath.Join("..", "bootstrap", "packs", "core", "formulas"))
+	fixture, err := os.ReadFile(filepath.Join("testdata", "rsi-dispatch-fixture.toml"))
 	if err != nil {
+		t.Fatal(err)
+	}
+	// Supply the generic controller fixture explicitly under the conformance
+	// test's formula name; production workflows belong to their consuming pack.
+	fixture = []byte(strings.Replace(string(fixture), `formula = "rsi-dispatch-fixture"`, `formula = "mol-rsi-candidate"`, 1))
+	formulaDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(formulaDir, "mol-rsi-candidate.toml"), fixture, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return formulaDir

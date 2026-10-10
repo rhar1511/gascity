@@ -11084,10 +11084,7 @@ func BenchmarkRecordOnceEnqueue(b *testing.B) {
 
 func newMetricsBenchmarkHome(b *testing.B) gchome.ProductUsageHome {
 	b.Helper()
-	trustedTempRoot := "/tmp"
-	if runtime.GOOS == "darwin" {
-		trustedTempRoot = "/private/tmp"
-	}
+	trustedTempRoot := metricsTestTempRoot(b)
 	b.Setenv("GOTMPDIR", trustedTempRoot)
 	b.Setenv("TMPDIR", trustedTempRoot)
 	privateAncestor := b.TempDir()

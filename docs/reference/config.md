@@ -34,7 +34,9 @@ City is the top-level configuration for a Gas City instance.
 | `dolt` | DoltConfig |  |  | Dolt configures optional dolt server connection overrides. |
 | `formulas` | FormulasConfig |  |  | Formulas is the legacy [formulas] table; authored [formulas].dir is rejected at config load. Formulas live in the well-known formulas/ directory. |
 | `daemon` | DaemonConfig |  |  | Daemon configures controller daemon settings. |
+| `lifecycle` | LifecycleConfig |  |  | Lifecycle configures the opt-in, evidence-backed work admission and recovery contract. Both gates default to disabled; see LifecycleConfig. |
 | `rsi` | RSIConfig |  |  | RSI points the controller at trusted signed evaluation and human approval records. An unset evaluator leaves promotion fail-closed. |
+| `decision_frontier` | DecisionFrontierConfig |  |  | DecisionFrontier configures optional delivery of persisted human-decision prompts. An empty target leaves prompt delivery disabled. |
 | `orders` | OrdersConfig |  |  | Orders configures order settings: skip list, max_timeout cap, and per-order overrides. |
 | `api` | APIConfig |  |  | API configures the optional HTTP API server. |
 | `chat_sessions` | ChatSessionsConfig |  |  | ChatSessions configures chat session behavior (auto-suspend). |
@@ -73,7 +75,7 @@ APIConfig configures the HTTP API server.
 | `write_auth_verify_key` | string |  |  | WriteAuthVerifyKey, when set, requires every mutating request to an already-registered city — the per-city routes under /v0/city/&#123;cityName&#125; — to carry a signed write grant from a configured trusted authority. It gates all per-city writes (beads, mail, sessions, agents, and config), not only config edits. City registry creation (POST /v0/city) is not covered: a grant binds a path-resident city name, which a not-yet-created city lacks, so creation stays governed by the supervisor-registry guards. Built-in callers (the bundled gc API client and dashboard SPA) send only the CSRF header and mint no grant, so enabling this gate turns their direct city mutations away with a clear 401; such deployments front mutations through the trusted authority that mints grants instead. The value is one or more "kid:base64-ed25519-pubkey" entries, comma separated. The GC_CITY_WRITE_PUBKEY env var overrides this. Grant revocation via an epoch floor is an ops-plane control set only through the GC_CITY_WRITE_EPOCH_FLOOR env var; it has no config field. On hosted multi-tenant deployments the GC_CITY_WRITE_CID env var (ops-plane only, no config field) additionally binds the gate to the controller's own city id: every grant must then carry that exact cid claim, failing closed on a mismatching or missing cid. |
 | `write_auth_required` | boolean |  |  | WriteAuthRequired makes a missing or empty WriteAuthVerifyKey a startup error instead of silently disabling the gate, so a config that intends to gate writes fails closed if the key is ever dropped. The GC_CITY_WRITE_REQUIRED=1 env var has the same effect. |
 | `write_auth_allow_unverified` | boolean |  |  | WriteAuthAllowUnverified acknowledges running a non-loopback bind with allow_mutations and NO write-auth verify key — an unauthenticated write plane fronted only by the network. Without it, that combination is a fail-closed startup error (gate G10) so a hardened deployment cannot boot wide open by omission. Set it (or GC_CITY_WRITE_ALLOW_UNVERIFIED=1) only for a network-fronted deployment that intentionally trusts its perimeter. |
-| `read_auth_verify_key` | string |  |  | ReadAuthVerifyKey, when set, requires every read (GET/HEAD) of an already-registered city on the typed per-city API — the routes under /v0/city/&#123;cityName&#125; — to carry a signed read grant from a configured trusted authority. It is the read-side twin of WriteAuthVerifyKey, adding in-process, grant-based admission control to the typed city read surface (beads, mail, sessions, agent transcripts) instead of trusting network position.  Scope boundary: this gate covers ONLY the typed /v0/city/&#123;cityName&#125; read routes. It does NOT cover other surfaces on the same listener that can also expose per-city data: the supervisor-scope aggregate event feed (/v0/events and /v0/events/stream, which multiplex every running city's events), the default-on dashboard host plane (/api/*, including its /api/city/&#123;cityName&#125;/* samplers, run detail, run diff, and config reads), and the supervisor-scope routes /v0/cities, /health, /v0/readiness, /v0/provider-readiness, the OpenAPI document, and the dashboard SPA shell. On a non-localhost bind, the only complete mitigation is to front the whole listener with the grant-minting authority/edge (the intended deployment), which protects every surface above. Disabling the dashboard host plane with GC_SUPERVISOR_DASHBOARD=0 is additive, not a substitute: it closes /api/* only, while the supervisor-scope event feed /v0/events and /v0/events/stream stays readable by network position until the follow-up supervisor-scope grant lands. Gating those feeds is tracked as that follow-up work.  Built-in callers (the bundled gc API client and dashboard SPA) mint no grant, so enabling this gate turns their direct /v0/city reads away with a clear 401; such deployments front reads through the authority that mints grants. The value is one or more "kid:base64-ed25519-pubkey" entries, comma separated. The GC_CITY_READ_PUBKEY env var overrides this. Grant revocation via an epoch floor is an ops-plane control set only through the GC_CITY_READ_EPOCH_FLOOR env var; it has no config field. |
+| `read_auth_verify_key` | string |  |  | ReadAuthVerifyKey, when set, requires every read (GET/HEAD) of an already-registered city on the typed per-city API — the routes under /v0/city/&#123;cityName&#125; — to carry a signed read grant from a configured trusted authority. It is the read-side twin of WriteAuthVerifyKey, adding in-process, grant-based admission control to the typed city read surface (beads, mail, sessions, agent transcripts) instead of trusting network position.  Scope boundary: this gate covers ONLY the typed /v0/city/&#123;cityName&#125; read routes. It does NOT cover other surfaces on the same listener that can also expose per-city data: the supervisor-scope aggregate event feed (/v0/events and /v0/events/stream, which multiplex every running city's events), the default-on dashboard host plane (/api/*, including its /api/city/&#123;cityName&#125;/* samplers, run detail, run diff, and config reads), and the supervisor-scope routes /v0/cities, /health, /v0/readiness, /v0/provider-readiness, the OpenAPI document, and the dashboard SPA shell. On a non-localhost bind, the only complete mitigation is to front the whole listener with the grant-minting authority/edge (the intended deployment), which protects every surface above. Disabling the dashboard host plane with GC_SUPERVISOR_DASHBOARD=0 is additive, not a substitute: it closes /api/* only, while the supervisor-scope event feed /v0/events and /v0/events/stream stays readable by network position until the follow-up supervisor-scope grant lands. Gating those feeds is tracked as that follow-up work.  Built-in callers (the bundled gc API client and dashboard SPA) mint no grant, so enabling this gate turns their direct /v0/city reads away with a clear 401; such deployments front reads through the authority that mints grants. The value is one or more "kid:base64-ed25519-pubkey" entries, comma separated. The GC_CITY_READ_PUBKEY env var overrides this. Grant revocation via an epoch floor is an ops-plane control set only through the GC_CITY_READ_EPOCH_FLOOR env var; it has no config field. GC_CITY_READ_CID binds grants to the deployment's tenant-specific city identity; set it when signing keys are shared across tenants. Retained attempt evidence additionally requires the signed authenticated subject and exact original-scope read grants from that permission authority. |
 | `read_auth_required` | boolean |  |  | ReadAuthRequired makes a missing or empty ReadAuthVerifyKey a startup error instead of silently disabling the gate, so a config that intends to gate reads fails closed if the key is ever dropped. The GC_CITY_READ_REQUIRED=1 env var has the same effect. |
 
 ## Agent
@@ -300,6 +302,7 @@ BeadsConfig holds bead store settings.
 | `bd_compatibility` | string |  |  | BDCompatibility selects the bd CLI semantics Gas City may rely on. Empty defaults to "bd-1.0.4", which keeps claimable work history-backed and avoids bd ready/list flags that are unavailable or incomplete in bd 1.0.4. Enum: `bd-1.0.4`, `bd-1.0.5` |
 | `conditional_writes` | string |  |  | ConditionalWrites selects the bead-write discipline: "off" (legacy, byte-identical), "auto" (compare-and-swap where the store is capable, loud degrade otherwise), or "require" (CAS or a typed refusal). Empty defaults to "off". Any other value fails config load. Enum: `off`, `auto`, `require` |
 | `guarded_release` | string |  |  | GuardedRelease selects the ownership-release discipline for work beads: "off" (legacy, owner-blind bd update/unclaim), "auto" (fence-guarded release verbs where the bd binary is capable, loud degrade otherwise), or "require" (guarded release or a typed refusal). Empty defaults to "off". Any other value fails config load. Enum: `off`, `auto`, `require` |
+| `private_evidence` | map[string]PrivateEvidenceTransportConfig |  |  | PrivateEvidence opts selected canonical city/rig Beads scopes into the controller-only HTTP body transport for attempt evidence. An absent map keeps the capability disabled. Keys are canonical refs such as "city:town" and "rig:api"; tokens stay in protected files. |
 | `policies` | map[string]BeadPolicyConfig |  |  | Policies defines per-bead-use storage and garbage-collection defaults. Policy names are interpreted by higher-level systems; unknown names are preserved so packs can stage future policy classes without breaking load. |
 
 ## ChatSessionsConfig
@@ -372,6 +375,14 @@ DaemonConfig holds controller daemon settings.
 | `start_ready_timeout` | string |  | `5m` | StartReadyTimeout is how long `gc start` and `gc register` wait for the supervisor to report the city as Running. Cities with many registered or adopted sessions take longer to start because the per-tick wake budget (max_wakes_per_tick) throttles startup: wall time to wake N sessions is roughly ceil(N / max_wakes_per_tick) * patrol_interval. At the defaults (5 wakes / 30s), ~40 sessions need ~4 minutes. Duration string (e.g., "5m", "10m"). Defaults to DefaultStartReadyTimeout (5m). When set, this value replaces the default start/register budget; [session].startup_timeout may still extend the effective wait for a slow single session. |
 | `tick_debounce` | string |  |  | TickDebounce coalesces bursty event-driven ticks (pokeCh, controlDispatcherCh) within this window. A first event in a quiet period arms a timer; subsequent events arriving before the timer fires are dropped (the single delayed tick re-reads authoritative state covering all collapsed events). Zero (the default) disables debouncing — each event fires its own tick, matching pre-existing behavior. Duration string (e.g., "250ms", "500ms"). Trade-off: adds tick latency up to this value when set. |
 | `auto_prune_worker_dir` | boolean |  | `true` | AutoPruneWorkerDir controls whether the reconciler removes a pool-managed session's worker_dir (agent worktree) after the session bead is closed. Removal is gated on: path lives under the city's .gc/worktrees/ tree, clean working tree, no unpushed commits, no stashed work. Nil (unset) defaults to true so pool worktrees do not accumulate without bound across pool recycles. Set to false to retain worktrees for post-session diagnostics. |
+
+## DecisionFrontierConfig
+
+DecisionFrontierConfig configures the optional human prompt target for decision-frontier records.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `prompt_target` | string |  |  | PromptTarget is a config-facing identity for one configured named session. The controller resolves it to the canonical identity and requires persisted evidence for that exact session execution before delivery. |
 
 ## DoctorConfig
 
@@ -525,6 +536,33 @@ K8sConfig holds native K8s session provider settings.
 | `mem_limit` | string |  | `4Gi` | MemLimit is the pod memory limit. Default: "4Gi". |
 | `prebaked` | boolean |  |  | Prebaked skips init container staging and EmptyDir volumes when true. Use with images built by `gc build-image` that have city content baked in. |
 
+## LifecycleConfig
+
+LifecycleConfig controls controller-owned admission and recovery.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `admission_enabled` | boolean |  |  | AdmissionEnabled requires a signed admission receipt for work carrying explicit lifecycle admission intent. It also disables direct custom sling_query routing for the city because an arbitrary runner has no atomic guard against a concurrent admission attachment. Defaults to false. |
+| `recovery_enabled` | boolean |  |  | RecoveryEnabled permits the controller lifecycle recovery policy. It is separately gated because an admission authority does not grant permission to recover work. Defaults to false. |
+| `admission_authorities` | map[string]string |  |  | AdmissionAuthorities maps historical v1 admission identities to their Ed25519 public keys. V2 admission verification does not use this map. |
+| `admission_v2_primary_authority` | string |  |  | AdmissionV2PrimaryAuthority names the single initial v2 admission signer. Set it to Ricky's exact configured identity for the initial rollout. Additional signer identities require a separately implemented and verified delegation-grant path and are rejected by this release. |
+| `admission_v2_authorities` | map[string]string |  |  | AdmissionV2Authorities contains exactly the primary v2 admission signer and its purpose-specific Ed25519 public key. The key must differ from v1 admission and acceptance keys. Private keys stay outside city config and the bead store. |
+| `acceptance_authorities` | map[string]string |  |  | AcceptanceAuthorities maps trusted completion authorities to their Ed25519 public keys. Keys are base64-encoded 32-byte public keys. |
+| `recovery_authorities` | map[string]LifecycleRecoveryAuthority |  |  | RecoveryAuthorities maps separately authorized recovery identities to public keys and exact action/store scopes. These keys must differ from admission and acceptance keys. Private recovery keys stay outside city configuration and the bead store. |
+| `escalation_target` | string |  |  | EscalationTarget is the configured recipient for one exhaustion escalation per work item. Empty deliberately leaves recovery disabled. |
+| `completion_receipt_max_age` | string |  |  | CompletionReceiptMaxAge bounds how long after signing an acceptance receipt may close work. Operators must choose this from their acceptance and rollout policy; no default is inferred. Empty disables completion reconciliation. |
+| `completion_clock_skew` | string |  |  | CompletionClockSkew is the largest accepted future timestamp allowance. Operators must choose this from expected signer/controller clock drift. It must be set with CompletionReceiptMaxAge; empty disables completion reconciliation rather than choosing a controller-specific default. |
+
+## LifecycleRecoveryAuthority
+
+LifecycleRecoveryAuthority grants one signing identity exact recovery actions in exact city/store scopes.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `public_key` | string | **yes** |  |  |
+| `actions` | []string | **yes** |  |  |
+| `scopes` | []string | **yes** |  |  |
+
 ## LocalDoctorCheck
 
 LocalDoctorCheck is a city-local doctor check declared inline in city.toml via [[doctor.check]].
@@ -627,7 +665,7 @@ OrdersConfig holds order settings for orders discovered from flat TOML files (on
 |-------|------|----------|---------|-------------|
 | `skip` | []string |  |  | Skip lists order names to exclude from scanning. |
 | `max_timeout` | string |  |  | MaxTimeout is an operator hard cap on the per-order dispatch timeout: no order's dispatched exec/formula runs longer than this. Go duration string (e.g., "60s"). Empty means uncapped (no override). This bounds the dispatch timeout only; a condition trigger's check_timeout is a separate probe deadline and is not capped here. |
-| `max_dispatches_per_tick` | integer |  |  | MaxDispatchesPerTick caps how many clock-driven orders (cooldown, cron and event triggers) the supervisor dispatches per tick, in a rotation that resumes where the previous tick stopped. Unset keeps the built-in default of 4; set to 1 to drain overdue cooldown orders one-per-tick at cold start instead of firing several concurrent goroutines at once. Condition-triggered orders are outside this budget: a passing check means work is pending right now, so they dispatch on the tick that observes it. The open-tracking and open-work gates still run for them (unless the order sets no_work_gate), but those gates are keyed per order and only hold back a redispatch of an order whose previous run is still moving, so they do not bound the tick as a whole: a tick launches at most this budget plus one dispatch per condition order whose check passed on that tick. That second term grows with how many condition orders a city defines, not with this setting, and at cold start, before any tracking bead exists, neither gate holds a simultaneously-due set back. |
+| `max_dispatches_per_tick` | integer |  |  | MaxDispatchesPerTick caps how many clock-driven orders (cooldown, cron and event triggers) the supervisor dispatches per orders-lane pass, in a rotation that resumes where the previous pass stopped. The key keeps its historical name from when order dispatch ran once per controller tick. Unset keeps the built-in default of 4; set to 1 to drain overdue cooldown orders one per pass at cold start instead of firing several concurrent goroutines at once. Condition-triggered orders are outside this budget: a passing check means work is pending right now, so they dispatch on the pass that observes it. The open-tracking and open-work gates still run for them (unless the order sets no_work_gate), but those gates are keyed per order and only hold back a redispatch of an order whose previous run is still moving, so they do not bound the pass as a whole: a pass launches at most this budget plus one dispatch per condition order whose check passed on that pass. That second term grows with how many condition orders a city defines, not with this setting, and at cold start, before any tracking bead exists, neither gate holds a simultaneously-due set back. |
 | `overrides` | []OrderOverride |  |  | Overrides apply per-order field overrides after scanning. Each override targets an order by name and optionally by rig. |
 
 ## PackDefaults
@@ -670,6 +708,18 @@ PoolOverride modifies legacy [pool] fields that map to session scaling.
 | `drain_timeout` | string |  |  | DrainTimeout overrides the drain timeout. Duration string (e.g., "5m", "30m", "1h"). |
 | `on_death` | string |  |  | OnDeath overrides the on_death command template. Supports the same Go template placeholders as Agent.on_death. |
 | `on_boot` | string |  |  | OnBoot overrides the on_boot command template. Supports the same Go template placeholders as Agent.on_boot. |
+
+## PrivateEvidenceTransportConfig
+
+PrivateEvidenceTransportConfig opts one canonical Beads store scope into the controller-only HTTP transport for immutable attempt evidence.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `endpoint` | string | **yes** |  |  |
+| `project_id` | string | **yes** |  |  |
+| `database` | string | **yes** |  |  |
+| `token_file` | string | **yes** |  |  |
+| `revision_transitions` | boolean |  |  | RevisionTransitions opts this exact store scope into the Q43 transition and immutable-receipt routes. It defaults to false. |
 
 ## ProviderOption
 
