@@ -31,8 +31,14 @@ filegroup(
 
 go_test(
     name = "mcp-skills_test",
-    srcs = ["main_test.go"],
+    srcs = [
+        "main_test.go",
+        "testenv_import_test.go",
+    ],
     data = ["gascity-skills.toml.example"],
     embed = [":mcp-skills_lib"],
-    deps = ["//internal/materialize"],
+    deps = [
+        "//internal/materialize",
+        "//internal/testenv",
+    ],
 )
