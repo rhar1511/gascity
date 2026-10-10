@@ -1355,7 +1355,7 @@ func TestMacQualityRetainsBoundedLintFailureDiagnostics(t *testing.T) {
 		"set -o pipefail",
 		"make lint LINT_FLAGS=",
 		"--verbose",
-		`python3 scripts/ci-lint-profile --deadline "$MAC_LINT_DEADLINE" --profile-dir "$MAC_LINT_DIR" -- make lint`,
+		`python3 scripts/ci-lint-profile --deadline "$MAC_LINT_DEADLINE" --profile-dir "$MAC_LINT_DIR" --sample-executable "$(go env GOPATH)/bin/golangci-lint" -- make lint`,
 		`git rev-parse HEAD > "$MAC_LINT_DIR/revision.txt"`,
 		"--cpu-profile-path=$MAC_LINT_DIR/cpu.pprof",
 		"--mem-profile-path=$MAC_LINT_DIR/mem.pprof",

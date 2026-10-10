@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Owning proofs for the portable lint deadline and diagnostic receipt."""
+import ctypes
+import errno
 import json
+import runpy
 import os
 import select
 import signal
@@ -10,6 +13,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 SCRIPT = Path(__file__).with_name("ci-lint-profile")
 
@@ -131,6 +135,302 @@ class LintDeadlineTests(unittest.TestCase):
                 if process.poll() is None:
                     process.kill()
                     process.wait(timeout=10)
+
+
+class StackDiagnosticTests(unittest.TestCase):
+    def setUp(self):
+        self.module = runpy.run_path(str(SCRIPT))
+
+    def test_native_process_identity_adapter(self):
+        factory = self.module["DarwinProcesses"]
+        if sys.platform != "darwin":
+            with self.assertRaises(OSError):
+                factory()
+        else:
+            processes = factory()
+            identity = processes.identity(os.getpid())
+            self.assertEqual(identity["pid"], os.getpid())
+            self.assertEqual(identity["group"], os.getpgrp())
+            self.assertGreater(identity["birth_microseconds"], 0)
+            dyld = ctypes.CDLL(None)
+            executable_path = dyld._NSGetExecutablePath
+            executable_path.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]
+            executable_path.restype = ctypes.c_int
+            size = ctypes.c_uint32(0)
+            self.assertEqual(executable_path(None, ctypes.byref(size)), -1)
+            self.assertGreater(size.value, 0)
+            self.assertLess(size.value, 65536)
+            buffer = ctypes.create_string_buffer(size.value)
+            self.assertEqual(executable_path(buffer, ctypes.byref(size)), 0)
+            expected_executable = Path(os.fsdecode(buffer.value)).resolve()
+            self.assertTrue(expected_executable.is_file())
+            self.assertEqual(Path(identity["executable"]).resolve(), expected_executable)
+            self.assertIn(os.getpid(), processes.group(os.getpgrp()))
+
+    def test_identity_rejects_partial_native_results(self):
+        factory = self.module["DarwinProcesses"]
+        processes = factory.__new__(factory)
+        processes.native = mock.Mock()
+        processes.native.proc_pidinfo.return_value = 1
+        with self.assertRaises(OSError):
+            processes.identity(os.getpid())
+        processes.native.proc_pidinfo.return_value = 0
+        with mock.patch.object(ctypes, "get_errno", return_value=errno.ESRCH):
+            self.assertIsNone(processes.identity(os.getpid()))
+
+    def test_group_rejects_truncated_native_enumeration(self):
+        factory = self.module["DarwinProcesses"]
+        processes = factory.__new__(factory)
+        processes.native = mock.Mock()
+        processes.native.proc_listpids.return_value = 512 * ctypes.sizeof(ctypes.c_int)
+        with self.assertRaises(OSError):
+            processes.group(os.getpgrp())
+
+    def test_capture_bounds_output_and_waits_child(self):
+        capture = self.module["capture_observation"]
+        report, output = capture(
+            [sys.executable, "-c", "import os; os.write(1,b'x'*200000); __import__('time').sleep(20)"],
+            time.monotonic() + 3, 1024, lambda: False,
+        )
+        self.assertLessEqual(len(output), 1024)
+        self.assertTrue(report["truncated"])
+        self.assertTrue(report["reaped"])
+        self.assertNotEqual(report["raw_exit"], 0)
+        self.assertEqual(report["group"], os.getpgrp())
+        with self.assertRaises(ChildProcessError):
+            os.waitpid(report["pid"], os.WNOHANG)
+
+    def test_capture_deadline_and_cancellation_wait_children(self):
+        capture = self.module["capture_observation"]
+        original_launch = subprocess.Popen
+        for cancelled in (False, True):
+            launched = []
+
+            def launch(*args, **kwargs):
+                child = original_launch(*args, **kwargs)
+                launched.append(child.pid)
+                return child
+
+            # Advance the observation clock only after a real child exists.
+            # Keep subprocess's own real wait clock untouched.
+            clock = mock.Mock()
+            clock.monotonic.side_effect = lambda: 2 if launched and not cancelled else 0
+            with mock.patch.dict(capture.__globals__, {"time": clock}), \
+                    mock.patch.object(subprocess, "Popen", side_effect=launch):
+                report, _ = capture(
+                    [sys.executable, "-c", "__import__('time').sleep(20)"],
+                    1, 1024, lambda: cancelled and bool(launched),
+                )
+            self.assertEqual(launched, [report["pid"]])
+            self.assertIsNotNone(report["pid"])
+            self.assertTrue(report["reaped"])
+            self.assertEqual(report["cancelled"], cancelled)
+            self.assertEqual(report["timed_out"], not cancelled)
+            with self.assertRaises(ChildProcessError):
+                os.waitpid(report["pid"], os.WNOHANG)
+
+    def test_capture_expired_or_cancelled_never_launches(self):
+        for cancelled in (False, True):
+            with mock.patch.object(subprocess, "Popen") as launch:
+                report, output = self.module["capture_observation"](
+                    ["/must-not-launch"], time.monotonic()+10 if cancelled else time.monotonic()-1,
+                    1024, lambda: cancelled,
+                )
+            launch.assert_not_called()
+            self.assertEqual(report["cancelled"], cancelled)
+            self.assertEqual(report["timed_out"], not cancelled)
+            self.assertIsNone(report["pid"])
+            self.assertEqual(output, b"")
+
+    def test_sampling_rejects_unowned_ambiguous_and_changed_identity(self):
+        with tempfile.TemporaryDirectory(dir="/var/tmp") as temporary:
+            directory = Path(temporary)
+            owned = {"pid": 41, "group": 17, "birth_microseconds": 100,
+                     "executable": "/fixture/golangci-lint"}
+            processes = mock.Mock()
+            processes.group.return_value = [41]
+            capture = mock.Mock(return_value=({"reaped": True, "raw_exit": 0}, b"fixture"))
+            sample = self.module["stack_observation"]
+            with mock.patch.dict(sample.__globals__, {"capture_observation": capture}):
+                processes.identity.return_value = dict(owned, group=18)
+                self.assertEqual(sample(processes, 17, owned["executable"], directory, 1,
+                                        time.monotonic()+10, lambda: False)["state"], "no-owned-target")
+                capture.assert_not_called()
+                processes.group.return_value = [41, 42]
+                processes.identity.side_effect = [owned, dict(owned, pid=42)]
+                self.assertEqual(sample(processes, 17, owned["executable"], directory, 2,
+                                        time.monotonic()+10, lambda: False)["state"], "ambiguous-target")
+                capture.assert_not_called()
+                processes.group.return_value = [41]
+                processes.identity.side_effect = [owned, dict(owned, birth_microseconds=101)]
+                self.assertEqual(sample(processes, 17, owned["executable"], directory, 3,
+                                        time.monotonic()+10, lambda: False)["state"], "identity-changed-before-sample")
+                # The memory probe may run; sample itself must not.
+                self.assertEqual(capture.call_count, 1)
+                capture.reset_mock()
+                processes.identity.side_effect = [owned, owned, dict(owned, birth_microseconds=101)]
+                result = sample(processes, 17, owned["executable"], directory, 4,
+                                time.monotonic()+10, lambda: False)
+                self.assertEqual(result["state"], "identity-changed-after-sample")
+                self.assertFalse(result["usable"])
+                self.assertEqual(capture.call_count, 2)
+
+    def test_verified_sample_keeps_identity_memory_and_output(self):
+        with tempfile.TemporaryDirectory(dir="/var/tmp") as temporary:
+            directory = Path(temporary)
+            owned = {"pid": 41, "group": 17, "birth_microseconds": 100,
+                     "executable": "/fixture/golangci-lint"}
+            processes = mock.Mock()
+            processes.group.return_value = [41]
+            processes.identity.return_value = owned
+            capture = mock.Mock(return_value=({"reaped": True, "raw_exit": 0,
+                                               "truncated": False, "timed_out": False,
+                                               "cancelled": False}, b"fixture stack"))
+            sample = self.module["stack_observation"]
+            with mock.patch.dict(sample.__globals__, {"capture_observation": capture}):
+                result = sample(processes, 17, owned["executable"], directory, 1,
+                                time.monotonic()+10, lambda: False)
+            self.assertTrue(result["usable"])
+            self.assertEqual(result["target_before"], owned)
+            self.assertEqual(result["target_after"], owned)
+            self.assertEqual((directory/"stack-01.txt").read_bytes(), b"fixture stack")
+            self.assertIn("memory", result)
+            self.assertEqual(capture.call_args_list[1].args[0],
+                             ["/usr/bin/sample", "41", "5", "10", "-file", "/dev/stdout"])
+            self.assertEqual(capture.call_args_list[1].args[2], 1024*1024)
+
+    def test_sampling_disabled_keeps_original_command_contract(self):
+        with tempfile.TemporaryDirectory(dir="/var/tmp") as temporary:
+            directory = Path(temporary)
+            result = LintDeadlineTests().call(directory, [sys.executable, "-c", "raise SystemExit(7)"])
+            self.assertEqual(result.returncode, 7, result.stderr)
+            receipt = json.loads((directory/"result.json").read_text())
+            self.assertEqual(receipt["command_raw_exit"], 7)
+            self.assertIsNone(receipt["stack_cleanup"])
+            self.assertFalse((directory/"stack-samples.json").exists())
+
+    def observation_driver(self, directory):
+        # Real supervisor, waits, probes, pipe protocol, and outer cleanup.
+        # Only the Darwin API and its two native executables are substituted.
+        driver = directory/"driver.py"
+        driver.write_text(
+            "import json,os,pathlib,runpy,signal,sys,threading,time\n"
+            f"m=runpy.run_path({str(SCRIPT)!r})\n"
+            "class FixtureProcesses:\n"
+            " def group(self,group): return [os.getpid()]\n"
+            " def identity(self,pid): return {'pid':pid,'group':os.getpgrp(),"
+            "'birth_microseconds':1,'executable':'/fixture/golangci-lint'}\n"
+            "m['supervise'].__globals__['DarwinProcesses']=FixtureProcesses\n"
+            "m['supervise'].__globals__['STACK_INTERVAL']=.05\n"
+            "m['supervise'].__globals__['STACK_COUNT']=2\n"
+            "real=m['capture_observation']\n"
+            "def capture(command,deadline,limit,stop):\n"
+            " if command[0]=='/usr/bin/vm_stat': command=[sys.executable,'-c','print(\"fixture vm\")']\n"
+            " if command[0]=='/usr/bin/sample':\n"
+            "  opts=json.loads(sys.argv[3]); directory=pathlib.Path(opts['directory'])\n"
+            "  script='import os,pathlib,signal,sys; ready=pathlib.Path(sys.argv[1]); pending=ready.with_suffix(\".tmp\"); pending.write_text(str(os.getpid())); pending.replace(ready); '\n"
+            "  script+='print(\"fixture stack\",flush=True); '\n"
+            "  script+='pass' if (directory/'count-mode').exists() else 'signal.pause()'\n"
+            "  command=[sys.executable,'-c',script,str(directory/'sampler-ready')]\n"
+            " result=real(command,deadline,limit,stop)\n"
+            " if command[0]==sys.executable and len(command)>3 and 'fixture stack' in command[2]:\n"
+            "  counter=pathlib.Path(json.loads(sys.argv[3])['directory'])/'sample-count'\n"
+            "  pending=counter.with_suffix('.tmp'); pending.write_text(str((int(counter.read_text()) if counter.exists() else 0)+1)); pending.replace(counter)\n"
+            " return result\n"
+            "m['stack_observation'].__globals__['capture_observation']=capture\n"
+            "m['run'].__globals__['__file__']=__file__\n"
+            "if sys.argv[1:2]==['--supervise']:\n"
+            " m['supervise'](int(sys.argv[2]),sys.argv[4:],json.loads(sys.argv[3]))\n"
+            "else:\n"
+            " directory=pathlib.Path(sys.argv[1]); mode=sys.argv[2]\n"
+            " if mode=='count': (directory/'count-mode').touch()\n"
+            " if mode in ('cancel','handshake-error'):\n"
+            "  def cancel_when_ready():\n"
+            "   stop=time.monotonic()+2\n"
+            "   while not (directory/'sampler-ready').exists() and time.monotonic()<stop: time.sleep(.01)\n"
+            "   os.kill(os.getpid(),signal.SIGTERM)\n"
+            "  threading.Thread(target=cancel_when_ready).start()\n"
+            " if mode=='handshake-error':\n"
+            "  original=os.kill\n"
+            "  def fail_handshake(pid,signum):\n"
+            "   if signum==signal.SIGUSR1: raise OSError('fixture handshake failure')\n"
+            "   return original(pid,signum)\n"
+            "  m['run'].__globals__['os'].kill=fail_handshake\n"
+            " budget=.8 if mode=='deadline' else 3\n"
+            " code=7 if mode=='failure' else 0\n"
+            " (directory/'cpu.pprof').write_bytes(b'fixture cpu')\n"
+            " (directory/'mem.pprof').write_bytes(b'fixture heap')\n"
+            " command='import os,pathlib,sys,time; d=pathlib.Path(sys.argv[1]); (d/\"command-pid\").write_text(str(os.getpid())); mode=sys.argv[2]; cutoff=time.monotonic()+20\\n'\n"
+            " command+='while time.monotonic()<cutoff:\\n'\n"
+            " command+=' ready=(d/\"sampler-ready\").exists() if mode in (\"success\",\"failure\") else ((d/\"sample-count\").exists() and int((d/\"sample-count\").read_text())>=2) if mode==\"count\" else False\\n'\n"
+            " command+=' if ready: sys.exit(int(sys.argv[3]))\\n'\n"
+            " command+=' time.sleep(.01)\\n'\n"
+            " command+='sys.exit(91)'\n"
+            " sys.exit(m['run']([sys.executable,'-c',command,str(directory),mode,str(code)],"
+            "time.monotonic()+budget,directory,'/fixture/golangci-lint'))\n"
+        )
+        return driver
+
+    def test_sampling_supervisor_deadline_and_cancellation_wait_owned_children(self):
+        for mode, code in (("deadline", 124), ("cancel", 143)):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory(dir="/var/tmp") as temporary:
+                directory = Path(temporary)
+                driver = self.observation_driver(directory)
+                result = subprocess.run([sys.executable, str(driver), str(directory), mode],
+                                        capture_output=True, text=True, timeout=15)
+                self.assertEqual(result.returncode, code, result.stderr)
+                receipt = json.loads((directory/"result.json").read_text())
+                self.assertTrue(receipt["stack_cleanup"]["complete"])
+                self.assertEqual(receipt["cleanup"], "group-killed-leader-reaped")
+                samples = json.loads((directory/"stack-samples.json").read_text())
+                self.assertLessEqual(len(samples["attempts"]), 2)
+                sample = samples["attempts"][0]["sample"]
+                self.assertTrue(sample["cancelled"] or sample["timed_out"])
+                self.assertTrue(sample["reaped"])
+                self.assertEqual(sample["group"], samples["group"])
+                LintDeadlineTests().assert_not_running(sample["pid"])
+                LintDeadlineTests().assert_not_running(int((directory/"command-pid").read_text()))
+
+    def test_command_completion_during_blocked_probe_keeps_original_verdict(self):
+        for mode, code in (("success", 0), ("failure", 7)):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory(dir="/var/tmp") as temporary:
+                directory = Path(temporary)
+                driver = self.observation_driver(directory)
+                result = subprocess.run([sys.executable, str(driver), str(directory), mode],
+                                        capture_output=True, text=True, timeout=15)
+                self.assertEqual(result.returncode, code, result.stderr)
+                receipt = json.loads((directory/"result.json").read_text())
+                self.assertEqual(receipt["command_raw_exit"], code)
+                self.assertFalse(receipt["timed_out"])
+                self.assertTrue(receipt["stack_cleanup"]["complete"])
+                sample = json.loads((directory/"stack-samples.json").read_text())["attempts"][0]["sample"]
+                self.assertTrue(sample["cancelled"])
+                self.assertTrue(sample["reaped"])
+
+    def test_stop_handshake_failure_still_kills_and_waits_original_group(self):
+        with tempfile.TemporaryDirectory(dir="/var/tmp") as temporary:
+            directory = Path(temporary)
+            driver = self.observation_driver(directory)
+            result = subprocess.run([sys.executable, str(driver), str(directory), "handshake-error"],
+                                    capture_output=True, text=True, timeout=15)
+            self.assertEqual(result.returncode, 125, result.stderr)
+            receipt = json.loads((directory/"result.json").read_text())
+            self.assertEqual(receipt["cleanup"], "group-killed-leader-reaped")
+            self.assertIsNone(receipt["stack_cleanup"])
+            self.assertIn("handshake", receipt["error"])
+            LintDeadlineTests().assert_not_running(int((directory/"sampler-ready").read_text()))
+            LintDeadlineTests().assert_not_running(int((directory/"command-pid").read_text()))
+
+    def test_sampling_attempt_count_is_bounded(self):
+        with tempfile.TemporaryDirectory(dir="/var/tmp") as temporary:
+            directory = Path(temporary)
+            driver = self.observation_driver(directory)
+            result = subprocess.run([sys.executable, str(driver), str(directory), "count"],
+                                    capture_output=True, text=True, timeout=15)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            samples = json.loads((directory/"stack-samples.json").read_text())
+            self.assertEqual(len(samples["attempts"]), 2)
+            self.assertTrue(all(item["usable"] for item in samples["attempts"]))
 
 
 if __name__ == "__main__":

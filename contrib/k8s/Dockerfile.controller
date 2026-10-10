@@ -12,25 +12,53 @@
 
 # Local build-layer image produced by Dockerfile.agent, not a registry pull.
 ARG BASE=gc-agent:latest
+FROM golang:1.26.9-bookworm@sha256:d9c68c2c51161e12fd77e4c6320687c9cd86e1af1e3ad6e6cd63ff970641453c AS kubectl-builder
+
+ARG KUBECTL_VERSION=v1.36.3
+ARG KUBECTL_SOURCE_REF=0f29094e5b73085e3802ecc1298ecae13866bfe6
+ARG KUBECTL_SOURCE_SHA256=8877f821fe517fa5d00df5f88ce416f47ef279b85f5aba6eb1fa4a0da7511e72
+
+# Deterministic build timestamp from the official release tag.
+ARG KUBECTL_BUILD_DATE=2026-07-22T18:07:38Z
+ARG XNET_VERSION=0.60.0
+ARG XCRYPTO_VERSION=0.57.0
+ARG XTEXT_VERSION=0.42.0
+ARG TARGETARCH
+
+# Kubernetes carries a checked-in vendor graph and a staging workspace. Select
+# its root module's local staging replacements while resolving the security
+# overrides, rather than compiling the original vendored dependencies.
+ENV GOTOOLCHAIN=local GOWORK=off GOFLAGS=-mod=mod
+RUN mkdir -p /src/kubernetes /out \
+    && curl -fsSL --retry 3 \
+       "https://github.com/kubernetes/kubernetes/archive/${KUBECTL_SOURCE_REF}.tar.gz" \
+       -o /tmp/kubectl-source.tar.gz \
+    && echo "${KUBECTL_SOURCE_SHA256}  /tmp/kubectl-source.tar.gz" | sha256sum --check --strict \
+    && tar -xzf /tmp/kubectl-source.tar.gz --strip-components=1 -C /src/kubernetes \
+    && rm -f /tmp/kubectl-source.tar.gz
+
+WORKDIR /src/kubernetes
+RUN case "${TARGETARCH}" in amd64|arm64) ;; *) echo "unsupported target architecture: ${TARGETARCH}" >&2; exit 1 ;; esac \
+    && go get "golang.org/x/net@v${XNET_VERSION}" "golang.org/x/crypto@v${XCRYPTO_VERSION}" "golang.org/x/text@v${XTEXT_VERSION}" \
+    && CGO_ENABLED=0 GOOS=linux GOARCH="${TARGETARCH}" go build \
+       -trimpath \
+       -ldflags="-s -w -X k8s.io/component-base/version.gitVersion=${KUBECTL_VERSION} -X k8s.io/component-base/version.gitCommit=${KUBECTL_SOURCE_REF} -X k8s.io/component-base/version.gitTreeState=dirty -X k8s.io/component-base/version.gitMajor=1 -X k8s.io/component-base/version.gitMinor=36 -X k8s.io/component-base/version.buildDate=${KUBECTL_BUILD_DATE}" \
+       -o /out/kubectl ./cmd/kubectl \
+    && /out/kubectl version --client --output=json | grep -Fq "\"gitVersion\": \"${KUBECTL_VERSION}\"" \
+    && /out/kubectl version --client --output=json | grep -Fq "\"gitCommit\": \"${KUBECTL_SOURCE_REF}\"" \
+    && go version -m /out/kubectl | grep -Fq "/out/kubectl: go1.26.9" \
+    && go version -m /out/kubectl | tr '\t' ' ' | grep -Fq "dep golang.org/x/net v${XNET_VERSION} " \
+    && go version -m /out/kubectl | tr '\t' ' ' | grep -Fq "dep golang.org/x/crypto v${XCRYPTO_VERSION} " \
+    && go version -m /out/kubectl | tr '\t' ' ' | grep -Fq "dep golang.org/x/text v${XTEXT_VERSION} "
+
 FROM ${BASE}
 
 # Controller installs to /usr/local/bin — need root.
 USER root
 
-# kubectl for agent attach and beads/events exec providers.
-# v1.36.3 is the newest 1.36 patch and the newest kubectl on a patched Go
-# stdlib (1.26.5, against 1.26.2 in v1.36.0). Its x/net and x/text stay behind
-# the fixed versions, so those keep waivers in .trivyignore.yaml.
-ARG KUBECTL_VERSION=v1.36.3
-RUN curl -fsSL \
-    "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" \
-    -o /tmp/kubectl \
-    && curl -fsSL \
-       "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl.sha256" \
-       -o /tmp/kubectl.sha256 \
-    && echo "$(cat /tmp/kubectl.sha256)  /tmp/kubectl" | sha256sum -c - \
-    && install -m 0755 /tmp/kubectl /usr/local/bin/kubectl \
-    && rm -f /tmp/kubectl /tmp/kubectl.sha256
+# Keep the selected Kubernetes release, rebuilt with patched compiler/modules.
+COPY --from=kubectl-builder /out/kubectl /usr/local/bin/kubectl
+RUN kubectl version --client --output=json
 
 # K8s provider scripts (beads, events). Session provider is now native
 # (compiled into gc binary as GC_SESSION=k8s).

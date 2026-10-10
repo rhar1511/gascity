@@ -161,6 +161,7 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 		name, version, lockVersion string
 		override                   bool
 	}{
+		{"fsspec", "2026.6.0", "2026.6.0", false},
 		{"gitpython", "3.1.60", "3.2.0", false},
 		{"aiohttp", "3.14.3", "3.14.3", false},
 		{"anyio", "4.14.2", "4.14.2", false},
@@ -282,10 +283,10 @@ func TestRebuiltToolsForcePatchedXModules(t *testing.T) {
 
 	// Versions each override forces, at or above what Trivy names as fixed for the findings it clears.
 	for _, arg := range []string{
-		"ARG XCRYPTO_VERSION=0.55.0",
-		"ARG XNET_VERSION=0.58.0",
-		"ARG XTEXT_VERSION=0.41.0",
-		"ARG XMOD_VERSION=0.40.0",
+		"ARG XCRYPTO_VERSION=0.57.0",
+		"ARG XNET_VERSION=0.60.0",
+		"ARG XTEXT_VERSION=0.42.0",
+		"ARG XMOD_VERSION=0.41.0",
 		"ARG THRIFT_VERSION=0.24.0",
 	} {
 		if !strings.Contains(base, arg) {
@@ -293,11 +294,13 @@ func TestRebuiltToolsForcePatchedXModules(t *testing.T) {
 		}
 	}
 
-	// gh needs x/text and x/mod; its pinned source already selects patched x/crypto and x/net.
+	// All gh x-module overrides must survive the final module graph selection.
 	// Dolt takes no x/mod override because no x/mod package is linked into its binary.
 	ghModules := map[string]string{
-		"golang.org/x/text": "XTEXT_VERSION",
-		"golang.org/x/mod":  "XMOD_VERSION",
+		"golang.org/x/crypto": "XCRYPTO_VERSION",
+		"golang.org/x/net":    "XNET_VERSION",
+		"golang.org/x/text":   "XTEXT_VERSION",
+		"golang.org/x/mod":    "XMOD_VERSION",
 	}
 	doltModules := map[string]string{
 		"golang.org/x/crypto":      "XCRYPTO_VERSION",
@@ -385,12 +388,35 @@ func unreviewedTrivyIgnorePurlWaivers(doc trivyIgnoreDoc) []string {
 	return found
 }
 
-// TestTrivyIgnoreRejectsPurlScopedWaivers drives the guard itself, because the
-// file it guards is (correctly) all kubectl paths today, so the assertion in
-// TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools cannot demonstrate what it
-// catches. The entry below is the one the council named: a thrift regression
-// waived by module instead of moving Dockerfile.base's THRIFT_VERSION, on the
-// file's own horizon, which both existing guards accepted.
+// TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools keeps findings visible for
+// every rebuilt supplier. Compiler and module assertions prove the security
+// floors; a path or purl waiver must not conceal a later regression.
+func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
+	root := repoRoot(t)
+	var doc trivyIgnoreDoc
+	if err := yaml.Unmarshal([]byte(readFile(t, root, ".trivyignore.yaml")), &doc); err != nil {
+		t.Fatalf("parsing .trivyignore.yaml: %v", err)
+	}
+	for _, unreviewed := range unreviewedTrivyIgnorePurlWaivers(doc) {
+		t.Error(unreviewed)
+	}
+	rebuiltPaths := map[string]bool{
+		"usr/local/bin/bd":      true,
+		"usr/local/bin/dolt":    true,
+		"usr/bin/gh":            true,
+		"usr/local/bin/kubectl": true,
+	}
+	for _, v := range doc.Vulnerabilities {
+		for _, path := range v.Paths {
+			if rebuiltPaths[path] {
+				t.Errorf("%s waives rebuilt tool %q; update the supplier build instead of suppressing its findings", v.ID, path)
+			}
+		}
+	}
+}
+
+// TestTrivyIgnoreRejectsPurlScopedWaivers exercises rejection even when the
+// repository ignore file is empty.
 func TestTrivyIgnoreRejectsPurlScopedWaivers(t *testing.T) {
 	const waived = `vulnerabilities:
   - id: CVE-2026-43871
@@ -412,84 +438,6 @@ func TestTrivyIgnoreRejectsPurlScopedWaivers(t *testing.T) {
 	}
 	if !strings.Contains(found[0], "CVE-2026-43871") || !strings.Contains(found[0], "apache/thrift") {
 		t.Fatalf("finding = %q, want it to name the CVE and the module", found[0])
-	}
-}
-
-// TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools enforces that the rebuilt-from-
-// source tools (bd, dolt, gh) carry no waiver at all. They are rebuilt with the Go
-// 1.26.5 toolchain, which fixes every stdlib CVE listed, and Dockerfile.base forces
-// x/crypto, x/net, x/text and thrift forward in the gh and Dolt builds the same way
-// it forces grpc, so a waiver on those paths would let the scan gate mask a regressed
-// rebuild instead of proving the fix holds. The one surviving reviewed waiver is
-// CVE-2026-56852 for kubectl, which is an upstream-signed prebuilt this repo installs
-// rather than builds, so nothing here can move its dependencies. gc's module waivers
-// are enforced separately by TestTrivyIgnoreDropsGCModuleWaiversPastThreshold.
-func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
-	root := repoRoot(t)
-
-	var doc trivyIgnoreDoc
-	if err := yaml.Unmarshal([]byte(readFile(t, root, ".trivyignore.yaml")), &doc); err != nil {
-		t.Fatalf("parsing .trivyignore.yaml: %v", err)
-	}
-	for _, unreviewed := range unreviewedTrivyIgnorePurlWaivers(doc) {
-		t.Error(unreviewed)
-	}
-
-	rebuiltPaths := map[string]bool{
-		"usr/local/bin/bd":   true,
-		"usr/local/bin/dolt": true,
-		"usr/bin/gh":         true,
-	}
-	stdlibCVEs := map[string]bool{
-		"CVE-2026-33811": true, "CVE-2026-33814": true, "CVE-2026-39820": true,
-		"CVE-2026-39822": true, "CVE-2026-39823": true, "CVE-2026-39825": true,
-		"CVE-2026-39826": true, "CVE-2026-39836": true, "CVE-2026-42499": true,
-		"CVE-2026-42504": true, "CVE-2026-27145": true,
-		// kubectl-only stdlib CVEs, fixed in Go 1.26.6.
-		"CVE-2026-33818": true, "CVE-2026-56853": true, "CVE-2026-56858": true,
-		"CVE-2026-56859": true, "CVE-2026-56860": true, "CVE-2026-56862": true,
-	}
-	// Waivers that survive, checked as present so an entry cannot be dropped without
-	// a deliberate edit here, and as the only rebuilt-path entries allowed, so the set
-	// cannot grow without one either. The bd and gc paths of the grpc pair were removed
-	// after both moved to 1.83.2; the gh and Dolt grpc paths (CVE-2026-84304,
-	// CVE-2026-84445) were removed once Dockerfile.base's own GRPC_VERSION also reached
-	// 1.83.2, clearing both CVEs for both binaries. The thrift entry (CVE-2026-43871)
-	// is gone entirely: Dockerfile.agent forced bd's thrift to 0.24.0 first, and
-	// Dockerfile.base's own THRIFT_VERSION has now followed for the Dolt rebuild, so
-	// no rebuilt path is waived for it and a regression below 0.24.0 fails the scan.
-	// Nothing rebuilt from source is waived here any more; only kubectl is, and
-	// kubectl is a prebuilt.
-	reviewedWaivers := map[string]map[string]bool{
-		"CVE-2026-56852": {
-			"usr/local/bin/kubectl": true,
-		},
-	}
-	foundReviewed := map[string]map[string]bool{}
-
-	for _, v := range doc.Vulnerabilities {
-		for _, p := range v.Paths {
-			if stdlibCVEs[v.ID] && rebuiltPaths[p] {
-				t.Errorf("%s still waives rebuilt tool %q for a Go-stdlib CVE the 1.26.5 rebuild clears; drop the path so the scan proves the fix stays effective", v.ID, p)
-			}
-			if allowedPaths, ok := reviewedWaivers[v.ID]; ok && allowedPaths[p] {
-				if foundReviewed[v.ID] == nil {
-					foundReviewed[v.ID] = map[string]bool{}
-				}
-				foundReviewed[v.ID][p] = true
-				continue
-			}
-			if rebuiltPaths[p] {
-				t.Errorf("%s waives rebuilt tool %q; Dockerfile.base forces the patched modules into the gh and Dolt builds and Dockerfile.agent forces bd's grpc and thrift forward, so move the module forward in that build instead of waiving the path", v.ID, p)
-			}
-		}
-	}
-	for cve, paths := range reviewedWaivers {
-		for path := range paths {
-			if !foundReviewed[cve][path] {
-				t.Errorf(".trivyignore.yaml must retain the reviewed %s waiver for %s until its pin moves past the fixed version", cve, path)
-			}
-		}
 	}
 }
 
@@ -652,30 +600,134 @@ func TestGoModPinsXModPastGCFinding(t *testing.T) {
 // these forward is a deliberate decision that belongs in this file's own horizon with
 // a statement to match, which is exactly the edit this test forces.
 func TestTrivyIgnoreKeepsReviewedBridgeEntries(t *testing.T) {
+	// An explicit empty sequence is a valid no-waiver policy. Missing or null
+	// configuration must still fail instead of silently parsing as no waivers.
+	// Exercise the expiry predicate independently of today's empty document.
+	validate := func(text string) []string {
+		var doc struct {
+			Vulnerabilities []struct {
+				ID        string `yaml:"id"`
+				ExpiredAt string `yaml:"expired_at"`
+			} `yaml:"vulnerabilities"`
+		}
+		if err := yaml.Unmarshal([]byte(text), &doc); err != nil {
+			return []string{fmt.Sprintf("parsing .trivyignore.yaml: %v", err)}
+		}
+		if doc.Vulnerabilities == nil {
+			return []string{".trivyignore.yaml must declare vulnerabilities as an explicit sequence"}
+		}
+
+		// ISO-8601 dates compare correctly as strings, so <= is "at or behind".
+		const bridgeHorizon = "2026-09-21"
+		var issues []string
+		for _, v := range doc.Vulnerabilities {
+			if v.ExpiredAt == "" {
+				issues = append(issues, fmt.Sprintf("%s has no expired_at; every waiver in this file is time-boxed", v.ID))
+				continue
+			}
+			if v.ExpiredAt <= bridgeHorizon {
+				issues = append(issues, fmt.Sprintf("%s expires %s, at or behind the retired bridge horizon %s; fix the finding as the bridge's own entries were, or move it to this file's horizon with a statement saying why", v.ID, v.ExpiredAt, bridgeHorizon))
+			}
+		}
+		return issues
+	}
+
+	for _, tc := range []struct {
+		name string
+		text string
+		want string
+	}{
+		{name: "explicit-empty", text: "vulnerabilities: []\n"},
+		{name: "reviewed-horizon", text: "vulnerabilities:\n  - id: CVE-test\n    expired_at: \"2026-10-30\"\n"},
+		{name: "missing-sequence", text: "{}\n", want: "explicit sequence"},
+		{name: "null-sequence", text: "vulnerabilities: null\n", want: "explicit sequence"},
+		{name: "malformed-yaml", text: "vulnerabilities: [\n", want: "parsing .trivyignore.yaml"},
+		{name: "wrong-sequence-type", text: "vulnerabilities: {}\n", want: "parsing .trivyignore.yaml"},
+		{name: "missing-expiry", text: "vulnerabilities:\n  - id: CVE-test\n", want: "has no expired_at"},
+		{name: "at-retired-horizon", text: "vulnerabilities:\n  - id: CVE-test\n    expired_at: \"2026-09-21\"\n", want: "at or behind the retired bridge horizon"},
+		{name: "before-retired-horizon", text: "vulnerabilities:\n  - id: CVE-test\n    expired_at: \"2026-09-20\"\n", want: "at or behind the retired bridge horizon"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			issues := validate(tc.text)
+			if tc.want == "" {
+				if len(issues) != 0 {
+					t.Fatalf("valid policy rejected: %s", strings.Join(issues, "\n"))
+				}
+				return
+			}
+			if !strings.Contains(strings.Join(issues, "\n"), tc.want) {
+				t.Fatalf("invalid policy yielded %v, want %q", issues, tc.want)
+			}
+		})
+	}
+
+	for _, issue := range validate(readFile(t, repoRoot(t), ".trivyignore.yaml")) {
+		t.Error(issue)
+	}
+}
+
+// Rebuilt suppliers must use the patched compiler as well as patched modules:
+// changing this repository's go.mod does not change their embedded Go stdlib.
+func TestContainerSupplierToolchainsAndBDXModules(t *testing.T) {
 	root := repoRoot(t)
-
-	var doc struct {
-		Vulnerabilities []struct {
-			ID        string `yaml:"id"`
-			ExpiredAt string `yaml:"expired_at"`
-		} `yaml:"vulnerabilities"`
-	}
-	if err := yaml.Unmarshal([]byte(readFile(t, root, ".trivyignore.yaml")), &doc); err != nil {
-		t.Fatalf("parsing .trivyignore.yaml: %v", err)
-	}
-	if len(doc.Vulnerabilities) == 0 {
-		t.Fatal(".trivyignore.yaml parsed to no entries; the guard below would pass vacuously")
-	}
-
-	// ISO-8601 dates compare correctly as strings, so <= is "at or behind".
-	const bridgeHorizon = "2026-09-21"
-	for _, v := range doc.Vulnerabilities {
-		if v.ExpiredAt == "" {
-			t.Errorf("%s has no expired_at; every waiver in this file is time-boxed", v.ID)
-			continue
+	const toolchain = "golang:1.26.9-bookworm@sha256:d9c68c2c51161e12fd77e4c6320687c9cd86e1af1e3ad6e6cd63ff970641453c"
+	for path, binaries := range map[string][]string{
+		"contrib/k8s/Dockerfile.base":       {"gh", "dolt"},
+		"contrib/k8s/Dockerfile.agent":      {"bd"},
+		"contrib/k8s/Dockerfile.controller": {"kubectl"},
+	} {
+		dockerfile := readFile(t, root, path)
+		if !strings.Contains(dockerfile, "FROM "+toolchain+" AS ") || !strings.Contains(dockerfile, "GOTOOLCHAIN=local") {
+			t.Errorf("%s must bind its supplier builder to the immutable patched compiler without automatic toolchain switching", path)
 		}
-		if v.ExpiredAt <= bridgeHorizon {
-			t.Errorf("%s expires %s, at or behind the retired bridge horizon %s; fix the finding as the bridge's own entries were, or move it to this file's horizon with a statement saying why", v.ID, v.ExpiredAt, bridgeHorizon)
+		for _, binary := range binaries {
+			want := `go version -m /out/` + binary + ` | grep -Fq "/out/` + binary + `: go1.26.9"`
+			if !strings.Contains(dockerfile, want) {
+				t.Errorf("%s must assert %s embeds patched Go; missing %q", path, binary, want)
+			}
 		}
+	}
+	agent := readFile(t, root, "contrib/k8s/Dockerfile.agent")
+	for module, arg := range map[string]string{"golang.org/x/net": "XNET_VERSION", "golang.org/x/crypto": "XCRYPTO_VERSION", "golang.org/x/text": "XTEXT_VERSION"} {
+		if !strings.Contains(agent, `"`+module+`@v${`+arg+`}"`) || !strings.Contains(agent, `go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep `+module+` v${`+arg+`} "`) {
+			t.Errorf("bd must both select and assert patched %s", module)
+		}
+	}
+	for _, want := range []string{"ARG XNET_VERSION=0.60.0", "ARG XCRYPTO_VERSION=0.57.0", "ARG XTEXT_VERSION=0.42.0"} {
+		if !strings.Contains(agent, want) {
+			t.Errorf("agent builder missing %q", want)
+		}
+	}
+}
+
+// Kubernetes' checked-in vendor/workspace graph must not bypass the patched
+// dependencies, and the rebuilt client must retain its official source identity.
+func TestControllerRebuildsSameKubectlRelease(t *testing.T) {
+	dockerfile := readFile(t, repoRoot(t), "contrib/k8s/Dockerfile.controller")
+	for _, want := range []string{
+		"ARG KUBECTL_VERSION=v1.36.3",
+		"ARG KUBECTL_SOURCE_REF=0f29094e5b73085e3802ecc1298ecae13866bfe6",
+		"ARG KUBECTL_SOURCE_SHA256=8877f821fe517fa5d00df5f88ce416f47ef279b85f5aba6eb1fa4a0da7511e72",
+		"ARG TARGETARCH", "GOWORK=off", "GOFLAGS=-mod=mod",
+		"ARG XNET_VERSION=0.60.0", "ARG XCRYPTO_VERSION=0.57.0", "ARG XTEXT_VERSION=0.42.0",
+		`https://github.com/kubernetes/kubernetes/archive/${KUBECTL_SOURCE_REF}.tar.gz`,
+		`echo "${KUBECTL_SOURCE_SHA256}  /tmp/kubectl-source.tar.gz" | sha256sum --check --strict`,
+		`CGO_ENABLED=0 GOOS=linux GOARCH="${TARGETARCH}" go build`,
+		`-X k8s.io/component-base/version.gitVersion=${KUBECTL_VERSION}`,
+		`-X k8s.io/component-base/version.gitCommit=${KUBECTL_SOURCE_REF}`,
+		`./cmd/kubectl`, `COPY --from=kubectl-builder /out/kubectl /usr/local/bin/kubectl`,
+		`/out/kubectl version --client --output=json`,
+	} {
+		if !strings.Contains(dockerfile, want) {
+			t.Errorf("controller builder missing %q", want)
+		}
+	}
+	for module, arg := range map[string]string{"golang.org/x/net": "XNET_VERSION", "golang.org/x/crypto": "XCRYPTO_VERSION", "golang.org/x/text": "XTEXT_VERSION"} {
+		if !strings.Contains(dockerfile, `"`+module+`@v${`+arg+`}"`) || !strings.Contains(dockerfile, `go version -m /out/kubectl | tr '\t' ' ' | grep -Fq "dep `+module+` v${`+arg+`} "`) {
+			t.Errorf("kubectl must both select and assert patched %s", module)
+		}
+	}
+	if strings.Contains(dockerfile, "https://dl.k8s.io/release/") {
+		t.Error("controller still installs a vulnerable prebuilt kubectl")
 	}
 }

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Bound a lint process group and retain its status and profile availability."""
 import argparse
+import ctypes
+import errno
 import json
 import math
 import os
@@ -11,10 +13,222 @@ import signal
 import subprocess
 import sys
 import time
+import threading
 
 
-def supervise(status_fd, command):
+STACK_INTERVAL = 120
+STACK_COUNT = 32
+STACK_BYTES = 1024 * 1024
+
+
+class ObservationCleanupError(OSError):
+    """An owned probe could not be killed and waited by its supervisor."""
+
+
+class DarwinBSDInfo(ctypes.Structure):
+    """Public proc_bsdinfo layout from Darwin's sys/proc_info.h."""
+    _fields_ = [(name, ctypes.c_uint32) for name in (
+        "flags", "status", "xstatus", "pid", "ppid", "uid", "gid", "ruid",
+        "rgid", "svuid", "svgid", "reserved",
+    )] + [("comm", ctypes.c_char * 16), ("name", ctypes.c_char * 32)] + [
+        (name, ctypes.c_uint32) for name in ("nfiles", "group", "jobc", "tdev", "tgroup")
+    ] + [("nice", ctypes.c_int32), ("start_seconds", ctypes.c_uint64),
+         ("start_microseconds", ctypes.c_uint64)]
+
+
+class DarwinProcesses:
+    """Read bounded group membership and kernel birth identity without children."""
+    def __init__(self):
+        if sys.platform != "darwin":
+            raise OSError("live stack observations require Darwin")
+        self.native = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+        self.native.proc_listpids.argtypes = [ctypes.c_uint32, ctypes.c_uint32,
+                                             ctypes.c_void_p, ctypes.c_int]
+        self.native.proc_listpids.restype = ctypes.c_int
+        self.native.proc_pidinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64,
+                                            ctypes.c_void_p, ctypes.c_int]
+        self.native.proc_pidinfo.restype = ctypes.c_int
+        self.native.proc_pidpath.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+        self.native.proc_pidpath.restype = ctypes.c_int
+
+    def group(self, group):
+        pids = (ctypes.c_int * 512)()
+        count = self.native.proc_listpids(2, group, pids, ctypes.sizeof(pids))
+        if count <= 0 or count >= ctypes.sizeof(pids) or count % ctypes.sizeof(ctypes.c_int):
+            raise OSError("group enumeration failed or exceeded its bounded buffer")
+        return [pid for pid in pids[:count // ctypes.sizeof(ctypes.c_int)] if pid > 0]
+
+    def identity(self, pid):
+        info = DarwinBSDInfo()
+        count = self.native.proc_pidinfo(pid, 3, 0, ctypes.byref(info), ctypes.sizeof(info))
+        if count != ctypes.sizeof(info):
+            if count == 0 and ctypes.get_errno() == errno.ESRCH:
+                return None
+            raise OSError("kernel process identity unavailable or incomplete")
+        path = ctypes.create_string_buffer(4096)
+        if self.native.proc_pidpath(pid, path, len(path)) <= 0:
+            if ctypes.get_errno() == errno.ESRCH:
+                return None
+            raise OSError("kernel executable identity unavailable")
+        return {"pid": info.pid, "group": info.group,
+                "birth_microseconds": info.start_seconds * 1000000 + info.start_microseconds,
+                "executable": os.fsdecode(path.value)}
+
+
+def capture_observation(command, deadline, limit, stopped):
+    """Bound output and lifetime, and wait our direct observation child."""
+    report = {"pid": None, "raw_exit": None, "reaped": True,
+              "truncated": False, "timed_out": False, "cancelled": False}
+    output = bytearray()
+    if stopped() or time.monotonic() >= deadline:
+        report["cancelled"] = stopped()
+        report["timed_out"] = not report["cancelled"]
+        return report, bytes(output)
+    child = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    report.update(pid=child.pid, group=os.getpgrp(), reaped=False)
+    try:
+        while True:
+            report["cancelled"] = stopped()
+            report["timed_out"] = time.monotonic() >= deadline
+            if report["cancelled"] or report["timed_out"]:
+                break
+            ready, _, _ = select.select([child.stdout], [], [], max(0, min(.1, deadline-time.monotonic())))
+            if not ready:
+                continue
+            chunk = os.read(child.stdout.fileno(), min(65536, limit-len(output)+1))
+            if not chunk:
+                try:
+                    child.wait(timeout=max(.01, min(.25, deadline-time.monotonic())))
+                except subprocess.TimeoutExpired:
+                    report["timed_out"] = True
+                break
+            room = limit-len(output)
+            output.extend(chunk[:room])
+            if len(chunk) > room:
+                report["truncated"] = True
+                break
+    finally:
+        # The live/unreaped Popen PID remains our direct child until this wait.
+        try:
+            if child.poll() is None:
+                child.kill()
+            report["raw_exit"] = child.wait(timeout=2)
+            report["reaped"] = True
+        except (OSError, subprocess.TimeoutExpired) as failure:
+            raise ObservationCleanupError(f"probe {child.pid} cleanup unconfirmed: {failure}") from failure
+        finally:
+            child.stdout.close()
+    return report, bytes(output)
+
+
+def stack_observation(processes, group, executable, directory, index, deadline, stopped):
+    """Sample one verified owned linter; reject birth changes before and after."""
+    record = {"index": index, "monotonic": time.monotonic(), "usable": False}
+    targets = []
+    for pid in processes.group(group):
+        identity = processes.identity(pid)
+        if identity and identity["group"] == group and identity["executable"] == executable:
+            targets.append(identity)
+    if len(targets) != 1:
+        record["state"] = "no-owned-target" if not targets else "ambiguous-target"
+        return record
+    target = targets[0]
+    record["target_before"] = target
+    record["memory"], memory = capture_observation(
+        ["/usr/bin/vm_stat"], min(deadline, time.monotonic()+1), 16384, stopped)
+    (directory / f"vm-{index:02d}.txt").write_bytes(memory)
+    if processes.identity(target["pid"]) != target:
+        record["state"] = "identity-changed-before-sample"
+        return record
+    # Redirect sample's documented -file output to its captured pipe. Without
+    # -file it also creates an uncontrolled report in /tmp.
+    record["sample"], output = capture_observation(
+        ["/usr/bin/sample", str(target["pid"]), "5", "10", "-file", "/dev/stdout"],
+        min(deadline, time.monotonic()+6), STACK_BYTES, stopped)
+    (directory / f"stack-{index:02d}.txt").write_bytes(output)
+    record["target_after"] = processes.identity(target["pid"])
+    same_identity = record["target_after"] == target
+    report = record["sample"]
+    record["usable"] = same_identity and bool(output) and report["raw_exit"] == 0 and not any(
+        report[name] for name in ("truncated", "timed_out", "cancelled"))
+    record["state"] = "observed" if same_identity else "identity-changed-after-sample"
+    return record
+
+
+def supervise_with_observations(status_fd, command, options):
+    """Extend the existing held leader, owning and waiting every probe child."""
+    stopped = False
+
+    def stop(_signum, _frame):
+        nonlocal stopped
+        stopped = True
+
+    signal.signal(signal.SIGUSR1, stop)
+
+    def report(message):
+        os.write(status_fd, (json.dumps(message)+"\n").encode())
+
+    report({"kind": "ready"})
+    directory = Path(options["directory"])
+    deadline = options["deadline"]
+    data = {"group": os.getpgrp(), "interval_seconds": STACK_INTERVAL,
+            "max_attempts": STACK_COUNT, "max_sample_bytes": STACK_BYTES,
+            "attempts": [], "error": None}
+    complete = True
+    child = None
+    command_done = threading.Event()
+    waiter = None
+
+    def await_command():
+        # Exactly one waiter retains the original command outcome. A probe
+        # cannot delay this verdict or consume the command's deadline budget.
+        raw_exit = child.wait()
+        report({"kind": "command", "raw_exit": raw_exit})
+        command_done.set()
+
+    try:
+        child = subprocess.Popen(command)
+        waiter = threading.Thread(target=await_command, daemon=True)
+        waiter.start()
+        processes = DarwinProcesses()
+        next_sample = time.monotonic()+min(2, STACK_INTERVAL)
+        while not stopped and not command_done.is_set() and time.monotonic() < deadline:
+            if time.monotonic() >= next_sample and len(data["attempts"]) < STACK_COUNT:
+                data["attempts"].append(stack_observation(
+                    processes, os.getpgrp(), options["executable"], directory,
+                    len(data["attempts"])+1, deadline, lambda: stopped or command_done.is_set()))
+                (directory/"stack-samples.json").write_text(json.dumps(data, indent=2)+"\n")
+                next_sample += STACK_INTERVAL
+            time.sleep(.1)
+    except (OSError, subprocess.TimeoutExpired) as failure:
+        data["error"] = str(failure)
+        # A failed wait cannot be replaced by successful group cleanup later.
+        complete = not isinstance(failure, (subprocess.TimeoutExpired, ObservationCleanupError))
+        if child is None:
+            report({"kind": "command", "raw_exit": 125, "error": str(failure)})
+        else:
+            # Stop diagnostics on failure; continue to retain the real verdict.
+            while not stopped and not command_done.is_set() and time.monotonic() < deadline:
+                time.sleep(.1)
+    finally:
+        try:
+            (directory/"stack-samples.json").write_text(json.dumps(data, indent=2)+"\n")
+        except OSError as failure:
+            data["error"] = str(failure)
+        if command_done.is_set():
+            waiter.join()
+        report({"kind": "stack_cleanup", "complete": complete, "error": data["error"]})
+        # A live command waiter still owns this FD. Keep it with the held
+        # leader; the outer group's final kill closes it without FD reuse.
+    # Keep the original group identity reserved until the outer owner kills it.
+    while True:
+        signal.pause()
+
+
+def supervise(status_fd, command, options=None):
     """Hold an unreaped group leader until the operator terminates the group."""
+    if options is not None:
+        return supervise_with_observations(status_fd, command, options)
     try:
         child = subprocess.Popen(command)
         status = {"raw_exit": child.wait()}
@@ -28,7 +242,7 @@ def supervise(status_fd, command):
         signal.pause()
 
 
-def run(command, deadline, directory):
+def run(command, deadline, directory, sample_executable=None):
     started = time.monotonic()
     directory.mkdir(parents=True, exist_ok=True)
     process = None
@@ -38,6 +252,10 @@ def run(command, deadline, directory):
     cleanup = "not-launched"
     error = None
     cancellation = None
+    raw_exit = None
+    stack_ready = False
+    stack_cleanup = None
+    message = b""
 
     def interrupt(signum, _frame):
         nonlocal cancellation
@@ -52,7 +270,9 @@ def run(command, deadline, directory):
             # Popen cannot discard the handle to a newly launched group.
             process = subprocess.Popen(
                 [sys.executable, str(Path(__file__).resolve()), "--supervise",
-                 str(status_write), *command],
+                 str(status_write), json.dumps({"deadline": deadline, "directory": str(directory),
+                                                 "executable": sample_executable}) if sample_executable else "null",
+                 *command],
                 start_new_session=True, pass_fds=(status_write,),
             )
             os.close(status_write)
@@ -76,11 +296,21 @@ def run(command, deadline, directory):
                     exit_code = 125
                     break
                 message += chunk
-                if b"\n" in message:
-                    status = json.loads(message)
-                    raw_exit = status["raw_exit"]
-                    exit_code = raw_exit if raw_exit >= 0 else 128 - raw_exit
-                    error = status.get("error")
+                command_complete = False
+                while b"\n" in message:
+                    line, message = message.split(b"\n", 1)
+                    status = json.loads(line)
+                    kind = status.get("kind", "command")
+                    if kind == "ready":
+                        stack_ready = True
+                    elif kind == "stack_cleanup":
+                        stack_cleanup = status
+                    elif kind == "command":
+                        raw_exit = status["raw_exit"]
+                        exit_code = raw_exit if raw_exit >= 0 else 128 - raw_exit
+                        error = status.get("error")
+                        command_complete = True
+                if command_complete:
                     break
     except OSError as failure:
         error = str(failure)
@@ -90,6 +320,39 @@ def run(command, deadline, directory):
             # Never poll/wait the leader before signaling: its reserved PID
             # prevents reuse of this group identity, even if it crashed.
             try:
+                try:
+                    if sample_executable:
+                        # Request probe cleanup only after the leader installed its
+                        # handler. Do not reap that leader or release its identity.
+                        cleanup_deadline = time.monotonic()+3
+                        stop_sent = False
+                        while stack_cleanup is None and time.monotonic() < cleanup_deadline:
+                            if stack_ready and not stop_sent:
+                                os.kill(process.pid, signal.SIGUSR1)
+                                stop_sent = True
+                            while b"\n" in message:
+                                line, message = message.split(b"\n", 1)
+                                status = json.loads(line)
+                                if status.get("kind") == "ready":
+                                    stack_ready = True
+                                elif status.get("kind") == "stack_cleanup":
+                                    stack_cleanup = status
+                                elif status.get("kind") == "command":
+                                    raw_exit = status["raw_exit"]
+                            if stack_cleanup is not None:
+                                break
+                            ready, _, _ = select.select([status_read], [], [], .1)
+                            if ready:
+                                chunk = os.read(status_read, 4096)
+                                if not chunk:
+                                    break
+                                message += chunk
+                        if stack_cleanup is None or not stack_cleanup["complete"]:
+                            error = "observation child cleanup unconfirmed"
+                            exit_code = 125
+                except (OSError, ValueError) as failure:
+                    error = f"observation stop handshake failed: {failure}"
+                    exit_code = 125
                 try:
                     os.killpg(process.pid, signal.SIGKILL)
                 except ProcessLookupError:
@@ -122,7 +385,7 @@ def run(command, deadline, directory):
             "elapsed_seconds": time.monotonic() - started,
             "deadline": deadline, "profiles": profiles,
             "profiles_complete": exit_code == 0 and profiles_nonempty,
-            "error": error,
+            "error": error, "command_raw_exit": raw_exit, "stack_cleanup": stack_cleanup,
             "max_rss": resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss,
             "max_rss_units": "bytes" if sys.platform == "darwin" else "KiB",
         }
@@ -137,16 +400,23 @@ def main():
     parser.add_argument("--deadline", required=True, type=float,
                         help="absolute time.monotonic deadline, captured before job setup")
     parser.add_argument("--profile-dir", required=True, type=Path)
+    parser.add_argument("--sample-executable", type=Path,
+                        help="opt in to bounded Darwin samples of this owned linter executable")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
     if not command or not math.isfinite(args.deadline):
         parser.error("a finite deadline and command are required")
-    return run(command, args.deadline, args.profile_dir)
+    executable = None
+    if args.sample_executable is not None:
+        if sys.platform != "darwin" or not args.sample_executable.is_absolute():
+            parser.error("sampling requires Darwin and an absolute linter executable")
+        executable = str(args.sample_executable.resolve(strict=True))
+    return run(command, args.deadline, args.profile_dir, executable)
 
 
 if __name__ == "__main__":
     if sys.argv[1:2] == ["--supervise"]:
-        supervise(int(sys.argv[2]), sys.argv[3:])
+        supervise(int(sys.argv[2]), sys.argv[4:], json.loads(sys.argv[3]))
     else:
         sys.exit(main())

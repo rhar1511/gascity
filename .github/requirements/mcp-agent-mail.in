@@ -60,3 +60,7 @@ mcp>=1.28.1
 # Authlib and FastMCP security floors live in
 # .github/requirements/mcp-agent-mail.overrides.txt because mcp-agent-mail
 # v0.3.2 still caps Authlib below the fixed release.
+
+# Security floor: CVE-2026-104851 affects fsspec < 2026.6.0. Keep this
+# explicit until huggingface-hub carries the patched release transitively.
+fsspec>=2026.6.0
