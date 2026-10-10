@@ -20,9 +20,13 @@ go_test(
     srcs = [
         "catalog_test.go",
         "server_test.go",
+        "testenv_import_test.go",
     ],
     embed = [":mcpskills"],
-    deps = ["@com_github_modelcontextprotocol_go_sdk//mcp"],
+    deps = [
+        "//internal/testenv",
+        "@com_github_modelcontextprotocol_go_sdk//mcp",
+    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

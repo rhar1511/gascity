@@ -72,6 +72,7 @@ go_library(
         "assets/scripts/scope_bd.sh",
         "formulas/mol-rsi-candidate.toml",
         "formulas/mol-software-factory.toml",
+        "skills/gc-factory/SKILL.md",
     ],
     importpath = "github.com/gastownhall/gascity/internal/bootstrap/packs/core",
     visibility = ["//:__subpackages__"],
