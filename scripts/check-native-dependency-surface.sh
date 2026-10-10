@@ -11,7 +11,12 @@ set -euo pipefail
 # pulled through by the google.golang.org/api bump MVS forced alongside it. None
 # of the OpenAPI stack links into gc -- only bd's internal/httpapi/apigen imports
 # it, which the root beads package never reaches.
-max_modules="${GC_NATIVE_DEP_MAX_MODULES:-737}"
+# Human-approved 2026-10-10 MCP SDK budget: exact baseline 737 -> 741.
+# Four additions: modelcontextprotocol/go-sdk v1.8.0, google/jsonschema-go
+# v0.4.3, segmentio/encoding v0.5.4 and segmentio/asm v1.1.3. They serve the
+# opt-in standalone contrib/mcp-skills adapter; none links into cmd/gc.
+# All vendor-family caps and the native binary-size cap stay unchanged.
+max_modules="${GC_NATIVE_DEP_MAX_MODULES:-741}"
 # max_binary_bytes re-baselined 2026-09-27 (gp-olwhg.9). Matching Go 1.26.6
 # CGO_ENABLED=0 builds with -trimpath -buildvcs=false measured 177,910,874
 # bytes at fork baseline 284fd816f and 180,252,726 at 18943f295. The latter
