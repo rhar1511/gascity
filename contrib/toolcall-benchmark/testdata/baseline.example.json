@@ -1,0 +1,220 @@
+{
+  "suite_sha256": "ca5ce0ea9a3e9b706e4268cc7cbe88e835800a03e1e3384c4437137d9ca3f209",
+  "bundle_id": "synthetic-baseline",
+  "captured_by": "synthetic-fixture-author",
+  "proposals": [
+    {
+      "case_id": "cli-flags",
+      "action": "call",
+      "cost": {
+        "calls": 0,
+        "tokens": 0,
+        "duration_ms": 0
+      },
+      "call": {
+        "kind": "cli",
+        "target": "gc",
+        "working_dir": "/work/bead-42",
+        "arguments": [
+          "status",
+          "--everything"
+        ]
+      }
+    },
+    {
+      "case_id": "cli-cwd",
+      "action": "call",
+      "cost": {
+        "calls": 0,
+        "tokens": 0,
+        "duration_ms": 0
+      },
+      "call": {
+        "kind": "cli",
+        "target": "go",
+        "working_dir": "/city/rig",
+        "arguments": [
+          "test",
+          "./internal/config"
+        ]
+      }
+    },
+    {
+      "case_id": "cli-tool",
+      "action": "call",
+      "cost": {
+        "calls": 0,
+        "tokens": 0,
+        "duration_ms": 0
+      },
+      "call": {
+        "kind": "cli",
+        "target": "bd",
+        "working_dir": "/work/bead-42",
+        "arguments": [
+          "list"
+        ]
+      }
+    },
+    {
+      "case_id": "cli-capability",
+      "action": "call",
+      "cost": {
+        "calls": 0,
+        "tokens": 0,
+        "duration_ms": 0
+      },
+      "call": {
+        "kind": "cli",
+        "target": "gc",
+        "working_dir": "/work/bead-42",
+        "arguments": [
+          "worktree",
+          "mount"
+        ]
+      }
+    },
+    {
+      "case_id": "cli-prerequisite",
+      "action": "call",
+      "cost": {
+        "calls": 0,
+        "tokens": 0,
+        "duration_ms": 0
+      },
+      "call": {
+        "kind": "cli",
+        "target": "go",
+        "working_dir": "/work/bead-42",
+        "arguments": [
+          "build",
+          "./cmd/gc"
+        ]
+      }
+    },
+    {
+      "case_id": "mcp-arguments",
+      "action": "call",
+      "cost": {
+        "calls": 0,
+        "tokens": 0,
+        "duration_ms": 0
+      },
+      "call": {
+        "kind": "mcp",
+        "target": "beads/show",
+        "working_dir": "/work/bead-42",
+        "arguments": {
+          "bead": "bead-42"
+        }
+      }
+    },
+    {
+      "case_id": "mcp-capability",
+      "action": "call",
+      "cost": {
+        "calls": 0,
+        "tokens": 0,
+        "duration_ms": 0
+      },
+      "call": {
+        "kind": "mcp",
+        "target": "resources/readDirectory",
+        "working_dir": "/work/bead-42",
+        "arguments": {
+          "uri": "skill://team/example/"
+        }
+      }
+    },
+    {
+      "case_id": "skill-digest",
+      "action": "call",
+      "cost": {
+        "calls": 0,
+        "tokens": 0,
+        "duration_ms": 0
+      },
+      "call": {
+        "kind": "skill",
+        "target": "team/research",
+        "working_dir": "/work/bead-42",
+        "arguments": {
+          "uri": "skill://team/research/SKILL.md",
+          "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      }
+    },
+    {
+      "case_id": "skill-selection",
+      "action": "call",
+      "cost": {
+        "calls": 0,
+        "tokens": 0,
+        "duration_ms": 0
+      },
+      "call": {
+        "kind": "skill",
+        "target": "team/deploy",
+        "working_dir": "/work/bead-42",
+        "arguments": {
+          "uri": "skill://team/deploy/SKILL.md",
+          "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        }
+      }
+    },
+    {
+      "case_id": "denied-retry",
+      "action": "call",
+      "cost": {
+        "calls": 0,
+        "tokens": 0,
+        "duration_ms": 0
+      },
+      "call": {
+        "kind": "cli",
+        "target": "deploy",
+        "working_dir": "/work/bead-42",
+        "arguments": [
+          "--alternate-credentials"
+        ]
+      }
+    },
+    {
+      "case_id": "cli-valid",
+      "action": "call",
+      "cost": {
+        "calls": 0,
+        "tokens": 0,
+        "duration_ms": 0
+      },
+      "call": {
+        "kind": "cli",
+        "target": "gc",
+        "working_dir": "/work/bead-42",
+        "arguments": [
+          "status"
+        ]
+      }
+    },
+    {
+      "case_id": "mcp-valid",
+      "action": "call",
+      "cost": {
+        "calls": 0,
+        "tokens": 0,
+        "duration_ms": 0
+      },
+      "call": {
+        "kind": "mcp",
+        "target": "records/query",
+        "working_dir": "/work/bead-42",
+        "arguments": {
+          "filter": {
+            "active": true
+          },
+          "limit": 10
+        }
+      }
+    }
+  ]
+}
