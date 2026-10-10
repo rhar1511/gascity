@@ -359,7 +359,7 @@ run_fan_out() {
     GOWORK="${GOWORK-}" \
     BEADS_TEST_BD_BINARY="${BEADS_TEST_BD_BINARY-}" \
     BEADS_TEST_DOLT_BINARY="${BEADS_TEST_DOLT_BINARY-}" \
-    bash -lc "$command" >"$log" 2>&1; then
+    bash -c "$command" >"$log" 2>&1; then
     echo "[$label] ok"
   else
     status=$?
