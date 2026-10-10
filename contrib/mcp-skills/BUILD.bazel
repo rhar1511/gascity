@@ -1,0 +1,44 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
+
+go_library(
+    name = "mcp-skills_lib",
+    srcs = ["main.go"],
+    importpath = "github.com/gastownhall/gascity/contrib/mcp-skills",
+    visibility = ["//visibility:private"],
+    deps = [
+        "//internal/mcpskills",
+        "@com_github_modelcontextprotocol_go_sdk//mcp",
+    ],
+)
+
+go_binary(
+    name = "mcp-skills",
+    embed = [":mcp-skills_lib"],
+    visibility = ["//visibility:public"],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "mcp-skills_test",
+    srcs = [
+        "main_test.go",
+        "testenv_import_test.go",
+    ],
+    data = ["gascity-skills.toml.example"],
+    embed = [":mcp-skills_lib"],
+    deps = [
+        "//internal/materialize",
+        "//internal/testenv",
+    ],
+)

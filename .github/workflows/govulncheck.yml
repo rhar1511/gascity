@@ -121,7 +121,12 @@ jobs:
           # "error", imported-not-called is "warning", required-not-imported is
           # "note". Code Scanning ranks them accordingly instead of flattening
           # everything into one undifferentiated pile of alerts.
-          govulncheck -format sarif ./... > govulncheck-results/govulncheck.sarif
+          govulncheck -format sarif ./... > govulncheck-results/govulncheck.raw.sarif
+          python3 -m unittest discover -s scripts/tests -p test_normalize_govulncheck_sarif.py
+          # Preserve every finding and distinct trace. The scanner can emit exact
+          # duplicate stacks, which violate SARIF uniqueItems during upload.
+          python3 scripts/normalize-govulncheck-sarif.py \
+            govulncheck-results/govulncheck.raw.sarif govulncheck-results/govulncheck.sarif
 
       - name: Upload SARIF results
         # Forks do not get security-events: write, so skip rather than fail there.
@@ -136,7 +141,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: govulncheck-sarif
-          path: govulncheck-results/govulncheck.sarif
+          path: govulncheck-results/*.sarif
           retention-days: 5
 
       - name: Summarize findings and enforce reachable vulnerability policy

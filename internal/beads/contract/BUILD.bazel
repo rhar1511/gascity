@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "backend_bundle.go",
         "backend_registry.go",
+        "config_layers.go",
         "connection.go",
         "files.go",
         "identity.go",
@@ -32,6 +33,7 @@ go_test(
     name = "contract_test",
     srcs = [
         "backend_registry_test.go",
+        "config_overlay_test.go",
         "connection_bd_external_binding_test.go",
         "connection_bd_owned_direct_binding_test.go",
         "connection_bd_owned_server_test.go",

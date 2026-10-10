@@ -1,0 +1,42 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "mcpskills",
+    srcs = [
+        "catalog.go",
+        "server.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/mcpskills",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "@com_github_modelcontextprotocol_go_sdk//jsonrpc",
+        "@com_github_modelcontextprotocol_go_sdk//mcp",
+        "@in_gopkg_yaml_v3//:yaml_v3",
+    ],
+)
+
+go_test(
+    name = "mcpskills_test",
+    srcs = [
+        "catalog_test.go",
+        "server_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":mcpskills"],
+    deps = [
+        "//internal/testenv",
+        "@com_github_modelcontextprotocol_go_sdk//mcp",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
