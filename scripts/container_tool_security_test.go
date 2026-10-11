@@ -722,12 +722,59 @@ func TestControllerRebuildsSameKubectlRelease(t *testing.T) {
 			t.Errorf("controller builder missing %q", want)
 		}
 	}
-	for module, arg := range map[string]string{"golang.org/x/net": "XNET_VERSION", "golang.org/x/crypto": "XCRYPTO_VERSION", "golang.org/x/text": "XTEXT_VERSION"} {
+	for module, arg := range map[string]string{"golang.org/x/net": "XNET_VERSION", "golang.org/x/text": "XTEXT_VERSION"} {
 		if !strings.Contains(dockerfile, `"`+module+`@v${`+arg+`}"`) || !strings.Contains(dockerfile, `go version -m /out/kubectl | tr '\t' ' ' | grep -Fq "dep `+module+` v${`+arg+`} "`) {
 			t.Errorf("kubectl must both select and assert patched %s", module)
 		}
 	}
+	for _, want := range []string{
+		`"golang.org/x/crypto@v${XCRYPTO_VERSION}"`,
+		`test "$(go list -m -f '{{if .Replace}}replaced{{else}}{{.Version}}{{end}}' golang.org/x/crypto)" = "v${XCRYPTO_VERSION}"`,
+		`go version -m /out/kubectl > /out/kubectl.buildinfo`,
+	} {
+		if !strings.Contains(dockerfile, want) {
+			t.Errorf("controller must verify selected crypto and any embedded crypto; missing %q", want)
+		}
+	}
 	if strings.Contains(dockerfile, "https://dl.k8s.io/release/") {
 		t.Error("controller still installs a vulnerable prebuilt kubectl")
+	}
+}
+
+// The crypto module is selected by Kubernetes but is not linked into kubectl.
+// Exercise the shipped predicate: absence is safe, an embedded wrong version
+// or a replacement is not. Merely checking Dockerfile text missed this failure.
+func TestControllerEmbeddedCryptoVersion(t *testing.T) {
+	dockerfile := readFile(t, repoRoot(t), "contrib/k8s/Dockerfile.controller")
+	const prefix = `awk -v expected="v${XCRYPTO_VERSION}" '`
+	_, rest, ok := strings.Cut(dockerfile, prefix)
+	if !ok {
+		t.Fatal("controller is missing the embedded crypto version predicate")
+	}
+	program, _, ok := strings.Cut(rest, `' /out/kubectl.buildinfo`)
+	if !ok {
+		t.Fatal("controller crypto predicate is not bound to actual binary metadata")
+	}
+	for _, tc := range []struct {
+		name string
+		info string
+		pass bool
+	}{
+		{"not-linked", "dep\tgolang.org/x/net\tv0.60.0\th1:net\n", true},
+		{"patched", "dep\tgolang.org/x/crypto\tv0.57.0\th1:crypto\n", true},
+		{"vulnerable", "dep\tgolang.org/x/crypto\tv0.47.0\th1:old\n", false},
+		{"missing-version", "dep\tgolang.org/x/crypto\n", false},
+		{"replaced", "dep\tgolang.org/x/crypto\tv0.57.0\n=>\tgolang.org/x/crypto\tv0.47.0\th1:old\n", false},
+		{"local-replacement", "dep\tgolang.org/x/crypto\tv0.57.0\n=>\t../crypto\t(devel)\n", false},
+		{"duplicate-wrong", "dep\tgolang.org/x/crypto\tv0.57.0\nhdep\tother\tv1\ndep\tgolang.org/x/crypto\tv0.47.0\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := testCommand("awk", "-v", "expected=v0.57.0", program)
+			cmd.Stdin = strings.NewReader(tc.info)
+			out, err := cmd.CombinedOutput()
+			if (err == nil) != tc.pass {
+				t.Fatalf("embedded crypto verdict: err=%v output=%s want pass=%v", err, out, tc.pass)
+			}
+		})
 	}
 }

@@ -38,8 +38,12 @@ RUN mkdir -p /src/kubernetes /out \
     && rm -f /tmp/kubectl-source.tar.gz
 
 WORKDIR /src/kubernetes
+# Kubernetes selects x/crypto even though kubectl does not link its packages.
+# Check the selected pin and reject replacements; if crypto becomes linked,
+# its binary metadata must also carry that exact patched version.
 RUN case "${TARGETARCH}" in amd64|arm64) ;; *) echo "unsupported target architecture: ${TARGETARCH}" >&2; exit 1 ;; esac \
     && go get "golang.org/x/net@v${XNET_VERSION}" "golang.org/x/crypto@v${XCRYPTO_VERSION}" "golang.org/x/text@v${XTEXT_VERSION}" \
+    && test "$(go list -m -f '{{if .Replace}}replaced{{else}}{{.Version}}{{end}}' golang.org/x/crypto)" = "v${XCRYPTO_VERSION}" \
     && CGO_ENABLED=0 GOOS=linux GOARCH="${TARGETARCH}" go build \
        -trimpath \
        -ldflags="-s -w -X k8s.io/component-base/version.gitVersion=${KUBECTL_VERSION} -X k8s.io/component-base/version.gitCommit=${KUBECTL_SOURCE_REF} -X k8s.io/component-base/version.gitTreeState=dirty -X k8s.io/component-base/version.gitMajor=1 -X k8s.io/component-base/version.gitMinor=36 -X k8s.io/component-base/version.buildDate=${KUBECTL_BUILD_DATE}" \
@@ -48,7 +52,8 @@ RUN case "${TARGETARCH}" in amd64|arm64) ;; *) echo "unsupported target architec
     && /out/kubectl version --client --output=json | grep -Fq "\"gitCommit\": \"${KUBECTL_SOURCE_REF}\"" \
     && go version -m /out/kubectl | grep -Fq "/out/kubectl: go1.26.9" \
     && go version -m /out/kubectl | tr '\t' ' ' | grep -Fq "dep golang.org/x/net v${XNET_VERSION} " \
-    && go version -m /out/kubectl | tr '\t' ' ' | grep -Fq "dep golang.org/x/crypto v${XCRYPTO_VERSION} " \
+    && go version -m /out/kubectl > /out/kubectl.buildinfo \
+    && awk -v expected="v${XCRYPTO_VERSION}" '$1 == "dep" && $2 == "golang.org/x/crypto" { if ($3 != expected) exit 1; crypto = 1; next } crypto && $1 == "=>" { exit 1 } { crypto = 0 }' /out/kubectl.buildinfo \
     && go version -m /out/kubectl | tr '\t' ' ' | grep -Fq "dep golang.org/x/text v${XTEXT_VERSION} "
 
 FROM ${BASE}
