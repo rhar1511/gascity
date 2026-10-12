@@ -394,11 +394,19 @@ func (s *BdStore) UpdateIfMatch(id string, expectedRevision int64, opts UpdateOp
 	if err := validateConditionalUpdateOpts(opts); err != nil {
 		return fmt.Errorf("conditional update %s: %w", id, err)
 	}
-	if bdUpdateMayReopenOrClearLifecycleEvidence(opts) {
-		current, err := s.Get(id)
-		if err != nil {
-			return err
+	if !s.privateEvidenceHTTPConfigured {
+		if capable, _ := s.conditionalWritesCapable(); !capable {
+			return ErrConditionalWriteUnsupported
 		}
+	}
+	current, err := s.Get(id)
+	if err != nil {
+		return err
+	}
+	if !hasRevisionToken(current) {
+		return ErrConditionalWriteUnsupported
+	}
+	if bdUpdateMayReopenOrClearLifecycleEvidence(opts) {
 		if err := ValidateLifecycleMutation(current, opts); err != nil {
 			return fmt.Errorf("conditional update lifecycle bead %q: %w", id, err)
 		}
@@ -407,15 +415,18 @@ func (s *BdStore) UpdateIfMatch(id string, expectedRevision int64, opts UpdateOp
 }
 
 // updateIfMatchAtRevision is the single bd update CAS path. Callers that have
-// just read and validated a lifecycle-sensitive snapshot pass its exact
-// positive revision here; an unsupported capability or stale revision never
+// just read and validated a lifecycle-sensitive snapshot pass its
+// exact opaque revision here; an unsupported capability or stale revision never
 // falls back to an unconditional update.
 func (s *BdStore) updateIfMatchAtRevision(id string, expectedRevision int64, opts UpdateOpts) error {
-	if expectedRevision <= 0 {
-		return ErrConditionalWriteUnsupported
-	}
+	// Callers validate token presence on the same detail snapshot used for
+	// lifecycle checks. This explicitly supplied guard may be zero or negative;
+	// it is never renewed to the revision read during preflight or retry.
 	if err := validateConditionalUpdateOpts(opts); err != nil {
 		return fmt.Errorf("conditional update %s: %w", id, err)
+	}
+	if s.privateEvidenceHTTPConfigured {
+		return s.updateIssueIfMatchHTTP(id, expectedRevision, opts)
 	}
 	if capable, _ := s.conditionalWritesCapable(); !capable {
 		return ErrConditionalWriteUnsupported
@@ -440,6 +451,9 @@ func (s *BdStore) CloseIfMatch(id string, expectedRevision int64) error {
 	if err != nil {
 		return err
 	}
+	if !hasRevisionToken(current) {
+		return ErrConditionalWriteUnsupported
+	}
 	if current.Revision == expectedRevision && HasLifecycleRecoveryIntent(current) {
 		return ErrLifecycleIntentImmutable
 	}
@@ -455,6 +469,9 @@ func (s *BdStore) DeleteIfMatch(id string, expectedRevision int64) error {
 	current, err := s.Get(id)
 	if err != nil {
 		return err
+	}
+	if !hasRevisionToken(current) {
+		return ErrConditionalWriteUnsupported
 	}
 	if current.Revision == expectedRevision {
 		if err := protectRetainedEvidenceDelete(current); err != nil {
@@ -512,7 +529,14 @@ func (s *BdStore) runConditionalWrite(id string, expectedRevision int64, args ..
 			break
 		}
 		if isBdTransientWriteError(err) && attempt < conditionalWriteMaxAttempts {
-			if cur, getErr := s.Get(id); getErr == nil && cur.Revision != expectedRevision {
+			cur, getErr := s.Get(id)
+			if getErr != nil {
+				return getErr
+			}
+			if !hasRevisionToken(cur) {
+				return ErrConditionalWriteUnsupported
+			}
+			if cur.Revision != expectedRevision {
 				return s.finalizeConditionalWrite(id, verb, expectedRevision,
 					&PreconditionFailedError{Current: cur.Revision})
 			}
@@ -589,7 +613,7 @@ func (s *BdStore) CompareAndSetMetadataKey(id, key, expected, next string) (bool
 		if err := ValidateLifecycleMutation(b, UpdateOpts{Metadata: map[string]string{key: next}}); err != nil {
 			return false, err
 		}
-		if b.Revision <= 0 {
+		if !hasRevisionToken(b) {
 			return false, ErrConditionalWriteUnsupported
 		}
 		// Build the fenced set through bdUpdateArgs so the metadata write carries

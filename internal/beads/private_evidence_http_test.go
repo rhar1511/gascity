@@ -29,13 +29,13 @@ func privateEvidenceTokenFile(t *testing.T) string {
 	return path
 }
 
-func privateEvidenceHTTPStore(t *testing.T, endpoint string) *BdStore {
+func privateEvidenceHTTPStore(t *testing.T) *BdStore {
 	t.Helper()
 	return NewBdStore(t.TempDir(), func(_, _ string, _ ...string) ([]byte, error) {
 		t.Fatal("private evidence HTTP path invoked bd command runner")
 		return nil, nil
 	}, WithBdStorePrivateEvidenceHTTP(PrivateEvidenceHTTPConfig{
-		Endpoint:  endpoint,
+		Endpoint:  "http://127.0.0.1:1",
 		ProjectID: "project-a",
 		Database:  "gc_fixture",
 		ScopeRef:  "rig:fixture",
@@ -187,7 +187,7 @@ func TestBdStorePrivateEvidenceCASPreservesAbsentEmptyAndNull(t *testing.T) {
 				}
 			})
 
-			store := privateEvidenceHTTPStore(t, "http://127.0.0.1:1")
+			store := privateEvidenceHTTPStore(t)
 			store.privateEvidenceHTTP.client.Transport = privateEvidenceHandlerTransport{handler: handler}
 			swapped, err := store.CompareAndSetPrivateEvidenceMetadataKey("gc-1", "gc.attempt_evidence.index.a1", "", "private-evidence")
 			if err != nil {
@@ -232,7 +232,7 @@ func TestBdStorePrivateEvidenceCASRejectsWrongContextBeforeWrite(t *testing.T) {
 		}
 		http.Error(w, "private-evidence-must-not-appear-here", http.StatusBadRequest)
 	})
-	store := privateEvidenceHTTPStore(t, "http://127.0.0.1:1")
+	store := privateEvidenceHTTPStore(t)
 	store.privateEvidenceHTTP.client.Transport = privateEvidenceHandlerTransport{handler: handler}
 	_, err := store.CompareAndSetPrivateEvidenceMetadataKey("gc-1", "gc.attempt_evidence.index.a1", "", "private-evidence")
 	if err == nil {
@@ -330,7 +330,7 @@ func TestPrivateEvidenceHTTPAcceptsOnlyDurableDoltServerModes(t *testing.T) {
 				}
 				_, _ = fmt.Fprintf(w, `{"api_version":"v0","backend":"dolt","bd_version":"1.3.0","capabilities":["issues.casMetadata","issues.create","issues.get","project.enforce"],"database":"gc_fixture","dolt_mode":%q,"project_id":"project-a","schema_version":1}`, tt.mode)
 			})
-			store := privateEvidenceHTTPStore(t, "http://127.0.0.1:1")
+			store := privateEvidenceHTTPStore(t)
 			store.privateEvidenceHTTP.client.Transport = privateEvidenceHandlerTransport{handler: handler}
 			err := store.privateEvidenceHTTP.verifyContext(context.Background())
 			if (err == nil) != tt.want {
@@ -547,7 +547,7 @@ func TestBdStoreContentPayloadCapabilityAndArgvFailClosed(t *testing.T) {
 		ScopeRef: "rig:fixture", TokenFile: privateEvidenceTokenFile(t),
 	}))
 	if SupportsPrivatePayloadValues(store) {
-		t.Fatal("BdStore advertised content-payload support without a deterministic private payload creator")
+		t.Fatal("BdStore advertised content-payload support without a reachable verified HTTP transport")
 	}
 	metadata := map[string]string{
 		beadmeta.AttemptEvidencePayloadDigestMetadataKey: strings.Repeat("a", 64),
@@ -601,4 +601,135 @@ func btoi(value bool) int {
 		return 1
 	}
 	return 0
+}
+
+// This uses the public lifecycle-sensitive Update path that GraphWorkflow calls.
+// The CLI advertises guards but refuses them for a proxied store; the configured
+// authenticated HTTP transport must carry the same observed aggregate token.
+func TestBdStoreLifecycleUpdateUsesGuardedHTTP(t *testing.T) {
+	for _, mode := range []string{"server", "proxied-server"} {
+		for _, tc := range []struct {
+			name, observed, expected, next                      string
+			conditional, changed, missingToken                  bool
+			status                                              int
+			problem, missingCapability, wrongProject, malformed string
+			want                                                string
+		}{
+			{name: "zero", observed: "0", expected: "0", next: "-8", changed: true},
+			{name: "negative", observed: "-7", expected: "-7", next: "-8", changed: true},
+			{name: "large", observed: "9007199254740993", expected: "9007199254740993", next: "9007199254740995", changed: true},
+			{name: "zero noop", observed: "0", expected: "0", next: "0"},
+			{name: "caller guard is not renewed", observed: "9", expected: "7", conditional: true, status: http.StatusConflict, problem: `{"code":"precondition_failed","param":"expected_version","expected_version":"7"}`, want: "stale"},
+			{name: "missing detail token", missingToken: true, want: "unsupported"},
+			{name: "missing workspace enforcement", observed: "7", missingCapability: "project.enforce", want: "protocol"},
+			{name: "missing update capability", observed: "7", missingCapability: "issues.update", want: "unsupported"},
+			{name: "wrong workspace", observed: "7", wrongProject: "project-b", want: "error"},
+			{name: "malformed success", observed: "7", expected: "7", malformed: `{}`, want: "error"},
+			{name: "changed token unchanged", observed: "7", expected: "7", next: "7", changed: true, want: "error"},
+			{name: "no-op token changed", observed: "7", expected: "7", next: "8", want: "error"},
+			{name: "runtime route unsupported", observed: "7", expected: "7", status: http.StatusNotImplemented, want: "unsupported"},
+			{name: "protected refusal", observed: "7", expected: "7", status: http.StatusConflict, problem: `{"code":"protected_record","param":"patch"}`, want: "gate"},
+			{name: "service failure", observed: "7", expected: "7", status: http.StatusServiceUnavailable, want: "error"},
+		} {
+			t.Run(mode+"/"+tc.name, func(t *testing.T) {
+				store := privateEvidenceHTTPStore(t)
+				patches := 0
+				store.privateEvidenceHTTP.client.Transport = privateEvidenceHandlerTransport{handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.Header.Get("Authorization") != "Bearer controller-secret" {
+						t.Fatal("missing configured authentication")
+					}
+					w.Header().Set("Content-Type", "application/json")
+					switch {
+					case r.Method == http.MethodGet && r.URL.Path == "/v0/beads/context":
+						caps := []string{"issues.casMetadata", "issues.create", "issues.get", "project.enforce", "issues.update"}
+						var actual []string
+						for _, cap := range caps {
+							if cap != tc.missingCapability {
+								actual = append(actual, cap)
+							}
+						}
+						project := "project-a"
+						if tc.wrongProject != "" {
+							project = tc.wrongProject
+						}
+						_ = json.NewEncoder(w).Encode(map[string]any{"api_version": "v0", "bd_version": "fixture", "backend": "dolt", "dolt_mode": mode, "database": "gc_fixture", "project_id": project, "capabilities": actual})
+					case r.Method == http.MethodGet && r.URL.Path == "/v0/beads/issues/gc-1":
+						row := map[string]any{"id": "gc-1", "title": "workflow", "status": "open"}
+						if !tc.missingToken {
+							row["revision"] = tc.observed
+						}
+						_ = json.NewEncoder(w).Encode(row)
+					case r.Method == http.MethodPatch && r.URL.Path == "/v0/beads/issues/gc-1":
+						patches++
+						var body struct {
+							Expected string `json:"expected_version"`
+							Patch    struct {
+								Status string `json:"status"`
+							} `json:"patch"`
+						}
+						if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+							t.Fatal(err)
+						}
+						if body.Expected != tc.expected || body.Patch.Status != "in_progress" {
+							t.Fatalf("guarded PATCH = %+v", body)
+						}
+						if tc.status != 0 {
+							w.WriteHeader(tc.status)
+							_, _ = io.WriteString(w, tc.problem)
+							return
+						}
+						if tc.malformed != "" {
+							_, _ = io.WriteString(w, tc.malformed)
+							return
+						}
+						_ = json.NewEncoder(w).Encode(map[string]any{"issue": map[string]any{"id": "gc-1", "title": "workflow", "priority": 2, "created_at": "2026-10-01T00:00:00Z", "updated_at": "2026-10-01T00:00:00Z"}, "changed": tc.changed, "revision": tc.next})
+					default:
+						t.Fatalf("unexpected HTTP request: %s %s", r.Method, r.URL.Path)
+					}
+				})}
+				status := "in_progress"
+				var err error
+				if tc.conditional {
+					err = store.UpdateIfMatch("gc-1", 7, UpdateOpts{Status: &status})
+				} else {
+					err = store.Update("gc-1", UpdateOpts{Status: &status})
+				}
+				switch tc.want {
+				case "":
+					if err != nil {
+						t.Fatalf("lifecycle update: %v", err)
+					}
+				case "unsupported":
+					if !errors.Is(err, ErrConditionalWriteUnsupported) {
+						t.Fatalf("error = %v, want unsupported", err)
+					}
+				case "protocol":
+					if !errors.Is(err, ErrPrivateEvidenceHTTPProtocol) {
+						t.Fatalf("error = %v, want protocol refusal", err)
+					}
+				case "stale":
+					var stale *PreconditionFailedError
+					if !errors.As(err, &stale) || stale.Expected != 7 || stale.ID != "gc-1" {
+						t.Fatalf("stale result = %v", err)
+					}
+				case "gate":
+					var gate *GateRefusalError
+					if !errors.As(err, &gate) || gate.Code != "protected_record" {
+						t.Fatalf("gate result = %v", err)
+					}
+				default:
+					if err == nil {
+						t.Fatal("expected refusal")
+					}
+				}
+				wantPatches := 1
+				if tc.missingToken || tc.missingCapability != "" || tc.wrongProject != "" {
+					wantPatches = 0
+				}
+				if patches != wantPatches {
+					t.Fatalf("PATCH count = %d, want %d", patches, wantPatches)
+				}
+			})
+		}
+	}
 }

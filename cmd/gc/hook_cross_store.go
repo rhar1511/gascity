@@ -19,11 +19,12 @@ type hookStore struct {
 	dir string
 	env []string
 	// sourceStoreRef is derived from the controller-built scope environment,
-	// never from work-query output. Custom work queries that omit the transient
+	// never from work-query output. Single-store queries that omit the transient
 	// per-row source_store_ref may use this exact scope for canonical lookup.
 	sourceStoreRef string
-	// inferMissingSourceStoreRef is set only for a configured custom work_query.
-	// Default gc ready output can span stores and must carry its own provenance.
+	// inferMissingSourceStoreRef is set for custom queries and generated
+	// single-store bd queries. Federated gc ready output must carry its own
+	// per-row provenance because it can span stores.
 	inferMissingSourceStoreRef bool
 	// command overrides the shared work query for this store, and is empty on
 	// every store production builds: one command is run against each leg in
@@ -233,7 +234,7 @@ func newHookStore(cityPath string, cfg *config.City, a *config.Agent, dir string
 		dir:                        dir,
 		env:                        env,
 		sourceStoreRef:             hookStoreSourceStoreRef(cityPath, cfg, env),
-		inferMissingSourceStoreRef: customQuery,
+		inferMissingSourceStoreRef: customQuery || !cityQueryTopology(cityPath, cfg).FederatedReady,
 	}
 }
 
@@ -272,9 +273,9 @@ func hookStoreEnvString(env []string, key string) string {
 }
 
 // hookStoreFormulaActionCheck adds a missing source ref only when the selected
-// query leg is an explicitly configured custom work query. Its fallback is
-// controller-derived from that leg's scope. Claim callers also require any
-// explicit ordinary city/rig ref to match the store that will receive the
+// query leg reads one scope: a custom query or the generated non-federated
+// bd query. Its fallback is controller-derived from that leg's scope. Claim
+// callers also require any explicit ordinary city/rig ref to match the store that will receive the
 // write; class refs remain eligible for the dedicated class-routing path.
 func hookStoreFormulaActionCheck(check formulaActionCandidateCheck, store hookStore, forClaim bool) formulaActionCandidateCheck {
 	if check == nil || !store.inferMissingSourceStoreRef {
@@ -285,7 +286,7 @@ func hookStoreFormulaActionCheck(check formulaActionCandidateCheck, store hookSt
 		if ref == "" {
 			candidate.SourceStoreRef = store.sourceStoreRef
 		} else if forClaim && !storeref.IsClassRef(ref) && ref != store.sourceStoreRef {
-			return formulaActionCandidate{Bead: candidate}, fmt.Errorf("custom work-query store reference %q does not match selected claim store %q", ref, store.sourceStoreRef)
+			return formulaActionCandidate{Bead: candidate}, fmt.Errorf("work-query store reference %q does not match selected claim store %q", ref, store.sourceStoreRef)
 		}
 		return check(ctx, candidate)
 	}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -310,7 +311,7 @@ func controlReadyFallbackReady(dir, cityPath string, env map[string]string, incl
 	if binding, relocated := controlGraphBinding(cityPath, dir); relocated {
 		return controlReadyBindingReady(dir, binding, includeEphemeral)
 	}
-	scoped, err := controlReadyScopeShellReady(dir, env, includeEphemeral)
+	scoped, err := controlReadyScopeReady(dir, cityPath, env, includeEphemeral)
 	if err != nil {
 		return nil, err
 	}
@@ -348,6 +349,32 @@ func mergeControlReadyLegs(legs ...[]beads.Bead) []beads.Bead {
 	}
 	beads.SortBeadsReadyOrder(merged)
 	return merged
+}
+
+// controlReadyScopeReady uses the configured control store for a proxied scope.
+// Its public Ready operation owns the backend's query and maintenance semantics;
+// proxied bd cannot honor the shell fallback's strict --readonly promise.
+// Keep the strict backend refusal intact and retain the scope/class routing used
+// by control dispatch. An open or read error is returned, never retried through
+// a different transport that could answer from another ledger.
+func controlReadyScopeReady(dir, cityPath string, env map[string]string, includeEphemeral bool) ([]beads.Bead, error) {
+	if !scopeUsesProxiedDoltMode(cityPath, resolveStoreScopeRoot(cityPath, dir)) {
+		return controlReadyScopeShellReady(dir, env, includeEphemeral)
+	}
+	cfg, err := loadCityConfig(cityPath, io.Discard)
+	if err != nil {
+		return nil, fmt.Errorf("control-ready fallback: loading city config: %w", err)
+	}
+	store, err := openControlStoreAtForCity(dir, cityPath, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("control-ready fallback: opening scope store: %w", err)
+	}
+	ready, readErr := controlReadyBindingReady(dir, store, includeEphemeral)
+	closeErr := closeBeadStoreHandle(store)
+	if err := errors.Join(readErr, closeErr); err != nil {
+		return nil, err
+	}
+	return ready, nil
 }
 
 // controlReadyScopeShellReady is the scope leg: the batched ready scan taken by

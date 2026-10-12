@@ -91,7 +91,8 @@ const (
 	// only, no new job, step, trigger or permission.
 	// Reviewed PR43 diagnostic delta: preflight-static adds the portable lint
 	// deadline contract. No existing step, trigger, permission or gate changes.
-	expectedCIExecutionHash     = "e0b4518f31fbeecf865230bd2ced6d8a60819c5a67556a72b9d97ce691d7963e"
+	// Reviewed v1.5.0 integration: stable Beads v1.3.1 pins only.
+	expectedCIExecutionHash     = "f360de1b9dc249f2890c2f076c8883f88eb8bfcf30fed18315d6808f18015194"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,
@@ -104,8 +105,8 @@ const (
 	// -run selector gained TestFreshInit_SlingSpawnsDefaultPoolWorker and
 	// TestFreshInit_ClaudeUnrestricted, mirroring RC Gate's acceptance C shards;
 	// same job, env, secrets and runner. Then the Beads v1.3.0 -> v1.3.1-rc.2
-	// pin: the workflow and job BD_VERSION env values only.
-	expectedNightlyExecutionHash = "95cdfa034e95e92beb2e1d01d29b7a6e4ccd323614caa4e8c2932f3ebe3de243"
+	// pin, followed by stable v1.3.1: workflow and job BD_VERSION values only.
+	expectedNightlyExecutionHash = "183db1faaa748f8bacd7d7de970ddc40ea87a65892bc37083ca40175cc4c2ea1"
 	// Reviewed setup delta: export the exact installed public bd path for
 	// integration input provenance, refusing unsafe or PATH-shadowed inputs.
 	// Version pins, provider installation, permissions and gates stay pinned.

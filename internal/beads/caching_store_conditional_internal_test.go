@@ -1416,3 +1416,24 @@ func TestCachingStoreConditionalFollowsBackingResolveTarget(t *testing.T) {
 		t.Fatalf("UpdateIfMatch through the sandwich: %v", err)
 	}
 }
+
+func TestRevisionMovedDistinguishesPublishedZeroFromUnknownZero(t *testing.T) {
+	var issue bdIssue
+	if err := json.Unmarshal([]byte(`{"id":"ga-1","revision":"0"}`), &issue); err != nil {
+		t.Fatal(err)
+	}
+	published := issue.toBead()
+	if revisionMoved(published, 0) || revisionMoved(cloneBead(published), 0) {
+		t.Fatal("unchanged published zero was accepted as a reminted revision")
+	}
+	if !revisionMoved(Bead{Revision: 0}, 0) || !revisionMoved(Bead{Revision: -3}, 0) {
+		t.Fatal("unknown zero/native behavior or signed revision movement changed")
+	}
+	wire, err := json.Marshal(published)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(wire), "revision") {
+		t.Fatalf("private presence/revision escaped wire: %s", wire)
+	}
+}

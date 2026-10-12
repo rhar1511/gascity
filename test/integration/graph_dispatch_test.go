@@ -579,6 +579,13 @@ func setupGraphWorkflowCityWithOptions(t *testing.T, mode string, privateEvidenc
 				cleanupFailures = append(cleanupFailures, "gc stop")
 			}
 		}
+		// Stop the controller before its store so a final reconciliation cannot
+		// restart the fixture proxy while cleanup is retiring it.
+		if supervisorStarted {
+			if _, err := runGCDoltWithEnv(env, "", "supervisor", "stop", "--wait"); err != nil {
+				cleanupFailures = append(cleanupFailures, "gc supervisor stop")
+			}
+		}
 		proxyRoot := filepath.Join(cityDir, ".beads", proxyendpoint.DefaultRootDirName)
 		unsafeProxyRoot := false
 		if info, err := os.Lstat(proxyRoot); err == nil {
@@ -591,11 +598,6 @@ func setupGraphWorkflowCityWithOptions(t *testing.T, mode string, privateEvidenc
 		} else if !os.IsNotExist(err) {
 			unsafeProxyRoot = true
 			cleanupFailures = append(cleanupFailures, "proxy root could not be inspected; bd stop refused")
-		}
-		if supervisorStarted {
-			if _, err := runGCDoltWithEnv(env, "", "supervisor", "stop", "--wait"); err != nil {
-				cleanupFailures = append(cleanupFailures, "gc supervisor stop")
-			}
 		}
 		unregisterCityCommandEnv(cityDir)
 		if remains, err := graphFixtureProcessesMayRemain(cityDir, gcHome); unsafeProxyRoot || remains || err != nil {

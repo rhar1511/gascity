@@ -639,9 +639,10 @@ func (c *CachingStore) evictForConditionalWrite(id string) conditionalEviction {
 // revisionMoved reports whether b can be the row a successful fenced write
 // against expectedRevision committed: a store with revisions mints a fresh one
 // on every whole-row write, so a row still at expectedRevision is a lagged
-// pre-write read. Zero on either side means no usable token.
+// pre-write read. An explicitly published zero is a usable legacy bd token;
+// a native/missing zero without that provenance retains its existing behavior.
 func revisionMoved(b Bead, expectedRevision int64) bool {
-	return expectedRevision == 0 || b.Revision == 0 || b.Revision != expectedRevision
+	return !hasRevisionToken(b) || b.Revision != expectedRevision
 }
 
 // updateReflected reports whether b carries every row-backed field opts

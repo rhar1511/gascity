@@ -853,8 +853,8 @@ func TestRunConditionalWriteRetriesSerializationSameRevision(t *testing.T) {
 	if w.writeCalls != 2 {
 		t.Fatalf("write attempts = %d, want 2 (one serialization + one success)", w.writeCalls)
 	}
-	if w.getCalls != 1 {
-		t.Fatalf("re-read count = %d, want 1 (revision re-read before retry)", w.getCalls)
+	if w.getCalls != 2 {
+		t.Fatalf("detail reads = %d, want 2 (one preflight and one before retry)", w.getCalls)
 	}
 }
 
@@ -929,15 +929,18 @@ func TestCompareAndSetMetadataKeyWin(t *testing.T) {
 	}
 }
 
-func TestCompareAndSetMetadataKeyRejectsZeroRevision(t *testing.T) {
+func TestCompareAndSetMetadataKeyAcceptsPublishedZeroRevision(t *testing.T) {
+	// scriptedBd publishes an explicit legacy integer zero. Missing/null
+	// details are covered separately and must still issue no write.
 	w := &scriptedBd{id: "ga-1", revision: 0, status: "open"}
 	s := NewBdStore("/city", w.runner)
 	ok, err := s.CompareAndSetMetadataKey("ga-1", "k", "", "next")
-	if ok || !errors.Is(err, ErrConditionalWriteUnsupported) {
-		t.Fatalf("CompareAndSetMetadataKey = (%v, %v), want zero-revision fail-closed", ok, err)
+	if !ok || err != nil {
+		t.Fatalf("CompareAndSetMetadataKey = (%v, %v), want published-zero CAS", ok, err)
 	}
-	if w.writeCalls != 0 {
-		t.Fatalf("conditional writes = %d, want 0", w.writeCalls)
+	if w.writeCalls != 1 || w.metadata["k"] != "next" || w.revision == 0 ||
+		!argvContains(w.writeArgv, "update", "--json", "ga-1", "--set-metadata", "k=next", conditionalWriteFlag, "0") {
+		t.Fatalf("zero CAS state/guard: writes=%d metadata=%v revision=%d argv=%v", w.writeCalls, w.metadata, w.revision, w.writeArgv)
 	}
 }
 
@@ -1180,8 +1183,8 @@ func TestRunConditionalWriteSerializationExhaustionSurfacesRaw(t *testing.T) {
 	if w.writeCalls != conditionalWriteMaxAttempts {
 		t.Fatalf("serialization write attempts = %d, want %d", w.writeCalls, conditionalWriteMaxAttempts)
 	}
-	if w.getCalls != conditionalWriteMaxAttempts-1 {
-		t.Fatalf("serialization re-reads = %d, want %d (one before each retry)", w.getCalls, conditionalWriteMaxAttempts-1)
+	if w.getCalls != conditionalWriteMaxAttempts {
+		t.Fatalf("detail reads = %d, want %d (one preflight and one before each retry)", w.getCalls, conditionalWriteMaxAttempts)
 	}
 }
 
@@ -1470,5 +1473,251 @@ func TestUpdateIfMatchParentAndFieldsCarryOneRevisionFence(t *testing.T) {
 	}
 	if !argvContains(w.writeArgv, "update", "--json", "ga-1", "--title", "renamed", "--parent", "ga-parent", conditionalWriteFlag, "1") {
 		t.Fatalf("combined parent update argv missing one fence: %v", w.writeArgv)
+	}
+}
+
+// revisionDomainRunner changes only the show revision wire member. It retains
+// scriptedBd's real recording/fence path and never converts tokens to float64.
+func revisionDomainRunner(w *scriptedBd, wire func(string) json.RawMessage) CommandRunner {
+	return func(dir, name string, args ...string) ([]byte, error) {
+		out, err := w.runner(dir, name, args...)
+		if err != nil || len(args) == 0 || args[0] != "show" {
+			return out, err
+		}
+		var rows []map[string]json.RawMessage
+		if err := json.Unmarshal(out, &rows); err != nil {
+			return nil, err
+		}
+		if len(rows) != 1 {
+			return nil, errors.New("revision fixture requires one exact detail")
+		}
+		revision := wire(string(rows[0]["revision"]))
+		if revision == nil {
+			delete(rows[0], "revision")
+		} else {
+			rows[0]["revision"] = revision
+		}
+		return json.Marshal(rows)
+	}
+}
+
+func revisionDomainQuoted(raw string) json.RawMessage {
+	return json.RawMessage(strconv.Quote(raw))
+}
+
+func revisionDomainWrites() []struct {
+	name  string
+	apply func(*BdStore, int64) error
+} {
+	return []struct {
+		name  string
+		apply func(*BdStore, int64) error
+	}{
+		{"UpdateIfMatch", func(s *BdStore, revision int64) error {
+			return s.UpdateIfMatch("ga-1", revision, UpdateOpts{Metadata: map[string]string{"k": "next"}})
+		}},
+		{"CompareAndSetMetadataKey", func(s *BdStore, _ int64) error {
+			ok, err := s.CompareAndSetMetadataKey("ga-1", "k", "", "next")
+			if err == nil && !ok {
+				return errors.New("matching CAS did not win")
+			}
+			return err
+		}},
+		{"Update lifecycle", func(s *BdStore, _ int64) error {
+			return s.Update("ga-1", UpdateOpts{Metadata: map[string]string{beadmeta.WorkflowIDMetadataKey: "wf-next"}})
+		}},
+		{"SetMetadata lifecycle", func(s *BdStore, _ int64) error {
+			return s.SetMetadata("ga-1", beadmeta.WorkflowIDMetadataKey, "wf-next")
+		}},
+		{"SetMetadataBatch lifecycle", func(s *BdStore, _ int64) error {
+			return s.SetMetadataBatch("ga-1", map[string]string{beadmeta.WorkflowIDMetadataKey: "wf-next"})
+		}},
+	}
+}
+
+func TestBdDetailRevisionWirePresenceAndParser(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		wire   string
+		want   int64
+		usable bool
+		bad    bool
+	}{
+		{name: "absent"},
+		{name: "null", wire: "null"},
+		{name: "published string zero", wire: `"0"`, usable: true},
+		{name: "published legacy integer zero", wire: "0", usable: true},
+		{name: "negative string", wire: `"-3285076669762484252"`, want: -3285076669762484252, usable: true},
+		{name: "negative legacy integer", wire: "-1014862916764651620", want: -1014862916764651620, usable: true},
+		{name: "minimum signed64", wire: `"-9223372036854775808"`, want: -9223372036854775808, usable: true},
+		{name: "maximum signed64", wire: `"9223372036854775807"`, want: 9223372036854775807, usable: true},
+		{name: "precision string", wire: `"9007199254740993"`, want: 9007199254740993, usable: true},
+		{name: "precision legacy integer", wire: "9007199254740993", want: 9007199254740993, usable: true},
+		{name: "empty string", wire: `""`, bad: true},
+		{name: "malformed string", wire: `"bad"`, bad: true},
+		{name: "overflow string", wire: `"9223372036854775808"`, bad: true},
+		{name: "underflow integer", wire: "-9223372036854775809", bad: true},
+		{name: "fraction", wire: "1.5", bad: true},
+		{name: "boolean", wire: "true", bad: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := &scriptedBd{id: "ga-1", revision: tc.want, status: "open"}
+			s := NewBdStore("/city", revisionDomainRunner(w, func(string) json.RawMessage {
+				if tc.wire == "" {
+					return nil
+				}
+				return json.RawMessage(tc.wire)
+			}))
+			got, err := s.Get(w.id)
+			if (err != nil) != tc.bad {
+				t.Fatalf("Get error = %v, want malformed=%v", err, tc.bad)
+			}
+			if !tc.bad && got.Revision != tc.want {
+				t.Fatalf("decoded revision = %d, want %d", got.Revision, tc.want)
+			}
+			ok, err := s.CompareAndSetMetadataKey(w.id, "k", "", "next")
+			if tc.usable {
+				if !ok || err != nil || w.writeCalls != 1 {
+					t.Fatalf("published token CAS = (%v,%v), writes=%d", ok, err, w.writeCalls)
+				}
+			} else if ok || err == nil || w.writeCalls != 0 || len(w.metadata) != 0 {
+				t.Fatalf("unknown/invalid token mutated: (%v,%v) writes=%d metadata=%v", ok, err, w.writeCalls, w.metadata)
+			}
+		})
+	}
+}
+
+func TestBdStoreAllFiveGuardedPathsAcceptSignedAndPublishedZero(t *testing.T) {
+	for _, revision := range []int64{
+		0, -3285076669762484252, -1014862916764651620,
+		-9223372036854775808, 9223372036854775807, 9007199254740993,
+	} {
+		for _, op := range revisionDomainWrites() {
+			t.Run(fmt.Sprintf("%s/%d", op.name, revision), func(t *testing.T) {
+				w := &scriptedBd{id: "ga-1", revision: revision, status: "open"}
+				s := NewBdStore("/city", revisionDomainRunner(w, revisionDomainQuoted))
+				if err := op.apply(s, revision); err != nil {
+					t.Fatalf("matching published token: %v", err)
+				}
+				if w.writeCalls != 1 || w.getCalls != 1 || w.revision == revision {
+					t.Fatalf("writes=%d detail reads=%d revision=%d; want one fenced write and one owning snapshot", w.writeCalls, w.getCalls, w.revision)
+				}
+				guard, present := parseIfRevisionArg(w.writeArgv[0])
+				if !present || guard != revision {
+					t.Fatalf("lost exact opaque guard: %v", w.writeArgv)
+				}
+				if w.metadata["k"] != "next" && w.metadata[beadmeta.WorkflowIDMetadataKey] != "wf-next" {
+					t.Fatalf("matching write did not persist requested metadata: %v", w.metadata)
+				}
+			})
+		}
+	}
+}
+
+func TestBdStoreAllFiveGuardedPathsRefuseAbsentNullAndInvalid(t *testing.T) {
+	for _, wire := range []string{"", "null", `"bad"`, `"9223372036854775808"`} {
+		for _, op := range revisionDomainWrites() {
+			t.Run(op.name+"/"+wire, func(t *testing.T) {
+				w := &scriptedBd{id: "ga-1", revision: 0, status: "open"}
+				s := NewBdStore("/city", revisionDomainRunner(w, func(string) json.RawMessage {
+					if wire == "" {
+						return nil
+					}
+					return json.RawMessage(wire)
+				}))
+				if err := op.apply(s, 0); err == nil {
+					t.Fatal("absent/null/invalid detail accepted")
+				}
+				if w.writeCalls != 0 || len(w.metadata) != 0 || w.revision != 0 {
+					t.Fatalf("unknown token fell back to mutation: %+v", w)
+				}
+			})
+		}
+	}
+}
+
+func TestBdStoreSignedStaleGuardRemainsCallerOwned(t *testing.T) {
+	for _, stale := range []int64{0, -3285076669762484252} {
+		t.Run(strconv.FormatInt(stale, 10), func(t *testing.T) {
+			w := &scriptedBd{id: "ga-1", revision: -1014862916764651620, status: "open"}
+			s := NewBdStore("/city", revisionDomainRunner(w, revisionDomainQuoted))
+			err := s.UpdateIfMatch(w.id, stale, UpdateOpts{Metadata: map[string]string{"k": "lost"}})
+			var mismatch *PreconditionFailedError
+			if !errors.As(err, &mismatch) || mismatch.Expected != stale || mismatch.Current != w.revision {
+				t.Fatalf("stale guard error = %v, want caller=%d current=%d", err, stale, w.revision)
+			}
+			if w.writeCalls != 1 || len(w.metadata) != 0 {
+				t.Fatalf("stale guard mutated/retried: writes=%d metadata=%v", w.writeCalls, w.metadata)
+			}
+			guard, present := parseIfRevisionArg(w.writeArgv[0])
+			if !present || guard != stale {
+				t.Fatalf("caller guard renewed: %v", w.writeArgv)
+			}
+		})
+	}
+}
+
+func TestBdStoreRetryCannotTurnMissingDetailIntoZeroGuard(t *testing.T) {
+	disableConditionalWriteSleep(t)
+	for _, lostWire := range []string{"", "null"} {
+		t.Run(lostWire, func(t *testing.T) {
+			w := &scriptedBd{id: "ga-1", revision: 0, status: "open"}
+			w.writeHook = func(_ *scriptedBd, _ string, _ int64) ([]byte, error, bool) {
+				return nil, errors.New("exit status 1: Error 1213 (40001): serialization failure"), true
+			}
+			s := NewBdStore("/city", revisionDomainRunner(w, func(raw string) json.RawMessage {
+				if w.getCalls == 1 {
+					return revisionDomainQuoted(raw)
+				}
+				if lostWire == "" {
+					return nil
+				}
+				return json.RawMessage(lostWire)
+			}))
+			err := s.UpdateIfMatch(w.id, 0, UpdateOpts{Metadata: map[string]string{"k": "next"}})
+			if !errors.Is(err, ErrConditionalWriteUnsupported) || w.writeCalls != 1 || w.getCalls != 2 || len(w.metadata) != 0 {
+				t.Fatalf("uncertain reread replayed zero: err=%v writes=%d reads=%d metadata=%v", err, w.writeCalls, w.getCalls, w.metadata)
+			}
+		})
+	}
+}
+
+func TestBdStorePublishedZeroNoopStillUsesFence(t *testing.T) {
+	w := &scriptedBd{id: "ga-1", revision: 0, status: "open", metadata: map[string]string{"k": "same"}}
+	s := NewBdStore("/city", revisionDomainRunner(w, revisionDomainQuoted))
+	ok, err := s.CompareAndSetMetadataKey(w.id, "k", "same", "same")
+	if !ok || err != nil || w.writeCalls != 1 || w.revision == 0 || w.metadata["k"] != "same" {
+		t.Fatalf("zero no-op bypassed fence: ok=%v err=%v writes=%d revision=%d", ok, err, w.writeCalls, w.revision)
+	}
+	guard, present := parseIfRevisionArg(w.writeArgv[0])
+	if !present || guard != 0 {
+		t.Fatalf("zero guard omitted: %v", w.writeArgv)
+	}
+}
+
+func TestBdStoreProtectedForcedDeleteStillRefusesSignedToken(t *testing.T) {
+	w := &scriptedBd{id: "ga-1", revision: -3285076669762484252, status: "closed", metadata: protectedAttemptEvidenceBead().Metadata}
+	s := NewBdStore("/city", revisionDomainRunner(w, revisionDomainQuoted))
+	if err := s.DeleteIfMatch(w.id, w.revision); !errors.Is(err, ErrProtectedAttemptEvidenceArchive) {
+		t.Fatalf("protected forced delete = %v", err)
+	}
+	if w.writeCalls != 0 || w.deleted {
+		t.Fatal("force or signed token erased protected record")
+	}
+}
+
+func TestBdStoreCloseAndDeleteRefuseMissingZeroObservation(t *testing.T) {
+	for _, close := range []bool{false, true} {
+		w := &scriptedBd{id: "ga-1", revision: 0, status: "open"}
+		s := NewBdStore("/city", revisionDomainRunner(w, func(string) json.RawMessage { return nil }))
+		var err error
+		if close {
+			err = s.CloseIfMatch(w.id, 0)
+		} else {
+			err = s.DeleteIfMatch(w.id, 0)
+		}
+		if !errors.Is(err, ErrConditionalWriteUnsupported) || w.writeCalls != 0 || w.deleted || w.status != "open" {
+			t.Fatalf("missing zero close/delete: close=%v err=%v writes=%d", close, err, w.writeCalls)
+		}
 	}
 }

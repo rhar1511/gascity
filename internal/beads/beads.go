@@ -242,6 +242,10 @@ type Bead struct {
 	// backing store until reconcile or CAS-failure eviction; callers read it only
 	// through ConditionalWriter (equality-only; see the revision contract).
 	Revision int64 `json:"-"`
+	// revisionZeroPublished records an explicitly decoded bd zero token.
+	// Missing/null bd revisions leave it false. Keep it private and off the
+	// wire; value-copying wrappers preserve it with the same observed bead.
+	revisionZeroPublished bool `json:"-"`
 	// ClaimFence is the store-internal ownership fence: a monotonic counter
 	// bumped ONLY on ownership transitions — a claim/unclaim/release, an
 	// assignee change, or a reopen (closed→open) — never by content mutations
@@ -254,6 +258,14 @@ type Bead struct {
 	// maintain it per bead and FileStore persists it out of band. A bd-backed
 	// store leaves it 0 until the pinned bd emits claim_fence.
 	ClaimFence int64 `json:"-"`
+}
+
+// ObservedRevision returns the opaque token and whether this bead snapshot
+// carries a usable conditional-write revision. An explicitly published bd zero
+// is usable; an absent/null bd token or unpublished native zero is not.
+// The result does not establish writer capability or snapshot freshness.
+func ObservedRevision(b Bead) (int64, bool) {
+	return b.Revision, hasRevisionToken(b)
 }
 
 // UpdateOpts specifies which fields to change. Nil pointers are skipped.
@@ -977,8 +989,10 @@ type ConditionalAssignmentReleaser interface {
 //     test it only for equality; arithmetic, ordering across beads, and gap
 //     inference are undefined. A token is never intentionally reused during one
 //     bead's observed lifetime. A never-mutated bead may read back as zero on a
-//     counter-backed store, so zero means "no usable token", not "revisions
-//     unsupported".
+//     counter-backed store without a published token. That zero is unusable,
+//     not evidence of unsupported revisions. A bd detail that explicitly
+//     publishes zero instead carries a usable legacy token; missing/null and
+//     published zero must remain distinguishable at that provider boundary.
 //   - Every successful mutation of revision-guarded whole-row content —
 //     conditional or unconditional — mints a fresh nonzero revision. This
 //     covers row-backed Update fields, metadata writes, Close, and Reopen;

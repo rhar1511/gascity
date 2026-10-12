@@ -180,8 +180,8 @@ type hookClaimOptions struct {
 	// generated default work query or a custom query's exact controller-selected
 	// single-store scope is available.
 	TrustedLifecycleScope bool
-	// ClaimSourceStoreRef is set by the controller only when a custom query ran
-	// against one exact store. It supplies provenance omitted by that query and
+	// ClaimSourceStoreRef is set by the controller only when the query ran
+	// against one exact store (custom or generated non-federated bd query). It supplies provenance omitted by that query and
 	// rejects a candidate that claims a different source store.
 	ClaimSourceStoreRef string
 	// RequireAuthoritativeClaimRead requires claim candidates to be replaced

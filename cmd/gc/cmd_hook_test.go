@@ -71,6 +71,55 @@ func TestHookStoreSourceStoreRefRequiresKnownMatchingControllerScope(t *testing.
 	}
 }
 
+func TestDefaultHookFormulaActionProvenanceFollowsQueryTopology(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		split   bool
+		custom  bool
+		wantRef bool
+	}{
+		{name: "default single store", wantRef: true},
+		{name: "custom single store", custom: true, wantRef: true},
+		{name: "default federated", split: true},
+		{name: "custom scoped on split city", split: true, custom: true, wantRef: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			cfg := &config.City{Workspace: config.Workspace{Name: "hook-city"}}
+			if tc.split {
+				routes := splitRoutes(beads.NewMemStore())
+				registerResidencyRoutes(cityDir, routes, nil)
+				t.Cleanup(func() { unregisterResidencyRoutes(cityDir, routes) })
+			}
+			agent := &config.Agent{Name: "worker"}
+			if tc.custom {
+				agent.WorkQuery = "bd ready --json"
+			}
+			store := newHookStore(cityDir, cfg, agent, cityDir, []string{
+				"GC_STORE_ROOT=" + cityDir, "GC_STORE_SCOPE=city",
+			})
+			check := func(_ context.Context, b beads.Bead) (formulaActionCandidate, error) {
+				if b.SourceStoreRef == "" {
+					return formulaActionCandidate{}, errors.New("canonical formula lookup lacks source store")
+				}
+				return formulaActionCandidate{Bead: b}, nil
+			}
+			for _, forClaim := range []bool{false, true} {
+				got, err := hookStoreFormulaActionCheck(check, store, forClaim)(context.Background(), beads.Bead{
+					ID: "hook-step", Metadata: beads.StringMap{"gc.root_bead_id": "hook-root"},
+				})
+				if tc.wantRef {
+					if err != nil || got.Bead.SourceStoreRef != "city:hook-city" {
+						t.Fatalf("claim=%v: canonical lookup = %+v, %v; want selected city scope", forClaim, got, err)
+					}
+				} else if err == nil {
+					t.Fatalf("claim=%v: federated row without provenance was assigned the primary scope", forClaim)
+				}
+			}
+		})
+	}
+}
+
 func TestHookStoreFormulaActionCheckUsesOnlySelectedScope(t *testing.T) {
 	for _, tc := range []struct {
 		name string

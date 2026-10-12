@@ -241,23 +241,8 @@ type PrivatePayloadValueTransportTargeter interface {
 // The explicit allow-list is intentional: archive-body transport alone is not
 // enough. The backend must also implement deterministic content-payload rows.
 func SupportsPrivatePayloadValues(store Store) bool {
-	for depth := 0; store != nil && depth < 16; depth++ {
-		if targeter, ok := store.(PrivatePayloadValueTransportTargeter); ok {
-			target := targeter.PrivatePayloadValueTransportTarget()
-			if target == nil {
-				return false
-			}
-			store = target
-			continue
-		}
-		switch store.(type) {
-		case *FileStore, *SQLiteStore, *NativeDoltStore:
-			return true
-		default:
-			return false
-		}
-	}
-	return false
+	_, ok := PrivatePayloadValueBackend(store)
+	return ok
 }
 
 // PrivatePayloadValueBackend returns the exact durable backend permitted to
@@ -274,12 +259,17 @@ func PrivatePayloadValueBackend(store Store) (Store, bool) {
 			store = target
 			continue
 		}
-		switch store.(type) {
+		switch backend := store.(type) {
 		case *FileStore, *SQLiteStore, *NativeDoltStore:
 			return store, true
+		case *BdStore:
+			if backend.PrivateEvidencePayloadTransportReady() {
+				return backend, true
+			}
+			return nil, false
 		default:
 			// This is an explicit allow-list. In particular, MemStore is not
-			// durable, and BdStore, ProxiedStore, BeadsLibStore, and exec-backed
+			// durable, and BeadsLibStore and exec-backed
 			// stores are unsupported until their persistence and payload transport
 			// are independently proven safe.
 			return nil, false
