@@ -72,6 +72,7 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 		bdBranch       = "HEAD"
 		grpcVersion    = "1.83.2"
 		thriftVersion  = "0.24.0"
+		xNetVersion    = "0.60.0"
 	)
 
 	root := repoRoot(t)
@@ -102,16 +103,19 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 		"ARG BD_BRANCH=" + bdBranch,
 		"ARG GRPC_VERSION=" + grpcVersion,
 		"ARG THRIFT_VERSION=" + thriftVersion,
+		"ARG XNET_VERSION=" + xNetVersion,
 		`https://github.com/gastownhall/beads/archive/${BD_SOURCE_REF}.tar.gz`,
 		`echo "${BD_SOURCE_SHA256}  /tmp/bd-source.tar.gz" | sha256sum --check --strict`,
 		`grep -Fq "Version = \"${bd_version}\"" cmd/bd/version.go`,
 		`go get "google.golang.org/grpc@v${GRPC_VERSION}"`,
 		`go get "github.com/apache/thrift@v${THRIFT_VERSION}"`,
+		`go get "golang.org/x/net@v${XNET_VERSION}"`,
 		`go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep github.com/apache/thrift v${THRIFT_VERSION} "`,
 		`CGO_ENABLED=1 go build`,
 		`-tags="gms_pure_go"`,
 		`-X main.Version=${bd_version}`,
 		`-X main.Build=${BD_BUILD}`,
+		`go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep golang.org/x/net v${XNET_VERSION} "`,
 		`-X main.Commit=${BD_SOURCE_REF}`,
 		`-X main.Branch=${BD_BRANCH}`,
 		`COPY --from=bd-builder /out/bd /usr/local/bin/bd`,
