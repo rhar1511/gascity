@@ -7,6 +7,7 @@ import runpy
 import os
 import select
 import signal
+import shlex
 from pathlib import Path
 import subprocess
 import sys
@@ -16,6 +17,27 @@ import unittest
 from unittest import mock
 
 SCRIPT = Path(__file__).with_name("ci-lint-profile")
+
+
+class MacLintSchedulingTests(unittest.TestCase):
+    def test_full_mac_lint_bounds_analysis_concurrency_without_relaxing_gate(self):
+        root = SCRIPT.parent.parent
+        workflow = (root / ".github/workflows/mac-regression.yml").read_text()
+        quality = workflow.split("  mac-quality:\n", 1)[1].split("\n  mac-", 1)[0]
+        command = next(line for line in quality.splitlines()
+                       if "-- make lint LINT_FLAGS=" in line)
+        flags = shlex.split(command.split('LINT_FLAGS="', 1)[1].split('"', 1)[0])
+        # Limit simultaneous analysis on the memory-constrained Mac runner;
+        # retain the same full-repository gate and its original deadline.
+        self.assertIn("--concurrency=2", flags)
+        self.assertIn("--timeout=55m", flags)
+        self.assertFalse(any(flag.startswith(("--disable", "--enable-only", "--new"))
+                             for flag in flags))
+        self.assertIn("--cpu-profile-path=$MAC_LINT_DIR/cpu.pprof", flags)
+        self.assertIn("--mem-profile-path=$MAC_LINT_DIR/mem.pprof", flags)
+        self.assertIn('time.monotonic() + 65*60', quality)
+        self.assertIn('$(LINT_ENV) $(GOLANGCI_LINT) run $(LINT_FLAGS) ./...',
+                      (root / "Makefile").read_text())
 
 
 class LintDeadlineTests(unittest.TestCase):

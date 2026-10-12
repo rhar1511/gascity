@@ -254,11 +254,15 @@ jobs:
           GOLANGCI_LINT_CACHE: ${{ github.workspace }}/.cache/golangci-lint
         # Retain the full gate. The outer deadline includes setup time;
         # forced termination records incomplete profiles and fails the check.
+        # Bound concurrent analysis on memory-constrained hosted Macs. The
+        # ca909 run reached a 6.8G footprint with sustained GC scanning; more
+        # parallel analyzers must not amplify its live working set. This
+        # changes scheduling only, not analyzers, package scope or deadlines.
         run: |
           set -o pipefail
           mkdir -p "$MAC_LINT_DIR"
           git rev-parse HEAD > "$MAC_LINT_DIR/revision.txt"
-          python3 scripts/ci-lint-profile --deadline "$MAC_LINT_DEADLINE" --profile-dir "$MAC_LINT_DIR" --sample-executable "$(go env GOPATH)/bin/golangci-lint" -- make lint LINT_FLAGS="--verbose --timeout=55m --cpu-profile-path=$MAC_LINT_DIR/cpu.pprof --mem-profile-path=$MAC_LINT_DIR/mem.pprof" 2>&1 | tee "$MAC_LINT_DIR/lint.log"
+          python3 scripts/ci-lint-profile --deadline "$MAC_LINT_DEADLINE" --profile-dir "$MAC_LINT_DIR" --sample-executable "$(go env GOPATH)/bin/golangci-lint" -- make lint LINT_FLAGS="--verbose --concurrency=2 --timeout=55m --cpu-profile-path=$MAC_LINT_DIR/cpu.pprof --mem-profile-path=$MAC_LINT_DIR/mem.pprof" 2>&1 | tee "$MAC_LINT_DIR/lint.log"
       - name: Upload Mac lint diagnostics
         if: ${{ always() }}
         timeout-minutes: 3
