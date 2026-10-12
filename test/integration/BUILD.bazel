@@ -40,6 +40,9 @@ go_test(
         "gc_live_contract_test.go",
         "graph_dispatch_harness_test.go",
         "graph_dispatch_test.go",
+        "graph_fixture_birth_darwin_test.go",
+        "graph_fixture_birth_other_test.go",
+        "graph_fixture_process_test.go",
         "helpers_test.go",
         "huma_binary_test.go",
         "integration_test.go",
@@ -103,10 +106,20 @@ go_test(
         "@com_github_gastownhall_gascity_packs//:gascity-packs",
         "@com_github_pb33f_libopenapi//:libopenapi",
         "@com_github_pb33f_libopenapi_validator//:libopenapi-validator",
+        "@com_github_shirou_gopsutil_v4//net",
+        "@com_github_shirou_gopsutil_v4//process",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
         "@in_gopkg_yaml_v3//:yaml_v3",
-    ],
+    ] + select({
+        "@rules_go//go/platform:darwin": [
+            "@org_golang_x_sys//unix",
+        ],
+        "@rules_go//go/platform:ios": [
+            "@org_golang_x_sys//unix",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

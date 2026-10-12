@@ -189,7 +189,7 @@ func TestGraphProxyProofRejectsReachableUnownedPortMirror(t *testing.T) {
 	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
 		t.Fatalf("create fixture Beads directory: %v", err)
 	}
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen on disposable loopback port: %v", err)
 	}
@@ -199,6 +199,12 @@ func TestGraphProxyProofRejectsReachableUnownedPortMirror(t *testing.T) {
 		}
 	})
 	port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
+	if !graphProcessOwnsListeningPort(os.Getpid(), listener.Addr().(*net.TCPAddr).Port) {
+		t.Fatal("native process proof did not recognize this process's loopback listener")
+	}
+	if graphProcessOwnsListeningPort(os.Getppid(), listener.Addr().(*net.TCPAddr).Port) {
+		t.Fatal("native process proof accepted the listener's parent as its owner")
+	}
 	if err := os.WriteFile(filepath.Join(beadsDir, "dolt-server.port"), []byte(port+"\n"), 0o600); err != nil {
 		t.Fatalf("write reachable port mirror: %v", err)
 	}
@@ -208,7 +214,7 @@ func TestGraphProxyProofRejectsReachableUnownedPortMirror(t *testing.T) {
 	if got, ok := graphFixtureProxyPortForTest(cityDir); ok {
 		t.Fatalf("graph proxy proof accepted unowned reachable port %q", got)
 	}
-	if runtime.GOOS == "linux" {
+	if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
 		if _, err := graphFixtureProxyPortForTestWithDiagnostic(cityDir); err == nil || !strings.Contains(err.Error(), "proxy root is absent") {
 			t.Fatalf("detailed graph proxy proof error = %v, want the missing fixture-root reason", err)
 		}
@@ -236,6 +242,74 @@ func TestGraphProcessFlagRejectsDuplicatesAndMissingValues(t *testing.T) {
 				t.Fatalf("graphProcessFlag() = (%q, %v, %v), want (%q, %v, %v)", got, found, valid, tc.want, tc.found, tc.valid)
 			}
 		})
+	}
+}
+
+func TestGraphFixtureRecognizesItsRenamedSupervisorBinary(t *testing.T) {
+	t.Setenv(integrationGCBinaryEnv, "")
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	home, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	home, err = filepath.EvalSymlinks(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := gcBinary
+	gcBinary = executable
+	t.Cleanup(func() { gcBinary = previous })
+	argv := []string{executable, "supervisor", "run"}
+	if !graphSupervisorUsesFixtureHome(os.Getpid(), argv, home) {
+		t.Fatal("fixture cleanup failed to recognize its exact renamed supervisor executable")
+	}
+	if graphSupervisorUsesFixtureHome(os.Getpid(), argv, t.TempDir()) {
+		t.Fatal("fixture cleanup accepted a supervisor in another home")
+	}
+	t.Run("pinned executable behind exec shim", func(t *testing.T) {
+		t.Setenv(integrationGCBinaryEnv, executable)
+		gcBinary = filepath.Join(t.TempDir(), "gc")
+		if err := writeExecShim(gcBinary, executable); err != nil {
+			t.Fatal(err)
+		}
+		if !graphSupervisorUsesFixtureHome(os.Getpid(), argv, home) {
+			t.Fatal("fixture cleanup failed to recognize the pinned executable behind its shim")
+		}
+	})
+	t.Run("different executable", func(t *testing.T) {
+		t.Setenv(integrationGCBinaryEnv, "")
+		gcBinary = filepath.Join(t.TempDir(), "unrelated-gc")
+		if graphSupervisorUsesFixtureHome(os.Getpid(), argv, home) {
+			t.Fatal("fixture cleanup accepted another executable")
+		}
+	})
+}
+
+func TestGraphFixtureCanonicalizesControllerHome(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "controller")
+	cityRoot := filepath.Join(root, "city-root")
+	cityDir := filepath.Join(cityRoot, "city")
+	for _, dir := range []string{home, cityDir} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	alias := filepath.Join(root, "controller-alias")
+	if err := os.Symlink(home, alias); err != nil {
+		t.Fatal(err)
+	}
+	want, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := prepareGraphWorkflowCityEnv(t, []string{"GC_HOME=" + alias, "DOLT_ROOT_PATH=" + alias}, alias, cityDir, cityRoot)
+	values := parseEnvList(env)
+	if values["GC_HOME"] != want || values["DOLT_ROOT_PATH"] != want {
+		t.Fatal("fixture home identity differs from the native process working directory")
 	}
 }
 
@@ -593,6 +667,7 @@ func setupWorkflowCityWithPrivateEvidence(t *testing.T, config func(string) stri
 		t.Fatalf("create disposable graph city directory: %v", err)
 	}
 	env = prepareGraphWorkflowCityEnv(t, env, gcHome, cityDir, cityRoot)
+	gcHome = parseEnvList(env)["GC_HOME"]
 	launcher := filepath.Join(cityRoot, "fixture-bin", "bd")
 	preserveGraphEnvRoot := func() error {
 		gcRoot := filepath.Dir(gcHome)
@@ -773,6 +848,8 @@ func prepareGraphWorkflowCityEnv(t *testing.T, env []string, gcHome, cityDir, ci
 	if !graphPathWithin(cityRoot, cityDir) || graphPathWithin(cityRoot, resolvedGCHome) || graphPathWithin(resolvedGCHome, cityRoot) {
 		t.Fatal("graph city and controller paths are not separate disposable roots")
 	}
+	env = replaceEnv(env, "GC_HOME", resolvedGCHome)
+	env = replaceEnv(env, "DOLT_ROOT_PATH", resolvedGCHome)
 	env = replaceEnv(env, "BEADS_DIR", filepath.Join(cityDir, ".beads"))
 	env = replaceEnv(env, "XDG_CONFIG_HOME", filepath.Join(cityRoot, "bd-config"))
 	env = replaceEnv(env, "XDG_DATA_HOME", filepath.Join(cityRoot, "bd-data"))
@@ -948,7 +1025,7 @@ func graphPathWithin(root, path string) bool {
 
 // graphFixtureProxyPortForTest accepts only the BD-owned proxied lifecycle
 // initialized for this graph city. The proxy record proves which supervisor
-// owns the root and identifies the proxy listener. The child pidfile and /proc
+// owns the root and identifies the proxy listener. The child pidfile and native
 // listener ownership independently prove the Dolt backend listener in that
 // same root; those two listeners intentionally have distinct ports.
 func graphFixtureProxyPortForTest(cityDir string) (string, bool) {
@@ -976,8 +1053,8 @@ func waitForGraphFixtureProxyForTest(cityDir string, timeout time.Duration) (str
 }
 
 func graphFixtureProxyPortForTestWithDiagnostic(cityDir string) (string, error) {
-	if runtime.GOOS != "linux" || cityDir == "" || !filepath.IsAbs(cityDir) {
-		return "", errors.New("proof requires an absolute city path on Linux")
+	if (runtime.GOOS != "linux" && runtime.GOOS != "darwin") || cityDir == "" || !filepath.IsAbs(cityDir) {
+		return "", errors.New("proof requires an absolute city path on Linux or Darwin")
 	}
 	cityDir = filepath.Clean(cityDir)
 	resolvedCity, err := filepath.EvalSymlinks(cityDir)
@@ -1051,7 +1128,7 @@ func graphFixtureProxyPortForTestWithDiagnostic(cityDir string) (string, error) 
 	if _, ok := graphReadFixtureRegularFile(proxyendpoint.PIDPath(root), 16<<10); !ok {
 		return "", errors.New("proxy PID record is absent or not a regular file")
 	}
-	endpoint := proxyendpoint.Inspect(root, proxyendpoint.DefaultProcessTable())
+	endpoint := proxyendpoint.Inspect(root, graphFixtureProcessTable())
 	if endpoint.Verdict != proxyendpoint.VerdictLive || endpoint.Liveness.Evidence != proxyendpoint.EvidenceArgvBirth ||
 		endpoint.Record.Kind != proxyendpoint.RecordKind || endpoint.Record.Port <= 0 || endpoint.Record.Port > 65535 {
 		return "", fmt.Errorf("proxy endpoint is not verified live (verdict=%s evidence=%s record_kind=%q port=%d)", endpoint.Verdict, endpoint.Liveness.Evidence, endpoint.Record.Kind, endpoint.Record.Port)
@@ -1078,7 +1155,7 @@ func graphFixtureProxyPortForTestWithDiagnostic(cityDir string) (string, error) 
 	if child.PID == endpoint.Record.PID {
 		return "", errors.New("Dolt child and proxy must be distinct processes")
 	}
-	processes := proxyendpoint.DefaultProcessTable()
+	processes := graphFixtureProcessTable()
 	if !processes.Alive(child.PID) {
 		return "", errors.New("Dolt child process is not alive")
 	}
@@ -1118,11 +1195,11 @@ func graphFixtureProxyPortForTestWithDiagnostic(cityDir string) (string, error) 
 // scan finds neither a proxy nor a Dolt child whose argv names this exact
 // disposable root. Ambiguous endpoint evidence preserves the root for review.
 func graphFixtureProcessesMayRemain(cityDir, gcHome string) (bool, error) {
-	if runtime.GOOS != "linux" || cityDir == "" || gcHome == "" || !filepath.IsAbs(cityDir) || !filepath.IsAbs(gcHome) {
-		return true, errors.New("fixture process shutdown requires absolute Linux city and controller paths")
+	if (runtime.GOOS != "linux" && runtime.GOOS != "darwin") || cityDir == "" || gcHome == "" || !filepath.IsAbs(cityDir) || !filepath.IsAbs(gcHome) {
+		return true, errors.New("fixture process shutdown requires absolute Linux or Darwin city and controller paths")
 	}
 	root := filepath.Join(filepath.Clean(cityDir), ".beads", proxyendpoint.DefaultRootDirName)
-	endpoint := proxyendpoint.Inspect(root, proxyendpoint.DefaultProcessTable())
+	endpoint := proxyendpoint.Inspect(root, graphFixtureProcessTable())
 	switch endpoint.Verdict {
 	case proxyendpoint.VerdictNoRecord, proxyendpoint.VerdictDead:
 	case proxyendpoint.VerdictLive:
@@ -1130,14 +1207,14 @@ func graphFixtureProcessesMayRemain(cityDir, gcHome string) (bool, error) {
 	default:
 		return true, fmt.Errorf("proxy endpoint state is %s", endpoint.Verdict)
 	}
-	processes := proxyendpoint.DefaultProcessTable()
-	entries, err := os.ReadDir("/proc")
+	processes := graphFixtureProcessTable()
+	pids, err := graphFixtureProcessIDs()
 	if err != nil {
-		return true, fmt.Errorf("read Linux process table: %w", err)
+		return true, fmt.Errorf("read process table: %w", err)
 	}
-	for _, entry := range entries {
-		pid, err := strconv.Atoi(entry.Name())
-		if err != nil || pid <= 0 || !entry.IsDir() {
+	for _, rawPID := range pids {
+		pid := int(rawPID)
+		if pid <= 0 {
 			continue
 		}
 		argv, err := processes.Argv(pid)
@@ -1164,12 +1241,11 @@ func graphDoltProcessUsesFixtureRoot(pid int, argv []string, root string) bool {
 	if pid <= 0 || len(argv) < 2 || argv[1] != "sql-server" {
 		return false
 	}
-	executable, err := os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "exe"))
+	executable, cwd, err := graphProcessExecutableAndCWD(pid)
 	if err != nil || strings.TrimSuffix(filepath.Base(executable), " (deleted)") != "dolt" {
 		return false
 	}
-	cwd, err := os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "cwd"))
-	if err != nil || !graphCleanupPathEquals(cwd, root) {
+	if !graphCleanupPathEquals(cwd, root) {
 		return false
 	}
 	if !graphCleanupArgvMentionsPath(argv, "--config", filepath.Join(root, proxyendpoint.ConfigFileName)) {
@@ -1182,12 +1258,11 @@ func graphBeadsServiceUsesFixtureCity(pid int, argv []string, cityDir string) bo
 	if pid <= 0 || len(argv) < 2 || argv[1] != "serve" {
 		return false
 	}
-	executable, err := os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "exe"))
+	executable, cwd, err := graphProcessExecutableAndCWD(pid)
 	if err != nil || strings.TrimSuffix(filepath.Base(executable), " (deleted)") != "bd" {
 		return false
 	}
-	cwd, err := os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "cwd"))
-	if err != nil || !graphCleanupPathEquals(cwd, cityDir) {
+	if !graphCleanupPathEquals(cwd, cityDir) {
 		return false
 	}
 	return graphCleanupArgvMentionsPath(argv, "--auth-token-file", filepath.Join(filepath.Dir(cityDir), "controller-token"))
@@ -1197,12 +1272,23 @@ func graphSupervisorUsesFixtureHome(pid int, argv []string, gcHome string) bool 
 	if pid <= 0 || len(argv) < 3 || argv[1] != "supervisor" || argv[2] != "run" {
 		return false
 	}
-	executable, err := os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "exe"))
-	if err != nil || strings.TrimSuffix(filepath.Base(executable), " (deleted)") != "gc" {
+	// TestMain may invoke gc through an exec shim; compare the native
+	// executable to the pinned target, not the shell script used to launch it.
+	expected := gcBinary
+	if override, ok, err := binaryOverride(integrationGCBinaryEnv); err != nil {
+		return false
+	} else if ok {
+		expected = override
+	}
+	expected, err := filepath.EvalSymlinks(expected)
+	if err != nil {
 		return false
 	}
-	cwd, err := os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "cwd"))
-	return err == nil && graphCleanupPathEquals(cwd, gcHome)
+	executable, cwd, err := graphProcessExecutableAndCWD(pid)
+	if err != nil || !graphCleanupPathEquals(executable, expected) {
+		return false
+	}
+	return graphCleanupPathEquals(cwd, gcHome)
 }
 
 func graphCleanupPathEquals(path, expected string) bool {
@@ -1299,12 +1385,11 @@ func graphDoltChildCommandMatches(pid int, args []string, configPath, root strin
 	if pid <= 0 || len(args) < 2 || filepath.Base(args[0]) != "dolt" || args[1] != "sql-server" {
 		return false
 	}
-	executable, err := os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "exe"))
+	executable, cwd, err := graphProcessExecutableAndCWD(pid)
 	if err != nil || strings.TrimSuffix(filepath.Base(executable), " (deleted)") != "dolt" {
 		return false
 	}
-	cwd, err := os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "cwd"))
-	if err != nil || !graphFixturePathEquals(cwd, root) {
+	if !graphFixturePathEquals(cwd, root) {
 		return false
 	}
 	config, found, valid := graphProcessFlag(args, "--config")
@@ -1352,7 +1437,13 @@ func graphFixtureListenersOwnedWith(proxyPID, proxyPort, doltPID, doltPort int, 
 }
 
 func graphProcessOwnsListeningPort(pid, port int) bool {
-	if runtime.GOOS != "linux" || pid <= 0 || port < 1 || port > 65535 {
+	if pid <= 0 || port < 1 || port > 65535 {
+		return false
+	}
+	if runtime.GOOS == "darwin" {
+		return graphDarwinProcessOwnsListeningPort(pid, port)
+	}
+	if runtime.GOOS != "linux" {
 		return false
 	}
 	data, err := os.ReadFile("/proc/net/tcp")
