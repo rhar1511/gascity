@@ -145,7 +145,7 @@ func TestAdoptPRFormulaCompileAndRun(t *testing.T) {
 		"skip_gemini": "false",
 	})
 
-	workflow := waitForBeadClosedWithoutPrivatePayloadDiagnostics(t, cityDir, transport, workflowID, reviewWorkflowTimeout)
+	workflow := waitForWorkflowAndTeardown(t, cityDir, transport, workflowID, reviewWorkflowTimeout)
 	if got := metaValue(workflow, "gc.outcome"); got != "pass" {
 		dumpReviewFormulaCityState(t, cityDir, transport)
 		t.Fatalf("workflow outcome = %q, want pass", got)
@@ -188,7 +188,7 @@ func TestPersonalWorkFormulaCompileAndRun(t *testing.T) {
 		"test_command":  "true",
 	})
 
-	workflow := waitForBeadClosedWithoutPrivatePayloadDiagnostics(t, cityDir, transport, workflowID, reviewWorkflowTimeout)
+	workflow := waitForWorkflowAndTeardown(t, cityDir, transport, workflowID, reviewWorkflowTimeout)
 	if got := metaValue(workflow, "gc.outcome"); got != "pass" {
 		dumpReviewFormulaCityState(t, cityDir, transport)
 		t.Fatalf("workflow outcome = %q, want pass", got)
@@ -230,7 +230,7 @@ func TestAdoptPRFormulaRetriesTransientReviewerStep(t *testing.T) {
 		"skip_gemini": "false",
 	})
 
-	workflow := waitForBeadClosedWithoutPrivatePayloadDiagnostics(t, cityDir, transport, workflowID, reviewWorkflowTimeout)
+	workflow := waitForWorkflowAndTeardown(t, cityDir, transport, workflowID, reviewWorkflowTimeout)
 	if got := metaValue(workflow, "gc.outcome"); got != "pass" {
 		dumpReviewFormulaCityState(t, cityDir, transport)
 		t.Fatalf("workflow outcome = %q, want pass", got)
@@ -265,7 +265,7 @@ func TestAdoptPRFormulaSoftFailsGeminiAfterTransientRetries(t *testing.T) {
 		"skip_gemini": "false",
 	})
 
-	workflow := waitForBeadClosedWithoutPrivatePayloadDiagnostics(t, cityDir, transport, workflowID, reviewWorkflowTimeout)
+	workflow := waitForWorkflowAndTeardown(t, cityDir, transport, workflowID, reviewWorkflowTimeout)
 	if got := metaValue(workflow, "gc.outcome"); got != "pass" {
 		dumpReviewFormulaCityState(t, cityDir, transport)
 		t.Fatalf("workflow outcome = %q, want pass", got)
@@ -321,7 +321,7 @@ on_exhausted = "hard_fail"
 
 	_, workflowID := startReviewWorkflow(t, cityDir, transport, "mol-retry-recovery-smoke", map[string]string{})
 
-	workflow := waitForBeadClosedWithoutPrivatePayloadDiagnostics(t, cityDir, transport, workflowID, 4*time.Minute)
+	workflow := waitForWorkflowAndTeardown(t, cityDir, transport, workflowID, 4*time.Minute)
 	if got := metaValue(workflow, "gc.outcome"); got != "pass" {
 		dumpReviewFormulaCityState(t, cityDir, transport)
 		t.Fatalf("workflow outcome = %q, want pass", got)
@@ -434,7 +434,7 @@ on_exhausted = "hard_fail"
 
 	_, workflowID := startReviewWorkflow(t, cityDir, transport, "mol-review-loop-iteration-smoke", map[string]string{})
 
-	workflow := waitForBeadClosedWithoutPrivatePayloadDiagnostics(t, cityDir, transport, workflowID, 8*time.Minute)
+	workflow := waitForWorkflowAndTeardown(t, cityDir, transport, workflowID, 8*time.Minute)
 	if got := metaValue(workflow, "gc.outcome"); got != "pass" {
 		dumpReviewFormulaCityState(t, cityDir, transport)
 		t.Fatalf("workflow outcome = %q, want pass (review loop must approve in iteration 2)", got)

@@ -46,6 +46,47 @@ func extractShellFunc(t *testing.T, path, name string) string {
 	return ""
 }
 
+func TestGraphDispatchCloseRecordsAttemptWorkspace(t *testing.T) {
+	fn := extractShellFunc(t, agentScript("graph-dispatch.sh"), "close_with_result")
+	const ledger = `
+bd() {
+    local status=open workspace= outcome=
+    [ "$1" = update ] && [ "$2" = attempt ] || return 1
+    shift 2
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --status) status="$2"; shift 2 ;;
+            --set-metadata)
+                case "$2" in
+                    gc.work_dir=*) workspace="${2#gc.work_dir=}" ;;
+                    gc.outcome=*) outcome="${2#gc.outcome=}" ;;
+                esac
+                shift 2 ;;
+            *) return 1 ;;
+        esac
+    done
+    printf '%s\n%s\n%s\n' "$status" "$outcome" "$workspace"
+}
+trace() { :; }
+`
+	for _, outcome := range []string{"pass", "fail"} {
+		for _, workspace := range []string{"", "/tmp/actual worker workspace"} {
+			t.Run(outcome+workspace, func(t *testing.T) {
+				out, err := runGraphHarnessFunction(ledger+fn+"\nclose_with_result attempt \"$OUTCOME\" hard injected\n", []string{
+					"OUTCOME=" + outcome, "work_dir=" + workspace,
+				})
+				if err != nil {
+					t.Fatalf("close attempt: %v: %s", err, out)
+				}
+				want := "closed\n" + outcome + "\n" + workspace + "\n"
+				if string(out) != want {
+					t.Fatalf("closed attempt state = %q, want %q", out, want)
+				}
+			})
+		}
+	}
+}
+
 // TestGraphDispatchTransientOnceBudgetSurvivesLostClose guards the ga-j88sfp
 // gate flake: TestRetryManagedPooledWorkerRecoversClaimedAttemptAfterCrash
 // finishing the workflow with no review.attempt.2 (four release-gate sightings

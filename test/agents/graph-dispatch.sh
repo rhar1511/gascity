@@ -120,6 +120,12 @@ close_with_result() {
     local outcome="$2"
     local failure_class="${3:-}"
     local failure_reason="${4:-}"
+    local workspace_args=()
+    if [ -n "${work_dir:-}" ]; then
+        # The controller captures evidence after close; record the workspace
+        # this simulated worker actually used, including on failed attempts.
+        workspace_args=(--set-metadata "gc.work_dir=$work_dir")
+    fi
 
     # Swallow any bd failure — the worker runs under `set -e`, so an
     # error from a transient bd issue here (flaky socket, concurrent
@@ -128,13 +134,14 @@ close_with_result() {
     # outcomes (they read it back via show_outcome), so failing silently
     # is safer than failing loudly.
     if [ "$outcome" = "pass" ]; then
-        if ! bd update "$bead_id" --set-metadata "gc.outcome=pass" --status closed 2>/dev/null; then
+        if ! bd update "$bead_id" "${workspace_args[@]}" --set-metadata "gc.outcome=pass" --status closed 2>/dev/null; then
             trace "close-rejected bead=$bead_id outcome=$outcome (likely already closed by controller)"
         fi
         return 0
     fi
 
     if ! bd update "$bead_id" \
+        "${workspace_args[@]}" \
         --set-metadata "gc.outcome=fail" \
         --set-metadata "gc.failure_class=$failure_class" \
         --set-metadata "gc.failure_reason=$failure_reason" \

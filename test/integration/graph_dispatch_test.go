@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -82,7 +83,7 @@ func TestGraphWorkflowSuccessPath(t *testing.T) {
 	cityDir, transport := setupGraphWorkflowCityWithPrivateEvidence(t, "success")
 	convoyID, workflowID := startScopedWorkflowWithPrivateEvidenceHTTP(t, cityDir, transport)
 
-	workflow := waitForBeadClosedWithoutPrivatePayloadDiagnostics(t, cityDir, transport, workflowID, graphWorkflowCloseTimeout())
+	workflow := waitForWorkflowAndTeardown(t, cityDir, transport, workflowID, graphWorkflowCloseTimeout())
 	if got := metaValue(workflow, "gc.outcome"); got != "pass" {
 		t.Fatalf("workflow outcome = %q, want pass", got)
 	}
@@ -128,10 +129,14 @@ func TestGraphWorkflowSuccessPath(t *testing.T) {
 				t.Fatalf("exact retry evidence readback for control %s failed: %v", control.ID, err)
 			}
 			if attempt.CandidateStatus == attemptevidence.StatusAvailable {
-				if len(attempt.CandidateSHA) != 40 || !graphFixturePathEquals(attempt.Permission.WorkspaceRoot, filepath.Join(cityDir, "worktrees", convoyID)) {
-					t.Fatalf("retry evidence has the wrong committed workspace identity: candidate=%q workspace=%q", attempt.CandidateSHA, attempt.Permission.WorkspaceRoot)
+				workspace := attempt.Permission.WorkspaceRoot
+				implementationWorkspace := graphFixturePathEquals(workspace, filepath.Join(cityDir, "worktrees", convoyID))
+				if len(attempt.CandidateSHA) != 40 || (!implementationWorkspace && !graphFixturePathEquals(workspace, cityDir)) {
+					t.Fatalf("retry evidence has the wrong committed workspace identity: candidate=%q workspace=%q", attempt.CandidateSHA, workspace)
 				}
-				repositorySnapshots++
+				if implementationWorkspace {
+					repositorySnapshots++
+				}
 			}
 			sealedRetries++
 		}
@@ -287,7 +292,7 @@ func TestGraphWorkflowFailureRunsCleanup(t *testing.T) {
 	cityDir, transport := setupGraphWorkflowCityWithPrivateEvidence(t, "fail-preflight")
 	convoyID, workflowID := startScopedWorkflowWithPrivateEvidenceHTTP(t, cityDir, transport)
 
-	workflow := waitForBeadClosedWithoutPrivatePayloadDiagnostics(t, cityDir, transport, workflowID, graphWorkflowCloseTimeout())
+	workflow := waitForWorkflowAndTeardown(t, cityDir, transport, workflowID, graphWorkflowCloseTimeout())
 	if got := metaValue(workflow, "gc.outcome"); got != "fail" {
 		t.Fatalf("workflow outcome = %q, want fail", got)
 	}
@@ -1460,13 +1465,7 @@ func startGraphPrivateEvidenceService(t *testing.T, cityEnv []string, cityDir, c
 	// bd serve resolves its project context from Git. Give the disposable city
 	// an explicitly bounded repository instead of letting Git discover the
 	// ambient checkout (the service environment intentionally strips Git vars).
-	if output, err := runCommand(cityDir, serviceEnv, 10*time.Second, "git", "init", "--quiet", cityDir); err != nil {
-		t.Fatalf("initialize private-evidence fixture repository: %v\noutput: %s", err, output)
-	}
-	root, err := runCommand(cityDir, serviceEnv, 10*time.Second, "git", "rev-parse", "--show-toplevel")
-	if err != nil || filepath.Clean(strings.TrimSpace(root)) != filepath.Clean(cityDir) {
-		t.Fatalf("private-evidence fixture repository root = %q, want %q (err=%v)", strings.TrimSpace(root), cityDir, err)
-	}
+	initializeGraphFixtureRepository(t, cityDir, serviceEnv)
 	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
 	serviceCtx, stopService := context.WithCancel(context.Background())
 	cmd := buildCommand(serviceCtx, cityDir, serviceEnv, realBDBinary, "serve", "--addr", addr, "--auth-token-file", tokenFile)
@@ -1616,19 +1615,19 @@ func readGraphIssuesOverHTTP(ctx context.Context, transport graphPrivateEvidence
 			return nil, fmt.Errorf("could not read graph issues through installed service: %s", safeGraphHTTPTransportError(err, transport.token))
 		}
 		var page struct {
-			Items      []graphBead `json:"items"`
-			HasMore    bool        `json:"has_more"`
-			NextCursor string      `json:"next_cursor"`
+			Items      *[]graphBead `json:"items"`
+			HasMore    *bool        `json:"has_more"`
+			NextCursor string       `json:"next_cursor"`
 		}
 		decodeErr := json.NewDecoder(response.Body).Decode(&page)
 		closeErr := response.Body.Close()
 		if decodeErr == nil && closeErr != nil {
 			decodeErr = closeErr
 		}
-		if response.StatusCode != http.StatusOK || decodeErr != nil {
+		if response.StatusCode != http.StatusOK || decodeErr != nil || page.Items == nil || page.HasMore == nil {
 			return nil, fmt.Errorf("installed service graph issue-list response was invalid (HTTP %d)", response.StatusCode)
 		}
-		for _, item := range page.Items {
+		for _, item := range *page.Items {
 			for key := range item.Metadata {
 				if isGraphPrivateEvidenceMetadataKey(key) {
 					delete(item.Metadata, key)
@@ -1636,7 +1635,7 @@ func readGraphIssuesOverHTTP(ctx context.Context, transport graphPrivateEvidence
 			}
 			issues = append(issues, item)
 		}
-		if !page.HasMore {
+		if !*page.HasMore {
 			return issues, nil
 		}
 		if strings.TrimSpace(page.NextCursor) == "" {
@@ -1662,7 +1661,7 @@ func findGraphWorkflowBeadByRefSuffixOverHTTP(t *testing.T, transport graphPriva
 	return graphBead{}
 }
 
-func waitForBeadClosedWithoutPrivatePayloadDiagnostics(t *testing.T, cityDir string, transport graphPrivateEvidenceTransport, beadID string, timeout time.Duration) graphBead {
+func waitForWorkflowAndTeardown(t *testing.T, cityDir string, transport graphPrivateEvidenceTransport, beadID string, timeout time.Duration) graphBead {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
@@ -1678,8 +1677,20 @@ func waitForBeadClosedWithoutPrivatePayloadDiagnostics(t *testing.T, cityDir str
 				return false, "workflow bead read is unavailable: " + err.Error(), nil
 			}
 			if bead.Status == "closed" {
+				// A settled root releases its teardown tail. Root closure alone
+				// cannot establish that cleanup has executed.
+				issues, listErr := readGraphIssuesOverHTTP(ctx, transport)
+				if listErr != nil {
+					return false, "workflow teardown state is unavailable: " + listErr.Error(), nil
+				}
+				for _, issue := range issues {
+					if metaValue(issue, beadmeta.RootBeadIDMetadataKey) == beadID &&
+						metaValue(issue, beadmeta.ScopeRoleMetadataKey) == beadmeta.ScopeRoleTeardown && issue.Status != "closed" {
+						return false, "workflow teardown " + issue.ID + " is " + issue.Status, nil
+					}
+				}
 				closed = bead
-				return true, "workflow bead is closed", nil
+				return true, "workflow and teardown are closed", nil
 			}
 			return false, "workflow bead status is " + bead.Status, nil
 		})
@@ -1909,4 +1920,125 @@ func readWorkflowReport(t *testing.T, cityDir string) string {
 		t.Fatalf("reading workflow report: %v", err)
 	}
 	return string(data)
+}
+
+func initializeGraphFixtureRepository(t *testing.T, cityDir string, serviceEnv []string) {
+	t.Helper()
+	if output, err := runCommand(cityDir, serviceEnv, 10*time.Second, "git", "init", "--quiet", cityDir); err != nil {
+		t.Fatalf("initialize private-evidence fixture repository: %v\noutput: %s", err, output)
+	}
+	root, err := runCommand(cityDir, serviceEnv, 10*time.Second, "git", "rev-parse", "--show-toplevel")
+	if err != nil || filepath.Clean(strings.TrimSpace(root)) != filepath.Clean(cityDir) {
+		t.Fatalf("private-evidence fixture repository root = %q, want %q (err=%v)", strings.TrimSpace(root), cityDir, err)
+	}
+	// The city's repository is a default execution workspace, separate from
+	// the simulated implementation repository. Keep mutable fixture state
+	// (including its ledger) out of snapshots and never commit staged data.
+	excludePath := filepath.Join(cityDir, ".git", "info", "exclude")
+	excludes, err := os.ReadFile(excludePath)
+	if err != nil {
+		t.Fatalf("read fixture repository exclusions: %v", err)
+	}
+	if err := os.WriteFile(excludePath, append(excludes, []byte("\n/*\n")...), 0o600); err != nil {
+		t.Fatalf("exclude mutable fixture state from repository captures: %v", err)
+	}
+	if output, err := runCommand(cityDir, serviceEnv, 10*time.Second, "git",
+		"-c", "user.name=Graph fixture", "-c", "user.email=graph-fixture@example.invalid",
+		"-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null",
+		"commit", "--quiet", "--allow-empty", "--only", "-m", "Initialize graph city workspace"); err != nil {
+		t.Fatalf("commit empty fixture workspace: %v\noutput: %s", err, output)
+	}
+}
+
+// Settlement closes the root before its teardown tail becomes executable.
+// The integration completion gate must observe both phases before checking
+// worktree cleanup, even after a failed body.
+func TestGraphWorkflowWaitIncludesTeardownAfterSettlement(t *testing.T) {
+	for _, outcome := range []string{"pass", "fail"} {
+		t.Run(outcome, func(t *testing.T) {
+			var listCalls atomic.Int64
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case "/v0/beads/issues/root":
+					_ = json.NewEncoder(w).Encode(graphBead{ID: "root", Status: "closed", Metadata: map[string]any{"gc.outcome": outcome}})
+				case "/v0/beads/issues":
+					state := "open"
+					if listCalls.Add(1) >= 2 {
+						state = "closed"
+					}
+					_ = json.NewEncoder(w).Encode(map[string]any{"items": []graphBead{
+						{ID: "cleanup", Status: state, Metadata: map[string]any{"gc.root_bead_id": "root", "gc.scope_role": "teardown", "gc.kind": "retry", "gc.outcome": "pass"}},
+						{ID: "other-workflow", Status: "open", Metadata: map[string]any{"gc.root_bead_id": "other-root", "gc.scope_role": "teardown"}},
+						{ID: "non-teardown", Status: "open", Metadata: map[string]any{"gc.root_bead_id": "root", "gc.scope_role": "member"}},
+					}, "has_more": false})
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			t.Cleanup(server.Close)
+			client := newGraphPrivateEvidenceHTTPClient()
+			t.Cleanup(client.CloseIdleConnections)
+			transport := graphPrivateEvidenceTransport{endpoint: server.URL, client: client}
+			root := waitForWorkflowAndTeardown(t, t.TempDir(), transport, "root", 2*time.Second)
+			if root.Status != "closed" || metaValue(root, "gc.outcome") != outcome {
+				t.Fatalf("workflow state changed: %+v", root)
+			}
+			if got := listCalls.Load(); got != 2 {
+				t.Fatalf("teardown observations=%d, want open then closed before returning", got)
+			}
+		})
+	}
+}
+
+func TestGraphIssueListRejectsMissingCompletionFields(t *testing.T) {
+	for _, body := range []string{`{}`, `{"items":[]}`, `{"has_more":false}`, `{"items":null,"has_more":false}`} {
+		t.Run(body, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, body)
+			}))
+			t.Cleanup(server.Close)
+			client := newGraphPrivateEvidenceHTTPClient()
+			t.Cleanup(client.CloseIdleConnections)
+			if _, err := readGraphIssuesOverHTTP(t.Context(), graphPrivateEvidenceTransport{endpoint: server.URL, client: client}); err == nil {
+				t.Fatal("incomplete issue list could falsely prove teardown completion")
+			}
+		})
+	}
+}
+
+func TestGraphFixtureRepositoryStartsWithEmptyCommit(t *testing.T) {
+	root := t.TempDir()
+	env := []string{"PATH=" + os.Getenv("PATH"), "HOME=" + t.TempDir(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null"}
+	runGit := func(args ...string) string {
+		t.Helper()
+		out, err := runCommand(root, env, 10*time.Second, "git", args...)
+		if err != nil {
+			t.Fatalf("fixture git command: %v: %s", err, out)
+		}
+		return strings.TrimSpace(out)
+	}
+	runGit("init", "--quiet")
+	const privateFile = "private-fixture-state"
+	if err := os.WriteFile(filepath.Join(root, privateFile), []byte("fixture-only private state\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", privateFile)
+	initializeGraphFixtureRepository(t, root, env)
+	if err := os.WriteFile(filepath.Join(root, "runtime-artifact"), []byte("mutable fixture state"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := runGit("rev-parse", "--verify", "HEAD^{commit}"); len(got) != 40 {
+		t.Fatalf("fixture HEAD=%q, want a real commit", got)
+	}
+	if got := runGit("ls-tree", "--name-only", "HEAD"); got != "" {
+		t.Fatalf("fixture committed data: %q", got)
+	}
+	if got := runGit("diff", "--cached", "--name-only"); got != privateFile {
+		t.Fatalf("fixture changed staged private data: %q", got)
+	}
+	if got := runGit("ls-files", "--others", "--exclude-standard"); got != "" {
+		t.Fatalf("mutable fixture state remains in the capture workspace: %q", got)
+	}
 }
