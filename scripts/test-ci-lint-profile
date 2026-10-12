@@ -12,6 +12,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import textwrap
 import time
 import unittest
 from unittest import mock
@@ -20,6 +21,117 @@ SCRIPT = Path(__file__).with_name("ci-lint-profile")
 
 
 class MacLintSchedulingTests(unittest.TestCase):
+    def test_full_mac_lint_refuses_failed_flag_discovery(self):
+        workflow = (SCRIPT.parent.parent / ".github/workflows/mac-regression.yml").read_text()
+        quality = workflow.split("  mac-quality:\n", 1)[1].split("\n  mac-", 1)[0]
+        step = quality.split("      - name: Lint\n", 1)[1].split("      - name:", 1)[0]
+        command = step.split("        run: |\n", 1)[1]
+        configuration = command.split('          mkdir -p "$MAC_LINT_DIR"', 1)[0]
+        # Run the exact setup prefix with failing Go flag discovery. The
+        # workflow must stop before the supervisor or lint command can launch.
+        result = subprocess.run(
+            ["bash", "-o", "pipefail", "-c",
+             "go() { return 7; }\n" + textwrap.dedent(configuration)
+             + "\nprintf 'continued-after-failed-discovery\\n'"],
+            capture_output=True, text=True, timeout=5,
+        )
+        self.assertEqual(result.returncode, 7, result.stdout + result.stderr)
+        self.assertNotIn("continued-after-failed-discovery", result.stdout)
+
+    def test_full_mac_lint_bounds_inherited_compiler_concurrency(self):
+        root = SCRIPT.parent.parent
+        workflow = (root / ".github/workflows/mac-regression.yml").read_text()
+        quality = workflow.split("  mac-quality:\n", 1)[1].split("\n  mac-", 1)[0]
+        step = quality.split("      - name: Lint\n", 1)[1].split("      - name:", 1)[0]
+        settings, command = step.split("        run: |\n", 1)
+        self.assertIn('          GOMAXPROCS: "2"', settings)
+        self.assertIn('lint_go_flags="$(go env GOFLAGS)" || exit "$?"', command)
+        self.assertIn('export GOFLAGS="$lint_go_flags -p=1"', command)
+        self.assertNotIn("GOMAXPROCS", quality.split("      - name: Lint\n", 1)[0])
+        # Execute the workflow body, supervisor and Makefile with stub tools.
+        # Non-Darwin hosts first prove native sampling refuses to launch,
+        # then omit only that option for the portable environment proof.
+        # Neither path proves performance or analyzer correctness.
+        for effective_flags in ("", "-tags=fixture -trimpath -p=7 -mod=mod"):
+            with self.subTest(effective_flags=effective_flags):
+                with tempfile.TemporaryDirectory(dir="/var/tmp") as temporary:
+                    directory = Path(temporary)
+                    bin_dir = directory / "bin"
+                    bin_dir.mkdir()
+                    profiles = directory / "profiles"
+                    capture = directory / "capture.json"
+                    go = bin_dir / "go"
+                    go.write_text(
+                        f"#!{sys.executable}\n"
+                        "import os,sys\n"
+                        "assert sys.argv[1] == 'env', sys.argv\n"
+                        "key=sys.argv[2]\n"
+                        "values={'GOOS':'darwin','GOARCH':'arm64',"
+                        "'GOPATH':os.environ['FIXTURE_ROOT']}\n"
+                        "print(os.environ.get('GOFLAGS',os.environ['FIXTURE_GOFLAGS']) "
+                        "if key=='GOFLAGS' else values.get(key,''))\n"
+                    )
+                    git = bin_dir / "git"
+                    git.write_text(f"#!{sys.executable}\nprint('fixture-revision')\n")
+                    linter = bin_dir / "golangci-lint"
+                    linter.write_text(
+                        f"#!{sys.executable}\n"
+                        "import json,os,sys\nfrom pathlib import Path\n"
+                        "Path(os.environ['FIXTURE_CAPTURE']).write_text(json.dumps({"
+                        "'args':sys.argv[1:],'gomaxprocs':os.environ.get('GOMAXPROCS'),"
+                        "'goflags':os.environ.get('GOFLAGS'),"
+                        "'gomemlimit':os.environ.get('GOMEMLIMIT')}))\n"
+                        "for arg in sys.argv[1:]:\n"
+                        " if arg.startswith(('--cpu-profile-path=','--mem-profile-path=')):\n"
+                        "  Path(arg.split('=',1)[1]).write_bytes(b'fixture profile')\n"
+                    )
+                    for executable in (go, git, linter):
+                        executable.chmod(0o755)
+                    env = os.environ.copy()
+                    env.pop("GOFLAGS", None)
+                    env.pop("MAKEFLAGS", None)
+                    env.pop("MFLAGS", None)
+                    env.update({
+                        "PATH": str(bin_dir) + os.pathsep + env["PATH"],
+                        "GOMAXPROCS": "2",
+                        "MAC_LINT_DIR": str(profiles),
+                        "MAC_LINT_DEADLINE": str(time.monotonic() + 20),
+                        "FIXTURE_ROOT": str(directory),
+                        "FIXTURE_GOFLAGS": effective_flags,
+                        "FIXTURE_CAPTURE": str(capture),
+                    })
+                    shell_body = textwrap.dedent(command)
+                    if sys.platform != "darwin":
+                        refusal = subprocess.run(
+                            ["bash", "-e", "-o", "pipefail", "-c", shell_body],
+                            cwd=root, env=env, capture_output=True, text=True, timeout=30,
+                        )
+                        self.assertEqual(refusal.returncode, 2, refusal.stdout + refusal.stderr)
+                        self.assertIn("sampling requires Darwin", refusal.stdout + refusal.stderr)
+                        self.assertFalse(capture.exists(), "refused sampling launched linter")
+                        self.assertFalse((profiles / "result.json").exists())
+                        sampling = ' --sample-executable "$(go env GOPATH)/bin/golangci-lint"'
+                        self.assertEqual(shell_body.count(sampling), 1)
+                        shell_body = shell_body.replace(sampling, "", 1)
+                    result = subprocess.run(
+                        ["bash", "-e", "-o", "pipefail", "-c", shell_body],
+                        cwd=root, env=env, capture_output=True, text=True, timeout=30,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    observed = json.loads(capture.read_text())
+                    self.assertEqual(observed["gomaxprocs"], "2")
+                    self.assertEqual(observed["gomemlimit"], env.get("LINT_GOMEMLIMIT", "6GiB"))
+                    flags = shlex.split(observed["goflags"])
+                    expected = [flag for flag in shlex.split(effective_flags)
+                                if not flag.startswith("-mod=")]
+                    self.assertEqual(flags, expected + ["-p=1", "-mod=readonly"])
+                    self.assertEqual(observed["args"][0], "run")
+                    self.assertEqual(observed["args"][-1], "./...")
+                    self.assertIn("--concurrency=2", observed["args"])
+                    self.assertIn("--timeout=55m", observed["args"])
+                    self.assertTrue(json.loads((profiles / "result.json").read_text())
+                                    ["profiles_complete"])
+
     def test_full_mac_lint_bounds_analysis_concurrency_without_relaxing_gate(self):
         root = SCRIPT.parent.parent
         workflow = (root / ".github/workflows/mac-regression.yml").read_text()
