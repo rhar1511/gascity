@@ -1051,6 +1051,10 @@ jobs:
           bd-version: ${{ env.BD_VERSION }}
           qualified-integration-bd: "true"
           install-claude-cli: "false"
+      - name: Pin exact integration test binaries
+        run: |
+          echo "BEADS_TEST_BD_BINARY=$(command -v bd)" >> "$GITHUB_ENV"
+          echo "BEADS_TEST_DOLT_BINARY=$(command -v dolt)" >> "$GITHUB_ENV"
       - name: Run integration shard
         run: ${{ matrix.command }}
 
