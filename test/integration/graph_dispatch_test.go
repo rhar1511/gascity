@@ -4,8 +4,10 @@ package integration
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -124,8 +126,15 @@ func TestGraphWorkflowSuccessPath(t *testing.T) {
 			if attempt.Identity.Kind != attemptevidence.KindRetry {
 				continue
 			}
+			compact, err := attemptevidence.ReadCompact(beadStore, control.ID, attempt.AttemptID)
+			if err != nil {
+				t.Fatalf("compact retry evidence readback for control %s failed: %v", control.ID, err)
+			}
 			readback, err := attemptevidence.Read(beadStore, control.ID, attempt.AttemptID)
-			if err != nil || !reflect.DeepEqual(readback, attempt) {
+			if err != nil {
+				t.Fatalf("hydrated retry evidence readback for control %s failed: %v", control.ID, err)
+			}
+			if err := validateGraphAttemptReadback(attempt, compact, readback); err != nil {
 				t.Fatalf("exact retry evidence readback for control %s failed: %v", control.ID, err)
 			}
 			if attempt.CandidateStatus == attemptevidence.StatusAvailable {
@@ -2040,5 +2049,71 @@ func TestGraphFixtureRepositoryStartsWithEmptyCommit(t *testing.T) {
 	}
 	if got := runGit("ls-files", "--others", "--exclude-standard"); got != "" {
 		t.Fatalf("mutable fixture state remains in the capture workspace: %q", got)
+	}
+}
+
+// Compact reads retain the manifest; full reads additionally hydrate diff
+// bytes. Verify both contracts without discarding identity or status fields.
+func validateGraphAttemptReadback(listed, compact, hydrated attemptevidence.Evidence) error {
+	if !reflect.DeepEqual(compact, listed) {
+		return errors.New("compact attempt readback differs from its listed manifest")
+	}
+	for _, diff := range []attemptevidence.DiffSnapshot{hydrated.Diff, hydrated.WorkspaceDiff} {
+		if diff.Status == attemptevidence.StatusAvailable {
+			if _, _, err := attemptevidence.DecodeDiff(diff); err != nil {
+				return fmt.Errorf("hydrated attempt diff verification: %w", err)
+			}
+		}
+	}
+	hydrated.Diff.Payload = nil
+	hydrated.WorkspaceDiff.Payload = nil
+	if !reflect.DeepEqual(hydrated, compact) {
+		return errors.New("hydrated attempt readback changed its compact manifest")
+	}
+	return nil
+}
+
+func TestGraphAttemptReadbackVerifiesCompactManifestAndHydratedDiffs(t *testing.T) {
+	const bundle = `{"tracked_patch":"Zml4dHVyZSBwYXRjaA=="}`
+	var compressed bytes.Buffer
+	writer := gzip.NewWriter(&compressed)
+	if _, err := io.WriteString(writer, bundle); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(compressed.Bytes())
+	diff := attemptevidence.DiffSnapshot{
+		Status: attemptevidence.StatusAvailable, Encoding: attemptevidence.DiffEncoding,
+		SHA256: fmt.Sprintf("%x", digest), UncompressedBytes: int64(len(bundle)),
+	}
+	listed := attemptevidence.Evidence{AttemptID: "exact-attempt", Diff: diff, WorkspaceDiff: diff}
+	hydrated := listed
+	hydrated.Diff.Payload = append([]byte(nil), compressed.Bytes()...)
+	hydrated.WorkspaceDiff.Payload = append([]byte(nil), compressed.Bytes()...)
+	if err := validateGraphAttemptReadback(listed, listed, hydrated); err != nil {
+		t.Fatalf("valid hydrated diff rejected: %v", err)
+	}
+	for _, tc := range []struct {
+		name   string
+		change func(*attemptevidence.Evidence, *attemptevidence.Evidence)
+	}{
+		{"different compact attempt", func(c, _ *attemptevidence.Evidence) { c.AttemptID = "other-attempt" }},
+		{"different hydrated owner", func(_, h *attemptevidence.Evidence) { h.Identity.OwnerBeadID = "other-owner" }},
+		{"missing candidate bytes", func(_, h *attemptevidence.Evidence) { h.Diff.Payload = nil }},
+		{"missing workspace bytes", func(_, h *attemptevidence.Evidence) { h.WorkspaceDiff.Payload = nil }},
+		{"corrupt candidate bytes", func(_, h *attemptevidence.Evidence) { h.Diff.Payload = []byte("corrupt") }},
+		{"corrupt workspace bytes", func(_, h *attemptevidence.Evidence) { h.WorkspaceDiff.Payload = []byte("corrupt") }},
+		{"downgraded candidate", func(_, h *attemptevidence.Evidence) { h.Diff.Status = "unavailable" }},
+		{"downgraded workspace", func(_, h *attemptevidence.Evidence) { h.WorkspaceDiff.Status = "unavailable" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			compact, full := listed, hydrated
+			tc.change(&compact, &full)
+			if err := validateGraphAttemptReadback(listed, compact, full); err == nil {
+				t.Fatal("invalid attempt readback accepted")
+			}
+		})
 	}
 }
