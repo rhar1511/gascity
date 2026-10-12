@@ -779,38 +779,8 @@ func TestBeadsProxiedDefault(t *testing.T) {
 			bdCalls.Count(), bdCalls.Count("ping"), bdCalls.Describe())
 	})
 
-	t.Run("native-lane", func(t *testing.T) {
-		runProxiedNativeLaneGates(t, bdPath, doltPath)
-	})
-
-	var createdBead string
-	t.Run("bd-front-door", func(t *testing.T) {
-		out, err := city.GCStdout("bd", "create", "e2e proxied default", "--json")
-		if err != nil {
-			t.Fatalf("gc bd create: %v\n%s", err, out)
-		}
-		var created struct {
-			ID string `json:"id"`
-		}
-		lastJSONLine(t, out, &created)
-		if strings.TrimSpace(created.ID) == "" {
-			t.Fatalf("gc bd create returned no id:\n%s", out)
-		}
-		createdBead = created.ID
-
-		list, err := city.GCStdout("bd", "list", "--json")
-		if err != nil {
-			t.Fatalf("gc bd list: %v\n%s", err, list)
-		}
-		if !strings.Contains(list, createdBead) {
-			t.Fatalf("gc bd list does not contain %s:\n%s", createdBead, list)
-		}
-		show, err := city.GCStdout("bd", "show", createdBead, "--json")
-		if err != nil {
-			t.Fatalf("gc bd show %s: %v\n%s", createdBead, err, show)
-		}
-	})
-
+	// Check the rig while the one-minute health orders are still current;
+	// the independent native-lane journey below can take several cycles.
 	t.Run("rig-inherits", func(t *testing.T) {
 		city.RigAdd(rigDir, "")
 		assertProxiedScope(t, rigDir, "rig")
@@ -843,6 +813,38 @@ func TestBeadsProxiedDefault(t *testing.T) {
 		// bd-owned proxied scopes with no backup anywhere, and this is the only
 		// doctor line that says so.
 		assertProxiedBackupAdvisory(t, city, "a proxied city with a rig", true, "city", filepath.Base(rigDir))
+	})
+
+	t.Run("native-lane", func(t *testing.T) {
+		runProxiedNativeLaneGates(t, bdPath, doltPath)
+	})
+
+	var createdBead string
+	t.Run("bd-front-door", func(t *testing.T) {
+		out, err := city.GCStdout("bd", "create", "e2e proxied default", "--json")
+		if err != nil {
+			t.Fatalf("gc bd create: %v\n%s", err, out)
+		}
+		var created struct {
+			ID string `json:"id"`
+		}
+		lastJSONLine(t, out, &created)
+		if strings.TrimSpace(created.ID) == "" {
+			t.Fatalf("gc bd create returned no id:\n%s", out)
+		}
+		createdBead = created.ID
+
+		list, err := city.GCStdout("bd", "list", "--json")
+		if err != nil {
+			t.Fatalf("gc bd list: %v\n%s", err, list)
+		}
+		if !strings.Contains(list, createdBead) {
+			t.Fatalf("gc bd list does not contain %s:\n%s", createdBead, list)
+		}
+		show, err := city.GCStdout("bd", "show", createdBead, "--json")
+		if err != nil {
+			t.Fatalf("gc bd show %s: %v\n%s", createdBead, err, show)
+		}
 	})
 
 	t.Run("start-default-pack", func(t *testing.T) {
