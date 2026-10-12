@@ -526,7 +526,24 @@ func TestGraphIssueReadTimeoutReportsHTTPProgress(t *testing.T) {
 
 func setupGraphWorkflowCityWithPrivateEvidence(t *testing.T, mode string) (string, graphPrivateEvidenceTransport) {
 	t.Helper()
+	return setupWorkflowCityWithPrivateEvidence(t, func(cityName string) string {
+		startCommand := "GC_GRAPH_MODE=" + mode + " bash " + agentScript("graph-dispatch.sh")
+		cityToml := fmt.Sprintf(
+			"[workspace]\nname = %q\n\n[session]\nprovider = \"subprocess\"\n\n[daemon]\nformula_v2 = true\npatrol_interval = \"100ms\"\n\n[[agent]]\nname = \"worker\"\nmax_active_sessions = 1\nstart_command = %q\n\n[[named_session]]\ntemplate = \"worker\"\nmode = \"always\"\n",
+			cityName, startCommand,
+		)
+
+		return cityToml
+	}, nil)
+}
+
+// setupWorkflowCityWithPrivateEvidence binds every retry-capable fixture to
+// its own stock Beads HTTP service and verifies process absence on cleanup.
+func setupWorkflowCityWithPrivateEvidence(t *testing.T, config func(string) string, prepare func(string)) (string, graphPrivateEvidenceTransport) {
+	t.Helper()
 	gcHome, env := newIsolatedCommandEnvWithoutSupervisor(t, true)
+	// Bound transient Beads probes during pooled worker recovery.
+	env = append(env, "GC_BD_PROBE_TIMEOUT=30s")
 
 	var cityName string
 	if usingSubprocess() {
@@ -634,14 +651,14 @@ func setupGraphWorkflowCityWithPrivateEvidence(t *testing.T, mode string) (strin
 	}
 	t.Cleanup(cleanupFixture)
 
-	startCommand := "GC_GRAPH_MODE=" + mode + " bash " + agentScript("graph-dispatch.sh")
-	cityToml := fmt.Sprintf(
-		"[workspace]\nname = %q\n\n[session]\nprovider = \"subprocess\"\n\n[daemon]\nformula_v2 = true\npatrol_interval = \"100ms\"\n\n[[agent]]\nname = \"worker\"\nmax_active_sessions = 1\nstart_command = %q\n\n[[named_session]]\ntemplate = \"worker\"\nmode = \"always\"\n",
-		cityName, startCommand,
-	)
+	cityToml := config(cityName)
 	configPath := filepath.Join(t.TempDir(), "graph-workflow.toml")
 	if err := os.WriteFile(configPath, []byte(cityToml), 0o644); err != nil {
 		t.Fatalf("writing graph workflow config: %v", err)
+	}
+
+	if prepare != nil {
+		prepare(cityDir)
 	}
 
 	// gc init can start the BD-owned proxy even with --no-start. The cleanup
@@ -1840,92 +1857,6 @@ func waitForGraphWorkflowRootForInputConvoyOverHTTP(t *testing.T, cityDir string
 	return workflowID
 }
 
-func waitForGraphWorkflowRootForInputConvoy(t *testing.T, cityDir, inputConvoyID, slingOutput string, timeout time.Duration) string {
-	t.Helper()
-
-	deadline := time.Now().Add(timeout)
-	var lastErr error
-	var lastList string
-	for time.Now().Before(deadline) {
-		workflowID, rawList, err := findGraphWorkflowRootForInputConvoy(cityDir, inputConvoyID)
-		if err == nil && workflowID != "" {
-			return workflowID
-		}
-		lastErr = err
-		lastList = rawList
-		time.Sleep(200 * time.Millisecond)
-	}
-	inputConvoy := showBead(t, cityDir, inputConvoyID)
-	t.Fatalf("timed out waiting for graph.v2 workflow root for input convoy %s: %v\ngc sling output:\n%s\ninput convoy:\n%+v\nbd list:\n%s", inputConvoyID, lastErr, slingOutput, inputConvoy, lastList)
-	return ""
-}
-
-func findGraphWorkflowRootForInputConvoy(cityDir, inputConvoyID string) (string, string, error) {
-	out, err := bdDolt(cityDir, "list", "--json", "--all", "--limit=0")
-	if err != nil {
-		return "", out, fmt.Errorf("bd list --json failed: %w", err)
-	}
-	var beads []graphBead
-	if err := json.Unmarshal([]byte(strings.TrimSpace(extractJSONPayload(out))), &beads); err != nil {
-		return "", out, fmt.Errorf("unmarshal bead list: %w", err)
-	}
-
-	for _, bead := range beads {
-		if bead.ID == inputConvoyID && beadType(bead) != "convoy" {
-			return "", out, fmt.Errorf("input target %s is type %q, want convoy", inputConvoyID, beadType(bead))
-		}
-	}
-	for _, bead := range beads {
-		if metaValue(bead, "gc.kind") != "workflow" {
-			continue
-		}
-		if metaValue(bead, "gc.input_convoy_id") == inputConvoyID {
-			return bead.ID, out, nil
-		}
-	}
-	return "", out, fmt.Errorf("no workflow root found for input convoy %s", inputConvoyID)
-}
-
-func waitForBeadClosed(t *testing.T, cityDir, beadID string, timeout time.Duration) graphBead {
-	t.Helper()
-
-	var waitErr error
-	if bead, err := waitForBeadCondition(t, cityDir, beadID, timeout, func(bead graphBead) bool {
-		return bead.Status == "closed"
-	}); err == nil {
-		return bead
-	} else {
-		waitErr = err
-		t.Logf("waitForBeadClosed(%s) ended with %v; collecting diagnostics", beadID, err)
-	}
-
-	out, err := bdDolt(cityDir, "list", "--json", "--all", "--limit=0")
-	if err != nil {
-		t.Fatalf("timed out waiting for bead %s to close; bd list failed: %v\noutput: %s", beadID, err, out)
-	}
-	readyOut, readyErr := bdDolt(cityDir, "ready", "--json", "--limit=0")
-	if readyErr != nil {
-		readyOut = fmt.Sprintf("bd ready failed: %v\noutput: %s", readyErr, readyOut)
-	}
-	readyAssigneeOut, readyAssigneeErr := bdDolt(cityDir, "ready", "--json", "--limit=0", "--assignee=worker")
-	if readyAssigneeErr != nil {
-		readyAssigneeOut = fmt.Sprintf("bd ready --assignee failed: %v\noutput: %s", readyAssigneeErr, readyAssigneeOut)
-	}
-	sessionListOut, sessionListErr := gcDolt(cityDir, "session", "list")
-	if sessionListErr != nil {
-		sessionListOut = fmt.Sprintf("gc session list failed: %v\noutput: %s", sessionListErr, sessionListOut)
-	}
-	sessionPeekOut, sessionPeekErr := gcDolt(cityDir, "session", "peek", "worker")
-	if sessionPeekErr != nil {
-		sessionPeekOut = fmt.Sprintf("gc session peek worker failed: %v\noutput: %s", sessionPeekErr, sessionPeekOut)
-	}
-	traceOut := readOptionalFile(filepath.Join(cityDir, "graph-workflow-trace.log"))
-	workflowTraceOut := readGraphWorkflowTraceFiles(cityDir)
-	t.Fatalf("waiting for bead %s to close failed: %v\nready:\n%s\nready worker:\n%s\nsessions:\n%s\nworker peek:\n%s\ntrace:\n%s\nworkflow trace:\n%s\nbeads:\n%s",
-		beadID, waitErr, readyOut, readyAssigneeOut, sessionListOut, sessionPeekOut, traceOut, workflowTraceOut, out)
-	return graphBead{}
-}
-
 func readGraphWorkflowTraceFiles(cityDir string) string {
 	tracePaths := []string{
 		citylayout.ControlDispatcherTraceDefaultPath(cityDir),
@@ -1944,60 +1875,6 @@ func readOptionalFile(path string) string {
 		return fmt.Sprintf("read %s failed: %v", path, err)
 	}
 	return string(data)
-}
-
-func showBead(t *testing.T, cityDir, beadID string) graphBead {
-	t.Helper()
-
-	bead, err := tryShowBead(cityDir, beadID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return bead
-}
-
-func tryShowBead(cityDir, beadID string) (graphBead, error) {
-	out, err := bdDolt(cityDir, "show", beadID, "--json")
-	if err != nil {
-		return graphBead{}, fmt.Errorf("bd show --json %s failed: %v\noutput: %s", beadID, err, out)
-	}
-	var bead graphBead
-	trimmed := strings.TrimSpace(extractJSONPayload(out))
-	if err := json.Unmarshal([]byte(trimmed), &bead); err == nil {
-		return bead, nil
-	}
-	var beads []graphBead
-	if err := json.Unmarshal([]byte(trimmed), &beads); err != nil {
-		return graphBead{}, fmt.Errorf("unmarshal bead %s: %v\njson: %s", beadID, err, out)
-	}
-	if len(beads) == 0 {
-		return graphBead{}, fmt.Errorf("bd show --json %s returned no beads\njson: %s", beadID, out)
-	}
-	return beads[0], nil
-}
-
-func mustFindWorkflowBeadByRefSuffix(t *testing.T, cityDir, workflowID, suffix string) graphBead {
-	t.Helper()
-
-	out, err := bdDolt(cityDir, "list", "--json", "--all", "--limit=0")
-	if err != nil {
-		t.Fatalf("bd list --json failed: %v\noutput: %s", err, out)
-	}
-	var beads []graphBead
-	if err := json.Unmarshal([]byte(strings.TrimSpace(extractJSONPayload(out))), &beads); err != nil {
-		t.Fatalf("unmarshal bead list: %v\njson: %s", err, out)
-	}
-	for _, bead := range beads {
-		ref := bead.Ref
-		if ref == "" {
-			ref = metaValue(bead, "gc.step_ref")
-		}
-		if metaValue(bead, "gc.root_bead_id") == workflowID && strings.HasSuffix(ref, suffix) {
-			return bead
-		}
-	}
-	t.Fatalf("no bead with ref suffix %s found for workflow %s", suffix, workflowID)
-	return graphBead{}
 }
 
 func extractJSONPayload(raw string) string {

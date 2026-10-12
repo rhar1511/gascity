@@ -588,16 +588,18 @@ func (s *BdStore) finalizeConditionalWrite(id, verb string, expectedRevision int
 }
 
 // CompareAndSetMetadataKey atomically sets metadata[key]=next iff the current
-// value equals expected, emulated over bd's revision fence (bd has no value-CAS
-// primitive). The loop is bounded because control/member beads are metadata-hot:
+// value equals expected, emulated over the same aggregate revision fence as
+// UpdateIfMatch. The loop is bounded because control/member beads are metadata-hot:
 // an unrelated-key write between the read and the fenced write bumps the revision
 // and produces a spurious precondition even though nobody touched our key.
 // Exhaustion returns *CASRetriesExhaustedError — a transient, distinct from a
 // genuine value loss ((false,nil)) or a precondition — so consumers re-enter
 // level-triggered instead of stranding a reservation (DESIGN §8.4).
 func (s *BdStore) CompareAndSetMetadataKey(id, key, expected, next string) (bool, error) {
-	if capable, _ := s.conditionalWritesCapable(); !capable {
-		return false, ErrConditionalWriteUnsupported
+	if !s.privateEvidenceHTTPConfigured {
+		if capable, _ := s.conditionalWritesCapable(); !capable {
+			return false, ErrConditionalWriteUnsupported
+		}
 	}
 	for attempt := 1; ; attempt++ {
 		b, err := s.Get(id)
@@ -616,13 +618,10 @@ func (s *BdStore) CompareAndSetMetadataKey(id, key, expected, next string) (bool
 		if !hasRevisionToken(b) {
 			return false, ErrConditionalWriteUnsupported
 		}
-		// Build the fenced set through bdUpdateArgs so the metadata write carries
-		// the same --json envelope (and future flag handling) as the *IfMatch
-		// verbs; the classifier is body-based and a plain-text error body would
-		// misclassify a precondition into the surface-as-is default.
-		args := append(bdUpdateArgs(id, UpdateOpts{Metadata: map[string]string{key: next}}),
-			conditionalWriteFlag, strconv.FormatInt(b.Revision, 10))
-		err = s.runConditionalWrite(id, b.Revision, args...)
+		// Fence the exact snapshot used for both the value comparison and
+		// lifecycle validation. Configured HTTP uses stock expected_version;
+		// an HTTP refusal must never fall back to an unconditional CLI write.
+		err = s.updateIfMatchAtRevision(id, b.Revision, UpdateOpts{Metadata: map[string]string{key: next}})
 		switch {
 		case err == nil:
 			return true, nil

@@ -40,3 +40,20 @@ Private retry evidence does not require the fork's custom source-snapshot or
 revision-transition APIs. Leave `revision_transitions` disabled when using
 stock Beads. Durable lifecycle admission remains a separate opt-in feature
 with its own backend requirements.
+
+The exact-binary source-snapshot and revision-transition qualification is an
+opt-in test for backends that implement those custom APIs. It is excluded
+from the stock integration suite. To qualify such a backend explicitly:
+
+```sh
+BEADS_TEST_BD_BINARY=/absolute/path/to/custom/bd \
+BEADS_TEST_DOLT_BINARY=/absolute/path/to/dolt \
+go test -tags 'integration beads_revision_transitions' ./internal/beads \
+  -run '^TestBdStoreDecisionFrontierSourceSnapshotExactBinaryIntegration$' \
+  -count=1 -timeout=15m
+```
+
+That qualification still requires every custom capability and verifies exact
+requests, replay, and recovery after a lost response. It does not qualify a
+stock installation. Stock qualification uses the ordinary backend contracts
+and real workflows with authenticated HTTP payloads and guarded updates.

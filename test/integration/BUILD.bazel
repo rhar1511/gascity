@@ -52,7 +52,6 @@ go_test(
         "testenv_import_test.go",
         "tool_home_test.go",
         "tutorial_path_test.go",
-        "workflow_event_wait_test.go",
     ],
     data = glob(
         ["**"],

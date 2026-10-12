@@ -733,3 +733,102 @@ func TestBdStoreLifecycleUpdateUsesGuardedHTTP(t *testing.T) {
 		}
 	}
 }
+
+// Public attempt references use the generic metadata CAS after private payload
+// sealing. Stock Beads must retain the value comparison and aggregate fence
+// without requiring the fork-only four-verb CLI capability.
+func TestBdStoreMetadataCASUsesGuardedHTTP(t *testing.T) {
+	for _, tc := range []struct {
+		name                   string
+		conflicts              int
+		competingValue         bool
+		missingRevision        bool
+		status                 int
+		wantSwapped            bool
+		wantReads, wantPatches int
+		wantError              string
+	}{
+		{name: "seal public reference", wantSwapped: true, wantReads: 1, wantPatches: 1},
+		{name: "unrelated write retries with fresh snapshot", conflicts: 1, wantSwapped: true, wantReads: 2, wantPatches: 2},
+		{name: "competing reference wins", conflicts: 1, competingValue: true, wantReads: 2, wantPatches: 1},
+		{name: "bounded contention", conflicts: casEmulationMaxAttempts, wantReads: casEmulationMaxAttempts + 1, wantPatches: casEmulationMaxAttempts, wantError: "exhausted"},
+		{name: "missing revision refuses", missingRevision: true, wantReads: 1, wantError: "unsupported"},
+		{name: "unavailable transport never falls back", status: http.StatusServiceUnavailable, wantReads: 1, wantPatches: 1, wantError: "unavailable"},
+		{name: "unsupported route never falls back", status: http.StatusNotImplemented, wantReads: 1, wantPatches: 1, wantError: "unsupported"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := privateEvidenceHTTPStore(t)
+			reads, patches := 0, 0
+			key := beadmeta.AttemptEvidenceReferenceMetadataKey
+			const next = `{"work_id":"gc-1","attempt_id":"a-1","digest":"public-digest"}`
+			store.privateEvidenceHTTP.client.Transport = privateEvidenceHandlerTransport{handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("Authorization") != "Bearer controller-secret" {
+					t.Fatal("missing configured authentication")
+				}
+				w.Header().Set("Content-Type", "application/json")
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/v0/beads/context":
+					_, _ = io.WriteString(w, `{"api_version":"v0","backend":"dolt","bd_version":"1.3.1","capabilities":["issues.casMetadata","issues.create","issues.get","issues.update","project.enforce"],"database":"gc_fixture","dolt_mode":"proxied-server","project_id":"project-a"}`)
+				case r.Method == http.MethodGet && r.URL.Path == "/v0/beads/issues/gc-1":
+					reads++
+					metadata := map[string]string{}
+					if tc.competingValue && patches > 0 {
+						metadata[key] = "competitor"
+					}
+					row := map[string]any{"id": "gc-1", "title": "attempt", "status": "closed", "metadata": metadata}
+					if !tc.missingRevision {
+						row["revision"] = fmt.Sprint(-reads)
+					}
+					_ = json.NewEncoder(w).Encode(row)
+				case r.Method == http.MethodPatch && r.URL.Path == "/v0/beads/issues/gc-1":
+					patches++
+					var body conditionalIssueUpdateRequest
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+						t.Fatal(err)
+					}
+					if body.ExpectedVersion != fmt.Sprint(-reads) || body.Patch.Metadata == nil || len(body.Patch.Metadata.Set) != 1 || body.Patch.Metadata.Set[key] != next {
+						t.Fatalf("CAS did not preserve the observed guard and exact public reference: %+v", body)
+					}
+					if tc.status != 0 {
+						w.WriteHeader(tc.status)
+						return
+					}
+					if patches <= tc.conflicts {
+						w.WriteHeader(http.StatusConflict)
+						_, _ = io.WriteString(w, `{"code":"precondition_failed","param":"expected_version"}`)
+						return
+					}
+					_ = json.NewEncoder(w).Encode(map[string]any{"issue": map[string]any{"id": "gc-1", "title": "attempt", "priority": 2, "created_at": "2026-10-01T00:00:00Z", "updated_at": "2026-10-01T00:00:00Z"}, "changed": true, "revision": fmt.Sprint(-reads - 1)})
+				default:
+					t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+				}
+			})}
+			swapped, err := store.CompareAndSetMetadataKey("gc-1", key, "", next)
+			if swapped != tc.wantSwapped {
+				t.Fatalf("swapped=%v, error=%v", swapped, err)
+			}
+			switch tc.wantError {
+			case "":
+				if err != nil {
+					t.Fatal(err)
+				}
+			case "exhausted":
+				var exhausted *CASRetriesExhaustedError
+				if !errors.As(err, &exhausted) || exhausted.Attempts != casEmulationMaxAttempts {
+					t.Fatalf("error=%v, want bounded exhaustion", err)
+				}
+			case "unsupported":
+				if !errors.Is(err, ErrConditionalWriteUnsupported) {
+					t.Fatalf("error=%v, want unsupported", err)
+				}
+			case "unavailable":
+				if !errors.Is(err, ErrConditionalIssueUpdateHTTPUnavailable) {
+					t.Fatalf("error=%v, want unavailable", err)
+				}
+			}
+			if reads != tc.wantReads || patches != tc.wantPatches {
+				t.Fatalf("reads/patches=%d/%d, want %d/%d", reads, patches, tc.wantReads, tc.wantPatches)
+			}
+		})
+	}
+}
