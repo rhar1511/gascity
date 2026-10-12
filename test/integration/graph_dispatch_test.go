@@ -139,8 +139,11 @@ func TestGraphWorkflowSuccessPath(t *testing.T) {
 			}
 			if attempt.CandidateStatus == attemptevidence.StatusAvailable {
 				workspace := attempt.Permission.WorkspaceRoot
-				implementationWorkspace := graphFixturePathEquals(workspace, filepath.Join(cityDir, "worktrees", convoyID))
-				if len(attempt.CandidateSHA) != 40 || (!implementationWorkspace && !graphFixturePathEquals(workspace, cityDir)) {
+				// This is the recorded identity of an already-removed workspace.
+				// The fixture city path is canonical; resolving the deleted leaf
+				// here would reject successful teardown.
+				implementationWorkspace := workspace == filepath.Join(cityDir, "worktrees", convoyID)
+				if len(attempt.CandidateSHA) != 40 || (!implementationWorkspace && workspace != cityDir) {
 					t.Fatalf("retry evidence has the wrong committed workspace identity: candidate=%q workspace=%q", attempt.CandidateSHA, workspace)
 				}
 				if implementationWorkspace {
