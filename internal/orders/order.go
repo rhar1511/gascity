@@ -96,9 +96,9 @@ type Order struct {
 	// reserved_dispatch = true. A higher-priority formula layer that
 	// redefines an order by name replaces it wholesale (see scanner.go),
 	// so reserved eligibility is inherited only by explicit redeclaration,
-	// never implicitly by name. The actual capped-budget dispatch behavior
-	// is implemented separately (gastownhall/gascity ga-1ocm3f); this field
-	// only declares eligibility.
+	// never implicitly by name. The dispatcher permits up to three reserved
+	// dispatches per tick, separately from the ordinary allowance. Overflow
+	// rotates independently; reservation does not bypass triggers or gates.
 	ReservedDispatch bool `toml:"reserved_dispatch,omitempty"`
 	// Env is a map of environment variables exported into an exec
 	// order's child process. Use the `[order.env]` TOML table to

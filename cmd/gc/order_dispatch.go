@@ -89,6 +89,7 @@ const (
 	// now), after which cachedLastRun remembers it across ticks and rebuilds.
 	orderTrackingHistoryIndexLimit   = 256
 	defaultMaxOrderDispatchesPerTick = 4
+	reservedOrderDispatchesPerTick   = 3
 	orderTrackingSweepCloseBudget    = 4
 
 	// orderTrackingRetentionWatchdogInterval is the minimum time between
@@ -322,6 +323,7 @@ type memoryOrderDispatcher struct {
 	maxTimeout                time.Duration
 	maxDispatchesPerTick      int
 	nextDispatchStart         int
+	nextReservedDispatchStart int
 	cfg                       *config.City
 	cityName                  string
 	cityPath                  string
@@ -762,7 +764,8 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 
 	m.prefetchConditionResults(candidates, now)
 
-	// Phase 2: the fire loop, in two passes over the same rotation order.
+	// Phase 2: a capped reserved pass, followed by the existing unreserved
+	// condition and ordinary-budget passes.
 	//
 	// A due condition order is not a sweep asking for its turn. Its check has
 	// just reported that work is pending right now, which is the order system's
@@ -779,13 +782,37 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 	// event to show for it (ga-unaz7). Raising max_dispatches_per_tick only
 	// moves that cliff.
 	//
-	// Both passes run the identical per-candidate body; only the budget differs.
-	var unbudgeted, budgeted []*orderDispatchCandidate
+	// All passes run the identical per-candidate body; only the budget differs.
+	var reserved, unbudgeted, budgeted []*orderDispatchCandidate
 	for _, cand := range candidates {
-		if dueConditionCandidate(cand) {
+		switch {
+		case cand.order.ReservedDispatch:
+			reserved = append(reserved, cand)
+		case dueConditionCandidate(cand):
 			unbudgeted = append(unbudgeted, cand)
-		} else {
+		default:
 			budgeted = append(budgeted, cand)
+		}
+	}
+	// The explicitly reserved lane has its own fixed cap and cursor. Neither
+	// its launches nor unused slots change the ordinary budget or rotation.
+	// All eligibility, suspension and work gates still use fireCandidate.
+	reservedStart := m.nextReservedDispatchStart % total
+	sort.SliceStable(reserved, func(i, j int) bool {
+		return (reserved[i].idx-reservedStart+total)%total < (reserved[j].idx-reservedStart+total)%total
+	})
+	reservedSpent := 0
+	for i, cand := range reserved {
+		if !m.fireCandidate(ctx, cand, trackingIndex, &inFlight, cityPath, now) {
+			continue
+		}
+		m.nextReservedDispatchStart = (cand.idx + 1) % total
+		reservedSpent++
+		if reservedSpent == reservedOrderDispatchesPerTick {
+			if remaining := len(reserved) - i - 1; remaining > 0 {
+				logDispatchError(m.stderr, "gc: order dispatch: reserved per-tick budget %d spent; %d more reserved order(s) not reached (due-ness not evaluated)", reservedOrderDispatchesPerTick, remaining)
+			}
+			break
 		}
 	}
 	for _, cand := range unbudgeted {
@@ -913,7 +940,7 @@ func (m *memoryOrderDispatcher) openWorkGateShut(ctx context.Context, cand *orde
 // trigger-env failure that stands in for one. Every other exit — undue, gated,
 // suppressed, store error — reports false and costs the caller nothing.
 //
-// The budget is deliberately not this function's business. Both fire passes call
+// The budget is deliberately not this function's business. All fire passes call
 // it, so the gate logic exists once and the only difference between an
 // unbudgeted condition order and a budgeted sweep is what the caller does with
 // the answer.
