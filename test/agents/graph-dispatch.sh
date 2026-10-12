@@ -24,6 +24,22 @@ mkdir -p "$HARNESS_STATE_DIR"
 
 echo "graph-worker startup: GC_CITY=${GC_CITY:-} GC_CITY_PATH=${GC_CITY_PATH:-} GC_DOLT_PORT=${GC_DOLT_PORT:-} GC_AGENT=${GC_AGENT:-} GC_SESSION_NAME=${GC_SESSION_NAME:-} PWD=$(pwd)"
 
+setup_graph_workspace() {
+    local dir="$1"
+    mkdir -p "$dir"
+    (
+        unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE
+        unset GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_TEMPLATE_DIR
+        unset GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS
+        unset GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
+        export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+        git -C "$dir" init --quiet
+        git -C "$dir" -c user.name='Graph fixture' -c user.email=graph-fixture@example.invalid \
+            -c commit.gpgsign=false -c core.hooksPath=/dev/null \
+            commit --quiet --allow-empty -m 'Initialize graph attempt workspace'
+    )
+}
+
 trace() {
     printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >> "$TRACE_FILE"
 }
@@ -591,7 +607,7 @@ while true; do
         *.workspace-setup*)
             if [ -z "$work_dir" ]; then
                 work_dir="$GC_CITY/worktrees/$target_id"
-                mkdir -p "$work_dir"
+                setup_graph_workspace "$work_dir"
                 bd update "$target_id" --set-metadata "work_dir=$work_dir"
                 trace "workspace-setup target=$target_id work_dir=$work_dir"
             fi

@@ -12,6 +12,10 @@ database = "the-database-reported-by-this-store"
 token_file = "/absolute/path/to/owner-only-token"
 ```
 
+Graph retry and ralph controls seal evidence for each closed attempt, including
+passing attempts. Configure this transport before dispatching those workflows
+on a CLI-backed scope; an absent or unavailable transport refuses advancement.
+
 The endpoint must serve that exact store. Gas City verifies its authenticated
 context, project, database, backend, and required routes. The token stays in
 the token file and HTTP authorization header. Payload bytes travel in HTTP

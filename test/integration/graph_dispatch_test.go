@@ -113,7 +113,7 @@ func TestGraphWorkflowSuccessPath(t *testing.T) {
 		t.Fatal("actual graph city did not bind the configured private-evidence transport")
 	}
 	controls := listGraphRetryControlsOverHTTP(t, transport)
-	var sealedRetries int
+	var sealedRetries, repositorySnapshots int
 	for _, control := range controls {
 		attempts, err := attemptevidence.List(beadStore, control.ID)
 		if err != nil {
@@ -127,11 +127,20 @@ func TestGraphWorkflowSuccessPath(t *testing.T) {
 			if err != nil || !reflect.DeepEqual(readback, attempt) {
 				t.Fatalf("exact retry evidence readback for control %s failed: %v", control.ID, err)
 			}
+			if attempt.CandidateStatus == attemptevidence.StatusAvailable {
+				if len(attempt.CandidateSHA) != 40 || !graphFixturePathEquals(attempt.Permission.WorkspaceRoot, filepath.Join(cityDir, "worktrees", convoyID)) {
+					t.Fatalf("retry evidence has the wrong committed workspace identity: candidate=%q workspace=%q", attempt.CandidateSHA, attempt.Permission.WorkspaceRoot)
+				}
+				repositorySnapshots++
+			}
 			sealedRetries++
 		}
 	}
 	if sealedRetries == 0 {
 		t.Fatal("graph workflow passed without an exact retry-attempt evidence archive")
+	}
+	if repositorySnapshots == 0 {
+		t.Fatal("graph workflow passed without committed attempt workspace evidence")
 	}
 
 	worktreePath := filepath.Join(cityDir, "worktrees", convoyID)
@@ -275,20 +284,23 @@ func TestGraphFixtureListenerOwnershipAllowsSeparateProxyAndDoltPorts(t *testing
 }
 
 func TestGraphWorkflowFailureRunsCleanup(t *testing.T) {
-	cityDir := setupGraphWorkflowCity(t, "fail-preflight")
-	convoyID, workflowID := startScopedWorkflow(t, cityDir)
+	cityDir, transport := setupGraphWorkflowCityWithPrivateEvidence(t, "fail-preflight")
+	convoyID, workflowID := startScopedWorkflowWithPrivateEvidenceHTTP(t, cityDir, transport)
 
-	workflow := waitForBeadClosed(t, cityDir, workflowID, graphWorkflowCloseTimeout())
+	workflow := waitForBeadClosedWithoutPrivatePayloadDiagnostics(t, cityDir, transport, workflowID, graphWorkflowCloseTimeout())
 	if got := metaValue(workflow, "gc.outcome"); got != "fail" {
 		t.Fatalf("workflow outcome = %q, want fail", got)
 	}
 
-	body := mustFindWorkflowBeadByRefSuffix(t, cityDir, workflowID, ".body")
+	body := findGraphWorkflowBeadByRefSuffixOverHTTP(t, transport, workflowID, ".body")
 	if got := metaValue(body, "gc.outcome"); got != "fail" {
 		t.Fatalf("body outcome = %q, want fail", got)
 	}
 
-	convoy := showBead(t, cityDir, convoyID)
+	convoy, err := readGraphBeadOverHTTP(t, transport, convoyID)
+	if err != nil {
+		t.Fatalf("read graph convoy through installed service: %v", err)
+	}
 	if got := metaValue(convoy, "work_dir"); got != "" {
 		t.Fatalf("convoy work_dir = %q, want unset after cleanup", got)
 	}
@@ -297,7 +309,7 @@ func TestGraphWorkflowFailureRunsCleanup(t *testing.T) {
 	}
 
 	for _, suffix := range []string{".implement", ".self-review", ".submit"} {
-		bead := mustFindWorkflowBeadByRefSuffix(t, cityDir, workflowID, suffix)
+		bead := findGraphWorkflowBeadByRefSuffixOverHTTP(t, transport, workflowID, suffix)
 		if bead.Status != "closed" {
 			t.Fatalf("%s status = %q, want closed", suffix, bead.Status)
 		}
@@ -350,11 +362,6 @@ func assertControlDispatcherLane(t *testing.T, cityDir string) {
 
 func graphWorkflowCloseTimeout() time.Duration {
 	return 6 * time.Minute
-}
-
-func setupGraphWorkflowCity(t *testing.T, mode string) string {
-	cityDir, _ := setupGraphWorkflowCityWithOptions(t, mode, false)
-	return cityDir
 }
 
 type graphPrivateEvidenceTransport struct {
@@ -518,10 +525,6 @@ func TestGraphIssueReadTimeoutReportsHTTPProgress(t *testing.T) {
 }
 
 func setupGraphWorkflowCityWithPrivateEvidence(t *testing.T, mode string) (string, graphPrivateEvidenceTransport) {
-	return setupGraphWorkflowCityWithOptions(t, mode, true)
-}
-
-func setupGraphWorkflowCityWithOptions(t *testing.T, mode string, privateEvidence bool) (string, graphPrivateEvidenceTransport) {
 	t.Helper()
 	gcHome, env := newIsolatedCommandEnvWithoutSupervisor(t, true)
 
@@ -673,42 +676,39 @@ func setupGraphWorkflowCityWithOptions(t *testing.T, mode string, privateEvidenc
 	if _, err := waitForGraphFixtureProxyForTest(cityDir, 30*time.Second); err != nil {
 		t.Fatalf("graph city did not establish a verified fixture-owned Beads proxy and Dolt listener after isolated startup: %v", err)
 	}
-	var transport graphPrivateEvidenceTransport
-	if privateEvidence {
-		transport = startGraphPrivateEvidenceService(t, env, cityDir, cityName, identity)
-		cityConfigPath := filepath.Join(cityDir, "city.toml")
-		contents, err := os.ReadFile(cityConfigPath)
-		if err != nil {
-			t.Fatalf("read initialized graph city config: %v", err)
-		}
-		privateEvidenceConfig := fmt.Sprintf(
-			"\n[beads.private_evidence.%q]\nendpoint = %q\nproject_id = %q\ndatabase = %q\ntoken_file = %q\n",
-			transport.scopeRef, transport.endpoint, transport.projectID, transport.database, transport.tokenFile,
-		)
-		if err := os.WriteFile(cityConfigPath, append(contents, []byte(privateEvidenceConfig)...), 0o600); err != nil {
-			t.Fatalf("enable disposable graph private-evidence transport: %v", err)
-		}
-		reloadOut, reloadErr := runGCDoltWithEnv(env, cityDir, "reload", "--json", "--timeout", "45s", cityDir)
-		if reloadErr != nil {
-			t.Fatalf("reload graph city after enabling private-evidence transport: %v\noutput: %s", reloadErr, reloadOut)
-		}
-		var reload struct {
-			SchemaVersion string `json:"schema_version"`
-			OK            bool   `json:"ok"`
-			Command       string `json:"command"`
-			Action        string `json:"action"`
-			CityPath      string `json:"city_path"`
-			Outcome       string `json:"outcome"`
-			Revision      string `json:"revision"`
-		}
-		if err := json.Unmarshal([]byte(strings.TrimSpace(reloadOut)), &reload); err != nil ||
-			reload.SchemaVersion != "1" || !reload.OK || reload.Command != "reload" || reload.Action != "reload" ||
-			!graphFixturePathEquals(reload.CityPath, cityDir) ||
-			(reload.Outcome != "applied" && reload.Outcome != "no_change") || strings.TrimSpace(reload.Revision) == "" {
-			t.Fatalf("controller did not confirm loading the private-evidence configuration: output=%q", strings.TrimSpace(reloadOut))
-		}
-		transport.configRevision = reload.Revision
+	transport := startGraphPrivateEvidenceService(t, env, cityDir, cityName, identity)
+	cityConfigPath := filepath.Join(cityDir, "city.toml")
+	contents, err := os.ReadFile(cityConfigPath)
+	if err != nil {
+		t.Fatalf("read initialized graph city config: %v", err)
 	}
+	privateEvidenceConfig := fmt.Sprintf(
+		"\n[beads.private_evidence.%q]\nendpoint = %q\nproject_id = %q\ndatabase = %q\ntoken_file = %q\n",
+		transport.scopeRef, transport.endpoint, transport.projectID, transport.database, transport.tokenFile,
+	)
+	if err := os.WriteFile(cityConfigPath, append(contents, []byte(privateEvidenceConfig)...), 0o600); err != nil {
+		t.Fatalf("enable disposable graph private-evidence transport: %v", err)
+	}
+	reloadOut, reloadErr := runGCDoltWithEnv(env, cityDir, "reload", "--json", "--timeout", "45s", cityDir)
+	if reloadErr != nil {
+		t.Fatalf("reload graph city after enabling private-evidence transport: %v\noutput: %s", reloadErr, reloadOut)
+	}
+	var reload struct {
+		SchemaVersion string `json:"schema_version"`
+		OK            bool   `json:"ok"`
+		Command       string `json:"command"`
+		Action        string `json:"action"`
+		CityPath      string `json:"city_path"`
+		Outcome       string `json:"outcome"`
+		Revision      string `json:"revision"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(reloadOut)), &reload); err != nil ||
+		reload.SchemaVersion != "1" || !reload.OK || reload.Command != "reload" || reload.Action != "reload" ||
+		!graphFixturePathEquals(reload.CityPath, cityDir) ||
+		(reload.Outcome != "applied" && reload.Outcome != "no_change") || strings.TrimSpace(reload.Revision) == "" {
+		t.Fatalf("controller did not confirm loading the private-evidence configuration: output=%q", strings.TrimSpace(reloadOut))
+	}
+	transport.configRevision = reload.Revision
 	transport.bdLauncher = launcher
 	return cityDir, transport
 }
@@ -1767,15 +1767,7 @@ func isGraphPrivateEvidenceMetadataKey(key string) bool {
 		strings.HasPrefix(key, beadmeta.AttemptEvidenceIndexPrefix)
 }
 
-func startScopedWorkflow(t *testing.T, cityDir string) (string, string) {
-	return startScopedWorkflowWithLookup(t, cityDir, nil)
-}
-
 func startScopedWorkflowWithPrivateEvidenceHTTP(t *testing.T, cityDir string, transport graphPrivateEvidenceTransport) (string, string) {
-	return startScopedWorkflowWithLookup(t, cityDir, &transport)
-}
-
-func startScopedWorkflowWithLookup(t *testing.T, cityDir string, transport *graphPrivateEvidenceTransport) (string, string) {
 	t.Helper()
 
 	out, err := bdDolt(cityDir, "create", "--json", "Run built-in scoped workflow part one")
@@ -1819,14 +1811,7 @@ func startScopedWorkflowWithLookup(t *testing.T, cityDir string, transport *grap
 	if err != nil {
 		t.Fatalf("gc sling failed: %v\noutput: %s", err, out)
 	}
-	slingOutput := out
-
-	var workflowID string
-	if transport == nil {
-		workflowID = waitForGraphWorkflowRootForInputConvoy(t, cityDir, convoyID, slingOutput, 10*time.Second)
-	} else {
-		workflowID = waitForGraphWorkflowRootForInputConvoyOverHTTP(t, cityDir, *transport, convoyID, 10*time.Second)
-	}
+	workflowID := waitForGraphWorkflowRootForInputConvoyOverHTTP(t, cityDir, transport, convoyID, 10*time.Second)
 	return convoyID, workflowID
 }
 

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -215,5 +216,48 @@ bd() {
 				t.Fatalf("owned queue = %s, want claimed attempt owned by %q", out, actor)
 			}
 		})
+	}
+}
+
+func TestGraphDispatchWorkspaceOwnsCommittedRepository(t *testing.T) {
+	ambient := t.TempDir()
+	workspace := filepath.Join(t.TempDir(), "attempt")
+	gitAt := func(dir string, args ...string) string {
+		t.Helper()
+		gitArgs := []string{"-C", dir, "-c", "user.name=Graph fixture", "-c", "user.email=graph-fixture@example.invalid", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null"}
+		cmd := exec.Command("git", append(gitArgs, args...)...)
+		cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null"}
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v in %s: %v: %s", args, dir, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	gitAt(ambient, "init", "--quiet")
+	gitAt(ambient, "commit", "--quiet", "--allow-empty", "-m", "Preserve ambient repository")
+	before := gitAt(ambient, "rev-parse", "HEAD")
+	fn := extractShellFunc(t, agentScript("graph-dispatch.sh"), "setup_graph_workspace")
+	out, err := runGraphHarnessFunction(fn+"\nsetup_graph_workspace \"$WORKSPACE\"\n", []string{
+		"WORKSPACE=" + workspace,
+		"GIT_DIR=" + filepath.Join(ambient, ".git"),
+		"GIT_WORK_TREE=" + ambient,
+		"GIT_COMMON_DIR=" + filepath.Join(ambient, ".git"),
+		"GIT_INDEX_FILE=" + filepath.Join(ambient, ".git", "index"),
+		"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=core.bare", "GIT_CONFIG_VALUE_0=true",
+	})
+	if err != nil {
+		t.Fatalf("initialize attempt workspace: %v: %s", err, out)
+	}
+	if got := gitAt(workspace, "rev-parse", "--show-toplevel"); !graphFixturePathEquals(got, workspace) {
+		t.Fatalf("workspace repository root = %q, want %q", got, workspace)
+	}
+	if got := gitAt(workspace, "cat-file", "-t", "HEAD"); got != "commit" {
+		t.Fatalf("workspace HEAD type = %q, want commit", got)
+	}
+	if got := gitAt(workspace, "ls-tree", "HEAD"); got != "" {
+		t.Fatalf("initial workspace commit contains unexpected files: %s", got)
+	}
+	if after := gitAt(ambient, "rev-parse", "HEAD"); after != before {
+		t.Fatalf("workspace initialization changed ambient HEAD: %s -> %s", before, after)
 	}
 }
