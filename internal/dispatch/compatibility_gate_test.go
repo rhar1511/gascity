@@ -11,7 +11,10 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/compatibility"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/molecule"
 )
 
@@ -353,4 +356,89 @@ func mustDeps(t *testing.T, store beads.Store, beadID string) []beads.Dep {
 		t.Fatalf("list dependencies for %s: %v", beadID, err)
 	}
 	return deps
+}
+
+func TestAttemptMaterializationPreservesCanonicalFormulaSource(t *testing.T) {
+	city := t.TempDir()
+	t.Setenv("GC_HOME", filepath.Join(t.TempDir(), "gc-home"))
+	write := func(path, body string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ordinary := filepath.Join(city, "formulas", "ordinary.toml")
+	required := filepath.Join(city, "packs", "required", "formulas", "review.toml")
+	write(filepath.Join(city, "city.toml"), "[workspace]\nname = \"retry-source-test\"\n")
+	write(filepath.Join(city, "pack.toml"), "[pack]\nname = \"city-root\"\nschema = 2\nincludes = [\"packs/required\"]\n")
+	write(filepath.Join(city, "packs", "required", "pack.toml"), "[pack]\nname = \"required\"\nschema = 2\nrequires_gc = \">=0.14.0\"\n")
+	write(ordinary, "formula = \"ordinary\"\n")
+	write(required, "formula = \"review\"\n")
+	cfg, _, err := config.LoadWithIncludesOptions(fsys.OSFS{}, filepath.Join(city, "city.toml"), config.LoadOptions{CaptureQualificationInputs: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate := compatibility.MaterializationGate{Config: cfg}
+	for _, kind := range []string{"retry", "ralph"} {
+		for _, tc := range []struct {
+			name, source, request, approval string
+			allowed                         bool
+		}{
+			{name: "ordinary source", source: ordinary, allowed: true},
+			{name: "missing canonical source"},
+			{name: "required pack source", source: required},
+			{name: "request only", source: ordinary, request: "{}"},
+			{name: "approval only", source: ordinary, approval: "{}"},
+			{name: "malformed approval", source: ordinary, approval: " "},
+			{name: "bound composition needs full source set", source: ordinary, request: "{}", approval: "{}"},
+		} {
+			t.Run(kind+"/"+tc.name, func(t *testing.T) {
+				store := beads.NewMemStore()
+				control := mustCreateWorkflowBead(t, store, beads.Bead{Title: "control", Type: "task", Metadata: map[string]string{
+					beadmeta.KindMetadataKey: kind, beadmeta.StepIDMetadataKey: "review", beadmeta.StepRefMetadataKey: "workflow.review",
+					beadmeta.FormulaSourceMetadataKey: tc.source, beadmeta.CompatibilityRequestMetadataKey: tc.request,
+					beadmeta.CompatibilityAuthorizationMetadataKey: tc.approval,
+				}})
+				// A frozen step cannot supply or downgrade canonical provenance.
+				step := &formula.Step{ID: "review", Title: "Review", Type: "task", Metadata: map[string]string{beadmeta.FormulaSourceMetadataKey: ordinary}}
+				if kind == "ralph" {
+					step.Ralph = &formula.RalphSpec{MaxAttempts: 3}
+					step.Children = []*formula.Step{{ID: "fix", Title: "Fix", Type: "task", Retry: &formula.RetrySpec{MaxAttempts: 2}}}
+				} else {
+					step.Retry = &formula.RetrySpec{MaxAttempts: 3}
+				}
+				before, err := store.List(beads.ListQuery{AllowScan: true})
+				if err != nil {
+					t.Fatal(err)
+				}
+				recipe := buildAttemptRecipe(step, control, 2)
+				_, err = molecule.Attach(t.Context(), store, recipe, control.ID, molecule.AttachOptions{ActionGate: gate, RequireActionGate: true})
+				if tc.allowed && err != nil {
+					t.Fatalf("ordinary next attempt refused by real source-aware gate: %v", err)
+				}
+				after, listErr := store.List(beads.ListQuery{AllowScan: true})
+				if listErr != nil {
+					t.Fatal(listErr)
+				}
+				if !tc.allowed {
+					var refused *molecule.FormulaActionError
+					if !errors.As(err, &refused) || !reflect.DeepEqual(before, after) {
+						t.Fatalf("unqualified retry was not refused before mutation: err=%v before=%d after=%d", err, len(before), len(after))
+					}
+					return
+				}
+				if len(after) <= len(before) {
+					t.Fatal("ordinary next attempt created no work")
+				}
+				for _, bead := range after {
+					if bead.ID != control.ID && bead.Metadata[beadmeta.FormulaSourceMetadataKey] != ordinary {
+						t.Fatalf("attempt descendant %s lost canonical formula source", bead.ID)
+					}
+				}
+			})
+		}
+	}
 }

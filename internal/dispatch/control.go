@@ -1020,6 +1020,14 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 		Name:  attemptPrefix,
 		Steps: []formula.RecipeStep{rootStep},
 	}
+	// Ordinary attempts inherit the canonical control's source, never the
+	// formula-authored step metadata. An approved composition can contain more
+	// sources than this pointer represents; keep its provenance unavailable
+	// rather than silently dropping those sources and their approval requirements.
+	if control.Metadata[beadmeta.CompatibilityRequestMetadataKey] == "" &&
+		control.Metadata[beadmeta.CompatibilityAuthorizationMetadataKey] == "" {
+		recipe.FormulaSource = strings.TrimSpace(control.Metadata[beadmeta.FormulaSourceMetadataKey])
+	}
 	var fanoutSteps []formula.RecipeStep
 	var fanoutDeps []formula.RecipeDep
 	var nestedSeedSteps []formula.RecipeStep
