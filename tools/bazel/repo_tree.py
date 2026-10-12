@@ -117,7 +117,7 @@ def refresh_root(labels: list[str]) -> None:
         '    name = "root_extras",\n'
         '    srcs = glob([\n'
         '        ".devcontainer/**",\n'
-        '        "schemas/**",\n        "release-gates/**",\n        "specs/**",\n        "tools/**",\n        "*.md",\n'
+        '        "schemas/**",\n        "*.go",\n        "release-gates/**",\n        "specs/**",\n        "tools/**",\n        "*.md",\n'
         '        "engdocs/**",\n'
         '        ".github/**",\n'
         '        ".githooks/**",\n'

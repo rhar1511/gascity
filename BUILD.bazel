@@ -460,6 +460,7 @@ filegroup(
     srcs = glob([
         ".devcontainer/**",
         "schemas/**",
+        "*.go",
         "release-gates/**",
         "specs/**",
         "tools/**",
