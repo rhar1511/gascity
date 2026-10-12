@@ -68,7 +68,10 @@ go_test(
         "testenv_import_test.go",
         "zz_boolptr_test.go",
     ],
-    data = ["testdata/rsi-dispatch-fixture.toml"],
+    data = [
+        "testdata/rsi-dispatch-fixture.toml",
+        "//internal/bootstrap/packs/core:formulas/mol-rsi-candidate.toml",
+    ],
     embed = [":dispatch"],
     deps = [
         "//internal/attemptevidence",
