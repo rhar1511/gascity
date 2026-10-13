@@ -204,15 +204,15 @@ jobs:
       - gate
     if: needs.gate.outputs.run_smoke == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_macos_quality }}
-    # A cold golangci-lint cache exceeded 35 minutes on hosted macOS. Give
-    # the full lint gate time to finish and report a verdict.
-    timeout-minutes: 75
+    # Cold package loading plus full analysis exceeded 55 minutes. Reserve
+    # 65 minutes for lint, ten for setup, and ten for diagnostics/other gates.
+    timeout-minutes: 85
     steps:
       - name: Start Mac lint deadline
         env:
           MAC_LINT_DIR: ${{ runner.temp }}/mac-lint-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
-          python3 -c 'import time; print(f"MAC_LINT_DEADLINE={time.monotonic() + 65*60}")' >> "$GITHUB_ENV"
+          python3 -c 'import time; print(f"MAC_LINT_DEADLINE={time.monotonic() + 75*60}")' >> "$GITHUB_ENV"
           echo "MAC_LINT_DIR=$MAC_LINT_DIR" >> "$GITHUB_ENV"
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -259,7 +259,7 @@ jobs:
         # Bound concurrent analysis on memory-constrained hosted Macs. The
         # ca909 run reached a 6.8G footprint with sustained GC scanning; more
         # parallel analyzers must not amplify its live working set. This
-        # changes scheduling only, not analyzers, package scope or deadlines.
+        # bounds scheduling without changing analyzers or package scope.
         run: |
           set -o pipefail
           # --concurrency bounds the linter runtime, not inherited Go tools.
@@ -268,7 +268,7 @@ jobs:
           export GOFLAGS="$lint_go_flags -p=1"
           mkdir -p "$MAC_LINT_DIR"
           git rev-parse HEAD > "$MAC_LINT_DIR/revision.txt"
-          python3 scripts/ci-lint-profile --deadline "$MAC_LINT_DEADLINE" --profile-dir "$MAC_LINT_DIR" --sample-executable "$(go env GOPATH)/bin/golangci-lint" -- make lint LINT_FLAGS="--verbose --concurrency=2 --timeout=55m --cpu-profile-path=$MAC_LINT_DIR/cpu.pprof --mem-profile-path=$MAC_LINT_DIR/mem.pprof" 2>&1 | tee "$MAC_LINT_DIR/lint.log"
+          python3 scripts/ci-lint-profile --deadline "$MAC_LINT_DEADLINE" --profile-dir "$MAC_LINT_DIR" --sample-executable "$(go env GOPATH)/bin/golangci-lint" -- make lint LINT_FLAGS="--verbose --concurrency=2 --timeout=65m --cpu-profile-path=$MAC_LINT_DIR/cpu.pprof --mem-profile-path=$MAC_LINT_DIR/mem.pprof" 2>&1 | tee "$MAC_LINT_DIR/lint.log"
       - name: Upload Mac lint diagnostics
         if: ${{ always() }}
         timeout-minutes: 3
