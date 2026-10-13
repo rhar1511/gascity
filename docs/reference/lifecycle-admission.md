@@ -90,6 +90,16 @@ and receipt freshness, then attaches acceptance and its completion budget in one
 protected transition before closing the source. Holds and deferrals prevent a
 pending completion from progressing.
 
+Source completion also seals private attempt evidence and its public reference
+in that protected budget transition. Fresh capture requires the persisted
+session incarnation that owns the claim. The archive must finish before the
+source closes. If archiving fails after the budget commits, work stays in
+progress; an exact request retry or background reconciliation repairs the
+archive from the sealed bytes without taking another workspace snapshot or
+requiring the original session to remain present. Older pending budgets without
+capture evidence stay held with a diagnostic. Already-closed historical
+completions remain read-only replays.
+
 Use `completion prepare --work-outcome <shipped|no-op|blocked|abandoned>`
 with optional `--work-commit`, `--work-branch`, and `--work-verification` to
 include the reviewed work record. Any work-record flag requires a valid outcome.

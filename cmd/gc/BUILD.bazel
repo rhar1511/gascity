@@ -320,6 +320,7 @@ go_library(
         "lifecycle_admission.go",
         "lifecycle_admission_graph.go",
         "lifecycle_admission_policy.go",
+        "lifecycle_attempt_evidence.go",
         "lifecycle_claim_provider.go",
         "lifecycle_completion.go",
         "lifecycle_completion_provider.go",

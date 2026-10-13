@@ -673,6 +673,12 @@ func DecodeDiff(snapshot DiffSnapshot) (trackedPatch []byte, untracked []Untrack
 	return bundle.TrackedPatch, bundle.Untracked, nil
 }
 
+// OwnerIndexKey returns the metadata address of an exact attempt. The digest
+// keeps the stable attempt ID's punctuation out of backend metadata key names.
+func OwnerIndexKey(attemptID string) string {
+	return ownerIndexKey(attemptID)
+}
+
 func ownerIndexKey(attemptID string) string {
 	digest := sha256.Sum256([]byte(attemptID))
 	return beadmeta.AttemptEvidenceIndexPrefix + hex.EncodeToString(digest[:])
@@ -835,6 +841,24 @@ func evidenceFromArchive(row beads.Bead) (Evidence, error) {
 	if evidence.Identity.OwnerBeadID != row.Metadata[beadmeta.AttemptEvidenceArchiveOwnerIDMetadataKey] ||
 		evidence.AttemptID != row.Metadata[beadmeta.AttemptEvidenceArchiveAttemptIDMetadataKey] {
 		return Evidence{}, fmt.Errorf("attempt evidence archive %s identity mismatch", row.ID)
+	}
+	return evidence, nil
+}
+
+// DecodeCompact validates a serialized owner-index record without loading its
+// payloads. Protected lifecycle transitions use it before sealing the index.
+func DecodeCompact(raw []byte) (Evidence, error) {
+	evidence, err := decodeEvidence(raw)
+	if err != nil {
+		return Evidence{}, err
+	}
+	if len(evidence.Diff.Payload) != 0 || len(evidence.WorkspaceDiff.Payload) != 0 {
+		return Evidence{}, errors.New("compact attempt evidence contains inline diff bytes")
+	}
+	for _, artifact := range evidence.Artifacts {
+		if len(artifact.Content) != 0 {
+			return Evidence{}, errors.New("compact attempt evidence contains inline artifact bytes")
+		}
 	}
 	return evidence, nil
 }

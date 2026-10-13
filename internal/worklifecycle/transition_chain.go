@@ -673,6 +673,11 @@ func (c *TransitionChain) verifyParentChain(issueID, receiptID string, attachmen
 				return transitionParent{}, fmt.Errorf("stored recovery escalation is not authorized and append-only: %w", errors.Join(ErrTransitionChainReceipt, err))
 			}
 		}
+		if parentInfo.Step == TransitionStepCompletionBudget {
+			if err := validateCompletionAttemptEvidencePatch(parentInfo.Patch, source); err != nil {
+				return transitionParent{}, fmt.Errorf("stored completion attempt evidence is invalid: %w", errors.Join(ErrTransitionChainReceipt, err))
+			}
+		}
 		if parentInfo.Step == TransitionStepClose {
 			if err := verifyCompletionBudgetBinding(upstream, source.Metadata[beadmeta.LifecycleCompletionReceiptMetadataKey], issueID, c.scope, evidence.Attachment.ReceiptDigest); err != nil {
 				return transitionParent{}, fmt.Errorf("stored close does not bind the current completion receipt to its budget: %w", errors.Join(ErrTransitionChainReceipt, err))
@@ -1130,6 +1135,7 @@ func validateTransitionStepPatch(step TransitionStep, patch SourceWorkPatch) err
 			beadmeta.LifecycleCompletionBudgetMetadataKey: {}, beadmeta.LifecycleCompletionReceiptMetadataKey: {},
 			beadmeta.WorkOutcomeMetadataKey: {}, beadmeta.WorkCommitMetadataKey: {},
 			beadmeta.WorkBranchMetadataKey: {}, beadmeta.WorkVerificationMetadataKey: {},
+			beadmeta.AttemptEvidenceReferenceMetadataKey: {},
 		},
 		TransitionStepClose: {},
 		TransitionStepClaimIdentity: {
@@ -1159,6 +1165,18 @@ func validateTransitionStepPatch(step TransitionStep, patch SourceWorkPatch) err
 	}
 	if step == TransitionStepClose && len(patch.Metadata) != 0 {
 		return fmt.Errorf("close step must preserve the current completion receipt without rewriting metadata: %w", ErrTransitionChainInvalid)
+	}
+	if step == TransitionStepCompletionBudget {
+		indexCount := 0
+		for key := range patch.Metadata {
+			if strings.HasPrefix(key, beadmeta.AttemptEvidenceIndexPrefix) {
+				indexCount++
+				allowedKeys[key] = struct{}{}
+			}
+		}
+		if indexCount > 1 {
+			return fmt.Errorf("completion must seal only one attempt index: %w", ErrTransitionChainInvalid)
+		}
 	}
 	for key := range patch.Metadata {
 		if _, ok := allowedKeys[key]; !ok {
@@ -1336,6 +1354,9 @@ func (c *TransitionChain) validateTransitionStepPatchEvidence(request Transition
 			return err
 		}
 		if err := validateCompletionAttachmentProof(request.Patch, source.ID, c.scope, evidence.Admission, c.admissionConfig); err != nil {
+			return err
+		}
+		if err := validateCompletionAttemptEvidencePatch(request.Patch, source); err != nil {
 			return err
 		}
 	}

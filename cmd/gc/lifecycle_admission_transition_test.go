@@ -22,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/bootstrap/packs/core"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/graphv2"
 	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
@@ -873,7 +874,11 @@ func newLifecycleAdmissionTransitionSetupWithBacking(t *testing.T, fixture *life
 		if signErr != nil {
 			t.Fatal(signErr)
 		}
-		finalBase := &beads.MemStore{IDPrefix: "pilot-rig", HonorExplicitIDs: true}
+		finalBase, openErr := beads.OpenFileStore(fsys.OSFS{}, filepath.Join(t.TempDir(), "completion.json"), beads.WithFileStoreIDPrefix("pilot-rig"))
+		if openErr != nil {
+			t.Fatal(openErr)
+		}
+		finalBase.HonorExplicitIDs = true
 		metadata := cloneLifecycleAdmissionMetadata(source.Metadata)
 		metadata[beadmeta.LifecycleCompletionReceiptMetadataKey] = completionReceipt
 		finalSource, createErr := finalBase.Create(beads.Bead{
@@ -933,21 +938,30 @@ type lifecycleAdmissionBackingStore interface {
 
 type lifecycleAdmissionTransitionTestStore struct {
 	lifecycleAdmissionBackingStore
-	mu                    sync.Mutex
-	sourceID              string
-	rows                  map[string]beads.Bead
-	workflowReadOverrides map[string]beads.Bead
-	q43Receipts           map[string]beads.ControllerMetadataTransitionReceipt
-	patchReceipts         map[string]beads.RevisionTransitionPatchReceipt
-	patchRequests         []beads.RevisionTransitionPatchRequest
-	sourceGenericWrites   int
-	nextPatchRevision     int64
-	loseNextPatchKind     string
-	rejectNextPatchKind   string
-	failNextPatchKind     string
-	afterNextPatch        func(kind string)
-	afterSourceSnapshot   func()
-	afterWorkflowRead     func()
+	mu                      sync.Mutex
+	sourceID                string
+	rows                    map[string]beads.Bead
+	workflowReadOverrides   map[string]beads.Bead
+	q43Receipts             map[string]beads.ControllerMetadataTransitionReceipt
+	patchReceipts           map[string]beads.RevisionTransitionPatchReceipt
+	patchRequests           []beads.RevisionTransitionPatchRequest
+	sourceGenericWrites     int
+	nextPatchRevision       int64
+	loseNextPatchKind       string
+	rejectNextPatchKind     string
+	failNextPatchKind       string
+	failNextEvidenceArchive bool
+	afterNextPatch          func(kind string)
+	afterSourceSnapshot     func()
+	afterWorkflowRead       func()
+}
+
+func (s *lifecycleAdmissionTransitionTestStore) Create(b beads.Bead) (beads.Bead, error) {
+	if beads.HasAttemptEvidenceArchiveMarkers(b) && s.failNextEvidenceArchive {
+		s.failNextEvidenceArchive = false
+		return beads.Bead{}, errors.New("injected evidence archive failure")
+	}
+	return s.lifecycleAdmissionBackingStore.Create(b)
 }
 
 var (
@@ -1058,6 +1072,10 @@ func (s *lifecycleAdmissionTransitionTestStore) ControllerMetadataTransitionWrit
 }
 
 func (s *lifecycleAdmissionTransitionTestStore) StableCreateIDResolveTarget() beads.Store {
+	return s.lifecycleAdmissionBackingStore
+}
+
+func (s *lifecycleAdmissionTransitionTestStore) PrivatePayloadValueTransportTarget() beads.Store {
 	return s.lifecycleAdmissionBackingStore
 }
 

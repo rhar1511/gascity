@@ -173,7 +173,7 @@ func reconcileLifecycleCompletionForLeg(
 			return err
 		}
 	}
-	budgetResult, err := transition.chain.Apply(worklifecycle.TransitionRequest{
+	budgetResult, err := applyLifecycleCompletionBudget(ctx, cityPath, cfg, cityStore, leg, scope, transition, worklifecycle.TransitionRequest{
 		IssueID: id, Step: worklifecycle.TransitionStepCompletionBudget,
 		OperationID: budgetOperationID, PriorReceiptID: budgetParentID, Evidence: transition.evidence,
 		Patch: worklifecycle.SourceWorkPatch{Metadata: budgetMetadata},

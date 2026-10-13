@@ -70,6 +70,21 @@ func captureWorkbenchAttemptEvidenceFromStores(ctx context.Context, archiveStore
 	if strings.TrimSpace(info.Generation) == "" {
 		return fmt.Errorf("session %s has no persisted generation", sessionID)
 	}
+	spec, err := workbenchAttemptCaptureSpec(bead, dirs, cityPath, cfg, strings.TrimSpace(info.Generation))
+	if err != nil {
+		return err
+	}
+	evidence, err := attemptevidence.Capture(ctx, archiveStore, spec)
+	if err != nil {
+		return err
+	}
+	return stampAttemptEvidenceReference(archiveStore, bead.ID, evidence, spec.StoreRef)
+}
+
+// workbenchAttemptCaptureSpec keeps ordinary and protected captures on the same
+// repository, workspace, artifact and store-reference rules. The protected
+// caller supplies the generation only after verifying its immutable claim.
+func workbenchAttemptCaptureSpec(bead beads.Bead, dirs workRecordRepoDirs, cityPath string, cfg *config.City, generation string) (attemptevidence.CaptureSpec, error) {
 	repoDir := strings.TrimSpace(dirs.repoDirFor(bead))
 	if cfg == nil {
 		cfg = &config.City{}
@@ -83,22 +98,22 @@ func captureWorkbenchAttemptEvidenceFromStores(ctx context.Context, archiveStore
 	}
 	storeRef, err := attemptEvidenceStoreRef(cityPath, storeRefRoot, cfg, bead)
 	if err != nil {
-		return err
+		return attemptevidence.CaptureSpec{}, err
 	}
 	workDir := firstNonBlankEvidenceValue(bead.Metadata[beadmeta.WorkDirMetadataKey], bead.Metadata[beadmeta.LegacyWorkDirMetadataKey])
 	if workDir != "" && !filepath.IsAbs(workDir) {
 		if repoDir == "" {
-			return fmt.Errorf("relative worktree %q has no exact repository root", workDir)
+			return attemptevidence.CaptureSpec{}, fmt.Errorf("relative worktree %q has no exact repository root", workDir)
 		}
 		workDir = filepath.Join(repoDir, workDir)
 	}
-	spec := attemptevidence.CaptureSpec{
+	return attemptevidence.CaptureSpec{
 		Identity: attemptevidence.Identity{
 			Kind:              attemptevidence.KindWorkbench,
 			OwnerBeadID:       bead.ID,
 			ExecutionBeadID:   bead.ID,
-			SessionID:         sessionID,
-			SessionGeneration: strings.TrimSpace(info.Generation),
+			SessionID:         strings.TrimSpace(bead.Metadata[beadmeta.SessionIDMetadataKey]),
+			SessionGeneration: generation,
 			ClaimGeneration:   strings.TrimSpace(bead.Metadata[beadmeta.ClaimGenerationMetadataKey]),
 		},
 		StoreRef: storeRef,
@@ -110,12 +125,7 @@ func captureWorkbenchAttemptEvidenceFromStores(ctx context.Context, archiveStore
 		BaseSHA:   strings.TrimSpace(bead.Metadata[beadmeta.WorktreeBaseSHAMetadataKey]),
 		Outcome:   strings.TrimSpace(bead.Metadata[beadmeta.WorkOutcomeMetadataKey]),
 		Artifacts: attemptEvidenceArtifacts(bead),
-	}
-	evidence, err := attemptevidence.Capture(ctx, archiveStore, spec)
-	if err != nil {
-		return err
-	}
-	return stampAttemptEvidenceReference(archiveStore, bead.ID, evidence, storeRef)
+	}, nil
 }
 
 func captureWorkbenchBeforeAssignmentRelease(ctx context.Context, cityPath string, cfg *config.City, archiveStore, sessionReadStore beads.Store, bead beads.Bead) error {

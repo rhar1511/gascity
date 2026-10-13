@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/attemptevidence"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -1709,6 +1710,33 @@ func TestTransitionChainAttachesCompletionAfterClaim(t *testing.T) {
 	request.Patch.Metadata[beadmeta.WorkCommitMetadataKey] = MetadataStringPatch{Value: strings.Repeat("a", 40)}
 	request.Patch.Metadata[beadmeta.WorkBranchMetadataKey] = MetadataStringPatch{Expected: &priorBranch, Value: "reviewed-branch"}
 	request.Patch.Metadata[beadmeta.WorkVerificationMetadataKey] = MetadataStringPatch{Value: "required checks passed"}
+	claimedSource, err := fixture.store.DecisionFrontierSourceSnapshot(fixture.work.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := attemptevidence.Identity{
+		Kind: attemptevidence.KindWorkbench, OwnerBeadID: fixture.work.ID, ExecutionBeadID: fixture.work.ID,
+		SessionID: claimedSource.Metadata[beadmeta.SessionIDMetadataKey], SessionGeneration: "1",
+		ClaimGeneration: claimedSource.Metadata[beadmeta.ClaimGenerationMetadataKey],
+	}
+	attemptID, err := attemptevidence.AttemptID(identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capture := attemptevidence.MakeUnavailable(attemptevidence.CaptureSpec{
+		Identity: identity, StoreRef: "source-store", Outcome: "shipped", Now: func() time.Time { return fixture.now },
+	}, attemptID, "fixture_workspace_absent")
+	encodedCapture, err := json.Marshal(capture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encodedReference, err := json.Marshal(attemptevidence.EvidenceReference(capture, "source-store"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	indexKey := attemptevidence.OwnerIndexKey(attemptID)
+	request.Patch.Metadata[indexKey] = MetadataStringPatch{Value: string(encodedCapture)}
+	request.Patch.Metadata[beadmeta.AttemptEvidenceReferenceMetadataKey] = MetadataStringPatch{Value: string(encodedReference)}
 	beforeWrites := len(fixture.store.patchRequests)
 	budget, err := fixture.chain.Apply(request)
 	if err != nil {
@@ -1725,6 +1753,9 @@ func TestTransitionChainAttachesCompletionAfterClaim(t *testing.T) {
 		if current.Metadata[key] != want {
 			t.Fatalf("accepted work-record field %s = %q, want %q", key, current.Metadata[key], want)
 		}
+	}
+	if current.Metadata[indexKey] != string(encodedCapture) || current.Metadata[beadmeta.AttemptEvidenceReferenceMetadataKey] != string(encodedReference) {
+		t.Fatal("completion budget lost the exact sealed attempt index or reference")
 	}
 	decision, err := fixture.chain.VerifyCompletionReceipt(fixture.work.ID, fixture.evidence)
 	if err != nil || !decision.Accepted {
@@ -1822,6 +1853,90 @@ func TestTransitionChainCompletionAttachmentRefusesInvalidProofBeforeWrites(t *t
 			after, _ := fixture.store.DecisionFrontierSourceSnapshot(fixture.work.ID)
 			if !reflect.DeepEqual(before, after) || len(fixture.store.patchRequests) != writes || len(fixture.permits.requests) != permits {
 				t.Fatal("refused acceptance reached protected permit or source mutation")
+			}
+		})
+	}
+}
+
+func TestTransitionChainCompletionRefusesUnboundAttemptEvidence(t *testing.T) {
+	for _, name := range []string{"owner", "session", "generation", "store", "outcome", "reference", "index key", "missing reference", "missing index", "duplicate index", "overwrite", "noncanonical"} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newTransitionChainFixtureWithCompletion(t, false)
+			claim := applyTestClaim(t, fixture, applyTestAttachment(t, fixture, applyTestReservation(t, fixture)))
+			completion := fixture.completionReceiptValue(t, nil)
+			request := fixture.completionBudgetRequest(t, claim.Receipt, completion)
+			request.Patch.Metadata[beadmeta.LifecycleCompletionReceiptMetadataKey] = MetadataStringPatch{Value: completion}
+			before, err := fixture.store.DecisionFrontierSourceSnapshot(fixture.work.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			identity := attemptevidence.Identity{
+				Kind: attemptevidence.KindWorkbench, OwnerBeadID: before.ID, ExecutionBeadID: before.ID,
+				SessionID: before.Metadata[beadmeta.SessionIDMetadataKey], SessionGeneration: "1",
+				ClaimGeneration: before.Metadata[beadmeta.ClaimGenerationMetadataKey],
+			}
+			switch name {
+			case "owner":
+				identity.OwnerBeadID, identity.ExecutionBeadID = "other", "other"
+			case "session":
+				identity.SessionID = "other-session"
+			case "generation":
+				identity.ClaimGeneration = "2"
+			}
+			attemptID, err := attemptevidence.AttemptID(identity)
+			if err != nil {
+				t.Fatal(err)
+			}
+			capture := attemptevidence.MakeUnavailable(attemptevidence.CaptureSpec{
+				Identity: identity, StoreRef: "source-store", Now: func() time.Time { return fixture.now },
+			}, attemptID, "fixture_workspace_absent")
+			if name == "store" {
+				capture.StoreRef, capture.Permission.StoreRef = "other-store", "other-store"
+			}
+			if name == "outcome" {
+				capture.Outcome = "shipped"
+			}
+			encoded, err := json.Marshal(capture)
+			if err != nil {
+				t.Fatal(err)
+			}
+			reference := attemptevidence.EvidenceReference(capture, capture.StoreRef)
+			if name == "reference" {
+				reference.WorkID = "other"
+			}
+			encodedReference, err := json.Marshal(reference)
+			if err != nil {
+				t.Fatal(err)
+			}
+			key := attemptevidence.OwnerIndexKey(attemptID)
+			if name == "index key" {
+				key = beadmeta.AttemptEvidenceIndexPrefix + strings.Repeat("0", 64)
+			}
+			index := MetadataStringPatch{Value: string(encoded)}
+			if name == "overwrite" {
+				expected := "previous"
+				index.Expected = &expected
+			}
+			if name == "noncanonical" {
+				index.Value = " " + index.Value
+			}
+			request.Patch.Metadata[key] = index
+			request.Patch.Metadata[beadmeta.AttemptEvidenceReferenceMetadataKey] = MetadataStringPatch{Value: string(encodedReference)}
+			switch name {
+			case "missing reference":
+				delete(request.Patch.Metadata, beadmeta.AttemptEvidenceReferenceMetadataKey)
+			case "missing index":
+				delete(request.Patch.Metadata, key)
+			case "duplicate index":
+				request.Patch.Metadata[beadmeta.AttemptEvidenceIndexPrefix+strings.Repeat("f", 64)] = index
+			}
+			writes, permits := len(fixture.store.patchRequests), len(fixture.permits.requests)
+			if _, err := fixture.chain.Apply(request); !errors.Is(err, ErrTransitionChainEvidence) && !errors.Is(err, ErrTransitionChainInvalid) {
+				t.Fatalf("unbound attempt evidence was not refused: %v", err)
+			}
+			after, err := fixture.store.DecisionFrontierSourceSnapshot(before.ID)
+			if err != nil || !reflect.DeepEqual(before, after) || len(fixture.store.patchRequests) != writes || len(fixture.permits.requests) != permits {
+				t.Fatal("unbound attempt evidence changed work or consumed authority")
 			}
 		})
 	}

@@ -146,7 +146,7 @@ func (cs *controllerState) CompleteLifecycleWork(ctx context.Context, request ap
 	if err := ctx.Err(); err != nil {
 		return empty, err
 	}
-	budget, err := transition.chain.Apply(worklifecycle.TransitionRequest{
+	budget, err := applyLifecycleCompletionBudget(ctx, cityPath, cfg, cityStore, selected, scope, transition, worklifecycle.TransitionRequest{
 		IssueID: body.WorkID, Step: worklifecycle.TransitionStepCompletionBudget,
 		OperationID:    lifecycleTransitionOperationID("completion-budget", body.WorkID, scope, transition.admissionDigest, body.CompletionReceipt),
 		PriorReceiptID: body.ExpectedTransitionHead, Evidence: transition.evidence,

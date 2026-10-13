@@ -294,7 +294,14 @@ func newLifecycleClaimProviderFixtureForSetup(t *testing.T, setup lifecycleAdmis
 		cityBeadStore: setup.cityStore, beadStores: setup.rigStores,
 		beadsPermitResolver: setup.permitResolver, graphStoreGeneration: 1,
 	}
-	info := session.Info{ID: "claim-session", Generation: "1", InstanceToken: "instance-token", Template: "pilot/worker", AgentName: "pilot/worker"}
+	info, err := session.NewStore(beads.SessionStore{Store: setup.cityStore}).CreateSessionInfo(session.CreateSpec{
+		Title: "worker", AgentName: "pilot/worker", Metadata: map[string]string{
+			"template": "pilot/worker", "agent_name": "pilot/worker", "generation": "1", "instance_token": "instance-token",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	actor := session.AssigneeIdentifier(info)
 	request := api.LifecycleClaimTransitionRequest{
 		Work: current, WorkStore: setup.store, WorkStoreRef: storeref.RigRef("pilot"),
