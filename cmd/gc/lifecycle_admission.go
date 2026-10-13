@@ -1527,11 +1527,18 @@ func lifecycleLineageCurrent(candidate beads.Bead, lineage lifecycleMaterializat
 	transitionDecision := worklifecycle.EvaluateAdmissionWithTransitionProof(source, opts.Lifecycle, lineage.Scope,
 		worklifecycle.AdmissionProofInputsV2{Attachment: &attachmentProof, PolicyProjection: &projection}, head)
 	sourceStatus := strings.ToLower(strings.TrimSpace(source.Status))
+	acceptedSourceTail := false
+	if sourceStatus == "closed" && projection.FormulaSchemaVersion == beadmeta.FormulaContractGraphV2 &&
+		lineage.SourceStoreRef == lineage.WorkflowStoreRef && candidate.ID != source.ID {
+		completion := worklifecycle.EvaluateCommittedCompletionWithTransitionProof(source, opts.Lifecycle, lineage.Scope,
+			worklifecycle.AdmissionProofInputsV2{Attachment: &attachmentProof, PolicyProjection: &projection}, head)
+		acceptedSourceTail = completion.Accepted
+	}
 	sourceOwner := strings.TrimSpace(source.Assignee)
 	if err != nil || digestErr != nil || !transitionDecision.Admitted || digest != lineage.Contract || receipt.Route != lineage.Route ||
 		receipt.Workflow != lineage.Workflow || receipt.MergeStrategy != lineage.MergeStrategy ||
 		!lifecycleAttachedSourceRouteCurrent(opts.LifecycleCity, source, receipt, lineage.Scope) ||
-		(sourceStatus != "open" && sourceStatus != "in_progress") ||
+		(sourceStatus != "open" && sourceStatus != "in_progress" && !acceptedSourceTail) ||
 		(sourceOwner != "" && !hookClaimHasIdentity(sourceOwner, opts.IdentityCandidates)) ||
 		beads.IsDeferred(source, time.Now()) || lifecycleRowHeld(source) {
 		return false
@@ -1555,7 +1562,8 @@ func lifecycleLineageCurrent(candidate beads.Bead, lineage lifecycleMaterializat
 	root, err := workflowStore.Get(workflowID)
 	graphRoot := sourceworkflow.IsWorkflowRoot(root) && root.Metadata[beadmeta.FormulaContractMetadataKey] == beadmeta.FormulaContractGraphV2 &&
 		projection.FormulaSchemaVersion == beadmeta.FormulaContractGraphV2 && lineage.SourceStoreRef == lineage.WorkflowStoreRef && candidate.ID != workflowID
-	if err != nil || root.ID != workflowID || (!lifecycleFormulaV1Root(root, lineage.Workflow) && !graphRoot) ||
+	if err != nil || root.ID != workflowID || (acceptedSourceTail && !graphRoot) ||
+		(!lifecycleFormulaV1Root(root, lineage.Workflow) && !graphRoot) ||
 		strings.TrimSpace(root.Metadata[beadmeta.FormulaNameMetadataKey]) != lineage.Workflow ||
 		strings.TrimSpace(root.Metadata[beadmeta.MergeStrategyMetadataKey]) != lineage.MergeStrategy ||
 		root.Metadata[beadmeta.IdempotencyKeyMetadataKey] != lifecycleMaterializationID(lineage.SourceID, lineage.Scope, lineage.Contract) ||

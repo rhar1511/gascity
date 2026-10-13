@@ -168,7 +168,16 @@ uses `gc beads completion prepare` and `gc beads completion accept`.
 
 The session's current claim stays on this step for retry and workflow lookup.
 An exact retry returns the original receipt without another mutation; a changed
-outcome conflicts. A later claim replaces the stamp normally. This initial path
-requires a nonterminal parent and the live session states allowed for claiming.
-Terminal-parent tails, draining sessions, and descendant recovery are separate
-integration gates. The core formula has not yet been switched to this command.
+outcome conflicts. A later claim replaces the stamp normally. This path requires
+the live session states allowed for claiming. Draining sessions and descendant
+recovery remain separate integration gates. The core formula has not yet been
+switched to this command.
+
+A remaining static graph step in the same store can also claim and complete
+after reviewer acceptance closes its source. The controller requires the current
+verified source-close transition, its complete receipt chain, a still-trusted
+acceptance bound to the admission contract, and the current signed route policy.
+Source ownership and holds still apply, and the workflow root must remain open.
+A raw closed status is insufficient. Receipt freshness is checked when acceptance
+and closure commit; it is not reapplied to that historical close while finishing
+the workflow. Tail operations preserve the accepted source without reopening it.

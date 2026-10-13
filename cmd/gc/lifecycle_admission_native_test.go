@@ -511,6 +511,74 @@ func TestLifecycleAdmissionNativeGraphAttachAndReplay(t *testing.T) {
 	t.Logf("native signed completion %s followed acceptance budget %s; exact replay preserved revision %d", closeReceipt.ReceiptID, budget.ReceiptID, closed.Revision)
 	t.Log("native operator completion prepare/accept used generated client and real supervisor HTTP/controller path")
 	t.Log("native operator refusals preserved source for wrong key, altered authority, stale review and replacement acceptance")
+
+	// Reviewer acceptance closes the source before the signed workflow's tail.
+	// The remaining static step must still claim and finish through protected
+	// authority, without reopening or otherwise changing the accepted source.
+	tails, err := c.sourceLeg.store.Ready(beads.ReadyQuery{TierMode: beads.FederatedReadTier})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tail beads.Bead
+	for _, row := range tails {
+		if row.Metadata[beadmeta.RootBeadIDMetadataKey] == root.ID && row.Metadata[beadmeta.StepRefMetadataKey] == "mol-do-work.drain" {
+			tail = row
+			break
+		}
+	}
+	if tail.ID == "" {
+		t.Fatal("accepted source has no ready workflow tail")
+	}
+	tail, err = c.sourceLeg.store.Get(tail.ID)
+	if err != nil || tail.Revision == 0 {
+		t.Fatalf("hydrate exact tail: %v", err)
+	}
+	tailBody := api.LifecycleClaimSubmitRequest{
+		WorkID: tail.ID, SourceStoreRef: "rig:api", ExpectedRevision: tail.Revision, ExpectedTransitionHead: tail.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey],
+		SessionID: info.ID, InstanceToken: info.InstanceToken, RuntimeEpoch: info.Generation,
+	}
+	tailClaim, err := client.ClaimLifecycleWork(context.Background(), tailBody)
+	if err != nil {
+		t.Fatalf("native accepted-source tail claim: %v", err)
+	}
+	if tailClaim.WorkID != tail.ID || tailClaim.ReceiptID == "" || tailClaim.Replayed {
+		t.Fatalf("native tail claim: %+v", tailClaim)
+	}
+	tailReplay, err := client.ClaimLifecycleWork(context.Background(), tailBody)
+	if err != nil || !tailReplay.Replayed || tailReplay.ReceiptID != tailClaim.ReceiptID {
+		t.Fatalf("native tail claim retry: %+v, %v", tailReplay, err)
+	}
+	finishOut.Reset()
+	finishErr.Reset()
+	if code := run(finish, &finishOut, &finishErr); code != 0 {
+		t.Fatalf("native accepted-source tail completion exit %d: %s", code, finishErr.String())
+	}
+	var tailCompletion api.LifecycleCompletionResult
+	if err := json.Unmarshal([]byte(finishOut.String()), &tailCompletion); err != nil {
+		t.Fatal(err)
+	}
+	tailClosed, err := c.sourceLeg.store.Get(tail.ID)
+	if err != nil || tailCompletion.WorkID != tail.ID || tailCompletion.Replayed || tailClosed.Status != "closed" || tailClosed.Revision != tailCompletion.Revision || tailClosed.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey] != tailCompletion.ReceiptID {
+		t.Fatalf("native tail completion: %+v, %v", tailCompletion, err)
+	}
+	finishOut.Reset()
+	finishErr.Reset()
+	if code := run(finish, &finishOut, &finishErr); code != 0 {
+		t.Fatalf("native accepted-source tail completion retry exit %d: %s", code, finishErr.String())
+	}
+	var tailCompletionReplay api.LifecycleCompletionResult
+	if err := json.Unmarshal([]byte(finishOut.String()), &tailCompletionReplay); err != nil {
+		t.Fatal(err)
+	}
+	tailAfter, err := c.sourceLeg.store.Get(tail.ID)
+	if err != nil || !tailCompletionReplay.Replayed || tailCompletionReplay.ReceiptID != tailCompletion.ReceiptID || !reflect.DeepEqual(tailClosed, tailAfter) {
+		t.Fatal("native tail completion retry changed its terminal step")
+	}
+	sourceAfterTail, err := c.snapshot(fixture.SourceID)
+	if err != nil || !reflect.DeepEqual(closed, sourceAfterTail) {
+		t.Fatal("native workflow tail changed accepted source")
+	}
+	t.Log("native accepted-source tail claimed and completed with exact retry while preserving signed source closure")
 }
 
 type nativeAdmissionSessionState struct {

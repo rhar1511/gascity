@@ -766,3 +766,128 @@ func TestLifecycleExecutionCompletionRefusesChangedAuthorityBeforeWrites(t *test
 		})
 	}
 }
+
+func TestLifecycleDescendantClaimAfterAcceptedSourceClose(t *testing.T) {
+	for _, scenario := range []string{"valid closure", "historical acceptance", "unaccepted closure", "missing close receipt", "missing budget receipt", "missing acceptance", "altered acceptance", "untrusted authority", "changed source revision", "changed source head", "held source", "changed owner", "closed workflow", "changed policy"} {
+		t.Run(scenario, func(t *testing.T) {
+			setup, state, request := newLifecycleCoreGraphClaimProviderFixture(t)
+			setup.fixture.cfg.Lifecycle.CompletionReceiptMaxAge = "24h"
+			setup.fixture.cfg.Lifecycle.CompletionClockSkew = "2m"
+			source, err := setup.store.Get(setup.source.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sourceRequest := request
+			sourceRequest.Work = source
+			sourceRequest.ExpectedRevision = source.Revision
+			sourceRequest.ExpectedTransitionHead = source.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey]
+			if _, err := state.ClaimLifecycleWork(context.Background(), sourceRequest); err != nil {
+				t.Fatal(err)
+			}
+			source, err = setup.store.Get(source.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			digest, err := worklifecycle.AdmissionDigestV2(setup.receipt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			signed, err := worklifecycle.SignCompletionReceipt(worklifecycle.CompletionReceipt{
+				Version: 1, WorkItemID: source.ID, Scope: request.Scope, AdmissionDigest: digest,
+				DeliverableRef: "commit:reviewed", VerificationRef: "checks:passed", AcceptedBy: "reviewer",
+				AcceptedAt: time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano),
+			}, setup.acceptancePrivate)
+			if err != nil {
+				t.Fatal(err)
+			}
+			beforeAcceptance := source
+			completion, err := state.CompleteLifecycleWork(context.Background(), api.LifecycleCompletionTransitionRequest{
+				Work: source, WorkStore: setup.store, WorkStoreRef: request.WorkStoreRef, Scope: request.Scope,
+				Submission: api.LifecycleCompletionSubmitRequest{
+					WorkID: source.ID, SourceStoreRef: "rig:pilot", ExpectedRevision: source.Revision,
+					ExpectedTransitionHead: source.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey], CompletionReceipt: signed,
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			source, err = setup.store.Get(source.ID)
+			if err != nil || source.Status != "closed" {
+				t.Fatalf("source close: %v", err)
+			}
+			source.Metadata = cloneLifecycleAdmissionMetadata(source.Metadata)
+			switch scenario {
+			case "historical acceptance":
+				// Changing the new-intake window does not invalidate an already
+				// committed close. Trust and the signed route policy still apply.
+				setup.fixture.cfg.Lifecycle.CompletionReceiptMaxAge = "30m"
+			case "unaccepted closure":
+				source = beforeAcceptance
+				source.Status = "closed"
+			case "missing close receipt":
+				delete(setup.store.patchReceipts, completion.ReceiptID)
+			case "missing budget receipt":
+				delete(setup.store.patchReceipts, setup.store.patchReceipts[completion.ReceiptID].PriorReceiptID)
+			case "missing acceptance":
+				delete(source.Metadata, beadmeta.LifecycleCompletionReceiptMetadataKey)
+			case "altered acceptance":
+				source.Metadata[beadmeta.LifecycleCompletionReceiptMetadataKey] = strings.Replace(signed, "commit:reviewed", "commit:unreviewed", 1)
+			case "untrusted authority":
+				setup.fixture.cfg.Lifecycle.AcceptanceAuthorities = nil
+			case "changed source revision":
+				source.Revision++
+			case "changed source head":
+				source.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey] = "other-head"
+			case "held source":
+				source.Labels = append(source.Labels, beadmeta.DispatchHoldLabels[0])
+			case "changed owner":
+				source.Assignee = "another-worker"
+			case "closed workflow":
+				marker, _ := lifecycleMaterializationFor(source)
+				root, err := setup.store.Get(marker.WorkflowID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				root.Status = "closed"
+				setup.store.rows[root.ID] = root
+			case "changed policy":
+				workflow := "another-workflow"
+				setup.fixture.cfg.Agents[0].DefaultSlingFormula = &workflow
+			}
+			setup.store.rows[source.ID] = source
+			step, err := setup.store.Get(request.Work.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			patches, anchors := len(setup.store.patchRequests), len(setup.store.q43Receipts)
+			claim, err := state.ClaimLifecycleWork(context.Background(), request)
+			if scenario == "valid closure" || scenario == "historical acceptance" {
+				if err != nil || claim.ReceiptID == "" {
+					t.Fatalf("accepted-source descendant claim: %+v, %v", claim, err)
+				}
+				claimed, err := setup.store.Get(step.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				request.Work, request.ExpectedRevision, request.ExpectedTransitionHead = claimed, claimed.Revision, claim.ReceiptID
+				if _, err := state.CompleteLifecycleExecution(context.Background(), api.LifecycleExecutionCompletionTransitionRequest{
+					Claim: request, Intent: api.LifecycleExecutionCompletionIntent{ClaimGeneration: claim.ClaimGeneration, Outcome: "pass"},
+				}); err != nil {
+					t.Fatalf("complete accepted-source descendant: %v", err)
+				}
+			} else {
+				if err == nil {
+					t.Fatalf("accepted %s", scenario)
+				}
+				after, err := setup.store.Get(step.ID)
+				if err != nil || !reflect.DeepEqual(step, after) || len(setup.store.patchRequests) != patches || len(setup.store.q43Receipts) != anchors {
+					t.Fatal("refused tail claim changed step or wrote protected evidence")
+				}
+			}
+			after, err := setup.store.Get(source.ID)
+			if err != nil || !reflect.DeepEqual(source, after) {
+				t.Fatal("tail operation changed accepted source")
+			}
+		})
+	}
+}

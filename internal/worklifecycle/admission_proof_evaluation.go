@@ -38,6 +38,29 @@ func EvaluateAdmissionWithTransitionProof(
 	return evaluateAdmissionWithProof(bead, cfg, scope, inputs, head, true)
 }
 
+// EvaluateCommittedCompletionWithTransitionProof verifies an already committed
+// source close for descendant execution. The verified Q54 close must still be
+// current, and its acceptance must remain trusted under the admission contract.
+// Receipt freshness applies at acceptance/close time, not again to workflow tails.
+func EvaluateCommittedCompletionWithTransitionProof(
+	bead beads.Bead,
+	cfg config.LifecycleConfig,
+	scope string,
+	inputs AdmissionProofInputsV2,
+	head TransitionHead,
+) CompletionDecision {
+	if bead.Status != "closed" || !head.verified || head.FromAttachment ||
+		head.Step != TransitionStepClose || head.ToVersion != bead.Revision ||
+		head.ReceiptID == "" || head.ReceiptID != bead.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey] {
+		return CompletionDecision{Reason: "source has no current verified close transition"}
+	}
+	admission := EvaluateAdmissionWithTransitionProof(bead, cfg, scope, inputs, head)
+	if !admission.Admitted {
+		return CompletionDecision{Reason: admission.Reason}
+	}
+	return evaluateCompletionReceiptProof(bead, cfg, scope, admission.Receipt)
+}
+
 func evaluateAdmissionWithProof(
 	bead beads.Bead,
 	cfg config.LifecycleConfig,
