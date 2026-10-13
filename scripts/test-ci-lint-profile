@@ -128,7 +128,7 @@ class MacLintSchedulingTests(unittest.TestCase):
                     self.assertEqual(observed["args"][0], "run")
                     self.assertEqual(observed["args"][-1], "./...")
                     self.assertIn("--concurrency=2", observed["args"])
-                    self.assertIn("--timeout=55m", observed["args"])
+                    self.assertIn("--timeout=65m", observed["args"])
                     self.assertTrue(json.loads((profiles / "result.json").read_text())
                                     ["profiles_complete"])
 
@@ -140,14 +140,14 @@ class MacLintSchedulingTests(unittest.TestCase):
                        if "-- make lint LINT_FLAGS=" in line)
         flags = shlex.split(command.split('LINT_FLAGS="', 1)[1].split('"', 1)[0])
         # Limit simultaneous analysis on the memory-constrained Mac runner;
-        # retain the same full-repository gate and its original deadline.
+        # retain the full-repository gate and its measured cold-run budget.
         self.assertIn("--concurrency=2", flags)
-        self.assertIn("--timeout=55m", flags)
+        self.assertIn("--timeout=65m", flags)
         self.assertFalse(any(flag.startswith(("--disable", "--enable-only", "--new"))
                              for flag in flags))
         self.assertIn("--cpu-profile-path=$MAC_LINT_DIR/cpu.pprof", flags)
         self.assertIn("--mem-profile-path=$MAC_LINT_DIR/mem.pprof", flags)
-        self.assertIn('time.monotonic() + 65*60', quality)
+        self.assertIn('time.monotonic() + 75*60', quality)
         self.assertIn('$(LINT_ENV) $(GOLANGCI_LINT) run $(LINT_FLAGS) ./...',
                       (root / "Makefile").read_text())
 
