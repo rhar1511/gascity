@@ -1745,6 +1745,10 @@ export type LifecycleClaimSubmitOutputBody = {
 
 export type LifecycleClaimSubmitRequest = {
     /**
+     * Begin this source while retaining the exact currently claimed generated execution step. The controller verifies signed workflow membership.
+     */
+    execution_claim?: LifecycleExecutionClaim;
+    /**
      * Nonzero opaque signed source revision observed by the claim candidate query; compare only for equality.
      */
     expected_revision: number;
@@ -1792,6 +1796,11 @@ export type LifecycleCompletionSubmitRequest = {
     expected_revision: number;
     expected_transition_head: string;
     source_store_ref: string;
+    work_id: string;
+};
+
+export type LifecycleExecutionClaim = {
+    claim_generation: string;
     work_id: string;
 };
 

@@ -2039,6 +2039,9 @@ func (c *Client) ClaimLifecycleWork(parent context.Context, request LifecycleCla
 		ExpectedRevision: request.ExpectedRevision, ExpectedTransitionHead: request.ExpectedTransitionHead,
 		SessionId: request.SessionID, InstanceToken: request.InstanceToken, RuntimeEpoch: request.RuntimeEpoch,
 	}
+	if request.ExecutionClaim != nil {
+		body.ExecutionClaim = &genclient.LifecycleExecutionClaim{WorkId: request.ExecutionClaim.WorkID, ClaimGeneration: request.ExecutionClaim.ClaimGeneration}
+	}
 	resp, err := c.cw.ClaimAdmittedLifecycleWorkWithResponse(ctx, c.cityName, nil, body)
 	if err != nil {
 		return LifecycleClaimResult{}, &connError{err: fmt.Errorf("request failed: %w", err)}

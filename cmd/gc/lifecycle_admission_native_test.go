@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/worklifecycle"
@@ -122,46 +123,34 @@ func TestLifecycleAdmissionNativeGraphAttachAndReplay(t *testing.T) {
 	}
 	t.Logf("native graph %s attached source %s through reservation %s and attachment %s; exact replay preserved revision %d", root.ID, fixture.SourceID, parent.ReceiptID, head.ReceiptID, attached.Revision)
 
-	// Exercise the existing source-claim provider against the same real chain.
-	// Session authentication and worker launch remain separate API/runtime proofs.
+	// Exercise the worker order through authenticated HTTP: claim the generated
+	// step first, then its source without replacing execution attribution. The
+	// session manager uses a fake runtime; a real worker launch remains a gate.
 	state := &controllerState{
 		cfg: c.cfg, cityName: c.cityName, cityPath: c.cityPath,
 		cityBeadStore: c.cityStore, beadStores: c.rigStores,
 		beadsPermitResolver: resolver, graphStoreGeneration: 1,
 	}
-	info := session.Info{ID: "native-claim-session", Generation: "1", InstanceToken: "native-fixture-incarnation", Template: "api/worker", AgentName: "api/worker"}
+	sessionRows := beads.NewMemStoreFrom(1, nil, nil)
+	manager := session.NewManagerWithOptions(sessionRows, runtime.NewFake())
+	info, err := manager.CreateSession(context.Background(), session.CreateOptions{
+		Template: "api/worker", Command: "test-agent", WorkDir: t.TempDir(), Provider: "test-agent",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	authenticated := &nativeAdmissionSessionState{controllerState: state, sessions: beads.SessionStore{Store: sessionRows}}
+	supervisor := api.NewSupervisorMux(nativeAdmissionCityResolver{authenticated}, nil, false, "native-test", "", time.Now())
+	server := httptest.NewServer(supervisor.Handler())
+	defer server.Close()
+	client := api.NewCityScopedClient(server.URL, c.cityName)
+
 	request := api.LifecycleClaimTransitionRequest{
 		Work: attached, WorkStore: c.sourceLeg.store, WorkStoreRef: storeref.RigRef("api"),
 		Scope: worklifecycle.ScopeForStore(c.cityName, "rig:api"), Session: info,
 		Actor: session.AssigneeIdentifier(info), ExpectedRevision: attached.Revision,
 		ExpectedTransitionHead: head.ReceiptID,
 	}
-	claim, err := state.ClaimLifecycleWork(context.Background(), request)
-	if err != nil || claim.ClaimGeneration != "1" || claim.ReceiptID == "" || claim.Replayed || claim.Recovered {
-		t.Fatalf("real source claim: result=%+v err=%v", claim, err)
-	}
-	claimed, err := c.snapshot(fixture.SourceID)
-	if err != nil || claimed.Status != "in_progress" || claimed.Assignee != request.Actor ||
-		claimed.Metadata[beadmeta.SessionIDMetadataKey] != info.ID ||
-		claimed.Metadata[beadmeta.ClaimGenerationMetadataKey] != "1" ||
-		claimed.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey] != claim.ReceiptID {
-		t.Fatalf("real source claim was not persisted exactly: err=%v", err)
-	}
-	claimReceipt, found, err := reader.ReadRevisionTransitionPatchReceipt(claim.ReceiptID)
-	if err != nil || !found || claimReceipt.Kind != "lifecycle_source_claim_identity_v1" ||
-		claimReceipt.PriorReceiptID != head.ReceiptID || claimReceipt.ExpectedVersion != attached.Revision ||
-		claimReceipt.ToVersion != claimed.Revision {
-		t.Fatalf("real source claim receipt: %+v found=%t err=%v", claimReceipt, found, err)
-	}
-	claimReplay, err := state.ClaimLifecycleWork(context.Background(), request)
-	if err != nil || !claimReplay.Replayed || claimReplay.ReceiptID != claim.ReceiptID || claimReplay.ClaimGeneration != "1" {
-		t.Fatalf("real source claim replay: result=%+v err=%v", claimReplay, err)
-	}
-	claimReadback, err := c.snapshot(fixture.SourceID)
-	if err != nil || !reflect.DeepEqual(claimed, claimReadback) {
-		t.Fatalf("real source claim replay changed the committed source: err=%v", err)
-	}
-	t.Logf("native source claim %s committed generation 1 and exact replay preserved revision %d", claim.ReceiptID, claimed.Revision)
 
 	ready, err := c.sourceLeg.store.Ready(beads.ReadyQuery{TierMode: beads.FederatedReadTier})
 	if err != nil {
@@ -185,10 +174,12 @@ func TestLifecycleAdmissionNativeGraphAttachAndReplay(t *testing.T) {
 		t.Fatalf("hydrate exact native step revision: revision=%d err=%v", step.Revision, err)
 	}
 	t.Logf("native descendant ready revision %d hydrated to exact revision %d", projectedRevision, step.Revision)
-	stepRequest := request
-	stepRequest.Work, stepRequest.ExpectedRevision, stepRequest.ExpectedTransitionHead = step, step.Revision, ""
-	stepClaim, err := state.ClaimLifecycleWork(context.Background(), stepRequest)
-	if err != nil || stepClaim.ClaimGeneration != "1" || stepClaim.Replayed || stepClaim.Recovered {
+	stepBody := api.LifecycleClaimSubmitRequest{
+		WorkID: step.ID, SourceStoreRef: "rig:api", ExpectedRevision: step.Revision,
+		ExpectedTransitionHead: "", SessionID: info.ID, InstanceToken: info.InstanceToken, RuntimeEpoch: info.Generation,
+	}
+	stepClaim, err := client.ClaimLifecycleWork(context.Background(), stepBody)
+	if err != nil || stepClaim.ClaimGeneration != "1" || stepClaim.Replayed {
 		t.Fatalf("native descendant claim: %+v err=%v", stepClaim, err)
 	}
 	stepReceipt, found, err := reader.ReadRevisionTransitionPatchReceipt(stepClaim.ReceiptID)
@@ -210,7 +201,7 @@ func TestLifecycleAdmissionNativeGraphAttachAndReplay(t *testing.T) {
 		stepReadback.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey] != stepClaim.ReceiptID {
 		t.Fatalf("native descendant claim was not persisted exactly: %v", err)
 	}
-	stepReplay, err := state.ClaimLifecycleWork(context.Background(), stepRequest)
+	stepReplay, err := client.ClaimLifecycleWork(context.Background(), stepBody)
 	if err != nil || !stepReplay.Replayed || stepReplay.ReceiptID != stepClaim.ReceiptID {
 		t.Fatalf("native descendant replay: %+v err=%v", stepReplay, err)
 	}
@@ -219,11 +210,65 @@ func TestLifecycleAdmissionNativeGraphAttachAndReplay(t *testing.T) {
 		t.Fatalf("native descendant replay changed committed step: %v", err)
 	}
 	t.Logf("native descendant claim %s anchored step %s through %s; exact replay preserved revision %d", stepClaim.ReceiptID, step.ID, anchor.ReceiptID, stepFinal.Revision)
+	sourceBody := api.LifecycleClaimSubmitRequest{
+		WorkID: attached.ID, SourceStoreRef: "rig:api", ExpectedRevision: attached.Revision,
+		ExpectedTransitionHead: head.ReceiptID, SessionID: info.ID, InstanceToken: info.InstanceToken, RuntimeEpoch: info.Generation,
+		ExecutionClaim: &api.LifecycleExecutionClaim{WorkID: step.ID, ClaimGeneration: "1"},
+	}
+	for _, scenario := range []string{"stale incarnation", "stale execution generation"} {
+		refused := sourceBody
+		if scenario == "stale incarnation" {
+			refused.InstanceToken = "stale-incarnation"
+		} else {
+			refused.ExecutionClaim = &api.LifecycleExecutionClaim{WorkID: step.ID, ClaimGeneration: "2"}
+		}
+		if _, err := client.ClaimLifecycleWork(context.Background(), refused); err == nil {
+			t.Fatalf("accepted %s", scenario)
+		}
+		unchanged, err := c.snapshot(fixture.SourceID)
+		if err != nil || !reflect.DeepEqual(attached, unchanged) {
+			t.Fatalf("%s changed source", scenario)
+		}
+	}
+	claim, err := client.ClaimLifecycleWork(context.Background(), sourceBody)
+	if err != nil || claim.ClaimGeneration != "1" || claim.ReceiptID == "" || claim.Replayed {
+		t.Fatalf("real source claim: result=%+v err=%v", claim, err)
+	}
+	claimed, err := c.snapshot(fixture.SourceID)
+	if err != nil || claimed.Status != "in_progress" || claimed.Assignee != request.Actor ||
+		claimed.Metadata[beadmeta.SessionIDMetadataKey] != info.ID ||
+		claimed.Metadata[beadmeta.ClaimGenerationMetadataKey] != "1" ||
+		claimed.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey] != claim.ReceiptID {
+		t.Fatalf("real source claim was not persisted exactly: err=%v", err)
+	}
+	claimReceipt, found, err := reader.ReadRevisionTransitionPatchReceipt(claim.ReceiptID)
+	if err != nil || !found || claimReceipt.Kind != "lifecycle_source_claim_identity_v1" ||
+		claimReceipt.PriorReceiptID != head.ReceiptID || claimReceipt.ExpectedVersion != attached.Revision ||
+		claimReceipt.ToVersion != claimed.Revision {
+		t.Fatalf("real source claim receipt: %+v found=%t err=%v", claimReceipt, found, err)
+	}
+	claimReplay, err := client.ClaimLifecycleWork(context.Background(), sourceBody)
+	if err != nil || !claimReplay.Replayed || claimReplay.ReceiptID != claim.ReceiptID || claimReplay.ClaimGeneration != "1" {
+		t.Fatalf("real source claim replay: result=%+v err=%v", claimReplay, err)
+	}
+	claimReadback, err := c.snapshot(fixture.SourceID)
+	if err != nil || !reflect.DeepEqual(claimed, claimReadback) {
+		t.Fatalf("real source claim replay changed the committed source: err=%v", err)
+	}
+	t.Logf("native source claim %s committed generation 1 and exact replay preserved revision %d", claim.ReceiptID, claimed.Revision)
+
+	claimID, generation, err := session.NewStore(authenticated.sessions).CurrentClaim(info.ID)
+	if err != nil || claimID != step.ID || generation != "1" {
+		t.Fatalf("source start replaced execution attribution: %s/%s, %v", claimID, generation, err)
+	}
+	preservedStep, err := c.sourceLeg.store.Get(step.ID)
+	if err != nil || !reflect.DeepEqual(stepFinal, preservedStep) {
+		t.Fatal("source start changed the claimed step")
+	}
+	t.Log("native authenticated step-first source claim preserved execution attribution and rejected stale incarnation/generation")
+
 	// Exercise the public operator prepare/accept commands through the generated
 	// client, real supervisor HTTP handler, controller provider and native backend.
-	supervisor := api.NewSupervisorMux(nativeAdmissionCityResolver{state}, nil, false, "native-test", "", time.Now())
-	server := httptest.NewServer(supervisor.Handler())
-	defer server.Close()
 	oldAlive, oldClient := apiRouteControllerAliveHook, apiRouteSupervisorClientHook
 	t.Cleanup(func() { apiRouteControllerAliveHook, apiRouteSupervisorClientHook = oldAlive, oldClient })
 	apiRouteControllerAliveHook = func(string) int { return os.Getpid() }
@@ -327,14 +372,21 @@ func TestLifecycleAdmissionNativeGraphAttachAndReplay(t *testing.T) {
 	t.Log("native operator refusals preserved source for wrong key, altered authority, stale review and replacement acceptance")
 }
 
-type nativeAdmissionCityResolver struct{ state *controllerState }
+type nativeAdmissionSessionState struct {
+	*controllerState
+	sessions beads.SessionStore
+}
+
+func (s *nativeAdmissionSessionState) SessionsBeadStore() beads.SessionStore { return s.sessions }
+
+type nativeAdmissionCityResolver struct{ state api.State }
 
 func (r nativeAdmissionCityResolver) ListCities() []api.CityInfo {
-	return []api.CityInfo{{Name: r.state.cityName, Path: r.state.cityPath, Running: true}}
+	return []api.CityInfo{{Name: r.state.CityName(), Path: r.state.CityPath(), Running: true}}
 }
 
 func (r nativeAdmissionCityResolver) CityState(name string) api.State {
-	if name == r.state.cityName {
+	if name == r.state.CityName() {
 		return r.state
 	}
 	return nil

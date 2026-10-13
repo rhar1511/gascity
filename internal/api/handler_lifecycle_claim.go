@@ -21,13 +21,21 @@ import (
 // managed runtime incarnation; the controller derives the actor, generation,
 // exact evidence, and protected-mutation permit.
 type LifecycleClaimSubmitRequest struct {
-	WorkID                 string `json:"work_id" minLength:"1" maxLength:"200" doc:"Exact admitted work bead ID."`
-	SourceStoreRef         string `json:"source_store_ref" maxLength:"200" doc:"Q54 source scope accepted by this endpoint: city:<city_name> for the city work store or rig:<rig_name> for a rig store. Relocated class:<classes> references are not supported."`
-	ExpectedRevision       int64  `json:"expected_revision" doc:"Nonzero opaque signed source revision observed by the claim candidate query; compare only for equality."`
-	ExpectedTransitionHead string `json:"expected_transition_head" maxLength:"200" doc:"Observed lifecycle transition head; empty only for a generated step awaiting its first protected anchor."`
-	SessionID              string `json:"session_id" minLength:"1" maxLength:"200" doc:"Managed session bead ID."`
-	InstanceToken          string `json:"instance_token" minLength:"1" maxLength:"512" doc:"Current managed runtime instance token."`
-	RuntimeEpoch           string `json:"runtime_epoch" minLength:"1" maxLength:"32" doc:"Canonical positive managed runtime epoch."`
+	ExecutionClaim         *LifecycleExecutionClaim `json:"execution_claim,omitempty" doc:"Begin this source while retaining the exact currently claimed generated execution step. The controller verifies signed workflow membership."`
+	WorkID                 string                   `json:"work_id" minLength:"1" maxLength:"200" doc:"Exact admitted work bead ID."`
+	SourceStoreRef         string                   `json:"source_store_ref" maxLength:"200" doc:"Q54 source scope accepted by this endpoint: city:<city_name> for the city work store or rig:<rig_name> for a rig store. Relocated class:<classes> references are not supported."`
+	ExpectedRevision       int64                    `json:"expected_revision" doc:"Nonzero opaque signed source revision observed by the claim candidate query; compare only for equality."`
+	ExpectedTransitionHead string                   `json:"expected_transition_head" maxLength:"200" doc:"Observed lifecycle transition head; empty only for a generated step awaiting its first protected anchor."`
+	SessionID              string                   `json:"session_id" minLength:"1" maxLength:"200" doc:"Managed session bead ID."`
+	InstanceToken          string                   `json:"instance_token" minLength:"1" maxLength:"512" doc:"Current managed runtime instance token."`
+	RuntimeEpoch           string                   `json:"runtime_epoch" minLength:"1" maxLength:"32" doc:"Canonical positive managed runtime epoch."`
+}
+
+// LifecycleExecutionClaim identifies the generated step whose ownership must
+// remain current while its worker begins the enclosing source work.
+type LifecycleExecutionClaim struct {
+	WorkID          string `json:"work_id" minLength:"1" maxLength:"200"`
+	ClaimGeneration string `json:"claim_generation" minLength:"1" maxLength:"32"`
 }
 
 // LifecycleClaimSubmitInput is the city-scoped Q54 claim request.
@@ -37,7 +45,7 @@ type LifecycleClaimSubmitInput struct {
 }
 
 // LifecycleClaimSubmitOutput reports the durable claim transition and the
-// reciprocal session claim stamp that was verified before success returned.
+// reciprocal session claim stamp (or retained execution claim) verified before success.
 type LifecycleClaimSubmitOutput struct {
 	Body struct {
 		WorkID          string `json:"work_id"`
@@ -52,14 +60,16 @@ type LifecycleClaimSubmitOutput struct {
 // the controller-owned transition-chain provider after API authorization and
 // authoritative store/session reads.
 type LifecycleClaimTransitionRequest struct {
-	Work                   beads.Bead
-	WorkStore              beads.Store
-	WorkStoreRef           storeref.StoreRef
-	Scope                  string
-	Session                session.Info
-	Actor                  string
-	ExpectedRevision       int64
-	ExpectedTransitionHead string
+	ExecutionWork            beads.Bead
+	ExecutionClaimGeneration string
+	Work                     beads.Bead
+	WorkStore                beads.Store
+	WorkStoreRef             storeref.StoreRef
+	Scope                    string
+	Session                  session.Info
+	Actor                    string
+	ExpectedRevision         int64
+	ExpectedTransitionHead   string
 }
 
 // LifecycleClaimTransitionResult is the exact Q54 transition receipt needed
@@ -85,7 +95,7 @@ func registerLifecycleClaimRoutes(sm *SupervisorMux) {
 		Method:        http.MethodPost,
 		Path:          "/lifecycle/claims",
 		Summary:       "Claim admitted work through its durable lifecycle transition",
-		Description:   "Authenticates the current managed session incarnation, atomically appends a Q54 ClaimIdentity transition for exact admitted work, then stamps and verifies the reciprocal session claim.",
+		Description:   "Authenticates the current managed session incarnation, atomically appends a Q54 ClaimIdentity transition for exact admitted work, then stamps and verifies the reciprocal session claim. With execution_claim, verifies the current generated step belongs to this source and preserves that step as the session claim.",
 		DefaultStatus: http.StatusOK,
 		Errors:        []int{http.StatusBadRequest, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable},
 	}, (*Server).humaHandleLifecycleClaimSubmit)
@@ -160,22 +170,30 @@ func (s *Server) humaHandleLifecycleClaimSubmit(ctx context.Context, input *Life
 	if !ok {
 		return nil, apierr.ServiceUnavailable.Msg("controller lifecycle claim transition provider is unavailable")
 	}
-	transition, err := provider.ClaimLifecycleWork(ctx, LifecycleClaimTransitionRequest{
+	request := LifecycleClaimTransitionRequest{
 		Work: work, WorkStore: owner.Store, WorkStoreRef: owner.Ref, Scope: scope,
 		Session: info, Actor: actor, ExpectedRevision: body.ExpectedRevision,
 		ExpectedTransitionHead: body.ExpectedTransitionHead,
-	})
+	}
+	var transition LifecycleClaimTransitionResult
+	if body.ExecutionClaim != nil {
+		transition, err = claimLifecycleSourceKeepingExecution(ctx, sessionStore, body, request, provider)
+	} else {
+		transition, err = provider.ClaimLifecycleWork(ctx, request)
+	}
 	if err != nil {
 		return nil, lifecycleClaimTransitionError(err)
 	}
 	if !canonicalLifecycleClaimInteger(transition.ClaimGeneration) || strings.TrimSpace(transition.ReceiptID) == "" {
 		return nil, apierr.ServiceUnavailable.Msg("controller returned an invalid durable claim result")
 	}
-	if err := stampLifecycleClaimReciprocal(sessionStore, info, body, work.ID, transition.ClaimGeneration); err != nil {
-		if errors.Is(err, errLifecycleClaimSessionChanged) {
-			return nil, apierr.ConflictWrongState.Msg("managed session incarnation changed before reciprocal claim stamp")
+	if body.ExecutionClaim == nil {
+		if err := stampLifecycleClaimReciprocal(sessionStore, info, body, work.ID, transition.ClaimGeneration); err != nil {
+			if errors.Is(err, errLifecycleClaimSessionChanged) {
+				return nil, apierr.ConflictWrongState.Msg("managed session incarnation changed before reciprocal claim stamp")
+			}
+			return nil, apierr.ServiceUnavailable.Msg("reciprocal session claim could not be stamped and verified")
 		}
-		return nil, apierr.ServiceUnavailable.Msg("reciprocal session claim could not be stamped and verified")
 	}
 	out := &LifecycleClaimSubmitOutput{}
 	out.Body.WorkID = work.ID
@@ -187,6 +205,10 @@ func (s *Server) humaHandleLifecycleClaimSubmit(ctx context.Context, input *Life
 }
 
 func validLifecycleClaimSubmitRequest(request LifecycleClaimSubmitRequest) bool {
+	if e := request.ExecutionClaim; e != nil && (e.WorkID == "" || strings.TrimSpace(e.WorkID) != e.WorkID || e.WorkID == request.WorkID || !canonicalLifecycleClaimInteger(e.ClaimGeneration)) {
+		return false
+	}
+
 	return strings.TrimSpace(request.WorkID) != "" && strings.TrimSpace(request.WorkID) == request.WorkID &&
 		strings.TrimSpace(request.SourceStoreRef) == request.SourceStoreRef &&
 		request.ExpectedRevision != 0 && strings.TrimSpace(request.ExpectedTransitionHead) == request.ExpectedTransitionHead &&
@@ -265,4 +287,45 @@ func lifecycleClaimTransitionError(err error) error {
 	default:
 		return apierr.ServiceUnavailable.Msg("durable lifecycle claim transition failed")
 	}
+}
+
+// The session lock serializes in-process claim-stamp and incarnation writers.
+// Source and step rows are separately fenced by the controller; this is not a
+// cross-row transaction or a lock on out-of-process session writers.
+func claimLifecycleSourceKeepingExecution(ctx context.Context, sessions *session.Store, body LifecycleClaimSubmitRequest, request LifecycleClaimTransitionRequest, provider LifecycleClaimTransitionProvider) (LifecycleClaimTransitionResult, error) {
+	var result LifecycleClaimTransitionResult
+	err := session.WithSessionMutationLock(request.Session.ID, func() error {
+		verifySession := func() error {
+			current, err := sessions.Get(request.Session.ID)
+			if err != nil || !lifecycleClaimSessionMatches(current, body) || session.AssigneeIdentifier(current) != request.Actor {
+				return worklifecycle.ErrTransitionChainStale
+			}
+			workID, generation, err := sessions.CurrentClaim(current.ID)
+			if err != nil || workID != body.ExecutionClaim.WorkID || generation != body.ExecutionClaim.ClaimGeneration {
+				return worklifecycle.ErrTransitionChainStale
+			}
+			request.Session = current
+			return nil
+		}
+		if err := verifySession(); err != nil {
+			return err
+		}
+		step, err := beads.HandlesFor(request.WorkStore).Live.Get(body.ExecutionClaim.WorkID)
+		if err != nil {
+			return worklifecycle.ErrTransitionChainStale
+		}
+		if step.ID != body.ExecutionClaim.WorkID || step.Status != "in_progress" || step.Assignee != request.Actor ||
+			step.Metadata[beadmeta.SessionIDMetadataKey] != request.Session.ID || step.Metadata[beadmeta.ClaimGenerationMetadataKey] != body.ExecutionClaim.ClaimGeneration ||
+			step.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey] == "" || !worklifecycle.HasDurableEnrollment(step) {
+			return worklifecycle.ErrTransitionChainStale
+		}
+		request.ExecutionWork = step
+		request.ExecutionClaimGeneration = body.ExecutionClaim.ClaimGeneration
+		result, err = provider.ClaimLifecycleWork(ctx, request)
+		if err != nil {
+			return err
+		}
+		return verifySession()
+	})
+	return result, err
 }

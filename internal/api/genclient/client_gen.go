@@ -2561,6 +2561,8 @@ type LifecycleClaimSubmitOutputBody struct {
 
 // LifecycleClaimSubmitRequest defines model for LifecycleClaimSubmitRequest.
 type LifecycleClaimSubmitRequest struct {
+	ExecutionClaim *LifecycleExecutionClaim `json:"execution_claim,omitempty"`
+
 	// ExpectedRevision Nonzero opaque signed source revision observed by the claim candidate query; compare only for equality.
 	ExpectedRevision int64 `json:"expected_revision"`
 
@@ -2601,6 +2603,12 @@ type LifecycleCompletionSubmitRequest struct {
 	ExpectedTransitionHead string `json:"expected_transition_head"`
 	SourceStoreRef         string `json:"source_store_ref"`
 	WorkId                 string `json:"work_id"`
+}
+
+// LifecycleExecutionClaim defines model for LifecycleExecutionClaim.
+type LifecycleExecutionClaim struct {
+	ClaimGeneration string `json:"claim_generation"`
+	WorkId          string `json:"work_id"`
 }
 
 // LifecycleRecoverySubmitOutputBody defines model for LifecycleRecoverySubmitOutputBody.

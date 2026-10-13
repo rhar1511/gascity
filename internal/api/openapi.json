@@ -5007,6 +5007,10 @@
       "LifecycleClaimSubmitRequest": {
         "additionalProperties": false,
         "properties": {
+          "execution_claim": {
+            "$ref": "#/components/schemas/LifecycleExecutionClaim",
+            "description": "Begin this source while retaining the exact currently claimed generated execution step. The controller verifies signed workflow membership."
+          },
           "expected_revision": {
             "description": "Nonzero opaque signed source revision observed by the claim candidate query; compare only for equality.",
             "format": "int64",
@@ -5119,6 +5123,26 @@
           "expected_revision",
           "expected_transition_head",
           "completion_receipt"
+        ],
+        "type": "object"
+      },
+      "LifecycleExecutionClaim": {
+        "additionalProperties": false,
+        "properties": {
+          "claim_generation": {
+            "maxLength": 32,
+            "minLength": 1,
+            "type": "string"
+          },
+          "work_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "work_id",
+          "claim_generation"
         ],
         "type": "object"
       },
@@ -41995,7 +42019,7 @@
     },
     "/v0/city/{cityName}/lifecycle/claims": {
       "post": {
-        "description": "Authenticates the current managed session incarnation, atomically appends a Q54 ClaimIdentity transition for exact admitted work, then stamps and verifies the reciprocal session claim.",
+        "description": "Authenticates the current managed session incarnation, atomically appends a Q54 ClaimIdentity transition for exact admitted work, then stamps and verifies the reciprocal session claim. With execution_claim, verifies the current generated step belongs to this source and preserves that step as the session claim.",
         "operationId": "claim-admitted-lifecycle-work",
         "parameters": [
           {

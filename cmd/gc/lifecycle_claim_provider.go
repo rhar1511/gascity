@@ -37,6 +37,12 @@ func (cs *controllerState) ClaimLifecycleWork(ctx context.Context, request api.L
 		return api.LifecycleClaimTransitionResult{}, worklifecycle.ErrTransitionChainInvalid
 	}
 
+	if request.ExecutionWork.ID != "" || request.ExecutionClaimGeneration != "" {
+		if err := cs.verifyLifecycleSourceExecution(ctx, request); err != nil {
+			return api.LifecycleClaimTransitionResult{}, err
+		}
+	}
+
 	cs.mu.RLock()
 	cfg := cs.cfg
 	cityName := cs.cityName
@@ -264,6 +270,11 @@ func (cs *controllerState) ClaimLifecycleWork(ctx context.Context, request api.L
 	if err := ctx.Err(); err != nil {
 		return api.LifecycleClaimTransitionResult{}, err
 	}
+	if request.ExecutionWork.ID != "" {
+		if err := verifyLifecycleSourceExecutionSnapshot(request); err != nil {
+			return api.LifecycleClaimTransitionResult{}, err
+		}
+	}
 	claimed, err := chain.ClaimIdentity(worklifecycle.ClaimIdentityRequest{
 		IssueID: current.ID, SessionID: request.Session.ID,
 		InstanceToken: request.Session.InstanceToken, RuntimeEpoch: request.Session.Generation,
@@ -273,6 +284,11 @@ func (cs *controllerState) ClaimLifecycleWork(ctx context.Context, request api.L
 	})
 	if err != nil {
 		return api.LifecycleClaimTransitionResult{}, err
+	}
+	if request.ExecutionWork.ID != "" {
+		if err := verifyLifecycleSourceExecutionSnapshot(request); err != nil {
+			return api.LifecycleClaimTransitionResult{}, err
+		}
 	}
 	return api.LifecycleClaimTransitionResult{
 		ClaimGeneration: claimed.ClaimGeneration, ReceiptID: claimed.Receipt.ReceiptID,
@@ -375,3 +391,60 @@ func errorsJoinTransitionEvidence(err error) error {
 }
 
 var _ api.LifecycleClaimTransitionProvider = (*controllerState)(nil)
+
+// verifyLifecycleSourceExecution proves that this is the authenticated worker's
+// already claimed descendant of the exact source. Replaying an existing child
+// claim verifies its Q43 anchor, Q54 receipt, signed parent policy, compiled
+// membership, and runtime incarnation without writing another child transition.
+// It runs before taking the source route lease to avoid recursive RWMutex reads
+// across a waiting route publisher.
+func (cs *controllerState) verifyLifecycleSourceExecution(ctx context.Context, request api.LifecycleClaimTransitionRequest) error {
+	step := request.ExecutionWork
+	if step.ID == "" || step.ID == request.Work.ID || !canonicalLifecycleClaimProviderEpoch(request.ExecutionClaimGeneration) ||
+		request.Work.Metadata[beadmeta.LifecycleAdmissionReceiptV2MetadataKey] == "" ||
+		step.Metadata[beadmeta.LifecycleAdmissionReceiptV2MetadataKey] != "" || step.Metadata[beadmeta.LifecycleAdmissionReceiptMetadataKey] != "" {
+		return worklifecycle.ErrTransitionChainEvidence
+	}
+	if err := verifyLifecycleSourceExecutionSnapshot(request); err != nil {
+		return err
+	}
+	lineage, ok := lifecycleMaterializationFor(step)
+	if !ok || lineage.SourceID != request.Work.ID || lineage.SourceStoreRef != lineage.WorkflowStoreRef {
+		return worklifecycle.ErrTransitionChainEvidence
+	}
+	childRequest := request
+	childRequest.Work = step
+	childRequest.ExpectedRevision = step.Revision
+	childRequest.ExpectedTransitionHead = step.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey]
+	childRequest.ExecutionWork = beads.Bead{}
+	childRequest.ExecutionClaimGeneration = ""
+	result, err := cs.ClaimLifecycleWork(ctx, childRequest)
+	if err != nil {
+		return err
+	}
+	if !result.Replayed || result.Recovered || result.ClaimGeneration != request.ExecutionClaimGeneration || result.ReceiptID != childRequest.ExpectedTransitionHead {
+		return worklifecycle.ErrTransitionChainEvidence
+	}
+	return verifyLifecycleSourceExecutionSnapshot(request)
+}
+
+// This is a live observation of a separately owned row, not an atomic cross-row
+// fence. A concurrent external step/session mutation can leave a committed
+// source claim with an error response; retries must preserve the source's
+// original observation and revalidate both ownership proofs.
+func verifyLifecycleSourceExecutionSnapshot(request api.LifecycleClaimTransitionRequest) error {
+	step := request.ExecutionWork
+	current, err := beads.HandlesFor(request.WorkStore).Live.Get(step.ID)
+	if err != nil {
+		return worklifecycle.ErrTransitionChainStale
+	}
+	if current.ID != step.ID || current.Revision == 0 || current.Revision != step.Revision || current.Status != "in_progress" ||
+		current.Assignee != request.Actor || current.Metadata[beadmeta.SessionIDMetadataKey] != request.Session.ID ||
+		current.Metadata[beadmeta.ClaimGenerationMetadataKey] != request.ExecutionClaimGeneration ||
+		current.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey] == "" ||
+		current.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey] != step.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey] ||
+		current.Metadata[beadmeta.LifecycleMaterializationMetadataKey] != step.Metadata[beadmeta.LifecycleMaterializationMetadataKey] {
+		return worklifecycle.ErrTransitionChainStale
+	}
+	return nil
+}

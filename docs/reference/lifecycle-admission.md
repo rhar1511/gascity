@@ -120,3 +120,21 @@ revision checks, or clear enrollment metadata to force re-admission.
 The checkout's `scripts/protected-mutation/README.md` documents the host timer
 and authority layout. Deployments need separate backup,
 rollback, backend qualification, and real worker-canary evidence.
+
+### Beginning source work from a claimed step
+
+The typed lifecycle claim request accepts an optional `execution_claim` with
+`work_id` and `claim_generation`. A worker that has already claimed a generated
+step uses this context when beginning that step's admitted source work. The API
+checks the current managed incarnation and reciprocal step claim. The controller
+verifies the step's existing protected claim, signed parent policy and compiled
+workflow membership before claiming the source. The session's current claim
+remains the execution step, preserving `gc hook current` and request attribution.
+
+Omitting this context retains ordinary claim behavior. A stale incarnation,
+changed generation, unrelated step, missing proof, changed policy or held step
+refuses the composed source claim. Exact retries retain the original source
+revision and transition head. The source and step are separately fenced rows:
+a concurrent external change can leave a committed source transition with an
+error response, so an error does not authorize a generic claim or rollback.
+The worker receives neither admission nor acceptance signing keys.

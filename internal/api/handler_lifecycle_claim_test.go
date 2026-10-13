@@ -229,3 +229,63 @@ func TestLifecycleClaimSubmitDescendantWithoutOwnHeadReachesVerifier(t *testing.
 		t.Fatalf("rejected descendant stamped session claim %q: %v", claimID, err)
 	}
 }
+
+func TestLifecycleSourceClaimPreservesExecutionClaim(t *testing.T) {
+	state, store, info, work := newLifecycleClaimTestState(t)
+	step := beads.Bead{ID: "test-step", Revision: 9, Title: "execution step", Status: "in_progress", Assignee: session.AssigneeIdentifier(info), Metadata: map[string]string{
+		beadmeta.SessionIDMetadataKey:                info.ID,
+		beadmeta.ClaimGenerationMetadataKey:          "3",
+		beadmeta.LifecycleTransitionHeadMetadataKey:  "step-claim-head",
+		beadmeta.LifecycleMaterializationMetadataKey: "provider-verifies-lineage",
+	}}
+	sessionRow, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store = beads.NewMemStoreFrom(1, []beads.Bead{work, step, sessionRow}, nil)
+	state.cityBeadStore = store
+	state.sessionsBeadStore = store
+	sessions := session.NewStore(state.SessionsBeadStore())
+	if _, err := sessions.SetCurrentClaimForGeneration(info.ID, step.ID, "3"); err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	state.claim = func(_ context.Context, request LifecycleClaimTransitionRequest) (LifecycleClaimTransitionResult, error) {
+		called = true
+		if request.Work.ID != work.ID {
+			t.Fatalf("claimed %q instead of source", request.Work.ID)
+		}
+		if request.ExecutionWork.ID != step.ID || request.ExecutionClaimGeneration != "3" {
+			t.Fatal("execution context did not reach controller")
+		}
+		return LifecycleClaimTransitionResult{ClaimGeneration: "1", ReceiptID: "source-claim-head"}, nil
+	}
+	body, err := json.Marshal(lifecycleClaimInput(info, work).Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(body, &wire); err != nil {
+		t.Fatal(err)
+	}
+	wire["execution_claim"] = map[string]string{"work_id": step.ID, "claim_generation": "3"}
+	body, err = json.Marshal(wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	newTestCityHandler(t, state).ServeHTTP(response, newPostRequest(cityURL(state, "/lifecycle/claims"), bytes.NewReader(body)))
+	if response.Code != http.StatusOK {
+		t.Fatalf("source claim HTTP %d: %s", response.Code, response.Body.String())
+	}
+	client := NewCityScopedClient("http://127.0.0.1", "test-city", WithHTTPTransport(loopbackTransport{h: newTestCityHandler(t, state)}))
+	request := lifecycleClaimInput(info, work).Body
+	request.ExecutionClaim = &LifecycleExecutionClaim{WorkID: step.ID, ClaimGeneration: "3"}
+	if _, err := client.ClaimLifecycleWork(context.Background(), request); err != nil {
+		t.Fatalf("typed source claim client: %v", err)
+	}
+	claimID, generation, err := sessions.CurrentClaim(info.ID)
+	if !called || err != nil || claimID != step.ID || generation != "3" {
+		t.Fatalf("source claim replaced execution claim: got %s/%s, error=%v called=%v; want %s/3", claimID, generation, err, called, step.ID)
+	}
+}

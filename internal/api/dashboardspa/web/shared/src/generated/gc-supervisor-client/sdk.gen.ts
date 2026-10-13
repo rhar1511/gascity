@@ -695,7 +695,7 @@ export const getV0CityByCityNameHealth = <ThrowOnError extends boolean = false>(
 /**
  * Claim admitted work through its durable lifecycle transition
  *
- * Authenticates the current managed session incarnation, atomically appends a Q54 ClaimIdentity transition for exact admitted work, then stamps and verifies the reciprocal session claim.
+ * Authenticates the current managed session incarnation, atomically appends a Q54 ClaimIdentity transition for exact admitted work, then stamps and verifies the reciprocal session claim. With execution_claim, verifies the current generated step belongs to this source and preserves that step as the session claim.
  */
 export const claimAdmittedLifecycleWork = <ThrowOnError extends boolean = false>(options: Options<ClaimAdmittedLifecycleWorkData, ThrowOnError>) => (options.client ?? client).post<ClaimAdmittedLifecycleWorkResponses, ClaimAdmittedLifecycleWorkErrors, ThrowOnError>({
     url: '/v0/city/{cityName}/lifecycle/claims',

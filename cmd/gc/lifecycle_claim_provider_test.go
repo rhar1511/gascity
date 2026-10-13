@@ -515,3 +515,119 @@ func TestLifecycleDescendantClaimRejectsUnprovenGraphStep(t *testing.T) {
 		})
 	}
 }
+
+func TestLifecycleSourceClaimRejectsUnverifiedExecutionBeforeWrites(t *testing.T) {
+	setup, state, request := newLifecycleClaimProviderFixture(t)
+	request.ExecutionWork = beads.Bead{ID: "unrelated-step", Status: "in_progress", Assignee: request.Actor, Revision: 1}
+	request.ExecutionClaimGeneration = "1"
+	before := len(setup.store.patchRequests)
+	if _, err := state.ClaimLifecycleWork(context.Background(), request); err == nil {
+		t.Fatal("source was claimed using an unverified execution step")
+	}
+	if len(setup.store.patchRequests) != before {
+		t.Fatal("refusal changed protected source")
+	}
+}
+
+func TestLifecycleSourceClaimAfterExecutionClaimAndReplay(t *testing.T) {
+	setup, state, stepRequest := newLifecycleCoreGraphClaimProviderFixture(t)
+	stepClaim, err := state.ClaimLifecycleWork(context.Background(), stepRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	step, err := setup.store.Get(stepRequest.Work.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := setup.store.Get(setup.source.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := stepRequest
+	request.Work = source
+	request.ExpectedRevision = source.Revision
+	request.ExpectedTransitionHead = source.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey]
+	request.ExecutionWork = step
+	request.ExecutionClaimGeneration = stepClaim.ClaimGeneration
+	before := len(setup.store.patchRequests)
+	sourceClaim, err := state.ClaimLifecycleWork(context.Background(), request)
+	if err != nil {
+		t.Fatalf("begin source after claiming execution step: %v", err)
+	}
+	if sourceClaim.Replayed || sourceClaim.ClaimGeneration != "1" || len(setup.store.patchRequests) != before+1 {
+		t.Fatalf("source claim = %+v with %d new transitions", sourceClaim, len(setup.store.patchRequests)-before)
+	}
+	replay, err := state.ClaimLifecycleWork(context.Background(), request)
+	if err != nil || !replay.Replayed || replay.ReceiptID != sourceClaim.ReceiptID || len(setup.store.patchRequests) != before+1 {
+		t.Fatalf("source replay = %+v, %v", replay, err)
+	}
+	unchanged, err := setup.store.Get(step.ID)
+	if err != nil || unchanged.Revision != step.Revision || unchanged.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey] != stepClaim.ReceiptID {
+		t.Fatalf("source claim changed execution step: %+v, %v", unchanged, err)
+	}
+}
+
+func TestLifecycleSourceClaimRefusesChangedExecutionAuthority(t *testing.T) {
+	for _, scenario := range []string{"missing child receipt", "changed incarnation", "changed generation", "changed step revision", "changed parent", "changed instructions", "held step", "changed policy"} {
+		t.Run(scenario, func(t *testing.T) {
+			setup, state, request := newLifecycleCoreGraphClaimProviderFixture(t)
+			claim, err := state.ClaimLifecycleWork(context.Background(), request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			step, err := setup.store.Get(request.Work.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			source, err := setup.store.Get(setup.source.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request.Work, request.ExpectedRevision, request.ExpectedTransitionHead = source, source.Revision, source.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey]
+			request.ExecutionWork, request.ExecutionClaimGeneration = step, claim.ClaimGeneration
+			switch scenario {
+			case "missing child receipt":
+				delete(setup.store.patchReceipts, claim.ReceiptID)
+			case "changed incarnation":
+				request.Session.InstanceToken = "another-incarnation"
+			case "changed generation":
+				request.ExecutionClaimGeneration = "2"
+			case "changed step revision":
+				request.ExecutionWork.Revision--
+			case "changed parent":
+				marker, _ := lifecycleMaterializationFor(step)
+				marker.SourceID = "another-source"
+				value, err := encodeLifecycleMaterialization(marker)
+				if err != nil {
+					t.Fatal(err)
+				}
+				step.Metadata = cloneLifecycleAdmissionMetadata(step.Metadata)
+				step.Metadata[beadmeta.LifecycleMaterializationMetadataKey] = value
+				setup.store.rows[step.ID] = step
+				request.ExecutionWork = step
+			case "changed instructions":
+				step.Description += " altered instructions"
+				setup.store.rows[step.ID] = step
+				request.ExecutionWork = step
+			case "held step":
+				step.Labels = append(step.Labels, beadmeta.DispatchHoldLabels[0])
+				setup.store.rows[step.ID] = step
+				request.ExecutionWork = step
+			case "changed policy":
+				workflow := "another-workflow"
+				setup.fixture.cfg.Agents[0].DefaultSlingFormula = &workflow
+			}
+			anchors, patches := len(setup.store.q43Receipts), len(setup.store.patchRequests)
+			if _, err := state.ClaimLifecycleWork(context.Background(), request); err == nil {
+				t.Fatalf("accepted %s", scenario)
+			}
+			if len(setup.store.q43Receipts) != anchors || len(setup.store.patchRequests) != patches {
+				t.Fatal("refused source claim wrote protected work")
+			}
+			after, err := setup.store.Get(source.ID)
+			if err != nil || after.Revision != source.Revision || after.Status != source.Status || after.Assignee != source.Assignee {
+				t.Fatal("refusal changed source")
+			}
+		})
+	}
+}

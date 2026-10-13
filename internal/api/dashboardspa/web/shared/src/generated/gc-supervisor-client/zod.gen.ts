@@ -889,16 +889,6 @@ export const zLifecycleClaimSubmitOutputBody = z.object({
     work_id: z.string()
 });
 
-export const zLifecycleClaimSubmitRequest = z.object({
-    expected_revision: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
-    expected_transition_head: z.string().max(200),
-    instance_token: z.string().min(1).max(512),
-    runtime_epoch: z.string().min(1).max(32),
-    session_id: z.string().min(1).max(200),
-    source_store_ref: z.string().max(200),
-    work_id: z.string().min(1).max(200)
-});
-
 export const zLifecycleCompletionResult = z.object({
     receipt_id: z.string(),
     replayed: z.boolean(),
@@ -911,6 +901,22 @@ export const zLifecycleCompletionSubmitRequest = z.object({
     expected_revision: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
     expected_transition_head: z.string().min(1).max(200),
     source_store_ref: z.string().min(1).max(200),
+    work_id: z.string().min(1).max(200)
+});
+
+export const zLifecycleExecutionClaim = z.object({
+    claim_generation: z.string().min(1).max(32),
+    work_id: z.string().min(1).max(200)
+});
+
+export const zLifecycleClaimSubmitRequest = z.object({
+    execution_claim: zLifecycleExecutionClaim.optional(),
+    expected_revision: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    expected_transition_head: z.string().max(200),
+    instance_token: z.string().min(1).max(512),
+    runtime_epoch: z.string().min(1).max(32),
+    session_id: z.string().min(1).max(200),
+    source_store_ref: z.string().max(200),
     work_id: z.string().min(1).max(200)
 });
 
