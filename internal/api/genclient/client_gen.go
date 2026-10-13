@@ -2561,10 +2561,10 @@ type LifecycleClaimSubmitOutputBody struct {
 
 // LifecycleClaimSubmitRequest defines model for LifecycleClaimSubmitRequest.
 type LifecycleClaimSubmitRequest struct {
-	// ExpectedRevision Source revision observed by the claim candidate query.
+	// ExpectedRevision Nonzero opaque signed source revision observed by the claim candidate query; compare only for equality.
 	ExpectedRevision int64 `json:"expected_revision"`
 
-	// ExpectedTransitionHead Lifecycle transition head observed by the claim candidate query.
+	// ExpectedTransitionHead Observed lifecycle transition head; empty only for a generated step awaiting its first protected anchor.
 	ExpectedTransitionHead string `json:"expected_transition_head"`
 
 	// InstanceToken Current managed runtime instance token.
@@ -2581,6 +2581,26 @@ type LifecycleClaimSubmitRequest struct {
 
 	// WorkId Exact admitted work bead ID.
 	WorkId string `json:"work_id"`
+}
+
+// LifecycleCompletionResult defines model for LifecycleCompletionResult.
+type LifecycleCompletionResult struct {
+	ReceiptId string `json:"receipt_id"`
+	Replayed  bool   `json:"replayed"`
+	Revision  int64  `json:"revision"`
+	WorkId    string `json:"work_id"`
+}
+
+// LifecycleCompletionSubmitRequest defines model for LifecycleCompletionSubmitRequest.
+type LifecycleCompletionSubmitRequest struct {
+	// CompletionReceipt Canonical acceptance JSON signed by the authority named in this admission.
+	CompletionReceipt string `json:"completion_receipt"`
+
+	// ExpectedRevision Nonzero opaque signed source revision; compare only for equality.
+	ExpectedRevision       int64  `json:"expected_revision"`
+	ExpectedTransitionHead string `json:"expected_transition_head"`
+	SourceStoreRef         string `json:"source_store_ref"`
+	WorkId                 string `json:"work_id"`
 }
 
 // LifecycleRecoverySubmitOutputBody defines model for LifecycleRecoverySubmitOutputBody.
@@ -10546,6 +10566,12 @@ type ClaimAdmittedLifecycleWorkParams struct {
 	XGCRequest string `json:"X-GC-Request"`
 }
 
+// CompleteAdmittedLifecycleWorkParams defines parameters for CompleteAdmittedLifecycleWork.
+type CompleteAdmittedLifecycleWorkParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
 // SubmitLifecycleRecoveryRequestParams defines parameters for SubmitLifecycleRecoveryRequest.
 type SubmitLifecycleRecoveryRequestParams struct {
 	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
@@ -11271,6 +11297,9 @@ type PostV0CityByCityNameFormulasByNamePreviewJSONRequestBody = FormulaPreviewBo
 
 // ClaimAdmittedLifecycleWorkJSONRequestBody defines body for ClaimAdmittedLifecycleWork for application/json ContentType.
 type ClaimAdmittedLifecycleWorkJSONRequestBody = LifecycleClaimSubmitRequest
+
+// CompleteAdmittedLifecycleWorkJSONRequestBody defines body for CompleteAdmittedLifecycleWork for application/json ContentType.
+type CompleteAdmittedLifecycleWorkJSONRequestBody = LifecycleCompletionSubmitRequest
 
 // SubmitLifecycleRecoveryRequestJSONRequestBody defines body for SubmitLifecycleRecoveryRequest for application/json ContentType.
 type SubmitLifecycleRecoveryRequestJSONRequestBody = RecoveryRequest
@@ -21098,6 +21127,11 @@ type ClientInterface interface {
 
 	ClaimAdmittedLifecycleWork(ctx context.Context, cityName string, params *ClaimAdmittedLifecycleWorkParams, body ClaimAdmittedLifecycleWorkJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// CompleteAdmittedLifecycleWorkWithBody request with any body
+	CompleteAdmittedLifecycleWorkWithBody(ctx context.Context, cityName string, params *CompleteAdmittedLifecycleWorkParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	CompleteAdmittedLifecycleWork(ctx context.Context, cityName string, params *CompleteAdmittedLifecycleWorkParams, body CompleteAdmittedLifecycleWorkJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// SubmitLifecycleRecoveryRequestWithBody request with any body
 	SubmitLifecycleRecoveryRequestWithBody(ctx context.Context, cityName string, params *SubmitLifecycleRecoveryRequestParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -22841,6 +22875,30 @@ func (c *Client) ClaimAdmittedLifecycleWorkWithBody(ctx context.Context, cityNam
 
 func (c *Client) ClaimAdmittedLifecycleWork(ctx context.Context, cityName string, params *ClaimAdmittedLifecycleWorkParams, body ClaimAdmittedLifecycleWorkJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewClaimAdmittedLifecycleWorkRequest(c.Server, cityName, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) CompleteAdmittedLifecycleWorkWithBody(ctx context.Context, cityName string, params *CompleteAdmittedLifecycleWorkParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCompleteAdmittedLifecycleWorkRequestWithBody(c.Server, cityName, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) CompleteAdmittedLifecycleWork(ctx context.Context, cityName string, params *CompleteAdmittedLifecycleWorkParams, body CompleteAdmittedLifecycleWorkJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCompleteAdmittedLifecycleWorkRequest(c.Server, cityName, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -29961,6 +30019,66 @@ func NewClaimAdmittedLifecycleWorkRequestWithBody(server string, cityName string
 	return req, nil
 }
 
+// NewCompleteAdmittedLifecycleWorkRequest calls the generic CompleteAdmittedLifecycleWork builder with application/json body
+func NewCompleteAdmittedLifecycleWorkRequest(server string, cityName string, params *CompleteAdmittedLifecycleWorkParams, body CompleteAdmittedLifecycleWorkJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewCompleteAdmittedLifecycleWorkRequestWithBody(server, cityName, params, "application/json", bodyReader)
+}
+
+// NewCompleteAdmittedLifecycleWorkRequestWithBody generates requests for CompleteAdmittedLifecycleWork with any type of body
+func NewCompleteAdmittedLifecycleWorkRequestWithBody(server string, cityName string, params *CompleteAdmittedLifecycleWorkParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/lifecycle/completions", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
+	return req, nil
+}
+
 // NewSubmitLifecycleRecoveryRequestRequest calls the generic SubmitLifecycleRecoveryRequest builder with application/json body
 func NewSubmitLifecycleRecoveryRequestRequest(server string, cityName string, params *SubmitLifecycleRecoveryRequestParams, body SubmitLifecycleRecoveryRequestJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
@@ -36572,6 +36690,11 @@ type ClientWithResponsesInterface interface {
 
 	ClaimAdmittedLifecycleWorkWithResponse(ctx context.Context, cityName string, params *ClaimAdmittedLifecycleWorkParams, body ClaimAdmittedLifecycleWorkJSONRequestBody, reqEditors ...RequestEditorFn) (*ClaimAdmittedLifecycleWorkResponse, error)
 
+	// CompleteAdmittedLifecycleWorkWithBodyWithResponse request with any body
+	CompleteAdmittedLifecycleWorkWithBodyWithResponse(ctx context.Context, cityName string, params *CompleteAdmittedLifecycleWorkParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CompleteAdmittedLifecycleWorkResponse, error)
+
+	CompleteAdmittedLifecycleWorkWithResponse(ctx context.Context, cityName string, params *CompleteAdmittedLifecycleWorkParams, body CompleteAdmittedLifecycleWorkJSONRequestBody, reqEditors ...RequestEditorFn) (*CompleteAdmittedLifecycleWorkResponse, error)
+
 	// SubmitLifecycleRecoveryRequestWithBodyWithResponse request with any body
 	SubmitLifecycleRecoveryRequestWithBodyWithResponse(ctx context.Context, cityName string, params *SubmitLifecycleRecoveryRequestParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SubmitLifecycleRecoveryRequestResponse, error)
 
@@ -39273,6 +39396,35 @@ func (r ClaimAdmittedLifecycleWorkResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r ClaimAdmittedLifecycleWorkResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type CompleteAdmittedLifecycleWorkResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON200                   *LifecycleCompletionResult
+	ApplicationproblemJSON400 *ErrorModel
+	ApplicationproblemJSON403 *ErrorModel
+	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON409 *ErrorModel
+	ApplicationproblemJSON422 *ErrorModel
+	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON503 *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r CompleteAdmittedLifecycleWorkResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r CompleteAdmittedLifecycleWorkResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -43010,6 +43162,23 @@ func (c *ClientWithResponses) ClaimAdmittedLifecycleWorkWithResponse(ctx context
 		return nil, err
 	}
 	return ParseClaimAdmittedLifecycleWorkResponse(rsp)
+}
+
+// CompleteAdmittedLifecycleWorkWithBodyWithResponse request with arbitrary body returning *CompleteAdmittedLifecycleWorkResponse
+func (c *ClientWithResponses) CompleteAdmittedLifecycleWorkWithBodyWithResponse(ctx context.Context, cityName string, params *CompleteAdmittedLifecycleWorkParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CompleteAdmittedLifecycleWorkResponse, error) {
+	rsp, err := c.CompleteAdmittedLifecycleWorkWithBody(ctx, cityName, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCompleteAdmittedLifecycleWorkResponse(rsp)
+}
+
+func (c *ClientWithResponses) CompleteAdmittedLifecycleWorkWithResponse(ctx context.Context, cityName string, params *CompleteAdmittedLifecycleWorkParams, body CompleteAdmittedLifecycleWorkJSONRequestBody, reqEditors ...RequestEditorFn) (*CompleteAdmittedLifecycleWorkResponse, error) {
+	rsp, err := c.CompleteAdmittedLifecycleWork(ctx, cityName, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCompleteAdmittedLifecycleWorkResponse(rsp)
 }
 
 // SubmitLifecycleRecoveryRequestWithBodyWithResponse request with arbitrary body returning *SubmitLifecycleRecoveryRequestResponse
@@ -49543,6 +49712,81 @@ func ParseClaimAdmittedLifecycleWorkResponse(rsp *http.Response) (*ClaimAdmitted
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest LifecycleClaimSubmitOutputBody
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 400:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON400 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON403 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON409 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseCompleteAdmittedLifecycleWorkResponse parses an HTTP response from a CompleteAdmittedLifecycleWorkWithResponse call
+func ParseCompleteAdmittedLifecycleWorkResponse(rsp *http.Response) (*CompleteAdmittedLifecycleWorkResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &CompleteAdmittedLifecycleWorkResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest LifecycleCompletionResult
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

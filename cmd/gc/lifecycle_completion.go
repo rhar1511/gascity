@@ -145,6 +145,9 @@ func reconcileLifecycleCompletionForLeg(
 	}
 	budgetOperationID := lifecycleTransitionOperationID("completion-budget", id, scope, transition.admissionDigest, completionReceipt)
 	budgetParentID := transition.head.ReceiptID
+	budgetMetadata := map[string]worklifecycle.MetadataStringPatch{
+		beadmeta.LifecycleCompletionBudgetMetadataKey: {Value: budgetValue},
+	}
 	if transition.source.Metadata[beadmeta.LifecycleCompletionBudgetMetadataKey] != "" {
 		budgetReceipt, found, readErr := lifecycleHeadReceipt(leg.store, transition.head)
 		if readErr != nil || !found {
@@ -155,13 +158,20 @@ func reconcileLifecycleCompletionForLeg(
 			return fmt.Errorf("current completion budget does not bind this exact receipt and head: %w", worklifecycle.ErrTransitionChainStale)
 		}
 		budgetParentID = budgetReceipt.PriorReceiptID
+		// Acceptance can arrive after the claim, atomically with its budget.
+		// Reconstruct that exact verified patch when recovering after a restart;
+		// a budget-only retry would conflict with the immutable receipt.
+		if attached, present := lifecyclePatchMetadataString(budgetReceipt, beadmeta.LifecycleCompletionReceiptMetadataKey); present {
+			if attached != completionReceipt {
+				return fmt.Errorf("completion budget attached a different acceptance receipt: %w", worklifecycle.ErrTransitionChainEvidence)
+			}
+			budgetMetadata[beadmeta.LifecycleCompletionReceiptMetadataKey] = worklifecycle.MetadataStringPatch{Value: attached}
+		}
 	}
 	budgetResult, err := transition.chain.Apply(worklifecycle.TransitionRequest{
 		IssueID: id, Step: worklifecycle.TransitionStepCompletionBudget,
 		OperationID: budgetOperationID, PriorReceiptID: budgetParentID, Evidence: transition.evidence,
-		Patch: worklifecycle.SourceWorkPatch{Metadata: map[string]worklifecycle.MetadataStringPatch{
-			beadmeta.LifecycleCompletionBudgetMetadataKey: {Value: budgetValue},
-		}},
+		Patch: worklifecycle.SourceWorkPatch{Metadata: budgetMetadata},
 	})
 	if err != nil {
 		return fmt.Errorf("apply receipt-bound completion budget: %w", err)

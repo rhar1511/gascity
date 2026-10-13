@@ -66,7 +66,7 @@ func attachBeadsAdmission(draftPath, storeRef, keyFile string, stderr io.Writer)
 		return empty, fmt.Errorf("reviewed draft is not strict admission JSON: %w", err)
 	}
 	receipt := draft.Receipt
-	if draft.SchemaVersion != 1 || draft.StoreRef != storeRef || receipt.Version != 2 || receipt.ExpectedWorkRevision <= 0 || receipt.Signature != "" || !validMetadataCASToken(receipt.WorkItemID, metadataCASMaxBeadIDBytes) {
+	if draft.SchemaVersion != 1 || draft.StoreRef != storeRef || receipt.Version != 2 || receipt.ExpectedWorkRevision == 0 || receipt.Signature != "" || !validMetadataCASToken(receipt.WorkItemID, metadataCASMaxBeadIDBytes) {
 		return empty, fmt.Errorf("draft must be unsigned schema 1 with an exact v2 source identity, store and revision")
 	}
 	context, err := openBeadsAdmissionContext(storeRef, stderr)
@@ -84,7 +84,7 @@ func attachBeadsAdmission(draftPath, storeRef, keyFile string, stderr io.Writer)
 	if err != nil {
 		return empty, err
 	}
-	if source.ID != receipt.WorkItemID || source.Revision <= 0 || source.Status != "open" {
+	if source.ID != receipt.WorkItemID || source.Revision == 0 || source.Status != "open" {
 		return empty, fmt.Errorf("source must remain open with an authoritative revision")
 	}
 	// A replay may have the Q43 attachment revision. The adapter proves that

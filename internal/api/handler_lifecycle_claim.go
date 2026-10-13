@@ -23,8 +23,8 @@ import (
 type LifecycleClaimSubmitRequest struct {
 	WorkID                 string `json:"work_id" minLength:"1" maxLength:"200" doc:"Exact admitted work bead ID."`
 	SourceStoreRef         string `json:"source_store_ref" maxLength:"200" doc:"Q54 source scope accepted by this endpoint: city:<city_name> for the city work store or rig:<rig_name> for a rig store. Relocated class:<classes> references are not supported."`
-	ExpectedRevision       int64  `json:"expected_revision" minimum:"1" doc:"Source revision observed by the claim candidate query."`
-	ExpectedTransitionHead string `json:"expected_transition_head" minLength:"1" maxLength:"200" doc:"Lifecycle transition head observed by the claim candidate query."`
+	ExpectedRevision       int64  `json:"expected_revision" doc:"Nonzero opaque signed source revision observed by the claim candidate query; compare only for equality."`
+	ExpectedTransitionHead string `json:"expected_transition_head" maxLength:"200" doc:"Observed lifecycle transition head; empty only for a generated step awaiting its first protected anchor."`
 	SessionID              string `json:"session_id" minLength:"1" maxLength:"200" doc:"Managed session bead ID."`
 	InstanceToken          string `json:"instance_token" minLength:"1" maxLength:"512" doc:"Current managed runtime instance token."`
 	RuntimeEpoch           string `json:"runtime_epoch" minLength:"1" maxLength:"32" doc:"Canonical positive managed runtime epoch."`
@@ -132,8 +132,10 @@ func (s *Server) humaHandleLifecycleClaimSubmit(ctx context.Context, input *Life
 	if body.SourceStoreRef != expectedSourceRef {
 		return nil, apierr.ConflictWrongState.Msg("claim candidate no longer resolves to its exact authoritative work store")
 	}
-	if work.Metadata[beadmeta.LifecycleAdmissionReceiptV2MetadataKey] == "" || work.Metadata[beadmeta.LifecycleAdmissionReceiptMetadataKey] != "" {
-		return nil, apierr.ConflictWrongState.Msg("work item is not enrolled with an exact v2 lifecycle admission")
+	// Enrollment only locates the protected lane. The trusted provider verifies
+	// direct admission or inherited workflow authority after session authentication.
+	if !worklifecycle.HasDurableEnrollment(work) || work.Metadata[beadmeta.LifecycleAdmissionReceiptMetadataKey] != "" {
+		return nil, apierr.ConflictWrongState.Msg("work item has no supported durable lifecycle enrollment")
 	}
 	sessions := s.state.SessionsBeadStore()
 	if sessions.Store == nil {
@@ -187,7 +189,7 @@ func (s *Server) humaHandleLifecycleClaimSubmit(ctx context.Context, input *Life
 func validLifecycleClaimSubmitRequest(request LifecycleClaimSubmitRequest) bool {
 	return strings.TrimSpace(request.WorkID) != "" && strings.TrimSpace(request.WorkID) == request.WorkID &&
 		strings.TrimSpace(request.SourceStoreRef) == request.SourceStoreRef &&
-		request.ExpectedRevision > 0 && strings.TrimSpace(request.ExpectedTransitionHead) != "" && strings.TrimSpace(request.ExpectedTransitionHead) == request.ExpectedTransitionHead &&
+		request.ExpectedRevision != 0 && strings.TrimSpace(request.ExpectedTransitionHead) == request.ExpectedTransitionHead &&
 		strings.TrimSpace(request.SessionID) != "" && strings.TrimSpace(request.SessionID) == request.SessionID &&
 		strings.TrimSpace(request.InstanceToken) != "" && strings.TrimSpace(request.InstanceToken) == request.InstanceToken &&
 		canonicalLifecycleClaimInteger(request.RuntimeEpoch)

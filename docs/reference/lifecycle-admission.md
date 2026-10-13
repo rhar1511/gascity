@@ -56,6 +56,49 @@ Attachment does not launch workers or clear holds. Coordinate the final route
 configuration, attachment, controller activation, and worker canary in the
 deployment plan. A suspended route is ineligible for signing.
 
+## Review and accept completion
+
+Completion requires an explicit `lifecycle.completion_receipt_max_age` and
+`lifecycle.completion_clock_skew` policy. Choose both durations for the deployment;
+there are no inferred defaults. The acceptance signer named in the admission
+reviews the delivered artifact and verification evidence before signing.
+
+Prepare a draft for claimed source work:
+
+```sh
+gc beads completion prepare task-id \
+  --store-ref rig:api \
+  --deliverable-ref 'repository/pull/123@exact-head' \
+  --verification-ref 'evidence://accepted-checks' > completion-draft.json
+```
+
+Preparation reads the current signed admission and route policy and records the
+exact source revision, transition head, and acceptance timestamp. It does not
+change work. Review the draft against the delivered artifact, verification
+results, and admission requirements, then sign with the separate acceptance key:
+
+```sh
+gc beads completion accept completion-draft.json \
+  --store-ref rig:api --key-file /private/acceptance/key.pkcs8.pem
+```
+
+The same owner-only key-file requirements apply. The command verifies that the
+key belongs to the acceptance authority named in the current admission. Only
+the signed receipt goes to the running controller; the private key stays local.
+The controller verifies the admission, current workflow policy, source revision,
+and receipt freshness, then attaches acceptance and its completion budget in one
+protected transition before closing the source. Holds and deferrals prevent a
+pending completion from progressing.
+
+Retain the reviewed draft. An exact retry recovers the same committed acceptance
+and close, including after a lost response. Changing the reviewed revision,
+transition head, authority, or accepted artifact does not authorize a replacement
+receipt. If work changes before acceptance commits, prepare and review a new
+draft. Generic status writes cannot substitute for this completion path.
+
+These commands accept source work with its own signed admission. They do not
+complete generated workflow steps or delegate acceptance keys to workers.
+
 ## Graph workflows and policy upgrades
 
 Policy projection version 4 adds a signed graph invocation binding. A supported

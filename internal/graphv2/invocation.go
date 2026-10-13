@@ -486,6 +486,17 @@ func CreateSingleItemInputConvoy(store beads.Store, target beads.Bead) (beads.Be
 // bead-store entry, so the preview substitutes a synthetic input convoy
 // instead of resolving the target through the store.
 func PreparePreviewInvocation(ctx context.Context, store beads.Store, formulaName string, searchPaths []string, targetID string, targetIsRoutingIdentity bool, userVars map[string]string) (Invocation, error) {
+	return preparePreviewInvocation(ctx, store, formulaName, searchPaths, targetID, targetIsRoutingIdentity, userVars, false)
+}
+
+// PrepareEvidenceInvocation reconstructs compiler inputs for an existing bead,
+// including a closed target, without creating a convoy or authorizing a launch.
+// Callers must separately verify the persisted workflow and transition proofs.
+func PrepareEvidenceInvocation(ctx context.Context, store beads.Store, formulaName string, searchPaths []string, targetID string, userVars map[string]string) (Invocation, error) {
+	return preparePreviewInvocation(ctx, store, formulaName, searchPaths, targetID, false, userVars, true)
+}
+
+func preparePreviewInvocation(ctx context.Context, store beads.Store, formulaName string, searchPaths []string, targetID string, targetIsRoutingIdentity bool, userVars map[string]string, allowClosedTarget bool) (Invocation, error) {
 	resolved, parser, err := loadFormulaWithParser(formulaName, searchPaths)
 	if err != nil {
 		return Invocation{}, fmt.Errorf("loading formula %q: %w", formulaName, err)
@@ -538,7 +549,7 @@ func PreparePreviewInvocation(ctx context.Context, store beads.Store, formulaNam
 	if targetIsRoutingIdentity {
 		inputConvoyID = PreviewInputConvoyIDForRoutingIdentity(targetID)
 	} else {
-		inputConvoyID, err = PreviewInputConvoyID(store, targetID)
+		inputConvoyID, err = previewInputConvoyID(store, targetID, allowClosedTarget)
 		if err != nil {
 			return Invocation{}, err
 		}
@@ -580,6 +591,10 @@ func previewLegacyIssueAlias(store beads.Store, targetID, inputConvoyID string) 
 // PreviewInputConvoyID returns the read-only input convoy ID a graph.v2 preview
 // should use for targetID without creating an input convoy.
 func PreviewInputConvoyID(store beads.Store, targetID string) (string, error) {
+	return previewInputConvoyID(store, targetID, false)
+}
+
+func previewInputConvoyID(store beads.Store, targetID string, allowClosedTarget bool) (string, error) {
 	targetID = strings.TrimSpace(targetID)
 	if store == nil {
 		return "", fmt.Errorf("formulas v2 preview requires a bead store")
@@ -591,7 +606,7 @@ func PreviewInputConvoyID(store beads.Store, targetID string) (string, error) {
 		}
 		return "", fmt.Errorf("loading formulas v2 target %s: %w", targetID, err)
 	}
-	if convoycore.IsTerminalStatus(target.Status) {
+	if convoycore.IsTerminalStatus(target.Status) && (!allowClosedTarget || target.Status != "closed") {
 		return "", fmt.Errorf("formulas v2 target %s is %s", target.ID, target.Status)
 	}
 	if target.Type == "convoy" {

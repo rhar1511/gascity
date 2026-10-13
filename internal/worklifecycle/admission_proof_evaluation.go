@@ -80,7 +80,7 @@ func evaluateAdmissionWithProof(
 func verifyAdvancedAdmissionProofAttachment(bead beads.Bead, receipt AdmissionReceiptV2, proof *AdmissionAttachmentProof, head TransitionHead) error {
 	if proof == nil || proof.SchemaVersion != 1 || proof.WorkItemID != bead.ID || proof.Scope != receipt.Scope ||
 		proof.FromRevision != receipt.ExpectedWorkRevision || proof.ToRevision == 0 || proof.ToRevision == proof.FromRevision ||
-		bead.Revision <= proof.ToRevision {
+		bead.Revision == 0 || bead.Revision == proof.ToRevision {
 		return fmt.Errorf("%w: historical Q43 proof does not identify an older revision of this receipt", ErrAdmissionAttachmentInvalid)
 	}
 	digest, err := AdmissionDigestV2(receipt)

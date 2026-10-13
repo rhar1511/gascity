@@ -1351,6 +1351,11 @@ type transitionChainFixture struct {
 
 func newTransitionChainFixture(t *testing.T) *transitionChainFixture {
 	t.Helper()
+	return newTransitionChainFixtureWithCompletion(t, true)
+}
+
+func newTransitionChainFixtureWithCompletion(t *testing.T, seedCompletion bool) *transitionChainFixture {
+	t.Helper()
 	policy := validAdmissionPolicyProjectionV2(t)
 	scope := policy.SourceScope
 	admissionPublic, admissionPrivate, err := ed25519.GenerateKey(rand.Reader)
@@ -1406,7 +1411,9 @@ func newTransitionChainFixture(t *testing.T) *transitionChainFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	work.Metadata[beadmeta.LifecycleCompletionReceiptMetadataKey] = completionReceipt
+	if seedCompletion {
+		work.Metadata[beadmeta.LifecycleCompletionReceiptMetadataKey] = completionReceipt
+	}
 	store := &transitionChainTestStore{
 		source: work, q43Receipts: map[string]beads.ControllerMetadataTransitionReceipt{},
 		patchReceipts: map[string]beads.RevisionTransitionPatchReceipt{}, nextRevision: 1000,
@@ -1683,4 +1690,104 @@ func cloneRawMessagePointer(raw *json.RawMessage) *json.RawMessage {
 	}
 	cloned := append(json.RawMessage(nil), (*raw)...)
 	return &cloned
+}
+
+// Acceptance arrives after work, not before admission or the worker claim.
+func TestTransitionChainAttachesCompletionAfterClaim(t *testing.T) {
+	fixture := newTransitionChainFixtureWithCompletion(t, false)
+	claim := applyTestClaim(t, fixture, applyTestAttachment(t, fixture, applyTestReservation(t, fixture)))
+	completion := fixture.completionReceiptValue(t, nil)
+	request := fixture.completionBudgetRequest(t, claim.Receipt, completion)
+	request.Patch.Metadata[beadmeta.LifecycleCompletionReceiptMetadataKey] = MetadataStringPatch{Value: completion}
+	beforeWrites := len(fixture.store.patchRequests)
+	budget, err := fixture.chain.Apply(request)
+	if err != nil {
+		t.Fatalf("attach acceptance after claimed work: %v", err)
+	}
+	current, err := fixture.store.DecisionFrontierSourceSnapshot(fixture.work.ID)
+	if err != nil || current.Status != "in_progress" || current.Metadata[beadmeta.LifecycleCompletionReceiptMetadataKey] != completion || current.Revision != budget.Receipt.ToVersion {
+		t.Fatalf("acceptance and budget were not committed at the same in-progress revision: %+v err=%v", current, err)
+	}
+	decision, err := fixture.chain.VerifyCompletionReceipt(fixture.work.ID, fixture.evidence)
+	if err != nil || !decision.Accepted {
+		t.Fatalf("current acceptance proof: %+v err=%v", decision, err)
+	}
+	replay, err := fixture.chain.Apply(request)
+	if err != nil || !replay.Replayed || replay.Receipt.ReceiptID != budget.Receipt.ReceiptID || len(fixture.store.patchRequests) != beforeWrites+1 {
+		t.Fatalf("acceptance replay wrote again: %+v err=%v", replay, err)
+	}
+	closed, err := fixture.chain.Apply(closeTestRequest(fixture, budget, completion))
+	if err != nil {
+		t.Fatalf("close after protected acceptance: %v", err)
+	}
+	final, err := fixture.store.DecisionFrontierSourceSnapshot(fixture.work.ID)
+	if err != nil || final.Status != "closed" || final.Revision != closed.Receipt.ToVersion {
+		t.Fatalf("final source: %+v err=%v", final, err)
+	}
+	fixture.now = fixture.now.Add(8 * 24 * time.Hour)
+	replay, err = fixture.chain.Apply(request)
+	if err != nil || !replay.Replayed || replay.Receipt.ReceiptID != budget.Receipt.ReceiptID {
+		t.Fatalf("historical acceptance replay after freshness window: %+v err=%v", replay, err)
+	}
+}
+
+func TestTransitionChainCompletionAttachmentRefusesInvalidProofBeforeWrites(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		edit  func(*CompletionReceipt)
+		patch func(*TransitionRequest)
+		seed  bool
+	}{
+		{name: "wrong work", edit: func(r *CompletionReceipt) { r.WorkItemID = "other" }},
+		{name: "wrong scope", edit: func(r *CompletionReceipt) { r.Scope = "city:other" }},
+		{name: "wrong admission", edit: func(r *CompletionReceipt) { r.AdmissionDigest = strings.Repeat("x", 43) }},
+		{name: "wrong authority", edit: func(r *CompletionReceipt) { r.AcceptedBy = "other" }},
+		{name: "expired", edit: func(r *CompletionReceipt) { r.AcceptedAt = "2026-09-01T00:00:00Z" }},
+		{name: "future", edit: func(r *CompletionReceipt) { r.AcceptedAt = "2026-10-30T00:00:00Z" }},
+		{name: "untrusted signature", patch: func(r *TransitionRequest) {
+			v := r.Patch.Metadata[beadmeta.LifecycleCompletionReceiptMetadataKey]
+			var receipt CompletionReceipt
+			if err := json.Unmarshal([]byte(v.Value), &receipt); err != nil {
+				panic(err)
+			}
+			receipt.Signature = base64.RawURLEncoding.EncodeToString(make([]byte, ed25519.SignatureSize))
+			raw, _ := json.Marshal(receipt)
+			v.Value = string(raw)
+			r.Patch.Metadata[beadmeta.LifecycleCompletionReceiptMetadataKey] = v
+			budget, _ := BuildCompletionBudgetMetadata(receipt.WorkItemID, receipt.Scope, receipt.AdmissionDigest, v.Value)
+			r.Patch.Metadata[beadmeta.LifecycleCompletionBudgetMetadataKey] = MetadataStringPatch{Value: budget}
+		}},
+		{name: "mismatched digest", patch: func(r *TransitionRequest) {
+			v := r.Patch.Metadata[beadmeta.LifecycleCompletionReceiptMetadataKey]
+			v.Value += " "
+			r.Patch.Metadata[beadmeta.LifecycleCompletionReceiptMetadataKey] = v
+		}},
+		{name: "replace acceptance", seed: true, patch: func(r *TransitionRequest) {
+			v := r.Patch.Metadata[beadmeta.LifecycleCompletionReceiptMetadataKey]
+			prior := v.Value
+			v.Expected = &prior
+			r.Patch.Metadata[beadmeta.LifecycleCompletionReceiptMetadataKey] = v
+		}},
+		{name: "existing acceptance", seed: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newTransitionChainFixtureWithCompletion(t, tc.seed)
+			claim := applyTestClaim(t, fixture, applyTestAttachment(t, fixture, applyTestReservation(t, fixture)))
+			completion := fixture.completionReceiptValue(t, tc.edit)
+			request := fixture.completionBudgetRequest(t, claim.Receipt, completion)
+			request.Patch.Metadata[beadmeta.LifecycleCompletionReceiptMetadataKey] = MetadataStringPatch{Value: completion}
+			if tc.patch != nil {
+				tc.patch(&request)
+			}
+			before, _ := fixture.store.DecisionFrontierSourceSnapshot(fixture.work.ID)
+			writes, permits := len(fixture.store.patchRequests), len(fixture.permits.requests)
+			if _, err := fixture.chain.Apply(request); err == nil {
+				t.Fatal("invalid acceptance attachment succeeded")
+			}
+			after, _ := fixture.store.DecisionFrontierSourceSnapshot(fixture.work.ID)
+			if !reflect.DeepEqual(before, after) || len(fixture.store.patchRequests) != writes || len(fixture.permits.requests) != permits {
+				t.Fatal("refused acceptance reached protected permit or source mutation")
+			}
+		})
+	}
 }

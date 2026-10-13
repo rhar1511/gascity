@@ -1,14 +1,21 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"maps"
+	"reflect"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/graphv2"
+	"github.com/gastownhall/gascity/internal/molecule"
+	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/worklifecycle"
 )
 
@@ -68,4 +75,42 @@ func verifyLifecycleGraphInvocation(store beads.Store, root beads.Bead, sourceID
 		return fmt.Errorf("graph invocation root key differs from its signed scope and inputs")
 	}
 	return nil
+}
+
+// Recompile with the real convoy, after the signed preview invocation has been
+// verified. Formula source identities must still match the signed closure.
+func verifyLifecycleGraphWorkerStep(ctx context.Context, store beads.Store, source, candidate beads.Bead, policy lifecycleAdmissionPolicy, cfg *config.City) error {
+	marker, ok := lifecycleMaterializationFor(source)
+	if !ok || marker.WorkflowID == "" {
+		return fmt.Errorf("source has no attached workflow")
+	}
+	root, err := store.Get(marker.WorkflowID)
+	if err != nil {
+		return err
+	}
+	if err := verifyLifecycleGraphInvocation(store, root, source.ID, policy.projection); err != nil {
+		return err
+	}
+	vars := maps.Clone(policy.projection.EffectiveCompileVariables)
+	vars[graphv2.ConvoyIDVar] = root.Metadata[beadmeta.InputConvoyIDMetadataKey]
+	recipe, provenance, err := formula.CompileWithoutRuntimeVarValidationWithProvenance(ctx, policy.projection.Workflow, sling.SlingFormulaSearchPaths(policy.deps, policy.target), vars)
+	if err != nil {
+		return err
+	}
+	if recipe == nil || provenance.Status != formula.CompileProvenanceAvailable || provenance.FormulaV2Enabled != policy.projection.FormulaV2Enabled ||
+		provenance.CompilerCapability != policy.projection.FormulaCompilerCapability || provenance.CompilerImplementationVersion != policy.projection.FormulaCompilerImplementationVersion ||
+		len(provenance.ExternalAssets) != 0 || len(provenance.CheckPaths) != 0 {
+		return fmt.Errorf("graph compiler provenance changed")
+	}
+	sources, err := admissionFormulaSourceClosure(recipe.FormulaSources, provenance.FormulaSources)
+	if err != nil || !reflect.DeepEqual(sources, policy.projection.FormulaSources) {
+		return fmt.Errorf("graph formula source closure changed")
+	}
+	scopeKind, scopeRef := lifecycleSlingScope(marker.SourceStoreRef, "")
+	if err := graphroute.ApplyGraphRouting(recipe, &policy.target, marker.Route, vars, "", scopeKind, scopeRef, marker.SourceStoreRef, store, censusCityName(cfg), cfg, graphroute.Deps{
+		CityPath: policy.deps.CityPath, Resolver: policy.deps.Resolver, DirectSessionResolver: policy.deps.DirectSessionResolver,
+	}); err != nil {
+		return err
+	}
+	return molecule.VerifyMaterializedStep(store, root, candidate, recipe, molecule.Options{Vars: vars})
 }

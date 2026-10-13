@@ -3,6 +3,7 @@ package beads
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"testing"
 
@@ -190,48 +191,52 @@ func TestControllerBeadsProtectedRevisionTransitionDigestMatchesPinnedGolden(t *
 }
 
 func TestRemoteDecisionFrontierMetadataCASAcceptsExactReplayReceiptAndAuthoritativeRecord(t *testing.T) {
-	issuer := &remoteDecisionFrontierMetadataPermitIssuerStub{token: "opaque-transition-permit"}
-	transition := &remoteDecisionFrontierMetadataTransitionWriterStub{toRevision: 47, replayed: true}
-	record := remoteDecisionFrontierMetadataCASMapRecord(t, 7)
-	writer, reader := newRemoteDecisionFrontierMetadataCASFixture(t, record, issuer, transition)
+	for _, revisions := range [][2]int64{{7, 47}, {-7, 47}, {7, -47}} {
+		t.Run(fmt.Sprint(revisions), func(t *testing.T) {
+			issuer := &remoteDecisionFrontierMetadataPermitIssuerStub{token: "opaque-transition-permit"}
+			transition := &remoteDecisionFrontierMetadataTransitionWriterStub{toRevision: revisions[1], replayed: true}
+			record := remoteDecisionFrontierMetadataCASMapRecord(t, revisions[0])
+			writer, reader := newRemoteDecisionFrontierMetadataCASFixture(t, record, issuer, transition)
 
-	won, err := writer.CompareAndSetDecisionFrontierRecordMetadataKey(record.ID, beadmeta.DecisionFrontierStateMetadataKey, "pending", "resolved")
-	if err != nil || !won {
-		t.Fatalf("CompareAndSetDecisionFrontierRecordMetadataKey = %v, %v; want applied", won, err)
-	}
-	if len(issuer.requests) != 1 || len(transition.requests) != 1 {
-		t.Fatalf("permit/transition calls = %d/%d, want 1/1", len(issuer.requests), len(transition.requests))
-	}
-	request := transition.requests[0]
-	unsigned := cloneControllerMetadataTransitionRequest(request)
-	unsigned.ProtectedPermit = ""
-	digest, err := controllerBeadsProtectedRevisionTransitionDigest(record.ID, unsigned)
-	if err != nil {
-		t.Fatalf("digest applied transition: %v", err)
-	}
-	seed := unsigned
-	seed.ReceiptID = ""
-	seedDigest, err := controllerBeadsProtectedRevisionTransitionDigest(record.ID, seed)
-	if err != nil {
-		t.Fatalf("digest receipt seed: %v", err)
-	}
-	if request.ReceiptID != controllerDecisionFrontierMetadataCASReceiptPrefix+seedDigest ||
-		issuer.replayIDs[0] != controllerDecisionFrontierMetadataCASReplayPrefix+digest {
-		t.Fatalf("receipt/replay identity = %q/%q, want seed/final digest bindings", request.ReceiptID, issuer.replayIDs[0])
-	}
-	wantPermit := ControllerProtectedMutationRequest{
-		Operation: controllerDecisionFrontierMetadataCASOperation, ResourceIDs: []string{record.ID}, RequestDigest: digest,
-	}
-	if !reflect.DeepEqual(issuer.requests[0], wantPermit) || request.ProtectedPermit != issuer.token ||
-		request.ExpectedVersion != record.Revision || request.Scope != "store-test" || request.Kind != "decision-frontier-record-metadata" ||
-		request.Actor != "controller-test-actor" || request.Key != beadmeta.DecisionFrontierStateMetadataKey {
-		t.Fatalf("permit/request binding = %#v / %#v, want %#v and explicit Q43 fields", issuer.requests[0], request, wantPermit)
-	}
-	if got := reader.records[record.ID]; got.Revision != 47 || got.Metadata[beadmeta.DecisionFrontierStateMetadataKey] != "resolved" {
-		t.Fatalf("authoritative record after transition = revision %d state %q, want 47/resolved", got.Revision, got.Metadata[beadmeta.DecisionFrontierStateMetadataKey])
-	}
-	if handle, ok := writer.DecisionFrontierRecordWriterHandle(); !ok || handle != writer {
-		t.Fatal("complete protected create/link/CAS writer did not advertise its record-writer capability")
+			won, err := writer.CompareAndSetDecisionFrontierRecordMetadataKey(record.ID, beadmeta.DecisionFrontierStateMetadataKey, "pending", "resolved")
+			if err != nil || !won {
+				t.Fatalf("CompareAndSetDecisionFrontierRecordMetadataKey = %v, %v; want applied", won, err)
+			}
+			if len(issuer.requests) != 1 || len(transition.requests) != 1 {
+				t.Fatalf("permit/transition calls = %d/%d, want 1/1", len(issuer.requests), len(transition.requests))
+			}
+			request := transition.requests[0]
+			unsigned := cloneControllerMetadataTransitionRequest(request)
+			unsigned.ProtectedPermit = ""
+			digest, err := controllerBeadsProtectedRevisionTransitionDigest(record.ID, unsigned)
+			if err != nil {
+				t.Fatalf("digest applied transition: %v", err)
+			}
+			seed := unsigned
+			seed.ReceiptID = ""
+			seedDigest, err := controllerBeadsProtectedRevisionTransitionDigest(record.ID, seed)
+			if err != nil {
+				t.Fatalf("digest receipt seed: %v", err)
+			}
+			if request.ReceiptID != controllerDecisionFrontierMetadataCASReceiptPrefix+seedDigest ||
+				issuer.replayIDs[0] != controllerDecisionFrontierMetadataCASReplayPrefix+digest {
+				t.Fatalf("receipt/replay identity = %q/%q, want seed/final digest bindings", request.ReceiptID, issuer.replayIDs[0])
+			}
+			wantPermit := ControllerProtectedMutationRequest{
+				Operation: controllerDecisionFrontierMetadataCASOperation, ResourceIDs: []string{record.ID}, RequestDigest: digest,
+			}
+			if !reflect.DeepEqual(issuer.requests[0], wantPermit) || request.ProtectedPermit != issuer.token ||
+				request.ExpectedVersion != record.Revision || request.Scope != "store-test" || request.Kind != "decision-frontier-record-metadata" ||
+				request.Actor != "controller-test-actor" || request.Key != beadmeta.DecisionFrontierStateMetadataKey {
+				t.Fatalf("permit/request binding = %#v / %#v, want %#v and explicit Q43 fields", issuer.requests[0], request, wantPermit)
+			}
+			if got := reader.records[record.ID]; got.Revision != revisions[1] || got.Metadata[beadmeta.DecisionFrontierStateMetadataKey] != "resolved" {
+				t.Fatalf("authoritative record after transition = revision %d state %q, want exact committed revision and resolved state", got.Revision, got.Metadata[beadmeta.DecisionFrontierStateMetadataKey])
+			}
+			if handle, ok := writer.DecisionFrontierRecordWriterHandle(); !ok || handle != writer {
+				t.Fatal("complete protected create/link/CAS writer did not advertise its record-writer capability")
+			}
+		})
 	}
 }
 

@@ -102,6 +102,7 @@ go_test(
         "controller_metadata_revision_transition_test.go",
         "controller_transition_http_test.go",
         "controller_transition_patch_http_test.go",
+        "controller_transition_permit_test.go",
         "controller_transition_wrappers_internal_test.go",
         "corpus_decoder_test.go",
         "decision_frontier_atomic_test.go",

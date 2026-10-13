@@ -355,6 +355,7 @@ gc beads
 |------------|-------------|
 | [gc beads admission](#gc-beads-admission) | Prepare and attach reviewed lifecycle admission |
 | [gc beads city](#gc-beads-city) | Manage canonical city endpoint topology |
+| [gc beads completion](#gc-beads-completion) | Prepare and submit reviewed lifecycle acceptance |
 | [gc beads health](#gc-beads-health) | Check beads provider health |
 | [gc beads list](#gc-beads-list) | List beads (API-routed with bd fallback) |
 | [gc beads metadata-cas](#gc-beads-metadata-cas) | Atomically compare and set one metadata key in an exact local store |
@@ -493,6 +494,53 @@ gc beads city use-managed [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--dry-run` | bool |  | show the canonical changes without writing files |
+
+## gc beads completion
+
+Prepare and submit reviewed lifecycle acceptance
+
+```
+gc beads completion
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc beads completion accept](#gc-beads-completion-accept) | Sign reviewed acceptance and complete work through the controller |
+| [gc beads completion prepare](#gc-beads-completion-prepare) | Prepare an unsigned acceptance draft without changing work |
+
+## gc beads completion accept
+
+Verify the reviewed draft against the current signed admission, sign with
+its configured acceptance authority, and submit the exact observed source head
+to the controller. The key must be an owner-only Ed25519 PKCS#8 PEM file in an
+owner-only directory. The key remains local and is never sent to the controller.
+
+Retain the reviewed draft. Retrying the same draft recovers its committed
+acceptance and close without another completion attempt. A controller is
+required; this command has no generic metadata or status-write fallback.
+
+```
+gc beads completion accept <reviewed-draft.json> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--key-file` | string |  | owner-only PKCS#8 file for the configured acceptance signer |
+| `--store-ref` | string |  | exact source store named in the reviewed draft |
+
+## gc beads completion prepare
+
+Prepare an unsigned acceptance draft without changing work
+
+```
+gc beads completion prepare <bead-id> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--deliverable-ref` | string |  | reviewed delivered artifact reference |
+| `--store-ref` | string |  | exact city or rig work store |
+| `--verification-ref` | string |  | reviewed verification evidence reference |
 
 ## gc beads health
 

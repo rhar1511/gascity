@@ -1,8 +1,13 @@
 package api
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -25,32 +30,45 @@ func (s *lifecycleClaimTestState) ClaimLifecycleWork(ctx context.Context, reques
 }
 
 func TestLifecycleClaimSubmitAuthenticatesSessionAndStampsReciprocalClaim(t *testing.T) {
-	state, store, info, work := newLifecycleClaimTestState(t)
-	called := false
-	state.claim = func(_ context.Context, request LifecycleClaimTransitionRequest) (LifecycleClaimTransitionResult, error) {
-		called = true
-		if request.Work.ID != work.ID || request.WorkStore != store || request.WorkStoreRef != storeref.WorkRef ||
-			request.Scope != worklifecycle.ScopeForStore("test-city", "city:test-city") ||
-			request.ExpectedRevision != work.Revision || request.ExpectedTransitionHead != "head-1" ||
-			request.Session.ID != info.ID || request.Session.Template != info.Template ||
-			request.Session.AgentName != info.AgentName || request.Session.CommonName != info.CommonName ||
-			request.Actor != session.AssigneeIdentifier(info) {
-			t.Fatalf("provider request = %+v; want exact work/session snapshot", request)
-		}
-		return LifecycleClaimTransitionResult{ClaimGeneration: "1", ReceiptID: "claim-receipt-1"}, nil
-	}
+	for _, revision := range []int64{1, -7} {
+		t.Run(fmt.Sprint(revision), func(t *testing.T) {
+			state, store, info, work := newLifecycleClaimTestStateWithRevision(t, revision)
+			called := false
+			state.claim = func(_ context.Context, request LifecycleClaimTransitionRequest) (LifecycleClaimTransitionResult, error) {
+				called = true
+				if request.Work.ID != work.ID || request.WorkStore != store || request.WorkStoreRef != storeref.WorkRef ||
+					request.Scope != worklifecycle.ScopeForStore("test-city", "city:test-city") ||
+					request.ExpectedRevision != work.Revision || request.ExpectedTransitionHead != "head-1" ||
+					request.Session.ID != info.ID || request.Session.Template != info.Template ||
+					request.Session.AgentName != info.AgentName || request.Session.CommonName != info.CommonName ||
+					request.Actor != session.AssigneeIdentifier(info) {
+					t.Fatalf("provider request = %+v; want exact work/session snapshot", request)
+				}
+				return LifecycleClaimTransitionResult{ClaimGeneration: "1", ReceiptID: "claim-receipt-1"}, nil
+			}
 
-	output, err := (&Server{state: state}).humaHandleLifecycleClaimSubmit(context.Background(), lifecycleClaimInput(info, work))
-	if err != nil {
-		t.Fatalf("claim submit: %v", err)
-	}
-	if !called || output.Body.WorkID != work.ID || output.Body.Actor != session.AssigneeIdentifier(info) ||
-		output.Body.ClaimGeneration != "1" || output.Body.ReceiptID != "claim-receipt-1" || output.Body.Replayed {
-		t.Fatalf("claim result = %+v called=%v", output.Body, called)
-	}
-	claimID, generation, err := session.NewStore(state.SessionsBeadStore()).CurrentClaim(info.ID)
-	if err != nil || claimID != work.ID || generation != "1" {
-		t.Fatalf("reciprocal session claim = %q/%q, %v; want %q/1", claimID, generation, err, work.ID)
+			body, err := json.Marshal(lifecycleClaimInput(info, work).Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			response := httptest.NewRecorder()
+			newTestCityHandler(t, state).ServeHTTP(response, newPostRequest(cityURL(state, "/lifecycle/claims"), bytes.NewReader(body)))
+			if response.Code != http.StatusOK {
+				t.Fatalf("claim submit HTTP %d: %s", response.Code, response.Body.String())
+			}
+			var output LifecycleClaimSubmitOutput
+			if err := json.Unmarshal(response.Body.Bytes(), &output.Body); err != nil {
+				t.Fatal(err)
+			}
+			if !called || output.Body.WorkID != work.ID || output.Body.Actor != session.AssigneeIdentifier(info) ||
+				output.Body.ClaimGeneration != "1" || output.Body.ReceiptID != "claim-receipt-1" || output.Body.Replayed {
+				t.Fatalf("claim result = %+v called=%v", output.Body, called)
+			}
+			claimID, generation, err := session.NewStore(state.SessionsBeadStore()).CurrentClaim(info.ID)
+			if err != nil || claimID != work.ID || generation != "1" {
+				t.Fatalf("reciprocal session claim = %q/%q, %v; want %q/1", claimID, generation, err, work.ID)
+			}
+		})
 	}
 }
 
@@ -60,6 +78,7 @@ func TestLifecycleClaimSubmitRejectsStaleSessionOrSourceIdentity(t *testing.T) {
 		mutate func(*LifecycleClaimSubmitRequest)
 	}{
 		{name: "instance token", mutate: func(request *LifecycleClaimSubmitRequest) { request.InstanceToken = "stale-token" }},
+		{name: "zero revision", mutate: func(request *LifecycleClaimSubmitRequest) { request.ExpectedRevision = 0 }},
 		{name: "runtime epoch", mutate: func(request *LifecycleClaimSubmitRequest) { request.RuntimeEpoch = "2" }},
 		{name: "source store", mutate: func(request *LifecycleClaimSubmitRequest) { request.SourceStoreRef = "rig:stale" }},
 	} {
@@ -129,12 +148,17 @@ func TestLifecycleClaimSubmitRepairsReciprocalAfterLostTransitionResponse(t *tes
 
 func newLifecycleClaimTestState(t *testing.T) (*lifecycleClaimTestState, *beads.MemStore, session.Info, beads.Bead) {
 	t.Helper()
+	return newLifecycleClaimTestStateWithRevision(t, 1)
+}
+
+func newLifecycleClaimTestStateWithRevision(t *testing.T, revision int64) (*lifecycleClaimTestState, *beads.MemStore, session.Info, beads.Bead) {
+	t.Helper()
 	base := newFakeState(t)
 	base.cfg.Rigs = nil
 	base.cfg.Workspace.Prefix = "test"
 	base.cfg.Lifecycle = config.LifecycleConfig{AdmissionEnabled: true}
 	store := beads.NewMemStoreFrom(1, []beads.Bead{{
-		ID: "test-claim-work", Title: "admitted work", Type: "task", Status: "open", Revision: 1,
+		ID: "test-claim-work", Title: "admitted work", Type: "task", Status: "open", Revision: revision,
 		Metadata: map[string]string{
 			beadmeta.LifecycleAdmissionReceiptV2MetadataKey: "v2-admission",
 			beadmeta.LifecycleTransitionHeadMetadataKey:     "head-1",
@@ -146,7 +170,7 @@ func newLifecycleClaimTestState(t *testing.T) (*lifecycleClaimTestState, *beads.
 	base.sessionsBeadStore = store
 	base.stores = map[string]beads.Store{}
 	work := beads.Bead{
-		ID: "test-claim-work", Title: "admitted work", Type: "task", Status: "open", Revision: 1,
+		ID: "test-claim-work", Title: "admitted work", Type: "task", Status: "open", Revision: revision,
 		Metadata: map[string]string{
 			beadmeta.LifecycleAdmissionReceiptV2MetadataKey: "v2-admission",
 			beadmeta.LifecycleTransitionHeadMetadataKey:     "head-1",
@@ -168,4 +192,40 @@ func lifecycleClaimInput(info session.Info, work beads.Bead) *LifecycleClaimSubm
 		ExpectedTransitionHead: "head-1", SessionID: info.ID, InstanceToken: info.InstanceToken,
 		RuntimeEpoch: info.Generation,
 	}}
+}
+
+// The HTTP edge authenticates the managed session before asking the trusted
+// controller to verify inherited workflow authority. It grants no claim from
+// the lineage marker itself.
+func TestLifecycleClaimSubmitDescendantWithoutOwnHeadReachesVerifier(t *testing.T) {
+	state, store, info, _ := newLifecycleClaimTestState(t)
+	work, err := store.Create(beads.Bead{Title: "generated step", Type: "bug", ParentID: "workflow-root", Metadata: map[string]string{
+		beadmeta.LifecycleMaterializationMetadataKey: "unverified-parent-lineage",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	state.claim = func(_ context.Context, request LifecycleClaimTransitionRequest) (LifecycleClaimTransitionResult, error) {
+		called = true
+		if request.Work.ID != work.ID || request.ExpectedTransitionHead != "" || request.ExpectedRevision != work.Revision || request.Session.ID != info.ID {
+			t.Fatal("descendant verifier did not receive the exact authenticated observation")
+		}
+		return LifecycleClaimTransitionResult{}, worklifecycle.ErrTransitionChainEvidence
+	}
+	input := lifecycleClaimInput(info, work)
+	input.Body.ExpectedTransitionHead = ""
+	body, err := json.Marshal(input.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	newTestCityHandler(t, state).ServeHTTP(response, newPostRequest(cityURL(state, "/lifecycle/claims"), bytes.NewReader(body)))
+	if !called || response.Code != http.StatusConflict {
+		t.Fatalf("descendant HTTP %d, verifier called=%t; want authenticated verifier refusal", response.Code, called)
+	}
+	claimID, _, err := session.NewStore(state.SessionsBeadStore()).CurrentClaim(info.ID)
+	if err != nil || claimID != "" {
+		t.Fatalf("rejected descendant stamped session claim %q: %v", claimID, err)
+	}
 }

@@ -420,6 +420,15 @@ func (c *TransitionChain) Apply(request TransitionRequest) (TransitionResult, er
 			return TransitionResult{}, fmt.Errorf("recovery escalation source is not currently in progress: %w", ErrTransitionChainStale)
 		}
 	}
+	if request.Step == TransitionStepCompletionBudget {
+		if change, attaches := request.Patch.Metadata[beadmeta.LifecycleCompletionReceiptMetadataKey]; attaches {
+			candidate := beads.Bead{ID: source.ID, Metadata: map[string]string{beadmeta.LifecycleCompletionReceiptMetadataKey: change.Value}}
+			decision := evaluateCompletionReceiptAt(candidate, c.admissionConfig, c.scope, evidence.Admission, c.now())
+			if source.Status != "in_progress" || !decision.Accepted {
+				return TransitionResult{}, fmt.Errorf("completion attachment requires in-progress work and current signed acceptance: %s: %w", decision.Reason, ErrTransitionChainEvidence)
+			}
+		}
+	}
 	if request.Step == TransitionStepClose {
 		if err := c.verifyCloseReceipt(source, evidence, parent, request.CompletionReceipt); err != nil {
 			return TransitionResult{}, err
@@ -940,8 +949,14 @@ func validateCompletionBudgetPatch(patch SourceWorkPatch, workID, scope, admissi
 	if !ok || change.Expected != nil {
 		return fmt.Errorf("completion budget must consume one absent budget record: %w", ErrTransitionChainInvalid)
 	}
-	if _, err := parseCompletionBudgetMetadata(change.Value, workID, scope, admissionDigest); err != nil {
+	budget, err := parseCompletionBudgetMetadata(change.Value, workID, scope, admissionDigest)
+	if err != nil {
 		return fmt.Errorf("completion budget metadata is invalid: %w", errors.Join(ErrTransitionChainInvalid, err))
+	}
+	if receipt, attaches := patch.Metadata[beadmeta.LifecycleCompletionReceiptMetadataKey]; attaches {
+		if receipt.Expected != nil || receipt.Value == "" || completionReceiptMetadataDigest(receipt.Value) != budget.CompletionReceiptDigest {
+			return fmt.Errorf("completion attachment must create the exact receipt bound by its budget: %w", ErrTransitionChainInvalid)
+		}
 	}
 	return nil
 }
@@ -1107,7 +1122,7 @@ func validateTransitionStepPatch(step TransitionStep, patch SourceWorkPatch) err
 		TransitionStepAttachedMaterialization: {beadmeta.LifecycleMaterializationMetadataKey: {}},
 		TransitionStepRecoveryBudget:          {beadmeta.LifecycleRecoveryStateMetadataKey: {}},
 		TransitionStepRecoveryEscalation:      {beadmeta.LifecycleRecoveryStateMetadataKey: {}},
-		TransitionStepCompletionBudget:        {beadmeta.LifecycleCompletionBudgetMetadataKey: {}},
+		TransitionStepCompletionBudget:        {beadmeta.LifecycleCompletionBudgetMetadataKey: {}, beadmeta.LifecycleCompletionReceiptMetadataKey: {}},
 		TransitionStepClose:                   {},
 		TransitionStepClaimIdentity: {
 			beadmeta.ClaimGenerationMetadataKey: {}, beadmeta.ClaimedAtMetadataKey: {}, beadmeta.SessionIDMetadataKey: {},
@@ -1129,7 +1144,7 @@ func validateTransitionStepPatch(step TransitionStep, patch SourceWorkPatch) err
 			beadmeta.MergeStrategyMetadataKey:            {},
 		}
 	}
-	if step == TransitionStepRecoveryBudget || step == TransitionStepRecoveryEscalation || step == TransitionStepCompletionBudget {
+	if step == TransitionStepRecoveryBudget || step == TransitionStepRecoveryEscalation {
 		if len(patch.Metadata) != 1 {
 			return fmt.Errorf("step %q must set exactly one metadata key: %w", step, ErrTransitionChainInvalid)
 		}
@@ -1312,6 +1327,9 @@ func (c *TransitionChain) validateTransitionStepPatchEvidence(request Transition
 		if err := validateCompletionBudgetPatch(request.Patch, source.ID, c.scope, evidence.Attachment.ReceiptDigest); err != nil {
 			return err
 		}
+		if err := validateCompletionAttachmentProof(request.Patch, source.ID, c.scope, evidence.Admission, c.admissionConfig); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -1440,9 +1458,11 @@ func validateStoredTransitionPatchReceipt(receipt beads.RevisionTransitionPatchR
 			return transitionParent{}, fmt.Errorf("stored recovery escalation authorization is invalid: %w", errors.Join(ErrTransitionChainReceipt, err))
 		}
 	case TransitionStepCompletionBudget:
-		change := sourcePatch.Metadata[beadmeta.LifecycleCompletionBudgetMetadataKey]
-		if _, err := parseCompletionBudgetMetadata(change.Value, issueID, scope, evidence.Attachment.ReceiptDigest); err != nil || change.Expected != nil {
+		if err := validateCompletionBudgetPatch(sourcePatch, issueID, scope, evidence.Attachment.ReceiptDigest); err != nil {
 			return transitionParent{}, fmt.Errorf("stored completion budget differs from current admission proof: %w", errors.Join(ErrTransitionChainReceipt, err))
+		}
+		if err := validateCompletionAttachmentProof(sourcePatch, issueID, scope, evidence.Admission, admissionConfig); err != nil {
+			return transitionParent{}, errors.Join(ErrTransitionChainReceipt, err)
 		}
 	}
 	receipt.Patch = canonicalPatch
@@ -1688,4 +1708,18 @@ func validTransitionPermit(value string) bool {
 		}
 	}
 	return true
+}
+
+// A budget may atomically attach the separately signed acceptance receipt after
+// work finishes. Existing receipts are never overwritten by this path.
+func validateCompletionAttachmentProof(patch SourceWorkPatch, workID, scope string, admission AdmissionReceiptV2, cfg config.LifecycleConfig) error {
+	change, attaches := patch.Metadata[beadmeta.LifecycleCompletionReceiptMetadataKey]
+	if !attaches {
+		return nil
+	}
+	candidate := beads.Bead{ID: workID, Metadata: map[string]string{beadmeta.LifecycleCompletionReceiptMetadataKey: change.Value}}
+	if decision := evaluateCompletionReceiptProof(candidate, cfg, scope, admission); !decision.Accepted {
+		return fmt.Errorf("completion attachment has no trusted acceptance proof: %s: %w", decision.Reason, ErrTransitionChainEvidence)
+	}
+	return nil
 }

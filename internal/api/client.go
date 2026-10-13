@@ -2058,3 +2058,39 @@ func (c *Client) ClaimLifecycleWork(parent context.Context, request LifecycleCla
 		Replayed: resp.JSON200.Replayed,
 	}, nil
 }
+
+// CompleteLifecycleWork submits externally signed acceptance to the controller.
+// It preserves the caller's original observation for exact retry and never
+// falls back to a generic metadata or status write.
+func (c *Client) CompleteLifecycleWork(parent context.Context, request LifecycleCompletionSubmitRequest) (LifecycleCompletionResult, error) {
+	if err := c.requireCityScope(); err != nil {
+		return LifecycleCompletionResult{}, err
+	}
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, defaultClientTimeout)
+	defer cancel()
+	body := genclient.CompleteAdmittedLifecycleWorkJSONRequestBody{
+		WorkId: request.WorkID, SourceStoreRef: request.SourceStoreRef,
+		ExpectedRevision: request.ExpectedRevision, ExpectedTransitionHead: request.ExpectedTransitionHead,
+		CompletionReceipt: request.CompletionReceipt,
+	}
+	response, err := c.cw.CompleteAdmittedLifecycleWorkWithResponse(ctx, c.cityName, nil, body)
+	if err != nil {
+		return LifecycleCompletionResult{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if response == nil {
+		return LifecycleCompletionResult{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(response.StatusCode(), pdOf(response)); err != nil {
+		return LifecycleCompletionResult{}, err
+	}
+	if response.JSON200 == nil {
+		return LifecycleCompletionResult{}, fmt.Errorf("API returned %d with no body", response.StatusCode())
+	}
+	return LifecycleCompletionResult{
+		WorkID: response.JSON200.WorkId, ReceiptID: response.JSON200.ReceiptId,
+		Revision: response.JSON200.Revision, Replayed: response.JSON200.Replayed,
+	}, nil
+}

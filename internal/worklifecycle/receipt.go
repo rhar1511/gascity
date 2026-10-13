@@ -348,6 +348,34 @@ func EvaluateCompletionAt(bead beads.Bead, cfg config.LifecycleConfig, scope str
 // EvaluateAdmission, which intentionally holds v2 work before those proofs are
 // supplied.
 func evaluateCompletionReceiptAt(bead beads.Bead, cfg config.LifecycleConfig, scope string, admission AdmissionReceiptV2, now time.Time) CompletionDecision {
+	decision := evaluateCompletionReceiptProof(bead, cfg, scope, admission)
+	if !decision.Accepted {
+		return decision
+	}
+	// The proof verifier already validated this signed timestamp.
+	acceptedAt, _ := time.Parse(time.RFC3339Nano, decision.Receipt.AcceptedAt)
+	decision.Accepted = false
+	maxAge, clockSkew, configured := completionFreshnessPolicy(cfg)
+	if !configured {
+		decision.Reason = "completion receipt freshness policy is not configured"
+		return decision
+	}
+	if now.IsZero() || acceptedAt.After(now.Add(clockSkew)) {
+		decision.Reason = "completion receipt acceptance time is too far in the future"
+		return decision
+	}
+	if acceptedAt.Before(now.Add(-maxAge)) {
+		decision.Reason = "completion receipt is older than the configured freshness window"
+		return decision
+	}
+	decision.Accepted = true
+	return decision
+}
+
+// evaluateCompletionReceiptProof verifies immutable acceptance evidence without
+// applying today's freshness window to a historical committed transition.
+// New writes and close still use evaluateCompletionReceiptAt.
+func evaluateCompletionReceiptProof(bead beads.Bead, cfg config.LifecycleConfig, scope string, admission AdmissionReceiptV2) CompletionDecision {
 	decision := CompletionDecision{Reason: "completion receipt is missing"}
 	encoded := bead.Metadata[beadmeta.LifecycleCompletionReceiptMetadataKey]
 	var receipt CompletionReceipt
@@ -371,19 +399,6 @@ func evaluateCompletionReceiptAt(bead beads.Bead, cfg config.LifecycleConfig, sc
 	acceptedAt, err := time.Parse(time.RFC3339Nano, receipt.AcceptedAt)
 	if err != nil || acceptedAt.IsZero() {
 		decision.Reason = "completion receipt has an invalid acceptance time"
-		return decision
-	}
-	maxAge, clockSkew, configured := completionFreshnessPolicy(cfg)
-	if !configured {
-		decision.Reason = "completion receipt freshness policy is not configured"
-		return decision
-	}
-	if now.IsZero() || acceptedAt.After(now.Add(clockSkew)) {
-		decision.Reason = "completion receipt acceptance time is too far in the future"
-		return decision
-	}
-	if acceptedAt.Before(now.Add(-maxAge)) {
-		decision.Reason = "completion receipt is older than the configured freshness window"
 		return decision
 	}
 	digest, err := AdmissionDigestV2(admission)

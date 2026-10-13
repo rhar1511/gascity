@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strconv"
 	"strings"
@@ -30,8 +32,8 @@ func (cs *controllerState) ClaimLifecycleWork(ctx context.Context, request api.L
 		return api.LifecycleClaimTransitionResult{}, err
 	}
 	if strings.TrimSpace(request.Work.ID) == "" || request.WorkStore == nil || strings.TrimSpace(request.Session.ID) != request.Session.ID ||
-		request.Session.ID == "" || request.Actor == "" || request.ExpectedRevision <= 0 ||
-		strings.TrimSpace(request.ExpectedTransitionHead) != request.ExpectedTransitionHead || request.ExpectedTransitionHead == "" {
+		request.Session.ID == "" || request.Actor == "" || request.ExpectedRevision == 0 ||
+		strings.TrimSpace(request.ExpectedTransitionHead) != request.ExpectedTransitionHead {
 		return api.LifecycleClaimTransitionResult{}, worklifecycle.ErrTransitionChainInvalid
 	}
 
@@ -106,6 +108,91 @@ func (cs *controllerState) ClaimLifecycleWork(ctx context.Context, request api.L
 	permitIssuer, permitPolicy, authorized := permitResolver.resolve(cityName, selected.ref)
 	if !authorized || permitIssuer == nil || strings.TrimSpace(permitPolicy.Actor) == "" {
 		return api.LifecycleClaimTransitionResult{}, worklifecycle.ErrTransitionChainPermit
+	}
+	observed, err := beads.HandlesFor(selected.store).Live.Get(request.Work.ID)
+	if err != nil {
+		return api.LifecycleClaimTransitionResult{}, err
+	}
+	if lineage, ok := lifecycleMaterializationFor(observed); ok && lineage.SourceID != observed.ID &&
+		observed.Metadata[beadmeta.LifecycleAdmissionReceiptV2MetadataKey] == "" {
+		resolveStore := func(ref string) (beads.Store, error) {
+			for _, leg := range legs {
+				if leg.ref == ref {
+					return leg.store, nil
+				}
+			}
+			if ref == "city:"+cityName {
+				return cityStore, nil
+			}
+			return nil, worklifecycle.ErrTransitionChainUnavailable
+		}
+		opts := hookClaimOptions{
+			Lifecycle: cfg.Lifecycle, LifecycleCity: cfg, TrustedLifecycleScope: true,
+			IdentityCandidates: []string{request.Actor}, ResolveLifecycleStore: resolveStore,
+			VerifyLifecycleTransitionHead: newLifecycleClaimTransitionHeadVerifier(cityPath, cfg, resolveStore),
+		}
+		verify := func(row beads.Bead) (worklifecycle.DescendantBinding, error) {
+			if err := ctx.Err(); err != nil {
+				return worklifecycle.DescendantBinding{}, err
+			}
+			marker, valid := lifecycleMaterializationFor(row)
+			row.SourceStoreRef, row.LifecycleScope = selected.ref, scope
+			if !valid || row.ID != request.Work.ID || marker.Scope != scope || marker.SourceStoreRef != selected.ref || marker.WorkflowStoreRef != selected.ref ||
+				row.Metadata[beadmeta.LifecycleAdmissionReceiptMetadataKey] != "" || row.Metadata[beadmeta.LifecycleAdmissionReceiptV2MetadataKey] != "" ||
+				!lifecycleLineageAdmissionMatches(cfg, row, marker) || !lifecycleLineageCurrent(row, marker, opts) {
+				return worklifecycle.DescendantBinding{}, worklifecycle.ErrTransitionChainEvidence
+			}
+			target := findAgentByTemplate(cfg, agentutil.NormalizePoolRouteTarget(cfg, marker.Route))
+			if target == nil {
+				return worklifecycle.DescendantBinding{}, worklifecycle.ErrTransitionChainEvidence
+			}
+			if err := verifyLifecycleClaimSessionRoute(cfg, request.Session, lifecycleAdmissionPolicy{target: *target}, marker.Route); err != nil {
+				return worklifecycle.DescendantBinding{}, err
+			}
+			parent, err := selected.store.Get(marker.SourceID)
+			if err != nil {
+				return worklifecycle.DescendantBinding{}, err
+			}
+			admission, err := worklifecycle.VerifyAdmissionReceiptV2(parent, cfg.Lifecycle, scope)
+			if err != nil {
+				return worklifecycle.DescendantBinding{}, err
+			}
+			policy, err := buildLifecycleAdmissionPolicy(parent, admission, scope, cityName, cityPath, cfg, cityStore, rigStores, selected, legs, sling.SlingRunner(shellSlingRunner), authority)
+			if err != nil {
+				return worklifecycle.DescendantBinding{}, err
+			}
+			if policy.projection.FormulaSchemaVersion == beadmeta.FormulaContractGraphV2 {
+				if err := verifyLifecycleGraphWorkerStep(ctx, selected.store, parent, row, policy, cfg); err != nil {
+					return worklifecycle.DescendantBinding{}, fmt.Errorf("verify compiled graph worker step: %w", errorsJoinTransitionEvidence(err))
+				}
+			}
+			attached, valid := lifecycleMaterializationFor(parent)
+			if !valid || attached.WorkflowID == "" || row.ID == attached.WorkflowID {
+				return worklifecycle.DescendantBinding{}, worklifecycle.ErrTransitionChainEvidence
+			}
+			if row.Status == "open" && row.Assignee == "" {
+				if err := verifyLifecycleClaimReadiness(selected.store, row.ID, row.Revision, row.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey]); err != nil {
+					return worklifecycle.DescendantBinding{}, fmt.Errorf("verify descendant readiness: %w", err)
+				}
+			} else if row.Status != "in_progress" || row.Assignee != request.Actor || row.Metadata[beadmeta.SessionIDMetadataKey] != request.Session.ID {
+				return worklifecycle.DescendantBinding{}, worklifecycle.ErrTransitionChainStale
+			}
+			digest := sha256.Sum256([]byte(row.Metadata[beadmeta.LifecycleMaterializationMetadataKey]))
+			return worklifecycle.DescendantBinding{
+				AdmissionDigest: marker.Contract, LineageDigest: hex.EncodeToString(digest[:]),
+				ParentID: marker.SourceID, Scope: scope, StoreRef: selected.ref, WorkflowID: attached.WorkflowID,
+			}, nil
+		}
+		claimed, err := worklifecycle.ClaimDescendantIdentity(worklifecycle.DescendantClaimConfig{
+			Store: selected.store, Scope: scope, Actor: request.Actor, AnchorActor: permitPolicy.Actor, PermitIssuer: permitIssuer, Verify: verify,
+		}, worklifecycle.ClaimIdentityRequest{
+			IssueID: observed.ID, SessionID: request.Session.ID, InstanceToken: request.Session.InstanceToken, RuntimeEpoch: request.Session.Generation,
+			ExpectedRevision: request.ExpectedRevision, ExpectedTransitionHead: request.ExpectedTransitionHead, SessionName: request.Session.SessionNameMetadata, WorkDir: request.Session.WorkDir,
+		})
+		if err != nil {
+			return api.LifecycleClaimTransitionResult{}, err
+		}
+		return api.LifecycleClaimTransitionResult{ClaimGeneration: claimed.ClaimGeneration, ReceiptID: claimed.Receipt.ReceiptID, Replayed: claimed.Replayed, Recovered: claimed.Recovered}, nil
 	}
 	attachmentAdapter, err := worklifecycle.NewAdmissionAttachmentAdapter(selected.store)
 	if err != nil {
@@ -217,7 +304,7 @@ func verifyLifecycleClaimSessionRoute(cfg *config.City, info session.Info, polic
 // authoritative live ready set. Dependency readiness is whatever that final
 // live read observes; it is not an atomic fence on independent dependency rows.
 func verifyLifecycleClaimReadiness(store beads.Store, workID string, expectedRevision int64, expectedHead string) error {
-	if store == nil || strings.TrimSpace(workID) == "" || expectedRevision <= 0 || strings.TrimSpace(expectedHead) == "" {
+	if store == nil || strings.TrimSpace(workID) == "" || expectedRevision == 0 {
 		return worklifecycle.ErrTransitionChainUnavailable
 	}
 	live := beads.HandlesFor(store).Live
@@ -228,12 +315,12 @@ func verifyLifecycleClaimReadiness(store beads.Store, workID string, expectedRev
 	if current.ID != workID || current.Revision != expectedRevision ||
 		current.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey] != expectedHead ||
 		current.Status != "open" || current.Assignee != "" {
-		return worklifecycle.ErrTransitionChainStale
+		return fmt.Errorf("claim snapshot changed before readiness read: %w", worklifecycle.ErrTransitionChainStale)
 	}
 	now := time.Now()
 	if (current.IsBlocked != nil && *current.IsBlocked) || lifecycleRowHeld(current) ||
 		beads.IsDeferred(current, now) || hookCandidateBudgetDeferred(current, now) {
-		return worklifecycle.ErrTransitionChainStale
+		return fmt.Errorf("claim snapshot is blocked, held, or deferred: %w", worklifecycle.ErrTransitionChainStale)
 	}
 	ready, err := live.Ready(beads.ReadyQuery{TierMode: beads.FederatedReadTier})
 	if err != nil {
@@ -244,7 +331,7 @@ func verifyLifecycleClaimReadiness(store beads.Store, workID string, expectedRev
 			return nil
 		}
 	}
-	return worklifecycle.ErrTransitionChainStale
+	return fmt.Errorf("claim snapshot is absent from live ready set: %w", worklifecycle.ErrTransitionChainStale)
 }
 
 func lifecycleClaimSourceStoreRef(cityName string, apiRef storeref.StoreRef) (string, error) {

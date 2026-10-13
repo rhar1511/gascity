@@ -41,6 +41,16 @@ func TestBeadPolicyStoreDoesNotInventDecisionFrontierSourceReader(t *testing.T) 
 	}
 }
 
+func TestBeadPolicyStoreDoesNotInventRevisionTransitionPatchCapabilities(t *testing.T) {
+	wrapped := wrapStoreWithBeadPolicies(beadPolicyPlainStore{Store: beads.NewMemStore()}, nil)
+	if writer, ok := beads.RevisionTransitionPatchWriterFor(wrapped); ok || writer != nil {
+		t.Fatal("bead policy wrapper invented a protected patch writer")
+	}
+	if reader, ok := beads.RevisionTransitionPatchReceiptReaderFor(wrapped); ok || reader != nil {
+		t.Fatal("bead policy wrapper invented a protected patch receipt reader")
+	}
+}
+
 func TestBeadPolicyStorePreservesOnlyBackingDecisionFrontierWriter(t *testing.T) {
 	backing := beads.NewMemStore()
 	backing.HonorExplicitIDs = true

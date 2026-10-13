@@ -2,6 +2,7 @@ package worklifecycle
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -59,43 +60,48 @@ func TestClaimIdentityOperationIDBindsIncarnationAndGeneration(t *testing.T) {
 }
 
 func TestTransitionChainClaimIdentityAtomicAndIdempotent(t *testing.T) {
-	fixture := newTransitionChainFixture(t)
-	attached := applyTestAttachment(t, fixture, applyTestReservation(t, fixture))
-	request := claimIdentityRequest(t, fixture, attached.Receipt.ReceiptID)
-	result, err := fixture.chain.ClaimIdentity(request)
-	if err != nil {
-		t.Fatalf("ClaimIdentity: %v", err)
-	}
-	if result.ClaimGeneration != "1" || result.Receipt.Kind != transitionKindClaimIdentity || result.Replayed || result.Recovered {
-		t.Fatalf("claim result = %+v, want fresh generation 1 transition", result)
-	}
-	if len(fixture.store.patchRequests) != 3 || len(fixture.permits.requests) != 3 {
-		t.Fatalf("typed writes/permits = %d/%d, want reservation, attachment, and one atomic claim", len(fixture.store.patchRequests), len(fixture.permits.requests))
-	}
-	current, err := fixture.store.DecisionFrontierSourceSnapshot(fixture.work.ID)
-	if err != nil || current.Status != "in_progress" || current.Assignee != "controller" ||
-		current.Metadata[beadmeta.SessionIDMetadataKey] != "session-1" ||
-		current.Metadata[beadmeta.ClaimGenerationMetadataKey] != "1" ||
-		current.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey] != result.Receipt.ReceiptID {
-		t.Fatalf("claimed source = %+v, err %v", current, err)
-	}
-	if len(fixture.store.patchRequests[2].Patch.Metadata) != 7 || fixture.store.patchRequests[2].Patch.Status == nil || fixture.store.patchRequests[2].Patch.Assignee == nil {
-		t.Fatalf("claim writer request = %+v, want one typed patch carrying all claim metadata and status/assignee", fixture.store.patchRequests[2])
-	}
+	for _, revisionStart := range []int64{1000, -1000} {
+		t.Run(fmt.Sprint(revisionStart), func(t *testing.T) {
+			fixture := newTransitionChainFixture(t)
+			fixture.store.nextRevision = revisionStart
+			attached := applyTestAttachment(t, fixture, applyTestReservation(t, fixture))
+			request := claimIdentityRequest(t, fixture, attached.Receipt.ReceiptID)
+			result, err := fixture.chain.ClaimIdentity(request)
+			if err != nil {
+				t.Fatalf("ClaimIdentity: %v", err)
+			}
+			if result.ClaimGeneration != "1" || result.Receipt.Kind != transitionKindClaimIdentity || result.Replayed || result.Recovered {
+				t.Fatalf("claim result = %+v, want fresh generation 1 transition", result)
+			}
+			if len(fixture.store.patchRequests) != 3 || len(fixture.permits.requests) != 3 {
+				t.Fatalf("typed writes/permits = %d/%d, want reservation, attachment, and one atomic claim", len(fixture.store.patchRequests), len(fixture.permits.requests))
+			}
+			current, err := fixture.store.DecisionFrontierSourceSnapshot(fixture.work.ID)
+			if err != nil || current.Status != "in_progress" || current.Assignee != "controller" ||
+				current.Metadata[beadmeta.SessionIDMetadataKey] != "session-1" ||
+				current.Metadata[beadmeta.ClaimGenerationMetadataKey] != "1" ||
+				current.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey] != result.Receipt.ReceiptID {
+				t.Fatalf("claimed source = %+v, err %v", current, err)
+			}
+			if len(fixture.store.patchRequests[2].Patch.Metadata) != 7 || fixture.store.patchRequests[2].Patch.Status == nil || fixture.store.patchRequests[2].Patch.Assignee == nil {
+				t.Fatalf("claim writer request = %+v, want one typed patch carrying all claim metadata and status/assignee", fixture.store.patchRequests[2])
+			}
 
-	// A lost response can retry the original request. It reuses the exact claim
-	// receipt and performs no second work write, allowing the caller to repair
-	// the session's reciprocal stamp safely.
-	replayed, err := fixture.chain.ClaimIdentity(request)
-	if err != nil || !replayed.Replayed || replayed.ClaimGeneration != "1" || replayed.Receipt.ReceiptID != result.Receipt.ReceiptID || len(fixture.store.patchRequests) != 3 {
-		t.Fatalf("ClaimIdentity replay = %+v err %v writes %d, want exact receipt without another patch", replayed, err, len(fixture.store.patchRequests))
-	}
-	currentRequest := request
-	currentRequest.ExpectedRevision = result.Receipt.ToVersion
-	currentRequest.ExpectedTransitionHead = result.Receipt.ReceiptID
-	replayed, err = fixture.chain.ClaimIdentity(currentRequest)
-	if err != nil || !replayed.Replayed || replayed.Receipt.ReceiptID != result.Receipt.ReceiptID {
-		t.Fatalf("current-head claim repair = %+v err %v, want exact replay", replayed, err)
+			// A lost response can retry the original request. It reuses the exact claim
+			// receipt and performs no second work write, allowing the caller to repair
+			// the session's reciprocal stamp safely.
+			replayed, err := fixture.chain.ClaimIdentity(request)
+			if err != nil || !replayed.Replayed || replayed.ClaimGeneration != "1" || replayed.Receipt.ReceiptID != result.Receipt.ReceiptID || len(fixture.store.patchRequests) != 3 {
+				t.Fatalf("ClaimIdentity replay = %+v err %v writes %d, want exact receipt without another patch", replayed, err, len(fixture.store.patchRequests))
+			}
+			currentRequest := request
+			currentRequest.ExpectedRevision = result.Receipt.ToVersion
+			currentRequest.ExpectedTransitionHead = result.Receipt.ReceiptID
+			replayed, err = fixture.chain.ClaimIdentity(currentRequest)
+			if err != nil || !replayed.Replayed || replayed.Receipt.ReceiptID != result.Receipt.ReceiptID {
+				t.Fatalf("current-head claim repair = %+v err %v, want exact replay", replayed, err)
+			}
+		})
 	}
 }
 

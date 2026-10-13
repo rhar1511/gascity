@@ -47,6 +47,8 @@ var (
 	_ beads.DecisionFrontierRecordWriterHandleProvider              = (*beadPolicyStore)(nil)
 	_ beads.RevisionTransitionReceiptReaderHandleProvider           = (*beadPolicyStore)(nil)
 	_ beads.RevisionTransitionWriterHandleProvider                  = (*beadPolicyStore)(nil)
+	_ beads.RevisionTransitionPatchWriterHandleProvider             = (*beadPolicyStore)(nil)
+	_ beads.RevisionTransitionPatchReceiptReaderHandleProvider      = (*beadPolicyStore)(nil)
 )
 
 // ConditionalWritesResolveTarget declares the wrapped store as the
@@ -119,6 +121,18 @@ func (s *beadPolicyStore) ControllerMetadataTransitionReceiptReaderHandle() (bea
 
 func (s *beadPolicyStore) RevisionTransitionWriterHandle() (beads.RevisionTransitionWriter, bool) {
 	return beads.RevisionTransitionWriterFor(s.Store)
+}
+
+// RevisionTransitionPatchWriterHandle preserves the backing's protected patch
+// capability without granting the policy wrapper independent write authority.
+func (s *beadPolicyStore) RevisionTransitionPatchWriterHandle() (beads.RevisionTransitionPatchWriter, bool) {
+	return beads.RevisionTransitionPatchWriterFor(s.Store)
+}
+
+// RevisionTransitionPatchReceiptReaderHandle forwards exact durable receipts
+// through the backing's existing read boundary.
+func (s *beadPolicyStore) RevisionTransitionPatchReceiptReaderHandle() (beads.RevisionTransitionPatchReceiptReader, bool) {
+	return beads.RevisionTransitionPatchReceiptReaderFor(s.Store)
 }
 
 var (

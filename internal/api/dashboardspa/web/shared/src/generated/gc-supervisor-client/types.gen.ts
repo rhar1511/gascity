@@ -1745,11 +1745,11 @@ export type LifecycleClaimSubmitOutputBody = {
 
 export type LifecycleClaimSubmitRequest = {
     /**
-     * Source revision observed by the claim candidate query.
+     * Nonzero opaque signed source revision observed by the claim candidate query; compare only for equality.
      */
     expected_revision: number;
     /**
-     * Lifecycle transition head observed by the claim candidate query.
+     * Observed lifecycle transition head; empty only for a generated step awaiting its first protected anchor.
      */
     expected_transition_head: string;
     /**
@@ -1771,6 +1771,27 @@ export type LifecycleClaimSubmitRequest = {
     /**
      * Exact admitted work bead ID.
      */
+    work_id: string;
+};
+
+export type LifecycleCompletionResult = {
+    receipt_id: string;
+    replayed: boolean;
+    revision: number;
+    work_id: string;
+};
+
+export type LifecycleCompletionSubmitRequest = {
+    /**
+     * Canonical acceptance JSON signed by the authority named in this admission.
+     */
+    completion_receipt: string;
+    /**
+     * Nonzero opaque signed source revision; compare only for equality.
+     */
+    expected_revision: number;
+    expected_transition_head: string;
+    source_store_ref: string;
     work_id: string;
 };
 
@@ -15736,6 +15757,66 @@ export type ClaimAdmittedLifecycleWorkResponses = {
 };
 
 export type ClaimAdmittedLifecycleWorkResponse = ClaimAdmittedLifecycleWorkResponses[keyof ClaimAdmittedLifecycleWorkResponses];
+
+export type CompleteAdmittedLifecycleWorkData = {
+    body: LifecycleCompletionSubmitRequest;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/lifecycle/completions';
+};
+
+export type CompleteAdmittedLifecycleWorkErrors = {
+    /**
+     * Bad Request
+     */
+    400: ErrorModel;
+    /**
+     * Forbidden
+     */
+    403: ErrorModel;
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type CompleteAdmittedLifecycleWorkError = CompleteAdmittedLifecycleWorkErrors[keyof CompleteAdmittedLifecycleWorkErrors];
+
+export type CompleteAdmittedLifecycleWorkResponses = {
+    /**
+     * OK
+     */
+    200: LifecycleCompletionResult;
+};
+
+export type CompleteAdmittedLifecycleWorkResponse = CompleteAdmittedLifecycleWorkResponses[keyof CompleteAdmittedLifecycleWorkResponses];
 
 export type SubmitLifecycleRecoveryRequestData = {
     body: RecoveryRequest;

@@ -33,6 +33,7 @@ import (
 func TestLifecycleAdmissionTransitionCoreGraphWorkflowAttachAndReplay(t *testing.T) {
 	setup := newLifecycleAdmissionCoreGraphSetup(t)
 	fixture := setup.fixture
+	setup.rigStores["pilot"] = wrapStoreWithBeadPolicies(setup.store, fixture.cfg)
 	var stderr strings.Builder
 	reconcileLifecycleAdmissionWithPermitResolver("pilot", fixture.cityPath, fixture.cfg, setup.cityStore, setup.rigStores, nil, &stderr, setup.permitResolver)
 	attached, err := setup.store.Get(setup.source.ID)
@@ -699,7 +700,7 @@ func lifecycleAdmissionV1StepCandidate(t *testing.T, setup lifecycleAdmissionTra
 	}
 	for _, row := range rows {
 		lineage, ok := lifecycleMaterializationFor(row)
-		if ok && row.ID != setup.source.ID && lineage.State == "lineage_pending" && lineage.SourceID == setup.source.ID {
+		if ok && row.ID != setup.source.ID && row.ID != marker.WorkflowID && row.Type != "molecule" && lineage.State == "lineage_pending" && lineage.SourceID == setup.source.ID {
 			row.SourceStoreRef = marker.WorkflowStoreRef
 			row.LifecycleScope = marker.Scope
 			return row
@@ -733,15 +734,16 @@ func encodeAdmissionTestKey(key ed25519.PublicKey) string {
 }
 
 type lifecycleAdmissionTransitionSetup struct {
-	fixture        *lifecycleAdmissionPolicyFixture
-	cityStore      beads.Store
-	rigStores      map[string]beads.Store
-	store          *lifecycleAdmissionTransitionTestStore
-	source         beads.Bead
-	receipt        worklifecycle.AdmissionReceiptV2
-	policy         lifecycleAdmissionPolicy
-	q43            worklifecycle.AdmissionAttachmentProof
-	permitResolver *hostBeadsPermitResolver
+	acceptancePrivate ed25519.PrivateKey
+	fixture           *lifecycleAdmissionPolicyFixture
+	cityStore         beads.Store
+	rigStores         map[string]beads.Store
+	store             *lifecycleAdmissionTransitionTestStore
+	source            beads.Bead
+	receipt           worklifecycle.AdmissionReceiptV2
+	policy            lifecycleAdmissionPolicy
+	q43               worklifecycle.AdmissionAttachmentProof
+	permitResolver    *hostBeadsPermitResolver
 }
 
 // lifecycleAdmissionNoPatchStore preserves Q43 verification while hiding the
@@ -920,7 +922,7 @@ func newLifecycleAdmissionTransitionSetupWithBacking(t *testing.T, fixture *life
 	permitResolver := controllerPermitTestResolver(t, entry, key)
 	return lifecycleAdmissionTransitionSetup{
 		fixture: fixture, cityStore: cityStore, rigStores: rigStores, store: store,
-		source: source, receipt: receipt, policy: policy, q43: q43, permitResolver: permitResolver,
+		source: source, receipt: receipt, policy: policy, q43: q43, permitResolver: permitResolver, acceptancePrivate: acceptancePrivate,
 	}
 }
 
@@ -939,6 +941,7 @@ type lifecycleAdmissionTransitionTestStore struct {
 	patchReceipts         map[string]beads.RevisionTransitionPatchReceipt
 	patchRequests         []beads.RevisionTransitionPatchRequest
 	sourceGenericWrites   int
+	nextPatchRevision     int64
 	loseNextPatchKind     string
 	rejectNextPatchKind   string
 	failNextPatchKind     string
@@ -1022,20 +1025,20 @@ func (s *lifecycleAdmissionTransitionTestStore) overlayLifecycleAdmissionRowsFor
 		if current, ok := s.rows[row.ID]; ok {
 			row = current
 		}
-		if query.Status != "" && row.Status != query.Status || query.Type != "" && row.Type != query.Type {
+		if !query.Matches(row) {
 			continue
 		}
 		row.Metadata = cloneLifecycleAdmissionMetadata(row.Metadata)
 		filtered = append(filtered, row)
 	}
 	for id, current := range s.rows {
-		if seen[id] || query.Status != "" && current.Status != query.Status || query.Type != "" && current.Type != query.Type {
+		if seen[id] || !query.Matches(current) {
 			continue
 		}
 		current.Metadata = cloneLifecycleAdmissionMetadata(current.Metadata)
 		filtered = append(filtered, current)
 	}
-	return filtered
+	return beads.ApplyListQuery(filtered, query)
 }
 
 func (s *lifecycleAdmissionTransitionTestStore) DecisionFrontierSourceReaderHandle() (beads.DecisionFrontierSourceReader, bool) {
@@ -1068,8 +1071,8 @@ func (s *lifecycleAdmissionTransitionTestStore) TransitionMetadata(issueID strin
 	if prior, ok := s.q43Receipts[request.ReceiptID]; ok {
 		return beads.ControllerMetadataTransitionResult{Applied: true, Replayed: true, Receipt: &prior}, nil
 	}
-	current, err := s.lifecycleAdmissionBackingStore.Get(issueID)
-	if err != nil || issueID != s.sourceID || current.Revision != request.ExpectedVersion || request.Expected != nil ||
+	current, err := s.currentLocked(issueID)
+	if err != nil || current.Revision != request.ExpectedVersion || request.Expected != nil ||
 		request.Value == nil || current.Metadata[request.Key] != "" {
 		return beads.ControllerMetadataTransitionResult{}, errors.New("Q43 test transition precondition failed")
 	}
@@ -1077,12 +1080,24 @@ func (s *lifecycleAdmissionTransitionTestStore) TransitionMetadata(issueID strin
 	if err := json.Unmarshal(*request.Value, &next); err != nil {
 		return beads.ControllerMetadataTransitionResult{}, err
 	}
-	if err := s.lifecycleAdmissionBackingStore.UpdateIfMatch(issueID, request.ExpectedVersion, beads.UpdateOpts{Metadata: map[string]string{request.Key: next}}); err != nil {
-		return beads.ControllerMetadataTransitionResult{}, err
-	}
-	committed, err := s.lifecycleAdmissionBackingStore.Get(issueID)
-	if err != nil {
-		return beads.ControllerMetadataTransitionResult{}, err
+	var committed beads.Bead
+	if issueID == s.sourceID {
+		if err := s.lifecycleAdmissionBackingStore.UpdateIfMatch(issueID, request.ExpectedVersion, beads.UpdateOpts{Metadata: map[string]string{request.Key: next}}); err != nil {
+			return beads.ControllerMetadataTransitionResult{}, err
+		}
+		committed, err = s.lifecycleAdmissionBackingStore.Get(issueID)
+		if err != nil {
+			return beads.ControllerMetadataTransitionResult{}, err
+		}
+	} else {
+		if request.Kind != "lifecycle_descendant_anchor_v1" || request.Key != beadmeta.LifecycleTransitionHeadMetadataKey || request.ProtectedPermit == "" || next != request.ReceiptID {
+			return beads.ControllerMetadataTransitionResult{}, errors.New("Q43 child anchor requires protected lifecycle authority")
+		}
+		committed = current
+		committed.Metadata = cloneLifecycleAdmissionMetadata(current.Metadata)
+		committed.Metadata[request.Key] = next
+		committed.Revision++
+		s.rows[issueID] = committed
 	}
 	receipt := beads.ControllerMetadataTransitionReceipt{
 		ReceiptID: request.ReceiptID, IssueID: issueID, Scope: request.Scope, Kind: request.Kind, Actor: request.Actor,
@@ -1126,7 +1141,7 @@ func (s *lifecycleAdmissionTransitionTestStore) TransitionPatch(issueID string, 
 		return beads.RevisionTransitionPatchResult{Applied: true, Replayed: true, Receipt: &prior}, nil
 	}
 	current, err := s.currentLocked(issueID)
-	if err != nil || issueID != s.sourceID || current.Revision != request.ExpectedVersion || request.ProtectedPermit == "" {
+	if err != nil || current.Revision != request.ExpectedVersion || request.ProtectedPermit == "" {
 		return beads.RevisionTransitionPatchResult{}, beads.ErrRevisionTransitionPatchPrecondition
 	}
 	if request.Kind == s.rejectNextPatchKind {
@@ -1171,7 +1186,12 @@ func (s *lifecycleAdmissionTransitionTestStore) TransitionPatch(issueID string, 
 		}
 		current.Assignee = request.Patch.Assignee.Value
 	}
-	current.Revision++
+	if s.nextPatchRevision != 0 {
+		current.Revision = s.nextPatchRevision
+		s.nextPatchRevision++
+	} else {
+		current.Revision++
+	}
 	s.rows[issueID] = current
 	receipt := beads.RevisionTransitionPatchReceipt{
 		ReceiptID: request.ReceiptID, IssueID: issueID, Scope: request.Scope, Kind: request.Kind, Actor: request.Actor,

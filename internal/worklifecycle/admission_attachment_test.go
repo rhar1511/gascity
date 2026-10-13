@@ -103,11 +103,12 @@ func TestAdmissionAttachmentTransitionVerifierAllowsOnlyExactQ54AdvancedSource(t
 				metadata[beadmeta.MergeStrategyMetadataKey] = marker.MergeStrategy
 			}
 			setAdmissionAttachmentSnapshotOverride(t, store, source.ID, metadata)
+			store.sourceOverride.Revision = -store.sourceOverride.Revision
 			if _, _, err := adapter.VerifyCurrent(source.ID, cfg, proof.Scope); err == nil {
 				t.Fatal("strict VerifyCurrent accepted a source revision advanced by Q54")
 			}
 			current, got, err := adapter.VerifyForTransition(source.ID, cfg, proof.Scope)
-			if err != nil || got != proof || current.Revision <= proof.ToRevision {
+			if err != nil || got != proof || current.Revision == 0 || current.Revision == proof.ToRevision {
 				t.Fatalf("VerifyForTransition() = row revision %d proof %+v err %v, want exact historical Q43 proof", current.Revision, got, err)
 			}
 		})
@@ -383,10 +384,19 @@ func (s *admissionAttachmentTestStore) TransitionMetadata(issueID string, reques
 	if err != nil {
 		return beads.ControllerMetadataTransitionResult{}, err
 	}
+	// The Q43 transport returns object members in canonical key order.
+	var payloadMembers map[string]json.RawMessage
+	if err := json.Unmarshal(request.Payload, &payloadMembers); err != nil {
+		return beads.ControllerMetadataTransitionResult{}, err
+	}
+	payload, err := json.Marshal(payloadMembers)
+	if err != nil {
+		return beads.ControllerMetadataTransitionResult{}, err
+	}
 	receipt := beads.ControllerMetadataTransitionReceipt{
 		ReceiptID: request.ReceiptID, IssueID: issueID, Scope: request.Scope, Kind: request.Kind, Actor: request.Actor,
 		ExpectedVersion: request.ExpectedVersion, ToVersion: committed.Revision, Key: request.Key,
-		Value: append(json.RawMessage(nil), (*request.Value)...), Payload: append(json.RawMessage(nil), request.Payload...),
+		Value: append(json.RawMessage(nil), (*request.Value)...), Payload: payload,
 	}
 	if s.returnWithoutPersistingReceipt {
 		return beads.ControllerMetadataTransitionResult{Applied: true, Receipt: &receipt}, nil

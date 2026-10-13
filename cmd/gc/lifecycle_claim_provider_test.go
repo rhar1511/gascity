@@ -93,23 +93,46 @@ func TestLifecycleClaimProviderRechecksCanonicalReadiness(t *testing.T) {
 
 func TestLifecycleClaimProviderClaimsReadyWorkAndReplaysExactClaim(t *testing.T) {
 	for _, tc := range []struct {
-		name      string
-		template  string
-		agentName string
-		poolSlot  string
+		name         string
+		template     string
+		agentName    string
+		poolSlot     string
+		nextRevision int64
+		descendant   bool
 	}{
 		{name: "configured base", template: "pilot/worker", agentName: "pilot/worker"},
+		{name: "generated workflow step", template: "pilot/worker", agentName: "pilot/worker", descendant: true},
+		{name: "negative revision", template: "pilot/worker", agentName: "pilot/worker", nextRevision: -1000},
 		{name: "canonical pool slot", template: "pilot/worker-2", agentName: "pilot/worker-2", poolSlot: "2"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			setup, state, request := newLifecycleClaimProviderFixture(t)
+			var setup lifecycleAdmissionTransitionSetup
+			if tc.descendant {
+				fixture := newLifecycleAdmissionPolicyFixture(t, "formula = \"review\"\nversion = 1\n\n[[steps]]\nid = \"work\"\ntitle = \"Review work\"\ntype = \"bug\"\n")
+				setup = newLifecycleAdmissionTransitionSetupWithFixture(t, fixture, false)
+			} else {
+				setup = newLifecycleAdmissionTransitionSetup(t)
+			}
+			setup, state, request := newLifecycleClaimProviderFixtureForSetup(t, setup, tc.nextRevision)
 			request.Session.Template = tc.template
 			request.Session.AgentName = tc.agentName
 			request.Session.PoolSlot = tc.poolSlot
+			if tc.descendant {
+				marker, ok := lifecycleMaterializationFor(request.Work)
+				if !ok {
+					t.Fatal("source has no attached workflow")
+				}
+				request.Work = lifecycleAdmissionV1StepCandidate(t, setup, marker)
+				if request.Work.ID == marker.WorkflowID {
+					t.Fatal("fixture selected the workflow root instead of a step")
+				}
+				request.ExpectedRevision = request.Work.Revision
+				request.ExpectedTransitionHead = request.Work.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey]
+			}
 			beforeRequests := len(setup.store.patchRequests)
 			claimed, err := state.ClaimLifecycleWork(context.Background(), request)
 			if err != nil {
-				t.Fatalf("claim currently ready admitted work: %v", err)
+				t.Fatalf("claim currently ready admitted work: %v (patches=%d, anchors=%d)", err, len(setup.store.patchRequests)-beforeRequests, len(setup.store.q43Receipts))
 			}
 			if claimed.ClaimGeneration != "1" || claimed.ReceiptID == "" || claimed.Replayed || claimed.Recovered {
 				t.Fatalf("claim result = %+v, want a fresh generation-1 transition", claimed)
@@ -244,7 +267,17 @@ func (s *lifecycleClaimReadinessTestStore) Ready(queries ...beads.ReadyQuery) ([
 
 func newLifecycleClaimProviderFixture(t *testing.T) (lifecycleAdmissionTransitionSetup, *controllerState, api.LifecycleClaimTransitionRequest) {
 	t.Helper()
-	setup := newLifecycleAdmissionTransitionSetup(t)
+	return newLifecycleClaimProviderFixtureWithRevision(t, 0)
+}
+
+func newLifecycleClaimProviderFixtureWithRevision(t *testing.T, revision int64) (lifecycleAdmissionTransitionSetup, *controllerState, api.LifecycleClaimTransitionRequest) {
+	t.Helper()
+	return newLifecycleClaimProviderFixtureForSetup(t, newLifecycleAdmissionTransitionSetup(t), revision)
+}
+
+func newLifecycleClaimProviderFixtureForSetup(t *testing.T, setup lifecycleAdmissionTransitionSetup, revision int64) (lifecycleAdmissionTransitionSetup, *controllerState, api.LifecycleClaimTransitionRequest) {
+	t.Helper()
+	setup.store.nextPatchRevision = revision
 	var stderr strings.Builder
 	reconcileLifecycleAdmissionWithPermitResolver("pilot", setup.fixture.cityPath, setup.fixture.cfg, setup.cityStore, setup.rigStores, nil, &stderr, setup.permitResolver)
 	current, err := setup.store.Get(setup.source.ID)
@@ -281,5 +314,204 @@ func seedLifecycleClaimBlocker(t *testing.T, setup lifecycleAdmissionTransitionS
 	}
 	if err := setup.store.lifecycleAdmissionBackingStore.DepAdd(setup.source.ID, blocker.ID, "blocks"); err != nil {
 		t.Fatalf("block admitted source: %v", err)
+	}
+}
+
+func newLifecycleDescendantClaimProviderFixture(t *testing.T) (lifecycleAdmissionTransitionSetup, *controllerState, api.LifecycleClaimTransitionRequest) {
+	t.Helper()
+	fixture := newLifecycleAdmissionPolicyFixture(t, "formula = \"review\"\nversion = 1\n\n[[steps]]\nid = \"work\"\ntitle = \"Review work\"\ntype = \"bug\"\n")
+	setup, state, request := newLifecycleClaimProviderFixtureForSetup(t, newLifecycleAdmissionTransitionSetupWithFixture(t, fixture, false), 0)
+	marker, ok := lifecycleMaterializationFor(request.Work)
+	if !ok {
+		t.Fatal("source has no workflow")
+	}
+	request.Work = lifecycleAdmissionV1StepCandidate(t, setup, marker)
+	request.ExpectedRevision = request.Work.Revision
+	request.ExpectedTransitionHead = ""
+	return setup, state, request
+}
+
+func TestLifecycleDescendantClaimRefusesInvalidAuthorityBeforeWrites(t *testing.T) {
+	for _, scenario := range []string{"missing parent attachment", "missing parent transition", "changed policy", "wrong session route", "stale step revision", "forged parent", "cross store", "held step", "v1 scaffolding"} {
+		t.Run(scenario, func(t *testing.T) {
+			setup, state, request := newLifecycleDescendantClaimProviderFixture(t)
+			switch scenario {
+			case "missing parent attachment":
+				clear(setup.store.q43Receipts)
+			case "missing parent transition":
+				clear(setup.store.patchReceipts)
+			case "changed policy":
+				workflow := "other-workflow"
+				setup.fixture.cfg.Agents[0].DefaultSlingFormula = &workflow
+			case "wrong session route":
+				request.Session.Template, request.Session.AgentName = "pilot/other", "pilot/other"
+			case "stale step revision":
+				request.ExpectedRevision--
+			case "forged parent", "cross store":
+				marker, ok := lifecycleMaterializationFor(request.Work)
+				if !ok {
+					t.Fatal("step has no lineage")
+				}
+				if scenario == "forged parent" {
+					marker.SourceID = "other-source"
+				} else {
+					marker.WorkflowStoreRef = "rig:other"
+				}
+				encoded, err := encodeLifecycleMaterialization(marker)
+				if err != nil {
+					t.Fatal(err)
+				}
+				row := request.Work
+				row.Metadata = cloneLifecycleAdmissionMetadata(row.Metadata)
+				row.Metadata[beadmeta.LifecycleMaterializationMetadataKey] = encoded
+				setup.store.rows[row.ID] = row
+			case "held step":
+				row := request.Work
+				row.Labels = append(row.Labels, beadmeta.DispatchHoldLabels[0])
+				setup.store.rows[row.ID] = row
+			case "v1 scaffolding":
+				setup, state, request = newLifecycleClaimProviderFixture(t)
+				marker, _ := lifecycleMaterializationFor(request.Work)
+				request.Work = lifecycleAdmissionV1StepCandidate(t, setup, marker)
+				request.ExpectedRevision, request.ExpectedTransitionHead = request.Work.Revision, ""
+			}
+			anchors, patches := len(setup.store.q43Receipts), len(setup.store.patchRequests)
+			if _, err := state.ClaimLifecycleWork(context.Background(), request); err == nil {
+				t.Fatal("invalid descendant authority claimed work")
+			}
+			if len(setup.store.q43Receipts) != anchors || len(setup.store.patchRequests) != patches {
+				t.Fatal("refused descendant wrote an anchor or claim")
+			}
+		})
+	}
+}
+
+func TestLifecycleDescendantClaimRecoversInterruptedWrites(t *testing.T) {
+	for _, scenario := range []string{"claim interrupted after anchor", "claim response lost", "negative step revision"} {
+		t.Run(scenario, func(t *testing.T) {
+			setup, state, request := newLifecycleDescendantClaimProviderFixture(t)
+			beforeAnchors, beforeClaims := len(setup.store.q43Receipts), len(setup.store.patchReceipts)
+			switch scenario {
+			case "claim interrupted after anchor":
+				setup.store.failNextPatchKind = "lifecycle_descendant_claim_identity_v1"
+				if _, err := state.ClaimLifecycleWork(context.Background(), request); err == nil {
+					t.Fatal("interrupted claim returned success")
+				}
+				if len(setup.store.q43Receipts) != beforeAnchors+1 || len(setup.store.patchReceipts) != beforeClaims {
+					t.Fatal("interruption did not leave exactly the committed anchor")
+				}
+			case "claim response lost":
+				setup.store.loseNextPatchKind = "lifecycle_descendant_claim_identity_v1"
+			case "negative step revision":
+				row := request.Work
+				row.Revision = -3000
+				setup.store.rows[row.ID] = row
+				request.Work, request.ExpectedRevision = row, row.Revision
+			}
+			claimed, err := state.ClaimLifecycleWork(context.Background(), request)
+			if err != nil {
+				t.Fatalf("recover descendant claim: %v", err)
+			}
+			if claimed.Recovered != (scenario == "claim response lost") || claimed.ClaimGeneration != "1" {
+				t.Fatalf("unexpected recovered claim: %+v", claimed)
+			}
+			if len(setup.store.q43Receipts) != beforeAnchors+1 || len(setup.store.patchReceipts) != beforeClaims+1 {
+				t.Fatal("claim recovery duplicated durable mutations")
+			}
+			writes := len(setup.store.patchRequests)
+			replay, err := state.ClaimLifecycleWork(context.Background(), request)
+			if err != nil || !replay.Replayed || replay.ReceiptID != claimed.ReceiptID || len(setup.store.patchRequests) != writes {
+				t.Fatalf("exact replay: %+v, %v", replay, err)
+			}
+			request.Session.InstanceToken = "different-incarnation"
+			if _, err := state.ClaimLifecycleWork(context.Background(), request); err == nil {
+				t.Fatal("another incarnation replayed the old claim")
+			}
+			if len(setup.store.q43Receipts) != beforeAnchors+1 || len(setup.store.patchRequests) != writes {
+				t.Fatal("wrong incarnation wrote another transition")
+			}
+		})
+	}
+}
+
+func newLifecycleCoreGraphClaimProviderFixture(t *testing.T) (lifecycleAdmissionTransitionSetup, *controllerState, api.LifecycleClaimTransitionRequest) {
+	t.Helper()
+	setup, state, request := newLifecycleClaimProviderFixtureForSetup(t, newLifecycleAdmissionCoreGraphSetup(t), 0)
+	ready, err := setup.store.Ready(beads.ReadyQuery{TierMode: beads.FederatedReadTier})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, row := range ready {
+		if row.Metadata[beadmeta.StepRefMetadataKey] == "mol-do-work.do-work" {
+			request.Work, found = row, true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("configured core graph has no ready worker step")
+	}
+	request.ExpectedRevision, request.ExpectedTransitionHead = request.Work.Revision, ""
+	return setup, state, request
+}
+
+func TestLifecycleDescendantClaimCoreGraphWorkerStep(t *testing.T) {
+	setup, state, request := newLifecycleCoreGraphClaimProviderFixture(t)
+	before := len(setup.store.patchRequests)
+	claimed, err := state.ClaimLifecycleWork(context.Background(), request)
+	if err != nil {
+		t.Fatalf("claim configured graph worker step: %v", err)
+	}
+	if claimed.ClaimGeneration != "1" || claimed.ReceiptID == "" || len(setup.store.patchRequests) != before+1 {
+		t.Fatalf("graph worker claim: %+v", claimed)
+	}
+	replay, err := state.ClaimLifecycleWork(context.Background(), request)
+	if err != nil || !replay.Replayed || replay.ReceiptID != claimed.ReceiptID || len(setup.store.patchRequests) != before+1 {
+		t.Fatalf("graph worker replay: %+v, %v", replay, err)
+	}
+}
+
+func TestLifecycleDescendantClaimRejectsUnprovenGraphStep(t *testing.T) {
+	for _, scenario := range []string{"changed description", "unknown step", "duplicate step", "wrong parent", "missing dependency"} {
+		t.Run(scenario, func(t *testing.T) {
+			setup, state, request := newLifecycleCoreGraphClaimProviderFixture(t)
+			row := request.Work
+			row.Metadata = cloneLifecycleAdmissionMetadata(row.Metadata)
+			switch scenario {
+			case "changed description":
+				row.Description += " changed worker instructions"
+			case "unknown step":
+				row.Metadata[beadmeta.StepRefMetadataKey] = "mol-do-work.unsigned"
+			case "wrong parent":
+				row.ParentID = "other-workflow"
+			case "duplicate step":
+				duplicate := row
+				duplicate.ID = ""
+				if _, err := setup.store.Create(duplicate); err != nil {
+					t.Fatal(err)
+				}
+			case "missing dependency":
+				deps, err := setup.store.DepList(row.ID, "down")
+				if err != nil || len(deps) == 0 {
+					t.Fatalf("graph has no dependency to remove: %v", err)
+				}
+				if err := setup.store.DepRemove(row.ID, deps[0].DependsOnID); err != nil {
+					t.Fatal(err)
+				}
+				row, err = setup.store.Get(row.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				request.ExpectedRevision = row.Revision
+			}
+			setup.store.rows[row.ID] = row
+			anchors, patches := len(setup.store.q43Receipts), len(setup.store.patchRequests)
+			if _, err := state.ClaimLifecycleWork(context.Background(), request); err == nil {
+				t.Fatal("unproven graph worker step was claimed")
+			}
+			if len(setup.store.q43Receipts) != anchors || len(setup.store.patchRequests) != patches {
+				t.Fatal("unproven graph step wrote an anchor or claim")
+			}
+		})
 	}
 }

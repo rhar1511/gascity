@@ -157,7 +157,7 @@ func (w *RemoteDecisionFrontierRecordWriter) verifyMetadataTransitionApplied(bef
 		receipt.Kind != request.Kind || receipt.Actor != request.Actor || receipt.ExpectedVersion != request.ExpectedVersion ||
 		receipt.Key != request.Key || !bytes.Equal(nilSafeRaw(rawControllerTransitionPointer(receipt.Expected)), nilSafeRaw(request.Expected)) ||
 		!bytes.Equal(nilSafeRaw(rawControllerTransitionPointer(receipt.Value)), nilSafeRaw(request.Value)) ||
-		!bytes.Equal(receipt.Payload, request.Payload) || receipt.ToVersion <= 0 || receipt.ToVersion == request.ExpectedVersion {
+		!bytes.Equal(receipt.Payload, request.Payload) || receipt.ToVersion == 0 || receipt.ToVersion == request.ExpectedVersion {
 		return false, ErrRemoteDecisionFrontierMetadataCASProtocol
 	}
 	stored, found, err := w.readMetadataTransitionReceipt(id, request)
@@ -211,7 +211,7 @@ func (w *RemoteDecisionFrontierRecordWriter) readMetadataTransitionReceipt(id st
 }
 
 func (w *RemoteDecisionFrontierRecordWriter) validateMetadataTransitionRecord(record Bead, id string) error {
-	if record.ID != id || record.Revision <= 0 {
+	if record.ID != id || record.Revision == 0 {
 		return ErrRemoteDecisionFrontierMetadataCASProtocol
 	}
 	doc, _, err := decisionFrontierLinkRecord(record)

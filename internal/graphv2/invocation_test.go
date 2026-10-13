@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1195,5 +1196,56 @@ func TestSyntheticInputConvoyIsWorkClassAndCoResidentWithItsTarget(t *testing.T)
 	}
 	if !tracked {
 		t.Fatalf("input convoy %s does not track target %s", convoyID, target.ID)
+	}
+}
+
+func TestPrepareEvidenceInvocationPreservesClosedInputsWithoutAllowingLaunch(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	writeFormula(t, dir, "work.formula.toml", `
+formula = "work"
+version = 1
+contract = "graph.v2"
+type = "workflow"
+[[steps]]
+id = "inspect"
+title = "Inspect {{convoy_id}}"
+`)
+	store := beads.NewMemStore()
+	target, err := store.Create(beads.Bead{Title: "target", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := PreparePreviewInvocation(context.Background(), store, "work", []string{dir}, target.ID, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(target.ID); err != nil {
+		t.Fatal(err)
+	}
+	closed, err := store.Get(target.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence, err := PrepareEvidenceInvocation(context.Background(), store, "work", []string{dir}, target.ID, nil)
+	if err != nil || evidence.InputConvoy != before.InputConvoy || !reflect.DeepEqual(evidence.Vars, before.Vars) {
+		t.Fatalf("completed workflow compiler inputs changed: before=%+v after=%+v err=%v", before, evidence, err)
+	}
+	if _, err := PreparePreviewInvocation(context.Background(), store, "work", []string{dir}, target.ID, false, nil); err == nil {
+		t.Fatal("ordinary preview accepted a closed target")
+	}
+	if _, err := PrepareInvocation(context.Background(), store, "work", []string{dir}, target.ID, nil); err == nil {
+		t.Fatal("launch accepted a closed target")
+	}
+	after, err := store.Get(target.ID)
+	if err != nil || !reflect.DeepEqual(closed, after) {
+		t.Fatal("evidence reconstruction mutated closed work")
+	}
+	convoys, err := store.List(beads.ListQuery{Type: "convoy"})
+	if err != nil || len(convoys) != 0 {
+		t.Fatalf("read-only reconstruction created a convoy: %v %v", convoys, err)
+	}
+	if _, err := PrepareEvidenceInvocation(context.Background(), store, "work", []string{dir}, "missing", nil); err == nil {
+		t.Fatal("evidence reconstruction accepted a missing target")
 	}
 }

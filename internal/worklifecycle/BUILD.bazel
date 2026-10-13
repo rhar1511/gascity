@@ -7,6 +7,7 @@ go_library(
         "admission_policy_v2.go",
         "admission_proof_evaluation.go",
         "claim_transition.go",
+        "descendant_claim.go",
         "receipt.go",
         "recovery.go",
         "recovery_escalation_request.go",

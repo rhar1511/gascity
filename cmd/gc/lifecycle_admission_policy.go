@@ -125,7 +125,7 @@ func buildLifecycleAdmissionPolicy(
 			return lifecycleAdmissionPolicy{}, fmt.Errorf("graph.v2 generated input convoy requires one co-resident rig-scoped source")
 		}
 		vars = sling.BuildGraphV2SlingFormulaVars(receipt.Workflow, bead.ID, nil, *targetAgent, compileDeps)
-		invocation, err := graphv2.PreparePreviewInvocation(context.Background(), leg.store, receipt.Workflow, searchPaths, bead.ID, false, vars)
+		invocation, err := graphv2.PrepareEvidenceInvocation(context.Background(), leg.store, receipt.Workflow, searchPaths, bead.ID, vars)
 		if err != nil {
 			return lifecycleAdmissionPolicy{}, fmt.Errorf("resolving graph invocation inputs: %w", err)
 		}

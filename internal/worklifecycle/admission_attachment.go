@@ -233,7 +233,7 @@ func (a *AdmissionAttachmentAdapter) verify(id string, cfg config.LifecycleConfi
 }
 
 func verifyAdvancedAdmissionTransition(current beads.Bead, encoded string, admission AdmissionReceiptV2, digest string, proof AdmissionAttachmentProof) bool {
-	if current.ID != proof.WorkItemID || current.Revision <= proof.ToRevision ||
+	if current.ID != proof.WorkItemID || current.Revision == 0 || current.Revision == proof.ToRevision ||
 		current.Metadata[beadmeta.LifecycleAdmissionReceiptV2MetadataKey] != encoded ||
 		current.Metadata[beadmeta.LifecycleAdmissionReceiptMetadataKey] != "" {
 		return false
@@ -284,6 +284,16 @@ func admissionAttachmentRequest(receipt AdmissionReceiptV2, encoded, digest stri
 	receiptID, err := admissionAttachmentReceiptID(payload, encoded)
 	if err != nil {
 		return beads.ControllerMetadataTransitionRequest{}, fmt.Errorf("encode deterministic admission attachment identity: %w", err)
+	}
+	// Keep the stable receipt identity while matching Q43's canonical object
+	// key order in both the returned transition and durable receipt readback.
+	var payloadMembers map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &payloadMembers); err != nil {
+		return beads.ControllerMetadataTransitionRequest{}, err
+	}
+	payload, err = json.Marshal(payloadMembers)
+	if err != nil {
+		return beads.ControllerMetadataTransitionRequest{}, err
 	}
 	return beads.ControllerMetadataTransitionRequest{
 		ReceiptID: receiptID,

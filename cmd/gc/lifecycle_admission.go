@@ -1409,7 +1409,7 @@ func filterHookLifecycleCandidates(candidates []beads.Bead, opts hookClaimOption
 			fmt.Fprintf(stderr, "gc hook --claim: holding lifecycle descendant %s: %s\n", bead.ID, reason) //nolint:errcheck
 			continue
 		}
-		decision := worklifecycle.EvaluateAdmission(bead, opts.Lifecycle, bead.LifecycleScope)
+		decision := lifecycleCurrentSourceAdmission(bead, opts)
 		if !decision.Requested && !lifecycleEnrollmentEvidence(bead) {
 			filtered = append(filtered, bead)
 			continue
@@ -1424,10 +1424,6 @@ func filterHookLifecycleCandidates(candidates []beads.Bead, opts hookClaimOption
 			reason = "trusted lifecycle scope is missing"
 		case !decision.Admitted:
 			// Keep the receipt verifier's item-specific explanation.
-		case !lifecycleCurrentSource(bead, opts):
-			reason = "canonical source admission or current eligibility could not be verified"
-		case !lifecycleAdmissionRouteMatches(opts.LifecycleCity, bead, bead.LifecycleScope):
-			reason = "attached workflow or route does not match the signed admission contract"
 		case !hookLifecycleRouteMatches(opts.LifecycleCity, decision.Receipt.Route, opts.RouteTargets):
 			reason = "candidate route does not match the signed admission contract"
 		default:
@@ -1439,26 +1435,53 @@ func filterHookLifecycleCandidates(candidates []beads.Bead, opts hookClaimOption
 	return filtered
 }
 
-func lifecycleCurrentSource(candidate beads.Bead, opts hookClaimOptions) bool {
-	if opts.ResolveLifecycleStore == nil || strings.TrimSpace(candidate.SourceStoreRef) == "" || strings.TrimSpace(candidate.LifecycleScope) == "" {
-		return false
+// lifecycleCurrentSourceAdmission verifies a source candidate using the same
+// exact Q43 attachment, current Q54 head, and policy proof as descendant claims.
+func lifecycleCurrentSourceAdmission(candidate beads.Bead, opts hookClaimOptions) worklifecycle.AdmissionDecision {
+	decision := worklifecycle.EvaluateAdmission(candidate, opts.Lifecycle, candidate.LifecycleScope)
+	if !decision.Requested {
+		return decision
+	}
+	if !opts.TrustedLifecycleScope || opts.ResolveLifecycleStore == nil || opts.VerifyLifecycleTransitionHead == nil ||
+		strings.TrimSpace(candidate.SourceStoreRef) == "" || strings.TrimSpace(candidate.LifecycleScope) == "" {
+		decision.Reason = "trusted source store and current transition proof are unavailable"
+		return decision
 	}
 	store, err := opts.ResolveLifecycleStore(candidate.SourceStoreRef)
 	if err != nil || store == nil {
-		return false
+		return decision
 	}
-	current, err := store.Get(candidate.ID)
+	adapter, err := worklifecycle.NewAdmissionAttachmentAdapter(store)
 	if err != nil {
-		return false
+		return decision
 	}
-	current.SourceStoreRef = candidate.SourceStoreRef
-	current.LifecycleScope = candidate.LifecycleScope
-	decision := worklifecycle.EvaluateAdmission(current, opts.Lifecycle, current.LifecycleScope)
+	current, attachment, err := adapter.VerifyForTransition(candidate.ID, opts.Lifecycle, candidate.LifecycleScope)
+	if err != nil || current.ID != candidate.ID || current.Revision != candidate.Revision ||
+		current.Metadata[beadmeta.LifecycleAdmissionReceiptV2MetadataKey] != candidate.Metadata[beadmeta.LifecycleAdmissionReceiptV2MetadataKey] {
+		decision.Reason = "canonical source attachment or revision could not be verified"
+		return decision
+	}
+	current.SourceStoreRef, current.LifecycleScope = candidate.SourceStoreRef, candidate.LifecycleScope
+	head, projection, err := opts.VerifyLifecycleTransitionHead(current, store, current.SourceStoreRef, attachment)
+	if err != nil || head.FromAttachment || head.ToVersion != current.Revision || head.ReceiptID == "" ||
+		head.ReceiptID != current.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey] {
+		decision.Reason = "canonical source transition head or current policy could not be verified"
+		return decision
+	}
+	decision = worklifecycle.EvaluateAdmissionWithTransitionProof(current, opts.Lifecycle, current.LifecycleScope,
+		worklifecycle.AdmissionProofInputsV2{Attachment: &attachment, PolicyProjection: &projection}, head)
+	if !decision.Admitted {
+		return decision
+	}
 	status := strings.ToLower(strings.TrimSpace(current.Status))
 	owner := strings.TrimSpace(current.Assignee)
-	return decision.Admitted && lifecycleAdmissionRouteMatches(opts.LifecycleCity, current, current.LifecycleScope) &&
-		(status == "open" || status == "in_progress") && !beads.IsDeferred(current, time.Now()) && !lifecycleRowHeld(current) &&
-		(owner == "" || hookClaimHasIdentity(owner, opts.IdentityCandidates))
+	if !lifecycleAttachedSourceRouteCurrent(opts.LifecycleCity, current, decision.Receipt, current.LifecycleScope) ||
+		(status != "open" && status != "in_progress") || beads.IsDeferred(current, time.Now()) || lifecycleRowHeld(current) ||
+		(owner != "" && !hookClaimHasIdentity(owner, opts.IdentityCandidates)) {
+		decision.Admitted = false
+		decision.Reason = "canonical source route or current eligibility could not be verified"
+	}
+	return decision
 }
 
 func lifecycleLineageCurrent(candidate beads.Bead, lineage lifecycleMaterialization, opts hookClaimOptions) bool {
@@ -1530,8 +1553,9 @@ func lifecycleLineageCurrent(candidate beads.Bead, lineage lifecycleMaterializat
 		return false
 	}
 	root, err := workflowStore.Get(workflowID)
-	if err != nil || root.ID != workflowID || !lifecycleFormulaV1Root(root, lineage.Workflow) ||
-		strings.EqualFold(strings.TrimSpace(root.Metadata[beadmeta.FormulaContractMetadataKey]), beadmeta.FormulaContractGraphV2) ||
+	graphRoot := sourceworkflow.IsWorkflowRoot(root) && root.Metadata[beadmeta.FormulaContractMetadataKey] == beadmeta.FormulaContractGraphV2 &&
+		projection.FormulaSchemaVersion == beadmeta.FormulaContractGraphV2 && lineage.SourceStoreRef == lineage.WorkflowStoreRef && candidate.ID != workflowID
+	if err != nil || root.ID != workflowID || (!lifecycleFormulaV1Root(root, lineage.Workflow) && !graphRoot) ||
 		strings.TrimSpace(root.Metadata[beadmeta.FormulaNameMetadataKey]) != lineage.Workflow ||
 		strings.TrimSpace(root.Metadata[beadmeta.MergeStrategyMetadataKey]) != lineage.MergeStrategy ||
 		root.Metadata[beadmeta.IdempotencyKeyMetadataKey] != lifecycleMaterializationID(lineage.SourceID, lineage.Scope, lineage.Contract) ||

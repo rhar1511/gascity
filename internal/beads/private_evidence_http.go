@@ -60,15 +60,20 @@ var (
 
 const redactedPrivateEvidenceDiagnostic = "[private attempt-evidence output redacted]"
 
-const privateEvidenceLifecycleAdmissionAttachmentKind = "lifecycle_admission_v2_attach"
+const (
+	privateEvidenceLifecycleAdmissionAttachmentKind = "lifecycle_admission_v2_attach"
+	privateEvidenceLifecycleDescendantAnchorKind    = "lifecycle_descendant_anchor_v1"
+)
 
 var privateEvidenceLifecyclePatchKinds = map[string]struct{}{
-	"lifecycle_source_reservation_v1":       {},
-	"lifecycle_source_materialization_v1":   {},
-	"lifecycle_source_claim_identity_v1":    {},
-	"lifecycle_source_recovery_budget_v1":   {},
-	"lifecycle_source_completion_budget_v1": {},
-	"lifecycle_source_close_v1":             {},
+	"lifecycle_descendant_claim_identity_v1":  {},
+	"lifecycle_source_reservation_v1":         {},
+	"lifecycle_source_materialization_v1":     {},
+	"lifecycle_source_claim_identity_v1":      {},
+	"lifecycle_source_recovery_budget_v1":     {},
+	"lifecycle_source_recovery_escalation_v1": {},
+	"lifecycle_source_completion_budget_v1":   {},
+	"lifecycle_source_close_v1":               {},
 }
 
 func redactPrivateEvidenceDiagnostic(value string) string {
@@ -547,6 +552,9 @@ func (c *privateEvidenceHTTPClient) metadataTransitionScopeAllowed(scope, kind s
 	if kind == privateEvidenceLifecycleAdmissionAttachmentKind {
 		return (c.lifecycleScope != "" && scope == c.lifecycleScope) ||
 			(c.admissionScope != "" && scope == c.admissionScope)
+	}
+	if kind == privateEvidenceLifecycleDescendantAnchorKind {
+		return c.lifecycleScope != "" && scope == c.lifecycleScope
 	}
 	if scope == c.scopeRef {
 		return true

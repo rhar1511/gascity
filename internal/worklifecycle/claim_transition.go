@@ -99,7 +99,7 @@ func (c *TransitionChain) ClaimIdentity(request ClaimIdentityRequest) (ClaimIden
 		return ClaimIdentityResult{}, ErrTransitionChainUnavailable
 	}
 	if !validTransitionText(request.IssueID, 200) || !validTransitionText(request.SessionID, 200) ||
-		strings.TrimSpace(request.SessionID) != request.SessionID || request.ExpectedRevision <= 0 ||
+		strings.TrimSpace(request.SessionID) != request.SessionID || request.ExpectedRevision == 0 ||
 		!validTransitionText(request.ExpectedTransitionHead, 200) ||
 		strings.TrimSpace(request.ExpectedTransitionHead) != request.ExpectedTransitionHead {
 		return ClaimIdentityResult{}, ErrTransitionChainInvalid

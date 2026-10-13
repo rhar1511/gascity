@@ -103,7 +103,7 @@ func prepareBeadsAdmission(storeRef string, receipt worklifecycle.AdmissionRecei
 	if err != nil {
 		return beadsAdmissionDraft{}, err
 	}
-	if source.Revision <= 0 || source.Status != "open" || lifecycleEnrollmentEvidence(source) {
+	if source.Revision == 0 || source.Status != "open" || lifecycleEnrollmentEvidence(source) {
 		return beadsAdmissionDraft{}, fmt.Errorf("source must be open, unenrolled, and have an authoritative revision")
 	}
 	receipt.ExpectedWorkRevision = source.Revision
