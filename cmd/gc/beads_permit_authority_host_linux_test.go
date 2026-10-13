@@ -23,6 +23,12 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// hostBeadsPermitBrokerFixture keeps test descriptors out of production policy.
+type hostBeadsPermitBrokerFixture struct {
+	hostBeadsPermitAuthorityEntry
+	privateKeyFD int
+}
+
 func TestHostBeadsPermitEffectiveCapability(t *testing.T) {
 	var capabilities [2]unix.CapUserData
 	if hostBeadsPermitEffectiveCapability(capabilities[:], unix.CAP_SYS_PTRACE) {
@@ -47,7 +53,7 @@ func TestHostBeadsPermitResolverLoadsDistinctExactScopes(t *testing.T) {
 	secondEntry, secondKey := hostBeadsPermitBrokerTestEntry(t, "beta", "rig:workers", "key-beta", "beta-key.pem")
 	_ = firstKey
 	_ = secondKey
-	writeHostBeadsPermitAuthority(t, directory, []hostBeadsPermitAuthorityEntry{firstEntry, secondEntry})
+	writeHostBeadsPermitAuthority(t, directory, []hostBeadsPermitBrokerFixture{firstEntry, secondEntry})
 
 	resolver, err := loadHostBeadsPermitResolver(directory)
 	if err != nil {
@@ -116,7 +122,7 @@ func TestHostBeadsPermitResolverCloseDestroysSigner(t *testing.T) {
 	directory := t.TempDir()
 	entry, key := hostBeadsPermitBrokerTestEntry(t, "alpha", "city:alpha", "key-alpha", "signing-key.pem")
 	_ = key
-	writeHostBeadsPermitAuthority(t, directory, []hostBeadsPermitAuthorityEntry{entry})
+	writeHostBeadsPermitAuthority(t, directory, []hostBeadsPermitBrokerFixture{entry})
 	resolver, err := loadHostBeadsPermitResolver(directory)
 	if err != nil {
 		t.Fatalf("loadHostBeadsPermitResolver: %v", err)
@@ -194,7 +200,7 @@ func TestHostBeadsPermitResolverRejectsUnsafeDirectoryAndFiles(t *testing.T) {
 			t.Fatal(err)
 		}
 		entry.privateKeyFD = fd
-		writeHostBeadsPermitDocument(t, directory, []hostBeadsPermitAuthorityEntry{entry})
+		writeHostBeadsPermitDocument(t, directory, []hostBeadsPermitBrokerFixture{entry})
 		if _, err := loadHostBeadsPermitResolver(directory); err == nil {
 			t.Fatal("named private-key file descriptor was accepted")
 		}
@@ -204,7 +210,7 @@ func TestHostBeadsPermitResolverRejectsUnsafeDirectoryAndFiles(t *testing.T) {
 		directory := t.TempDir()
 		entry, key := hostBeadsPermitBrokerTestEntry(t, "alpha", "city:alpha", "key-alpha", "")
 		replaceHostBeadsPermitTestKey(t, &entry, key, false)
-		writeHostBeadsPermitDocument(t, directory, []hostBeadsPermitAuthorityEntry{entry})
+		writeHostBeadsPermitDocument(t, directory, []hostBeadsPermitBrokerFixture{entry})
 		if _, err := loadHostBeadsPermitResolver(directory); err == nil {
 			t.Fatal("unsealed private-key memfd was accepted")
 		}
@@ -214,7 +220,7 @@ func TestHostBeadsPermitResolverRejectsUnsafeDirectoryAndFiles(t *testing.T) {
 		directory := t.TempDir()
 		entry, _ := hostBeadsPermitBrokerTestEntry(t, "alpha", "city:alpha", "key-alpha", "")
 		replaceHostBeadsPermitTestKey(t, &entry, []byte(strings.Repeat("x", maxHostBeadsPermitKeyBytes+1)), true)
-		writeHostBeadsPermitDocument(t, directory, []hostBeadsPermitAuthorityEntry{entry})
+		writeHostBeadsPermitDocument(t, directory, []hostBeadsPermitBrokerFixture{entry})
 		if _, err := loadHostBeadsPermitResolver(directory); err == nil {
 			t.Fatal("oversized private key was accepted")
 		}
@@ -320,16 +326,16 @@ func TestHostBeadsPermitResolverRejectsDuplicateScopesAndKeys(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		entries []hostBeadsPermitAuthorityEntry
+		entries []hostBeadsPermitBrokerFixture
 	}{
-		{name: "duplicate scope", entries: []hostBeadsPermitAuthorityEntry{first, first}},
-		{name: "duplicate key identifier", entries: []hostBeadsPermitAuthorityEntry{first, func() hostBeadsPermitAuthorityEntry { second.KeyID = first.KeyID; return second }()}},
-		{name: "duplicate public key", entries: []hostBeadsPermitAuthorityEntry{first, func() hostBeadsPermitAuthorityEntry {
+		{name: "duplicate scope", entries: []hostBeadsPermitBrokerFixture{first, first}},
+		{name: "duplicate key identifier", entries: []hostBeadsPermitBrokerFixture{first, func() hostBeadsPermitBrokerFixture { second.KeyID = first.KeyID; return second }()}},
+		{name: "duplicate public key", entries: []hostBeadsPermitBrokerFixture{first, func() hostBeadsPermitBrokerFixture {
 			second.KeyID = "key-other"
 			replaceHostBeadsPermitTestKey(t, &second, firstKey, true)
 			return second
 		}()}},
-		{name: "reused key handle", entries: []hostBeadsPermitAuthorityEntry{first, func() hostBeadsPermitAuthorityEntry { second.PrivateKeyHandle = first.PrivateKeyHandle; return second }()}},
+		{name: "reused key handle", entries: []hostBeadsPermitBrokerFixture{first, func() hostBeadsPermitBrokerFixture { second.PrivateKeyHandle = first.PrivateKeyHandle; return second }()}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -375,7 +381,7 @@ func TestHostBeadsPermitResolverRejectsNonStrictDocumentsAndUnsafePaths(t *testi
 		entry, _ := hostBeadsPermitBrokerTestEntry(t, "alpha", "city:alpha", "key-alpha", "")
 		entry.privateKeyFD = 2
 		entry.PrivateKeyHandle = ""
-		writeHostBeadsPermitDocument(t, directory, []hostBeadsPermitAuthorityEntry{entry})
+		writeHostBeadsPermitDocument(t, directory, []hostBeadsPermitBrokerFixture{entry})
 		if _, err := loadHostBeadsPermitResolver(directory); err == nil {
 			t.Fatal("standard private-key descriptor was accepted")
 		}
@@ -384,7 +390,7 @@ func TestHostBeadsPermitResolverRejectsNonStrictDocumentsAndUnsafePaths(t *testi
 	t.Run("city store reference mismatch", func(t *testing.T) {
 		directory := t.TempDir()
 		entry, _ := hostBeadsPermitBrokerTestEntry(t, "alpha", "city:other", "key-alpha", "")
-		writeHostBeadsPermitAuthority(t, directory, []hostBeadsPermitAuthorityEntry{entry})
+		writeHostBeadsPermitAuthority(t, directory, []hostBeadsPermitBrokerFixture{entry})
 		if _, err := loadHostBeadsPermitResolver(directory); err == nil {
 			t.Fatal("city store reference for another city was accepted")
 		}
@@ -403,7 +409,7 @@ func TestHostBeadsPermitResolverRejectsNonStrictDocumentsAndUnsafePaths(t *testi
 		}
 		key := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: wrongPKCS8})
 		replaceHostBeadsPermitTestKey(t, &entry, key, true)
-		writeHostBeadsPermitAuthority(t, directory, []hostBeadsPermitAuthorityEntry{entry})
+		writeHostBeadsPermitAuthority(t, directory, []hostBeadsPermitBrokerFixture{entry})
 		if _, err := loadHostBeadsPermitResolver(directory); err == nil {
 			t.Fatal("non-Ed25519 private key was accepted")
 		}
@@ -415,7 +421,7 @@ func TestHostBeadsPermitResolverErrorsDoNotExposePrivateKeyBytes(t *testing.T) {
 	entry, _ := hostBeadsPermitBrokerTestEntry(t, "alpha", "city:alpha", "key-alpha", "signing-key.pem")
 	secret := []byte("never-print-this-private-key-material")
 	replaceHostBeadsPermitTestKey(t, &entry, secret, true)
-	writeHostBeadsPermitAuthority(t, directory, []hostBeadsPermitAuthorityEntry{entry})
+	writeHostBeadsPermitAuthority(t, directory, []hostBeadsPermitBrokerFixture{entry})
 	_, err := loadHostBeadsPermitResolver(directory)
 	if err == nil {
 		t.Fatal("invalid private key was accepted")
@@ -429,11 +435,11 @@ func hostBeadsPermitTestDirectory(t *testing.T) string {
 	t.Helper()
 	directory := t.TempDir()
 	entry, _ := hostBeadsPermitBrokerTestEntry(t, "alpha", "city:alpha", "key-alpha", "")
-	writeHostBeadsPermitAuthority(t, directory, []hostBeadsPermitAuthorityEntry{entry})
+	writeHostBeadsPermitAuthority(t, directory, []hostBeadsPermitBrokerFixture{entry})
 	return directory
 }
 
-func replaceHostBeadsPermitTestKey(t *testing.T, entry *hostBeadsPermitAuthorityEntry, key []byte, sealed bool) {
+func replaceHostBeadsPermitTestKey(t *testing.T, entry *hostBeadsPermitBrokerFixture, key []byte, sealed bool) {
 	t.Helper()
 	fd, err := unix.MemfdCreate("gascity-test-protected-key", unix.MFD_CLOEXEC|unix.MFD_ALLOW_SEALING)
 	if err != nil {
@@ -463,7 +469,7 @@ func replaceHostBeadsPermitTestKey(t *testing.T, entry *hostBeadsPermitAuthority
 	entry.privateKeyFD = fd
 }
 
-func writeHostBeadsPermitAuthority(t *testing.T, directory string, entries []hostBeadsPermitAuthorityEntry) {
+func writeHostBeadsPermitAuthority(t *testing.T, directory string, entries []hostBeadsPermitBrokerFixture) {
 	t.Helper()
 	if err := os.Chmod(directory, 0o700); err != nil {
 		t.Fatal(err)
@@ -471,7 +477,7 @@ func writeHostBeadsPermitAuthority(t *testing.T, directory string, entries []hos
 	writeHostBeadsPermitDocument(t, directory, entries)
 }
 
-func writeHostBeadsPermitDocument(t *testing.T, directory string, entries []hostBeadsPermitAuthorityEntry) {
+func writeHostBeadsPermitDocument(t *testing.T, directory string, entries []hostBeadsPermitBrokerFixture) {
 	t.Helper()
 	placeholder, err := os.CreateTemp("/tmp", "gc-key-broker-*.sock")
 	if err != nil {
@@ -484,7 +490,11 @@ func writeHostBeadsPermitDocument(t *testing.T, directory string, entries []host
 	if err := os.Remove(brokerSocket); err != nil {
 		t.Fatal(err)
 	}
-	document := hostBeadsPermitAuthorityDocument{SchemaVersion: hostBeadsPermitAuthoritySchemaV1, KeyBrokerSocket: brokerSocket, Entries: entries}
+	policies := make([]hostBeadsPermitAuthorityEntry, len(entries))
+	for i, entry := range entries {
+		policies[i] = entry.hostBeadsPermitAuthorityEntry
+	}
+	document := hostBeadsPermitAuthorityDocument{SchemaVersion: hostBeadsPermitAuthoritySchemaV1, KeyBrokerSocket: brokerSocket, Entries: policies}
 	data, err := json.Marshal(document)
 	if err != nil {
 		t.Fatal(err)
@@ -495,7 +505,7 @@ func writeHostBeadsPermitDocument(t *testing.T, directory string, entries []host
 	startHostBeadsPermitTestBroker(t, brokerSocket, data, entries)
 }
 
-func startHostBeadsPermitTestBroker(t *testing.T, socketPath string, document []byte, entries []hostBeadsPermitAuthorityEntry) {
+func startHostBeadsPermitTestBroker(t *testing.T, socketPath string, document []byte, entries []hostBeadsPermitBrokerFixture) {
 	t.Helper()
 	listener, err := unix.Socket(unix.AF_UNIX, unix.SOCK_SEQPACKET|unix.SOCK_CLOEXEC, 0)
 	if err != nil {
@@ -598,9 +608,10 @@ func startHostBeadsPermitTestBroker(t *testing.T, socketPath string, document []
 
 // hostBeadsPermitBrokerTestEntry retains the real sealed descriptor fixture for
 // Linux host loader tests. Controller contract tests use the portable key factory.
-func hostBeadsPermitBrokerTestEntry(t *testing.T, cityName, storeRef, keyID, keyName string) (hostBeadsPermitAuthorityEntry, []byte) {
+func hostBeadsPermitBrokerTestEntry(t *testing.T, cityName, storeRef, keyID, keyName string) (hostBeadsPermitBrokerFixture, []byte) {
 	t.Helper()
-	entry, key := hostBeadsPermitTestEntry(t, cityName, storeRef, keyID, keyName)
+	policy, key := hostBeadsPermitTestEntry(t, cityName, storeRef, keyID, keyName)
+	entry := hostBeadsPermitBrokerFixture{hostBeadsPermitAuthorityEntry: policy}
 	replaceHostBeadsPermitTestKey(t, &entry, key, true)
 	return entry, key
 }
