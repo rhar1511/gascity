@@ -224,7 +224,9 @@
               "session-request-ack",
               "session-request-get",
               "session-request-submit",
-              "github-pr-action"
+              "github-pr-action",
+              "beads-admission-prepare",
+              "beads-admission-attach"
             ]
           },
           "event_id": {

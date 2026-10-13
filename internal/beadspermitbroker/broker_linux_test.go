@@ -162,6 +162,7 @@ func TestControllerEnvironmentFileAllowsExplicitSupervisorInputs(t *testing.T) {
 		"GC_COMPATIBILITY_AUTHORITY_DIR":"/etc/gc/compatibility-authority",
 		"GC_COMPATIBILITY_AUTHORITY_MAX_REVOCATION_AGE":"15m",
 		"GC_PR_HUMAN_TRUST":"trusted-reviewer",
+		"GC_SUPERVISOR_PRESERVE_SESSIONS_ON_SIGNAL":"1",
 		"ANTHROPIC_API_KEY":"provider-secret",
 		"GC_DOLT_HOST":"dolt.example.internal",
 		"GC_DOLT_LOGLEVEL":"warn",
@@ -202,6 +203,7 @@ func TestControllerEnvironmentFileAllowsExplicitSupervisorInputs(t *testing.T) {
 		"GC_COMPATIBILITY_AUTHORITY_DIR=/etc/gc/compatibility-authority",
 		"GC_COMPATIBILITY_AUTHORITY_MAX_REVOCATION_AGE=15m",
 		"GC_PR_HUMAN_TRUST=trusted-reviewer",
+		"GC_SUPERVISOR_PRESERVE_SESSIONS_ON_SIGNAL=1",
 		"ANTHROPIC_API_KEY=provider-secret",
 		"GC_DOLT_HOST=dolt.example.internal",
 		"GC_DOLT_LOGLEVEL=warn",
@@ -250,6 +252,8 @@ func TestControllerEnvironmentFileRejectsMalformedOrUnsafeEntries(t *testing.T) 
 		{name: "relative GC_HOME", data: `{"GC_HOME":"relative/home"}`},
 		{name: "relative CLAUDE_CONFIG_DIR", data: `{"CLAUDE_CONFIG_DIR":"relative/claude"}`},
 		{name: "unclean XDG_RUNTIME_DIR", data: `{"XDG_RUNTIME_DIR":"/run/../tmp"}`},
+		{name: "session preservation disabled", data: `{"GC_SUPERVISOR_PRESERVE_SESSIONS_ON_SIGNAL":"0"}`},
+		{name: "session preservation malformed", data: `{"GC_SUPERVISOR_PRESERVE_SESSIONS_ON_SIGNAL":"true"}`},
 		{name: "protected key material", data: `{"GC_BEADS_PROTECTED_KEY_TOKEN":"secret"}`},
 	} {
 		t.Run(test.name, func(t *testing.T) {

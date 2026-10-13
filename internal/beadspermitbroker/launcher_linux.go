@@ -24,6 +24,7 @@ import (
 const (
 	childLaunchMode                     = "--internal-protected-authority-exec-child"
 	maxControllerEnvironmentBytes int64 = 64 << 10
+	preserveSessionsOnSignalEnv         = "GC_SUPERVISOR_PRESERVE_SESSIONS_ON_SIGNAL"
 )
 
 type launchPayload struct {
@@ -367,6 +368,7 @@ func readControllerEnvironmentFile(path string) (map[string]string, error) {
 }
 
 var allowedControllerEnvironmentExtras = map[string]struct{}{
+	preserveSessionsOnSignalEnv:                     {},
 	"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":      {},
 	"CLAUDE_CODE_EFFORT_LEVEL":                      {},
 	"CLAUDE_CODE_OAUTH_TOKEN":                       {},
@@ -413,6 +415,9 @@ func validateControllerEnvironmentExtra(key, value string) error {
 	}
 	if value == "" || strings.ContainsRune(value, '\x00') {
 		return fmt.Errorf("controller environment variable %q has an invalid value", key)
+	}
+	if key == preserveSessionsOnSignalEnv && value != "1" {
+		return fmt.Errorf("controller environment variable %q must be 1 when provided", key)
 	}
 	if isControllerEnvironmentPath(key) && !cleanAbsolutePath(value) {
 		return fmt.Errorf("controller environment path %q must be clean and absolute", key)

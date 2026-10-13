@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/graphv2"
 	"github.com/gastownhall/gascity/internal/qualification"
 	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/storeref"
@@ -112,7 +113,31 @@ func buildLifecycleAdmissionPolicy(
 	// Admission cannot use a live Git probe as a hidden formula input. Current
 	// bead metadata and configured rig defaults remain reproducible inputs.
 	compileDeps.Branches = nil
+	searchPaths := sling.SlingFormulaSearchPaths(compileDeps, *targetAgent)
+	isGraph, _, err := graphv2.IsGraphV2Formula(receipt.Workflow, searchPaths)
+	if err != nil {
+		return lifecycleAdmissionPolicy{}, fmt.Errorf("resolving current workflow contract: %w", err)
+	}
 	vars := sling.BuildSlingFormulaVars(receipt.Workflow, bead.ID, nil, *targetAgent, compileDeps)
+	var graphInvocation *worklifecycle.AdmissionGraphInvocationV2
+	if isGraph {
+		if rig, rigScoped := storeref.ScopeRigContext(leg.ref); !rigScoped || rig == "" || deps.GraphStoreRef != leg.ref || bead.Type == "convoy" {
+			return lifecycleAdmissionPolicy{}, fmt.Errorf("graph.v2 generated input convoy requires one co-resident rig-scoped source")
+		}
+		vars = sling.BuildGraphV2SlingFormulaVars(receipt.Workflow, bead.ID, nil, *targetAgent, compileDeps)
+		invocation, err := graphv2.PreparePreviewInvocation(context.Background(), leg.store, receipt.Workflow, searchPaths, bead.ID, false, vars)
+		if err != nil {
+			return lifecycleAdmissionPolicy{}, fmt.Errorf("resolving graph invocation inputs: %w", err)
+		}
+		if invocation.InputConvoy == "" {
+			return lifecycleAdmissionPolicy{}, fmt.Errorf("graph.v2 workflow has no proven input-convoy compiler binding")
+		}
+		vars = invocation.Vars
+		graphInvocation = &worklifecycle.AdmissionGraphInvocationV2{
+			Version:  worklifecycle.AdmissionGraphInvocationSingleSourceV2,
+			SourceID: bead.ID, SourceStoreRef: leg.ref, PreviewConvoyID: invocation.InputConvoy,
+		}
+	}
 	if sling.SlingFormulaUsesBaseBranch(receipt.Workflow) && strings.TrimSpace(vars["base_branch"]) == "" {
 		return lifecycleAdmissionPolicy{}, fmt.Errorf("workflow base_branch would require a live or generated invocation value")
 	}
@@ -120,7 +145,7 @@ func buildLifecycleAdmissionPolicy(
 		return lifecycleAdmissionPolicy{}, fmt.Errorf("workflow target_branch would require a live or generated invocation value")
 	}
 	recipe, provenance, err := formula.CompileWithoutRuntimeVarValidationWithProvenance(
-		context.Background(), receipt.Workflow, sling.SlingFormulaSearchPaths(compileDeps, *targetAgent), vars,
+		context.Background(), receipt.Workflow, searchPaths, vars,
 	)
 	if err != nil {
 		return lifecycleAdmissionPolicy{}, fmt.Errorf("compiling current workflow with provenance: %w", err)
@@ -140,8 +165,8 @@ func buildLifecycleAdmissionPolicy(
 	if recipe == nil || len(recipe.Steps) == 0 {
 		return lifecycleAdmissionPolicy{}, fmt.Errorf("workflow compiler returned no root step")
 	}
-	if strings.EqualFold(strings.TrimSpace(recipe.Steps[0].Metadata[beadmeta.FormulaContractMetadataKey]), beadmeta.FormulaContractGraphV2) {
-		return lifecycleAdmissionPolicy{}, fmt.Errorf("graph.v2 workflow invocation requires a generated input convoy and is not supported by current admission evidence")
+	if compiledGraph := strings.EqualFold(strings.TrimSpace(recipe.Steps[0].Metadata[beadmeta.FormulaContractMetadataKey]), beadmeta.FormulaContractGraphV2); compiledGraph != isGraph {
+		return lifecycleAdmissionPolicy{}, fmt.Errorf("compiled workflow contract differs from its invocation inputs")
 	}
 	// The signed formula.v1 policy places the attached molecule in the source
 	// work store. Keep the graph-only materialization on that exact store too;
@@ -173,6 +198,9 @@ func buildLifecycleAdmissionPolicy(
 		}
 	}
 	formulaSchema := "formula.v1"
+	if isGraph {
+		formulaSchema = beadmeta.FormulaContractGraphV2
+	}
 	storePlacement := worklifecycle.AdmissionStorePlacementV2{
 		SourceStoreRef:        leg.ref,
 		GraphPlacementMode:    worklifecycle.AdmissionGraphPlacementClass,
@@ -202,6 +230,7 @@ func buildLifecycleAdmissionPolicy(
 		FormulaProvenanceSchemaVersion:       provenance.SchemaVersion,
 		FormulaSchemaVersion:                 formulaSchema,
 		FormulaV2Enabled:                     provenance.FormulaV2Enabled,
+		GraphInvocation:                      graphInvocation,
 		EffectiveCompileVariables:            provenance.EffectiveCompileVariables,
 		EffectiveComposedFormulaIDs:          composedIDs,
 		MergeStrategy:                        receipt.MergeStrategy,

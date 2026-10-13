@@ -247,7 +247,7 @@ func TestLifecycleRecoveryQ54RechecksWorkflowAtEffectBoundary(t *testing.T) {
 			return
 		}
 		closed := "closed"
-		if err := setup.store.MemStore.Update(workflow.ID, beads.UpdateOpts{Status: &closed}); err != nil {
+		if err := setup.store.lifecycleAdmissionBackingStore.Update(workflow.ID, beads.UpdateOpts{Status: &closed}); err != nil {
 			t.Errorf("close attached workflow after recovery reservation: %v", err)
 		}
 	}

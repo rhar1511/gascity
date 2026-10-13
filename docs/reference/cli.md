@@ -343,7 +343,7 @@ gc bd release-if-current my-project-abc worker-1
 
 Manage the beads provider (backing store for issue tracking).
 
-Subcommands for topology operations, health checking, diagnostics, exact-store
+Subcommands for reviewed admission, topology operations, health checking, diagnostics, exact-store
 metadata compare-and-set, and read-only list/show routed through the supervisor
 API with transparent fallback to direct bd reads.
 
@@ -353,11 +353,65 @@ gc beads
 
 | Subcommand | Description |
 |------------|-------------|
+| [gc beads admission](#gc-beads-admission) | Prepare and attach reviewed lifecycle admission |
 | [gc beads city](#gc-beads-city) | Manage canonical city endpoint topology |
 | [gc beads health](#gc-beads-health) | Check beads provider health |
 | [gc beads list](#gc-beads-list) | List beads (API-routed with bd fallback) |
 | [gc beads metadata-cas](#gc-beads-metadata-cas) | Atomically compare and set one metadata key in an exact local store |
 | [gc beads show](#gc-beads-show) | Show a single bead (API-routed with bd fallback) |
+
+## gc beads admission
+
+Prepare and attach reviewed lifecycle admission
+
+```
+gc beads admission
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc beads admission attach](#gc-beads-admission-attach) | Sign a reviewed draft and atomically attach its admission receipt |
+| [gc beads admission prepare](#gc-beads-admission-prepare) | Prepare an unsigned admission draft from the exact current source and policy |
+
+## gc beads admission attach
+
+Recompute the current source and policy, verify the reviewed draft, and
+sign it with the configured primary admission authority. The key must be an
+owner-only Ed25519 PKCS#8 PEM file in an owner-only directory. Unsupported file
+ownership checks fail closed. No private key is printed or placed in metadata.
+
+Attachment uses the exact source revision and durable transition receipt.
+An exact retry recovers the same attachment without another source write.
+This command does not launch a worker or clear any dispatch hold.
+
+```
+gc beads admission attach <reviewed-draft.json> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--key-file` | string |  | owner-only PKCS#8 file for the configured primary admission signer |
+| `--store-ref` | string |  | exact local source store named in the reviewed draft |
+
+## gc beads admission prepare
+
+Emit a JSON draft containing the unsigned v2 admission receipt and its
+current routing and workflow policy. Review the work item and this draft before
+signing. Preparation does not enroll work or change its metadata. The exact
+local store is required; no cross-store ID lookup or fallback is performed.
+
+```
+gc beads admission prepare <bead-id> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--acceptance-authority` | string |  | configured acceptance signer identity |
+| `--deliverable` | string |  | reviewed deliverable contract |
+| `--merge` | string | `mr` | delivery strategy: mr, direct, or local |
+| `--route` | string |  | exact configured rig-qualified worker pool |
+| `--store-ref` | string |  | exact local source store: city:&lt;name&gt; or rig:&lt;name&gt; |
+| `--verification` | string |  | reviewed verification contract |
 
 ## gc beads city
 

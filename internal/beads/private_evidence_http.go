@@ -171,10 +171,32 @@ type privateEvidenceHTTPClient struct {
 	database                  string
 	scopeRef                  string
 	lifecycleScope            string
+	admissionScope            string
 	token                     string
 	revisionTransitions       bool
 	revisionTransitionPatches bool
 	client                    *http.Client
+}
+
+// WithBdStorePrivateEvidenceAdmissionScope binds the exact receipt scope for
+// operator-signed admission attachments. It does not enable atomic source
+// patches or grant the controller's host-authorized lifecycle scope. Callers
+// must verify the configured admission signer and use the outer store's
+// admission attachment adapter, which validates the signed receipt and its
+// exact reviewed source revision.
+func WithBdStorePrivateEvidenceAdmissionScope(scope string) BdStoreOption {
+	return func(store *BdStore) {
+		if store == nil || store.privateEvidenceHTTP == nil || store.privateEvidenceHTTPInitErr != nil {
+			return
+		}
+		if !validPrivateEvidenceLifecycleScope(scope, store.privateEvidenceHTTP.scopeRef) {
+			store.privateEvidenceHTTPInitErr = fmt.Errorf("%w: admission receipt scope is invalid", ErrPrivateEvidenceHTTPUnavailable)
+			return
+		}
+		client := *store.privateEvidenceHTTP
+		client.admissionScope = scope
+		store.privateEvidenceHTTP = &client
+	}
 }
 
 // WithBdStorePrivateEvidenceLifecycleScope binds the additional lifecycle
@@ -523,7 +545,8 @@ func (c *privateEvidenceHTTPClient) metadataTransitionScopeAllowed(scope, kind s
 		return false
 	}
 	if kind == privateEvidenceLifecycleAdmissionAttachmentKind {
-		return c.lifecycleScope != "" && scope == c.lifecycleScope
+		return (c.lifecycleScope != "" && scope == c.lifecycleScope) ||
+			(c.admissionScope != "" && scope == c.admissionScope)
 	}
 	if scope == c.scopeRef {
 		return true

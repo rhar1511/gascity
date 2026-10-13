@@ -368,7 +368,7 @@ func reconcileLifecycleAdmissionWithPermitResolver(
 				var workflowID string
 				materialized := false
 				err = sourceworkflow.WithLock(context.Background(), cityPath, leg.ref, current.ID, func() error {
-					if recoveredID, found, recoverErr := findLifecycleMaterializedWorkflow(deps.GraphStore, materializationID, lineageValue, admission.Receipt.Workflow); recoverErr != nil {
+					if recoveredID, found, recoverErr := findLifecycleMaterializedWorkflow(deps.GraphStore, leg.store, policy.projection, materializationID, lineageValue, admission.Receipt.Workflow); recoverErr != nil {
 						return recoverErr
 					} else if found {
 						if err := beforeAttach(); err != nil {
@@ -661,7 +661,7 @@ func newLifecycleClaimTransitionHeadVerifier(
 	}
 }
 
-func findLifecycleMaterializedWorkflow(store beads.Store, materializationID, pendingLineage, formulaName string) (string, bool, error) {
+func findLifecycleMaterializedWorkflow(store, workStore beads.Store, policy worklifecycle.AdmissionPolicyProjectionV2, materializationID, pendingLineage, formulaName string) (string, bool, error) {
 	if store == nil || materializationID == "" || pendingLineage == "" || formulaName == "" {
 		return "", false, fmt.Errorf("workflow recovery identity is incomplete")
 	}
@@ -697,7 +697,9 @@ func findLifecycleMaterializedWorkflow(store beads.Store, materializationID, pen
 			return "", false, fmt.Errorf("deterministic lifecycle workflow is failed or closed")
 		}
 		if strings.EqualFold(strings.TrimSpace(root.Metadata[beadmeta.FormulaContractMetadataKey]), beadmeta.FormulaContractGraphV2) {
-			return "", false, fmt.Errorf("graph.v2 lifecycle workflow recovery is unsupported without proven invocation inputs")
+			if err := verifyLifecycleGraphInvocation(workStore, root, pending.SourceID, policy); err != nil {
+				return "", false, fmt.Errorf("recovered graph invocation: %w", err)
+			}
 		}
 		if rootID != "" && rootID != root.ID {
 			return "", false, fmt.Errorf("deterministic lifecycle identity resolves to multiple workflow roots")
@@ -763,11 +765,16 @@ func verifyLifecycleAttachedWorkflow(
 		return fmt.Errorf("exact workflow root is unavailable in the selected store")
 	}
 	if strings.TrimSpace(root.Metadata[beadmeta.FormulaNameMetadataKey]) != evidence.Workflow ||
-		strings.EqualFold(strings.TrimSpace(root.Metadata[beadmeta.FormulaContractMetadataKey]), beadmeta.FormulaContractGraphV2) ||
+		(strings.EqualFold(strings.TrimSpace(root.Metadata[beadmeta.FormulaContractMetadataKey]), beadmeta.FormulaContractGraphV2) != (policy.FormulaSchemaVersion == beadmeta.FormulaContractGraphV2)) ||
 		strings.EqualFold(strings.TrimSpace(root.Status), "closed") || root.Metadata[beadmeta.FailureReasonMetadataKey] != "" ||
 		root.Metadata[beadmeta.IdempotencyKeyMetadataKey] != lifecycleMaterializationID(source.ID, evidence.Scope, digest) ||
 		strings.TrimSpace(root.Metadata[beadmeta.MergeStrategyMetadataKey]) != evidence.MergeStrategy {
 		return fmt.Errorf("workflow root formula, status, merge, or deterministic identity does not match")
+	}
+	if policy.FormulaSchemaVersion == beadmeta.FormulaContractGraphV2 {
+		if err := verifyLifecycleGraphInvocation(workStore, root, source.ID, policy); err != nil {
+			return err
+		}
 	}
 	var formulaHash string
 	for _, formulaSource := range policy.FormulaSources {

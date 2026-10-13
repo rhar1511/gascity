@@ -279,7 +279,7 @@ func seedLifecycleClaimBlocker(t *testing.T, setup lifecycleAdmissionTransitionS
 	if err != nil {
 		t.Fatalf("create open claim blocker: %v", err)
 	}
-	if err := setup.store.MemStore.DepAdd(setup.source.ID, blocker.ID, "blocks"); err != nil {
+	if err := setup.store.lifecycleAdmissionBackingStore.DepAdd(setup.source.ID, blocker.ID, "blocks"); err != nil {
 		t.Fatalf("block admitted source: %v", err)
 	}
 }
