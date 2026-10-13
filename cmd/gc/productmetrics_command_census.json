@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "next_id": 217,
+  "next_id": 219,
   "permanent_ids": [
     {
       "name": "help",
@@ -329,6 +329,52 @@
       "classification": "beads-city-use-managed",
       "owner": "immediate",
       "id": 13
+    },
+    {
+      "path": "gc beads completion",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "structural",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "help",
+      "canonical_target": "@help",
+      "owner": "structural",
+      "id": 1
+    },
+    {
+      "path": "gc beads completion accept",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "beads-completion-accept",
+      "owner": "immediate",
+      "id": 218
+    },
+    {
+      "path": "gc beads completion prepare",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "beads-completion-prepare",
+      "owner": "immediate",
+      "id": 217
     },
     {
       "path": "gc beads health",

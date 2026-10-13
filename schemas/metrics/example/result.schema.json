@@ -226,7 +226,9 @@
               "session-request-submit",
               "github-pr-action",
               "beads-admission-prepare",
-              "beads-admission-attach"
+              "beads-admission-attach",
+              "beads-completion-prepare",
+              "beads-completion-accept"
             ]
           },
           "event_id": {
