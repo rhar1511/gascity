@@ -1,5 +1,5 @@
 name: Setup Gas City macOS CI
-description: Install the shared macOS dependencies for Gas City CI jobs on ARM64 macOS runners
+description: Install the shared macOS dependencies for Gas City CI jobs on ARM64 and Intel macOS runners
 
 inputs:
   go-version:
@@ -43,10 +43,10 @@ runs:
           exit 1
         fi
         arch="$(uname -m)"
-        if [[ "$arch" != "arm64" ]]; then
-          echo "setup-gascity-macos currently targets arm64; got $arch" >&2
-          exit 1
-        fi
+        case "$arch" in
+          arm64|x86_64) ;;
+          *) echo "setup-gascity-macos requires arm64 or x86_64; got $arch" >&2; exit 1 ;;
+        esac
 
     - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
       with:
