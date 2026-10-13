@@ -2222,6 +2222,7 @@ gc hook [agent] [flags]
 | Subcommand | Description |
 |------------|-------------|
 | [gc hook begin-source](#gc-hook-begin-source) | Begin admitted source work while retaining the current execution step |
+| [gc hook complete](#gc-hook-complete) | Complete the current protected execution step |
 | [gc hook current](#gc-hook-current) | Print the work bead this session most recently claimed |
 | [gc hook run](#gc-hook-run) | Run a managed hook command with a hard timeout |
 
@@ -2244,6 +2245,27 @@ gc hook begin-source <source-id> [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--store-ref` | string |  | exact city or rig store shared by the source and execution step |
+
+## gc hook complete
+
+Complete the persisted current execution claim through the controller.
+Requires GC_SESSION_ID, GC_INSTANCE_TOKEN and GC_RUNTIME_EPOCH. Verifies the
+protected claim, current parent policy and exact workflow membership. Closes
+only the step, records its outcome and returns the durable receipt as JSON.
+The source still requires separately signed reviewer acceptance.
+
+The current claim stamp is retained for retry and workflow lookup. An exact
+retry returns the same receipt; a changed outcome conflicts. Requires a running
+controller and an active parent source; no generic write fallback is used.
+
+```
+gc hook complete [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--outcome` | string |  | step outcome: pass, fail, or skipped |
+| `--store-ref` | string |  | exact city or rig store containing the execution step |
 
 ## gc hook current
 

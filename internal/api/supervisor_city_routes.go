@@ -368,6 +368,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	registerSessionRequestRoutes(sm)
 	registerLifecycleClaimRoutes(sm)
 	registerLifecycleCompletionRoutes(sm)
+	registerLifecycleExecutionCompletionRoutes(sm)
 	registerLifecycleRecoveryRoutes(sm)
 	cityRegister(sm, huma.Operation{
 		OperationID:   "create-session",

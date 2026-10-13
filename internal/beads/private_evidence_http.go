@@ -66,6 +66,7 @@ const (
 )
 
 var privateEvidenceLifecyclePatchKinds = map[string]struct{}{
+	"lifecycle_descendant_completion_v1":      {},
 	"lifecycle_descendant_claim_identity_v1":  {},
 	"lifecycle_source_reservation_v1":         {},
 	"lifecycle_source_materialization_v1":     {},

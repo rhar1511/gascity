@@ -75,6 +75,7 @@ type LifecycleClaimTransitionRequest struct {
 // LifecycleClaimTransitionResult is the exact Q54 transition receipt needed
 // to stamp the reciprocal session claim and return a stable result.
 type LifecycleClaimTransitionResult struct {
+	Revision        int64
 	ClaimGeneration string
 	ReceiptID       string
 	Replayed        bool

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -472,7 +473,7 @@ func TestLifecycleDescendantClaimCoreGraphWorkerStep(t *testing.T) {
 }
 
 func TestLifecycleDescendantClaimRejectsUnprovenGraphStep(t *testing.T) {
-	for _, scenario := range []string{"changed description", "unknown step", "duplicate step", "wrong parent", "missing dependency"} {
+	for _, scenario := range []string{"changed description", "unknown step", "duplicate step", "duplicate closed step", "wrong parent", "missing dependency"} {
 		t.Run(scenario, func(t *testing.T) {
 			setup, state, request := newLifecycleCoreGraphClaimProviderFixture(t)
 			row := request.Work
@@ -484,9 +485,12 @@ func TestLifecycleDescendantClaimRejectsUnprovenGraphStep(t *testing.T) {
 				row.Metadata[beadmeta.StepRefMetadataKey] = "mol-do-work.unsigned"
 			case "wrong parent":
 				row.ParentID = "other-workflow"
-			case "duplicate step":
+			case "duplicate step", "duplicate closed step":
 				duplicate := row
 				duplicate.ID = ""
+				if scenario == "duplicate closed step" {
+					duplicate.Status = "closed"
+				}
 				if _, err := setup.store.Create(duplicate); err != nil {
 					t.Fatal(err)
 				}
@@ -627,6 +631,137 @@ func TestLifecycleSourceClaimRefusesChangedExecutionAuthority(t *testing.T) {
 			after, err := setup.store.Get(source.ID)
 			if err != nil || after.Revision != source.Revision || after.Status != source.Status || after.Assignee != source.Assignee {
 				t.Fatal("refusal changed source")
+			}
+		})
+	}
+}
+
+func TestLifecycleExecutionCompletionPreservesSourceAndRecovers(t *testing.T) {
+	for _, lost := range []bool{false, true} {
+		t.Run(map[bool]string{false: "normal", true: "lost response"}[lost], func(t *testing.T) {
+			setup, state, request := newLifecycleCoreGraphClaimProviderFixture(t)
+			claim, err := state.ClaimLifecycleWork(context.Background(), request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			step, err := setup.store.Get(request.Work.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			source, err := setup.store.Get(setup.source.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request.Work, request.ExpectedRevision, request.ExpectedTransitionHead = step, step.Revision, claim.ReceiptID
+			finish := api.LifecycleExecutionCompletionTransitionRequest{Claim: request, Intent: api.LifecycleExecutionCompletionIntent{ClaimGeneration: claim.ClaimGeneration, Outcome: "pass"}}
+			if lost {
+				setup.store.loseNextPatchKind = "lifecycle_descendant_completion_v1"
+			}
+			before := len(setup.store.patchRequests)
+			completed, err := state.CompleteLifecycleExecution(context.Background(), finish)
+			if err != nil {
+				t.Fatalf("complete current execution: %v", err)
+			}
+			current, err := setup.store.Get(step.ID)
+			if err != nil || current.Status != "closed" || current.Metadata[beadmeta.OutcomeMetadataKey] != "pass" || current.Revision != completed.Revision || completed.ReceiptID == claim.ReceiptID || completed.Replayed != lost || len(setup.store.patchRequests) != before+1 {
+				t.Fatalf("completion result %+v, readback error %v", completed, err)
+			}
+			for _, fresh := range []bool{false, true} {
+				if fresh {
+					finish.Claim.Work = current
+					finish.Claim.ExpectedRevision = current.Revision
+					finish.Claim.ExpectedTransitionHead = completed.ReceiptID
+				}
+				replay, err := state.CompleteLifecycleExecution(context.Background(), finish)
+				if err != nil || !replay.Replayed || replay.ReceiptID != completed.ReceiptID || replay.Revision != completed.Revision || len(setup.store.patchRequests) != before+1 {
+					t.Fatalf("completion retry: %+v, %v", replay, err)
+				}
+			}
+			finish.Intent.Outcome = "fail"
+			if _, err := state.CompleteLifecycleExecution(context.Background(), finish); err == nil {
+				t.Fatal("changed outcome replaced completed execution")
+			}
+			after, err := setup.store.Get(step.ID)
+			if err != nil || !reflect.DeepEqual(current, after) || len(setup.store.patchRequests) != before+1 {
+				t.Fatal("completion retry changed step")
+			}
+			afterSource, err := setup.store.Get(source.ID)
+			if err != nil || !reflect.DeepEqual(source, afterSource) {
+				t.Fatal("execution completion changed source")
+			}
+		})
+	}
+}
+
+func TestLifecycleExecutionCompletionRefusesChangedAuthorityBeforeWrites(t *testing.T) {
+	for _, scenario := range []string{"missing anchor", "missing claim", "changed incarnation", "changed generation", "stale revision", "stale head", "changed instructions", "held step", "changed policy", "source as step", "operator outcome"} {
+		t.Run(scenario, func(t *testing.T) {
+			setup, state, request := newLifecycleCoreGraphClaimProviderFixture(t)
+			claim, err := state.ClaimLifecycleWork(context.Background(), request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			step, err := setup.store.Get(request.Work.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request.Work, request.ExpectedRevision, request.ExpectedTransitionHead = step, step.Revision, claim.ReceiptID
+			finish := api.LifecycleExecutionCompletionTransitionRequest{Claim: request, Intent: api.LifecycleExecutionCompletionIntent{ClaimGeneration: claim.ClaimGeneration, Outcome: "pass"}}
+			switch scenario {
+			case "missing anchor":
+				delete(setup.store.q43Receipts, setup.store.patchReceipts[claim.ReceiptID].PriorReceiptID)
+			case "missing claim":
+				delete(setup.store.patchReceipts, claim.ReceiptID)
+			case "changed incarnation":
+				finish.Claim.Session.InstanceToken = "other-runtime"
+			case "changed generation":
+				finish.Intent.ClaimGeneration = "2"
+			case "stale revision":
+				finish.Claim.ExpectedRevision--
+			case "stale head":
+				finish.Claim.ExpectedTransitionHead = "unrelated-head"
+			case "changed instructions":
+				step.Description += " altered"
+				setup.store.rows[step.ID] = step
+			case "held step":
+				step.Labels = append(step.Labels, beadmeta.DispatchHoldLabels[0])
+				setup.store.rows[step.ID] = step
+			case "changed policy":
+				workflow := "other-workflow"
+				setup.fixture.cfg.Agents[0].DefaultSlingFormula = &workflow
+			case "source as step":
+				source, err := setup.store.Get(setup.source.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				finish.Claim.Work = source
+				finish.Claim.ExpectedRevision = source.Revision
+				finish.Claim.ExpectedTransitionHead = source.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey]
+			case "operator outcome":
+				finish.Intent.Outcome = "canceled"
+			}
+			source, err := setup.store.Get(setup.source.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			beforeStep, err := setup.store.Get(step.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			patches, anchors := len(setup.store.patchRequests), len(setup.store.q43Receipts)
+			if _, err := state.CompleteLifecycleExecution(context.Background(), finish); err == nil {
+				t.Fatalf("accepted %s", scenario)
+			}
+			afterStep, err := setup.store.Get(step.ID)
+			if err != nil || !reflect.DeepEqual(beforeStep, afterStep) {
+				t.Fatal("refused completion changed step")
+			}
+			afterSource, err := setup.store.Get(source.ID)
+			if err != nil || !reflect.DeepEqual(source, afterSource) {
+				t.Fatal("refused completion changed source")
+			}
+			if len(setup.store.patchRequests) != patches || len(setup.store.q43Receipts) != anchors {
+				t.Fatal("refused completion wrote a protected transition")
 			}
 		})
 	}

@@ -149,3 +149,26 @@ revision and transition head. The source and step are separately fenced rows:
 a concurrent external change can leave a committed source transition with an
 error response, so an error does not authorize a generic claim or rollback.
 The worker receives neither admission nor acceptance signing keys.
+
+### Completing a protected execution step
+
+After finishing the current generated step, a managed worker can run:
+
+```bash
+gc hook complete --store-ref rig:NAME --outcome pass
+```
+
+The command derives the step and generation from the persisted current claim,
+then submits its exact revision and head through the authenticated controller.
+The controller verifies the protected anchor and incarnation-bound claim,
+current signed parent policy, holds, and compiled workflow membership. It
+atomically closes the step and records `gc.outcome` (`pass`, `fail`, or
+`skipped`). It does not close or accept the source. Reviewer acceptance still
+uses `gc beads completion prepare` and `gc beads completion accept`.
+
+The session's current claim stays on this step for retry and workflow lookup.
+An exact retry returns the original receipt without another mutation; a changed
+outcome conflicts. A later claim replaces the stamp normally. This initial path
+requires a nonterminal parent and the live session states allowed for claiming.
+Terminal-parent tails, draining sessions, and descendant recovery are separate
+integration gates. The core formula has not yet been switched to this command.

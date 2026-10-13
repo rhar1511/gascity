@@ -25,6 +25,12 @@ import (
 // head; all policy, workflow evidence, protected write authority, and actor
 // identity are resolved from controller state here.
 func (cs *controllerState) ClaimLifecycleWork(ctx context.Context, request api.LifecycleClaimTransitionRequest) (api.LifecycleClaimTransitionResult, error) {
+	return cs.transitionLifecycleWork(ctx, request, nil)
+}
+
+// transitionLifecycleWork shares exact route and descendant authority checks.
+// Completion is an internal intent, never a field accepted by the claim API.
+func (cs *controllerState) transitionLifecycleWork(ctx context.Context, request api.LifecycleClaimTransitionRequest, completion *api.LifecycleExecutionCompletionIntent) (api.LifecycleClaimTransitionResult, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -180,7 +186,7 @@ func (cs *controllerState) ClaimLifecycleWork(ctx context.Context, request api.L
 				if err := verifyLifecycleClaimReadiness(selected.store, row.ID, row.Revision, row.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey]); err != nil {
 					return worklifecycle.DescendantBinding{}, fmt.Errorf("verify descendant readiness: %w", err)
 				}
-			} else if row.Status != "in_progress" || row.Assignee != request.Actor || row.Metadata[beadmeta.SessionIDMetadataKey] != request.Session.ID {
+			} else if (row.Status != "in_progress" && (completion == nil || row.Status != "closed")) || row.Assignee != request.Actor || row.Metadata[beadmeta.SessionIDMetadataKey] != request.Session.ID {
 				return worklifecycle.DescendantBinding{}, worklifecycle.ErrTransitionChainStale
 			}
 			digest := sha256.Sum256([]byte(row.Metadata[beadmeta.LifecycleMaterializationMetadataKey]))
@@ -189,16 +195,28 @@ func (cs *controllerState) ClaimLifecycleWork(ctx context.Context, request api.L
 				ParentID: marker.SourceID, Scope: scope, StoreRef: selected.ref, WorkflowID: attached.WorkflowID,
 			}, nil
 		}
-		claimed, err := worklifecycle.ClaimDescendantIdentity(worklifecycle.DescendantClaimConfig{
+		descendantConfig := worklifecycle.DescendantClaimConfig{
 			Store: selected.store, Scope: scope, Actor: request.Actor, AnchorActor: permitPolicy.Actor, PermitIssuer: permitIssuer, Verify: verify,
-		}, worklifecycle.ClaimIdentityRequest{
+		}
+		claimRequest := worklifecycle.ClaimIdentityRequest{
 			IssueID: observed.ID, SessionID: request.Session.ID, InstanceToken: request.Session.InstanceToken, RuntimeEpoch: request.Session.Generation,
 			ExpectedRevision: request.ExpectedRevision, ExpectedTransitionHead: request.ExpectedTransitionHead, SessionName: request.Session.SessionNameMetadata, WorkDir: request.Session.WorkDir,
-		})
+		}
+		var claimed worklifecycle.ClaimIdentityResult
+		if completion != nil {
+			claimed, err = worklifecycle.CompleteDescendantExecution(descendantConfig, worklifecycle.DescendantCompletionRequest{
+				ClaimIdentityRequest: claimRequest, ClaimGeneration: completion.ClaimGeneration, Outcome: completion.Outcome,
+			})
+		} else {
+			claimed, err = worklifecycle.ClaimDescendantIdentity(descendantConfig, claimRequest)
+		}
 		if err != nil {
 			return api.LifecycleClaimTransitionResult{}, err
 		}
-		return api.LifecycleClaimTransitionResult{ClaimGeneration: claimed.ClaimGeneration, ReceiptID: claimed.Receipt.ReceiptID, Replayed: claimed.Replayed, Recovered: claimed.Recovered}, nil
+		return api.LifecycleClaimTransitionResult{ClaimGeneration: claimed.ClaimGeneration, ReceiptID: claimed.Receipt.ReceiptID, Revision: claimed.Receipt.ToVersion, Replayed: claimed.Replayed, Recovered: claimed.Recovered}, nil
+	}
+	if completion != nil {
+		return api.LifecycleClaimTransitionResult{}, worklifecycle.ErrTransitionChainEvidence
 	}
 	attachmentAdapter, err := worklifecycle.NewAdmissionAttachmentAdapter(selected.store)
 	if err != nil {
@@ -447,4 +465,13 @@ func verifyLifecycleSourceExecutionSnapshot(request api.LifecycleClaimTransition
 		return worklifecycle.ErrTransitionChainStale
 	}
 	return nil
+}
+
+// CompleteLifecycleExecution finishes only an authenticated descendant claim.
+func (cs *controllerState) CompleteLifecycleExecution(ctx context.Context, request api.LifecycleExecutionCompletionTransitionRequest) (api.LifecycleCompletionResult, error) {
+	result, err := cs.transitionLifecycleWork(ctx, request.Claim, &request.Intent)
+	if err != nil {
+		return api.LifecycleCompletionResult{}, err
+	}
+	return api.LifecycleCompletionResult{WorkID: request.Claim.Work.ID, ReceiptID: result.ReceiptID, Revision: result.Revision, Replayed: result.Replayed || result.Recovered}, nil
 }

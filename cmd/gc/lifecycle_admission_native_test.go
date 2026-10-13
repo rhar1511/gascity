@@ -139,7 +139,7 @@ func TestLifecycleAdmissionNativeGraphAttachAndReplay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	authenticated := &nativeAdmissionSessionState{controllerState: state, sessions: beads.SessionStore{Store: sessionRows}}
+	authenticated := &nativeAdmissionSessionState{controllerState: state, sessions: beads.SessionStore{Store: sessionRows}, t: t}
 	supervisor := api.NewSupervisorMux(nativeAdmissionCityResolver{authenticated}, nil, false, "native-test", "", time.Now())
 	server := httptest.NewServer(supervisor.Handler())
 	defer server.Close()
@@ -340,6 +340,83 @@ func TestLifecycleAdmissionNativeGraphAttachAndReplay(t *testing.T) {
 	}
 	t.Log("native authenticated step-first source claim preserved execution attribution and rejected stale incarnation/generation")
 
+	completionBody := api.LifecycleExecutionCompletionRequest{
+		LifecycleExecutionCompletionIntent: api.LifecycleExecutionCompletionIntent{ClaimGeneration: "1", Outcome: "pass"},
+		WorkID:                             step.ID, SourceStoreRef: "rig:api", ExpectedRevision: stepFinal.Revision, ExpectedTransitionHead: stepClaim.ReceiptID,
+		SessionID: info.ID, InstanceToken: info.InstanceToken, RuntimeEpoch: info.Generation,
+	}
+	for _, scenario := range []string{"stale token", "stale epoch", "wrong generation", "wrong store", "stale revision", "stale head", "source as step", "operator outcome"} {
+		bad := completionBody
+		switch scenario {
+		case "stale token":
+			bad.InstanceToken = "another-runtime"
+		case "stale epoch":
+			bad.RuntimeEpoch = "999999"
+		case "wrong generation":
+			bad.ClaimGeneration = "2"
+		case "wrong store":
+			bad.SourceStoreRef = "city:native-admission"
+		case "stale revision":
+			bad.ExpectedRevision--
+		case "stale head":
+			bad.ExpectedTransitionHead = "unrelated-head"
+		case "source as step":
+			bad.WorkID = claimed.ID
+			bad.ExpectedRevision = claimed.Revision
+			bad.ExpectedTransitionHead = claim.ReceiptID
+		case "operator outcome":
+			bad.Outcome = "canceled"
+		}
+		if _, err := client.CompleteLifecycleExecution(context.Background(), bad); err == nil {
+			t.Fatalf("native completion accepted %s", scenario)
+		}
+		stepNow, err := c.sourceLeg.store.Get(step.ID)
+		if err != nil || !reflect.DeepEqual(stepFinal, stepNow) {
+			t.Fatalf("%s refusal changed native step", scenario)
+		}
+		sourceNow, err := c.snapshot(fixture.SourceID)
+		if err != nil || !reflect.DeepEqual(claimed, sourceNow) {
+			t.Fatalf("%s refusal changed native source", scenario)
+		}
+	}
+	t.Log("native execution completion refused eight stale or unauthorized requests without changing step or source")
+
+	// Execution completion closes only the current generated step. It does not
+	// supply or replace the separately reviewed source acceptance below.
+	var finishOut, finishErr strings.Builder
+	finish := []string{"--city", c.cityPath, "hook", "complete", "--store-ref", "rig:api", "--outcome", "pass"}
+	if code := run(finish, &finishOut, &finishErr); code != 0 {
+		t.Fatalf("native worker step-completion command exit %d: %s", code, finishErr.String())
+	}
+	var finishedStep api.LifecycleCompletionResult
+	if err := json.Unmarshal([]byte(finishOut.String()), &finishedStep); err != nil {
+		t.Fatal(err)
+	}
+	completedStep, err := c.sourceLeg.store.Get(step.ID)
+	if err != nil || finishedStep.WorkID != step.ID || finishedStep.ReceiptID == "" || finishedStep.Replayed ||
+		completedStep.Status != "closed" || completedStep.Revision != finishedStep.Revision ||
+		completedStep.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomePass || completedStep.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey] != finishedStep.ReceiptID {
+		t.Fatalf("native step completion result %+v, readback error %v", finishedStep, err)
+	}
+	sourceAfterStep, err := c.snapshot(fixture.SourceID)
+	if err != nil || !reflect.DeepEqual(claimed, sourceAfterStep) {
+		t.Fatal("step completion changed the admitted source or its acceptance")
+	}
+	finishOut.Reset()
+	finishErr.Reset()
+	if code := run(finish, &finishOut, &finishErr); code != 0 {
+		t.Fatalf("native worker step-completion retry exit %d: %s", code, finishErr.String())
+	}
+	var finishedReplay api.LifecycleCompletionResult
+	if err := json.Unmarshal([]byte(finishOut.String()), &finishedReplay); err != nil {
+		t.Fatal(err)
+	}
+	replayedStep, err := c.sourceLeg.store.Get(step.ID)
+	if err != nil || !finishedReplay.Replayed || finishedReplay.ReceiptID != finishedStep.ReceiptID || !reflect.DeepEqual(completedStep, replayedStep) {
+		t.Fatal("step completion retry changed the committed step")
+	}
+	t.Log("native worker step completion closed only the execution step and exact retry preserved its receipt")
+
 	// Exercise the public operator prepare/accept commands through the generated
 	// client, real supervisor HTTP handler, controller provider and native backend.
 	var commandOut, commandErr strings.Builder
@@ -439,6 +516,7 @@ func TestLifecycleAdmissionNativeGraphAttachAndReplay(t *testing.T) {
 type nativeAdmissionSessionState struct {
 	*controllerState
 	sessions beads.SessionStore
+	t        *testing.T
 }
 
 func (s *nativeAdmissionSessionState) SessionsBeadStore() beads.SessionStore { return s.sessions }
@@ -454,4 +532,12 @@ func (r nativeAdmissionCityResolver) CityState(name string) api.State {
 		return r.state
 	}
 	return nil
+}
+
+func (s *nativeAdmissionSessionState) CompleteLifecycleExecution(ctx context.Context, request api.LifecycleExecutionCompletionTransitionRequest) (api.LifecycleCompletionResult, error) {
+	result, err := s.controllerState.CompleteLifecycleExecution(ctx, request)
+	if err != nil {
+		s.t.Logf("native execution completion controller refusal: %v", err)
+	}
+	return result, err
 }

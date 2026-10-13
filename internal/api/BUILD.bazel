@@ -52,6 +52,7 @@ go_library(
         "handler_formulas.go",
         "handler_lifecycle_claim.go",
         "handler_lifecycle_completion.go",
+        "handler_lifecycle_execution_completion.go",
         "handler_lifecycle_recovery.go",
         "handler_mail.go",
         "handler_maintenance.go",

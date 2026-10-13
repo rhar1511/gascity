@@ -23,7 +23,9 @@ func VerifyMaterializedStep(store beads.Store, root, candidate beads.Bead, recip
 	if !graph {
 		return fmt.Errorf("materialized step verification requires a graph recipe")
 	}
-	rows, err := store.ListByMetadata(map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID}, 0, beads.WithBothTiers)
+	// Membership and uniqueness survive completion. Omitting closed members
+	// loses completed prerequisites and can hide duplicate physical step refs.
+	rows, err := store.ListByMetadata(map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID}, 0, beads.WithBothTiers, beads.IncludeClosed)
 	if err != nil {
 		return err
 	}

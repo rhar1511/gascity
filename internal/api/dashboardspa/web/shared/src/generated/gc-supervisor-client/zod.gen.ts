@@ -920,6 +920,22 @@ export const zLifecycleClaimSubmitRequest = z.object({
     work_id: z.string().min(1).max(200)
 });
 
+export const zLifecycleExecutionCompletionRequest = z.object({
+    claim_generation: z.string().min(1).max(32),
+    expected_revision: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    expected_transition_head: z.string().min(1).max(200),
+    instance_token: z.string().min(1).max(512),
+    outcome: z.enum([
+        'pass',
+        'fail',
+        'skipped'
+    ]),
+    runtime_epoch: z.string().min(1).max(32),
+    session_id: z.string().min(1).max(200),
+    source_store_ref: z.string().min(1).max(200),
+    work_id: z.string().min(1).max(200)
+});
+
 export const zLifecycleRecoverySubmitOutputBody = z.object({
     intent_id: z.string(),
     request_id: z.string(),
@@ -9484,6 +9500,21 @@ export const zCompleteAdmittedLifecycleWorkPath = z.object({
  * OK
  */
 export const zCompleteAdmittedLifecycleWorkResponse = zLifecycleCompletionResult;
+
+export const zCompleteLifecycleExecutionBody = zLifecycleExecutionCompletionRequest;
+
+export const zCompleteLifecycleExecutionHeaders = z.object({
+    'X-GC-Request': z.string().min(1)
+});
+
+export const zCompleteLifecycleExecutionPath = z.object({
+    cityName: z.string().min(1).regex(/\S/)
+});
+
+/**
+ * OK
+ */
+export const zCompleteLifecycleExecutionResponse = zLifecycleCompletionResult;
 
 export const zSubmitLifecycleRecoveryRequestBody = zRecoveryRequest;
 

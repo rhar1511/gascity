@@ -1804,6 +1804,21 @@ export type LifecycleExecutionClaim = {
     work_id: string;
 };
 
+export type LifecycleExecutionCompletionRequest = {
+    claim_generation: string;
+    /**
+     * Opaque nonzero revision; compare only for equality.
+     */
+    expected_revision: number;
+    expected_transition_head: string;
+    instance_token: string;
+    outcome: 'pass' | 'fail' | 'skipped';
+    runtime_epoch: string;
+    session_id: string;
+    source_store_ref: string;
+    work_id: string;
+};
+
 export type LifecycleRecoverySubmitOutputBody = {
     intent_id: string;
     request_id: string;
@@ -15826,6 +15841,66 @@ export type CompleteAdmittedLifecycleWorkResponses = {
 };
 
 export type CompleteAdmittedLifecycleWorkResponse = CompleteAdmittedLifecycleWorkResponses[keyof CompleteAdmittedLifecycleWorkResponses];
+
+export type CompleteLifecycleExecutionData = {
+    body: LifecycleExecutionCompletionRequest;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/lifecycle/executions/complete';
+};
+
+export type CompleteLifecycleExecutionErrors = {
+    /**
+     * Bad Request
+     */
+    400: ErrorModel;
+    /**
+     * Forbidden
+     */
+    403: ErrorModel;
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type CompleteLifecycleExecutionError = CompleteLifecycleExecutionErrors[keyof CompleteLifecycleExecutionErrors];
+
+export type CompleteLifecycleExecutionResponses = {
+    /**
+     * OK
+     */
+    200: LifecycleCompletionResult;
+};
+
+export type CompleteLifecycleExecutionResponse = CompleteLifecycleExecutionResponses[keyof CompleteLifecycleExecutionResponses];
 
 export type SubmitLifecycleRecoveryRequestData = {
     body: RecoveryRequest;

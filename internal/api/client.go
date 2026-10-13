@@ -2097,3 +2097,39 @@ func (c *Client) CompleteLifecycleWork(parent context.Context, request Lifecycle
 		Revision: response.JSON200.Revision, Replayed: response.JSON200.Replayed,
 	}, nil
 }
+
+// CompleteLifecycleExecution submits the current worker claim for protected
+// step completion. It has no generic write fallback or source acceptance authority.
+func (c *Client) CompleteLifecycleExecution(parent context.Context, request LifecycleExecutionCompletionRequest) (LifecycleCompletionResult, error) {
+	if err := c.requireCityScope(); err != nil {
+		return LifecycleCompletionResult{}, err
+	}
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, defaultClientTimeout)
+	defer cancel()
+	body := genclient.CompleteLifecycleExecutionJSONRequestBody{
+		WorkId: request.WorkID, SourceStoreRef: request.SourceStoreRef,
+		ExpectedRevision: request.ExpectedRevision, ExpectedTransitionHead: request.ExpectedTransitionHead,
+		SessionId: request.SessionID, InstanceToken: request.InstanceToken, RuntimeEpoch: request.RuntimeEpoch,
+		ClaimGeneration: request.ClaimGeneration, Outcome: genclient.LifecycleExecutionCompletionRequestOutcome(request.Outcome),
+	}
+	response, err := c.cw.CompleteLifecycleExecutionWithResponse(ctx, c.cityName, nil, body)
+	if err != nil {
+		return LifecycleCompletionResult{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if response == nil {
+		return LifecycleCompletionResult{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(response.StatusCode(), pdOf(response)); err != nil {
+		return LifecycleCompletionResult{}, err
+	}
+	if response.JSON200 == nil {
+		return LifecycleCompletionResult{}, fmt.Errorf("API returned %d with no body", response.StatusCode())
+	}
+	return LifecycleCompletionResult{
+		WorkID: response.JSON200.WorkId, ReceiptID: response.JSON200.ReceiptId,
+		Revision: response.JSON200.Revision, Replayed: response.JSON200.Replayed,
+	}, nil
+}
