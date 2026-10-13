@@ -15,6 +15,7 @@ BLACKSMITH_RUNNERS = {
     "runner_16vcpu": "blacksmith-16vcpu-ubuntu-2404",
     "runner_32vcpu": "blacksmith-32vcpu-ubuntu-2404",
     "runner_macos": "blacksmith-12vcpu-macos-15",
+    "runner_macos_quality": "blacksmith-12vcpu-macos-15",
 }
 
 GITHUB_RUNNERS = {
@@ -23,6 +24,9 @@ GITHUB_RUNNERS = {
     "runner_16vcpu": "ubuntu-latest",
     "runner_32vcpu": "ubuntu-latest",
     "runner_macos": "macos-15",
+    # Full lint needs headroom above its 6 GiB Go heap limit. The standard
+    # Intel Mac has 14 GB; keep runtime regression jobs on the 7 GB ARM Mac.
+    "runner_macos_quality": "macos-15-intel",
 }
 
 

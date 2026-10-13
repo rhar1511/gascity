@@ -36,6 +36,8 @@ var beadCopyExemptFields = map[string]string{
 	"SourceStoreRef": "transient federated-read provenance. It is attached by a reader and is never persisted to or recreated by the destination store.",
 	"LifecycleScope": "transient trusted-ready projection. It is attached by gc ready and is never persisted to or recreated by the destination store.",
 	"Revision":       "store-internal optimistic-concurrency token. Each store mints and bumps its own; the destination's row is a fresh create, so its revision is unrelated to the source's by construction.",
+	"revisionZeroPublished": "read-time presence of the source store's explicit zero revision. Like Revision, " +
+		"it describes that store's concurrency token, not durable row content; the destination creates its own token.",
 	"ClaimFence": "store-internal ownership fence, maintained per store like Revision. " +
 		"SQLiteStore.Create clears it explicitly (clearClaimFenceTx), so a copied row always starts at zero.",
 	"Needs": "create-time dependency shorthand, deliberately stripped by infraMigrationRow so the destination's Create " +
@@ -134,14 +136,36 @@ func beadCopyFieldMutations() map[string]func(beads.Bead) beads.Bead {
 // beadCopyExemptMutations is one mutation per exempt field. Each must compare
 // EQUAL: an exemption that quietly stopped being an exemption is as much a
 // defect as an unwitnessed field, because it would refuse every faithful copy.
-func beadCopyExemptMutations() map[string]func(beads.Bead) beads.Bead {
+func beadCopyExemptMutations(t *testing.T) map[string]func(beads.Bead) beads.Bead {
+	t.Helper()
 	return map[string]func(beads.Bead) beads.Bead{
 		"SourceStoreRef": func(b beads.Bead) beads.Bead { b.SourceStoreRef = "city/rig/source"; return b },
 		"LifecycleScope": func(b beads.Bead) beads.Bead { b.LifecycleScope = "city/rig/source"; return b },
 		"Revision":       func(b beads.Bead) beads.Bead { b.Revision = 99; return b },
-		"ClaimFence":     func(b beads.Bead) beads.Bead { b.ClaimFence = 0; return b },
-		"Needs":          func(b beads.Bead) beads.Bead { b.Needs = nil; return b },
-		"Dependencies":   func(b beads.Bead) beads.Bead { b.Dependencies = nil; return b },
+		"revisionZeroPublished": func(b beads.Bead) beads.Bead {
+			store := beads.NewBdStore("/unused", func(_ string, _ string, _ ...string) ([]byte, error) {
+				return fmt.Appendf(nil, `[{"id":%q,"revision":0}]`, b.ID), nil
+			})
+			observed, err := store.Get(b.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if revision, present := beads.ObservedRevision(observed); revision != 0 || !present {
+				t.Fatal("fixture did not decode an explicitly published zero revision")
+			}
+			// Preserve every public field so only the decoded private presence
+			// marker changes. No unsafe access or production setter is needed.
+			source, target := reflect.ValueOf(b), reflect.ValueOf(&observed).Elem()
+			for i := range source.NumField() {
+				if source.Type().Field(i).IsExported() {
+					target.Field(i).Set(source.Field(i))
+				}
+			}
+			return observed
+		},
+		"ClaimFence":   func(b beads.Bead) beads.Bead { b.ClaimFence = 0; return b },
+		"Needs":        func(b beads.Bead) beads.Bead { b.Needs = nil; return b },
+		"Dependencies": func(b beads.Bead) beads.Bead { b.Dependencies = nil; return b },
 		// The fixture carries the marker, so clearing it here is the real loss:
 		// a destination that cannot hold what the source read produced. This is
 		// the mutation that must NOT be refused, or the migration wedges.
@@ -160,7 +184,7 @@ func beadCopyExemptMutations() map[string]func(beads.Bead) beads.Bead {
 // unwitnessed and when an existing comparison silently stops comparing.
 func TestBeadCopyDifferenceWitnessesEveryDurableField(t *testing.T) {
 	witnessed := beadCopyFieldMutations()
-	exemptMutations := beadCopyExemptMutations()
+	exemptMutations := beadCopyExemptMutations(t)
 
 	var unwitnessed, doubleBooked []string
 	for _, field := range reflect.VisibleFields(reflect.TypeOf(beads.Bead{})) {

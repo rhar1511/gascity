@@ -129,3 +129,5 @@ func TestControllerPermitFixturePinsAuthorityDocument(t *testing.T) {
 		t.Fatal("portable fixture signed after its pinned authority document changed")
 	}
 }
+
+func configureHostBeadsPermitBrokerTestOwnership() {}

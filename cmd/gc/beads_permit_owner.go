@@ -1,10 +1,6 @@
 package main
 
-var (
-	hostBeadsPermitAuthorityOwnerIsTrusted = hostBeadsPermitOwnerIsRoot
-	hostBeadsPermitBrokerOwnerIsTrusted    = hostBeadsPermitOwnerIsRoot
-	hostBeadsPermitBrokerUIDIsTrusted      = hostBeadsPermitOwnerUIDIsRoot
-)
+var hostBeadsPermitAuthorityOwnerIsTrusted = hostBeadsPermitOwnerIsRoot
 
 func hostBeadsPermitOwnerUIDIsTrusted(ownerUID uint64, effectiveUID int) bool {
 	return ownerUID == 0 || (effectiveUID >= 0 && ownerUID == uint64(effectiveUID))

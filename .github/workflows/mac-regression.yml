@@ -98,6 +98,7 @@ jobs:
       runner_16vcpu: ${{ steps.policy.outputs.runner_16vcpu }}
       runner_32vcpu: ${{ steps.policy.outputs.runner_32vcpu }}
       runner_macos: ${{ steps.policy.outputs.runner_macos }}
+      runner_macos_quality: ${{ steps.policy.outputs.runner_macos_quality }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - name: Select runner backend
@@ -202,7 +203,7 @@ jobs:
       - runner-policy
       - gate
     if: needs.gate.outputs.run_smoke == 'true'
-    runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
+    runs-on: ${{ needs.runner-policy.outputs.runner_macos_quality }}
     # A cold golangci-lint cache exceeded 35 minutes on hosted macOS. Give
     # the full lint gate time to finish and report a verdict.
     timeout-minutes: 75
@@ -246,7 +247,7 @@ jobs:
           # repeatedly re-poisoning the cache with a SA5011 false-positive
           # storm (ga-35qn7i, ga-v7x9vk, ga-l14mnf, ga-ndx34y). A miss now
           # forces a fully fresh, never-poisoned recompute.
-          key: ${{ runner.os }}-golangci-lint-${{ steps.glint-version.outputs.version }}-${{ steps.glint-version.outputs.goversion }}-${{ hashFiles('go.sum', '.golangci.yml') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-golangci-lint-${{ steps.glint-version.outputs.version }}-${{ steps.glint-version.outputs.goversion }}-${{ hashFiles('go.sum', '.golangci.yml') }}
       - name: Lint deadline contract
         run: python3 scripts/test-ci-lint-profile
       - name: Lint
@@ -347,9 +348,9 @@ jobs:
       - gate
     if: needs.gate.outputs.run_smoke == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
-    # Job cancelled at 25m05s after both test commands passed.
-    # Leave bounded outer headroom without changing either test deadline.
-    timeout-minutes: 26
+    # Cold ARM run reached the 26m job limit despite both commands passing.
+    # Budget the 20m Tier A and 10m CLI contract deadlines plus setup/cleanup.
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:

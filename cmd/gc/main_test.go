@@ -210,10 +210,7 @@ func TestMain(m *testing.M) {
 	// Production requires root-owned authority policy. Tests use temp
 	// directories owned by the test UID; root ownership has separate coverage.
 	hostBeadsPermitAuthorityOwnerIsTrusted = hostBeadsPermitOwnerIsTrusted
-	hostBeadsPermitBrokerOwnerIsTrusted = hostBeadsPermitOwnerIsTrusted
-	hostBeadsPermitBrokerUIDIsTrusted = func(ownerUID uint64) bool {
-		return hostBeadsPermitOwnerUIDIsTrusted(ownerUID, os.Geteuid())
-	}
+	configureHostBeadsPermitBrokerTestOwnership()
 	maybeRunProductMetricsDirectChildEnvSpy()
 	maybeRunFakeDoltSQLServer()
 
