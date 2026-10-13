@@ -123,6 +123,17 @@ rollback, backend qualification, and real worker-canary evidence.
 
 ### Beginning source work from a claimed step
 
+Inside a managed worker session, begin the source of the current claimed step:
+
+```bash
+gc hook begin-source SOURCE_ID --store-ref rig:NAME
+```
+
+The command reads the persisted execution claim and managed incarnation,
+submits the typed request to the controller, and prints the source claim receipt
+as JSON. It requires a controller and does not fall back to a generic claim.
+Retrying reads the same committed claim without changing the execution step.
+
 The typed lifecycle claim request accepts an optional `execution_claim` with
 `work_id` and `claim_generation`. A worker that has already claimed a generated
 step uses this context when beginning that step's admitted source work. The API

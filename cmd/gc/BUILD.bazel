@@ -115,6 +115,7 @@ go_library(
         "cmd_graph.go",
         "cmd_handoff.go",
         "cmd_hook.go",
+        "cmd_hook_begin_source.go",
         "cmd_hook_claim.go",
         "cmd_hook_claim_runmap_other.go",
         "cmd_hook_claim_runmap_unix.go",

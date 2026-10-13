@@ -348,11 +348,11 @@ type SessionSubmitResponse struct {
 // LifecycleClaimResult is the controller-confirmed result of one enrolled
 // lifecycle claim and its reciprocal session stamp.
 type LifecycleClaimResult struct {
-	WorkID          string
-	Actor           string
-	ClaimGeneration string
-	ReceiptID       string
-	Replayed        bool
+	WorkID          string `json:"work_id"`
+	Actor           string `json:"actor"`
+	ClaimGeneration string `json:"claim_generation"`
+	ReceiptID       string `json:"receipt_id"`
+	Replayed        bool   `json:"replayed"`
 }
 
 // sseEvent is a parsed SSE frame from the event stream.

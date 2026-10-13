@@ -2221,8 +2221,29 @@ gc hook [agent] [flags]
 
 | Subcommand | Description |
 |------------|-------------|
+| [gc hook begin-source](#gc-hook-begin-source) | Begin admitted source work while retaining the current execution step |
 | [gc hook current](#gc-hook-current) | Print the work bead this session most recently claimed |
 | [gc hook run](#gc-hook-run) | Run a managed hook command with a hard timeout |
+
+## gc hook begin-source
+
+Begin the admitted source of this session's currently claimed generated step.
+The session's current step and generation come from its persisted claim, never
+from a launcher bead ID. The controller verifies the managed incarnation,
+protected step claim, signed parent policy and workflow membership before
+claiming the source. The execution step remains the session's current claim.
+
+Requires GC_SESSION_ID, GC_INSTANCE_TOKEN, GC_RUNTIME_EPOCH and a running
+controller. Prints the durable source claim receipt as JSON. Exact retries
+return the existing claim. No signing key or generic write fallback is used.
+
+```
+gc hook begin-source <source-id> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--store-ref` | string |  | exact city or rig store shared by the source and execution step |
 
 ## gc hook current
 

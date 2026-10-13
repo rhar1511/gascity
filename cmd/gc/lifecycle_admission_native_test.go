@@ -145,6 +145,22 @@ func TestLifecycleAdmissionNativeGraphAttachAndReplay(t *testing.T) {
 	defer server.Close()
 	client := api.NewCityScopedClient(server.URL, c.cityName)
 
+	oldAlive, oldClient := apiRouteControllerAliveHook, apiRouteSupervisorClientHook
+	t.Cleanup(func() { apiRouteControllerAliveHook, apiRouteSupervisorClientHook = oldAlive, oldClient })
+	apiRouteControllerAliveHook = func(string) int { return os.Getpid() }
+	apiRouteSupervisorClientHook = func(path string) *api.Client {
+		if path != c.cityPath {
+			t.Fatalf("completion client resolved another city: %s", path)
+		}
+		return api.NewCityScopedClient(server.URL, c.cityName)
+	}
+	oldSessionFront := hookCurrentSessionFrontDoor
+	t.Cleanup(func() { hookCurrentSessionFrontDoor = oldSessionFront })
+	hookCurrentSessionFrontDoor = func() (*session.Store, error) { return session.NewStore(authenticated.sessions), nil }
+	t.Setenv("GC_SESSION_ID", info.ID)
+	t.Setenv("GC_INSTANCE_TOKEN", info.InstanceToken)
+	t.Setenv("GC_RUNTIME_EPOCH", info.Generation)
+
 	request := api.LifecycleClaimTransitionRequest{
 		Work: attached, WorkStore: c.sourceLeg.store, WorkStoreRef: storeref.RigRef("api"),
 		Scope: worklifecycle.ScopeForStore(c.cityName, "rig:api"), Session: info,
@@ -230,8 +246,48 @@ func TestLifecycleAdmissionNativeGraphAttachAndReplay(t *testing.T) {
 			t.Fatalf("%s changed source", scenario)
 		}
 	}
-	claim, err := client.ClaimLifecycleWork(context.Background(), sourceBody)
-	if err != nil || claim.ClaimGeneration != "1" || claim.ReceiptID == "" || claim.Replayed {
+	var startOut, startErr strings.Builder
+	begin := []string{"--city", c.cityPath, "hook", "begin-source", fixture.SourceID, "--store-ref", "rig:api"}
+	for _, scenario := range []string{"missing incarnation", "missing current claim", "controller unavailable"} {
+		restore := func() {}
+		switch scenario {
+		case "missing incarnation":
+			t.Setenv("GC_INSTANCE_TOKEN", "")
+			restore = func() { t.Setenv("GC_INSTANCE_TOKEN", info.InstanceToken) }
+		case "missing current claim":
+			if _, err := session.NewStore(authenticated.sessions).SetCurrentClaimForGeneration(info.ID, "", ""); err != nil {
+				t.Fatal(err)
+			}
+			restore = func() {
+				if _, err := session.NewStore(authenticated.sessions).SetCurrentClaimForGeneration(info.ID, step.ID, "1"); err != nil {
+					t.Fatal(err)
+				}
+			}
+		case "controller unavailable":
+			savedClient := apiRouteSupervisorClientHook
+			apiRouteSupervisorClientHook = func(string) *api.Client { return nil }
+			restore = func() { apiRouteSupervisorClientHook = savedClient }
+		}
+		code := run(begin, &startOut, &startErr)
+		restore()
+		if code == 0 {
+			t.Fatalf("worker source start accepted %s", scenario)
+		}
+		unchanged, err := c.snapshot(fixture.SourceID)
+		if err != nil || !reflect.DeepEqual(attached, unchanged) {
+			t.Fatalf("worker source-start %s changed source", scenario)
+		}
+		startOut.Reset()
+		startErr.Reset()
+	}
+	if code := run(begin, &startOut, &startErr); code != 0 {
+		t.Fatalf("native worker source-start command exit %d: %s", code, startErr.String())
+	}
+	var claim api.LifecycleClaimResult
+	if err := json.Unmarshal([]byte(startOut.String()), &claim); err != nil {
+		t.Fatal(err)
+	}
+	if claim.WorkID != fixture.SourceID || claim.ClaimGeneration != "1" || claim.ReceiptID == "" || claim.Replayed {
 		t.Fatalf("real source claim: result=%+v err=%v", claim, err)
 	}
 	claimed, err := c.snapshot(fixture.SourceID)
@@ -255,6 +311,23 @@ func TestLifecycleAdmissionNativeGraphAttachAndReplay(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(claimed, claimReadback) {
 		t.Fatalf("real source claim replay changed the committed source: err=%v", err)
 	}
+	startOut.Reset()
+	startErr.Reset()
+	if code := run(begin, &startOut, &startErr); code != 0 {
+		t.Fatalf("native worker source-start retry exit %d: %s", code, startErr.String())
+	}
+	var cliReplay api.LifecycleClaimResult
+	if err := json.Unmarshal([]byte(startOut.String()), &cliReplay); err != nil {
+		t.Fatal(err)
+	}
+	if !cliReplay.Replayed || cliReplay.ReceiptID != claim.ReceiptID {
+		t.Fatalf("native worker source-start retry: %+v", cliReplay)
+	}
+	cliReadback, err := c.snapshot(fixture.SourceID)
+	if err != nil || !reflect.DeepEqual(claimed, cliReadback) {
+		t.Fatal("worker source-start retry changed source")
+	}
+	t.Log("native worker begin-source command and retry used current execution claim without signing keys")
 	t.Logf("native source claim %s committed generation 1 and exact replay preserved revision %d", claim.ReceiptID, claimed.Revision)
 
 	claimID, generation, err := session.NewStore(authenticated.sessions).CurrentClaim(info.ID)
@@ -269,15 +342,6 @@ func TestLifecycleAdmissionNativeGraphAttachAndReplay(t *testing.T) {
 
 	// Exercise the public operator prepare/accept commands through the generated
 	// client, real supervisor HTTP handler, controller provider and native backend.
-	oldAlive, oldClient := apiRouteControllerAliveHook, apiRouteSupervisorClientHook
-	t.Cleanup(func() { apiRouteControllerAliveHook, apiRouteSupervisorClientHook = oldAlive, oldClient })
-	apiRouteControllerAliveHook = func(string) int { return os.Getpid() }
-	apiRouteSupervisorClientHook = func(path string) *api.Client {
-		if path != c.cityPath {
-			t.Fatalf("completion client resolved another city: %s", path)
-		}
-		return api.NewCityScopedClient(server.URL, c.cityName)
-	}
 	var commandOut, commandErr strings.Builder
 	prepare := []string{
 		"--city", c.cityPath, "beads", "completion", "prepare", fixture.SourceID, "--store-ref", "rig:api",
