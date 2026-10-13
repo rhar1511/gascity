@@ -164,12 +164,14 @@ func TestACPOrphanReapedAfterProviderRestart(t *testing.T) {
 	// process group can remain visible for a scheduler tick after that root
 	// exits, so observe a fresh proc snapshot until the whole group is gone.
 	deadline := time.Now().Add(3 * time.Second)
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
 	for {
 		scanSnapshot(t, func() { found = findOnly(t, restarted, sessionID) }, pids...)
 		if len(found) == 0 || time.Now().After(deadline) {
 			break
 		}
-		time.Sleep(25 * time.Millisecond)
+		<-ticker.C
 	}
 	if len(found) != 0 {
 		t.Fatalf("after terminate found = %+v, want the whole process group gone", found)
