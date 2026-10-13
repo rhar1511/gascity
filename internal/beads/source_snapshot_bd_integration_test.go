@@ -76,8 +76,20 @@ func TestBdStoreDecisionFrontierSourceSnapshotExactBinaryIntegration(t *testing.
 	bdSourceSnapshotIntegrationRun(t, ctx, 30*time.Second, env, workspace, "git", "config", "user.email", "source-snapshot@example.invalid")
 	bdSourceSnapshotIntegrationRun(t, ctx, 30*time.Second, env, workspace, "git", "config", "core.hooksPath", ".git/hooks")
 	bdSourceSnapshotIntegrationRun(t, ctx, 4*time.Minute, env, workspace, bdBinary,
-		"init", "--quiet", "--server", "--server-host", "127.0.0.1", "--server-port", strconv.Itoa(doltPort),
+		"init", "--quiet", "--proxied-server", "--proxied-server-external-host", "127.0.0.1",
+		"--proxied-server-external-port", strconv.Itoa(doltPort),
 		"--database", database, "--prefix", "snap", "--non-interactive", "--skip-agents", "--skip-hooks")
+	t.Cleanup(func() {
+		// This fixture owns the proxied workspace and its detached proxy. Stop
+		// that proxy before t.TempDir removes the control files used to verify it.
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer stopCancel()
+		cmd := exec.CommandContext(stopCtx, bdBinary, "dolt", "stop")
+		cmd.Dir, cmd.Env = workspace, env
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Errorf("stop fixture-owned Beads proxy: %v\noutput:\n%s", err, output)
+		}
+	})
 
 	identity := bdSourceSnapshotIntegrationReadIdentity(t, workspace)
 	if identity.ProjectID == "" {
@@ -861,10 +873,10 @@ func bdSourceSnapshotIntegrationWaitForServe(t *testing.T, ctx context.Context, 
 					}
 					if decodeErr := json.Unmarshal(body, &served); decodeErr != nil {
 						err = fmt.Errorf("decode context response: %w", decodeErr)
-					} else if served.APIVersion != "v0" || served.Backend != "dolt" || served.DoltMode != "server" ||
+					} else if served.APIVersion != "v0" || served.Backend != "dolt" || served.DoltMode != "proxied-server" ||
 						served.ProjectID != projectID || served.Database != database {
 						cancel()
-						t.Fatalf("bd serve identity = api %q backend %q mode %q project %q database %q, want v0 dolt server %q %q",
+						t.Fatalf("bd serve identity = api %q backend %q mode %q project %q database %q, want v0 dolt proxied-server %q %q",
 							served.APIVersion, served.Backend, served.DoltMode, served.ProjectID, served.Database, projectID, database)
 					} else {
 						for _, required := range []string{
