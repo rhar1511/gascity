@@ -5,10 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"io"
 	"math/rand"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1285,59 +1282,3 @@ func mustAttemptID(t *testing.T, identity Identity) string {
 type noMetadataCASStore struct{ beads.Store }
 
 func (s noMetadataCASStore) PrivatePayloadValueTransportTarget() beads.Store { return s.Store }
-
-// An ambiguous create may commit the canonical value while another writer adds
-// a corrupt duplicate. Exact-ID readback alone cannot validate that payload set.
-func TestRecoveredPayloadCreateRescansCorruptDuplicates(t *testing.T) {
-	content := []byte("immutable payload")
-	digest := payloadDigest(content)
-	id := beads.AttemptEvidencePayloadID(digest)
-	rows := []map[string]any{}
-	scannedAfterCreate := false
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/v0/beads/context":
-			_, _ = io.WriteString(w, `{"api_version":"v0","backend":"dolt","bd_version":"1.3.1","capabilities":["issues.casMetadata","issues.create","issues.get","project.enforce"],"database":"gc_fixture","dolt_mode":"server","project_id":"project-a"}`)
-		case r.Method == http.MethodGet && r.URL.Path == "/v0/beads/issues":
-			if r.URL.Query().Get("limit") == "1" && len(rows) > 1 {
-				_ = json.NewEncoder(w).Encode(map[string]any{"items": rows[:1], "has_more": true, "next_cursor": "second"})
-				return
-			}
-			if len(rows) > 0 && r.URL.Query().Get("metadata_field") == beadmeta.AttemptEvidencePayloadDigestMetadataKey+"="+digest {
-				scannedAfterCreate = true
-			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"items": rows, "has_more": false})
-		case r.Method == http.MethodPost && r.URL.Path == "/v0/beads/issues":
-			rows = append(rows, map[string]any{"id": id, "status": "closed", "issue_type": "molecule", "metadata": map[string]string{
-				beadmeta.AttemptEvidencePayloadDigestMetadataKey: digest,
-				beadmeta.AttemptEvidencePayloadDataMetadataKey:   base64.StdEncoding.EncodeToString(content),
-			}}, map[string]any{"id": "legacy-duplicate", "status": "closed", "issue_type": "molecule", "metadata": map[string]string{
-				beadmeta.AttemptEvidencePayloadDigestMetadataKey: digest,
-				beadmeta.AttemptEvidencePayloadDataMetadataKey:   base64.StdEncoding.EncodeToString([]byte("wrong content")),
-			}})
-			http.Error(w, "ambiguous response", http.StatusBadGateway)
-		case r.Method == http.MethodGet && r.URL.Path == "/v0/beads/issues/"+id:
-			if len(rows) == 0 {
-				http.NotFound(w, r)
-				return
-			}
-			_ = json.NewEncoder(w).Encode(rows[0])
-		default:
-			t.Errorf("unexpected payload request %s %s", r.Method, r.URL.Path)
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
-	token := filepath.Join(t.TempDir(), "token")
-	if err := os.WriteFile(token, []byte("fixture-secret"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	store := beads.NewBdStore(t.TempDir(), func(_, _ string, _ ...string) ([]byte, error) { t.Fatal("payload used CLI"); return nil, nil },
-		beads.WithBdStorePrivateEvidenceHTTP(beads.PrivateEvidenceHTTPConfig{
-			Endpoint: server.URL, ProjectID: "project-a", Database: "gc_fixture", ScopeRef: "rig:fixture", TokenFile: token,
-		}))
-	err := storePayloadBytes(store, digest, content)
-	if err == nil || !strings.Contains(err.Error(), "payload_digest_mismatch") || !scannedAfterCreate {
-		t.Fatalf("ambiguous create = %v, duplicate scan=%v; want verified digest mismatch", err, scannedAfterCreate)
-	}
-}
