@@ -538,7 +538,13 @@ func TestControlReadyProxiedScopeUsesStoreReader(t *testing.T) {
 			for _, fail := range []bool{false, true} {
 				t.Run(fmt.Sprintf("rig=%v/ephemeral=%v/fail=%v", rig, ephemeral, fail), func(t *testing.T) {
 					configureIsolatedRuntimeEnv(t)
-					city := t.TempDir()
+					// Exercise the same logical/physical cwd distinction that
+					// macOS exposes through its /var -> /private/var alias.
+					physicalCity := t.TempDir()
+					city := filepath.Join(t.TempDir(), "city")
+					if err := os.Symlink(physicalCity, city); err != nil {
+						t.Fatal(err)
+					}
 					scope := city
 					configText := "[workspace]\nname = \"test-city\"\n[beads]\nprovider = \"bd\"\n"
 					if rig {
@@ -601,7 +607,10 @@ esac
 						}
 						if strings.Contains(call, "|ready ") {
 							readyCalls++
-							if !strings.HasPrefix(call, scope+"|") {
+							cwd, _, found := strings.Cut(call, "|")
+							actualDir, actualErr := os.Stat(cwd)
+							expectedDir, expectedErr := os.Stat(scope)
+							if !found || actualErr != nil || expectedErr != nil || !os.SameFile(actualDir, expectedDir) {
 								t.Fatalf("query used wrong scope: %s", call)
 							}
 							if strings.Contains(call, "--include-ephemeral") != ephemeral {
