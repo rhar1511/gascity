@@ -832,3 +832,32 @@ func TestBdStoreMetadataCASUsesGuardedHTTP(t *testing.T) {
 		})
 	}
 }
+
+func TestPrivateEvidenceListRejectsIncompleteEnvelope(t *testing.T) {
+	for _, body := range []string{
+		`{}`, `null`, `{"items":[]}`, `{"items":[],"has_more":null}`,
+		`{"items":null,"has_more":false}`, `{"has_more":false}`,
+		`{"items":[],"has_more":false,"next_cursor":"hidden"}`,
+		`{"items":[],"has_more":true}`,
+	} {
+		t.Run(body, func(t *testing.T) {
+			store := newBdStoreWithPrivateEvidenceHTTPForTest(t, func(_, _ string, _ ...string) ([]byte, error) {
+				t.Fatal("private list invoked command runner")
+				return nil, nil
+			}, func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/v0/beads/context" {
+					writePrivateEvidenceTestContext(w)
+					return
+				}
+				_, _ = io.WriteString(w, body)
+			})
+			client := store.privateEvidenceHTTP
+			if err := client.verifyListRoute(context.Background()); err == nil {
+				t.Error("capability probe accepted incomplete pagination")
+			}
+			if _, err := client.listPrivateEvidenceRows(context.Background(), map[string]string{}); err == nil {
+				t.Error("private scan accepted incomplete pagination")
+			}
+		})
+	}
+}

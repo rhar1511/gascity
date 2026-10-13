@@ -337,21 +337,44 @@ func legacyEphemeralPoolDemandShell(limit int, topo QueryTopology, quiet bool) s
 	if topo.includeEphemeralReady() {
 		return `printf "[]"`
 	}
-	filter := legacyEphemeralReadyFilterJQ(
-		`select((.assignee // "") == "")`+
-			` | select((`+jqMeta(beadmeta.RoutedToMetadataKey)+` == $target) or ((`+jqMeta(beadmeta.RoutedToMetadataKey)+` == "") and (`+jqMeta(beadmeta.RunTargetMetadataKey)+` == $target) and (`+jqMeta(beadmeta.KindMetadataKey)+` == "`+beadmeta.KindWorkflow+`") and (`+jqMeta(beadmeta.WorkflowExpandedMetadataKey)+` != "true")))`,
-		limit,
-		true,
-	)
+	selector := `select((.assignee // "") == "")` +
+		` | select((` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == $target) or ((` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == "") and (` + jqMeta(beadmeta.RunTargetMetadataKey) + ` == $target) and (` + jqMeta(beadmeta.KindMetadataKey) + ` == "` + beadmeta.KindWorkflow + `") and (` + jqMeta(beadmeta.WorkflowExpandedMetadataKey) + ` != "true")))`
+	fastFilter := legacyEphemeralReadyFilterJQ(selector, limit, true) + ` | .[]`
+	slowFilter := ephemeralReadyDependencyCandidateFilterJQ(selector, limit, true) + ` | .[]`
+	// The legacy bd ready reader omits ephemeral rows. The fast path can
+	// prove dependency_count=0 ready from bd query alone; for a nonzero count,
+	// inspect the actual dependency types and statuses. A tracks edge to an
+	// in-progress workflow root does not block its first step. A failed show
+	// stays unclaimable in the worker query; demand counting reports the error
+	// instead of mistaking an unknown queue for zero demand.
+	const openBlockerCountJQ = `[.[0].dependencies[]? | select(.dependency_type == "blocks" or .dependency_type == "waits-for" or .dependency_type == "conditional-blocks") | select(((.status // "") | ascii_downcase) != "closed")] | length`
 	query := bdQueryEphemeralStatusShell("open")
 	if quiet {
 		query = bdQueryEphemeralStatusQuietShell("open")
 	}
 	jqStderr := ""
+	onFailure := `exit $?`
 	if quiet {
 		jqStderr = ` 2>/dev/null`
+		onFailure = `continue`
 	}
-	return `{ ` + query + ` | jq --arg target "$target" ` + shellquote.Quote(filter) + jqStderr + `; } || printf "[]"`
+	finalFilter := `sort_by(.created_at // "", .id // "")`
+	if limit > 0 {
+		finalFilter += fmt.Sprintf(` | .[:%d]`, limit)
+	}
+	queryFailure := `exit $?`
+	if quiet {
+		queryFailure = `printf "[]"; exit 0`
+	}
+	return `{ candidates=$(` + query + `) || { ` + queryFailure + `; }; ` +
+		`fast_rows=$(printf "%s\n" "$candidates" | jq -c --arg target "$target" ` + shellquote.Quote(fastFilter) + jqStderr + `) || { ` + queryFailure + `; }; ` +
+		`slow_candidates=$(printf "%s\n" "$candidates" | jq -c --arg target "$target" ` + shellquote.Quote(slowFilter) + jqStderr + `) || { ` + queryFailure + `; }; ` +
+		`slow_rows=$(printf "%s\n" "$slow_candidates" | while IFS= read -r candidate; do ` +
+		`id=$(printf "%s" "$candidate" | jq -r '.id // empty'` + jqStderr + `) || { ` + onFailure + `; }; [ -n "$id" ] || continue; ` +
+		`detail=$(bd show "$id" --json` + jqStderr + `) || { ` + onFailure + `; }; ` +
+		`nblocked=$(printf "%s" "$detail" | jq -er ` + shellquote.Quote(openBlockerCountJQ) + jqStderr + `) || { ` + onFailure + `; }; ` +
+		`if [ "$nblocked" = "0" ]; then printf "%s\n" "$candidate"; fi; done) || { ` + queryFailure + `; }; ` +
+		`printf "%s\n%s\n" "$fast_rows" "$slow_rows" | jq -s ` + shellquote.Quote(finalFilter) + jqStderr + `; }`
 }
 
 // poolDemandFirstRowFunctionScript emits the work_query Tier 3 function: it
@@ -423,11 +446,15 @@ func routedReadyTierCommand(topo QueryTopology) string {
 // form needed no new failure clause when the federated reader arrived — it is
 // the shape readyReaderFailurePropagation gives the worker-side tiers.
 func poolDemandCountShell(target string, topo QueryTopology) string {
+	legacyEphemeralFailure := ""
+	if !topo.includeEphemeralReady() {
+		legacyEphemeralFailure = ` || exit $?`
+	}
 	script := `target="$1"; ` +
 		`ready_json=$(` + bdReadyPoolDemandShell("--limit 0", topo) + `) || exit $?; ` +
 		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit 0", topo) + `) || exit $?; ` +
 		`legacy_json=$(printf "%s" "$legacy_candidates" | ` + poolDemandMigrationFilterJQ(0) + `) || exit $?; ` +
-		`legacy_ephemeral_json=$(` + legacyEphemeralPoolDemandShell(0, topo, false) + `); ` +
+		`legacy_ephemeral_json=$(` + legacyEphemeralPoolDemandShell(0, topo, false) + `)` + legacyEphemeralFailure + `; ` +
 		`printf "%s\n%s\n%s\n" "$ready_json" "$legacy_json" "$legacy_ephemeral_json" | jq -s "(add // []) | unique_by(.id) | length"`
 	return shellquote.Join([]string{"sh", "-c", script, "--", target})
 }

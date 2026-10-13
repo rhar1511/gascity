@@ -768,6 +768,28 @@ func (c *privateEvidenceHTTPClient) verifyRevisionTransitionContext(ctx context.
 	return nil
 }
 
+type privateEvidenceListPage struct {
+	Items      []json.RawMessage
+	HasMore    bool
+	NextCursor string
+}
+
+// decodePrivateEvidenceListPage requires explicit completion evidence; absent
+// or null pagination fields cannot prove that the duplicate scan is complete.
+func decodePrivateEvidenceListPage(body []byte) (privateEvidenceListPage, error) {
+	var response struct {
+		Items      []json.RawMessage `json:"items"`
+		HasMore    *bool             `json:"has_more"`
+		NextCursor string            `json:"next_cursor"`
+	}
+	if err := decodePrivateEvidenceJSON(body, &response); err != nil ||
+		response.Items == nil || response.HasMore == nil ||
+		(*response.HasMore != (strings.TrimSpace(response.NextCursor) != "")) {
+		return privateEvidenceListPage{}, fmt.Errorf("%w: incomplete private evidence pagination", ErrPrivateEvidenceHTTPProtocol)
+	}
+	return privateEvidenceListPage{Items: response.Items, HasMore: *response.HasMore, NextCursor: response.NextCursor}, nil
+}
+
 func (c *privateEvidenceHTTPClient) verifyListRoute(ctx context.Context) error {
 	query := url.Values{"limit": {"1"}, "sort": {"priority"}}
 	body, status, err := c.request(ctx, http.MethodGet, "/v0/beads/issues?"+query.Encode(), nil)
@@ -777,12 +799,8 @@ func (c *privateEvidenceHTTPClient) verifyListRoute(ctx context.Context) error {
 	if status != http.StatusOK {
 		return fmt.Errorf("%w: issue list route returned HTTP %d", ErrPrivateEvidenceHTTPProtocol, status)
 	}
-	var page struct {
-		Items      []json.RawMessage `json:"items"`
-		HasMore    bool              `json:"has_more"`
-		NextCursor string            `json:"next_cursor"`
-	}
-	if err := decodePrivateEvidenceJSON(body, &page); err != nil || len(page.Items) > 1 || (page.HasMore && strings.TrimSpace(page.NextCursor) == "") {
+	page, err := decodePrivateEvidenceListPage(body)
+	if err != nil || len(page.Items) > 1 {
 		return fmt.Errorf("%w: issue list route response is malformed", ErrPrivateEvidenceHTTPProtocol)
 	}
 	return nil
@@ -924,15 +942,11 @@ func (c *privateEvidenceHTTPClient) listPrivateEvidenceRows(ctx context.Context,
 		if status != http.StatusOK {
 			return nil, fmt.Errorf("%w: private evidence list returned HTTP %d", ErrPrivateEvidenceHTTPProtocol, status)
 		}
-		var page struct {
-			Items      *[]json.RawMessage `json:"items"`
-			HasMore    *bool              `json:"has_more"`
-			NextCursor string             `json:"next_cursor"`
-		}
-		if err := decodePrivateEvidenceJSON(body, &page); err != nil || page.Items == nil || page.HasMore == nil {
+		page, err := decodePrivateEvidenceListPage(body)
+		if err != nil {
 			return nil, fmt.Errorf("%w: malformed private evidence list response", ErrPrivateEvidenceHTTPProtocol)
 		}
-		for _, raw := range *page.Items {
+		for _, raw := range page.Items {
 			var issue bdIssue
 			if err := decodePrivateEvidenceJSON(raw, &issue); err != nil || strings.TrimSpace(issue.ID) == "" {
 				return nil, fmt.Errorf("%w: malformed private evidence row", ErrPrivateEvidenceHTTPProtocol)
@@ -945,7 +959,7 @@ func (c *privateEvidenceHTTPClient) listPrivateEvidenceRows(ctx context.Context,
 			}
 			out = append(out, bead)
 		}
-		if !*page.HasMore {
+		if !page.HasMore {
 			return out, nil
 		}
 		if strings.TrimSpace(page.NextCursor) == "" {

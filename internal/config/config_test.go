@@ -1960,6 +1960,50 @@ esac
 	}
 }
 
+func TestEffectiveWorkQueryBD104ChecksRoutedEphemeralDependencies(t *testing.T) {
+	a := Agent{Name: "worker"}
+	for _, tc := range []struct {
+		name      string
+		depType   string
+		depStatus string
+		wantReady bool
+	}{
+		{name: "tracks does not block", depType: "tracks", depStatus: "in_progress", wantReady: true},
+		{name: "open blocks", depType: "blocks", depStatus: "open"},
+		{name: "closed blocks does not block", depType: "blocks", depStatus: "closed", wantReady: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bdScript := fmt.Sprintf(`#!/bin/sh
+set -eu
+case "$1" in
+  list|ready) printf '[]' ;;
+  query)
+    case "$*" in
+      *"ephemeral=true AND status=open"*)
+        printf '%%s' '[{"id":"ga-step","issue_type":"task","status":"open","ephemeral":true,"dependency_count":1,"created_at":"2026-05-01T00:00:00Z","metadata":{"gc.routed_to":"worker"}}]'
+        ;;
+      *) printf '[]' ;;
+    esac
+    ;;
+  show)
+    printf '%%s' '[{"id":"ga-step","dependencies":[{"id":"ga-parent","dependency_type":"%s","status":"%s"}]}]'
+    ;;
+  *) printf '[]' ;;
+esac
+`, tc.depType, tc.depStatus)
+			out := runEffectiveWorkQuery(t, a, nil, bdScript)
+			gotReady := strings.Contains(out, "ga-step")
+			if gotReady != tc.wantReady {
+				t.Fatalf("work query returned step = %v, want %v; output: %q", gotReady, tc.wantReady, out)
+			}
+			demand := strings.TrimSpace(runShellWithFakeBd(t, a.EffectivePoolDemandQuery(), nil, bdScript))
+			if gotDemand := demand != "0"; gotDemand != tc.wantReady {
+				t.Fatalf("pool demand = %q, want present %v", demand, tc.wantReady)
+			}
+		})
+	}
+}
+
 func TestEffectiveWorkQueryBD105SurfacesEphemeralInProgressAssignedWork(t *testing.T) {
 	a := Agent{Name: "dog", Dir: "hello-world"}
 	out := runEffectiveWorkQueryForBeads(t, a, BeadsConfig{BDCompatibility: BeadsBDCompatibility105}, map[string]string{
@@ -8446,5 +8490,45 @@ func TestDefaultDoltReadTimeoutMillisPreservesOuterDeadlineHeadroom(t *testing.T
 	if DefaultDoltReadTimeoutMillis*2 > DefaultDoltWriteTimeoutMillis {
 		t.Fatalf("DefaultDoltReadTimeoutMillis (%d) leaves less than half of DefaultDoltWriteTimeoutMillis (%d) as headroom for #3101's outer wall-clock deadline to catch a stuck connection pile-up first",
 			DefaultDoltReadTimeoutMillis, DefaultDoltWriteTimeoutMillis)
+	}
+}
+
+func TestLegacyEphemeralPoolDemandRejectsSlowFilterFailure(t *testing.T) {
+	jqPath, err := exec.LookPath("jq")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	for name, script := range map[string]string{
+		"bd": "#!/bin/sh\nprintf '[]'\n",
+		"jq": "#!/bin/sh\nfor arg do\n case \"$arg\" in *'select(((.dependency_count // 0) > 0))'*) exit 19 ;; esac\ndone\nexec \"$REAL_JQ\" \"$@\"\n",
+	} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stdout, stderr, exit := runShellCommandCapture(t, (&Agent{Name: "worker"}).EffectivePoolDemandQuery(), []string{"PATH=" + root + ":" + os.Getenv("PATH"), "REAL_JQ=" + jqPath})
+	if exit != 19 {
+		t.Fatalf("slow filter failure exit=%d, want 19; stdout=%q stderr=%q", exit, stdout, stderr)
+	}
+}
+
+func TestLegacyEphemeralPoolDemandRejectsIDFilterFailure(t *testing.T) {
+	jqPath, err := exec.LookPath("jq")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	for name, script := range map[string]string{
+		"bd": "#!/bin/sh\ncase \"$1\" in query) printf '%s' '[{\"id\":\"ga-step\",\"status\":\"open\",\"ephemeral\":true,\"dependency_count\":1,\"metadata\":{\"gc.routed_to\":\"worker\"}}]' ;; *) printf '[]' ;; esac\n",
+		"jq": "#!/bin/sh\nfor arg do\n case \"$arg\" in '.id // empty') exit 23 ;; esac\ndone\nexec \"$REAL_JQ\" \"$@\"\n",
+	} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stdout, stderr, exit := runShellCommandCapture(t, (&Agent{Name: "worker"}).EffectivePoolDemandQuery(), []string{"PATH=" + root + ":" + os.Getenv("PATH"), "REAL_JQ=" + jqPath})
+	if exit != 23 {
+		t.Fatalf("ID filter failure exit=%d, want 23; stdout=%q stderr=%q", exit, stdout, stderr)
 	}
 }
