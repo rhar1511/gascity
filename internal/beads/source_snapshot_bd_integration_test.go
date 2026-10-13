@@ -75,11 +75,15 @@ func TestBdStoreDecisionFrontierSourceSnapshotExactBinaryIntegration(t *testing.
 	bdSourceSnapshotIntegrationRun(t, ctx, 30*time.Second, env, workspace, "git", "config", "user.name", "Source snapshot integration")
 	bdSourceSnapshotIntegrationRun(t, ctx, 30*time.Second, env, workspace, "git", "config", "user.email", "source-snapshot@example.invalid")
 	bdSourceSnapshotIntegrationRun(t, ctx, 30*time.Second, env, workspace, "git", "config", "core.hooksPath", ".git/hooks")
-	bdSourceSnapshotIntegrationRun(t, ctx, 4*time.Minute, env, workspace, bdBinary,
-		"init", "--quiet", "--proxied-server", "--proxied-server-external-host", "127.0.0.1",
-		"--proxied-server-external-port", strconv.Itoa(doltPort),
-		"--database", database, "--prefix", "snap", "--non-interactive", "--skip-agents", "--skip-hooks")
 	t.Cleanup(func() {
+		// Init persists metadata before launching a proxy. No metadata means
+		// initialization failed before any proxy could exist.
+		if _, err := os.Stat(filepath.Join(workspace, ".beads", "metadata.json")); errors.Is(err, os.ErrNotExist) {
+			return
+		} else if err != nil {
+			t.Errorf("inspect fixture proxy configuration: %v", err)
+			return
+		}
 		// This fixture owns the proxied workspace and its detached proxy. Stop
 		// that proxy before t.TempDir removes the control files used to verify it.
 		stopCtx, stopCancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -90,6 +94,10 @@ func TestBdStoreDecisionFrontierSourceSnapshotExactBinaryIntegration(t *testing.
 			t.Errorf("stop fixture-owned Beads proxy: %v\noutput:\n%s", err, output)
 		}
 	})
+	bdSourceSnapshotIntegrationRun(t, ctx, 4*time.Minute, env, workspace, bdBinary,
+		"init", "--quiet", "--proxied-server", "--proxied-server-external-host", "127.0.0.1",
+		"--proxied-server-external-port", strconv.Itoa(doltPort),
+		"--database", database, "--prefix", "snap", "--non-interactive", "--skip-agents", "--skip-hooks")
 
 	identity := bdSourceSnapshotIntegrationReadIdentity(t, workspace)
 	if identity.ProjectID == "" {
