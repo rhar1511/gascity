@@ -207,7 +207,7 @@ case "$1" in
     exit 0
     ;;
   update)
-    case "$*" in *'--if-revision 1') ;; *) exit 1 ;; esac
+    case "$*" in *'--if-revision'*) exit 1 ;; esac
     exit 0
     ;;
   *)
@@ -262,11 +262,16 @@ esac
 	for _, want := range []string{
 		"init --server -p tc --skip-hooks --database tc",
 		"update --json tc-1 --set-metadata gc.routed_to=sample/session-a",
-		"--if-revision 1",
 	} {
 		if !strings.Contains(log, want) {
 			t.Fatalf("bd log missing %q:\n%s", want, log)
 		}
+	}
+	// This city has admission disabled and the work is unenrolled. Ordinary
+	// routing metadata uses the stock CLI; explicit conditional writes are a
+	// separate capability, not a prerequisite for creating a bd-backed rig.
+	if strings.Contains(log, "--if-revision") {
+		t.Fatalf("ordinary rig metadata write unexpectedly required conditional support:\n%s", log)
 	}
 }
 
