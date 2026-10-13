@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -79,7 +80,12 @@ func (cs *controllerState) CompleteLifecycleWork(ctx context.Context, request ap
 		return empty, err
 	}
 	existingBudget := current.Metadata[beadmeta.LifecycleCompletionBudgetMetadataKey] != ""
-	if existingBudget {
+	budgetMetadata := map[string]worklifecycle.MetadataStringPatch{
+		beadmeta.LifecycleCompletionBudgetMetadataKey:  {Value: budgetValue},
+		beadmeta.LifecycleCompletionReceiptMetadataKey: {Value: body.CompletionReceipt},
+	}
+	switch {
+	case existingBudget:
 		// CurrentHead has already verified every immutable receipt. Bind this retry
 		// to the original observation, including when the close has since committed.
 		receipt, found, readErr := lifecycleHeadReceipt(selected.store, transition.head)
@@ -105,14 +111,37 @@ func (cs *controllerState) CompleteLifecycleWork(ctx context.Context, request ap
 			current.Metadata[beadmeta.LifecycleCompletionBudgetMetadataKey] != budgetValue {
 			return empty, worklifecycle.ErrTransitionChainEvidence
 		}
-	} else if current.Status != "in_progress" || !lifecycleCompletionMutable(current) || current.Revision != body.ExpectedRevision ||
-		transition.head.ReceiptID != body.ExpectedTransitionHead || current.Metadata[beadmeta.LifecycleCompletionReceiptMetadataKey] != "" {
+		budgetMetadata, err = lifecycleCompletionBudgetMetadata(receipt)
+		if err != nil {
+			return empty, err
+		}
+	case current.Status != "in_progress" || !lifecycleCompletionMutable(current) || current.Revision != body.ExpectedRevision ||
+		transition.head.ReceiptID != body.ExpectedTransitionHead || current.Metadata[beadmeta.LifecycleCompletionReceiptMetadataKey] != "":
 		return empty, worklifecycle.ErrTransitionChainStale
+	default:
+		var receipt worklifecycle.CompletionReceipt
+		if err := json.Unmarshal([]byte(body.CompletionReceipt), &receipt); err != nil {
+			return empty, errors.Join(worklifecycle.ErrTransitionChainEvidence, err)
+		}
+		// The chain verifies the canonical signature and every projected value
+		// before committing this single protected budget transition.
+		for key, value := range receipt.WorkRecord.Metadata() {
+			change := worklifecycle.MetadataStringPatch{Value: value}
+			if previous, present := current.Metadata[key]; present {
+				change.Expected = &previous
+			}
+			budgetMetadata[key] = change
+		}
 	}
 	// Holds and deferrals still prevent a pending completion from progressing.
 	// A terminal exact replay is read-only and does not reopen or reassign work.
 	if current.Status != "closed" && (current.Status != "in_progress" || !lifecycleCompletionMutable(current)) {
 		return empty, worklifecycle.ErrTransitionChainStale
+	}
+	if current.Status != "closed" {
+		if err := validateLifecycleCompletionWorkRecord(ctx, current, budgetMetadata, cityPath, cfg); err != nil {
+			return empty, err
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		return empty, err
@@ -121,10 +150,7 @@ func (cs *controllerState) CompleteLifecycleWork(ctx context.Context, request ap
 		IssueID: body.WorkID, Step: worklifecycle.TransitionStepCompletionBudget,
 		OperationID:    lifecycleTransitionOperationID("completion-budget", body.WorkID, scope, transition.admissionDigest, body.CompletionReceipt),
 		PriorReceiptID: body.ExpectedTransitionHead, Evidence: transition.evidence,
-		Patch: worklifecycle.SourceWorkPatch{Metadata: map[string]worklifecycle.MetadataStringPatch{
-			beadmeta.LifecycleCompletionBudgetMetadataKey:  {Value: budgetValue},
-			beadmeta.LifecycleCompletionReceiptMetadataKey: {Value: body.CompletionReceipt},
-		}},
+		Patch: worklifecycle.SourceWorkPatch{Metadata: budgetMetadata},
 	})
 	if err != nil {
 		return empty, err
@@ -132,7 +158,7 @@ func (cs *controllerState) CompleteLifecycleWork(ctx context.Context, request ap
 	if err := ctx.Err(); err != nil {
 		return empty, err
 	}
-	if err := reconcileLifecycleCompletionForLeg(cityName, cityPath, cfg, cityStore, rigStores, legs, selected, body.WorkID, scope, resolver, authority); err != nil {
+	if err := reconcileLifecycleCompletionForLeg(ctx, cityName, cityPath, cfg, cityStore, rigStores, legs, selected, body.WorkID, scope, resolver, authority); err != nil {
 		return empty, err
 	}
 	closed, err := selected.store.Get(body.WorkID)

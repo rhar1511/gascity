@@ -541,6 +541,10 @@ gc beads completion prepare <bead-id> [flags]
 | `--deliverable-ref` | string |  | reviewed delivered artifact reference |
 | `--store-ref` | string |  | exact city or rig work store |
 | `--verification-ref` | string |  | reviewed verification evidence reference |
+| `--work-branch` | string |  | branch containing the reviewed commit |
+| `--work-commit` | string |  | commit that delivered the reviewed work |
+| `--work-outcome` | string |  | reviewed work outcome: shipped, no-op, blocked, or abandoned |
+| `--work-verification` | string |  | work-record verification summary |
 
 ## gc beads health
 

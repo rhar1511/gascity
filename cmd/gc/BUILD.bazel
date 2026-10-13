@@ -1728,6 +1728,7 @@ go_test(
         "//internal/worker",
         "//internal/worker/workertest",
         "//internal/worklifecycle",
+        "//internal/workrecord",
         "//internal/workspacesvc",
         "//internal/worktree",
         "//pkg/eventexport",

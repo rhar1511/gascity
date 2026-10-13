@@ -440,49 +440,15 @@ func TestLifecycleAdmissionNativeGraphAttachAndReplay(t *testing.T) {
 	}
 	t.Log("native execution completion refused eight stale or unauthorized requests without changing step or source")
 
-	// Execution completion closes only the current generated step. It does not
-	// supply or replace the separately reviewed source acceptance below.
-	var finishOut, finishErr strings.Builder
-	finish := []string{"--city", c.cityPath, "hook", "complete", "--store-ref", "rig:api", "--outcome", "pass"}
-	if code := run(finish, &finishOut, &finishErr); code != 0 {
-		t.Fatalf("native worker step-completion command exit %d: %s", code, finishErr.String())
-	}
-	var finishedStep api.LifecycleCompletionResult
-	if err := json.Unmarshal([]byte(finishOut.String()), &finishedStep); err != nil {
-		t.Fatal(err)
-	}
-	completedStep, err := c.sourceLeg.store.Get(step.ID)
-	if err != nil || finishedStep.WorkID != step.ID || finishedStep.ReceiptID == "" || finishedStep.Replayed ||
-		completedStep.Status != "closed" || completedStep.Revision != finishedStep.Revision ||
-		completedStep.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomePass || completedStep.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey] != finishedStep.ReceiptID {
-		t.Fatalf("native step completion result %+v, readback error %v", finishedStep, err)
-	}
-	sourceAfterStep, err := c.snapshot(fixture.SourceID)
-	if err != nil || !reflect.DeepEqual(claimed, sourceAfterStep) {
-		t.Fatal("step completion changed the admitted source or its acceptance")
-	}
-	finishOut.Reset()
-	finishErr.Reset()
-	if code := run(finish, &finishOut, &finishErr); code != 0 {
-		t.Fatalf("native worker step-completion retry exit %d: %s", code, finishErr.String())
-	}
-	var finishedReplay api.LifecycleCompletionResult
-	if err := json.Unmarshal([]byte(finishOut.String()), &finishedReplay); err != nil {
-		t.Fatal(err)
-	}
-	replayedStep, err := c.sourceLeg.store.Get(step.ID)
-	if err != nil || !finishedReplay.Replayed || finishedReplay.ReceiptID != finishedStep.ReceiptID || !reflect.DeepEqual(completedStep, replayedStep) {
-		t.Fatal("step completion retry changed the committed step")
-	}
-	t.Log("native worker step completion closed only the execution step and exact retry preserved its receipt")
-
 	// Exercise the public operator prepare/accept commands through the generated
 	// client, real supervisor HTTP handler, controller provider and native backend.
 	var commandOut, commandErr strings.Builder
 	prepare := []string{
 		"--city", c.cityPath, "beads", "completion", "prepare", fixture.SourceID, "--store-ref", "rig:api",
 		"--deliverable-ref", "fixture://native-claim", "--verification-ref", "fixture://native-claim-replay",
+		"--work-outcome", "no-op", "--work-verification", "native exact-replay checks",
 	}
+	t.Setenv("GC_WORK_RECORD_ENFORCE", "true")
 	if code := run(prepare, &commandOut, &commandErr); code != 0 {
 		t.Fatalf("native completion prepare exit %d: %s", code, commandErr.String())
 	}
@@ -497,6 +463,10 @@ func TestLifecycleAdmissionNativeGraphAttachAndReplay(t *testing.T) {
 	var reviewed beadsCompletionDraft
 	if err := json.Unmarshal([]byte(commandOut.String()), &reviewed); err != nil {
 		t.Fatal(err)
+	}
+	if reviewed.Receipt.WorkRecord == nil || reviewed.Receipt.WorkRecord.Outcome != "no-op" ||
+		reviewed.Receipt.WorkRecord.Verification != "native exact-replay checks" || reviewed.Receipt.WorkRecord.Commit != "" || reviewed.Receipt.Signature != "" {
+		t.Fatal("operator draft lost the unsigned typed work record")
 	}
 	refuse := func(name, keyFile, reason string, draft beadsCompletionDraft, want beads.Bead) {
 		t.Helper()
@@ -539,6 +509,9 @@ func TestLifecycleAdmissionNativeGraphAttachAndReplay(t *testing.T) {
 	if err != nil || closed.Status != "closed" || completed.Revision != closed.Revision || completed.ReceiptID != closed.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey] || completed.Replayed {
 		t.Fatalf("operator completion did not close its exact source: %+v err=%v", completed, err)
 	}
+	if closed.Metadata[beadmeta.WorkOutcomeMetadataKey] != "no-op" || closed.Metadata[beadmeta.WorkVerificationMetadataKey] != "native exact-replay checks" {
+		t.Fatal("signed completion lost the accepted typed work record")
+	}
 	closeReceipt, found, err := reader.ReadRevisionTransitionPatchReceipt(completed.ReceiptID)
 	if err != nil || !found || closeReceipt.Kind != "lifecycle_source_close_v1" || closeReceipt.ToVersion != closed.Revision {
 		t.Fatalf("native close receipt: found=%t err=%v", found, err)
@@ -570,6 +543,44 @@ func TestLifecycleAdmissionNativeGraphAttachAndReplay(t *testing.T) {
 	t.Logf("native signed completion %s followed acceptance budget %s; exact replay preserved revision %d", closeReceipt.ReceiptID, budget.ReceiptID, closed.Revision)
 	t.Log("native operator completion prepare/accept used generated client and real supervisor HTTP/controller path")
 	t.Log("native operator refusals preserved source for wrong key, altered authority, stale review and replacement acceptance")
+
+	// Execution completion closes only the current generated step. It does not
+	// supply or replace the separately reviewed source acceptance above.
+	var finishOut, finishErr strings.Builder
+	finish := []string{"--city", c.cityPath, "hook", "complete", "--store-ref", "rig:api", "--outcome", "pass"}
+	if code := run(finish, &finishOut, &finishErr); code != 0 {
+		t.Fatalf("native worker step-completion command exit %d: %s", code, finishErr.String())
+	}
+	var finishedStep api.LifecycleCompletionResult
+	if err := json.Unmarshal([]byte(finishOut.String()), &finishedStep); err != nil {
+		t.Fatal(err)
+	}
+	completedStep, err := c.sourceLeg.store.Get(step.ID)
+	if err != nil || finishedStep.WorkID != step.ID || finishedStep.ReceiptID == "" || finishedStep.Replayed ||
+		completedStep.Status != "closed" || completedStep.Revision != finishedStep.Revision ||
+		completedStep.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomePass || completedStep.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey] != finishedStep.ReceiptID {
+		t.Fatalf("native step completion result %+v, readback error %v", finishedStep, err)
+	}
+	sourceAfterStep, err := c.snapshot(fixture.SourceID)
+	if err != nil || !reflect.DeepEqual(closed, sourceAfterStep) {
+		t.Fatal("step completion changed the admitted source or its acceptance")
+	}
+	finishOut.Reset()
+	finishErr.Reset()
+	if code := run(finish, &finishOut, &finishErr); code != 0 {
+		t.Fatalf("native worker step-completion retry exit %d: %s", code, finishErr.String())
+	}
+	var finishedReplay api.LifecycleCompletionResult
+	if err := json.Unmarshal([]byte(finishOut.String()), &finishedReplay); err != nil {
+		t.Fatal(err)
+	}
+	replayedStep, err := c.sourceLeg.store.Get(step.ID)
+	if err != nil || !finishedReplay.Replayed || finishedReplay.ReceiptID != finishedStep.ReceiptID || !reflect.DeepEqual(completedStep, replayedStep) {
+		t.Fatal("step completion retry changed the committed step")
+	}
+	t.Log("native worker step completion closed only the execution step and exact retry preserved its receipt")
+
+	t.Log("native signed work record and source closure precede current-step completion")
 
 	// Reviewer acceptance closes the source before the signed workflow's tail.
 	// The remaining static step must still claim and finish through protected

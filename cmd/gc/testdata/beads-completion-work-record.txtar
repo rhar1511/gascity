@@ -1,0 +1,23 @@
+# Work-record flags are checked before opening a source or contacting a signer.
+cd $WORK/city
+! exec gc beads completion prepare gc-source --store-ref city:city --deliverable-ref artifact --verification-ref checks --work-commit deadbeef
+stderr '--work-outcome must be one of shipped, no-op, blocked, abandoned'
+! stdout .
+! exec gc beads completion prepare gc-source --store-ref city:city --deliverable-ref artifact --verification-ref checks --work-outcome invalid
+stderr '--work-outcome must be one of shipped, no-op, blocked, abandoned'
+! exec gc beads completion prepare gc-source --store-ref city:city --deliverable-ref artifact --verification-ref checks --work-outcome=
+stderr '--work-outcome must be one of shipped, no-op, blocked, abandoned'
+
+# Valid records, and legacy calls without one, reach the ordinary admission check.
+! exec gc beads completion prepare gc-source --store-ref city:city --deliverable-ref artifact --verification-ref checks --work-outcome no-op
+stderr 'v2 lifecycle admission is disabled'
+! exec gc beads completion prepare gc-source --store-ref city:city --deliverable-ref artifact --verification-ref checks --work-outcome shipped --work-commit deadbeef --work-branch reviewed --work-verification unit-checks
+stderr 'v2 lifecycle admission is disabled'
+! exec gc beads completion prepare gc-source --store-ref city:city --deliverable-ref artifact --verification-ref checks
+stderr 'v2 lifecycle admission is disabled'
+
+-- city/city.toml --
+[workspace]
+name = "city"
+[beads]
+provider = "file"

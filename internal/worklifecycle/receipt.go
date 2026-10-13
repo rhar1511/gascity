@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/workrecord"
 )
 
 // AdmissionIntentLabel explicitly enrolls a bead in controller lifecycle admission.
@@ -75,15 +76,16 @@ type AdmissionReceiptV2 struct {
 // points to the delivered artifact and verification evidence. A trusted
 // acceptance authority signs the record after checking those references.
 type CompletionReceipt struct {
-	Version         int    `json:"version"`
-	WorkItemID      string `json:"work_item_id"`
-	Scope           string `json:"scope"`
-	AdmissionDigest string `json:"admission_digest"`
-	DeliverableRef  string `json:"deliverable_ref"`
-	VerificationRef string `json:"verification_ref"`
-	AcceptedBy      string `json:"accepted_by"`
-	AcceptedAt      string `json:"accepted_at"`
-	Signature       string `json:"signature"`
+	Version         int                `json:"version"`
+	WorkItemID      string             `json:"work_item_id"`
+	Scope           string             `json:"scope"`
+	AdmissionDigest string             `json:"admission_digest"`
+	DeliverableRef  string             `json:"deliverable_ref"`
+	VerificationRef string             `json:"verification_ref"`
+	AcceptedBy      string             `json:"accepted_by"`
+	AcceptedAt      string             `json:"accepted_at"`
+	Signature       string             `json:"signature"`
+	WorkRecord      *workrecord.Record `json:"work_record,omitempty"`
 }
 
 // AdmissionDecision reports whether a bead requests lifecycle admission and

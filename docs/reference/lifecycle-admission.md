@@ -90,6 +90,28 @@ and receipt freshness, then attaches acceptance and its completion budget in one
 protected transition before closing the source. Holds and deferrals prevent a
 pending completion from progressing.
 
+Use `completion prepare --work-outcome <shipped|no-op|blocked|abandoned>`
+with optional `--work-commit`, `--work-branch`, and `--work-verification` to
+include the reviewed work record. Any work-record flag requires a valid outcome.
+Preparing a draft remains read-only; final close-policy checks belong to the
+controller. Omitting all four flags preserves legacy preparation behavior.
+
+The draft's receipt may include an optional `work_record` with `outcome`,
+`commit`, `branch`, and `verification`. These fields are covered by the
+acceptance signature. The controller writes their nonempty values as the
+corresponding `gc.work_*` metadata in the same protected transition as acceptance
+and its budget. Omitted fields preserve existing metadata, including the branch
+stamped by the claim. Receipts without `work_record` retain their original
+canonical signing bytes.
+
+Protected completion uses the existing work-record close policy: violations
+warn by default and block new completion writes when `GC_WORK_RECORD_ENFORCE`
+is enabled. Shipped work is checked against its owning checkout; an unknown
+checkout degrades only the reachability check to a warning. A pending close
+rechecks that policy, including after a controller restart. An exact retry of
+already-closed work preserves the original receipts and does not recheck
+mutable Git references.
+
 Retain the reviewed draft. An exact retry recovers the same committed acceptance
 and close, including after a lost response. Changing the reviewed revision,
 transition head, authority, or accepted artifact does not authorize a replacement

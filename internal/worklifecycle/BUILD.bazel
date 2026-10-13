@@ -28,6 +28,7 @@ go_library(
         "//internal/qualification",
         "//internal/storebinding",
         "//internal/storeref",
+        "//internal/workrecord",
     ],
 )
 
@@ -53,6 +54,7 @@ go_test(
         "//internal/fsys",
         "//internal/storebinding",
         "//internal/testenv",
+        "//internal/workrecord",
     ],
 )
 

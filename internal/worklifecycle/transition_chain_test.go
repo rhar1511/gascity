@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/workrecord"
 )
 
 func TestTransitionChainAppliesEveryLifecycleStepWithExactPermitBinding(t *testing.T) {
@@ -1696,9 +1697,18 @@ func cloneRawMessagePointer(raw *json.RawMessage) *json.RawMessage {
 func TestTransitionChainAttachesCompletionAfterClaim(t *testing.T) {
 	fixture := newTransitionChainFixtureWithCompletion(t, false)
 	claim := applyTestClaim(t, fixture, applyTestAttachment(t, fixture, applyTestReservation(t, fixture)))
-	completion := fixture.completionReceiptValue(t, nil)
+	completion := fixture.completionReceiptValue(t, func(receipt *CompletionReceipt) {
+		receipt.WorkRecord = &workrecord.Record{
+			Outcome: "shipped", Commit: strings.Repeat("a", 40), Branch: "reviewed-branch", Verification: "required checks passed",
+		}
+	})
 	request := fixture.completionBudgetRequest(t, claim.Receipt, completion)
 	request.Patch.Metadata[beadmeta.LifecycleCompletionReceiptMetadataKey] = MetadataStringPatch{Value: completion}
+	priorBranch := "work-branch"
+	request.Patch.Metadata[beadmeta.WorkOutcomeMetadataKey] = MetadataStringPatch{Value: "shipped"}
+	request.Patch.Metadata[beadmeta.WorkCommitMetadataKey] = MetadataStringPatch{Value: strings.Repeat("a", 40)}
+	request.Patch.Metadata[beadmeta.WorkBranchMetadataKey] = MetadataStringPatch{Expected: &priorBranch, Value: "reviewed-branch"}
+	request.Patch.Metadata[beadmeta.WorkVerificationMetadataKey] = MetadataStringPatch{Value: "required checks passed"}
 	beforeWrites := len(fixture.store.patchRequests)
 	budget, err := fixture.chain.Apply(request)
 	if err != nil {
@@ -1707,6 +1717,14 @@ func TestTransitionChainAttachesCompletionAfterClaim(t *testing.T) {
 	current, err := fixture.store.DecisionFrontierSourceSnapshot(fixture.work.ID)
 	if err != nil || current.Status != "in_progress" || current.Metadata[beadmeta.LifecycleCompletionReceiptMetadataKey] != completion || current.Revision != budget.Receipt.ToVersion {
 		t.Fatalf("acceptance and budget were not committed at the same in-progress revision: %+v err=%v", current, err)
+	}
+	for key, want := range map[string]string{
+		beadmeta.WorkOutcomeMetadataKey: "shipped", beadmeta.WorkCommitMetadataKey: strings.Repeat("a", 40),
+		beadmeta.WorkBranchMetadataKey: "reviewed-branch", beadmeta.WorkVerificationMetadataKey: "required checks passed",
+	} {
+		if current.Metadata[key] != want {
+			t.Fatalf("accepted work-record field %s = %q, want %q", key, current.Metadata[key], want)
+		}
 	}
 	decision, err := fixture.chain.VerifyCompletionReceipt(fixture.work.ID, fixture.evidence)
 	if err != nil || !decision.Accepted {
@@ -1769,6 +1787,23 @@ func TestTransitionChainCompletionAttachmentRefusesInvalidProofBeforeWrites(t *t
 			r.Patch.Metadata[beadmeta.LifecycleCompletionReceiptMetadataKey] = v
 		}},
 		{name: "existing acceptance", seed: true},
+		{name: "unsigned work record", patch: func(r *TransitionRequest) {
+			r.Patch.Metadata[beadmeta.WorkOutcomeMetadataKey] = MetadataStringPatch{Value: "no-op"}
+		}},
+		{name: "missing signed work record", edit: func(r *CompletionReceipt) {
+			r.WorkRecord = &workrecord.Record{Outcome: "no-op"}
+		}},
+		{name: "different signed work record", edit: func(r *CompletionReceipt) {
+			r.WorkRecord = &workrecord.Record{Outcome: "no-op"}
+		}, patch: func(r *TransitionRequest) {
+			r.Patch.Metadata[beadmeta.WorkOutcomeMetadataKey] = MetadataStringPatch{Value: "shipped"}
+		}},
+		{name: "unsigned extra delivery field", edit: func(r *CompletionReceipt) {
+			r.WorkRecord = &workrecord.Record{Outcome: "no-op"}
+		}, patch: func(r *TransitionRequest) {
+			r.Patch.Metadata[beadmeta.WorkOutcomeMetadataKey] = MetadataStringPatch{Value: "no-op"}
+			r.Patch.Metadata[beadmeta.WorkCommitMetadataKey] = MetadataStringPatch{Value: strings.Repeat("a", 40)}
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fixture := newTransitionChainFixtureWithCompletion(t, tc.seed)

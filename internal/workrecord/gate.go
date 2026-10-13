@@ -42,6 +42,34 @@ import (
 // or are logged only (warn-only, the default).
 const EnforceEnvVar = "GC_WORK_RECORD_ENFORCE"
 
+// Record describes the reviewed outcome and delivery evidence of a work item.
+type Record struct {
+	Outcome      string `json:"outcome"`
+	Commit       string `json:"commit,omitempty"`
+	Branch       string `json:"branch,omitempty"`
+	Verification string `json:"verification,omitempty"`
+}
+
+// Metadata returns the nonempty work-record fields to record on a bead.
+// An absent record leaves existing delivery and claim metadata unchanged.
+func (r *Record) Metadata() map[string]string {
+	values := make(map[string]string)
+	if r == nil {
+		return values
+	}
+	for key, value := range map[string]string{
+		beadmeta.WorkOutcomeMetadataKey:      r.Outcome,
+		beadmeta.WorkCommitMetadataKey:       r.Commit,
+		beadmeta.WorkBranchMetadataKey:       r.Branch,
+		beadmeta.WorkVerificationMetadataKey: r.Verification,
+	} {
+		if value != "" {
+			values[key] = value
+		}
+	}
+	return values
+}
+
 // EnforceEnabled reports whether the close gate should block closes that violate
 // the work-record contract, rather than only warning.
 func EnforceEnabled() bool {

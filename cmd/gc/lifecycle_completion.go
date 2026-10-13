@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log"
+	"maps"
 	"strings"
 	"time"
 
@@ -13,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/qualification"
 	"github.com/gastownhall/gascity/internal/worklifecycle"
+	"github.com/gastownhall/gascity/internal/workrecord"
 )
 
 // reconcileLifecycleCompletions is retained for callers without controller
@@ -69,7 +73,7 @@ func reconcileLifecycleCompletionsWithPermitResolver(
 					continue
 				}
 				scope := lifecycleScopeForRef(cityName, cfg, leg.ref)
-				if err := reconcileLifecycleCompletionForLeg(cityName, cityPath, cfg, store, rigStores, legs, leg, row.ID, scope, permitResolver, authority); err != nil {
+				if err := reconcileLifecycleCompletionForLeg(context.Background(), cityName, cityPath, cfg, store, rigStores, legs, leg, row.ID, scope, permitResolver, authority); err != nil {
 					fmt.Fprintf(stderr, "lifecycle completion: %s in %s: %v\n", row.ID, leg.ref, err) //nolint:errcheck
 				}
 			}
@@ -98,6 +102,7 @@ func reconcileLifecycleCompletion(store beads.Store, id, scope string, cfg confi
 }
 
 func reconcileLifecycleCompletionForLeg(
+	ctx context.Context,
 	cityName, cityPath string,
 	cfg *config.City,
 	cityStore beads.Store,
@@ -139,6 +144,9 @@ func reconcileLifecycleCompletionForLeg(
 	if transition.source.Status != "in_progress" || transition.source.Metadata[beadmeta.LifecycleCompletionReceiptMetadataKey] != completionReceipt {
 		return fmt.Errorf("completion source changed while rebuilding current evidence: %w", worklifecycle.ErrTransitionChainStale)
 	}
+	if err := validateLifecycleCompletionWorkRecord(ctx, transition.source, nil, cityPath, cfg); err != nil {
+		return err
+	}
 	budgetValue, err := worklifecycle.BuildCompletionBudgetMetadata(id, scope, transition.admissionDigest, completionReceipt)
 	if err != nil {
 		return fmt.Errorf("build receipt-bound completion budget: %w", err)
@@ -158,14 +166,11 @@ func reconcileLifecycleCompletionForLeg(
 			return fmt.Errorf("current completion budget does not bind this exact receipt and head: %w", worklifecycle.ErrTransitionChainStale)
 		}
 		budgetParentID = budgetReceipt.PriorReceiptID
-		// Acceptance can arrive after the claim, atomically with its budget.
-		// Reconstruct that exact verified patch when recovering after a restart;
-		// a budget-only retry would conflict with the immutable receipt.
-		if attached, present := lifecyclePatchMetadataString(budgetReceipt, beadmeta.LifecycleCompletionReceiptMetadataKey); present {
-			if attached != completionReceipt {
-				return fmt.Errorf("completion budget attached a different acceptance receipt: %w", worklifecycle.ErrTransitionChainEvidence)
-			}
-			budgetMetadata[beadmeta.LifecycleCompletionReceiptMetadataKey] = worklifecycle.MetadataStringPatch{Value: attached}
+		// Replay the verified immutable patch, including the original expected
+		// values of delivery fields that the claim had already populated.
+		budgetMetadata, err = lifecycleCompletionBudgetMetadata(budgetReceipt)
+		if err != nil {
+			return err
 		}
 	}
 	budgetResult, err := transition.chain.Apply(worklifecycle.TransitionRequest{
@@ -219,6 +224,69 @@ func lifecycleHeadReceipt(store beads.Store, head worklifecycle.TransitionHead) 
 		return receipt, found, errors.Join(err, worklifecycle.ErrTransitionChainReceipt)
 	}
 	return receipt, true, nil
+}
+
+func validateLifecycleCompletionWorkRecord(ctx context.Context, source beads.Bead, submitted map[string]worklifecycle.MetadataStringPatch, cityPath string, cfg *config.City) error {
+	if !workrecord.Gated(source) {
+		return nil
+	}
+	source.Metadata = maps.Clone(source.Metadata)
+	if source.Metadata == nil {
+		source.Metadata = make(map[string]string)
+	}
+	for key, change := range submitted {
+		source.Metadata[key] = change.Value
+	}
+	dirs := workRecordRepoDirs{cityPath: cityPath, legacy: cityPath, rigs: func() []config.Rig { return cfg.Rigs }}
+	repoDir := dirs.repoDirFor(source)
+	unverified := false
+	violations := workrecord.ValidateOnClose(source, func(commit, branch string) bool {
+		if repoDir == "" {
+			unverified = true
+			return true
+		}
+		return workrecord.CommitReachableOnBranchContext(ctx, repoDir, commit, branch)
+	})
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	enforce := workrecord.EnforceEnabled()
+	mode := "warn-only"
+	if enforce {
+		mode = "enforced"
+	}
+	if unverified {
+		log.Printf("lifecycle completion: work-record gate (%s): %s: %s", mode, source.ID, workrecord.ReachabilityUnverifiedNote)
+	}
+	for _, violation := range violations {
+		log.Printf("lifecycle completion: work-record gate (%s): %s: %s", mode, source.ID, violation)
+	}
+	if enforce && len(violations) > 0 {
+		return fmt.Errorf("work record does not satisfy the close contract: %s: %w", strings.Join(violations, "; "), worklifecycle.ErrTransitionChainEvidence)
+	}
+	return nil
+}
+
+func lifecycleCompletionBudgetMetadata(receipt beads.RevisionTransitionPatchReceipt) (map[string]worklifecycle.MetadataStringPatch, error) {
+	metadata := make(map[string]worklifecycle.MetadataStringPatch)
+	for _, change := range receipt.Patch.Metadata {
+		if change.Key == beadmeta.LifecycleTransitionHeadMetadataKey {
+			continue
+		}
+		var field worklifecycle.MetadataStringPatch
+		if change.Value == nil || json.Unmarshal(*change.Value, &field.Value) != nil {
+			return nil, worklifecycle.ErrTransitionChainReceipt
+		}
+		if change.Expected != nil {
+			var expected string
+			if err := json.Unmarshal(*change.Expected, &expected); err != nil {
+				return nil, errors.Join(worklifecycle.ErrTransitionChainReceipt, err)
+			}
+			field.Expected = &expected
+		}
+		metadata[change.Key] = field
+	}
+	return metadata, nil
 }
 
 func lifecyclePatchMetadataString(receipt beads.RevisionTransitionPatchReceipt, key string) (string, bool) {

@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/worklifecycle"
+	"github.com/gastownhall/gascity/internal/workrecord"
 	"github.com/spf13/cobra"
 )
 
@@ -33,16 +34,28 @@ type beadsCompletionDraft struct {
 func newBeadsCompletionCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{Use: "completion", Short: "Prepare and submit reviewed lifecycle acceptance"}
 	var prepareStore, deliverable, verification string
+	var record workrecord.Record
 	prepare := &cobra.Command{
 		Use: "prepare <bead-id>", Short: "Prepare an unsigned acceptance draft without changing work", Args: cobra.ExactArgs(1),
-		RunE: func(_ *cobra.Command, args []string) error {
-			draft, err := prepareBeadsCompletion(args[0], prepareStore, deliverable, verification, stderr)
+		RunE: func(command *cobra.Command, args []string) error {
+			var submitted *workrecord.Record
+			for _, name := range []string{"work-outcome", "work-commit", "work-branch", "work-verification"} {
+				if command.Flags().Changed(name) {
+					submitted = &record
+					break
+				}
+			}
+			draft, err := prepareBeadsCompletion(args[0], prepareStore, deliverable, verification, submitted, stderr)
 			return printBeadsCompletionResult("prepare", draft, err, stdout, stderr)
 		},
 	}
 	prepare.Flags().StringVar(&prepareStore, "store-ref", "", "exact city or rig work store")
 	prepare.Flags().StringVar(&deliverable, "deliverable-ref", "", "reviewed delivered artifact reference")
 	prepare.Flags().StringVar(&verification, "verification-ref", "", "reviewed verification evidence reference")
+	prepare.Flags().StringVar(&record.Outcome, "work-outcome", "", "reviewed work outcome: shipped, no-op, blocked, or abandoned")
+	prepare.Flags().StringVar(&record.Commit, "work-commit", "", "commit that delivered the reviewed work")
+	prepare.Flags().StringVar(&record.Branch, "work-branch", "", "branch containing the reviewed commit")
+	prepare.Flags().StringVar(&record.Verification, "work-verification", "", "work-record verification summary")
 	var acceptStore, keyFile string
 	accept := &cobra.Command{
 		Use: "accept <reviewed-draft.json>", Short: "Sign reviewed acceptance and complete work through the controller", Args: cobra.ExactArgs(1),
@@ -78,8 +91,11 @@ func printBeadsCompletionResult(action string, value any, err error, stdout, std
 	return nil
 }
 
-func prepareBeadsCompletion(id, storeRef, deliverable, verification string, stderr io.Writer) (beadsCompletionDraft, error) {
+func prepareBeadsCompletion(id, storeRef, deliverable, verification string, record *workrecord.Record, stderr io.Writer) (beadsCompletionDraft, error) {
 	var empty beadsCompletionDraft
+	if record != nil && !workrecord.ValidOutcome(record.Outcome) {
+		return empty, fmt.Errorf("--work-outcome must be one of shipped, no-op, blocked, abandoned")
+	}
 	if !validMetadataCASToken(id, metadataCASMaxBeadIDBytes) || strings.TrimSpace(deliverable) == "" || strings.TrimSpace(verification) == "" {
 		return empty, fmt.Errorf("exact work ID, --deliverable-ref and --verification-ref are required")
 	}
@@ -109,7 +125,7 @@ func prepareBeadsCompletion(id, storeRef, deliverable, verification string, stde
 		SchemaVersion: 1, StoreRef: storeRef, ExpectedRevision: source.Revision,
 		ExpectedTransitionHead: source.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey], Admission: admission,
 		Receipt: worklifecycle.CompletionReceipt{
-			Version: 1, WorkItemID: id, Scope: admission.Scope, AdmissionDigest: digest,
+			Version: 1, WorkItemID: id, Scope: admission.Scope, AdmissionDigest: digest, WorkRecord: record,
 			DeliverableRef: deliverable, VerificationRef: verification, AcceptedBy: admission.AcceptanceAuthority, AcceptedAt: time.Now().UTC().Format(time.RFC3339Nano),
 		},
 	}, nil
