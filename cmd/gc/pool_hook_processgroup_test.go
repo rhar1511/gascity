@@ -80,8 +80,16 @@ func TestHookTimeoutKillsTheWholeProcessGroup(t *testing.T) {
 	})
 
 	t.Run("control: without it the descendant survives", func(t *testing.T) {
-		pid := descendantPIDAfterTimeout(t, 300*time.Millisecond, nil)
-		t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+		pid := descendantPIDAfterTimeout(t, 300*time.Millisecond, func(cmd *exec.Cmd) {
+			// Keep parent-only cancellation as the negative control; own a
+			// group so fixture cleanup reaches both independently-forked sleeps.
+			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+			t.Cleanup(func() {
+				if cmd.Process != nil {
+					_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+				}
+			})
+		})
 		if waitForProcessExit(pid, 2*time.Second) {
 			t.Fatal("the descendant died without the group cleanup, so the row above proves nothing about the cleanup")
 		}

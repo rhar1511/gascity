@@ -5307,6 +5307,7 @@ func TestOpenControlStoreDisablesAutoExportWithoutSandboxingWrites(t *testing.T)
 		t.Fatal(err)
 	}
 	cfg := &config.City{
+		Lifecycle: config.LifecycleConfig{AdmissionEnabled: true},
 		Workspace: config.Workspace{Name: "test-city"},
 		Rigs:      []config.Rig{{Name: "myrig", Path: rigDir}},
 	}
@@ -5457,6 +5458,7 @@ func TestOpenControlStoreAtForCityUsesControlRunnerForStaleBdScope(t *testing.T)
 		t.Fatalf("write stale rig metadata: %v", err)
 	}
 	cfg := &config.City{
+		Lifecycle: config.LifecycleConfig{AdmissionEnabled: true},
 		Workspace: config.Workspace{Name: "test-city"},
 		Rigs:      []config.Rig{{Name: "active", Path: "rigs/active"}},
 	}

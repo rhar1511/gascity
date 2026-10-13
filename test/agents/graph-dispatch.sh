@@ -12,7 +12,7 @@ export BEADS_DIR="$GC_CITY/.beads"
 MODE="${GC_GRAPH_MODE:-success}"
 REPORT_FILE="$GC_CITY/graph-workflow-steps.log"
 TRACE_FILE="$GC_CITY/graph-workflow-trace.log"
-ASSIGNEE="${GC_SESSION_NAME:-${GC_AGENT:-}}"
+ASSIGNEE="${BEADS_ACTOR:-${GC_SESSION_NAME:-${GC_AGENT:-}}}"
 HARNESS_STATE_DIR="$GC_CITY/.gc/test-harness"
 HOOK_TIMEOUT="${GC_GRAPH_HOOK_TIMEOUT:-35}"
 
@@ -23,6 +23,22 @@ export BEADS_ACTOR="${BEADS_ACTOR:-${ASSIGNEE:-worker}}"
 mkdir -p "$HARNESS_STATE_DIR"
 
 echo "graph-worker startup: GC_CITY=${GC_CITY:-} GC_CITY_PATH=${GC_CITY_PATH:-} GC_DOLT_PORT=${GC_DOLT_PORT:-} GC_AGENT=${GC_AGENT:-} GC_SESSION_NAME=${GC_SESSION_NAME:-} PWD=$(pwd)"
+
+setup_graph_workspace() {
+    local dir="$1"
+    mkdir -p "$dir"
+    (
+        unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE
+        unset GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_TEMPLATE_DIR
+        unset GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS
+        unset GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
+        export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+        git -C "$dir" init --quiet
+        git -C "$dir" -c user.name='Graph fixture' -c user.email=graph-fixture@example.invalid \
+            -c commit.gpgsign=false -c core.hooksPath=/dev/null \
+            commit --quiet --allow-empty -m 'Initialize graph attempt workspace'
+    )
+}
 
 trace() {
     printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >> "$TRACE_FILE"
@@ -104,6 +120,12 @@ close_with_result() {
     local outcome="$2"
     local failure_class="${3:-}"
     local failure_reason="${4:-}"
+    local workspace_args=()
+    if [ -n "${work_dir:-}" ]; then
+        # The controller captures evidence after close; record the workspace
+        # this simulated worker actually used, including on failed attempts.
+        workspace_args=(--set-metadata "gc.work_dir=$work_dir")
+    fi
 
     # Swallow any bd failure — the worker runs under `set -e`, so an
     # error from a transient bd issue here (flaky socket, concurrent
@@ -112,13 +134,14 @@ close_with_result() {
     # outcomes (they read it back via show_outcome), so failing silently
     # is safer than failing loudly.
     if [ "$outcome" = "pass" ]; then
-        if ! bd update "$bead_id" --set-metadata "gc.outcome=pass" --status closed 2>/dev/null; then
+        if ! bd update "$bead_id" "${workspace_args[@]}" --set-metadata "gc.outcome=pass" --status closed 2>/dev/null; then
             trace "close-rejected bead=$bead_id outcome=$outcome (likely already closed by controller)"
         fi
         return 0
     fi
 
     if ! bd update "$bead_id" \
+        "${workspace_args[@]}" \
         --set-metadata "gc.outcome=fail" \
         --set-metadata "gc.failure_class=$failure_class" \
         --set-metadata "gc.failure_reason=$failure_reason" \
@@ -128,18 +151,21 @@ close_with_result() {
     return 0
 }
 
+transient_once_marker() {
+    printf '%s/transient-once.%s' "$HARNESS_STATE_DIR" "$(sanitize_key "$1")"
+}
+
+# Deciding to inject must not spend the budget before its failing close lands.
 should_fail_transient_once() {
     local ref="$1"
-    local marker=""
     if ! ref_matches_suffix_list "$ref" "${GC_GRAPH_TRANSIENT_ONCE_SUFFIXES:-}"; then
         return 1
     fi
-    marker="$HARNESS_STATE_DIR/transient-once.$(sanitize_key "$ref")"
-    if [ -f "$marker" ]; then
-        return 1
-    fi
-    : > "$marker"
-    return 0
+    [ ! -f "$(transient_once_marker "$ref")" ]
+}
+
+commit_transient_once() {
+    : > "$(transient_once_marker "$1")"
 }
 
 should_fail_transient_always() {
@@ -588,7 +614,7 @@ while true; do
         *.workspace-setup*)
             if [ -z "$work_dir" ]; then
                 work_dir="$GC_CITY/worktrees/$target_id"
-                mkdir -p "$work_dir"
+                setup_graph_workspace "$work_dir"
                 bd update "$target_id" --set-metadata "work_dir=$work_dir"
                 trace "workspace-setup target=$target_id work_dir=$work_dir"
             fi
@@ -638,6 +664,11 @@ while true; do
         status_after=$(show_status "$bead_id" 2>/dev/null || true)
         outcome_after=$(show_outcome "$bead_id" 2>/dev/null || true)
         trace "closed bead=$bead_id status=$status_after outcome=$outcome_after"
+        if [ "$status_after" = "closed" ] && [ "$outcome_after" = "fail" ]; then
+            commit_transient_once "$ref"
+        else
+            trace "transient-once-uncommitted bead=$bead_id ref=$ref status=$status_after outcome=$outcome_after"
+        fi
         continue
     fi
     if should_fail_transient_always "$ref"; then

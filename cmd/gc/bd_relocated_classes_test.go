@@ -363,10 +363,10 @@ func TestBdSQLRelocatedClassRefusalIsInertOnASingleStoreCity(t *testing.T) {
 
 // TestBdStoreOptionsCarryRelocatedClassesOnlyWhenSplit pins the wiring: the one
 // choke point every cmd/gc bd store is built through must hand the guard down
-// on a split city and add nothing on a single-store one.
+// on a split city, alongside the admission policy shared by both topologies.
 func TestBdStoreOptionsCarryRelocatedClassesOnlyWhenSplit(t *testing.T) {
-	if got := len(bdStoreOptionsForConfig(allWorkCityConfig())); got != 0 {
-		t.Fatalf("single-store city produced %d bd store options, want 0", got)
+	if got := len(bdStoreOptionsForConfig(allWorkCityConfig())); got != 1 {
+		t.Fatalf("single-store city produced %d bd store options, want one admission policy", got)
 	}
 	base := len(bdStoreOptionsForConfig(allWorkCityConfig()))
 	if got := len(bdStoreOptionsForConfig(splitCityConfig())); got != base+1 {

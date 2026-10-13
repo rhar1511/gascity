@@ -58,7 +58,6 @@ type hostBeadsPermitAuthorityEntry struct {
 	ProtectionClass       string `json:"protection_class"`
 	PermitLifetimeSeconds int64  `json:"permit_lifetime_seconds"`
 	PrivateKeyHandle      string `json:"private_key_handle"`
-	privateKeyFD          int
 }
 
 type hostBeadsPermitScope struct {

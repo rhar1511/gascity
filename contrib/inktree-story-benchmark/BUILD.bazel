@@ -6,9 +6,12 @@ go_test(
         "formula_test.go",
         "testenv_import_test.go",
     ],
-    embedsrcs = ["formulas/mol-rsi-story-candidate.toml"],
+    data = glob(["testdata/**"]),
+    embedsrcs = [
+        "formulas/mol-rsi-story-candidate.toml",
+        "testdata/mol-rsi-candidate.toml",
+    ],
     deps = [
-        "//internal/bootstrap/packs/core",
         "//internal/formula",
         "//internal/testenv",
     ],

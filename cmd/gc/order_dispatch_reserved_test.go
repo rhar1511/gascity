@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -73,6 +74,129 @@ func ordinaryExecOrder(name string) orders.Order {
 		Exec:     name,
 		Trigger:  "cooldown",
 		Interval: "1h",
+	}
+}
+
+// Saturation must not turn a declared reserved probe's 30-second cooldown
+// into a whole ordinary-ring wait. Exercise the production dispatcher, with
+// neutral names and clock-driven orders (condition orders already bypass the
+// ordinary budget).
+func TestOrderDispatchReservedCapacityBesideSaturatedOrdinaryRing(t *testing.T) {
+	store := beads.NewMemStore()
+	recorder := &reservedDispatchExecRecorder{}
+	var aa []orders.Order
+	for _, name := range []string{"ordinary-a", "ordinary-b", "ordinary-c", "ordinary-d"} {
+		aa = append(aa, ordinaryExecOrder(name))
+	}
+	for _, name := range []string{"reserved-a", "reserved-b", "reserved-c"} {
+		aa = append(aa, reservedExecOrder(t, name, false))
+	}
+	m := buildOrderDispatcherFromListExec(aa, store, nil, recorder.run, nil).(*memoryOrderDispatcher)
+	m.maxDispatchesPerTick = 2
+	m.dispatch(context.Background(), t.TempDir(), time.Now())
+	drainOrderDispatch(t, m)
+	counts := recorder.counts()
+	for _, name := range []string{"reserved-a", "reserved-b", "reserved-c"} {
+		if counts[name] != 1 {
+			t.Errorf("%s dispatches = %d, want 1 beside saturated ordinary budget", name, counts[name])
+		}
+	}
+	ordinary := counts["ordinary-a"] + counts["ordinary-b"] + counts["ordinary-c"] + counts["ordinary-d"]
+	if ordinary != 2 {
+		t.Errorf("ordinary dispatches = %d, want unchanged budget 2", ordinary)
+	}
+}
+
+func TestOrderDispatchReservedCapacityCappedAndRotatesIndependently(t *testing.T) {
+	store := beads.NewMemStore()
+	recorder := &reservedDispatchExecRecorder{}
+	var aa []orders.Order
+	for _, name := range []string{"ordinary-a", "ordinary-b", "ordinary-c", "ordinary-d"} {
+		a := ordinaryExecOrder(name)
+		a.Interval = "1ms"
+		aa = append(aa, a)
+	}
+	for _, name := range []string{"reserved-a", "reserved-b", "reserved-c", "reserved-d"} {
+		a := reservedExecOrder(t, name, false)
+		a.Interval = "1ms"
+		aa = append(aa, a)
+	}
+	m := buildOrderDispatcherFromListExec(aa, store, nil, recorder.run, nil).(*memoryOrderDispatcher)
+	m.maxDispatchesPerTick = 2
+	now := time.Now()
+	cityPath := t.TempDir()
+	for tick := 0; tick < 2; tick++ {
+		before := recorder.counts()
+		m.dispatch(context.Background(), cityPath, now.Add(time.Duration(tick)*time.Second))
+		drainOrderDispatch(t, m)
+		after := recorder.counts()
+		ordinary, reserved := 0, 0
+		for _, a := range aa {
+			delta := after[a.Name] - before[a.Name]
+			if a.ReservedDispatch {
+				reserved += delta
+			} else {
+				ordinary += delta
+			}
+		}
+		if ordinary != 2 || reserved != 3 {
+			t.Errorf("tick %d: ordinary=%d reserved=%d, want independent bounds 2 and 3", tick, ordinary, reserved)
+		}
+	}
+	for _, a := range aa {
+		if recorder.counts()[a.Name] == 0 {
+			t.Errorf("%s starved across rotation", a.Name)
+		}
+	}
+}
+
+func TestOrderDispatchReservedUnusedSlotsDoNotEnlargeOrdinaryBudget(t *testing.T) {
+	for _, reservedCount := range []int{0, 1} {
+		t.Run(fmt.Sprintf("reserved-%d", reservedCount), func(t *testing.T) {
+			store := beads.NewMemStore()
+			recorder := &reservedDispatchExecRecorder{}
+			aa := []orders.Order{ordinaryExecOrder("ordinary-a"), ordinaryExecOrder("ordinary-b"), ordinaryExecOrder("ordinary-c")}
+			if reservedCount == 1 {
+				aa = append(aa, reservedExecOrder(t, "reserved-a", false))
+			}
+			m := buildOrderDispatcherFromListExec(aa, store, nil, recorder.run, nil).(*memoryOrderDispatcher)
+			m.maxDispatchesPerTick = 2
+			m.dispatch(context.Background(), t.TempDir(), time.Now())
+			drainOrderDispatch(t, m)
+			counts := recorder.counts()
+			if got := counts["ordinary-a"] + counts["ordinary-b"] + counts["ordinary-c"]; got != 2 {
+				t.Errorf("ordinary launches = %d, want 2 even with unused reserved slots", got)
+			}
+			if counts["reserved-a"] != reservedCount {
+				t.Errorf("reserved launches = %d, want %d", counts["reserved-a"], reservedCount)
+			}
+		})
+	}
+}
+
+func TestOrderDispatchReservedConditionCapacityIsStillCapped(t *testing.T) {
+	store := beads.NewMemStore()
+	recorder := &reservedDispatchExecRecorder{}
+	var aa []orders.Order
+	for i := 0; i < 4; i++ {
+		a := reservedExecOrder(t, fmt.Sprintf("reserved-%d", i), false)
+		a.Trigger, a.Check, a.Interval = "condition", "true", ""
+		aa = append(aa, a)
+	}
+	// The existing ordinary due-condition path stays outside the ordinary
+	// budget. Explicit reservation must not accidentally fire twice there.
+	aa = append(aa, orders.Order{Name: "ordinary-condition", Trigger: "condition", Check: "true", Exec: "ordinary-condition"})
+	m := buildOrderDispatcherFromListExec(aa, store, nil, recorder.run, nil).(*memoryOrderDispatcher)
+	m.maxDispatchesPerTick = 1
+	m.dispatch(context.Background(), t.TempDir(), time.Now())
+	drainOrderDispatch(t, m)
+	counts := recorder.counts()
+	reserved := 0
+	for i := 0; i < 4; i++ {
+		reserved += counts[fmt.Sprintf("reserved-%d", i)]
+	}
+	if reserved != 3 || counts["ordinary-condition"] != 1 {
+		t.Fatalf("reserved=%d ordinary-condition=%d, want capped 3 and unchanged ordinary 1", reserved, counts["ordinary-condition"])
 	}
 }
 

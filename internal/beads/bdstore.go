@@ -481,6 +481,10 @@ type BdStore struct {
 	// (disjoint from condWriteMu's capability state; no nesting).
 	condWritesStamp
 
+	// Explicitly resolved admission-disabled cities retain ordinary CLI writes.
+	// Unconfigured stores remain conservative.
+	lifecycleAdmissionDisabled bool
+
 	// unreadStore memoizes, per SCOPE PATH, whether an empty whole-ledger read
 	// from this scope can be believed while a second bead database sits unread
 	// in its .beads/. Shared with every other store rooted at the same
@@ -521,6 +525,16 @@ var _ ConditionalAssignmentReleaser = (*BdStore)(nil)
 
 // BdStoreOption configures optional bd CLI behavior for a BdStore.
 type BdStoreOption func(*BdStore)
+
+// WithBdStoreLifecycleAdmission records the resolved city admission policy.
+// Disabling admission permits ordinary, unenrolled writes through stock bd.
+// Existing enrollment, new enrollment, configured HTTP writes, and explicit
+// conditional writes still require a revision fence. Omitted policy is strict.
+func WithBdStoreLifecycleAdmission(enabled bool) BdStoreOption {
+	return func(s *BdStore) {
+		s.lifecycleAdmissionDisabled = !enabled
+	}
+}
 
 // WithBdStoreListSkipLabels controls whether List may pass --skip-labels to bd.
 // Keep disabled unless the caller has opted into bd 1.0.5-compatible CLI
@@ -872,10 +886,9 @@ func (r *bdRevision) UnmarshalJSON(data []byte) error {
 	if len(token) == 0 {
 		return errors.New("bd revision is empty")
 	}
-	// A JSON null revision means the row has no recorded token yet (legacy rows,
-	// or a backend that has not minted one). Decode it as the zero token — the
-	// same "no revision" sentinel a never-mutated bead carries — rather than
-	// failing the whole issue decode on strconv.ParseInt("null").
+	// Keep the scalar decoder's legacy null compatibility. bdIssue uses a
+	// pointer, so absent/null details stay nil and cannot be confused with an
+	// explicitly published zero when converted to the owning bead snapshot.
 	if string(token) == "null" {
 		*r = 0
 		return nil
@@ -893,6 +906,13 @@ func (r *bdRevision) UnmarshalJSON(data []byte) error {
 	}
 	*r = bdRevision(value)
 	return nil
+}
+
+// hasRevisionToken preserves a bd detail's explicit zero while native stores
+// without a published token retain their existing zero-as-unusable behavior.
+// Valid nonzero revisions are opaque: their sign carries no capability meaning.
+func hasRevisionToken(b Bead) bool {
+	return b.Revision != 0 || b.revisionZeroPublished
 }
 
 // bdIssue is the JSON shape returned by bd CLI commands. We decode only the
@@ -925,9 +945,10 @@ type bdIssue struct {
 	DeferUntil      *time.Time   `json:"defer_until,omitempty"`
 	IsBlocked       optionalBool `json:"is_blocked,omitempty"`
 	// Revision carries bd's optimistic-concurrency token for ConditionalWriter.
-	// Older bd versions omit it, so it decodes to 0; toBead stamps it onto the
-	// otherwise json:"-" Bead.Revision field.
-	Revision bdRevision `json:"revision,omitempty"`
+	// A pointer distinguishes absent/null from a valid explicitly published
+	// zero. bdRevision still parses both decimal strings and legacy integers
+	// directly to int64; malformed values fail the owning detail decode.
+	Revision *bdRevision `json:"revision,omitempty"`
 }
 
 type bdIssueDep struct {
@@ -1113,29 +1134,34 @@ func (b *bdIssue) toBead() Bead {
 		}
 	}
 	status, indefinitelyDeferred := normalizedBdReadState(b.Status, b.DeferUntil)
+	var revision int64
+	if b.Revision != nil {
+		revision = int64(*b.Revision)
+	}
 	return Bead{
-		ID:                   b.ID,
-		Title:                b.Title,
-		Status:               status,
-		Type:                 b.IssueType,
-		Priority:             cloneIntPtr(b.Priority),
-		CreatedAt:            b.CreatedAt.Truncate(time.Second),
-		UpdatedAt:            b.UpdatedAt.Truncate(time.Second),
-		Assignee:             b.Assignee,
-		From:                 from,
-		ParentID:             parentID,
-		Ref:                  b.Ref,
-		Needs:                b.Needs,
-		Description:          b.Description,
-		Labels:               b.Labels,
-		Metadata:             b.Metadata,
-		Dependencies:         deps,
-		Ephemeral:            b.Ephemeral,
-		NoHistory:            b.NoHistory,
-		DeferUntil:           cloneTimePtr(b.DeferUntil),
-		IsBlocked:            b.IsBlocked.ptr(),
-		IndefinitelyDeferred: indefinitelyDeferred,
-		Revision:             int64(b.Revision),
+		ID:                    b.ID,
+		Title:                 b.Title,
+		Status:                status,
+		Type:                  b.IssueType,
+		Priority:              cloneIntPtr(b.Priority),
+		CreatedAt:             b.CreatedAt.Truncate(time.Second),
+		UpdatedAt:             b.UpdatedAt.Truncate(time.Second),
+		Assignee:              b.Assignee,
+		From:                  from,
+		ParentID:              parentID,
+		Ref:                   b.Ref,
+		Needs:                 b.Needs,
+		Description:           b.Description,
+		Labels:                b.Labels,
+		Metadata:              b.Metadata,
+		Dependencies:          deps,
+		Ephemeral:             b.Ephemeral,
+		NoHistory:             b.NoHistory,
+		DeferUntil:            cloneTimePtr(b.DeferUntil),
+		IsBlocked:             b.IsBlocked.ptr(),
+		IndefinitelyDeferred:  indefinitelyDeferred,
+		Revision:              revision,
+		revisionZeroPublished: b.Revision != nil && revision == 0,
 	}
 }
 
@@ -1577,13 +1603,15 @@ func (s *BdStore) Update(id string, opts UpdateOpts) error {
 		if err := ValidateLifecycleMutation(current, opts); err != nil {
 			return fmt.Errorf("updating lifecycle bead %q: %w", id, err)
 		}
-		if current.Revision <= 0 {
-			return fmt.Errorf("updating lifecycle bead %q: %w", id, ErrConditionalWriteUnsupported)
+		if s.requiresLifecycleRevisionFence(current, opts) {
+			if !hasRevisionToken(current) {
+				return fmt.Errorf("updating lifecycle bead %q: %w", id, ErrConditionalWriteUnsupported)
+			}
+			if err := s.updateIfMatchAtRevision(id, current.Revision, opts); err != nil {
+				return fmt.Errorf("updating lifecycle bead %q: %w", id, err)
+			}
+			return nil
 		}
-		if err := s.updateIfMatchAtRevision(id, current.Revision, opts); err != nil {
-			return fmt.Errorf("updating lifecycle bead %q: %w", id, err)
-		}
-		return nil
 	}
 	// Internal store callers supply canonical full IDs; the exact-ID collision
 	// guard lives at the CLI/API entry points (cmd_bd.go, huma_handlers_beads.go)
@@ -1606,7 +1634,7 @@ func (s *BdStore) Update(id string, opts UpdateOpts) error {
 // nothing (bdstore_conditional_release.go). The raw `bd sql` path below is the
 // fallback for any bd predating the flags (beads#5008) — which means the
 // contract-tested minimum, deps.env BD_PREV_VERSION (1.0.4), and not the
-// installable default: deps.env BD_VERSION is v1.3.1-rc.2, cut past
+// installable default: deps.env BD_VERSION is v1.3.1, cut past
 // beads#5008, so a stock install takes the verb. This path is the floor's, not
 // the live one, and it stays reachable only because deps.env holds
 // BD_PREV_VERSION below beads#5008. On that path the sqlite backend refuses
@@ -1975,6 +2003,7 @@ func (s *BdStore) UpdateAll(ids []string, opts UpdateOpts) (int, error) {
 		return 0, err
 	}
 	if bdUpdateMayReopenOrClearLifecycleEvidence(opts) {
+		needsFence := false
 		for _, id := range ids {
 			current, err := s.Get(id)
 			if err != nil {
@@ -1983,10 +2012,13 @@ func (s *BdStore) UpdateAll(ids []string, opts UpdateOpts) (int, error) {
 			if err := ValidateLifecycleMutation(current, opts); err != nil {
 				return 0, fmt.Errorf("batch updating lifecycle bead %q: %w", id, err)
 			}
+			needsFence = needsFence || s.requiresLifecycleRevisionFence(current, opts)
 		}
 		// The public conditional API fences one row at a time. Do not send a
 		// lifecycle-sensitive multi-row update through bd's unfenced batch verb.
-		return 0, ErrConditionalWriteUnsupported
+		if needsFence {
+			return 0, ErrConditionalWriteUnsupported
+		}
 	}
 	args := append([]string{"update", "--json"}, ids...)
 	baseLen := len(args)
@@ -2124,13 +2156,15 @@ func (s *BdStore) SetMetadata(id, key, value string) error {
 		if err := ValidateLifecycleMutation(current, UpdateOpts{Metadata: metadata}); err != nil {
 			return fmt.Errorf("setting lifecycle metadata on %q: %w", id, err)
 		}
-		if current.Revision <= 0 {
-			return fmt.Errorf("setting lifecycle metadata on %q: %w", id, ErrConditionalWriteUnsupported)
+		if s.requiresLifecycleRevisionFence(current, UpdateOpts{Metadata: metadata}) {
+			if !hasRevisionToken(current) {
+				return fmt.Errorf("setting lifecycle metadata on %q: %w", id, ErrConditionalWriteUnsupported)
+			}
+			if err := s.updateIfMatchAtRevision(id, current.Revision, UpdateOpts{Metadata: metadata}); err != nil {
+				return fmt.Errorf("setting lifecycle metadata on %q: %w", id, err)
+			}
+			return nil
 		}
-		if err := s.updateIfMatchAtRevision(id, current.Revision, UpdateOpts{Metadata: metadata}); err != nil {
-			return fmt.Errorf("setting lifecycle metadata on %q: %w", id, err)
-		}
-		return nil
 	}
 	err := s.runBDTransientWrite("update", "--json", id,
 		"--set-metadata", key+"="+value)
@@ -2161,13 +2195,15 @@ func (s *BdStore) SetMetadataBatch(id string, kvs map[string]string) error {
 		if err := ValidateLifecycleMutation(current, UpdateOpts{Metadata: kvs}); err != nil {
 			return fmt.Errorf("setting lifecycle metadata batch on %q: %w", id, err)
 		}
-		if current.Revision <= 0 {
-			return fmt.Errorf("setting lifecycle metadata batch on %q: %w", id, ErrConditionalWriteUnsupported)
+		if s.requiresLifecycleRevisionFence(current, UpdateOpts{Metadata: kvs}) {
+			if !hasRevisionToken(current) {
+				return fmt.Errorf("setting lifecycle metadata batch on %q: %w", id, ErrConditionalWriteUnsupported)
+			}
+			if err := s.updateIfMatchAtRevision(id, current.Revision, UpdateOpts{Metadata: kvs}); err != nil {
+				return fmt.Errorf("setting lifecycle metadata batch on %q: %w", id, err)
+			}
+			return nil
 		}
-		if err := s.updateIfMatchAtRevision(id, current.Revision, UpdateOpts{Metadata: kvs}); err != nil {
-			return fmt.Errorf("setting lifecycle metadata batch on %q: %w", id, err)
-		}
-		return nil
 	}
 	args := []string{"update", "--json", id}
 	keys := make([]string, 0, len(kvs))
@@ -2894,6 +2930,14 @@ func (s *BdStore) Reopen(id string) error {
 		return fmt.Errorf("reopening bead %q: %w", id, err)
 	}
 	return nil
+}
+
+// requiresLifecycleRevisionFence is policy selection before a write, never a
+// fallback after a failed CAS. An explicitly configured HTTP transport keeps
+// its stronger write discipline, including when its configuration is invalid.
+func (s *BdStore) requiresLifecycleRevisionFence(current Bead, opts UpdateOpts) bool {
+	return !s.lifecycleAdmissionDisabled || s.privateEvidenceHTTPConfigured ||
+		HasLifecycleEvidence(current) || HasLifecycleEvidence(Bead{Metadata: opts.Metadata})
 }
 
 func bdUpdateMayReopenOrClearLifecycleEvidence(opts UpdateOpts) bool {

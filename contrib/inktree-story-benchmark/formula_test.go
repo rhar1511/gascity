@@ -3,26 +3,23 @@ package storybenchmark
 import (
 	"context"
 	_ "embed"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/gastownhall/gascity/internal/bootstrap/packs/core"
 	"github.com/gastownhall/gascity/internal/formula"
 )
 
 //go:embed formulas/mol-rsi-story-candidate.toml
 var storyFormula []byte
 
+//go:embed testdata/mol-rsi-candidate.toml
+var baseFormula []byte
+
 func TestStoryFormulaPreservesIndependentBenchmarkAndHumanBoundary(t *testing.T) {
 	dir := t.TempDir()
-	base, err := fs.ReadFile(core.PackFS, "formulas/mol-rsi-candidate.toml")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for name, raw := range map[string][]byte{"mol-rsi-candidate.toml": base, "mol-rsi-story-candidate.toml": storyFormula} {
+	for name, raw := range map[string][]byte{"mol-rsi-candidate.toml": baseFormula, "mol-rsi-story-candidate.toml": storyFormula} {
 		if err := os.WriteFile(filepath.Join(dir, name), raw, 0o600); err != nil {
 			t.Fatal(err)
 		}

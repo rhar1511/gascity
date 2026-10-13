@@ -30,3 +30,7 @@ file alongside it, fails without repairing or rewriting either file. Legacy
 malformed-config repair remains available only
 for the single-file configuration. Resolve an invalid local file before
 starting or reloading the city.
+
+CLI-backed workflows that archive private retry evidence also need a scoped
+HTTP transport in `city.toml`. See [Private attempt evidence with stock
+Beads](/reference/private-attempt-evidence) for that separate configuration.

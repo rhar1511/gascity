@@ -399,15 +399,15 @@ func TestCompileProvenanceRejectsChangedBytesForRepeatedPath(t *testing.T) {
 }
 
 func TestRecordingSourceReportsGitRefAndFilesystemFallbackPerRead(t *testing.T) {
+	root := initRepo(t)
+	commitFile(t, root, "committed.txt", "committed source")
+	commitOnBranch(t, root, "main", "source provenance fixture")
+
 	gitSource := gitRepoAwareFallback{git: NewGitRefSource("HEAD"), fs: FSSource{}}
 	recorder := newCompileProvenanceRecorder(gitSource)
 	reader := recordingFormulaSource{Source: gitSource, recorder: recorder}
 
-	root, err := filepath.Abs(filepath.Join("..", ".."))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := reader.ReadFile(filepath.Join(root, "internal", "formula", "compile.go")); err != nil {
+	if _, err := reader.ReadFile(filepath.Join(root, "committed.txt")); err != nil {
 		t.Fatalf("read repository file at ref: %v", err)
 	}
 	outside := filepath.Join(t.TempDir(), "external.txt")

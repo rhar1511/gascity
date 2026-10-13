@@ -3,6 +3,7 @@
 package proctable
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"slices"
@@ -11,6 +12,189 @@ import (
 	"testing"
 	"time"
 )
+
+func TestTerminateOwnedGroupConfirmsEveryMember(t *testing.T) {
+	for _, test := range []struct {
+		name                           string
+		termExitsChild, killExitsChild bool
+		wantSignals                    int
+		wantError                      bool
+	}{
+		{name: "leader exits but child needs KILL", killExitsChild: true, wantSignals: 2},
+		{name: "whole group exits on TERM", termExitsChild: true, wantSignals: 1},
+		{name: "child survives KILL", wantSignals: 2, wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := terminationProcess{PID: 100, PGID: 100, Start: "root", Runnable: true}
+			members := map[int]terminationProcess{100: root, 101: {PID: 101, PGID: 100, Start: "child", Runnable: true}}
+			group := fakeTerminationGroup(root, members)
+			var signals []syscall.Signal
+			group.kill = func(pid int, sig syscall.Signal) error {
+				if pid != -100 {
+					t.Fatalf("signal target = %d, want original group -100", pid)
+				}
+				signals = append(signals, sig)
+				delete(members, 100)
+				if test.termExitsChild || sig == syscall.SIGKILL && test.killExitsChild {
+					delete(members, 101)
+				}
+				return nil
+			}
+			err := terminatePIDWith(100, group.signal, group.live, group.live, 0, 0)
+			if (err != nil) != test.wantError || len(signals) != test.wantSignals {
+				t.Fatalf("termination = %v, signals = %v; want error=%v, %d signals", err, signals, test.wantError, test.wantSignals)
+			}
+		})
+	}
+}
+
+func TestTerminateOwnedGroupLateMemberState(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		runnable bool
+	}{
+		{name: "late zombie confirms death"},
+		{name: "late runnable member preserves refusal", runnable: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := terminationProcess{PID: 100, PGID: 100, Start: "root", Runnable: true}
+			members := map[int]terminationProcess{100: root}
+			group := fakeTerminationGroup(root, members)
+			var signals []syscall.Signal
+			group.kill = func(pid int, sig syscall.Signal) error {
+				if pid != -100 || sig != syscall.SIGTERM || len(signals) != 0 {
+					t.Fatalf("unwitnessed member was signaled: target=%d signal=%v", pid, sig)
+				}
+				signals = append(signals, sig)
+				delete(members, 100)
+				members[101] = terminationProcess{PID: 101, PGID: 100, Start: "late member", Runnable: test.runnable}
+				return nil
+			}
+			err := terminatePIDWith(100, group.signal, group.live, group.live, 0, 0)
+			if test.runnable {
+				if err == nil || !strings.Contains(err.Error(), "no original identity witness") {
+					t.Fatalf("unknown runnable member = %v, want identity refusal", err)
+				}
+			} else if err != nil {
+				t.Fatalf("non-runnable group was not confirmed dead: %v", err)
+			}
+			if !slices.Equal(signals, []syscall.Signal{syscall.SIGTERM}) {
+				t.Fatalf("signals = %v, want original witnessed TERM only", signals)
+			}
+		})
+	}
+}
+
+func TestTerminationGroupRefusesLostOrUnreadableIdentity(t *testing.T) {
+	root := terminationProcess{PID: 100, PGID: 100, Start: "root", Runnable: true}
+	for _, test := range []struct {
+		name        string
+		members     map[int]terminationProcess
+		censusError error
+		censusRows  []terminationProcess
+		readError   error
+	}{
+		{name: "recycled leader", members: map[int]terminationProcess{100: {PID: 100, PGID: 100, Start: "replacement", Runnable: true}}},
+		{name: "recycled zombie leader", members: map[int]terminationProcess{100: {PID: 100, PGID: 100, Start: "replacement", Runnable: false}}},
+		{name: "unknown survivor", members: map[int]terminationProcess{101: {PID: 101, PGID: 100, Start: "unknown", Runnable: true}}},
+		{name: "unreadable census", censusError: syscall.EACCES},
+		{name: "stale zombie is now runnable", members: map[int]terminationProcess{101: {PID: 101, PGID: 100, Start: "child", Runnable: true}}, censusRows: []terminationProcess{{PID: 101, PGID: 100, Start: "child"}}},
+		{name: "stale zombie PID recycled", members: map[int]terminationProcess{101: {PID: 101, PGID: 100, Start: "replacement"}}, censusRows: []terminationProcess{{PID: 101, PGID: 100, Start: "child"}}},
+		{name: "unreadable zombie identity", censusRows: []terminationProcess{{PID: 101, PGID: 100, Start: "child"}}, readError: syscall.EACCES},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			group := fakeTerminationGroup(root, test.members)
+			if test.censusError != nil {
+				group.census = func(int) ([]terminationProcess, error) { return nil, test.censusError }
+			} else if test.censusRows != nil {
+				group.census = func(int) ([]terminationProcess, error) { return test.censusRows, nil }
+			}
+			if test.readError != nil {
+				group.read = func(int) (terminationProcess, error) { return terminationProcess{}, test.readError }
+			}
+			group.kill = func(int, syscall.Signal) error { t.Fatal("ambiguous group was signaled"); return nil }
+			if err := group.signal(syscall.SIGKILL); err == nil {
+				t.Fatal("ambiguous group accepted")
+			}
+		})
+	}
+}
+
+func TestTerminationGroupAnchoredRefreshAndZombieConfirmation(t *testing.T) {
+	root := terminationProcess{PID: 100, PGID: 100, Start: "root", Runnable: true}
+	members := map[int]terminationProcess{100: root, 101: {PID: 101, PGID: 100, Start: "child", Runnable: true}}
+	group := fakeTerminationGroup(root, members)
+	if live, err := group.refresh(); !live || err != nil {
+		t.Fatalf("anchored refresh = %v, %v", live, err)
+	}
+	delete(members, 100)
+	members[102] = terminationProcess{PID: 102, PGID: 100, Start: "later child", Runnable: true}
+	if live, err := group.refresh(); !live || err != nil || group.known[102] != "later child" {
+		t.Fatalf("child-anchored refresh = %v, %v, known %v", live, err, group.known)
+	}
+	for pid, member := range members {
+		member.Runnable = false
+		members[pid] = member
+	}
+	if group.live(100) {
+		t.Fatalf("zombies considered runnable: %v", group.err)
+	}
+}
+
+func TestTerminationGroupNeverFallsBackToReusedRoot(t *testing.T) {
+	root := terminationProcess{PID: 100, PGID: 100, Start: "root", Runnable: true}
+	members := map[int]terminationProcess{100: root, 101: {PID: 101, PGID: 100, Start: "child", Runnable: true}}
+	group := fakeTerminationGroup(root, members)
+	if _, err := group.refresh(); err != nil {
+		t.Fatal(err)
+	}
+	members[100] = terminationProcess{PID: 100, PGID: 200, Start: "replacement", Runnable: true}
+	group.kill = func(pid int, _ syscall.Signal) error {
+		if pid != -100 {
+			t.Fatalf("recycled root was signaled: %d", pid)
+		}
+		return syscall.EPERM
+	}
+	if err := group.signal(syscall.SIGKILL); !errors.Is(err, syscall.EPERM) {
+		t.Fatalf("signal failure = %v, want original EPERM", err)
+	}
+}
+
+func TestTerminationGroupStaleCensusCannotPromoteForeignWitness(t *testing.T) {
+	root := terminationProcess{PID: 100, PGID: 100, Start: "old root", Runnable: true}
+	foreign := terminationProcess{PID: 101, PGID: 100, Start: "new unrelated group", Runnable: true}
+	group := fakeTerminationGroup(root, map[int]terminationProcess{101: foreign})
+	group.census = func(int) ([]terminationProcess, error) { return []terminationProcess{root, foreign}, nil }
+	group.kill = func(int, syscall.Signal) error { t.Fatal("stale census promoted a foreign signal witness"); return nil }
+	if err := group.signal(syscall.SIGKILL); err == nil {
+		t.Fatal("stale census accepted without a fresh previously known witness")
+	}
+	if _, promoted := group.known[101]; promoted {
+		t.Fatal("foreign identity was promoted")
+	}
+}
+
+func fakeTerminationGroup(root terminationProcess, members map[int]terminationProcess) terminationGroup {
+	return terminationGroup{
+		root: root, known: map[int]string{root.PID: root.Start},
+		read: func(pid int) (terminationProcess, error) {
+			member, ok := members[pid]
+			if !ok {
+				return terminationProcess{}, ErrProcessGone
+			}
+			return member, nil
+		},
+		census: func(pgid int) ([]terminationProcess, error) {
+			var rows []terminationProcess
+			for _, member := range members {
+				if member.PGID == pgid {
+					rows = append(rows, member)
+				}
+			}
+			return rows, nil
+		},
+	}
+}
 
 func TestKillByPIDRefusesLowPIDs(t *testing.T) {
 	for _, pid := range []int{-1, 0, 1} {

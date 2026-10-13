@@ -264,7 +264,7 @@ func readPayloadBytes(store beads.Store, digest string, expectedBytes int64) ([]
 	if !isPayloadDigest(digest) {
 		return nil, StatusCorrupt, "payload_reference_invalid", nil
 	}
-	rows, err := store.ListByMetadata(map[string]string{beadmeta.AttemptEvidencePayloadDigestMetadataKey: digest}, 0, beads.IncludeClosed)
+	rows, err := beads.ListPrivatePayloadValues(store, digest)
 	if err != nil {
 		return nil, "", "", fmt.Errorf("reading content-addressed payload %s: %w", digest, err)
 	}

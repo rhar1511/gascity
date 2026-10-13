@@ -968,6 +968,9 @@ func (s *Server) humaHandleBeadAssign(ctx context.Context, input *BeadAssignInpu
 func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInput) (*OKResponse, error) {
 	id := input.ID
 	body := input.Body
+	if err := validatePRActionMetadata(body.Metadata); err != nil {
+		return nil, err
+	}
 	if err := validateAttemptEvidenceMetadata(body.Metadata); err != nil {
 		return nil, err
 	}

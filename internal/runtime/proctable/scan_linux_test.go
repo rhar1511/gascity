@@ -410,3 +410,19 @@ func TestScanWithRootReportsWhetherTheParentIsProviderInfrastructure(t *testing.
 			"and killing it signals the process group whose SIGTERM handler stops the city's shared dolt sql-server")
 	}
 }
+
+func TestTerminationProcessReadsIdentityAndStateTogether(t *testing.T) {
+	for _, state := range []string{"S", "Z"} {
+		stat := "42 (cmd) " + state + " 11 42 13 0 -1 0 0 0 0 0 0 0 0 0 0 0 1 0 98765 0"
+		process, err := readTerminationProcessWith(42, func(string) ([]byte, error) { return []byte(stat), nil })
+		if err != nil || process.Start != "98765" || process.PGID != 42 || process.Runnable != (state != "Z") {
+			t.Fatalf("state %s: termination identity = %+v, %v", state, process, err)
+		}
+		if _, err := readTerminationProcessWith(43, func(string) ([]byte, error) { return []byte(stat), nil }); err == nil {
+			t.Fatal("different PID's identity accepted")
+		}
+	}
+	if _, err := readTerminationProcessWith(42, func(string) ([]byte, error) { return []byte("malformed"), nil }); err == nil {
+		t.Fatal("malformed stat accepted")
+	}
+}

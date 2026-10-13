@@ -344,6 +344,9 @@ func bdStoreForRig(rigDir, cityPath string, cfg *config.City, knownPrefix ...str
 
 func bdStoreOptionsForConfig(cfg *config.City) []beads.BdStoreOption {
 	var opts []beads.BdStoreOption
+	if cfg != nil {
+		opts = append(opts, beads.WithBdStoreLifecycleAdmission(cfg.Lifecycle.AdmissionEnabled))
+	}
 	if cfg != nil && cfg.Beads.UsesBD105CLISemantics() {
 		opts = append(opts, beads.WithBdStoreListSkipLabels(true))
 	}

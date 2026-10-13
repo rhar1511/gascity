@@ -265,3 +265,23 @@ func TestCensusCandidatesAnswerNoLegsForANilStore(t *testing.T) {
 		t.Fatalf("got %d candidates for a nil work store, want none", len(got))
 	}
 }
+
+func TestCensusCityNameUsesEffectiveIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  *config.City
+		want string
+	}{
+		{name: "resolved unnamed city", cfg: &config.City{ResolvedWorkspaceName: "site-city"}, want: "site-city"},
+		{name: "resolved overrides legacy name", cfg: &config.City{Workspace: config.Workspace{Name: "old-city"}, ResolvedWorkspaceName: "site-city"}, want: "site-city"},
+		{name: "raw declared name", cfg: &config.City{Workspace: config.Workspace{Name: "legacy-city"}}, want: "legacy-city"},
+		{name: "raw unnamed", cfg: &config.City{}, want: "city"},
+		{name: "nil", want: "city"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := censusCityName(tc.cfg); got != tc.want {
+				t.Fatalf("census city identity = %q, want effective city %q", got, tc.want)
+			}
+		})
+	}
+}

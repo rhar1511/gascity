@@ -12,6 +12,7 @@ go_library(
         "doc.go",
         "env.go",
         "lifecycle.go",
+        "order_diagnostics.go",
         "provider_shim.go",
         "recording_bd.go",
         "sentinel_dolt.go",
@@ -22,6 +23,7 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//internal/bazeltest",
+        "//internal/fsys",
         "//test/toolhome",
         "@com_github_steveyegge_beads//schema",
         "@org_golang_x_mod//semver",
@@ -38,6 +40,7 @@ go_test(
         "city_test.go",
         "claude_state_test.go",
         "env_test.go",
+        "order_diagnostics_test.go",
         "provider_shim_test.go",
         "recording_bd_test.go",
         "sentinel_dolt_test.go",

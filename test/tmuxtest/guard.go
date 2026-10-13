@@ -13,9 +13,11 @@
 package tmuxtest
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -151,17 +153,21 @@ func (g *Guard) killGuardSessions() {
 }
 
 // KillAllTestSessions kills tmux sessions for all orphaned gctest-* sockets.
-// Call from TestMain before and after test runs to clean up orphans.
+// Call from TestMain before and after test runs to clean up orphans. Each
+// selected server is identity-fenced and waited for; failed confirmation is
+// logged instead of counting a shutdown acknowledgment as an exited server.
 func KillAllTestSessions(t testing.TB) {
 	t.Helper()
-	var cleaned int
-	for _, socketPath := range listTestSocketPaths() {
-		if err := killTmuxServerAtSocket(socketPath); err == nil {
-			cleaned++
-		}
+	var diagnostics bytes.Buffer
+	killAllTestSessionsWith(listTestSocketPaths(), liveTmuxServerReaper, &diagnostics)
+	if diagnostics.Len() > 0 {
+		t.Logf("%s", diagnostics.String())
 	}
-	if cleaned > 0 {
-		t.Logf("tmuxtest: cleaned up %d orphaned test socket(s)", cleaned)
+}
+
+func killAllTestSessionsWith(paths []string, reaper tmuxServerReaper, diagnostics io.Writer) {
+	for _, socketPath := range paths {
+		reaper.reapServerAtSocket(socketPath, diagnostics)
 	}
 }
 

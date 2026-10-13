@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -33,6 +34,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
@@ -615,6 +617,49 @@ func newDriftIsolatedEnvRoot(t *testing.T) (string, string, []string) {
 // supervisor and the on-disk binary.
 func buildGCBinaryWithCommit(t *testing.T, outPath, commitID string) {
 	t.Helper()
+	if bazeltest.IsBazel() {
+		var target string
+		switch commitID {
+		case driftHappyOldCommit:
+			target = "gc_drift_old"
+		case driftHappyNewCommit:
+			target = "gc_drift_new"
+		default:
+			t.Fatalf("no declared drift binary for commit=%s", commitID)
+		}
+		binary := runfilesBinary(filepath.Join("cmd", "gc", target+"_", target))
+		if binary == "" {
+			t.Fatalf("declared drift binary %s is missing from runfiles", target)
+		}
+		source, err := os.Open(binary)
+		if err != nil {
+			t.Fatalf("open declared drift binary: %v", err)
+		}
+		defer source.Close()
+		// A new inode keeps the running supervisor's old executable intact.
+		// Publish only after the complete replacement is executable.
+		replacement, err := os.CreateTemp(filepath.Dir(outPath), ".gc-drift-*")
+		if err != nil {
+			t.Fatalf("create owned drift replacement: %v", err)
+		}
+		defer func() {
+			_ = replacement.Close()
+			_ = os.Remove(replacement.Name())
+		}()
+		if _, err := io.Copy(replacement, source); err != nil {
+			t.Fatalf("copy declared drift binary: %v", err)
+		}
+		if err := replacement.Chmod(0o755); err != nil {
+			t.Fatalf("make drift replacement executable: %v", err)
+		}
+		if err := replacement.Close(); err != nil {
+			t.Fatalf("close drift replacement: %v", err)
+		}
+		if err := os.Rename(replacement.Name(), outPath); err != nil {
+			t.Fatalf("publish drift replacement: %v", err)
+		}
+		return
+	}
 	cmd := exec.Command("go", "build",
 		"-buildvcs=false",
 		"-ldflags", "-X main.commit="+commitID,
@@ -665,19 +710,56 @@ func launchDirectSupervisor(t *testing.T, binary string, env []string, gcHome st
 // stopDirectSupervisor SIGTERMs a supervisor PID and waits briefly for
 // it to exit. Used by t.Cleanup so a failing test does not leak
 // supervisor processes onto the developer's box.
-func stopDirectSupervisor(pid int) {
+func stopDirectSupervisor(pid int, expectedStart ...string) {
 	if pid <= 0 {
+		return
+	}
+	sameProcess := func() bool {
+		if len(expectedStart) == 0 {
+			return true
+		}
+		start, err := processStartTicks(pid)
+		return len(expectedStart) == 1 && err == nil && start == expectedStart[0]
+	}
+	if !sameProcess() {
 		return
 	}
 	_ = syscall.Kill(pid, syscall.SIGTERM)
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
+		if !sameProcess() {
+			return
+		}
 		if err := syscall.Kill(pid, syscall.Signal(0)); err != nil {
 			return
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	_ = syscall.Kill(pid, syscall.SIGKILL)
+	if sameProcess() {
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+	}
+}
+
+func processStartTicks(pid int) (string, error) {
+	data, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
+	if err != nil {
+		return "", err
+	}
+	text := string(data)
+	separator := strings.IndexByte(text, ' ')
+	end := strings.LastIndex(text, ") ")
+	if separator < 0 || text[:separator] != strconv.Itoa(pid) || end < separator {
+		return "", fmt.Errorf("invalid process stat for PID %d", pid)
+	}
+	fields := strings.Fields(text[end+2:])
+	if len(fields) < 20 {
+		return "", fmt.Errorf("incomplete process stat for PID %d", pid)
+	}
+	start, err := strconv.ParseUint(fields[19], 10, 64)
+	if err != nil || start == 0 {
+		return "", fmt.Errorf("invalid process start for PID %d", pid)
+	}
+	return fields[19], nil
 }
 
 // supervisorPIDsFromBinary returns every live PID whose /proc/<pid>/exe
@@ -1047,7 +1129,24 @@ func setDaemonKeyForTest(src, key, value string) string {
 // binding the /health port. Used by the restart-timeout test.
 func writeStuckSupervisorShim(t *testing.T, binaryPath string) string {
 	t.Helper()
-	script := "#!/bin/sh\nif [ \"$1\" = \"supervisor\" ] && [ \"$2\" = \"run\" ]; then\n  exec sleep 60\nfi\nexec '" + binaryPath + ".real' \"$@\"\n"
+	pidPath := binaryPath + ".stuck-pid"
+	shellQuote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'" }
+	script := `#!/bin/sh
+set -eu
+if [ "${1:-}" = supervisor ] && [ "${2:-}" = run ]; then
+  IFS= read -r process_stat < /proc/$$/stat
+  [ "${process_stat%% *}" = "$$" ]
+  process_fields=${process_stat##*) }
+  set -f
+  set -- $process_fields
+  [ "$#" -ge 20 ]
+  start=${20}
+  case "$start" in ''|*[!0-9]*|0) exit 2 ;; esac
+  printf '%s %s\n' "$$" "$start" > ` + shellQuote(pidPath) + `
+  exec sleep 60
+fi
+exec ` + shellQuote(binaryPath+".real") + ` "$@"
+`
 	// Move the real binary aside so the shim can fall through for any
 	// non-`supervisor run` subcommand the drift code path needs.
 	realPath := binaryPath + ".real"
@@ -1055,8 +1154,39 @@ func writeStuckSupervisorShim(t *testing.T, binaryPath string) string {
 		t.Fatalf("moving real binary: %v", err)
 	}
 	t.Cleanup(func() {
-		_ = os.Remove(binaryPath)
-		_ = os.Rename(realPath, binaryPath)
+		defer func() {
+			_ = os.Remove(pidPath)
+			_ = os.Remove(binaryPath)
+			_ = os.Rename(realPath, binaryPath)
+		}()
+		data, err := os.ReadFile(pidPath)
+		if err != nil {
+			t.Errorf("read owned stuck-supervisor PID record: %v", err)
+			return
+		}
+		fields := strings.Fields(string(data))
+		if len(fields) != 2 {
+			t.Error("invalid owned stuck-supervisor PID record")
+			return
+		}
+		pid, pidErr := strconv.Atoi(fields[0])
+		start, startErr := strconv.ParseUint(fields[1], 10, 64)
+		if pidErr != nil || pid <= 1 || startErr != nil || start == 0 {
+			t.Error("invalid owned stuck-supervisor PID/start identity")
+			return
+		}
+		currentStart, err := processStartTicks(pid)
+		if os.IsNotExist(err) {
+			return
+		}
+		if err != nil || currentStart != fields[1] {
+			t.Errorf("owned stuck-supervisor identity cannot be verified: %v", err)
+			return
+		}
+		stopDirectSupervisor(pid, fields[1])
+		if _, err := processStartTicks(pid); !os.IsNotExist(err) {
+			t.Errorf("owned stuck-supervisor PID %d was not reaped: %v", pid, err)
+		}
 	})
 	if err := os.WriteFile(binaryPath, []byte(script), 0o755); err != nil {
 		t.Fatalf("writing stuck shim: %v", err)

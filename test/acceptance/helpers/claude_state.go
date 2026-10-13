@@ -5,13 +5,26 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+
+	"github.com/gastownhall/gascity/internal/fsys"
 )
+
+// Fixture cities share an Env within a test process. Serialize the complete
+// state merge so parallel city setup preserves every trusted project.
+var claudeStateMu sync.Mutex
 
 // EnsureClaudeStateFile creates or updates HOME/.claude.json with the minimum
 // global onboarding state Claude Code needs to avoid first-run onboarding UI.
 // If configDir is non-empty it is used as the Claude config directory;
 // otherwise it defaults to HOME/.claude.
 func EnsureClaudeStateFile(home string, configDir ...string) error {
+	claudeStateMu.Lock()
+	defer claudeStateMu.Unlock()
+	return ensureClaudeStateFile(home, configDir...)
+}
+
+func ensureClaudeStateFile(home string, configDir ...string) error {
 	home = strings.TrimSpace(home)
 	if home == "" {
 		return nil
@@ -39,7 +52,8 @@ func EnsureClaudeStateFile(home string, configDir ...string) error {
 }
 
 // EnsureClaudeProjectState marks a project path as trusted/onboarded in the
-// isolated Claude state file rooted at env HOME.
+// isolated Claude state file rooted at env GC_HOME. Environments without
+// GC_HOME use their explicitly supplied HOME for backwards compatibility.
 func EnsureClaudeProjectState(env *Env, projectPath string) error {
 	if env == nil {
 		return nil
@@ -55,7 +69,10 @@ func EnsureClaudeProjectState(env *Env, projectPath string) error {
 		}
 		projectPath = abs
 	}
-	home := strings.TrimSpace(env.Get("HOME"))
+	home := strings.TrimSpace(env.Get("GC_HOME"))
+	if home == "" {
+		home = strings.TrimSpace(env.Get("HOME"))
+	}
 	if home == "" {
 		return nil
 	}
@@ -65,7 +82,9 @@ func EnsureClaudeProjectState(env *Env, projectPath string) error {
 			configDir = v
 		}
 	}
-	if err := EnsureClaudeStateFile(home, configDir); err != nil {
+	claudeStateMu.Lock()
+	defer claudeStateMu.Unlock()
+	if err := ensureClaudeStateFile(home, configDir); err != nil {
 		return err
 	}
 	for _, statePath := range claudeStatePaths(home, configDir) {
@@ -142,5 +161,5 @@ func saveClaudeState(path string, root map[string]any) error {
 		return err
 	}
 	data = append(data, '\n')
-	return os.WriteFile(path, data, 0o600)
+	return fsys.WriteFileAtomic(fsys.OSFS{}, path, data, 0o600)
 }

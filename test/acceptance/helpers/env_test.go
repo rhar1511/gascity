@@ -35,6 +35,47 @@ func TestNewEnvInheritsClaudeGatewayVariables(t *testing.T) {
 	}
 }
 
+func TestNewEnvIsolatesDefaultClaudeConfig(t *testing.T) {
+	ambientConfig := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", ambientConfig)
+	gcHome := t.TempDir()
+	env := NewEnv("", gcHome, t.TempDir())
+	if got, want := env.Get("CLAUDE_CONFIG_DIR"), filepath.Join(gcHome, ".claude"); got != want {
+		t.Fatalf("default Claude config = %q, want isolated %q", got, want)
+	}
+	// Live suites stage their authorized profile and then provide its path.
+	stagedConfig := filepath.Join(gcHome, "staged-profile")
+	stagedState := filepath.Join(stagedConfig, ".claude.json")
+	writeClaudeStateForTest(t, stagedState, map[string]any{"copiedProfileSetting": "retain"})
+	// A simulated operator home makes this regression safe even if fixture
+	// isolation regresses. No real operator profile is read or written.
+	hostHome := t.TempDir()
+	hostState := filepath.Join(hostHome, ".claude.json")
+	writeClaudeStateForTest(t, hostState, map[string]any{"operatorSetting": "untouched"})
+	before, err := os.ReadFile(hostState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project := filepath.Join(gcHome, "city")
+	env.With("CLAUDE_CONFIG_DIR", stagedConfig).With("HOME", hostHome)
+	if err := EnsureClaudeProjectState(env, project); err != nil {
+		t.Fatal(err)
+	}
+	assertClaudeProjectTrustedForTest(t, stagedState, project, map[string]any{
+		"copiedProfileSetting": "retain",
+	}, nil)
+	after, err := os.ReadFile(hostState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatal("staged profile onboarding changed the simulated operator profile")
+	}
+	if _, err := os.Stat(filepath.Join(gcHome, ".claude", ".claude.json")); !os.IsNotExist(err) {
+		t.Fatalf("explicit staged profile unexpectedly used the default config: %v", err)
+	}
+}
+
 func TestNewEnvDefaultsBeadsProviderToFile(t *testing.T) {
 	t.Setenv("GC_ACCEPTANCE_BEADS_PROVIDER", "")
 

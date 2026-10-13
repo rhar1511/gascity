@@ -40,6 +40,9 @@ go_test(
         "gc_live_contract_test.go",
         "graph_dispatch_harness_test.go",
         "graph_dispatch_test.go",
+        "graph_fixture_birth_darwin_test.go",
+        "graph_fixture_birth_other_test.go",
+        "graph_fixture_process_test.go",
         "helpers_test.go",
         "huma_binary_test.go",
         "integration_test.go",
@@ -52,13 +55,14 @@ go_test(
         "testenv_import_test.go",
         "tool_home_test.go",
         "tutorial_path_test.go",
-        "workflow_event_wait_test.go",
     ],
     data = glob(
         ["**"],
         exclude = ["BUILD.bazel"],
     ) + [
         "//cmd/gc",
+        "//cmd/gc:gc_drift_old",
+        "//cmd/gc:gc_drift_new",
         "//examples/bd",
         "//test/integration/filebdshim",
         "//:go.mod",
@@ -66,7 +70,7 @@ go_test(
         # Pinned prebuilt release binaries (see MODULE.bazel): hermetic bd and
         # dolt for the dolt-backed integration shapes, same versions the
         # go-test CI installs via install-bd-archive.sh / install-dolt-archive.sh.
-        "@bd_bin_v1_3_1_rc_2//:bd",
+        "@bd_bin_v1_3_1//:bd",
         "@dolt_bin_v2_1_7//:dolt-linux-amd64/bin/dolt",
     ],
     shard_count = 4,
@@ -102,10 +106,20 @@ go_test(
         "@com_github_gastownhall_gascity_packs//:gascity-packs",
         "@com_github_pb33f_libopenapi//:libopenapi",
         "@com_github_pb33f_libopenapi_validator//:libopenapi-validator",
+        "@com_github_shirou_gopsutil_v4//net",
+        "@com_github_shirou_gopsutil_v4//process",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
         "@in_gopkg_yaml_v3//:yaml_v3",
-    ],
+    ] + select({
+        "@rules_go//go/platform:darwin": [
+            "@org_golang_x_sys//unix",
+        ],
+        "@rules_go//go/platform:ios": [
+            "@org_golang_x_sys//unix",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

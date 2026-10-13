@@ -20,6 +20,8 @@ go_library(
         "infrastructure_argv_darwin.go",
         "infrastructure_argv_linux.go",
         "infrastructure_argv_stub.go",
+        "kill_darwin.go",
+        "kill_linux.go",
         "kill_stub.go",
         "kill_unix.go",
         "proctable.go",

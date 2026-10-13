@@ -23,10 +23,11 @@ type seamBackedProvider struct {
 }
 
 var (
-	_ runtime.Provider                = (*seamBackedProvider)(nil)
-	_ runtime.DialogProvider          = (*seamBackedProvider)(nil)
-	_ runtime.SleepCapabilityProvider = (*seamBackedProvider)(nil)
-	_ runtime.RelaunchProvider        = (*seamBackedProvider)(nil)
+	_ runtime.Provider                  = (*seamBackedProvider)(nil)
+	_ runtime.DialogProvider            = (*seamBackedProvider)(nil)
+	_ runtime.SleepCapabilityProvider   = (*seamBackedProvider)(nil)
+	_ runtime.RelaunchProvider          = (*seamBackedProvider)(nil)
+	_ runtime.LivenessObserverWithError = (*seamBackedProvider)(nil)
 )
 
 // NewSeamBacked wraps an exec provider for the given script so it is served
@@ -63,4 +64,10 @@ func (s *seamBackedProvider) Relaunch(ctx context.Context, name string, cfg runt
 // capability set through the production seam-backed composition.
 func (s *seamBackedProvider) Capabilities() runtime.ProviderCapabilities {
 	return s.raw.Capabilities()
+}
+
+// ObserveLivenessWithError preserves the raw provider's error-bearing result
+// through the seam-backed composition without changing its legacy methods.
+func (s *seamBackedProvider) ObserveLivenessWithError(name string, processNames []string) (runtime.Liveness, error) {
+	return s.raw.ObserveLivenessWithError(name, processNames)
 }

@@ -184,7 +184,7 @@ func openLinuxIdentityPath(path string) (*linuxOpenedIdentityPath, error) {
 			opened.close()
 			return nil, errLinuxIdentitySymlink
 		}
-		if statErr := unix.Fstatat(opened.fd, part, &namedInfo, unix.AT_SYMLINK_NOFOLLOW); statErr != nil || !sameLinuxFileVersion(info, namedInfo) {
+		if statErr := unix.Fstatat(opened.fd, part, &namedInfo, unix.AT_SYMLINK_NOFOLLOW); statErr != nil || !sameLinuxPathComponent(info, namedInfo) {
 			_ = unix.Close(next)
 			opened.close()
 			return nil, ErrUnavailable
@@ -277,11 +277,23 @@ func (p *linuxOpenedIdentityPath) revalidate() error {
 		return ErrUnavailable
 	}
 	for i := range p.components {
-		if p.components[i].path != fresh.components[i].path || !sameLinuxFileVersion(p.components[i].info, fresh.components[i].info) {
+		if p.components[i].path != fresh.components[i].path || !sameLinuxPathComponent(p.components[i].info, fresh.components[i].info) {
 			return ErrUnavailable
 		}
 	}
 	return nil
+}
+
+// sameLinuxPathComponent binds directory ancestry to the same object and
+// access metadata. Unrelated sibling entries may change directory size, link
+// count and timestamps without changing the selected identity path. Regular
+// identity inputs retain full file-version checks.
+func sameLinuxPathComponent(left, right unix.Stat_t) bool {
+	if left.Mode&unix.S_IFMT != unix.S_IFDIR || right.Mode&unix.S_IFMT != unix.S_IFDIR {
+		return sameLinuxFileVersion(left, right)
+	}
+	return left.Dev == right.Dev && left.Ino == right.Ino && left.Mode == right.Mode &&
+		left.Rdev == right.Rdev && left.Uid == right.Uid && left.Gid == right.Gid
 }
 
 func sameLinuxFileVersion(left, right unix.Stat_t) bool {

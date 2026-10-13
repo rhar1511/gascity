@@ -2372,6 +2372,7 @@ func TestOrderRunNoPool(t *testing.T) {
 
 func TestOrderRunReportsAllMissingRequiredVarsAtOnce(t *testing.T) {
 	dir := t.TempDir()
+	cityDir := t.TempDir()
 	formulaBody := `
 formula = "order-required-vars"
 version = 1
@@ -2403,7 +2404,7 @@ description = "Target: {{target_id}}, workspace: {{workspace}}"
 
 	store := beads.NewMemStore()
 	var stdout, stderr bytes.Buffer
-	code := doOrderRun(aa, "digest", "", "/city", beads.OrdersStore{Store: store}, nil, &stdout, &stderr)
+	code := doOrderRun(aa, "digest", "", cityDir, beads.OrdersStore{Store: store}, nil, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("doOrderRun = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
 	}

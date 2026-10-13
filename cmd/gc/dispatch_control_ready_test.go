@@ -529,3 +529,100 @@ printf '[{"id":"ga-plain"}]'
 		t.Fatalf("nextWorkflowServeBeads = %#v, want [{ga-plain}]", got)
 	}
 }
+
+// Exercise the real scope resolver and BdStore reader: strict readonly is
+// refused by the proxied backend, while its ordinary Ready operation works.
+func TestControlReadyProxiedScopeUsesStoreReader(t *testing.T) {
+	for _, rig := range []bool{false, true} {
+		for _, ephemeral := range []bool{false, true} {
+			for _, fail := range []bool{false, true} {
+				t.Run(fmt.Sprintf("rig=%v/ephemeral=%v/fail=%v", rig, ephemeral, fail), func(t *testing.T) {
+					configureIsolatedRuntimeEnv(t)
+					// Exercise the same logical/physical cwd distinction that
+					// macOS exposes through its /var -> /private/var alias.
+					physicalCity := t.TempDir()
+					city := filepath.Join(t.TempDir(), "city")
+					if err := os.Symlink(physicalCity, city); err != nil {
+						t.Fatal(err)
+					}
+					scope := city
+					configText := "[workspace]\nname = \"test-city\"\n[beads]\nprovider = \"bd\"\n"
+					if rig {
+						scope = filepath.Join(city, "repo")
+						configText += "[[rigs]]\nname = \"repo\"\npath = \"repo\"\nprefix = \"repo\"\n"
+					}
+					if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte(configText), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					writeBdOwnedProxiedScope(t, scope, "ready-fixture")
+					bin := t.TempDir()
+					logPath := filepath.Join(bin, "calls")
+					script := fmt.Sprintf(`#!/bin/sh
+printf '%%s|%%s\n' "$PWD" "$*" >> %q
+case "$*" in *--readonly*) echo 'proxy.readonly.unsupported' >&2; exit 19;; esac
+case "$1" in
+ready)
+ if [ %q = true ]; then echo 'ready-fixture-failure' >&2; exit 23; fi
+ printf '%%s\n' '[{"id":"test-epic","status":"open","issue_type":"epic","priority":0},{"id":"test-ready","status":"open","issue_type":"task","priority":1,"assignee":"core.control-dispatcher","dependencies":[]},{"id":"test-wisp","status":"open","issue_type":"task","priority":2,"ephemeral":true,"metadata":{"gc.routed_to":"core.control-dispatcher"},"dependencies":[]}]'
+ ;;
+dep) printf '[]\n';;
+*) echo 'unexpected backend command' >&2; exit 31;;
+esac
+`, logPath, fmt.Sprint(fail))
+					if err := os.WriteFile(filepath.Join(bin, "bd"), []byte(script), 0o700); err != nil {
+						t.Fatal(err)
+					}
+					t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+					t.Setenv("GC_BEADS", "bd")
+					rows, err := controlReadyFallbackReady(scope, city, nil, ephemeral)
+					if fail {
+						if err == nil || !strings.Contains(err.Error(), "ready-fixture-failure") {
+							t.Fatalf("scope read error = %v, want original backend error", err)
+						}
+					} else {
+						if err != nil {
+							t.Fatalf("proxied scope must use its Ready operation: %v", err)
+						}
+						want := []string{"test-ready"}
+						if ephemeral {
+							want = append(want, "test-wisp")
+						}
+						var ids []string
+						for _, b := range rows {
+							ids = append(ids, b.ID)
+						}
+						if !stringSlicesEqual(ids, want) {
+							t.Fatalf("ready ids = %v, want %v", ids, want)
+						}
+					}
+					data, err := os.ReadFile(logPath)
+					if err != nil {
+						t.Fatal(err)
+					}
+					calls := strings.Split(strings.TrimSpace(string(data)), "\n")
+					readyCalls := 0
+					for _, call := range calls {
+						if strings.Contains(call, "--readonly") {
+							t.Fatalf("unsupported strict read escaped store boundary: %s", call)
+						}
+						if strings.Contains(call, "|ready ") {
+							readyCalls++
+							cwd, _, found := strings.Cut(call, "|")
+							actualDir, actualErr := os.Stat(cwd)
+							expectedDir, expectedErr := os.Stat(scope)
+							if !found || actualErr != nil || expectedErr != nil || !os.SameFile(actualDir, expectedDir) {
+								t.Fatalf("query used wrong scope: %s", call)
+							}
+							if strings.Contains(call, "--include-ephemeral") != ephemeral {
+								t.Fatalf("wrong tier query: %s", call)
+							}
+						}
+					}
+					if readyCalls != 1 {
+						t.Fatalf("ready calls = %d, want one without fallback; calls=%s", readyCalls, data)
+					}
+				})
+			}
+		}
+	}
+}

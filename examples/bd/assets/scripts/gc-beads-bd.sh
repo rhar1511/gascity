@@ -288,7 +288,31 @@ run_with_timeout() {
     "$@" &
     local cmd_pid=$!
     (
-        sleep "$timeout_seconds" 2>/dev/null || sleep 1
+        local cancelled=0 timer_pid=
+        stop_watchdog_timer() {
+            trap '' HUP INT TERM
+            if [ -n "$timer_pid" ]; then
+                kill "$timer_pid" 2>/dev/null || true
+                wait "$timer_pid" 2>/dev/null || true
+            fi
+            exit 0
+        }
+        wait_watchdog_timer() {
+            # Remember cancellation until the new child's PID is published;
+            # exiting in the fork-to-assignment window would orphan it.
+            trap 'cancelled=1' HUP INT TERM
+            sleep "$1" 2>/dev/null &
+            timer_pid=$!
+            trap stop_watchdog_timer HUP INT TERM
+            [ "$cancelled" -eq 0 ] || stop_watchdog_timer
+            local timer_status=0
+            wait "$timer_pid" || timer_status=$?
+            timer_pid=
+            trap 'cancelled=1' HUP INT TERM
+            [ "$cancelled" -eq 0 ] || stop_watchdog_timer
+            return "$timer_status"
+        }
+        wait_watchdog_timer "$timeout_seconds" || wait_watchdog_timer 1
         kill "$cmd_pid" 2>/dev/null || true
     ) </dev/null >/dev/null 2>&1 &
     local watchdog_pid=$!

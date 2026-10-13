@@ -101,3 +101,14 @@ func TestSnapshotProcessIdentityMatchesCurrentReader(t *testing.T) {
 		t.Fatalf("current identity = %q, snapshot identity = %q; destructive selection and signal recheck must share one contract", currentIdentity, snapshotIdentity)
 	}
 }
+
+func TestDarwinTerminationRecordUsesKernelStateAndIdentity(t *testing.T) {
+	for _, state := range []int8{2, 5} {
+		process := unix.KinfoProc{Proc: unix.ExternProc{P_pid: 42, P_stat: state, P_starttime: unix.Timeval{Sec: 123, Usec: 456}}, Eproc: unix.Eproc{Ppid: 11, Pgid: 42}}
+		record, err := darwinTerminationProcess(process)
+		identity, identityErr := darwinStartIdentity(process.Proc.P_starttime)
+		if err != nil || identityErr != nil || record.Start != identity || record.PGID != 42 || record.Runnable != (state != 5) {
+			t.Fatalf("state %d: termination record = %+v, %v", state, record, err)
+		}
+	}
+}

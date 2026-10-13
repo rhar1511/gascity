@@ -2,6 +2,8 @@
 package testutil
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"runtime"
 	"testing"
@@ -31,14 +33,16 @@ func AssertSamePath(t *testing.T, got, want string) {
 func ShortTempDir(t *testing.T, prefix string) string {
 	t.Helper()
 	root := os.TempDir()
+	fallback := ""
 	switch runtime.GOOS {
 	case "darwin":
 		root = "/tmp"
 	case "linux":
 		// Keep socket fixtures on disk; compiler scratch still uses TMPDIR.
 		root = "/var/tmp"
+		fallback = "/tmp"
 	}
-	dir, err := os.MkdirTemp(root, prefix)
+	dir, err := mkdirTempWithFallback(root, fallback, prefix)
 	if err != nil {
 		t.Fatalf("MkdirTemp(%q, %q): %v", root, prefix, err)
 	}
@@ -47,4 +51,12 @@ func ShortTempDir(t *testing.T, prefix string) string {
 		_ = os.RemoveAll(dir)
 	})
 	return dir
+}
+
+func mkdirTempWithFallback(root, fallback, prefix string) (string, error) {
+	dir, err := os.MkdirTemp(root, prefix)
+	if fallback != "" && errors.Is(err, fs.ErrNotExist) {
+		return os.MkdirTemp(fallback, prefix)
+	}
+	return dir, err
 }

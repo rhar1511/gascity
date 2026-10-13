@@ -2,13 +2,17 @@ package scripts_test
 
 import (
 	"encoding/json"
+	"errors"
 	"maps"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -26,6 +30,8 @@ type ciCriticalPathJob struct {
 	Steps           []ciCriticalPathStep      `yaml:"steps"`
 	Strategy        ciCriticalPathJobStrategy `yaml:"strategy"`
 	ContinueOnError bool                      `yaml:"continue-on-error"`
+	TimeoutMinutes  yaml.Node                 `yaml:"timeout-minutes"`
+	Env             map[string]string         `yaml:"env"`
 }
 
 type ciCriticalPathJobStrategy struct {
@@ -53,6 +59,7 @@ type ciCriticalPathStep struct {
 	Run             string            `yaml:"run"`
 	Uses            string            `yaml:"uses"`
 	ContinueOnError bool              `yaml:"continue-on-error"`
+	TimeoutMinutes  yaml.Node         `yaml:"timeout-minutes"`
 	Env             map[string]string `yaml:"env"`
 	With            map[string]string `yaml:"with"`
 }
@@ -1320,5 +1327,212 @@ func TestNotifyImageRebuildsRunsOnlyInCanonicalRepository(t *testing.T) {
 	}
 	if got, want := notify.If, "github.repository == 'gastownhall/gascity'"; got != want {
 		t.Fatalf("notify job if = %q, want %q", got, want)
+	}
+}
+
+func TestMacQualityRetainsBoundedLintFailureDiagnostics(t *testing.T) {
+	job := readCriticalPathWorkflow(t, "mac-regression.yml").Jobs["mac-quality"]
+	if job.ContinueOnError {
+		t.Fatal("Mac quality must fail when lint fails")
+	}
+	var lint, upload ciCriticalPathStep
+	lintIndex, uploadIndex := -1, -1
+	for i, step := range job.Steps {
+		if step.Name == "Lint" {
+			lint, lintIndex = step, i
+		}
+		if strings.Contains(step.Uses, "actions/upload-artifact@") && strings.Contains(step.With["name"], "mac-lint") {
+			upload, uploadIndex = step, i
+		}
+	}
+	if lintIndex < 0 || uploadIndex <= lintIndex {
+		t.Fatal("Mac lint needs a following diagnostics artifact upload")
+	}
+	if lint.ContinueOnError || lint.If != "" {
+		t.Fatal("Mac lint must remain an unconditional required check")
+	}
+	for _, marker := range []string{
+		"set -o pipefail",
+		"make lint LINT_FLAGS=",
+		"--verbose",
+		`python3 scripts/ci-lint-profile --deadline "$MAC_LINT_DEADLINE" --profile-dir "$MAC_LINT_DIR" --sample-executable "$(go env GOPATH)/bin/golangci-lint" -- make lint`,
+		`git rev-parse HEAD > "$MAC_LINT_DIR/revision.txt"`,
+		"--cpu-profile-path=$MAC_LINT_DIR/cpu.pprof",
+		"--mem-profile-path=$MAC_LINT_DIR/mem.pprof",
+		`tee "$MAC_LINT_DIR/lint.log"`,
+	} {
+		if !strings.Contains(lint.Run, marker) {
+			t.Errorf("Mac lint is missing %q", marker)
+		}
+	}
+	for _, bypass := range []string{"|| true", "--enable-only", "--disable", "--tests=false", "--new-from"} {
+		if strings.Contains(lint.Run, bypass) {
+			t.Errorf("Mac diagnostics must not weaken full lint: %q", bypass)
+		}
+	}
+	deadline := regexp.MustCompile(`--timeout=([0-9]+m)`).FindStringSubmatch(lint.Run)
+	if len(deadline) != 2 {
+		t.Fatal("Mac lint must have an internal deadline to flush profiles before job cancellation")
+	}
+	if len(job.Steps) == 0 || job.Steps[0].Name != "Start Mac lint deadline" {
+		t.Fatal("the lint deadline must start before checkout and setup")
+	}
+	if !strings.Contains(job.Steps[0].Run, "MAC_LINT_DEADLINE=") || !strings.Contains(job.Steps[0].Run, "GITHUB_ENV") {
+		t.Fatal("the monotonic deadline must reach the lint subprocess")
+	}
+	hard := regexp.MustCompile(`time.monotonic\(\) \+ ([0-9]+)\*60`).FindStringSubmatch(job.Steps[0].Run)
+	if len(hard) != 2 {
+		t.Fatal("the job needs an explicit monotonic watchdog budget")
+	}
+	hardBudget, err := time.ParseDuration(hard[1] + "m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	budget, err := time.ParseDuration(job.TimeoutMinutes.Value + "m")
+	if err != nil || hardBudget <= 0 || hardBudget > budget-10*time.Minute {
+		t.Fatalf("watchdog budget must leave ten minutes in the literal job budget %q", job.TimeoutMinutes.Value)
+	}
+	duration, err := time.ParseDuration(deadline[1])
+	if err != nil || duration <= 0 || duration >= hardBudget {
+		t.Errorf("internal lint deadline %q must expire before hard budget %s", deadline[1], hardBudget)
+	}
+	if upload.TimeoutMinutes.Value != "3" {
+		t.Error("the diagnostics upload must fit inside its reserved budget")
+	}
+	// GitHub evaluates job env before a runner exists; runner context is only
+	// available to steps. Publish the step-scoped directory for later steps.
+	if strings.Contains(job.Env["MAC_LINT_DIR"], "runner.") {
+		t.Error("the profile directory must not use runner context in job env")
+	}
+	for _, identity := range []string{"${{ runner.temp }}", "${{ github.run_id }}", "${{ github.run_attempt }}"} {
+		if !strings.Contains(job.Steps[0].Env["MAC_LINT_DIR"], identity) {
+			t.Errorf("the step-scoped profile directory must be unique per run/attempt: missing %q", identity)
+		}
+	}
+	if !strings.Contains(job.Steps[0].Run, `echo "MAC_LINT_DIR=$MAC_LINT_DIR" >> "$GITHUB_ENV"`) {
+		t.Error("the profile directory must be published for lint and artifact steps")
+	}
+	for _, workflow := range []string{"ci.yml", "mac-regression.yml"} {
+		wf := readCriticalPathWorkflow(t, workflow)
+		owner := wf.Jobs["preflight-static"]
+		if workflow == "mac-regression.yml" {
+			owner = wf.Jobs["mac-quality"]
+		}
+		found := false
+		for _, step := range owner.Steps {
+			if step.Run == "python3 scripts/test-ci-lint-profile" && step.If == "" && !step.ContinueOnError {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%s must run the owning portable deadline contract", workflow)
+		}
+	}
+	if upload.If != "${{ always() }}" || upload.ContinueOnError {
+		t.Error("lint diagnostics must upload on failure and report upload failures")
+	}
+	if upload.With["path"] != "${{ env.MAC_LINT_DIR }}" || upload.With["if-no-files-found"] != "error" {
+		t.Errorf("lint upload must require the directory containing profiles and log: %v", upload.With)
+	}
+	for _, identity := range []string{"${{ inputs.head_sha || github.sha }}", "${{ github.run_id }}", "${{ github.run_attempt }}"} {
+		if !strings.Contains(upload.With["name"], identity) {
+			t.Errorf("lint artifact must bind revision and attempt: missing %q", identity)
+		}
+	}
+}
+
+func TestVulnerabilityReportingPreservesRawAndIndependentVerdict(t *testing.T) {
+	job := readCriticalPathWorkflow(t, "govulncheck.yml").Jobs["govulncheck"]
+	var install, normalize, upload, rawArtifact, uploadArtifact, gate ciCriticalPathStep
+	for _, step := range job.Steps {
+		switch step.Name {
+		case "Install govulncheck":
+			install = step
+		case "Normalize SARIF duplicate stacks":
+			normalize = step
+		case "Upload SARIF results":
+			upload = step
+		case "Upload SARIF artifact":
+			rawArtifact = step
+		case "Upload normalized SARIF artifact":
+			uploadArtifact = step
+		case "Summarize findings and enforce reachable vulnerability policy":
+			gate = step
+		}
+	}
+	if install.ID != "install-govulncheck" {
+		t.Fatal("scanner availability must be identified independently of report generation")
+	}
+	if normalize.ID != "normalize-sarif" || normalize.ContinueOnError ||
+		!strings.Contains(normalize.Run, "python3 scripts/normalize-govulncheck-sarif.py") {
+		t.Error("the SARIF upload must use the owning lossless normalization")
+	}
+	if upload.With["sarif_file"] != "govulncheck-results/govulncheck.upload.sarif" ||
+		!strings.Contains(upload.If, "steps.normalize-sarif.outcome == 'success'") {
+		t.Error("upload must require successfully normalized SARIF")
+	}
+	if rawArtifact.With["path"] != "govulncheck-results/govulncheck.sarif" {
+		t.Error("the unmodified scanner SARIF must remain a separate artifact")
+	}
+	if !strings.Contains(uploadArtifact.With["path"], "govulncheck.upload.sarif") ||
+		!strings.Contains(uploadArtifact.With["path"], "normalization.json") {
+		t.Error("the normalized artifact must include transformation provenance")
+	}
+	if gate.If != "${{ always() && steps.install-govulncheck.outcome == 'success' }}" ||
+		gate.ContinueOnError || !strings.Contains(gate.Run, "govulncheck -show verbose ./...") ||
+		!strings.Contains(gate.Run, "exit \"$status\"") {
+		t.Error("native reachability verdict must run after reporting failures and retain its exit")
+	}
+}
+
+// TestVulnerabilityVerdictRunsWithoutReportingDirectory owns three real Bash
+// launches and their fixture children to prove scanner invocation and exits.
+func TestVulnerabilityVerdictRunsWithoutReportingDirectory(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("requires bash for the GitHub runner shell")
+	}
+	var gate ciCriticalPathStep
+	for _, step := range readCriticalPathWorkflow(t, "govulncheck.yml").Jobs["govulncheck"].Steps {
+		if step.Name == "Summarize findings and enforce reachable vulnerability policy" {
+			gate = step
+		}
+	}
+	for _, exit := range []int{0, 3, 7} {
+		t.Run(strconv.Itoa(exit), func(t *testing.T) {
+			dir := t.TempDir()
+			bin := filepath.Join(dir, "bin")
+			if err := os.Mkdir(bin, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			scanner := "#!/bin/sh\nprintf 'called' > \"$SCAN_MARKER\"\nprintf 'fixture scanner output\\n'\nexit \"$SCAN_EXIT\"\n"
+			if err := os.WriteFile(filepath.Join(bin, "govulncheck"), []byte(scanner), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			marker := filepath.Join(dir, "called")
+			cmd := exec.Command(bash, "-c", gate.Run)
+			cmd.Dir = dir
+			cmd.Env = []string{
+				"PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH"),
+				"GITHUB_STEP_SUMMARY=" + filepath.Join(dir, "summary"),
+				"SCAN_MARKER=" + marker,
+				"SCAN_EXIT=" + strconv.Itoa(exit),
+			}
+			output, runErr := cmd.CombinedOutput()
+			got, err := os.ReadFile(marker)
+			if err != nil || string(got) != "called" {
+				t.Fatalf("reporting setup must not prevent scanner execution: %v; output=%s", err, output)
+			}
+			if exit == 0 {
+				if runErr != nil {
+					t.Fatalf("successful scan: %v; output=%s", runErr, output)
+				}
+			} else {
+				var failure *exec.ExitError
+				if !errors.As(runErr, &failure) || failure.ExitCode() != exit {
+					t.Fatalf("must retain native scanner exit %d: %v; output=%s", exit, runErr, output)
+				}
+			}
+		})
 	}
 }

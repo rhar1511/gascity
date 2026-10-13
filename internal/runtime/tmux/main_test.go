@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -43,7 +44,13 @@ func TestMain(m *testing.M) {
 	if _, err := exec.LookPath("tmux"); err == nil {
 		tmuxtest.KillAllTestSessions(mainTB{})
 	}
-	_ = os.RemoveAll(tmuxSocketParent)
+	if err := tmuxtest.ReapOwnedSocketParentDir(tmuxSocketParent, tmuxSocketAliveSentinel, os.Stderr); err != nil {
+		_, _ = fmt.Fprintln(os.Stderr, "tmux tests: preserving socket parent:", err)
+		code = 1
+	} else if err := os.RemoveAll(tmuxSocketParent); err != nil {
+		_, _ = fmt.Fprintln(os.Stderr, "tmux tests: removing socket parent:", err)
+		code = 1
+	}
 	os.Exit(code)
 }
 

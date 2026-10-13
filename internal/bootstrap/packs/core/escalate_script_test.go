@@ -117,7 +117,9 @@ func TestEscalateSurvivesAHangingWake(t *testing.T) {
 	if _, err := exec.LookPath("timeout"); err != nil {
 		t.Skipf("timeout(1) not available: %v", err)
 	}
-	binDir, logPath := fakeGCBin(t, "sleep 30\nexit 0\n")
+	// Let timeout own and wait the hanging command directly, without a shell
+	// dying before it can reap a separate sleep child.
+	binDir, logPath := fakeGCBin(t, "exec sleep 30\n")
 
 	out, err := runEscalate(t, binDir,
 		"GC_ESCALATION_RECIPIENT=local-core.manager",

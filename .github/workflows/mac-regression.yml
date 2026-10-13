@@ -75,7 +75,7 @@ concurrency:
 
 env:
   DOLT_VERSION: "2.1.7"
-  BD_VERSION: "v1.3.1-rc.2"
+  BD_VERSION: "v1.3.1"
 
 # Tier routing is centralized in the `gate` job below, which always runs
 # and computes run_smoke/run_full/run_review_formulas plus a human-readable
@@ -98,6 +98,7 @@ jobs:
       runner_16vcpu: ${{ steps.policy.outputs.runner_16vcpu }}
       runner_32vcpu: ${{ steps.policy.outputs.runner_32vcpu }}
       runner_macos: ${{ steps.policy.outputs.runner_macos }}
+      runner_macos_quality: ${{ steps.policy.outputs.runner_macos_quality }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - name: Select runner backend
@@ -202,11 +203,17 @@ jobs:
       - runner-policy
       - gate
     if: needs.gate.outputs.run_smoke == 'true'
-    runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
-    # A cold golangci-lint cache exceeded 35 minutes on hosted macOS. Give
-    # the full lint gate time to finish and report a verdict.
-    timeout-minutes: 75
+    runs-on: ${{ needs.runner-policy.outputs.runner_macos_quality }}
+    # Cold package loading plus full analysis exceeded 55 minutes. Reserve
+    # 65 minutes for lint, ten for setup, and ten for diagnostics/other gates.
+    timeout-minutes: 85
     steps:
+      - name: Start Mac lint deadline
+        env:
+          MAC_LINT_DIR: ${{ runner.temp }}/mac-lint-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          python3 -c 'import time; print(f"MAC_LINT_DEADLINE={time.monotonic() + 75*60}")' >> "$GITHUB_ENV"
+          echo "MAC_LINT_DIR=$MAC_LINT_DIR" >> "$GITHUB_ENV"
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           repository: ${{ inputs.head_repo || github.repository }}
@@ -240,11 +247,36 @@ jobs:
           # repeatedly re-poisoning the cache with a SA5011 false-positive
           # storm (ga-35qn7i, ga-v7x9vk, ga-l14mnf, ga-ndx34y). A miss now
           # forces a fully fresh, never-poisoned recompute.
-          key: ${{ runner.os }}-golangci-lint-${{ steps.glint-version.outputs.version }}-${{ steps.glint-version.outputs.goversion }}-${{ hashFiles('go.sum', '.golangci.yml') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-golangci-lint-${{ steps.glint-version.outputs.version }}-${{ steps.glint-version.outputs.goversion }}-${{ hashFiles('go.sum', '.golangci.yml') }}
+      - name: Lint deadline contract
+        run: python3 scripts/test-ci-lint-profile
       - name: Lint
         env:
           GOLANGCI_LINT_CACHE: ${{ github.workspace }}/.cache/golangci-lint
-        run: make lint
+          GOMAXPROCS: "2"
+        # Retain the full gate. The outer deadline includes setup time;
+        # forced termination records incomplete profiles and fails the check.
+        # Bound concurrent analysis on memory-constrained hosted Macs. The
+        # ca909 run reached a 6.8G footprint with sustained GC scanning; more
+        # parallel analyzers must not amplify its live working set. This
+        # bounds scheduling without changing analyzers or package scope.
+        run: |
+          set -o pipefail
+          # --concurrency bounds the linter runtime, not inherited Go tools.
+          # Retain effective flags, then bound package compilation fan-out.
+          lint_go_flags="$(go env GOFLAGS)" || exit "$?"
+          export GOFLAGS="$lint_go_flags -p=1"
+          mkdir -p "$MAC_LINT_DIR"
+          git rev-parse HEAD > "$MAC_LINT_DIR/revision.txt"
+          python3 scripts/ci-lint-profile --deadline "$MAC_LINT_DEADLINE" --profile-dir "$MAC_LINT_DIR" --sample-executable "$(go env GOPATH)/bin/golangci-lint" -- make lint LINT_FLAGS="--verbose --concurrency=2 --timeout=65m --cpu-profile-path=$MAC_LINT_DIR/cpu.pprof --mem-profile-path=$MAC_LINT_DIR/mem.pprof" 2>&1 | tee "$MAC_LINT_DIR/lint.log"
+      - name: Upload Mac lint diagnostics
+        if: ${{ always() }}
+        timeout-minutes: 3
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: mac-lint-${{ inputs.head_sha || github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.MAC_LINT_DIR }}
+          if-no-files-found: error
       - name: Format
         run: make fmt-check
       - name: Vet
@@ -316,7 +348,9 @@ jobs:
       - gate
     if: needs.gate.outputs.run_smoke == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
-    timeout-minutes: 25
+    # Cold ARM run reached the 26m job limit despite both commands passing.
+    # Budget the 20m Tier A and 10m CLI contract deadlines plus setup/cleanup.
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:

@@ -1839,3 +1839,93 @@ func TestExec_ExitTwoIsUnsupportedWhenExecNotDeclared(t *testing.T) {
 // --- Compile-time interface check ---
 
 var _ runtime.Provider = (*Provider)(nil)
+
+func TestExecLivenessObservationPreservesCertainty(t *testing.T) {
+	constructors := []struct {
+		name string
+		new  func(string) runtime.Provider
+	}{
+		{"direct", func(script string) runtime.Provider { return NewProvider(script) }},
+		{"seam-backed", NewSeamBacked},
+	}
+	cases := []struct {
+		name       string
+		runningOp  string
+		processOp  string
+		processes  []string
+		want       runtime.Liveness
+		wantReason string
+	}{
+		{name: "live", runningOp: "echo true", want: runtime.Liveness{Running: true, Alive: true}},
+		{name: "absent", runningOp: "echo false"},
+		{name: "whitespace", runningOp: "echo '  true  '", want: runtime.Liveness{Running: true, Alive: true}},
+		{name: "blank-hints", runningOp: "echo false", processOp: "exit 1", processes: []string{"", " "}},
+		{name: "zombie", runningOp: "echo true", processOp: "echo false", processes: []string{"agent"}, want: runtime.Liveness{Running: true}},
+		{name: "absent-process", runningOp: "echo false", processOp: "echo false", processes: []string{"agent"}},
+		{name: "live-process", runningOp: "echo false", processOp: "echo true", processes: []string{"agent"}, want: runtime.Liveness{Running: true, Alive: true}},
+		{name: "unknown-runtime", runningOp: "echo unknown", processOp: "echo true", processes: []string{"agent"}, wantReason: `is-running returned "unknown"`},
+		{name: "empty-runtime", runningOp: ":", wantReason: `is-running returned ""`},
+		{name: "unsupported-runtime", runningOp: "exit 2", wantReason: `is-running returned ""`},
+		{name: "runtime-error", runningOp: "echo 'fixture-is-running-unavailable' >&2; exit 1", wantReason: "fixture-is-running-unavailable"},
+		{name: "unknown-process", runningOp: "echo false", processOp: "echo unknown", processes: []string{"agent"}, wantReason: `process-alive returned "unknown"`},
+		{name: "unsupported-process", runningOp: "echo true", processOp: "exit 2", processes: []string{"agent"}, wantReason: `process-alive returned ""`},
+		{name: "process-error", runningOp: "echo false", processOp: "echo 'fixture-process-alive-unavailable' >&2; exit 1", processes: []string{"agent"}, wantReason: "fixture-process-alive-unavailable"},
+	}
+	for _, ctor := range constructors {
+		t.Run(ctor.name, func(t *testing.T) {
+			for _, tc := range cases {
+				t.Run(tc.name, func(t *testing.T) {
+					processOp := tc.processOp
+					if processOp == "" {
+						processOp = ":"
+					}
+					script := writeScript(t, t.TempDir(), fmt.Sprintf(`
+case "$1" in
+ is-running) %s ;;
+ process-alive) cat >/dev/null; %s ;;
+ *) exit 2 ;;
+esac
+`, tc.runningOp, processOp))
+					got, err := runtime.ObserveLivenessWithError(ctor.new(script), "session-a", tc.processes)
+					if got != tc.want {
+						t.Fatalf("liveness=%+v, want %+v (err=%v)", got, tc.want, err)
+					}
+					if tc.wantReason == "" {
+						if err != nil {
+							t.Fatalf("confirmed observation failed: %v", err)
+						}
+					} else if !errors.Is(err, runtime.ErrRuntimeUnavailable) || !strings.Contains(err.Error(), tc.wantReason) {
+						t.Fatalf("uncertain observation error=%v, want runtime unavailable with %q", err, tc.wantReason)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestExecLivenessLegacyBooleanCompatibility(t *testing.T) {
+	script := writeScript(t, t.TempDir(), `
+case "$1" in
+ is-running) echo unknown ;;
+ process-alive) exit 2 ;;
+ *) exit 2 ;;
+esac
+`)
+	for _, tc := range []struct {
+		name         string
+		provider     runtime.Provider
+		processAlive bool
+	}{
+		{"direct", NewProvider(script), true},
+		{"seam-backed", NewSeamBacked(script), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.provider.IsRunning("session-a") {
+				t.Fatal("legacy unknown runtime must remain false")
+			}
+			if got := tc.provider.ProcessAlive("session-a", []string{"agent"}); got != tc.processAlive {
+				t.Fatalf("legacy process liveness=%v, want %v", got, tc.processAlive)
+			}
+		})
+	}
+}

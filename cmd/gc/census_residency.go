@@ -34,7 +34,6 @@ package main
 
 import (
 	"path/filepath"
-	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -231,16 +230,10 @@ func censusRef(cfg *config.City, ref storeref.StoreRef, style censusRefStyle) st
 	return "city:" + censusCityName(cfg)
 }
 
-// censusCityName is the workspace name the scoped vocabulary spells the city
-// leg with, defaulting to "city" exactly as the pre-resolver arm did.
+// censusCityName uses the loaded site identity for the scoped city leg, matching
+// workflow and hook provenance. Raw configs retain the legacy "city" fallback.
 func censusCityName(cfg *config.City) string {
-	if cfg == nil {
-		return "city"
-	}
-	if name := strings.TrimSpace(cfg.Workspace.Name); name != "" {
-		return name
-	}
-	return "city"
+	return config.EffectiveCityName(cfg, "city")
 }
 
 // servingRigStores is the suspension FRAME: the rig legs a census may read.

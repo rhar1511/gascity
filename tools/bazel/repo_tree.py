@@ -102,6 +102,7 @@ def refresh_root(labels: list[str]) -> None:
         f'    name = "{ROOT_TARGET}",\n'
         f"    srcs = [\n{body}\n"
         f'        ":go.mod",\n'
+        f'        ":go.sum",\n'
         f'        ":Makefile",\n'
         f'        ":TESTING.md",\n'
         f'        ":root_extras",\n'

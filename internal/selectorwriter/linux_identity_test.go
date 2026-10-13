@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestLinuxIdentityReaderUsesOnlyInjectedRegularFiles(t *testing.T) {
@@ -165,4 +167,116 @@ func writeFixture(t *testing.T, path, data string) {
 	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestLinuxIdentityPathRevalidationAllowsUnrelatedDirectoryEntries(t *testing.T) {
+	for _, kind := range []string{"file", "directory"} {
+		t.Run(kind, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "machine-id")
+			writeFixture(t, path, "stable-identity\n")
+			opened, err := openLinuxIdentityPath(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer opened.close()
+			if _, err := opened.read(); err != nil {
+				t.Fatal(err)
+			}
+			sibling := filepath.Join(dir, "unrelated-entry")
+			if kind == "directory" {
+				if err := os.Mkdir(sibling, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				writeFixture(t, sibling, "unrelated-data\n")
+			}
+			if err := opened.revalidate(); err != nil {
+				t.Fatalf("unchanged identity rejected after unrelated %s creation: %v", kind, err)
+			}
+			if err := os.Remove(sibling); err != nil {
+				t.Fatal(err)
+			}
+			if err := opened.revalidate(); err != nil {
+				t.Fatalf("unchanged identity rejected after unrelated %s removal: %v", kind, err)
+			}
+		})
+	}
+}
+
+func TestLinuxIdentityPathRevalidationStillRejectsContentAndAncestorModeChanges(t *testing.T) {
+	for _, kind := range []string{"content", "ancestor mode"} {
+		t.Run(kind, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "machine-id")
+			writeFixture(t, path, "stable-identity\n")
+			opened, err := openLinuxIdentityPath(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer opened.close()
+			if _, err := opened.read(); err != nil {
+				t.Fatal(err)
+			}
+			if kind == "content" {
+				writeFixture(t, path, "different-length-identity\n")
+			} else {
+				if err := os.Chmod(dir, 0o500); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() {
+					if err := os.Chmod(dir, 0o700); err != nil {
+						t.Error(err)
+					}
+				})
+			}
+			if err := opened.revalidate(); err == nil {
+				t.Fatalf("accepted changed %s", kind)
+			}
+		})
+	}
+}
+
+func TestLinuxIdentityPathComponentComparisonPreservesObjectAndAccessMetadata(t *testing.T) {
+	original := unix.Stat_t{Dev: 1, Ino: 2, Mode: unix.S_IFDIR | 0o700, Nlink: 2, Rdev: 3, Size: 4, Uid: 5, Gid: 6}
+	original.Mtim.Sec = 7
+	original.Ctim.Sec = 8
+	cases := []struct {
+		name   string
+		change func(*unix.Stat_t)
+		want   bool
+	}{
+		{"unchanged", func(*unix.Stat_t) {}, true},
+		{"directory entries", func(s *unix.Stat_t) { s.Nlink++; s.Size++; s.Mtim.Sec++; s.Ctim.Sec++ }, true},
+		{"device", func(s *unix.Stat_t) { s.Dev++ }, false},
+		{"inode", func(s *unix.Stat_t) { s.Ino++ }, false},
+		{"permissions", func(s *unix.Stat_t) { s.Mode ^= 0o100 }, false},
+		{"type", func(s *unix.Stat_t) { s.Mode = unix.S_IFREG | 0o700 }, false},
+		{"special device", func(s *unix.Stat_t) { s.Rdev++ }, false},
+		{"owner", func(s *unix.Stat_t) { s.Uid++ }, false},
+		{"group", func(s *unix.Stat_t) { s.Gid++ }, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			changed := original
+			tc.change(&changed)
+			if got := sameLinuxPathComponent(original, changed); got != tc.want {
+				t.Fatalf("forward comparison = %v, want %v", got, tc.want)
+			}
+			if got := sameLinuxPathComponent(changed, original); got != tc.want {
+				t.Fatalf("reverse comparison = %v, want %v", got, tc.want)
+			}
+		})
+	}
+	t.Run("regular file retains full version", func(t *testing.T) {
+		file := original
+		file.Mode = unix.S_IFREG | 0o600
+		for _, mutate := range []func(*unix.Stat_t){func(s *unix.Stat_t) { s.Nlink++ }, func(s *unix.Stat_t) { s.Size++ }, func(s *unix.Stat_t) { s.Mtim.Sec++ }, func(s *unix.Stat_t) { s.Ctim.Sec++ }} {
+			changed := file
+			mutate(&changed)
+			if sameLinuxPathComponent(file, changed) {
+				t.Fatal("accepted modified regular-file version")
+			}
+		}
+	})
 }

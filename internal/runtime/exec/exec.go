@@ -42,6 +42,8 @@ type startupWatchEvent struct {
 	Content string `json:"content"`
 }
 
+var _ runtime.LivenessObserverWithError = (*Provider)(nil)
+
 var startupWatchFirstEventTimeout = runtime.StartupDialogTimeout
 
 const startupWatchCloseTimeout = 200 * time.Millisecond
@@ -674,6 +676,42 @@ func (p *Provider) boxOccupancy(name string) (occupied, definite bool) {
 		return false, true
 	default:
 		return false, false
+	}
+}
+
+// ObserveLivenessWithError preserves uncertainty for callers that require a
+// confirmed runtime observation. The legacy boolean methods keep their existing
+// best-effort behavior.
+func (p *Provider) ObserveLivenessWithError(name string, processNames []string) (runtime.Liveness, error) {
+	running, err := p.observeLivenessBool(nil, "is-running", name)
+	if err != nil {
+		return runtime.Liveness{}, err
+	}
+	for _, processName := range processNames {
+		if strings.TrimSpace(processName) == "" {
+			continue
+		}
+		alive, err := p.observeLivenessBool([]byte(strings.Join(processNames, "\n")), "process-alive", name)
+		if err != nil {
+			return runtime.Liveness{}, err
+		}
+		return runtime.Liveness{Running: running || alive, Alive: alive}, nil
+	}
+	return runtime.Liveness{Running: running, Alive: running}, nil
+}
+
+func (p *Provider) observeLivenessBool(stdin []byte, op, name string) (bool, error) {
+	out, err := p.run(stdin, op, name)
+	if err != nil {
+		return false, fmt.Errorf("%w: %s: %w", runtime.ErrRuntimeUnavailable, op, err)
+	}
+	switch strings.TrimSpace(out) {
+	case "true":
+		return true, nil
+	case "false":
+		return false, nil
+	default:
+		return false, fmt.Errorf("%w: %s returned %q", runtime.ErrRuntimeUnavailable, op, strings.TrimSpace(out))
 	}
 }
 

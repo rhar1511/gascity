@@ -819,13 +819,20 @@ func (c *privateEvidenceHTTPClient) listEvidenceArchives(ctx context.Context, ow
 	if strings.TrimSpace(ownerID) == "" {
 		return nil, fmt.Errorf("%w: archive owner is required", ErrPrivateEvidenceHTTPProtocol)
 	}
+	filters := map[string]string{beadmeta.AttemptEvidenceArchiveOwnerIDMetadataKey: ownerID}
+	if attemptID != "" {
+		filters[beadmeta.AttemptEvidenceArchiveAttemptIDMetadataKey] = attemptID
+	}
+	return c.listPrivateEvidenceRows(ctx, filters)
+}
+
+func (c *privateEvidenceHTTPClient) listPrivateEvidenceRows(ctx context.Context, filters map[string]string) ([]Bead, error) {
 	if err := c.verifyContext(ctx); err != nil {
 		return nil, err
 	}
 	values := url.Values{}
-	values.Add("metadata_field", beadmeta.AttemptEvidenceArchiveOwnerIDMetadataKey+"="+ownerID)
-	if attemptID != "" {
-		values.Add("metadata_field", beadmeta.AttemptEvidenceArchiveAttemptIDMetadataKey+"="+attemptID)
+	for key, value := range filters {
+		values.Add("metadata_field", key+"="+value)
 	}
 	values.Set("all", "true")
 	values.Set("include_templates", "true")
@@ -845,41 +852,42 @@ func (c *privateEvidenceHTTPClient) listEvidenceArchives(ctx context.Context, ow
 			return nil, err
 		}
 		if status != http.StatusOK {
-			return nil, fmt.Errorf("%w: evidence archive list returned HTTP %d", ErrPrivateEvidenceHTTPProtocol, status)
+			return nil, fmt.Errorf("%w: private evidence list returned HTTP %d", ErrPrivateEvidenceHTTPProtocol, status)
 		}
 		var page struct {
-			Items      []json.RawMessage `json:"items"`
-			HasMore    bool              `json:"has_more"`
-			NextCursor string            `json:"next_cursor"`
+			Items      *[]json.RawMessage `json:"items"`
+			HasMore    *bool              `json:"has_more"`
+			NextCursor string             `json:"next_cursor"`
 		}
-		if err := decodePrivateEvidenceJSON(body, &page); err != nil {
-			return nil, fmt.Errorf("%w: malformed evidence archive list response", ErrPrivateEvidenceHTTPProtocol)
+		if err := decodePrivateEvidenceJSON(body, &page); err != nil || page.Items == nil || page.HasMore == nil {
+			return nil, fmt.Errorf("%w: malformed private evidence list response", ErrPrivateEvidenceHTTPProtocol)
 		}
-		for _, raw := range page.Items {
+		for _, raw := range *page.Items {
 			var issue bdIssue
 			if err := decodePrivateEvidenceJSON(raw, &issue); err != nil || strings.TrimSpace(issue.ID) == "" {
-				return nil, fmt.Errorf("%w: malformed evidence archive row", ErrPrivateEvidenceHTTPProtocol)
+				return nil, fmt.Errorf("%w: malformed private evidence row", ErrPrivateEvidenceHTTPProtocol)
 			}
 			bead := issue.toBead()
-			if bead.Metadata[beadmeta.AttemptEvidenceArchiveOwnerIDMetadataKey] != ownerID ||
-				(attemptID != "" && bead.Metadata[beadmeta.AttemptEvidenceArchiveAttemptIDMetadataKey] != attemptID) {
-				return nil, fmt.Errorf("%w: archive list returned a row outside its filter", ErrPrivateEvidenceHTTPProtocol)
+			for key, value := range filters {
+				if bead.Metadata[key] != value {
+					return nil, fmt.Errorf("%w: private evidence list returned a row outside its filter", ErrPrivateEvidenceHTTPProtocol)
+				}
 			}
 			out = append(out, bead)
 		}
-		if !page.HasMore {
+		if !*page.HasMore {
 			return out, nil
 		}
 		if strings.TrimSpace(page.NextCursor) == "" {
-			return nil, fmt.Errorf("%w: archive list omitted its next cursor", ErrPrivateEvidenceHTTPProtocol)
+			return nil, fmt.Errorf("%w: private evidence list omitted its next cursor", ErrPrivateEvidenceHTTPProtocol)
 		}
 		if _, duplicate := seenCursors[page.NextCursor]; duplicate {
-			return nil, fmt.Errorf("%w: archive list repeated a cursor", ErrPrivateEvidenceHTTPProtocol)
+			return nil, fmt.Errorf("%w: private evidence list repeated a cursor", ErrPrivateEvidenceHTTPProtocol)
 		}
 		seenCursors[page.NextCursor] = struct{}{}
 		cursor = page.NextCursor
 	}
-	return nil, fmt.Errorf("%w: archive list exceeded page bound", ErrPrivateEvidenceHTTPProtocol)
+	return nil, fmt.Errorf("%w: private evidence list exceeded page bound", ErrPrivateEvidenceHTTPProtocol)
 }
 
 func (c *privateEvidenceHTTPClient) listOwnerIndexes(ctx context.Context, ownerID string) (map[string]string, error) {

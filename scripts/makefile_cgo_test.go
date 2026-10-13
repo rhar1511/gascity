@@ -334,7 +334,7 @@ func makeCommand(args ...string) *exec.Cmd {
 }
 
 func testCommand(name string, args ...string) *exec.Cmd {
-	return exec.Command(name, args...)
+	return shardTestCommand(name, args...)
 }
 
 func filteredMakefileCGOTestEnv() []string {

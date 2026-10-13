@@ -1,5 +1,5 @@
 name: Setup Gas City macOS CI
-description: Install the shared macOS dependencies for Gas City CI jobs on ARM64 macOS runners
+description: Install the shared macOS dependencies for Gas City CI jobs on ARM64 and Intel macOS runners
 
 inputs:
   go-version:
@@ -43,10 +43,10 @@ runs:
           exit 1
         fi
         arch="$(uname -m)"
-        if [[ "$arch" != "arm64" ]]; then
-          echo "setup-gascity-macos currently targets arm64; got $arch" >&2
-          exit 1
-        fi
+        case "$arch" in
+          arm64|x86_64) ;;
+          *) echo "setup-gascity-macos requires arm64 or x86_64; got $arch" >&2; exit 1 ;;
+        esac
 
     - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
       with:
@@ -123,6 +123,28 @@ runs:
     - name: Install released bd v${{ inputs.bd-version }}
       shell: bash
       run: ${{ github.action_path }}/../../scripts/install-bd-archive.sh "${{ inputs.bd-version }}" --cache
+
+    - name: Declare the installed bd integration-test executable
+      shell: bash
+      env:
+        BD_TEST_RELEASE_VERSION: ${{ inputs.bd-version }}
+      run: |
+        set -euo pipefail
+        case "$(uname -m)" in
+          arm64|aarch64) bd_test_arch=arm64 ;;
+          x86_64|amd64) bd_test_arch=amd64 ;;
+          *) echo "Unsupported architecture for the installed bd test executable" >&2; exit 1 ;;
+        esac
+        bd_expected_binary="${RUNNER_TOOL_CACHE:-$HOME/.local}/gascity-bd/${BD_TEST_RELEASE_VERSION}/darwin_${bd_test_arch}/bin/bd"
+        bd_test_binary="$(command -v bd)"
+        [[ "$bd_test_binary" = /* && -f "$bd_test_binary" && -x "$bd_test_binary" && "$bd_test_binary" == "$bd_expected_binary" ]] || {
+          echo "The selected bd executable must be the binary installed by this setup action" >&2
+          exit 1
+        }
+        case "$bd_test_binary" in
+          *$'\n'*|*$'\r'*) echo "bd test executable path contains a line break" >&2; exit 1 ;;
+        esac
+        printf 'BEADS_TEST_BD_BINARY=%s\n' "$bd_test_binary" >> "$GITHUB_ENV"
 
     - name: Install Claude CLI
       if: ${{ inputs.install-claude-cli == 'true' }}

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -43,6 +44,47 @@ func extractShellFunc(t *testing.T, path, name string) string {
 	}
 	t.Fatalf("no column-0 closing brace for %q in %s", name, path)
 	return ""
+}
+
+func TestGraphDispatchCloseRecordsAttemptWorkspace(t *testing.T) {
+	fn := extractShellFunc(t, agentScript("graph-dispatch.sh"), "close_with_result")
+	const ledger = `
+bd() {
+    local status=open workspace= outcome=
+    [ "$1" = update ] && [ "$2" = attempt ] || return 1
+    shift 2
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --status) status="$2"; shift 2 ;;
+            --set-metadata)
+                case "$2" in
+                    gc.work_dir=*) workspace="${2#gc.work_dir=}" ;;
+                    gc.outcome=*) outcome="${2#gc.outcome=}" ;;
+                esac
+                shift 2 ;;
+            *) return 1 ;;
+        esac
+    done
+    printf '%s\n%s\n%s\n' "$status" "$outcome" "$workspace"
+}
+trace() { :; }
+`
+	for _, outcome := range []string{"pass", "fail"} {
+		for _, workspace := range []string{"", "/tmp/actual worker workspace"} {
+			t.Run(outcome+workspace, func(t *testing.T) {
+				out, err := runGraphHarnessFunction(ledger+fn+"\nclose_with_result attempt \"$OUTCOME\" hard injected\n", []string{
+					"OUTCOME=" + outcome, "work_dir=" + workspace,
+				})
+				if err != nil {
+					t.Fatalf("close attempt: %v: %s", err, out)
+				}
+				want := "closed\n" + outcome + "\n" + workspace + "\n"
+				if string(out) != want {
+					t.Fatalf("closed attempt state = %q, want %q", out, want)
+				}
+			})
+		}
+	}
 }
 
 // TestGraphDispatchTransientOnceBudgetSurvivesLostClose guards the ga-j88sfp
@@ -215,5 +257,48 @@ bd() {
 				t.Fatalf("owned queue = %s, want claimed attempt owned by %q", out, actor)
 			}
 		})
+	}
+}
+
+func TestGraphDispatchWorkspaceOwnsCommittedRepository(t *testing.T) {
+	ambient := t.TempDir()
+	workspace := filepath.Join(t.TempDir(), "attempt")
+	gitAt := func(dir string, args ...string) string {
+		t.Helper()
+		gitArgs := []string{"-C", dir, "-c", "user.name=Graph fixture", "-c", "user.email=graph-fixture@example.invalid", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null"}
+		cmd := exec.Command("git", append(gitArgs, args...)...)
+		cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null"}
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v in %s: %v: %s", args, dir, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	gitAt(ambient, "init", "--quiet")
+	gitAt(ambient, "commit", "--quiet", "--allow-empty", "-m", "Preserve ambient repository")
+	before := gitAt(ambient, "rev-parse", "HEAD")
+	fn := extractShellFunc(t, agentScript("graph-dispatch.sh"), "setup_graph_workspace")
+	out, err := runGraphHarnessFunction(fn+"\nsetup_graph_workspace \"$WORKSPACE\"\n", []string{
+		"WORKSPACE=" + workspace,
+		"GIT_DIR=" + filepath.Join(ambient, ".git"),
+		"GIT_WORK_TREE=" + ambient,
+		"GIT_COMMON_DIR=" + filepath.Join(ambient, ".git"),
+		"GIT_INDEX_FILE=" + filepath.Join(ambient, ".git", "index"),
+		"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=core.bare", "GIT_CONFIG_VALUE_0=true",
+	})
+	if err != nil {
+		t.Fatalf("initialize attempt workspace: %v: %s", err, out)
+	}
+	if got := gitAt(workspace, "rev-parse", "--show-toplevel"); !graphFixturePathEquals(got, workspace) {
+		t.Fatalf("workspace repository root = %q, want %q", got, workspace)
+	}
+	if got := gitAt(workspace, "cat-file", "-t", "HEAD"); got != "commit" {
+		t.Fatalf("workspace HEAD type = %q, want commit", got)
+	}
+	if got := gitAt(workspace, "ls-tree", "HEAD"); got != "" {
+		t.Fatalf("initial workspace commit contains unexpected files: %s", got)
+	}
+	if after := gitAt(ambient, "rev-parse", "HEAD"); after != before {
+		t.Fatalf("workspace initialization changed ambient HEAD: %s -> %s", before, after)
 	}
 }

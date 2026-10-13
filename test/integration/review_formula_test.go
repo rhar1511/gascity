@@ -3,6 +3,7 @@
 package integration
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -137,21 +138,21 @@ esac
 // TestAdoptPRFormulaCompileAndRun validates a test-local adopt-pr fixture that
 // exercises graph.v2 scopes, Ralph, compose.expand, and pooled review fan-out.
 func TestAdoptPRFormulaCompileAndRun(t *testing.T) {
-	cityDir := setupReviewFormulaCity(t, "success", nil)
-	convoyID, workflowID := startReviewWorkflow(t, cityDir, "mol-adopt-pr-v2", map[string]string{
+	cityDir, transport := setupReviewFormulaCity(t, "success", nil)
+	convoyID, workflowID := startReviewWorkflow(t, cityDir, transport, "mol-adopt-pr-v2", map[string]string{
 		"pr_ref":      "refs/heads/test",
 		"base_branch": "main",
 		"skip_gemini": "false",
 	})
 
-	workflow := waitForBeadClosed(t, cityDir, workflowID, reviewWorkflowTimeout)
+	workflow := waitForWorkflowAndTeardown(t, cityDir, transport, workflowID, reviewWorkflowTimeout)
 	if got := metaValue(workflow, "gc.outcome"); got != "pass" {
-		dumpWorkflowState(t, cityDir, workflowID)
+		dumpReviewFormulaCityState(t, cityDir, transport)
 		t.Fatalf("workflow outcome = %q, want pass", got)
 	}
 
 	// Verify the expansion produced reviewer steps inside the Ralph attempt.
-	steps := listWorkflowSteps(t, cityDir, workflowID)
+	steps := listWorkflowSteps(t, transport, workflowID)
 	wantSuffixes := []string{
 		"review-pipeline.review-claude",
 		"review-pipeline.review-codex",
@@ -167,7 +168,10 @@ func TestAdoptPRFormulaCompileAndRun(t *testing.T) {
 	}
 
 	// Verify the input convoy is clean.
-	convoy := showBead(t, cityDir, convoyID)
+	convoy, err := readGraphBeadOverHTTP(t, transport, convoyID)
+	if err != nil {
+		t.Fatalf("read input convoy: %v", err)
+	}
 	if got := metaValue(convoy, "work_dir"); got != "" {
 		t.Errorf("input convoy work_dir not cleaned up: %q", got)
 	}
@@ -176,22 +180,22 @@ func TestAdoptPRFormulaCompileAndRun(t *testing.T) {
 // TestPersonalWorkFormulaCompileAndRun validates a test-local personal-work
 // fixture with two Ralph loops and two compose.expand sites.
 func TestPersonalWorkFormulaCompileAndRun(t *testing.T) {
-	cityDir := setupReviewFormulaCity(t, "success", nil)
-	convoyID, workflowID := startReviewWorkflow(t, cityDir, "mol-personal-work-v2", map[string]string{
+	cityDir, transport := setupReviewFormulaCity(t, "success", nil)
+	convoyID, workflowID := startReviewWorkflow(t, cityDir, transport, "mol-personal-work-v2", map[string]string{
 		"base_branch":   "main",
 		"skip_gemini":   "true",
 		"setup_command": "true",
 		"test_command":  "true",
 	})
 
-	workflow := waitForBeadClosed(t, cityDir, workflowID, reviewWorkflowTimeout)
+	workflow := waitForWorkflowAndTeardown(t, cityDir, transport, workflowID, reviewWorkflowTimeout)
 	if got := metaValue(workflow, "gc.outcome"); got != "pass" {
-		dumpWorkflowState(t, cityDir, workflowID)
+		dumpReviewFormulaCityState(t, cityDir, transport)
 		t.Fatalf("workflow outcome = %q, want pass", got)
 	}
 
 	// Verify both Ralph loops produced steps.
-	steps := listWorkflowSteps(t, cityDir, workflowID)
+	steps := listWorkflowSteps(t, transport, workflowID)
 	wantSuffixes := []string{
 		"design-review-loop.iteration.1",
 		"design-review-pipeline.persona-gen-claude",
@@ -207,75 +211,78 @@ func TestPersonalWorkFormulaCompileAndRun(t *testing.T) {
 		}
 	}
 
-	convoy := showBead(t, cityDir, convoyID)
+	convoy, err := readGraphBeadOverHTTP(t, transport, convoyID)
+	if err != nil {
+		t.Fatalf("read input convoy: %v", err)
+	}
 	if got := metaValue(convoy, "work_dir"); got != "" {
 		t.Errorf("input convoy work_dir not cleaned up: %q", got)
 	}
 }
 
 func TestAdoptPRFormulaRetriesTransientReviewerStep(t *testing.T) {
-	cityDir := setupReviewFormulaCity(t, "success", map[string]string{
+	cityDir, transport := setupReviewFormulaCity(t, "success", map[string]string{
 		"GC_GRAPH_TRANSIENT_ONCE_SUFFIXES": "review-loop.iteration.1.review-pipeline.review-codex.attempt.1",
 	})
-	_, workflowID := startReviewWorkflow(t, cityDir, "mol-adopt-pr-v2", map[string]string{
+	_, workflowID := startReviewWorkflow(t, cityDir, transport, "mol-adopt-pr-v2", map[string]string{
 		"pr_ref":      "refs/heads/test",
 		"base_branch": "main",
 		"skip_gemini": "false",
 	})
 
-	workflow := waitForBeadClosed(t, cityDir, workflowID, reviewWorkflowTimeout)
+	workflow := waitForWorkflowAndTeardown(t, cityDir, transport, workflowID, reviewWorkflowTimeout)
 	if got := metaValue(workflow, "gc.outcome"); got != "pass" {
-		dumpWorkflowState(t, cityDir, workflowID)
+		dumpReviewFormulaCityState(t, cityDir, transport)
 		t.Fatalf("workflow outcome = %q, want pass", got)
 	}
 
-	steps := listWorkflowSteps(t, cityDir, workflowID)
+	steps := listWorkflowSteps(t, transport, workflowID)
 	if !hasStepWithSuffix(steps, "review-pipeline.review-codex.attempt.2") {
 		trace := readOptionalFile(filepath.Join(cityDir, "graph-workflow-trace.log"))
 		if !traceShowsSameAttemptTransientRetry(trace, "review-loop.iteration.1.review-pipeline.review-codex.attempt.1") {
-			dumpWorkflowState(t, cityDir, workflowID)
+			dumpReviewFormulaCityState(t, cityDir, transport)
 			t.Fatalf("missing retry attempt for codex reviewer; got: %v", steps)
 		}
 	}
 
-	logical := mustFindWorkflowBeadByRefSuffix(t, cityDir, workflowID, "review-loop.iteration.1.review-pipeline.review-codex")
+	logical := findGraphWorkflowBeadByRefSuffixOverHTTP(t, transport, workflowID, "review-loop.iteration.1.review-pipeline.review-codex")
 	if got := metaValue(logical, "gc.outcome"); got != "pass" {
 		t.Fatalf("review-codex logical outcome = %q, want pass", got)
 	}
 }
 
 func TestAdoptPRFormulaSoftFailsGeminiAfterTransientRetries(t *testing.T) {
-	cityDir := setupReviewFormulaCity(t, "success", map[string]string{
+	cityDir, transport := setupReviewFormulaCity(t, "success", map[string]string{
 		"GC_GRAPH_ALWAYS_TRANSIENT_SUFFIXES": strings.Join([]string{
 			"review-loop.iteration.1.review-pipeline.review-gemini.attempt.1",
 			"review-loop.iteration.1.review-pipeline.review-gemini.attempt.2",
 			"review-loop.iteration.1.review-pipeline.review-gemini.attempt.3",
 		}, ","),
 	})
-	_, workflowID := startReviewWorkflow(t, cityDir, "mol-adopt-pr-v2", map[string]string{
+	_, workflowID := startReviewWorkflow(t, cityDir, transport, "mol-adopt-pr-v2", map[string]string{
 		"pr_ref":      "refs/heads/test",
 		"base_branch": "main",
 		"skip_gemini": "false",
 	})
 
-	workflow := waitForBeadClosed(t, cityDir, workflowID, reviewWorkflowTimeout)
+	workflow := waitForWorkflowAndTeardown(t, cityDir, transport, workflowID, reviewWorkflowTimeout)
 	if got := metaValue(workflow, "gc.outcome"); got != "pass" {
-		dumpWorkflowState(t, cityDir, workflowID)
+		dumpReviewFormulaCityState(t, cityDir, transport)
 		t.Fatalf("workflow outcome = %q, want pass", got)
 	}
 
-	steps := listWorkflowSteps(t, cityDir, workflowID)
+	steps := listWorkflowSteps(t, transport, workflowID)
 	for _, suffix := range []string{
 		"review-pipeline.review-gemini.attempt.2",
 		"review-pipeline.review-gemini.attempt.3",
 	} {
 		if !hasStepWithSuffix(steps, suffix) {
-			dumpWorkflowState(t, cityDir, workflowID)
+			dumpReviewFormulaCityState(t, cityDir, transport)
 			t.Fatalf("missing Gemini retry attempt %q; got: %v", suffix, steps)
 		}
 	}
 
-	logical := mustFindWorkflowBeadByRefSuffix(t, cityDir, workflowID, "review-loop.iteration.1.review-pipeline.review-gemini")
+	logical := findGraphWorkflowBeadByRefSuffixOverHTTP(t, transport, workflowID, "review-loop.iteration.1.review-pipeline.review-gemini")
 	if got := metaValue(logical, "gc.outcome"); got != "pass" {
 		t.Fatalf("review-gemini logical outcome = %q, want pass", got)
 	}
@@ -288,7 +295,7 @@ func TestAdoptPRFormulaSoftFailsGeminiAfterTransientRetries(t *testing.T) {
 }
 
 func TestRetryManagedPooledWorkerRecoversClaimedAttemptAfterCrash(t *testing.T) {
-	cityDir := setupReviewFormulaCity(t, "success", map[string]string{
+	cityDir, transport := setupReviewFormulaCity(t, "success", map[string]string{
 		"GC_GRAPH_TRANSIENT_ONCE_SUFFIXES":        "review.attempt.1",
 		"GC_GRAPH_EXIT_AFTER_CLAIM_ONCE_SUFFIXES": "review.attempt.2",
 	})
@@ -312,15 +319,15 @@ max_attempts = 3
 on_exhausted = "hard_fail"
 `)
 
-	_, workflowID := startReviewWorkflow(t, cityDir, "mol-retry-recovery-smoke", map[string]string{})
+	_, workflowID := startReviewWorkflow(t, cityDir, transport, "mol-retry-recovery-smoke", map[string]string{})
 
-	workflow := waitForBeadClosed(t, cityDir, workflowID, 4*time.Minute)
+	workflow := waitForWorkflowAndTeardown(t, cityDir, transport, workflowID, 4*time.Minute)
 	if got := metaValue(workflow, "gc.outcome"); got != "pass" {
-		dumpWorkflowState(t, cityDir, workflowID)
+		dumpReviewFormulaCityState(t, cityDir, transport)
 		t.Fatalf("workflow outcome = %q, want pass", got)
 	}
 
-	steps := listWorkflowSteps(t, cityDir, workflowID)
+	steps := listWorkflowSteps(t, transport, workflowID)
 	if !hasStepWithSuffix(steps, "review.attempt.2") {
 		// Without the dump this failure carries only the step list, which cannot
 		// distinguish a lost transient injection from a controller that declined
@@ -328,12 +335,12 @@ on_exhausted = "hard_fail"
 		// sightings. The worker trace shows whether .attempt.1 was closed
 		// class=transient at all, and transient-once-uncommitted names a dropped
 		// close directly.
-		dumpWorkflowState(t, cityDir, workflowID)
+		dumpReviewFormulaCityState(t, cityDir, transport)
 		t.Fatalf("missing retry attempt after transient failure; got: %v", steps)
 	}
-	attempt2 := mustFindWorkflowBeadByRefSuffix(t, cityDir, workflowID, "review.attempt.2")
+	attempt2 := findGraphWorkflowBeadByRefSuffixOverHTTP(t, transport, workflowID, "review.attempt.2")
 
-	logical := mustFindWorkflowBeadByRefSuffix(t, cityDir, workflowID, ".review")
+	logical := findGraphWorkflowBeadByRefSuffixOverHTTP(t, transport, workflowID, ".review")
 	if got := metaValue(logical, "gc.outcome"); got != "pass" {
 		t.Fatalf("logical review outcome = %q, want pass", got)
 	}
@@ -373,7 +380,7 @@ on_exhausted = "hard_fail"
 // number (ga-v7pu5), and if the retry attempt is linked to its control so its
 // failure retries instead of aborting the scope.
 func TestReviewLoopApprovesInIterationTwoWithBodyRetry(t *testing.T) {
-	cityDir := setupReviewFormulaCity(t, "success", map[string]string{
+	cityDir, transport := setupReviewFormulaCity(t, "success", map[string]string{
 		"GC_GRAPH_ITERATE_VERDICT_SUFFIXES": "review-loop.iteration.1.apply-fixes.attempt.1",
 		"GC_GRAPH_TRANSIENT_ONCE_SUFFIXES":  "review-loop.iteration.2.review.attempt.1",
 	})
@@ -425,17 +432,17 @@ max_attempts = 2
 on_exhausted = "hard_fail"
 `)
 
-	_, workflowID := startReviewWorkflow(t, cityDir, "mol-review-loop-iteration-smoke", map[string]string{})
+	_, workflowID := startReviewWorkflow(t, cityDir, transport, "mol-review-loop-iteration-smoke", map[string]string{})
 
-	workflow := waitForBeadClosed(t, cityDir, workflowID, 8*time.Minute)
+	workflow := waitForWorkflowAndTeardown(t, cityDir, transport, workflowID, 8*time.Minute)
 	if got := metaValue(workflow, "gc.outcome"); got != "pass" {
-		dumpWorkflowState(t, cityDir, workflowID)
+		dumpReviewFormulaCityState(t, cityDir, transport)
 		t.Fatalf("workflow outcome = %q, want pass (review loop must approve in iteration 2)", got)
 	}
 
-	steps := listWorkflowSteps(t, cityDir, workflowID)
+	steps := listWorkflowSteps(t, transport, workflowID)
 	if hasStepWithSuffix(steps, "review-loop.iteration.3") {
-		dumpWorkflowState(t, cityDir, workflowID)
+		dumpReviewFormulaCityState(t, cityDir, transport)
 		t.Fatalf("review loop reached iteration 3; iteration 2 should have approved; got: %v", steps)
 	}
 
@@ -449,20 +456,20 @@ on_exhausted = "hard_fail"
 		"review-loop.iteration.2.apply-fixes":           {attempt: "2", iteration: "2"},
 		"review-loop.iteration.2.apply-fixes.attempt.1": {attempt: "2", retryAttempt: "1", iteration: "2"},
 	} {
-		bead := mustFindWorkflowBeadByRefSuffix(t, cityDir, workflowID, suffix)
+		bead := findGraphWorkflowBeadByRefSuffixOverHTTP(t, transport, workflowID, suffix)
 		got := counters{
 			attempt:      metaValue(bead, "gc.attempt"),
 			retryAttempt: metaValue(bead, "gc.retry_attempt"),
 			iteration:    metaValue(bead, "gc.iteration"),
 		}
 		if got != want {
-			dumpWorkflowState(t, cityDir, workflowID)
+			dumpReviewFormulaCityState(t, cityDir, transport)
 			t.Fatalf("%s counters (gc.attempt, gc.retry_attempt, gc.iteration) = %+v, want %+v", suffix, got, want)
 		}
 	}
 
 	for _, suffix := range []string{"review-loop.iteration.2.review", "review-loop.iteration.2.apply-fixes"} {
-		control := mustFindWorkflowBeadByRefSuffix(t, cityDir, workflowID, suffix)
+		control := findGraphWorkflowBeadByRefSuffixOverHTTP(t, transport, workflowID, suffix)
 		if got := metaValue(control, "gc.outcome"); got != "pass" {
 			t.Fatalf("%s outcome = %q, want pass", suffix, got)
 		}
@@ -471,74 +478,38 @@ on_exhausted = "hard_fail"
 
 // --- helpers ---
 
-func setupReviewFormulaCity(t *testing.T, mode string, extraEnv map[string]string) string {
+func setupReviewFormulaCity(t *testing.T, mode string, extraEnv map[string]string) (string, graphPrivateEvidenceTransport) {
 	t.Helper()
-	env := newIsolatedCommandEnv(t, true)
-	// Reduce bd probe timeout so pool respawn gaps don't stall CI runners.
-	// 30s is well above the floor (5s) and well below the 180s production default.
-	env = append(env, "GC_BD_PROBE_TIMEOUT=30s")
+	return setupWorkflowCityWithPrivateEvidence(t, func(cityName string) string {
+		startCommand := workflowAgentStartCommand(mode, extraEnv)
+		// The scale_check only needs to know whether routed polecat work exists up
+		// to the pool ceiling (max_active_sessions=3), so bound it with --limit=8
+		// instead of an unbounded --limit=0 scan. patrol_interval is 1s (not a
+		// sub-second cadence) so patrol-driven store reads — including this
+		// metadata-filtered probe, which scale_check excludes from the
+		// demand-snapshot cache — stay at ~1/s rather than ~10/s. Together these
+		// keep the single managed Dolt server from saturating under the
+		// design-review fan-out. Polecat work created by the fan-out is discovered
+		// by the next patrol scale_check (~1s here), well within the workflow's time
+		// budget.
+		polecatScaleCheck := `ready_json=$(bd ready --include-ephemeral --metadata-field gc.routed_to=polecat --unassigned --exclude-type=epic --json --limit=8) && printf '%s\n' "$ready_json" | jq 'length'`
+		cityToml := fmt.Sprintf(
+			"[workspace]\nname = %q\n\n[session]\nprovider = \"subprocess\"\n\n[daemon]\nformula_v2 = true\npatrol_interval = \"1s\"\n\n"+
+				"[[agent]]\nname = \"worker\"\nmax_active_sessions = 1\nstart_command = %q\n\n"+
+				"[[named_session]]\ntemplate = \"worker\"\nmode = \"always\"\n\n"+
+				"[[agent]]\nname = \"polecat\"\nstart_command = %q\nmin_active_sessions = 0\nmax_active_sessions = 3\nscale_check = %q\n",
+			cityName, startCommand, startCommand, polecatScaleCheck,
+		)
 
-	var cityName string
-	if usingSubprocess() {
-		cityName = uniqueCityName()
-	} else {
-		cityName = "review-formula-test"
-	}
-	cityDir := filepath.Join(t.TempDir(), cityName)
-
-	startCommand := workflowAgentStartCommand(mode, extraEnv)
-	// The scale_check only needs to know whether routed polecat work exists up
-	// to the pool ceiling (max_active_sessions=3), so bound it with --limit=8
-	// instead of an unbounded --limit=0 scan. patrol_interval is 1s (not a
-	// sub-second cadence) so patrol-driven store reads — including this
-	// metadata-filtered probe, which scale_check excludes from the
-	// demand-snapshot cache — stay at ~1/s rather than ~10/s. Together these
-	// keep the single managed Dolt server from saturating under the
-	// design-review fan-out. Polecat work created by the fan-out is discovered
-	// by the next patrol scale_check (~1s here), well within the workflow's time
-	// budget.
-	polecatScaleCheck := `ready_json=$(bd ready --include-ephemeral --metadata-field gc.routed_to=polecat --unassigned --exclude-type=epic --json --limit=8) && printf '%s\n' "$ready_json" | jq 'length'`
-	cityToml := fmt.Sprintf(
-		"[workspace]\nname = %q\n\n[session]\nprovider = \"subprocess\"\n\n[daemon]\nformula_v2 = true\npatrol_interval = \"1s\"\n\n"+
-			"[[agent]]\nname = \"worker\"\nmax_active_sessions = 1\nstart_command = %q\n\n"+
-			"[[named_session]]\ntemplate = \"worker\"\nmode = \"always\"\n\n"+
-			"[[agent]]\nname = \"polecat\"\nstart_command = %q\nmin_active_sessions = 0\nmax_active_sessions = 3\nscale_check = %q\n",
-		cityName, startCommand, startCommand, polecatScaleCheck,
-	)
-	configPath := filepath.Join(t.TempDir(), "review-formula.toml")
-	if err := os.WriteFile(configPath, []byte(cityToml), 0o644); err != nil {
-		t.Fatalf("writing config: %v", err)
-	}
-
-	formulaDir := filepath.Join(cityDir, "formulas")
-	if err := os.MkdirAll(formulaDir, 0o755); err != nil {
-		t.Fatalf("mkdir formulas: %v", err)
-	}
-	checksDir := filepath.Join(cityDir, ".gc", "scripts", "checks")
-	if err := os.MkdirAll(checksDir, 0o755); err != nil {
-		t.Fatalf("mkdir checks: %v", err)
-	}
-	installReviewFormulaFixtures(t, cityDir)
-
-	initCityWithManagedDoltRecovery(t, env, configPath, cityDir)
-	registerCityCommandEnv(cityDir, env)
-	t.Cleanup(func() {
-		unregisterCityCommandEnv(cityDir)
-		runGCDoltWithEnv(env, "", "stop", cityDir)                //nolint:errcheck
-		runGCDoltWithEnv(env, "", "supervisor", "stop", "--wait") //nolint:errcheck
-		deadline := time.Now().Add(10 * time.Second)
-		for time.Now().Before(deadline) {
-			_ = os.RemoveAll(cityDir)
-			if _, err := os.Stat(cityDir); os.IsNotExist(err) {
-				return
+		return cityToml
+	}, func(cityDir string) {
+		for _, dir := range []string{filepath.Join(cityDir, "formulas"), filepath.Join(cityDir, ".gc", "scripts", "checks")} {
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatalf("create review fixture directory: %v", err)
 			}
-			time.Sleep(25 * time.Millisecond)
 		}
-		beadsEntries, _ := os.ReadDir(filepath.Join(cityDir, ".beads"))
-		t.Fatalf("review formula city cleanup did not quiesce; .beads entries=%v", beadsEntries)
+		installReviewFormulaFixtures(t, cityDir)
 	})
-
-	return cityDir
 }
 
 func workflowAgentStartCommand(mode string, extraEnv map[string]string) string {
@@ -581,7 +552,7 @@ func countTraceLinesWithAll(trace string, tokens ...string) int {
 	return count
 }
 
-func startReviewWorkflow(t *testing.T, cityDir, formula string, vars map[string]string) (string, string) {
+func startReviewWorkflow(t *testing.T, cityDir string, transport graphPrivateEvidenceTransport, formula string, vars map[string]string) (string, string) {
 	t.Helper()
 
 	out, err := bdDolt(cityDir, "create", "--json", "Test review workflow part one")
@@ -627,25 +598,16 @@ func startReviewWorkflow(t *testing.T, cityDir, formula string, vars map[string]
 	}
 	out, err = gcDoltWithTimeout(cityDir, reviewWorkflowSlingTimeout, args...)
 	if err != nil {
-		dumpReviewFormulaCityState(t, cityDir)
+		dumpReviewFormulaCityState(t, cityDir, transport)
 		t.Fatalf("gc sling failed: %v\noutput: %s", err, out)
 	}
-	slingOutput := out
-
-	workflowID := waitForGraphWorkflowRootForInputConvoy(t, cityDir, convoyID, slingOutput, 10*time.Second)
+	workflowID := waitForGraphWorkflowRootForInputConvoyOverHTTP(t, cityDir, transport, convoyID, 10*time.Second)
 	return convoyID, workflowID
 }
 
-func listWorkflowSteps(t *testing.T, cityDir, workflowID string) []string {
+func listWorkflowSteps(t *testing.T, transport graphPrivateEvidenceTransport, workflowID string) []string {
 	t.Helper()
-	out, err := bdDolt(cityDir, "list", "--json", "--all", "--limit=0")
-	if err != nil {
-		t.Fatalf("bd list: %v\noutput: %s", err, out)
-	}
-	var beads []graphBead
-	if err := json.Unmarshal([]byte(strings.TrimSpace(extractJSONPayload(out))), &beads); err != nil {
-		t.Fatalf("unmarshal beads: %v", err)
-	}
+	beads := listGraphIssuesOverHTTP(t, transport)
 	var refs []string
 	for _, b := range beads {
 		rootID := metaValue(b, "gc.root_bead_id")
@@ -688,15 +650,12 @@ func traceShowsSameAttemptTransientRetry(trace, stepRef string) bool {
 	return sawTransientClose && runCount >= 2
 }
 
-func dumpWorkflowState(t *testing.T, cityDir, workflowID string) {
+func dumpReviewFormulaCityState(t *testing.T, cityDir string, transport graphPrivateEvidenceTransport) {
 	t.Helper()
-	dumpReviewFormulaCityState(t, cityDir)
-}
-
-func dumpReviewFormulaCityState(t *testing.T, cityDir string) {
-	t.Helper()
-	out, _ := bdDolt(cityDir, "list", "--json", "--all", "--limit=0")
-	t.Logf("all beads:\n%s", out)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	issues, err := readGraphIssuesOverHTTP(ctx, transport)
+	t.Logf("public workflow state: issues=%+v error=%v", issues, err)
 	sessionList, _ := gcDolt(cityDir, "session", "list")
 	t.Logf("sessions:\n%s", sessionList)
 	if traceFile := filepath.Join(cityDir, "graph-workflow-trace.log"); fileExists(traceFile) {

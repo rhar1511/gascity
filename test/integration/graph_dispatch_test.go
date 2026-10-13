@@ -4,11 +4,14 @@ package integration
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -82,7 +85,7 @@ func TestGraphWorkflowSuccessPath(t *testing.T) {
 	cityDir, transport := setupGraphWorkflowCityWithPrivateEvidence(t, "success")
 	convoyID, workflowID := startScopedWorkflowWithPrivateEvidenceHTTP(t, cityDir, transport)
 
-	workflow := waitForBeadClosedWithoutPrivatePayloadDiagnostics(t, cityDir, transport, workflowID, graphWorkflowCloseTimeout())
+	workflow := waitForWorkflowAndTeardown(t, cityDir, transport, workflowID, graphWorkflowCloseTimeout())
 	if got := metaValue(workflow, "gc.outcome"); got != "pass" {
 		t.Fatalf("workflow outcome = %q, want pass", got)
 	}
@@ -113,7 +116,7 @@ func TestGraphWorkflowSuccessPath(t *testing.T) {
 		t.Fatal("actual graph city did not bind the configured private-evidence transport")
 	}
 	controls := listGraphRetryControlsOverHTTP(t, transport)
-	var sealedRetries int
+	var sealedRetries, repositorySnapshots int
 	for _, control := range controls {
 		attempts, err := attemptevidence.List(beadStore, control.ID)
 		if err != nil {
@@ -123,15 +126,38 @@ func TestGraphWorkflowSuccessPath(t *testing.T) {
 			if attempt.Identity.Kind != attemptevidence.KindRetry {
 				continue
 			}
+			compact, err := attemptevidence.ReadCompact(beadStore, control.ID, attempt.AttemptID)
+			if err != nil {
+				t.Fatalf("compact retry evidence readback for control %s failed: %v", control.ID, err)
+			}
 			readback, err := attemptevidence.Read(beadStore, control.ID, attempt.AttemptID)
-			if err != nil || !reflect.DeepEqual(readback, attempt) {
+			if err != nil {
+				t.Fatalf("hydrated retry evidence readback for control %s failed: %v", control.ID, err)
+			}
+			if err := validateGraphAttemptReadback(attempt, compact, readback); err != nil {
 				t.Fatalf("exact retry evidence readback for control %s failed: %v", control.ID, err)
+			}
+			if attempt.CandidateStatus == attemptevidence.StatusAvailable {
+				workspace := attempt.Permission.WorkspaceRoot
+				// This is the recorded identity of an already-removed workspace.
+				// The fixture city path is canonical; resolving the deleted leaf
+				// here would reject successful teardown.
+				implementationWorkspace := workspace == filepath.Join(cityDir, "worktrees", convoyID)
+				if len(attempt.CandidateSHA) != 40 || (!implementationWorkspace && workspace != cityDir) {
+					t.Fatalf("retry evidence has the wrong committed workspace identity: candidate=%q workspace=%q", attempt.CandidateSHA, workspace)
+				}
+				if implementationWorkspace {
+					repositorySnapshots++
+				}
 			}
 			sealedRetries++
 		}
 	}
 	if sealedRetries == 0 {
 		t.Fatal("graph workflow passed without an exact retry-attempt evidence archive")
+	}
+	if repositorySnapshots == 0 {
+		t.Fatal("graph workflow passed without committed attempt workspace evidence")
 	}
 
 	worktreePath := filepath.Join(cityDir, "worktrees", convoyID)
@@ -163,7 +189,7 @@ func TestGraphProxyProofRejectsReachableUnownedPortMirror(t *testing.T) {
 	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
 		t.Fatalf("create fixture Beads directory: %v", err)
 	}
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen on disposable loopback port: %v", err)
 	}
@@ -173,6 +199,12 @@ func TestGraphProxyProofRejectsReachableUnownedPortMirror(t *testing.T) {
 		}
 	})
 	port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
+	if !graphProcessOwnsListeningPort(os.Getpid(), listener.Addr().(*net.TCPAddr).Port) {
+		t.Fatal("native process proof did not recognize this process's loopback listener")
+	}
+	if graphProcessOwnsListeningPort(os.Getppid(), listener.Addr().(*net.TCPAddr).Port) {
+		t.Fatal("native process proof accepted the listener's parent as its owner")
+	}
 	if err := os.WriteFile(filepath.Join(beadsDir, "dolt-server.port"), []byte(port+"\n"), 0o600); err != nil {
 		t.Fatalf("write reachable port mirror: %v", err)
 	}
@@ -182,7 +214,7 @@ func TestGraphProxyProofRejectsReachableUnownedPortMirror(t *testing.T) {
 	if got, ok := graphFixtureProxyPortForTest(cityDir); ok {
 		t.Fatalf("graph proxy proof accepted unowned reachable port %q", got)
 	}
-	if runtime.GOOS == "linux" {
+	if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
 		if _, err := graphFixtureProxyPortForTestWithDiagnostic(cityDir); err == nil || !strings.Contains(err.Error(), "proxy root is absent") {
 			t.Fatalf("detailed graph proxy proof error = %v, want the missing fixture-root reason", err)
 		}
@@ -210,6 +242,74 @@ func TestGraphProcessFlagRejectsDuplicatesAndMissingValues(t *testing.T) {
 				t.Fatalf("graphProcessFlag() = (%q, %v, %v), want (%q, %v, %v)", got, found, valid, tc.want, tc.found, tc.valid)
 			}
 		})
+	}
+}
+
+func TestGraphFixtureRecognizesItsRenamedSupervisorBinary(t *testing.T) {
+	t.Setenv(integrationGCBinaryEnv, "")
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	home, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	home, err = filepath.EvalSymlinks(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := gcBinary
+	gcBinary = executable
+	t.Cleanup(func() { gcBinary = previous })
+	argv := []string{executable, "supervisor", "run"}
+	if !graphSupervisorUsesFixtureHome(os.Getpid(), argv, home) {
+		t.Fatal("fixture cleanup failed to recognize its exact renamed supervisor executable")
+	}
+	if graphSupervisorUsesFixtureHome(os.Getpid(), argv, t.TempDir()) {
+		t.Fatal("fixture cleanup accepted a supervisor in another home")
+	}
+	t.Run("pinned executable behind exec shim", func(t *testing.T) {
+		t.Setenv(integrationGCBinaryEnv, executable)
+		gcBinary = filepath.Join(t.TempDir(), "gc")
+		if err := writeExecShim(gcBinary, executable); err != nil {
+			t.Fatal(err)
+		}
+		if !graphSupervisorUsesFixtureHome(os.Getpid(), argv, home) {
+			t.Fatal("fixture cleanup failed to recognize the pinned executable behind its shim")
+		}
+	})
+	t.Run("different executable", func(t *testing.T) {
+		t.Setenv(integrationGCBinaryEnv, "")
+		gcBinary = filepath.Join(t.TempDir(), "unrelated-gc")
+		if graphSupervisorUsesFixtureHome(os.Getpid(), argv, home) {
+			t.Fatal("fixture cleanup accepted another executable")
+		}
+	})
+}
+
+func TestGraphFixtureCanonicalizesControllerHome(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "controller")
+	cityRoot := filepath.Join(root, "city-root")
+	cityDir := filepath.Join(cityRoot, "city")
+	for _, dir := range []string{home, cityDir} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	alias := filepath.Join(root, "controller-alias")
+	if err := os.Symlink(home, alias); err != nil {
+		t.Fatal(err)
+	}
+	want, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := prepareGraphWorkflowCityEnv(t, []string{"GC_HOME=" + alias, "DOLT_ROOT_PATH=" + alias}, alias, cityDir, cityRoot)
+	values := parseEnvList(env)
+	if values["GC_HOME"] != want || values["DOLT_ROOT_PATH"] != want {
+		t.Fatal("fixture home identity differs from the native process working directory")
 	}
 }
 
@@ -275,20 +375,23 @@ func TestGraphFixtureListenerOwnershipAllowsSeparateProxyAndDoltPorts(t *testing
 }
 
 func TestGraphWorkflowFailureRunsCleanup(t *testing.T) {
-	cityDir := setupGraphWorkflowCity(t, "fail-preflight")
-	convoyID, workflowID := startScopedWorkflow(t, cityDir)
+	cityDir, transport := setupGraphWorkflowCityWithPrivateEvidence(t, "fail-preflight")
+	convoyID, workflowID := startScopedWorkflowWithPrivateEvidenceHTTP(t, cityDir, transport)
 
-	workflow := waitForBeadClosed(t, cityDir, workflowID, graphWorkflowCloseTimeout())
+	workflow := waitForWorkflowAndTeardown(t, cityDir, transport, workflowID, graphWorkflowCloseTimeout())
 	if got := metaValue(workflow, "gc.outcome"); got != "fail" {
 		t.Fatalf("workflow outcome = %q, want fail", got)
 	}
 
-	body := mustFindWorkflowBeadByRefSuffix(t, cityDir, workflowID, ".body")
+	body := findGraphWorkflowBeadByRefSuffixOverHTTP(t, transport, workflowID, ".body")
 	if got := metaValue(body, "gc.outcome"); got != "fail" {
 		t.Fatalf("body outcome = %q, want fail", got)
 	}
 
-	convoy := showBead(t, cityDir, convoyID)
+	convoy, err := readGraphBeadOverHTTP(t, transport, convoyID)
+	if err != nil {
+		t.Fatalf("read graph convoy through installed service: %v", err)
+	}
 	if got := metaValue(convoy, "work_dir"); got != "" {
 		t.Fatalf("convoy work_dir = %q, want unset after cleanup", got)
 	}
@@ -297,7 +400,7 @@ func TestGraphWorkflowFailureRunsCleanup(t *testing.T) {
 	}
 
 	for _, suffix := range []string{".implement", ".self-review", ".submit"} {
-		bead := mustFindWorkflowBeadByRefSuffix(t, cityDir, workflowID, suffix)
+		bead := findGraphWorkflowBeadByRefSuffixOverHTTP(t, transport, workflowID, suffix)
 		if bead.Status != "closed" {
 			t.Fatalf("%s status = %q, want closed", suffix, bead.Status)
 		}
@@ -350,11 +453,6 @@ func assertControlDispatcherLane(t *testing.T, cityDir string) {
 
 func graphWorkflowCloseTimeout() time.Duration {
 	return 6 * time.Minute
-}
-
-func setupGraphWorkflowCity(t *testing.T, mode string) string {
-	cityDir, _ := setupGraphWorkflowCityWithOptions(t, mode, false)
-	return cityDir
 }
 
 type graphPrivateEvidenceTransport struct {
@@ -518,12 +616,25 @@ func TestGraphIssueReadTimeoutReportsHTTPProgress(t *testing.T) {
 }
 
 func setupGraphWorkflowCityWithPrivateEvidence(t *testing.T, mode string) (string, graphPrivateEvidenceTransport) {
-	return setupGraphWorkflowCityWithOptions(t, mode, true)
+	t.Helper()
+	return setupWorkflowCityWithPrivateEvidence(t, func(cityName string) string {
+		startCommand := "GC_GRAPH_MODE=" + mode + " bash " + agentScript("graph-dispatch.sh")
+		cityToml := fmt.Sprintf(
+			"[workspace]\nname = %q\n\n[session]\nprovider = \"subprocess\"\n\n[daemon]\nformula_v2 = true\npatrol_interval = \"100ms\"\n\n[[agent]]\nname = \"worker\"\nmax_active_sessions = 1\nstart_command = %q\n\n[[named_session]]\ntemplate = \"worker\"\nmode = \"always\"\n",
+			cityName, startCommand,
+		)
+
+		return cityToml
+	}, nil)
 }
 
-func setupGraphWorkflowCityWithOptions(t *testing.T, mode string, privateEvidence bool) (string, graphPrivateEvidenceTransport) {
+// setupWorkflowCityWithPrivateEvidence binds every retry-capable fixture to
+// its own stock Beads HTTP service and verifies process absence on cleanup.
+func setupWorkflowCityWithPrivateEvidence(t *testing.T, config func(string) string, prepare func(string)) (string, graphPrivateEvidenceTransport) {
 	t.Helper()
 	gcHome, env := newIsolatedCommandEnvWithoutSupervisor(t, true)
+	// Bound transient Beads probes during pooled worker recovery.
+	env = append(env, "GC_BD_PROBE_TIMEOUT=30s")
 
 	var cityName string
 	if usingSubprocess() {
@@ -556,6 +667,7 @@ func setupGraphWorkflowCityWithOptions(t *testing.T, mode string, privateEvidenc
 		t.Fatalf("create disposable graph city directory: %v", err)
 	}
 	env = prepareGraphWorkflowCityEnv(t, env, gcHome, cityDir, cityRoot)
+	gcHome = parseEnvList(env)["GC_HOME"]
 	launcher := filepath.Join(cityRoot, "fixture-bin", "bd")
 	preserveGraphEnvRoot := func() error {
 		gcRoot := filepath.Dir(gcHome)
@@ -579,6 +691,13 @@ func setupGraphWorkflowCityWithOptions(t *testing.T, mode string, privateEvidenc
 				cleanupFailures = append(cleanupFailures, "gc stop")
 			}
 		}
+		// Stop the controller before its store so a final reconciliation cannot
+		// restart the fixture proxy while cleanup is retiring it.
+		if supervisorStarted {
+			if _, err := runGCDoltWithEnv(env, "", "supervisor", "stop", "--wait"); err != nil {
+				cleanupFailures = append(cleanupFailures, "gc supervisor stop")
+			}
+		}
 		proxyRoot := filepath.Join(cityDir, ".beads", proxyendpoint.DefaultRootDirName)
 		unsafeProxyRoot := false
 		if info, err := os.Lstat(proxyRoot); err == nil {
@@ -591,11 +710,6 @@ func setupGraphWorkflowCityWithOptions(t *testing.T, mode string, privateEvidenc
 		} else if !os.IsNotExist(err) {
 			unsafeProxyRoot = true
 			cleanupFailures = append(cleanupFailures, "proxy root could not be inspected; bd stop refused")
-		}
-		if supervisorStarted {
-			if _, err := runGCDoltWithEnv(env, "", "supervisor", "stop", "--wait"); err != nil {
-				cleanupFailures = append(cleanupFailures, "gc supervisor stop")
-			}
 		}
 		unregisterCityCommandEnv(cityDir)
 		if remains, err := graphFixtureProcessesMayRemain(cityDir, gcHome); unsafeProxyRoot || remains || err != nil {
@@ -629,14 +743,14 @@ func setupGraphWorkflowCityWithOptions(t *testing.T, mode string, privateEvidenc
 	}
 	t.Cleanup(cleanupFixture)
 
-	startCommand := "GC_GRAPH_MODE=" + mode + " bash " + agentScript("graph-dispatch.sh")
-	cityToml := fmt.Sprintf(
-		"[workspace]\nname = %q\n\n[session]\nprovider = \"subprocess\"\n\n[daemon]\nformula_v2 = true\npatrol_interval = \"100ms\"\n\n[[agent]]\nname = \"worker\"\nmax_active_sessions = 1\nstart_command = %q\n\n[[named_session]]\ntemplate = \"worker\"\nmode = \"always\"\n",
-		cityName, startCommand,
-	)
+	cityToml := config(cityName)
 	configPath := filepath.Join(t.TempDir(), "graph-workflow.toml")
 	if err := os.WriteFile(configPath, []byte(cityToml), 0o644); err != nil {
 		t.Fatalf("writing graph workflow config: %v", err)
+	}
+
+	if prepare != nil {
+		prepare(cityDir)
 	}
 
 	// gc init can start the BD-owned proxy even with --no-start. The cleanup
@@ -671,42 +785,39 @@ func setupGraphWorkflowCityWithOptions(t *testing.T, mode string, privateEvidenc
 	if _, err := waitForGraphFixtureProxyForTest(cityDir, 30*time.Second); err != nil {
 		t.Fatalf("graph city did not establish a verified fixture-owned Beads proxy and Dolt listener after isolated startup: %v", err)
 	}
-	var transport graphPrivateEvidenceTransport
-	if privateEvidence {
-		transport = startGraphPrivateEvidenceService(t, env, cityDir, cityName, identity)
-		cityConfigPath := filepath.Join(cityDir, "city.toml")
-		contents, err := os.ReadFile(cityConfigPath)
-		if err != nil {
-			t.Fatalf("read initialized graph city config: %v", err)
-		}
-		privateEvidenceConfig := fmt.Sprintf(
-			"\n[beads.private_evidence.%q]\nendpoint = %q\nproject_id = %q\ndatabase = %q\ntoken_file = %q\n",
-			transport.scopeRef, transport.endpoint, transport.projectID, transport.database, transport.tokenFile,
-		)
-		if err := os.WriteFile(cityConfigPath, append(contents, []byte(privateEvidenceConfig)...), 0o600); err != nil {
-			t.Fatalf("enable disposable graph private-evidence transport: %v", err)
-		}
-		reloadOut, reloadErr := runGCDoltWithEnv(env, cityDir, "reload", "--json", "--timeout", "45s", cityDir)
-		if reloadErr != nil {
-			t.Fatalf("reload graph city after enabling private-evidence transport: %v\noutput: %s", reloadErr, reloadOut)
-		}
-		var reload struct {
-			SchemaVersion string `json:"schema_version"`
-			OK            bool   `json:"ok"`
-			Command       string `json:"command"`
-			Action        string `json:"action"`
-			CityPath      string `json:"city_path"`
-			Outcome       string `json:"outcome"`
-			Revision      string `json:"revision"`
-		}
-		if err := json.Unmarshal([]byte(strings.TrimSpace(reloadOut)), &reload); err != nil ||
-			reload.SchemaVersion != "1" || !reload.OK || reload.Command != "reload" || reload.Action != "reload" ||
-			!graphFixturePathEquals(reload.CityPath, cityDir) ||
-			(reload.Outcome != "applied" && reload.Outcome != "no_change") || strings.TrimSpace(reload.Revision) == "" {
-			t.Fatalf("controller did not confirm loading the private-evidence configuration: output=%q", strings.TrimSpace(reloadOut))
-		}
-		transport.configRevision = reload.Revision
+	transport := startGraphPrivateEvidenceService(t, env, cityDir, cityName, identity)
+	cityConfigPath := filepath.Join(cityDir, "city.toml")
+	contents, err := os.ReadFile(cityConfigPath)
+	if err != nil {
+		t.Fatalf("read initialized graph city config: %v", err)
 	}
+	privateEvidenceConfig := fmt.Sprintf(
+		"\n[beads.private_evidence.%q]\nendpoint = %q\nproject_id = %q\ndatabase = %q\ntoken_file = %q\n",
+		transport.scopeRef, transport.endpoint, transport.projectID, transport.database, transport.tokenFile,
+	)
+	if err := os.WriteFile(cityConfigPath, append(contents, []byte(privateEvidenceConfig)...), 0o600); err != nil {
+		t.Fatalf("enable disposable graph private-evidence transport: %v", err)
+	}
+	reloadOut, reloadErr := runGCDoltWithEnv(env, cityDir, "reload", "--json", "--timeout", "45s", cityDir)
+	if reloadErr != nil {
+		t.Fatalf("reload graph city after enabling private-evidence transport: %v\noutput: %s", reloadErr, reloadOut)
+	}
+	var reload struct {
+		SchemaVersion string `json:"schema_version"`
+		OK            bool   `json:"ok"`
+		Command       string `json:"command"`
+		Action        string `json:"action"`
+		CityPath      string `json:"city_path"`
+		Outcome       string `json:"outcome"`
+		Revision      string `json:"revision"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(reloadOut)), &reload); err != nil ||
+		reload.SchemaVersion != "1" || !reload.OK || reload.Command != "reload" || reload.Action != "reload" ||
+		!graphFixturePathEquals(reload.CityPath, cityDir) ||
+		(reload.Outcome != "applied" && reload.Outcome != "no_change") || strings.TrimSpace(reload.Revision) == "" {
+		t.Fatalf("controller did not confirm loading the private-evidence configuration: output=%q", strings.TrimSpace(reloadOut))
+	}
+	transport.configRevision = reload.Revision
 	transport.bdLauncher = launcher
 	return cityDir, transport
 }
@@ -737,6 +848,8 @@ func prepareGraphWorkflowCityEnv(t *testing.T, env []string, gcHome, cityDir, ci
 	if !graphPathWithin(cityRoot, cityDir) || graphPathWithin(cityRoot, resolvedGCHome) || graphPathWithin(resolvedGCHome, cityRoot) {
 		t.Fatal("graph city and controller paths are not separate disposable roots")
 	}
+	env = replaceEnv(env, "GC_HOME", resolvedGCHome)
+	env = replaceEnv(env, "DOLT_ROOT_PATH", resolvedGCHome)
 	env = replaceEnv(env, "BEADS_DIR", filepath.Join(cityDir, ".beads"))
 	env = replaceEnv(env, "XDG_CONFIG_HOME", filepath.Join(cityRoot, "bd-config"))
 	env = replaceEnv(env, "XDG_DATA_HOME", filepath.Join(cityRoot, "bd-data"))
@@ -912,7 +1025,7 @@ func graphPathWithin(root, path string) bool {
 
 // graphFixtureProxyPortForTest accepts only the BD-owned proxied lifecycle
 // initialized for this graph city. The proxy record proves which supervisor
-// owns the root and identifies the proxy listener. The child pidfile and /proc
+// owns the root and identifies the proxy listener. The child pidfile and native
 // listener ownership independently prove the Dolt backend listener in that
 // same root; those two listeners intentionally have distinct ports.
 func graphFixtureProxyPortForTest(cityDir string) (string, bool) {
@@ -940,8 +1053,8 @@ func waitForGraphFixtureProxyForTest(cityDir string, timeout time.Duration) (str
 }
 
 func graphFixtureProxyPortForTestWithDiagnostic(cityDir string) (string, error) {
-	if runtime.GOOS != "linux" || cityDir == "" || !filepath.IsAbs(cityDir) {
-		return "", errors.New("proof requires an absolute city path on Linux")
+	if (runtime.GOOS != "linux" && runtime.GOOS != "darwin") || cityDir == "" || !filepath.IsAbs(cityDir) {
+		return "", errors.New("proof requires an absolute city path on Linux or Darwin")
 	}
 	cityDir = filepath.Clean(cityDir)
 	resolvedCity, err := filepath.EvalSymlinks(cityDir)
@@ -1015,7 +1128,7 @@ func graphFixtureProxyPortForTestWithDiagnostic(cityDir string) (string, error) 
 	if _, ok := graphReadFixtureRegularFile(proxyendpoint.PIDPath(root), 16<<10); !ok {
 		return "", errors.New("proxy PID record is absent or not a regular file")
 	}
-	endpoint := proxyendpoint.Inspect(root, proxyendpoint.DefaultProcessTable())
+	endpoint := proxyendpoint.Inspect(root, graphFixtureProcessTable())
 	if endpoint.Verdict != proxyendpoint.VerdictLive || endpoint.Liveness.Evidence != proxyendpoint.EvidenceArgvBirth ||
 		endpoint.Record.Kind != proxyendpoint.RecordKind || endpoint.Record.Port <= 0 || endpoint.Record.Port > 65535 {
 		return "", fmt.Errorf("proxy endpoint is not verified live (verdict=%s evidence=%s record_kind=%q port=%d)", endpoint.Verdict, endpoint.Liveness.Evidence, endpoint.Record.Kind, endpoint.Record.Port)
@@ -1042,7 +1155,7 @@ func graphFixtureProxyPortForTestWithDiagnostic(cityDir string) (string, error) 
 	if child.PID == endpoint.Record.PID {
 		return "", errors.New("Dolt child and proxy must be distinct processes")
 	}
-	processes := proxyendpoint.DefaultProcessTable()
+	processes := graphFixtureProcessTable()
 	if !processes.Alive(child.PID) {
 		return "", errors.New("Dolt child process is not alive")
 	}
@@ -1082,11 +1195,11 @@ func graphFixtureProxyPortForTestWithDiagnostic(cityDir string) (string, error) 
 // scan finds neither a proxy nor a Dolt child whose argv names this exact
 // disposable root. Ambiguous endpoint evidence preserves the root for review.
 func graphFixtureProcessesMayRemain(cityDir, gcHome string) (bool, error) {
-	if runtime.GOOS != "linux" || cityDir == "" || gcHome == "" || !filepath.IsAbs(cityDir) || !filepath.IsAbs(gcHome) {
-		return true, errors.New("fixture process shutdown requires absolute Linux city and controller paths")
+	if (runtime.GOOS != "linux" && runtime.GOOS != "darwin") || cityDir == "" || gcHome == "" || !filepath.IsAbs(cityDir) || !filepath.IsAbs(gcHome) {
+		return true, errors.New("fixture process shutdown requires absolute Linux or Darwin city and controller paths")
 	}
 	root := filepath.Join(filepath.Clean(cityDir), ".beads", proxyendpoint.DefaultRootDirName)
-	endpoint := proxyendpoint.Inspect(root, proxyendpoint.DefaultProcessTable())
+	endpoint := proxyendpoint.Inspect(root, graphFixtureProcessTable())
 	switch endpoint.Verdict {
 	case proxyendpoint.VerdictNoRecord, proxyendpoint.VerdictDead:
 	case proxyendpoint.VerdictLive:
@@ -1094,14 +1207,14 @@ func graphFixtureProcessesMayRemain(cityDir, gcHome string) (bool, error) {
 	default:
 		return true, fmt.Errorf("proxy endpoint state is %s", endpoint.Verdict)
 	}
-	processes := proxyendpoint.DefaultProcessTable()
-	entries, err := os.ReadDir("/proc")
+	processes := graphFixtureProcessTable()
+	pids, err := graphFixtureProcessIDs()
 	if err != nil {
-		return true, fmt.Errorf("read Linux process table: %w", err)
+		return true, fmt.Errorf("read process table: %w", err)
 	}
-	for _, entry := range entries {
-		pid, err := strconv.Atoi(entry.Name())
-		if err != nil || pid <= 0 || !entry.IsDir() {
+	for _, rawPID := range pids {
+		pid := int(rawPID)
+		if pid <= 0 {
 			continue
 		}
 		argv, err := processes.Argv(pid)
@@ -1128,12 +1241,11 @@ func graphDoltProcessUsesFixtureRoot(pid int, argv []string, root string) bool {
 	if pid <= 0 || len(argv) < 2 || argv[1] != "sql-server" {
 		return false
 	}
-	executable, err := os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "exe"))
+	executable, cwd, err := graphProcessExecutableAndCWD(pid)
 	if err != nil || strings.TrimSuffix(filepath.Base(executable), " (deleted)") != "dolt" {
 		return false
 	}
-	cwd, err := os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "cwd"))
-	if err != nil || !graphCleanupPathEquals(cwd, root) {
+	if !graphCleanupPathEquals(cwd, root) {
 		return false
 	}
 	if !graphCleanupArgvMentionsPath(argv, "--config", filepath.Join(root, proxyendpoint.ConfigFileName)) {
@@ -1146,12 +1258,11 @@ func graphBeadsServiceUsesFixtureCity(pid int, argv []string, cityDir string) bo
 	if pid <= 0 || len(argv) < 2 || argv[1] != "serve" {
 		return false
 	}
-	executable, err := os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "exe"))
+	executable, cwd, err := graphProcessExecutableAndCWD(pid)
 	if err != nil || strings.TrimSuffix(filepath.Base(executable), " (deleted)") != "bd" {
 		return false
 	}
-	cwd, err := os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "cwd"))
-	if err != nil || !graphCleanupPathEquals(cwd, cityDir) {
+	if !graphCleanupPathEquals(cwd, cityDir) {
 		return false
 	}
 	return graphCleanupArgvMentionsPath(argv, "--auth-token-file", filepath.Join(filepath.Dir(cityDir), "controller-token"))
@@ -1161,12 +1272,23 @@ func graphSupervisorUsesFixtureHome(pid int, argv []string, gcHome string) bool 
 	if pid <= 0 || len(argv) < 3 || argv[1] != "supervisor" || argv[2] != "run" {
 		return false
 	}
-	executable, err := os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "exe"))
-	if err != nil || strings.TrimSuffix(filepath.Base(executable), " (deleted)") != "gc" {
+	// TestMain may invoke gc through an exec shim; compare the native
+	// executable to the pinned target, not the shell script used to launch it.
+	expected := gcBinary
+	if override, ok, err := binaryOverride(integrationGCBinaryEnv); err != nil {
+		return false
+	} else if ok {
+		expected = override
+	}
+	expected, err := filepath.EvalSymlinks(expected)
+	if err != nil {
 		return false
 	}
-	cwd, err := os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "cwd"))
-	return err == nil && graphCleanupPathEquals(cwd, gcHome)
+	executable, cwd, err := graphProcessExecutableAndCWD(pid)
+	if err != nil || !graphCleanupPathEquals(executable, expected) {
+		return false
+	}
+	return graphCleanupPathEquals(cwd, gcHome)
 }
 
 func graphCleanupPathEquals(path, expected string) bool {
@@ -1241,7 +1363,7 @@ func graphProcessFlag(args []string, flag string) (value string, found, valid bo
 		arg := args[i]
 		if arg == flag {
 			if found || i+1 >= len(args) || args[i+1] == "" {
-				return "", found, false
+				return "", false, false
 			}
 			found = true
 			value = args[i+1]
@@ -1250,7 +1372,7 @@ func graphProcessFlag(args []string, flag string) (value string, found, valid bo
 		}
 		if strings.HasPrefix(arg, flag+"=") {
 			if found || strings.TrimPrefix(arg, flag+"=") == "" {
-				return "", found, false
+				return "", false, false
 			}
 			found = true
 			value = strings.TrimPrefix(arg, flag+"=")
@@ -1263,12 +1385,11 @@ func graphDoltChildCommandMatches(pid int, args []string, configPath, root strin
 	if pid <= 0 || len(args) < 2 || filepath.Base(args[0]) != "dolt" || args[1] != "sql-server" {
 		return false
 	}
-	executable, err := os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "exe"))
+	executable, cwd, err := graphProcessExecutableAndCWD(pid)
 	if err != nil || strings.TrimSuffix(filepath.Base(executable), " (deleted)") != "dolt" {
 		return false
 	}
-	cwd, err := os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "cwd"))
-	if err != nil || !graphFixturePathEquals(cwd, root) {
+	if !graphFixturePathEquals(cwd, root) {
 		return false
 	}
 	config, found, valid := graphProcessFlag(args, "--config")
@@ -1316,7 +1437,13 @@ func graphFixtureListenersOwnedWith(proxyPID, proxyPort, doltPID, doltPort int, 
 }
 
 func graphProcessOwnsListeningPort(pid, port int) bool {
-	if runtime.GOOS != "linux" || pid <= 0 || port < 1 || port > 65535 {
+	if pid <= 0 || port < 1 || port > 65535 {
+		return false
+	}
+	if runtime.GOOS == "darwin" {
+		return graphDarwinProcessOwnsListeningPort(pid, port)
+	}
+	if runtime.GOOS != "linux" {
 		return false
 	}
 	data, err := os.ReadFile("/proc/net/tcp")
@@ -1441,13 +1568,7 @@ func startGraphPrivateEvidenceService(t *testing.T, cityEnv []string, cityDir, c
 	// bd serve resolves its project context from Git. Give the disposable city
 	// an explicitly bounded repository instead of letting Git discover the
 	// ambient checkout (the service environment intentionally strips Git vars).
-	if output, err := runCommand(cityDir, serviceEnv, 10*time.Second, "git", "init", "--quiet", cityDir); err != nil {
-		t.Fatalf("initialize private-evidence fixture repository: %v\noutput: %s", err, output)
-	}
-	root, err := runCommand(cityDir, serviceEnv, 10*time.Second, "git", "rev-parse", "--show-toplevel")
-	if err != nil || filepath.Clean(strings.TrimSpace(root)) != filepath.Clean(cityDir) {
-		t.Fatalf("private-evidence fixture repository root = %q, want %q (err=%v)", strings.TrimSpace(root), cityDir, err)
-	}
+	initializeGraphFixtureRepository(t, cityDir, serviceEnv)
 	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
 	serviceCtx, stopService := context.WithCancel(context.Background())
 	cmd := buildCommand(serviceCtx, cityDir, serviceEnv, realBDBinary, "serve", "--addr", addr, "--auth-token-file", tokenFile)
@@ -1597,19 +1718,19 @@ func readGraphIssuesOverHTTP(ctx context.Context, transport graphPrivateEvidence
 			return nil, fmt.Errorf("could not read graph issues through installed service: %s", safeGraphHTTPTransportError(err, transport.token))
 		}
 		var page struct {
-			Items      []graphBead `json:"items"`
-			HasMore    bool        `json:"has_more"`
-			NextCursor string      `json:"next_cursor"`
+			Items      *[]graphBead `json:"items"`
+			HasMore    *bool        `json:"has_more"`
+			NextCursor string       `json:"next_cursor"`
 		}
 		decodeErr := json.NewDecoder(response.Body).Decode(&page)
 		closeErr := response.Body.Close()
 		if decodeErr == nil && closeErr != nil {
 			decodeErr = closeErr
 		}
-		if response.StatusCode != http.StatusOK || decodeErr != nil {
+		if response.StatusCode != http.StatusOK || decodeErr != nil || page.Items == nil || page.HasMore == nil {
 			return nil, fmt.Errorf("installed service graph issue-list response was invalid (HTTP %d)", response.StatusCode)
 		}
-		for _, item := range page.Items {
+		for _, item := range *page.Items {
 			for key := range item.Metadata {
 				if isGraphPrivateEvidenceMetadataKey(key) {
 					delete(item.Metadata, key)
@@ -1617,7 +1738,7 @@ func readGraphIssuesOverHTTP(ctx context.Context, transport graphPrivateEvidence
 			}
 			issues = append(issues, item)
 		}
-		if !page.HasMore {
+		if !*page.HasMore {
 			return issues, nil
 		}
 		if strings.TrimSpace(page.NextCursor) == "" {
@@ -1643,7 +1764,7 @@ func findGraphWorkflowBeadByRefSuffixOverHTTP(t *testing.T, transport graphPriva
 	return graphBead{}
 }
 
-func waitForBeadClosedWithoutPrivatePayloadDiagnostics(t *testing.T, cityDir string, transport graphPrivateEvidenceTransport, beadID string, timeout time.Duration) graphBead {
+func waitForWorkflowAndTeardown(t *testing.T, cityDir string, transport graphPrivateEvidenceTransport, beadID string, timeout time.Duration) graphBead {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
@@ -1659,8 +1780,20 @@ func waitForBeadClosedWithoutPrivatePayloadDiagnostics(t *testing.T, cityDir str
 				return false, "workflow bead read is unavailable: " + err.Error(), nil
 			}
 			if bead.Status == "closed" {
+				// A settled root releases its teardown tail. Root closure alone
+				// cannot establish that cleanup has executed.
+				issues, listErr := readGraphIssuesOverHTTP(ctx, transport)
+				if listErr != nil {
+					return false, "workflow teardown state is unavailable: " + listErr.Error(), nil
+				}
+				for _, issue := range issues {
+					if metaValue(issue, beadmeta.RootBeadIDMetadataKey) == beadID &&
+						metaValue(issue, beadmeta.ScopeRoleMetadataKey) == beadmeta.ScopeRoleTeardown && issue.Status != "closed" {
+						return false, "workflow teardown " + issue.ID + " is " + issue.Status, nil
+					}
+				}
 				closed = bead
-				return true, "workflow bead is closed", nil
+				return true, "workflow and teardown are closed", nil
 			}
 			return false, "workflow bead status is " + bead.Status, nil
 		})
@@ -1765,15 +1898,7 @@ func isGraphPrivateEvidenceMetadataKey(key string) bool {
 		strings.HasPrefix(key, beadmeta.AttemptEvidenceIndexPrefix)
 }
 
-func startScopedWorkflow(t *testing.T, cityDir string) (string, string) {
-	return startScopedWorkflowWithLookup(t, cityDir, nil)
-}
-
 func startScopedWorkflowWithPrivateEvidenceHTTP(t *testing.T, cityDir string, transport graphPrivateEvidenceTransport) (string, string) {
-	return startScopedWorkflowWithLookup(t, cityDir, &transport)
-}
-
-func startScopedWorkflowWithLookup(t *testing.T, cityDir string, transport *graphPrivateEvidenceTransport) (string, string) {
 	t.Helper()
 
 	out, err := bdDolt(cityDir, "create", "--json", "Run built-in scoped workflow part one")
@@ -1817,14 +1942,7 @@ func startScopedWorkflowWithLookup(t *testing.T, cityDir string, transport *grap
 	if err != nil {
 		t.Fatalf("gc sling failed: %v\noutput: %s", err, out)
 	}
-	slingOutput := out
-
-	var workflowID string
-	if transport == nil {
-		workflowID = waitForGraphWorkflowRootForInputConvoy(t, cityDir, convoyID, slingOutput, 10*time.Second)
-	} else {
-		workflowID = waitForGraphWorkflowRootForInputConvoyOverHTTP(t, cityDir, *transport, convoyID, 10*time.Second)
-	}
+	workflowID := waitForGraphWorkflowRootForInputConvoyOverHTTP(t, cityDir, transport, convoyID, 10*time.Second)
 	return convoyID, workflowID
 }
 
@@ -1853,92 +1971,6 @@ func waitForGraphWorkflowRootForInputConvoyOverHTTP(t *testing.T, cityDir string
 	return workflowID
 }
 
-func waitForGraphWorkflowRootForInputConvoy(t *testing.T, cityDir, inputConvoyID, slingOutput string, timeout time.Duration) string {
-	t.Helper()
-
-	deadline := time.Now().Add(timeout)
-	var lastErr error
-	var lastList string
-	for time.Now().Before(deadline) {
-		workflowID, rawList, err := findGraphWorkflowRootForInputConvoy(cityDir, inputConvoyID)
-		if err == nil && workflowID != "" {
-			return workflowID
-		}
-		lastErr = err
-		lastList = rawList
-		time.Sleep(200 * time.Millisecond)
-	}
-	inputConvoy := showBead(t, cityDir, inputConvoyID)
-	t.Fatalf("timed out waiting for graph.v2 workflow root for input convoy %s: %v\ngc sling output:\n%s\ninput convoy:\n%+v\nbd list:\n%s", inputConvoyID, lastErr, slingOutput, inputConvoy, lastList)
-	return ""
-}
-
-func findGraphWorkflowRootForInputConvoy(cityDir, inputConvoyID string) (string, string, error) {
-	out, err := bdDolt(cityDir, "list", "--json", "--all", "--limit=0")
-	if err != nil {
-		return "", out, fmt.Errorf("bd list --json failed: %w", err)
-	}
-	var beads []graphBead
-	if err := json.Unmarshal([]byte(strings.TrimSpace(extractJSONPayload(out))), &beads); err != nil {
-		return "", out, fmt.Errorf("unmarshal bead list: %w", err)
-	}
-
-	for _, bead := range beads {
-		if bead.ID == inputConvoyID && beadType(bead) != "convoy" {
-			return "", out, fmt.Errorf("input target %s is type %q, want convoy", inputConvoyID, beadType(bead))
-		}
-	}
-	for _, bead := range beads {
-		if metaValue(bead, "gc.kind") != "workflow" {
-			continue
-		}
-		if metaValue(bead, "gc.input_convoy_id") == inputConvoyID {
-			return bead.ID, out, nil
-		}
-	}
-	return "", out, fmt.Errorf("no workflow root found for input convoy %s", inputConvoyID)
-}
-
-func waitForBeadClosed(t *testing.T, cityDir, beadID string, timeout time.Duration) graphBead {
-	t.Helper()
-
-	var waitErr error
-	if bead, err := waitForBeadCondition(t, cityDir, beadID, timeout, func(bead graphBead) bool {
-		return bead.Status == "closed"
-	}); err == nil {
-		return bead
-	} else {
-		waitErr = err
-		t.Logf("waitForBeadClosed(%s) ended with %v; collecting diagnostics", beadID, err)
-	}
-
-	out, err := bdDolt(cityDir, "list", "--json", "--all", "--limit=0")
-	if err != nil {
-		t.Fatalf("timed out waiting for bead %s to close; bd list failed: %v\noutput: %s", beadID, err, out)
-	}
-	readyOut, readyErr := bdDolt(cityDir, "ready", "--json", "--limit=0")
-	if readyErr != nil {
-		readyOut = fmt.Sprintf("bd ready failed: %v\noutput: %s", readyErr, readyOut)
-	}
-	readyAssigneeOut, readyAssigneeErr := bdDolt(cityDir, "ready", "--json", "--limit=0", "--assignee=worker")
-	if readyAssigneeErr != nil {
-		readyAssigneeOut = fmt.Sprintf("bd ready --assignee failed: %v\noutput: %s", readyAssigneeErr, readyAssigneeOut)
-	}
-	sessionListOut, sessionListErr := gcDolt(cityDir, "session", "list")
-	if sessionListErr != nil {
-		sessionListOut = fmt.Sprintf("gc session list failed: %v\noutput: %s", sessionListErr, sessionListOut)
-	}
-	sessionPeekOut, sessionPeekErr := gcDolt(cityDir, "session", "peek", "worker")
-	if sessionPeekErr != nil {
-		sessionPeekOut = fmt.Sprintf("gc session peek worker failed: %v\noutput: %s", sessionPeekErr, sessionPeekOut)
-	}
-	traceOut := readOptionalFile(filepath.Join(cityDir, "graph-workflow-trace.log"))
-	workflowTraceOut := readGraphWorkflowTraceFiles(cityDir)
-	t.Fatalf("waiting for bead %s to close failed: %v\nready:\n%s\nready worker:\n%s\nsessions:\n%s\nworker peek:\n%s\ntrace:\n%s\nworkflow trace:\n%s\nbeads:\n%s",
-		beadID, waitErr, readyOut, readyAssigneeOut, sessionListOut, sessionPeekOut, traceOut, workflowTraceOut, out)
-	return graphBead{}
-}
-
 func readGraphWorkflowTraceFiles(cityDir string) string {
 	tracePaths := []string{
 		citylayout.ControlDispatcherTraceDefaultPath(cityDir),
@@ -1957,60 +1989,6 @@ func readOptionalFile(path string) string {
 		return fmt.Sprintf("read %s failed: %v", path, err)
 	}
 	return string(data)
-}
-
-func showBead(t *testing.T, cityDir, beadID string) graphBead {
-	t.Helper()
-
-	bead, err := tryShowBead(cityDir, beadID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return bead
-}
-
-func tryShowBead(cityDir, beadID string) (graphBead, error) {
-	out, err := bdDolt(cityDir, "show", beadID, "--json")
-	if err != nil {
-		return graphBead{}, fmt.Errorf("bd show --json %s failed: %v\noutput: %s", beadID, err, out)
-	}
-	var bead graphBead
-	trimmed := strings.TrimSpace(extractJSONPayload(out))
-	if err := json.Unmarshal([]byte(trimmed), &bead); err == nil {
-		return bead, nil
-	}
-	var beads []graphBead
-	if err := json.Unmarshal([]byte(trimmed), &beads); err != nil {
-		return graphBead{}, fmt.Errorf("unmarshal bead %s: %v\njson: %s", beadID, err, out)
-	}
-	if len(beads) == 0 {
-		return graphBead{}, fmt.Errorf("bd show --json %s returned no beads\njson: %s", beadID, out)
-	}
-	return beads[0], nil
-}
-
-func mustFindWorkflowBeadByRefSuffix(t *testing.T, cityDir, workflowID, suffix string) graphBead {
-	t.Helper()
-
-	out, err := bdDolt(cityDir, "list", "--json", "--all", "--limit=0")
-	if err != nil {
-		t.Fatalf("bd list --json failed: %v\noutput: %s", err, out)
-	}
-	var beads []graphBead
-	if err := json.Unmarshal([]byte(strings.TrimSpace(extractJSONPayload(out))), &beads); err != nil {
-		t.Fatalf("unmarshal bead list: %v\njson: %s", err, out)
-	}
-	for _, bead := range beads {
-		ref := bead.Ref
-		if ref == "" {
-			ref = metaValue(bead, "gc.step_ref")
-		}
-		if metaValue(bead, "gc.root_bead_id") == workflowID && strings.HasSuffix(ref, suffix) {
-			return bead
-		}
-	}
-	t.Fatalf("no bead with ref suffix %s found for workflow %s", suffix, workflowID)
-	return graphBead{}
 }
 
 func extractJSONPayload(raw string) string {
@@ -2045,4 +2023,191 @@ func readWorkflowReport(t *testing.T, cityDir string) string {
 		t.Fatalf("reading workflow report: %v", err)
 	}
 	return string(data)
+}
+
+func initializeGraphFixtureRepository(t *testing.T, cityDir string, serviceEnv []string) {
+	t.Helper()
+	if output, err := runCommand(cityDir, serviceEnv, 10*time.Second, "git", "init", "--quiet", cityDir); err != nil {
+		t.Fatalf("initialize private-evidence fixture repository: %v\noutput: %s", err, output)
+	}
+	root, err := runCommand(cityDir, serviceEnv, 10*time.Second, "git", "rev-parse", "--show-toplevel")
+	if err != nil || filepath.Clean(strings.TrimSpace(root)) != filepath.Clean(cityDir) {
+		t.Fatalf("private-evidence fixture repository root = %q, want %q (err=%v)", strings.TrimSpace(root), cityDir, err)
+	}
+	// The city's repository is a default execution workspace, separate from
+	// the simulated implementation repository. Keep mutable fixture state
+	// (including its ledger) out of snapshots and never commit staged data.
+	excludePath := filepath.Join(cityDir, ".git", "info", "exclude")
+	excludes, err := os.ReadFile(excludePath)
+	if err != nil {
+		t.Fatalf("read fixture repository exclusions: %v", err)
+	}
+	if err := os.WriteFile(excludePath, append(excludes, []byte("\n/*\n")...), 0o600); err != nil {
+		t.Fatalf("exclude mutable fixture state from repository captures: %v", err)
+	}
+	if output, err := runCommand(cityDir, serviceEnv, 10*time.Second, "git",
+		"-c", "user.name=Graph fixture", "-c", "user.email=graph-fixture@example.invalid",
+		"-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null",
+		"commit", "--quiet", "--allow-empty", "--only", "-m", "Initialize graph city workspace"); err != nil {
+		t.Fatalf("commit empty fixture workspace: %v\noutput: %s", err, output)
+	}
+}
+
+// Settlement closes the root before its teardown tail becomes executable.
+// The integration completion gate must observe both phases before checking
+// worktree cleanup, even after a failed body.
+func TestGraphWorkflowWaitIncludesTeardownAfterSettlement(t *testing.T) {
+	for _, outcome := range []string{"pass", "fail"} {
+		t.Run(outcome, func(t *testing.T) {
+			var listCalls atomic.Int64
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case "/v0/beads/issues/root":
+					_ = json.NewEncoder(w).Encode(graphBead{ID: "root", Status: "closed", Metadata: map[string]any{"gc.outcome": outcome}})
+				case "/v0/beads/issues":
+					state := "open"
+					if listCalls.Add(1) >= 2 {
+						state = "closed"
+					}
+					_ = json.NewEncoder(w).Encode(map[string]any{"items": []graphBead{
+						{ID: "cleanup", Status: state, Metadata: map[string]any{"gc.root_bead_id": "root", "gc.scope_role": "teardown", "gc.kind": "retry", "gc.outcome": "pass"}},
+						{ID: "other-workflow", Status: "open", Metadata: map[string]any{"gc.root_bead_id": "other-root", "gc.scope_role": "teardown"}},
+						{ID: "non-teardown", Status: "open", Metadata: map[string]any{"gc.root_bead_id": "root", "gc.scope_role": "member"}},
+					}, "has_more": false})
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			t.Cleanup(server.Close)
+			client := newGraphPrivateEvidenceHTTPClient()
+			t.Cleanup(client.CloseIdleConnections)
+			transport := graphPrivateEvidenceTransport{endpoint: server.URL, client: client}
+			root := waitForWorkflowAndTeardown(t, t.TempDir(), transport, "root", 2*time.Second)
+			if root.Status != "closed" || metaValue(root, "gc.outcome") != outcome {
+				t.Fatalf("workflow state changed: %+v", root)
+			}
+			if got := listCalls.Load(); got != 2 {
+				t.Fatalf("teardown observations=%d, want open then closed before returning", got)
+			}
+		})
+	}
+}
+
+func TestGraphIssueListRejectsMissingCompletionFields(t *testing.T) {
+	for _, body := range []string{`{}`, `{"items":[]}`, `{"has_more":false}`, `{"items":null,"has_more":false}`} {
+		t.Run(body, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, body)
+			}))
+			t.Cleanup(server.Close)
+			client := newGraphPrivateEvidenceHTTPClient()
+			t.Cleanup(client.CloseIdleConnections)
+			if _, err := readGraphIssuesOverHTTP(t.Context(), graphPrivateEvidenceTransport{endpoint: server.URL, client: client}); err == nil {
+				t.Fatal("incomplete issue list could falsely prove teardown completion")
+			}
+		})
+	}
+}
+
+func TestGraphFixtureRepositoryStartsWithEmptyCommit(t *testing.T) {
+	root := t.TempDir()
+	env := []string{"PATH=" + os.Getenv("PATH"), "HOME=" + t.TempDir(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null"}
+	runGit := func(args ...string) string {
+		t.Helper()
+		out, err := runCommand(root, env, 10*time.Second, "git", args...)
+		if err != nil {
+			t.Fatalf("fixture git command: %v: %s", err, out)
+		}
+		return strings.TrimSpace(out)
+	}
+	runGit("init", "--quiet")
+	const privateFile = "private-fixture-state"
+	if err := os.WriteFile(filepath.Join(root, privateFile), []byte("fixture-only private state\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", privateFile)
+	initializeGraphFixtureRepository(t, root, env)
+	if err := os.WriteFile(filepath.Join(root, "runtime-artifact"), []byte("mutable fixture state"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := runGit("rev-parse", "--verify", "HEAD^{commit}"); len(got) != 40 {
+		t.Fatalf("fixture HEAD=%q, want a real commit", got)
+	}
+	if got := runGit("ls-tree", "--name-only", "HEAD"); got != "" {
+		t.Fatalf("fixture committed data: %q", got)
+	}
+	if got := runGit("diff", "--cached", "--name-only"); got != privateFile {
+		t.Fatalf("fixture changed staged private data: %q", got)
+	}
+	if got := runGit("ls-files", "--others", "--exclude-standard"); got != "" {
+		t.Fatalf("mutable fixture state remains in the capture workspace: %q", got)
+	}
+}
+
+// Compact reads retain the manifest; full reads additionally hydrate diff
+// bytes. Verify both contracts without discarding identity or status fields.
+func validateGraphAttemptReadback(listed, compact, hydrated attemptevidence.Evidence) error {
+	if !reflect.DeepEqual(compact, listed) {
+		return errors.New("compact attempt readback differs from its listed manifest")
+	}
+	for _, diff := range []attemptevidence.DiffSnapshot{hydrated.Diff, hydrated.WorkspaceDiff} {
+		if diff.Status == attemptevidence.StatusAvailable {
+			if _, _, err := attemptevidence.DecodeDiff(diff); err != nil {
+				return fmt.Errorf("hydrated attempt diff verification: %w", err)
+			}
+		}
+	}
+	hydrated.Diff.Payload = nil
+	hydrated.WorkspaceDiff.Payload = nil
+	if !reflect.DeepEqual(hydrated, compact) {
+		return errors.New("hydrated attempt readback changed its compact manifest")
+	}
+	return nil
+}
+
+func TestGraphAttemptReadbackVerifiesCompactManifestAndHydratedDiffs(t *testing.T) {
+	const bundle = `{"tracked_patch":"Zml4dHVyZSBwYXRjaA=="}`
+	var compressed bytes.Buffer
+	writer := gzip.NewWriter(&compressed)
+	if _, err := io.WriteString(writer, bundle); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(compressed.Bytes())
+	diff := attemptevidence.DiffSnapshot{
+		Status: attemptevidence.StatusAvailable, Encoding: attemptevidence.DiffEncoding,
+		SHA256: fmt.Sprintf("%x", digest), UncompressedBytes: int64(len(bundle)),
+	}
+	listed := attemptevidence.Evidence{AttemptID: "exact-attempt", Diff: diff, WorkspaceDiff: diff}
+	hydrated := listed
+	hydrated.Diff.Payload = append([]byte(nil), compressed.Bytes()...)
+	hydrated.WorkspaceDiff.Payload = append([]byte(nil), compressed.Bytes()...)
+	if err := validateGraphAttemptReadback(listed, listed, hydrated); err != nil {
+		t.Fatalf("valid hydrated diff rejected: %v", err)
+	}
+	for _, tc := range []struct {
+		name   string
+		change func(*attemptevidence.Evidence, *attemptevidence.Evidence)
+	}{
+		{"different compact attempt", func(c, _ *attemptevidence.Evidence) { c.AttemptID = "other-attempt" }},
+		{"different hydrated owner", func(_, h *attemptevidence.Evidence) { h.Identity.OwnerBeadID = "other-owner" }},
+		{"missing candidate bytes", func(_, h *attemptevidence.Evidence) { h.Diff.Payload = nil }},
+		{"missing workspace bytes", func(_, h *attemptevidence.Evidence) { h.WorkspaceDiff.Payload = nil }},
+		{"corrupt candidate bytes", func(_, h *attemptevidence.Evidence) { h.Diff.Payload = []byte("corrupt") }},
+		{"corrupt workspace bytes", func(_, h *attemptevidence.Evidence) { h.WorkspaceDiff.Payload = []byte("corrupt") }},
+		{"downgraded candidate", func(_, h *attemptevidence.Evidence) { h.Diff.Status = "unavailable" }},
+		{"downgraded workspace", func(_, h *attemptevidence.Evidence) { h.WorkspaceDiff.Status = "unavailable" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			compact, full := listed, hydrated
+			tc.change(&compact, &full)
+			if err := validateGraphAttemptReadback(listed, compact, full); err == nil {
+				t.Fatal("invalid attempt readback accepted")
+			}
+		})
+	}
 }

@@ -413,11 +413,20 @@ the core fleet-health orders can be crowded out by ordinary work. Setting
 `reserved_dispatch = true` declares an order eligible for a small reserved lane
 that keeps those health orders running under saturation. Declaring it in TOML is
 the only way to grant that eligibility — the orchestrator never name-matches
-specific orders — and every order defaults opted out. Today the flag is
-**declaration-only**: the bundled health orders carry it, but no dispatcher
-consumes it yet, and it changes nothing about gate, suspension, or single-flight
-semantics — a reserved order is still skipped when its city or rig is suspended,
-still subject to the open-work gate, and still single-flighted.
+specific orders — and every order defaults opted out. The dispatcher allows
+**up to three reserved dispatches per tick**, separately from
+`orders.max_dispatches_per_tick`. Reserved launches do not consume ordinary
+slots, and unused reserved slots cannot enlarge the ordinary allowance. More
+than three eligible reserved orders rotate independently across ticks. The
+reserved cap also applies to reserved condition orders; ordinary due-condition
+orders retain their existing unbudgeted behavior.
+
+Reservation changes capacity selection only, not gate, suspension, or
+single-flight semantics: a reserved order is still skipped when its city or rig
+is suspended, still subject to its trigger and open-work policy, and still
+single-flighted. It cannot guarantee freshness when controller ticks or store
+operations themselves are delayed. A higher-priority definition replaces an
+order wholesale and must repeat `reserved_dispatch = true` to retain eligibility.
 
 ## Rig-scoped orders
 

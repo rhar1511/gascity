@@ -5,7 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"syscall"
 	"testing"
 	"time"
@@ -229,6 +231,93 @@ func TestIsTmuxArgv(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := isTmuxArgv(tt.argv); got != tt.want {
 				t.Errorf("isTmuxArgv(%q) = %v, want %v", tt.argv, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestKillAllTestSessionsConfirmsServerExit(t *testing.T) {
+	const socket = "/tmp/gct-fake-4242/sock"
+	host := fakeReapHost{pid: os.Getpid() + 10000, startTime: "original", aliveAfterKill: true, tmuxIdentity: true}
+	reaper := host.reaper()
+	var diagnostics bytes.Buffer
+	killAllTestSessionsWith([]string{socket}, reaper, &diagnostics)
+	if reaper.sameProcess(host.pid, host.startTime) {
+		t.Fatal("package cleanup returned while its original server remained runnable after shutdown acknowledgment")
+	}
+}
+
+// TestReapOwnedSocketParentDir fences the default-socket cleanup to a private
+// parent whose sentinel is still the caller's held file description.
+func TestReapOwnedSocketParentDir(t *testing.T) {
+	for _, name := range []string{"held", "nil", "closed", "replaced", "sentinel symlink", "directory symlink", "public directory", "other owner name"} {
+		t.Run(name, func(t *testing.T) {
+			dir, err := os.MkdirTemp(t.TempDir(), PIDPrefixedTempPattern(SocketParentDirPrefix))
+			if err != nil {
+				t.Fatal(err)
+			}
+			sentinel, err := HoldAliveSentinel(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = sentinel.Close() })
+			passed := sentinel
+			path := filepath.Join(dir, socketParentAliveSentinelName)
+			switch name {
+			case "nil":
+				passed = nil
+			case "closed":
+				if err := sentinel.Close(); err != nil {
+					t.Fatal(err)
+				}
+			case "replaced", "sentinel symlink":
+				if err := os.Rename(path, path+".original"); err != nil {
+					t.Fatal(err)
+				}
+				if name == "replaced" {
+					if err := os.WriteFile(path, nil, 0o600); err != nil {
+						t.Fatal(err)
+					}
+				} else if err := os.Symlink(path+".original", path); err != nil {
+					t.Fatal(err)
+				}
+			case "directory symlink":
+				if err := os.Rename(dir, dir+".original"); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(dir+".original", dir); err != nil {
+					t.Fatal(err)
+				}
+			case "public directory":
+				if err := os.Chmod(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			case "other owner name":
+				newDir := filepath.Join(filepath.Dir(dir), fmt.Sprintf("gct-%d-other", os.Getpid()+10000))
+				if err := os.Rename(dir, newDir); err != nil {
+					t.Fatal(err)
+				}
+				dir = newDir
+			}
+			called := false
+			err = reapOwnedSocketParentDir(dir, passed, nil, func(got string, diagnostics io.Writer) {
+				called = true
+				if got != dir || diagnostics == nil {
+					t.Fatalf("unexpected cleanup binding: %q %v", got, diagnostics)
+				}
+			})
+			if name == "held" {
+				if err != nil || !called {
+					t.Fatalf("held parent cleanup: called=%v err=%v", called, err)
+				}
+				if exists, held := aliveSentinelHeld(dir); !exists || !held {
+					t.Fatal("cleanup released sentinel lock")
+				}
+			} else if err == nil || called {
+				t.Fatalf("ownership refusal missing: called=%v err=%v", called, err)
+			}
+			if _, err := os.Lstat(dir); err != nil {
+				t.Fatalf("cleanup removed refused parent: %v", err)
 			}
 		})
 	}

@@ -92,6 +92,7 @@ jobs:
           go-version-file: go.mod
 
       - name: Install govulncheck
+        id: install-govulncheck
         run: |
           set -euo pipefail
           # `go install pkg@version` ignores the go.mod in the working directory, so
@@ -112,7 +113,11 @@ jobs:
       - name: Report scanner and database versions
         run: govulncheck -version
 
+      - name: SARIF normalization contract
+        run: python3 scripts/test-normalize-govulncheck-sarif.py
+
       - name: Generate module vulnerability SARIF
+        id: generate-sarif
         run: |
           set -euo pipefail
           mkdir -p govulncheck-results
@@ -123,12 +128,21 @@ jobs:
           # everything into one undifferentiated pile of alerts.
           govulncheck -format sarif ./... > govulncheck-results/govulncheck.sarif
 
+      - name: Normalize SARIF duplicate stacks
+        id: normalize-sarif
+        if: ${{ always() && steps.generate-sarif.outcome == 'success' }}
+        run: |
+          python3 scripts/normalize-govulncheck-sarif.py \
+            govulncheck-results/govulncheck.sarif \
+            govulncheck-results/govulncheck.upload.sarif \
+            govulncheck-results/normalization.json
+
       - name: Upload SARIF results
         # Forks do not get security-events: write, so skip rather than fail there.
-        if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+        if: ${{ always() && steps.normalize-sarif.outcome == 'success' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
         uses: github/codeql-action/upload-sarif@95e58e9a2cdfd71adc6e0353d5c52f41a045d225 # v4
         with:
-          sarif_file: govulncheck-results/govulncheck.sarif
+          sarif_file: govulncheck-results/govulncheck.upload.sarif
           category: govulncheck
 
       - name: Upload SARIF artifact
@@ -139,7 +153,19 @@ jobs:
           path: govulncheck-results/govulncheck.sarif
           retention-days: 5
 
+      - name: Upload normalized SARIF artifact
+        if: ${{ always() && steps.normalize-sarif.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: govulncheck-sarif-upload
+          path: |
+            govulncheck-results/govulncheck.upload.sarif
+            govulncheck-results/normalization.json
+          retention-days: 5
+
       - name: Summarize findings and enforce reachable vulnerability policy
+        # Reporting must not prevent the scanner's native safety verdict.
+        if: ${{ always() && steps.install-govulncheck.outcome == 'success' }}
         run: |
           set -uo pipefail
           # Deliberately one command doing both jobs. govulncheck already exits 3 only
@@ -147,6 +173,7 @@ jobs:
           # merely imported or merely required, so the policy this repo wants is the
           # tool's own exit code. Re-deriving it from parsed output would be a second
           # implementation of the same rule, free to drift from the first.
+          mkdir -p govulncheck-results || exit $?
           govulncheck -show verbose ./... > govulncheck-results/govulncheck.txt 2>&1
           status=$?
 

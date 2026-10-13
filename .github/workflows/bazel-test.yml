@@ -243,7 +243,8 @@ jobs:
 
   sync-check:
     name: BUILD files in sync
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    # Forks use GitHub-hosted compute; retain Blacksmith for the upstream repo.
+    runs-on: ${{ github.repository == 'gastownhall/gascity' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd

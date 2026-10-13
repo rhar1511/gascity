@@ -14,6 +14,11 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+var (
+	hostBeadsPermitBrokerOwnerIsTrusted = hostBeadsPermitOwnerIsRoot
+	hostBeadsPermitBrokerUIDIsTrusted   = hostBeadsPermitOwnerUIDIsRoot
+)
+
 const requiredHostBeadsPermitMemfdSeals = unix.F_SEAL_SEAL | unix.F_SEAL_SHRINK | unix.F_SEAL_GROW | unix.F_SEAL_WRITE
 
 const (
