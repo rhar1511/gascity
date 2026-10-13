@@ -32,11 +32,6 @@ pillow>=12.3.0
 # transitive constraints pull a patched version on their own.
 urllib3>=2.8.0
 
-# Security floor: CVE-2026-104851 permits code execution through crafted
-# fsspec inputs before 2026.6.0. Keep the transitive dependency pinned until
-# mcp-agent-mail's requirements carry the patched release.
-fsspec>=2026.6.0
-
 # Security floor: idna < 3.15 has GHSA-65pc-fj4g-8rjx (MEDIUM, IDNA
 # bypass of the CVE-2024-3651 fix). Drop once transitive constraints
 # carry the patched version themselves.
