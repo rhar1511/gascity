@@ -471,6 +471,7 @@ jobs:
         with:
           dolt-version: ${{ env.DOLT_VERSION }}
           bd-version: ${{ env.BD_VERSION }}
+          qualified-integration-bd: "true"
           install-claude-cli: "true"
       - name: Install tools
         run: make install-tools
@@ -578,6 +579,7 @@ jobs:
         with:
           dolt-version: ${{ env.DOLT_VERSION }}
           bd-version: ${{ env.BD_VERSION }}
+          qualified-integration-bd: "true"
           install-claude-cli: "true"
       - name: Install tools
         run: make install-tools

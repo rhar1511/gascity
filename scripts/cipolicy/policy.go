@@ -92,7 +92,9 @@ const (
 	// Reviewed PR43 diagnostic delta: preflight-static adds the portable lint
 	// deadline contract. No existing step, trigger, permission or gate changes.
 	// Reviewed v1.5.0 integration: stable Beads v1.3.1 pins only.
-	expectedCIExecutionHash     = "f360de1b9dc249f2890c2f076c8883f88eb8bfcf30fed18315d6808f18015194"
+	// Human-approved integration-only opt-in: checksum-pinned fork bd for
+	// source snapshots and revision-aware HTTP writes; release lanes unchanged.
+	expectedCIExecutionHash     = "5888a8c0e64340ba2b4601a78a14b5534e8a39ec9aefd2f4b1c971339e48ebc6"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,
@@ -110,7 +112,9 @@ const (
 	// Reviewed setup delta: export the exact installed public bd path for
 	// integration input provenance, refusing unsafe or PATH-shadowed inputs.
 	// Version pins, provider installation, permissions and gates stay pinned.
-	expectedSetupActionHash = "4b3b4999a61373c0c3c3c37f84b0f436380e108cddc09c6c900195aee85ddf45"
+	// Human-approved optional fork build installs ICU and verifies the pinned
+	// source archive before compiling; the default released bd is unchanged.
+	expectedSetupActionHash = "7af0d833904eec4bb76293c52f922fff308ccdf001f35712515c4305e0884921"
 )
 
 var requiredFilterPaths = map[string][]string{
