@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"maps"
 	"strings"
@@ -84,6 +85,43 @@ func TestEnrolledHookClaimUsesOnlyLifecycleTransitionPath(t *testing.T) {
 	}
 	if stdout.Len() == 0 {
 		t.Fatal("lifecycle claim result was not written")
+	}
+}
+
+func TestEnrolledHookClaimNeverReclaimsAnotherOwner(t *testing.T) {
+	for _, marker := range []string{beadmeta.LifecycleAdmissionReceiptV2MetadataKey, beadmeta.LifecycleTransitionHeadMetadataKey} {
+		for _, admissionEnabled := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/admission=%t", marker, admissionEnabled), func(t *testing.T) {
+				candidate := beads.Bead{
+					ID: "owned-1", Type: "task", Status: "in_progress", Assignee: "previous-session",
+					Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker", marker: "durable-evidence"},
+				}
+				opts := hookClaimOptions{
+					Assignee: "replacement-session", SessionID: "replacement-session", RouteTargets: []string{"worker"},
+					AutoReclaimStaleClaims: true, Lifecycle: config.LifecycleConfig{AdmissionEnabled: admissionEnabled},
+				}
+				opts.Lifecycle.RecoveryEnabled = false
+				ops := hookClaimOps{
+					ReclaimStale: func(context.Context, string, []string, string) (bool, string, error) {
+						t.Fatal("enrolled owner reached stale-lease reclaim")
+						return false, "", nil
+					},
+					Claim: func(context.Context, string, []string, string, string) (beads.Bead, bool, error) {
+						t.Fatal("enrolled owner reached generic claim")
+						return beads.Bead{}, false, nil
+					},
+					ClaimLifecycle: func(context.Context, beads.Bead, hookClaimOptions) (beads.Bead, hookLifecycleClaimResult, error) {
+						t.Fatal("enrolled owner reached replacement lifecycle claim")
+						return beads.Bead{}, hookLifecycleClaimResult{}, nil
+					},
+				}
+				var stdout, stderr bytes.Buffer
+				result := claimFirstEligibleHookCandidate([]beads.Bead{candidate}, opts, ops, "/work", &stdout, &stderr)
+				if result.terminal || stdout.Len() != 0 {
+					t.Fatalf("owned work was offered to replacement: result=%+v stdout=%s", result, stdout.String())
+				}
+			})
+		}
 	}
 }
 

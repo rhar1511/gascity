@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/storeref"
@@ -133,7 +134,8 @@ func TestLifecycleAdmissionNativeGraphAttachAndReplay(t *testing.T) {
 		beadsPermitResolver: resolver, graphStoreGeneration: 1,
 	}
 	sessionRows := c.cityStore
-	manager := session.NewManagerWithOptions(sessionRows, runtime.NewFake())
+	provider := runtime.NewFake()
+	manager := session.NewManagerWithOptions(sessionRows, provider)
 	info, err := manager.CreateSession(context.Background(), session.CreateOptions{
 		Template: "api/worker", Command: "test-agent", WorkDir: t.TempDir(), Provider: "test-agent",
 		ExtraMeta: map[string]string{"session_origin": "ephemeral"},
@@ -350,6 +352,24 @@ func TestLifecycleAdmissionNativeGraphAttachAndReplay(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(claimed, claimReadback) {
 		t.Fatalf("real source claim replay changed the committed source: err=%v", err)
 	}
+	heartbeatStep, err := c.sourceLeg.store.Get(step.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{fixture.SourceID, step.ID} {
+		var heartbeatOut, heartbeatErr strings.Builder
+		code := run([]string{"--city", c.cityPath, "bd", "--rig", "api", "heartbeat", id}, &heartbeatOut, &heartbeatErr)
+		if code == 0 || !strings.Contains(heartbeatErr.String(), "lifecycle admission is enabled; refusing raw bd command") ||
+			!strings.Contains(heartbeatErr.String(), "no lifecycle proof-aware write guard") {
+			t.Fatalf("enrolled heartbeat was not refused by its lifecycle guard: exit=%d stderr=%s", code, heartbeatErr.String())
+		}
+		sourceNow, sourceErr := c.snapshot(fixture.SourceID)
+		stepNow, stepErr := c.sourceLeg.store.Get(step.ID)
+		if sourceErr != nil || stepErr != nil || !reflect.DeepEqual(claimed, sourceNow) || !reflect.DeepEqual(heartbeatStep, stepNow) {
+			t.Fatal("refused enrolled heartbeat changed source or execution step")
+		}
+	}
+	t.Log("native enrolled source and execution heartbeats refused without changing work")
 	startOut.Reset()
 	startErr.Reset()
 	if code := run(begin, &startOut, &startErr); code != 0 {
@@ -588,6 +608,14 @@ func TestLifecycleAdmissionNativeGraphAttachAndReplay(t *testing.T) {
 	if err != nil || !tailReplay.Replayed || tailReplay.ReceiptID != tailClaim.ReceiptID {
 		t.Fatalf("native tail claim retry: %+v, %v", tailReplay, err)
 	}
+	var drainOut, drainErr strings.Builder
+	drain := newDrainOps(provider)
+	if code := doRuntimeDrain(drain, provider, events.Discard, info.SessionName, info.SessionName, true, &drainOut, &drainErr); code != 0 {
+		t.Fatalf("native managed runtime drain request exit=%d stderr=%s", code, drainErr.String())
+	}
+	if requested, err := drain.isDraining(info.SessionName); err != nil || !requested {
+		t.Fatalf("native runtime drain request missing: requested=%v err=%v", requested, err)
+	}
 	finishOut.Reset()
 	finishErr.Reset()
 	if code := run(finish, &finishOut, &finishErr); code != 0 {
@@ -620,6 +648,21 @@ func TestLifecycleAdmissionNativeGraphAttachAndReplay(t *testing.T) {
 	}
 	t.Log("native accepted-source tail claimed and completed with exact retry while preserving signed source closure")
 	t.Log("native worker hook discovered and claimed both initial step and accepted-source tail using real session storage")
+	t.Log("native current execution completed and replayed after a provider drain request")
+	if err := session.NewStore(authenticated.sessions).BeginDrainAckStopPending(info.ID, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	finishOut.Reset()
+	finishErr.Reset()
+	if code := run(finish, &finishOut, &finishErr); code == 0 {
+		t.Fatal("native completion accepted a session pending stop after drain acknowledgement")
+	}
+	stepAfterStop, stepErr := c.sourceLeg.store.Get(tail.ID)
+	sourceAfterStop, sourceErr := c.snapshot(fixture.SourceID)
+	if stepErr != nil || sourceErr != nil || !reflect.DeepEqual(tailClosed, stepAfterStop) || !reflect.DeepEqual(closed, sourceAfterStop) {
+		t.Fatal("stop-pending completion refusal changed execution or source")
+	}
+	t.Log("native stop-pending session refused completion replay without changing work")
 }
 
 type nativeAdmissionSessionState struct {

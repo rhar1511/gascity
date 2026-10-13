@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -180,6 +181,20 @@ func TestLifecycleRecoveryQ54ReservesExactRequestBeforeOneDeliveryAndReplaysRead
 	persistLifecycleRecoveryIntent(t, setup.store, request)
 
 	var logs strings.Builder
+	setup.fixture.cfg.Lifecycle.RecoveryEnabled = false
+	beforeDisabled, err := setup.store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	patchesBeforeDisabled := len(setup.store.patchRequests)
+	runLifecycleRecovery(setup, claim, &logs)
+	afterDisabled, err := setup.store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+	if err != nil || !reflect.DeepEqual(beforeDisabled, afterDisabled) ||
+		len(setup.store.patchRequests) != patchesBeforeDisabled || setup.store.sourceGenericWrites != 0 ||
+		claim.provider.CountCalls("Nudge", claim.info.SessionName) != 0 {
+		t.Fatalf("disabled recovery changed work, intent, session or delivery: err=%v logs=%s", err, logs.String())
+	}
+	setup.fixture.cfg.Lifecycle.RecoveryEnabled = true
 	runLifecycleRecovery(setup, claim, &logs)
 	if got := claim.provider.CountCalls("Nudge", claim.info.SessionName); got != 1 {
 		t.Fatalf("first exact recovery request sent %d nudges, want one; logs=%s", got, logs.String())

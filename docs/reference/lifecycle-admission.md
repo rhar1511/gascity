@@ -176,9 +176,22 @@ uses `gc beads completion prepare` and `gc beads completion accept`.
 The session's current claim stays on this step for retry and workflow lookup.
 An exact retry returns the original receipt without another mutation; a changed
 outcome conflicts. A later claim replaces the stamp normally. This path requires
-the live session states allowed for claiming. Draining sessions and descendant
-recovery remain separate integration gates. The core formula has not yet been
-switched to this command.
+the live session states allowed for claiming. A provider drain request leaves
+the current step eligible to finish and retry. Once drain acknowledgement marks
+the session pending stop, completion is refused, including retries. The core
+formula has not yet been switched to this command.
+
+Generic `gc bd heartbeat` cannot refresh enrolled work: it lacks the current
+incarnation, claim and revision proof. A refusal leaves the source and execution
+step unchanged. Do not use generic heartbeat or stale-lease reclaim as recovery
+for an enrolled owner. Turning off admission does not erase durable enrollment.
+
+Automatic lifecycle recovery is a separate opt-in, disabled by default. With
+`lifecycle.recovery_enabled = false`, even a valid signed recovery request leaves
+the work, intent, session and recovery budget unchanged and sends no nudge.
+Admission and acceptance authorities do not enable recovery. Unsupported
+descendant recovery remains held; source acceptance can still proceed through
+its protected completion path while recovery is disabled.
 
 A remaining static graph step in the same store can also claim and complete
 after reviewer acceptance closes its source. The controller requires the current
