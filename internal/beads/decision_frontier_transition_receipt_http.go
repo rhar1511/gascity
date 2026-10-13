@@ -98,8 +98,10 @@ func (c *privateEvidenceHTTPClient) controllerMetadataTransitionReceipt(ctx cont
 		!c.metadataTransitionScopeAllowed(remote.Scope, remote.Kind) {
 		return ControllerMetadataTransitionReceipt{}, false, fmt.Errorf("%w: receipt identity does not match the query", ErrDecisionFrontierTransitionReceiptCorrupt)
 	}
-	if _, err := decodeDecisionFrontierControllerReceipt(remote); err != nil {
-		return ControllerMetadataTransitionReceipt{}, false, fmt.Errorf("%w: invalid Q43 source-transition receipt", ErrDecisionFrontierTransitionReceiptCorrupt)
+	if remote.Kind == controllerDecisionFrontierTransitionKind {
+		if _, err := decodeDecisionFrontierControllerReceipt(remote); err != nil {
+			return ControllerMetadataTransitionReceipt{}, false, fmt.Errorf("%w: invalid Q43 source-transition receipt", ErrDecisionFrontierTransitionReceiptCorrupt)
+		}
 	}
 	return cloneControllerMetadataTransitionReceipt(remote), true, nil
 }
