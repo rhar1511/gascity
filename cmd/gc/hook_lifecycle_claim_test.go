@@ -519,20 +519,21 @@ func TestHookLifecycleClaimRequiresCurrentSourceProofBeforeControllerBoundary(t 
 		name         string
 		nextRevision int64
 		breakProof   string
-		descendant   bool
+		source       bool
 	}{
 		{name: "positive revision"},
-		{name: "admitted workflow step", descendant: true},
+		{name: "materialized source requires explicit begin-source", source: true},
 		{name: "negative revision", nextRevision: -1000},
 		{name: "missing Q43", nextRevision: -1000, breakProof: "q43"},
 		{name: "missing Q54", nextRevision: -1000, breakProof: "q54"},
 		{name: "changed policy", nextRevision: -1000, breakProof: "policy"},
 		{name: "no verifier", nextRevision: -1000, breakProof: "verifier"},
+		{name: "query environment cannot supply token", breakProof: "query-token"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			setup, _, request := newLifecycleClaimProviderFixtureWithRevision(t, tc.nextRevision)
 			candidate := request.Work
-			if tc.descendant {
+			if !tc.source {
 				marker, ok := lifecycleMaterializationFor(candidate)
 				if !ok {
 					t.Fatal("source fixture has no attached workflow")
@@ -541,13 +542,14 @@ func TestHookLifecycleClaimRequiresCurrentSourceProofBeforeControllerBoundary(t 
 			}
 			candidate.SourceStoreRef = "rig:pilot"
 			candidate.LifecycleScope = request.Scope
-			if tc.nextRevision < 0 && candidate.Revision >= 0 {
+			if tc.nextRevision < 0 && request.Work.Revision >= 0 {
 				t.Fatal("fixture did not produce a negative source revision")
 			}
 			opts := lifecycleAdmissionV1ClaimOptions(setup)
 			opts.LifecycleCityPath = setup.fixture.cityPath
 			opts.IdentityCandidates = []string{request.Actor}
-			opts.Env = []string{"GC_SESSION_ID=" + request.Session.ID, "GC_INSTANCE_TOKEN=" + request.Session.InstanceToken, "GC_RUNTIME_EPOCH=" + request.Session.Generation}
+			opts.Env = []string{"GC_SESSION_ID=" + request.Session.ID, "GC_RUNTIME_EPOCH=" + request.Session.Generation}
+			opts.LifecycleInstanceToken = request.Session.InstanceToken
 			switch tc.breakProof {
 			case "q43":
 				clear(setup.store.q43Receipts)
@@ -558,12 +560,18 @@ func TestHookLifecycleClaimRequiresCurrentSourceProofBeforeControllerBoundary(t 
 				setup.fixture.cfg.Agents[0].DefaultSlingFormula = &workflow
 			case "verifier":
 				opts.VerifyLifecycleTransitionHead = nil
+			case "query-token":
+				opts.LifecycleInstanceToken = ""
+				opts.Env = append(opts.Env, "GC_INSTANCE_TOKEN="+request.Session.InstanceToken)
 			}
 			before := len(setup.store.patchRequests)
 			_, _, err := hookClaimLifecycleWork(context.Background(), candidate, opts)
 			expected := "controller claim API is unavailable"
-			if tc.breakProof != "" {
+			if tc.breakProof != "" || tc.source {
 				expected = "exact admitted work source could not be re-read"
+			}
+			if tc.breakProof == "query-token" {
+				expected = "enrolled lifecycle claim requires GC_SESSION_ID, GC_INSTANCE_TOKEN, and canonical GC_RUNTIME_EPOCH"
 			}
 			if err == nil || !strings.Contains(err.Error(), expected) {
 				t.Fatalf("hook boundary error = %v, want %q", err, expected)

@@ -506,6 +506,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 			IdentityCandidates:            identityCandidates,
 			RouteTargets:                  routeTargets,
 			Env:                           queryEnv,
+			LifecycleInstanceToken:        strings.TrimSpace(os.Getenv("GC_INSTANCE_TOKEN")),
 			DrainAck:                      opts.DrainAck,
 			JSON:                          opts.JSON,
 			Lifecycle:                     cfg.Lifecycle,

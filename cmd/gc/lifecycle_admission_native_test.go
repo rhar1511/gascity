@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -131,10 +132,11 @@ func TestLifecycleAdmissionNativeGraphAttachAndReplay(t *testing.T) {
 		cityBeadStore: c.cityStore, beadStores: c.rigStores,
 		beadsPermitResolver: resolver, graphStoreGeneration: 1,
 	}
-	sessionRows := beads.NewMemStoreFrom(1, nil, nil)
+	sessionRows := c.cityStore
 	manager := session.NewManagerWithOptions(sessionRows, runtime.NewFake())
 	info, err := manager.CreateSession(context.Background(), session.CreateOptions{
 		Template: "api/worker", Command: "test-agent", WorkDir: t.TempDir(), Provider: "test-agent",
+		ExtraMeta: map[string]string{"session_origin": "ephemeral"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -154,12 +156,48 @@ func TestLifecycleAdmissionNativeGraphAttachAndReplay(t *testing.T) {
 		}
 		return api.NewCityScopedClient(server.URL, c.cityName)
 	}
-	oldSessionFront := hookCurrentSessionFrontDoor
-	t.Cleanup(func() { hookCurrentSessionFrontDoor = oldSessionFront })
-	hookCurrentSessionFrontDoor = func() (*session.Store, error) { return session.NewStore(authenticated.sessions), nil }
-	t.Setenv("GC_SESSION_ID", info.ID)
-	t.Setenv("GC_INSTANCE_TOKEN", info.InstanceToken)
-	t.Setenv("GC_RUNTIME_EPOCH", info.Generation)
+	runtimeGeneration, err := strconv.Atoi(info.Generation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	continuationEpoch, err := strconv.Atoi(info.ContinuationEpoch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for key, value := range session.RuntimeEnvWithSessionContext(info, runtimeGeneration, continuationEpoch, info.InstanceToken) {
+		t.Setenv(key, value)
+	}
+	hookReadStore, err := lifecycleStoreForRef(c.cityPath, c.cfg, "rig:api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if writer, ok := beads.RevisionTransitionPatchWriterFor(hookReadStore); ok || writer != nil {
+		t.Fatal("worker receipt-reader store acquired protected patch-write capability")
+	}
+	claimViaHook := func(expectedID string) {
+		t.Helper()
+		var hookOut, hookErr strings.Builder
+		if code := run([]string{"--city", c.cityPath, "hook", "--claim", "--json"}, &hookOut, &hookErr); code != 0 {
+			var readyOut, readyErr strings.Builder
+			readyCode := run([]string{"--city", c.cityPath, "ready", "--json", "--metadata-field", beadmeta.RoutedToMetadataKey + "=" + info.Template}, &readyOut, &readyErr)
+			var rows []beads.Bead
+			if err := json.Unmarshal([]byte(readyOut.String()), &rows); err != nil {
+				t.Logf("native public ready on hook failure: exit=%d decode=%v stderr=%s", readyCode, err, readyErr.String())
+			} else {
+				for _, row := range rows {
+					t.Logf("native public ready candidate: id=%s status=%s revision=%d step=%s", row.ID, row.Status, row.Revision, row.Metadata[beadmeta.StepRefMetadataKey])
+				}
+			}
+			t.Fatalf("native worker hook claim exit %d: stdout=%s stderr=%s", code, hookOut.String(), hookErr.String())
+		}
+		var result hookClaimJSONResult
+		if err := json.Unmarshal([]byte(hookOut.String()), &result); err != nil {
+			t.Fatalf("native hook result: %v, output=%s, stderr=%s", err, hookOut.String(), hookErr.String())
+		}
+		if !result.OK || result.Action != "work" || result.BeadID != expectedID || result.Assignee != session.AssigneeIdentifier(info) {
+			t.Fatalf("native hook did not claim expected work: %+v, stderr=%s", result, hookErr.String())
+		}
+	}
 
 	request := api.LifecycleClaimTransitionRequest{
 		Work: attached, WorkStore: c.sourceLeg.store, WorkStoreRef: storeref.RigRef("api"),
@@ -194,8 +232,9 @@ func TestLifecycleAdmissionNativeGraphAttachAndReplay(t *testing.T) {
 		WorkID: step.ID, SourceStoreRef: "rig:api", ExpectedRevision: step.Revision,
 		ExpectedTransitionHead: "", SessionID: info.ID, InstanceToken: info.InstanceToken, RuntimeEpoch: info.Generation,
 	}
+	claimViaHook(step.ID)
 	stepClaim, err := client.ClaimLifecycleWork(context.Background(), stepBody)
-	if err != nil || stepClaim.ClaimGeneration != "1" || stepClaim.Replayed {
+	if err != nil || stepClaim.ClaimGeneration != "1" || !stepClaim.Replayed {
 		t.Fatalf("native descendant claim: %+v err=%v", stepClaim, err)
 	}
 	stepReceipt, found, err := reader.ReadRevisionTransitionPatchReceipt(stepClaim.ReceiptID)
@@ -537,11 +576,12 @@ func TestLifecycleAdmissionNativeGraphAttachAndReplay(t *testing.T) {
 		WorkID: tail.ID, SourceStoreRef: "rig:api", ExpectedRevision: tail.Revision, ExpectedTransitionHead: tail.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey],
 		SessionID: info.ID, InstanceToken: info.InstanceToken, RuntimeEpoch: info.Generation,
 	}
+	claimViaHook(tail.ID)
 	tailClaim, err := client.ClaimLifecycleWork(context.Background(), tailBody)
 	if err != nil {
 		t.Fatalf("native accepted-source tail claim: %v", err)
 	}
-	if tailClaim.WorkID != tail.ID || tailClaim.ReceiptID == "" || tailClaim.Replayed {
+	if tailClaim.WorkID != tail.ID || tailClaim.ReceiptID == "" || !tailClaim.Replayed {
 		t.Fatalf("native tail claim: %+v", tailClaim)
 	}
 	tailReplay, err := client.ClaimLifecycleWork(context.Background(), tailBody)
@@ -579,6 +619,7 @@ func TestLifecycleAdmissionNativeGraphAttachAndReplay(t *testing.T) {
 		t.Fatal("native workflow tail changed accepted source")
 	}
 	t.Log("native accepted-source tail claimed and completed with exact retry while preserving signed source closure")
+	t.Log("native worker hook discovered and claimed both initial step and accepted-source tail using real session storage")
 }
 
 type nativeAdmissionSessionState struct {

@@ -28,7 +28,7 @@ The source still requires separately signed reviewer acceptance.
 
 The current claim stamp is retained for retry and workflow lookup. An exact
 retry returns the same receipt; a changed outcome conflicts. Requires a running
-controller and an active parent source; no generic write fallback is used.`,
+controller and a verified parent source; no generic write fallback is used.`,
 		RunE: func(command *cobra.Command, _ []string) error {
 			result, err := completeHookExecution(command.Context(), storeRef, outcome, stderr)
 			if err == nil {

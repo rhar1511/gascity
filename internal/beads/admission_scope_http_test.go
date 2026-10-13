@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -85,5 +86,121 @@ func TestAdmissionScopeAllowsReceiptAttachmentWithoutSourcePatchAuthority(t *tes
 	}
 	if transport.postCount != 1 {
 		t.Fatalf("HTTP writes = %d, want only the exact admission attachment", transport.postCount)
+	}
+}
+
+func TestLifecycleReadScopeReadsMetadataReceiptsWithoutWriteAuthority(t *testing.T) {
+	const scope = "city:alpha/rig:fixture"
+	for _, kind := range []string{"lifecycle_admission_v2_attach", "lifecycle_descendant_anchor_v1"} {
+		t.Run(kind, func(t *testing.T) {
+			request := controllerTransitionTestRequest()
+			request.Scope, request.Kind = scope, kind
+			receipt := controllerTransitionTestReceipt(t, request, request.Actor)
+			transport := &controllerTransitionTestTransport{handler: controllerTransitionTestHandler(&receipt, false)}
+			store := controllerTransitionTestStore(t, transport)
+			WithBdStorePrivateEvidenceLifecycleReadScope(scope)(store)
+			reader, ok := ControllerMetadataTransitionReceiptReaderFor(store)
+			if !ok {
+				t.Fatal("read scope did not expose metadata receipts")
+			}
+			got, found, err := reader.ControllerMetadataTransitionReceipt("gc/one", request.ReceiptID)
+			if err != nil || !found || got.Scope != scope || got.Kind != kind || got.ToVersion != 8 {
+				t.Fatalf("metadata receipt = %+v, found=%v err=%v", got, found, err)
+			}
+			if _, err := store.TransitionMetadata("gc/one", request); err == nil {
+				t.Fatal("read scope authorized a lifecycle metadata write")
+			}
+			for _, tc := range []struct{ name, scope, kind, issue, receiptID string }{
+				{"foreign city", "city:other/rig:fixture", kind, "gc/one", request.ReceiptID},
+				{"foreign store", "city:alpha/rig:other", kind, "gc/one", request.ReceiptID},
+				{"unrelated kind", scope, "lease", "gc/one", request.ReceiptID},
+				{"wrong issue", scope, kind, "gc/other", request.ReceiptID},
+				{"wrong receipt", scope, kind, "gc/one", "other-receipt"},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					bad := request
+					bad.Scope, bad.Kind, bad.ReceiptID = tc.scope, tc.kind, tc.receiptID
+					receipt = controllerTransitionTestReceipt(t, bad, bad.Actor)
+					if _, found, err := reader.ControllerMetadataTransitionReceipt(tc.issue, request.ReceiptID); found || !errors.Is(err, ErrDecisionFrontierTransitionReceiptCorrupt) {
+						t.Fatalf("invalid receipt: found=%v err=%v", found, err)
+					}
+				})
+			}
+			if transport.postCount != 0 {
+				t.Fatal("read-only lifecycle operations issued a mutation")
+			}
+		})
+	}
+}
+
+func TestLifecycleReadScopeReadsPatchReceiptsWithoutWriteAuthority(t *testing.T) {
+	const scope = "city:alpha/rig:fixture"
+	request := controllerTransitionPatchTestRequest()
+	request.Scope, request.Kind = scope, "lifecycle_descendant_claim_identity_v1"
+	receipt := controllerTransitionPatchTestReceipt(t, request, request.Actor)
+	transport := &controllerTransitionTestTransport{handler: controllerTransitionPatchTestHandler(receipt, http.StatusOK)}
+	store := controllerTransitionTestStore(t, transport)
+	WithBdStorePrivateEvidenceLifecycleReadScope(scope)(store)
+	if writer, ok := RevisionTransitionPatchWriterFor(store); ok || writer != nil {
+		t.Fatal("read scope exposed a protected patch writer")
+	}
+	if _, err := store.TransitionPatch("gc-1", request); !errors.Is(err, ErrRevisionTransitionPatchUnavailable) {
+		t.Fatalf("direct patch write = %v, want unavailable", err)
+	}
+	reader, ok := RevisionTransitionPatchReceiptReaderFor(store)
+	if !ok {
+		t.Fatal("read scope did not expose patch receipts")
+	}
+	got, found, err := reader.ReadRevisionTransitionPatchReceipt(request.ReceiptID)
+	if err != nil || !found || got.Scope != scope || got.Kind != request.Kind || got.ToVersion != 8 {
+		t.Fatalf("patch receipt = %+v, found=%v err=%v", got, found, err)
+	}
+	for _, tc := range []struct{ name, scope, kind, receiptID string }{
+		{"physical store only", "rig:fixture", "admission", request.ReceiptID},
+		{"foreign city", "city:other/rig:fixture", request.Kind, request.ReceiptID},
+		{"foreign store", "city:alpha/rig:other", request.Kind, request.ReceiptID},
+		{"unrelated kind", scope, "unrelated_patch", request.ReceiptID},
+		{"wrong receipt", scope, request.Kind, "other-receipt"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bad := request
+			bad.Scope, bad.Kind, bad.ReceiptID = tc.scope, tc.kind, tc.receiptID
+			transport.handler = controllerTransitionPatchTestHandler(controllerTransitionPatchTestReceipt(t, bad, bad.Actor), http.StatusOK)
+			if _, found, err := reader.ReadRevisionTransitionPatchReceipt(request.ReceiptID); found || !errors.Is(err, ErrRevisionTransitionPatchProtocol) {
+				t.Fatalf("invalid patch receipt: found=%v err=%v", found, err)
+			}
+		})
+	}
+	if transport.postCount != 0 {
+		t.Fatal("read-only lifecycle operations issued a mutation")
+	}
+}
+
+func TestLifecycleReadScopeRequiresConfiguredTransitionTransport(t *testing.T) {
+	for _, tc := range []struct {
+		name, scope string
+		disabled    bool
+	}{
+		{"disabled transitions", "city:alpha/rig:fixture", true},
+		{"wrong physical store", "city:alpha/rig:other", false},
+		{"empty scope", "", false},
+		{"malformed scope", "alpha/rig:fixture", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			transport := &controllerTransitionTestTransport{handler: http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+				t.Fatal("invalid read scope reached HTTP transport")
+			})}
+			store := controllerTransitionTestStoreWithEnabled(t, transport, !tc.disabled)
+			WithBdStorePrivateEvidenceLifecycleReadScope(tc.scope)(store)
+			if _, ok := ControllerMetadataTransitionReceiptReaderFor(store); ok {
+				t.Fatal("invalid read scope exposed metadata receipt reader")
+			}
+			if _, ok := RevisionTransitionPatchReceiptReaderFor(store); ok {
+				t.Fatal("invalid read scope exposed patch receipt reader")
+			}
+			if _, _, err := store.ReadRevisionTransitionPatchReceipt("patch/1"); !errors.Is(err, ErrRevisionTransitionPatchUnavailable) {
+				t.Fatalf("invalid read scope patch error = %v", err)
+			}
+		})
 	}
 }

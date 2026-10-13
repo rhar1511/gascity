@@ -23,7 +23,7 @@ func hookClaimLifecycleWork(ctx context.Context, candidate beads.Bead, opts hook
 		return beads.Bead{}, hookLifecycleClaimResult{}, fmt.Errorf("controller city path is unavailable")
 	}
 	sessionID := hookClaimEnvValue(opts.Env, "GC_SESSION_ID")
-	instanceToken := hookClaimEnvValue(opts.Env, "GC_INSTANCE_TOKEN")
+	instanceToken := strings.TrimSpace(opts.LifecycleInstanceToken)
 	runtimeEpoch := hookClaimEnvValue(opts.Env, "GC_RUNTIME_EPOCH")
 	if sessionID == "" || instanceToken == "" || !canonicalHookClaimEpoch(runtimeEpoch) {
 		return beads.Bead{}, hookLifecycleClaimResult{}, fmt.Errorf("enrolled lifecycle claim requires GC_SESSION_ID, GC_INSTANCE_TOKEN, and canonical GC_RUNTIME_EPOCH")

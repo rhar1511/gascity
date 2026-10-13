@@ -177,6 +177,7 @@ type privateEvidenceHTTPClient struct {
 	database                  string
 	scopeRef                  string
 	lifecycleScope            string
+	lifecycleReadScope        string
 	admissionScope            string
 	token                     string
 	revisionTransitions       bool
@@ -201,6 +202,24 @@ func WithBdStorePrivateEvidenceAdmissionScope(scope string) BdStoreOption {
 		}
 		client := *store.privateEvidenceHTTP
 		client.admissionScope = scope
+		store.privateEvidenceHTTP = &client
+	}
+}
+
+// WithBdStorePrivateEvidenceLifecycleReadScope binds receipt reads to an exact
+// lifecycle scope derived from the trusted city/store configuration. It grants
+// neither lifecycle metadata writes nor protected patch writes.
+func WithBdStorePrivateEvidenceLifecycleReadScope(scope string) BdStoreOption {
+	return func(store *BdStore) {
+		if store == nil || store.privateEvidenceHTTP == nil || store.privateEvidenceHTTPInitErr != nil {
+			return
+		}
+		if !store.privateEvidenceHTTP.revisionTransitions || !validPrivateEvidenceLifecycleScope(scope, store.privateEvidenceHTTP.scopeRef) {
+			store.privateEvidenceHTTPInitErr = fmt.Errorf("%w: lifecycle receipt read scope is invalid", ErrPrivateEvidenceHTTPUnavailable)
+			return
+		}
+		client := *store.privateEvidenceHTTP
+		client.lifecycleReadScope = scope
 		store.privateEvidenceHTTP = &client
 	}
 }
@@ -575,6 +594,24 @@ func (c *privateEvidenceHTTPClient) patchTransitionScopeAllowed(scope, kind stri
 		return true
 	}
 	return false
+}
+
+func (c *privateEvidenceHTTPClient) metadataReceiptScopeAllowed(scope, kind string) bool {
+	if c == nil {
+		return false
+	}
+	return c.metadataTransitionScopeAllowed(scope, kind) ||
+		(c.lifecycleReadScope != "" && scope == c.lifecycleReadScope &&
+			(kind == privateEvidenceLifecycleAdmissionAttachmentKind || kind == privateEvidenceLifecycleDescendantAnchorKind))
+}
+
+func (c *privateEvidenceHTTPClient) patchReceiptScopeAllowed(scope, kind string) bool {
+	if c == nil {
+		return false
+	}
+	_, lifecycleKind := privateEvidenceLifecyclePatchKinds[kind]
+	return (c.revisionTransitionPatches && c.patchTransitionScopeAllowed(scope, kind)) ||
+		(c.lifecycleReadScope != "" && scope == c.lifecycleReadScope && lifecycleKind)
 }
 
 func validPrivateEvidenceScopeRef(scope string) bool {

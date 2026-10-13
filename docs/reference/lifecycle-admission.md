@@ -123,6 +123,13 @@ rollback, backend qualification, and real worker-canary evidence.
 
 ### Beginning source work from a claimed step
 
+`gc hook --claim` discovers the generated execution step. A materialized source
+is excluded from automatic claims so it cannot displace the step's execution
+attribution. The hook reads immutable lifecycle receipts through its exact
+configured city/store scope; those reads do not grant protected write authority.
+Its managed instance token is passed in-process to the controller client and
+remains excluded from work-query subprocess environments.
+
 Inside a managed worker session, begin the source of the current claimed step:
 
 ```bash

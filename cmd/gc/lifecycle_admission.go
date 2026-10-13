@@ -1104,12 +1104,24 @@ func lifecycleStoreForRef(cityPath string, cfg *config.City, ref string) (beads.
 	if ref == "" {
 		return nil, fmt.Errorf("empty lifecycle store ref")
 	}
+	openReceiptStore := func(path string) (beads.Store, error) {
+		store, err := openStoreAtForCity(path, cityPath)
+		if err != nil {
+			return nil, err
+		}
+		if cfg != nil && cfg.Lifecycle.AdmissionEnabled {
+			if leaf, ok := controllerBdWriteLeaf(store); ok {
+				beads.WithBdStorePrivateEvidenceLifecycleReadScope(worklifecycle.ScopeForStore(censusCityName(cfg), ref))(leaf)
+			}
+		}
+		return store, nil
+	}
 	if strings.HasPrefix(ref, "city:") {
 		city := strings.TrimSpace(strings.TrimPrefix(ref, "city:"))
 		if cfg == nil || city == "" || city != censusCityName(cfg) {
 			return nil, fmt.Errorf("lifecycle store ref %q does not name this city", ref)
 		}
-		return openStoreAtForCity(cityPath, cityPath)
+		return openReceiptStore(cityPath)
 	}
 	if strings.HasPrefix(ref, "rig:") {
 		rigName := strings.TrimSpace(strings.TrimPrefix(ref, "rig:"))
@@ -1118,7 +1130,7 @@ func lifecycleStoreForRef(cityPath string, cfg *config.City, ref string) (beads.
 		}
 		for _, rig := range cfg.Rigs {
 			if strings.TrimSpace(rig.Name) == rigName {
-				return openStoreAtForCity(rig.Path, cityPath)
+				return openReceiptStore(rig.Path)
 			}
 		}
 		return nil, fmt.Errorf("lifecycle rig store %q is not configured", ref)
@@ -1427,6 +1439,13 @@ func filterHookLifecycleCandidates(candidates []beads.Bead, opts hookClaimOption
 		case !hookLifecycleRouteMatches(opts.LifecycleCity, decision.Receipt.Route, opts.RouteTargets):
 			reason = "candidate route does not match the signed admission contract"
 		default:
+			// A materialized source executes through its generated steps. Claiming
+			// it here would replace the current execution stamp and can starve the
+			// workflow's ready step. The worker begins it explicitly from that step.
+			if marker, ok := lifecycleMaterializationFor(bead); ok && marker.SourceID == bead.ID &&
+				marker.State == "attached" && marker.WorkflowID != "" && marker.WorkflowID != bead.ID {
+				continue
+			}
 			filtered = append(filtered, bead)
 			continue
 		}

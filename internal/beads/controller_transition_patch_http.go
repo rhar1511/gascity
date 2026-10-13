@@ -74,7 +74,7 @@ func (s *BdStore) RevisionTransitionPatchWriterHandle() (RevisionTransitionPatch
 // RevisionTransitionPatchReceiptReaderHandle exposes durable patch receipts
 // only when the configured private HTTP transport supports exact readback.
 func (s *BdStore) RevisionTransitionPatchReceiptReaderHandle() (RevisionTransitionPatchReceiptReader, bool) {
-	if s == nil || s.privateEvidenceHTTP == nil || s.privateEvidenceHTTPInitErr != nil || !s.privateEvidenceHTTP.revisionTransitionPatches {
+	if s == nil || s.privateEvidenceHTTP == nil || s.privateEvidenceHTTPInitErr != nil || (!s.privateEvidenceHTTP.revisionTransitionPatches && s.privateEvidenceHTTP.lifecycleReadScope == "") {
 		return nil, false
 	}
 	return s, true
@@ -112,7 +112,7 @@ func (s *BdStore) TransitionPatch(issueID string, request RevisionTransitionPatc
 // ReadRevisionTransitionPatchReceipt reads and validates one exact durable
 // patch receipt. A canonical not-found response is reported as found=false.
 func (s *BdStore) ReadRevisionTransitionPatchReceipt(receiptID string) (RevisionTransitionPatchReceipt, bool, error) {
-	if s == nil || s.privateEvidenceHTTP == nil || s.privateEvidenceHTTPInitErr != nil || !s.privateEvidenceHTTP.revisionTransitionPatches {
+	if s == nil || s.privateEvidenceHTTP == nil || s.privateEvidenceHTTPInitErr != nil || (!s.privateEvidenceHTTP.revisionTransitionPatches && s.privateEvidenceHTTP.lifecycleReadScope == "") {
 		return RevisionTransitionPatchReceipt{}, false, ErrRevisionTransitionPatchUnavailable
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*privateEvidenceHTTPTimeout)
@@ -122,6 +122,13 @@ func (s *BdStore) ReadRevisionTransitionPatchReceipt(receiptID string) (Revision
 
 func (c *privateEvidenceHTTPClient) verifyRevisionTransitionPatchContext(ctx context.Context) error {
 	if c == nil || !c.revisionTransitionPatches {
+		return ErrRevisionTransitionPatchUnavailable
+	}
+	return c.verifyRevisionTransitionPatchReceiptContext(ctx)
+}
+
+func (c *privateEvidenceHTTPClient) verifyRevisionTransitionPatchReceiptContext(ctx context.Context) error {
+	if c == nil || (!c.revisionTransitionPatches && c.lifecycleReadScope == "") {
 		return ErrRevisionTransitionPatchUnavailable
 	}
 	response, err := c.readRevisionTransitionContext(ctx)
@@ -233,7 +240,7 @@ func (c *privateEvidenceHTTPClient) readTransitionPatchReceipt(ctx context.Conte
 	if err := validateRevisionTransitionPatchReceiptID(receiptID); err != nil {
 		return RevisionTransitionPatchReceipt{}, false, fmt.Errorf("%w: receipt ID is invalid", ErrRevisionTransitionPatchProtocol)
 	}
-	if err := c.verifyRevisionTransitionPatchContext(ctx); err != nil {
+	if err := c.verifyRevisionTransitionPatchReceiptContext(ctx); err != nil {
 		return RevisionTransitionPatchReceipt{}, false, err
 	}
 	path := transitionPatchReceiptPath + url.PathEscape(receiptID)
@@ -253,7 +260,7 @@ func (c *privateEvidenceHTTPClient) readTransitionPatchReceipt(ctx context.Conte
 		return RevisionTransitionPatchReceipt{}, false, revisionTransitionPatchStatusError(status, body)
 	}
 	receipt, err := decodeRevisionTransitionPatchReceipt(body)
-	if err != nil || receipt.ReceiptID != receiptID || !c.patchTransitionScopeAllowed(receipt.Scope, receipt.Kind) {
+	if err != nil || receipt.ReceiptID != receiptID || !c.patchReceiptScopeAllowed(receipt.Scope, receipt.Kind) {
 		return RevisionTransitionPatchReceipt{}, false, fmt.Errorf("%w: receipt response is malformed or outside the configured scope", ErrRevisionTransitionPatchProtocol)
 	}
 	return receipt, true, nil
