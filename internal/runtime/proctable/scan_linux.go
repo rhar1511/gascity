@@ -195,13 +195,23 @@ func parseEnvironFile(path string) (map[string]string, error) {
 }
 
 func isRootWithSessionID(root string, pid int, sessionID string) (bool, error) {
-	ppid, ok, err := readParentPID(filepath.Join(root, strconv.Itoa(pid), "stat"))
+	statPath := filepath.Join(root, strconv.Itoa(pid), "stat")
+	ppid, ok, err := readParentPID(statPath)
 	if err != nil {
 		return false, err
 	}
 	if !ok {
 		// stat vanished between environ read and here; process died in the race
 		// window — skip rather than misreport it as a root.
+		return false, nil
+	}
+	state, stateOK, err := readProcState(statPath)
+	if err != nil {
+		return false, err
+	}
+	if !stateOK || state == 'Z' || state == 'X' {
+		// A zombie retains its environment and can be reparented to init, but
+		// can no longer execute. KillByPID treats that state as dead too.
 		return false, nil
 	}
 	if ppid <= 1 {
@@ -215,6 +225,25 @@ func isRootWithSessionID(root string, pid int, sessionID string) (bool, error) {
 		return true, nil
 	}
 	return parentEnv["GC_SESSION_ID"] != sessionID, nil
+}
+
+func readProcState(path string) (byte, bool, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, fs.ErrPermission) || os.IsPermission(err) {
+			return 0, false, nil
+		}
+		return 0, false, err
+	}
+	closeParen := strings.LastIndexByte(string(data), ')')
+	if closeParen < 0 || closeParen+1 >= len(data) {
+		return 0, false, fmt.Errorf("malformed proc stat record")
+	}
+	fields := strings.Fields(string(data[closeParen+1:]))
+	if len(fields) == 0 || len(fields[0]) != 1 {
+		return 0, false, fmt.Errorf("malformed proc stat state")
+	}
+	return fields[0][0], true, nil
 }
 
 // isInfrastructureProcess reports whether pid's comm names infrastructure (a
