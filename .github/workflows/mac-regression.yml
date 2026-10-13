@@ -348,9 +348,9 @@ jobs:
       - gate
     if: needs.gate.outputs.run_smoke == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
-    # Job cancelled at 25m05s after both test commands passed.
-    # Leave bounded outer headroom without changing either test deadline.
-    timeout-minutes: 26
+    # Cold ARM run reached the 26m job limit despite both commands passing.
+    # Budget the 20m Tier A and 10m CLI contract deadlines plus setup/cleanup.
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
