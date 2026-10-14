@@ -1547,3 +1547,78 @@ func TestVulnerabilityVerdictRunsWithoutReportingDirectory(t *testing.T) {
 		})
 	}
 }
+
+// Exercise the checker itself: HEAD and its archived baseline must use the
+// same site root, while actual new page failures still fail the comparison.
+func TestDocsRenderCheckUsesMatchingSiteRoots(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		head     string
+		wantExit int
+	}{
+		{name: "inherited_page", head: "error /inherited-page\n", wantExit: 0},
+		{name: "new_page", head: "error /inherited-page\nerror /new-page\n", wantExit: 1},
+		{name: "static_asset", head: "error /inherited-page\nerror /new-image.png\n", wantExit: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := t.TempDir()
+			writeTestFile(t, filepath.Join(repo, "docs", "docs.json"), "{}\n")
+			writeTestFile(t, filepath.Join(repo, "docs", "mint-output.txt"), "error /inherited-page\n")
+			writeTestFile(t, filepath.Join(repo, "engdocs", "outside.md"), "not part of the published site\n")
+			env := []string{
+				"PATH=" + os.Getenv("PATH"), "HOME=" + t.TempDir(),
+				"TMPDIR=" + t.TempDir(), "GIT_CONFIG_NOSYSTEM=1",
+				"GIT_CONFIG_GLOBAL=" + os.DevNull,
+			}
+			git := func(args ...string) {
+				t.Helper()
+				cmd := testCommand("git", args...)
+				cmd.Dir, cmd.Env = repo, env
+				if out, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("git %v: %v\n%s", args, err, out)
+				}
+			}
+			git("init", "-q")
+			git("add", "docs", "engdocs")
+			git("-c", "user.name=Docs test", "-c", "user.email=docs@example.test", "-c", "commit.gpgsign=false", "commit", "-qm", "baseline")
+			writeTestFile(t, filepath.Join(repo, "docs", "mint-output.txt"), tc.head)
+			mint := filepath.Join(t.TempDir(), "mint")
+			writeExecutable(t, mint, `#!/bin/sh
+printf '%s\n' "$PWD" >> "$MINT_ROOT_LOG"
+if [ ! -f docs.json ]; then
+    printf 'error /outside-site-root\n'
+    exit 1
+fi
+cat mint-output.txt
+exit 1
+`)
+			rootLog := filepath.Join(t.TempDir(), "roots")
+			cmd := testCommand("bash", filepath.Join(repoRoot(t), ".github", "scripts", "docs-render-check.sh"), "HEAD")
+			cmd.Dir = repo
+			cmd.Env = append(slices.Clone(env), "MINT_CMD="+mint, "MINT_ROOT_LOG="+rootLog)
+			out, err := cmd.CombinedOutput()
+			code := 0
+			if err != nil {
+				var exitErr *exec.ExitError
+				if !errors.As(err, &exitErr) {
+					t.Fatalf("run docs checker: %v\n%s", err, out)
+				}
+				code = exitErr.ExitCode()
+			}
+			if code != tc.wantExit {
+				t.Fatalf("exit = %d, want %d\n%s", code, tc.wantExit, out)
+			}
+			roots, err := os.ReadFile(rootLog)
+			if err != nil {
+				t.Fatal(err)
+			}
+			lines := strings.Split(strings.TrimSpace(string(roots)), "\n")
+			if len(lines) != 2 || lines[0] != filepath.Join(repo, "docs") || filepath.Base(lines[1]) != "docs" {
+				t.Fatalf("HEAD/base site roots = %q", lines)
+			}
+			if tc.wantExit == 1 && !strings.Contains(string(out), "/new-page") {
+				t.Fatalf("new page failure missing: %s", out)
+			}
+		})
+	}
+}
