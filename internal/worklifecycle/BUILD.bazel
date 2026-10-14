@@ -8,6 +8,7 @@ go_library(
         "admission_proof_evaluation.go",
         "attempt_evidence.go",
         "claim_transition.go",
+        "descendant_attempt_evidence.go",
         "descendant_claim.go",
         "descendant_completion.go",
         "receipt.go",

@@ -66,15 +66,16 @@ const (
 )
 
 var privateEvidenceLifecyclePatchKinds = map[string]struct{}{
-	"lifecycle_descendant_completion_v1":      {},
-	"lifecycle_descendant_claim_identity_v1":  {},
-	"lifecycle_source_reservation_v1":         {},
-	"lifecycle_source_materialization_v1":     {},
-	"lifecycle_source_claim_identity_v1":      {},
-	"lifecycle_source_recovery_budget_v1":     {},
-	"lifecycle_source_recovery_escalation_v1": {},
-	"lifecycle_source_completion_budget_v1":   {},
-	"lifecycle_source_close_v1":               {},
+	"lifecycle_descendant_attempt_evidence_v1": {},
+	"lifecycle_descendant_completion_v1":       {},
+	"lifecycle_descendant_claim_identity_v1":   {},
+	"lifecycle_source_reservation_v1":          {},
+	"lifecycle_source_materialization_v1":      {},
+	"lifecycle_source_claim_identity_v1":       {},
+	"lifecycle_source_recovery_budget_v1":      {},
+	"lifecycle_source_recovery_escalation_v1":  {},
+	"lifecycle_source_completion_budget_v1":    {},
+	"lifecycle_source_close_v1":                {},
 }
 
 func redactPrivateEvidenceDiagnostic(value string) string {

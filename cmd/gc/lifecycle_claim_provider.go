@@ -204,7 +204,13 @@ func (cs *controllerState) transitionLifecycleWork(ctx context.Context, request 
 		}
 		var claimed worklifecycle.ClaimIdentityResult
 		if completion != nil {
-			claimed, err = worklifecycle.CompleteDescendantExecution(descendantConfig, worklifecycle.DescendantCompletionRequest{
+			completionConfig := worklifecycle.DescendantCompletionConfig{
+				DescendantClaimConfig: descendantConfig,
+				CaptureAttempt: func(owner beads.Bead, seal func(key, value string) error) error {
+					return captureLifecycleExecutionAttempt(ctx, cityPath, cfg, cityStore, selected, owner, request.Session, completion.Outcome, seal)
+				},
+			}
+			claimed, err = worklifecycle.CompleteDescendantExecution(completionConfig, worklifecycle.DescendantCompletionRequest{
 				ClaimIdentityRequest: claimRequest, ClaimGeneration: completion.ClaimGeneration, Outcome: completion.Outcome,
 			})
 		} else {

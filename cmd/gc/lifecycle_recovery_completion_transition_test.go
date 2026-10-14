@@ -205,9 +205,14 @@ func TestLifecycleRecoveryQ54ReservesExactRequestBeforeOneDeliveryAndReplaysRead
 		t.Fatal(err)
 	}
 	patchesBeforeDisabled := len(setup.store.patchRequests)
+	sessionBeforeDisabled, err := setup.cityStore.Get(claim.info.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	runLifecycleRecovery(setup, claim, &logs)
+	sessionAfterDisabled, sessionErr := setup.cityStore.Get(claim.info.ID)
 	afterDisabled, err := setup.store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
-	if err != nil || !reflect.DeepEqual(beforeDisabled, afterDisabled) ||
+	if err != nil || sessionErr != nil || !reflect.DeepEqual(sessionBeforeDisabled, sessionAfterDisabled) || !reflect.DeepEqual(beforeDisabled, afterDisabled) ||
 		len(setup.store.patchRequests) != patchesBeforeDisabled || setup.store.sourceGenericWrites != 0 ||
 		claim.provider.CountCalls("Nudge", claim.info.SessionName) != 0 {
 		t.Fatalf("disabled recovery changed work, intent, session or delivery: err=%v logs=%s", err, logs.String())

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/attemptevidence"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
@@ -42,6 +43,7 @@ func TestLifecycleAdmissionNativeGraphAttachAndReplay(t *testing.T) {
 	}
 	var fixture struct {
 		CityPath          string                        `json:"city_path"`
+		WorkerWorkDir     string                        `json:"worker_work_dir"`
 		SourceID          string                        `json:"source_id"`
 		Environment       map[string]string             `json:"environment"`
 		AdmissionKeyFile  string                        `json:"admission_key_file"`
@@ -53,7 +55,7 @@ func TestLifecycleAdmissionNativeGraphAttachAndReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !strings.HasPrefix(filepath.Clean(fixture.CityPath), "/var/tmp/gc-bounded-go.") ||
-		fixture.SourceID == "" || fixture.Environment["GC_CITY"] != fixture.CityPath ||
+		fixture.SourceID == "" || fixture.WorkerWorkDir != filepath.Join(filepath.Dir(fixture.CityPath), "worker-worktree") || fixture.Environment["GC_CITY"] != fixture.CityPath ||
 		fixture.Authority.CityName != "native-admission" || fixture.Authority.StoreRef != "rig:api" {
 		t.Fatal("fixture is not the exact private admission city/source")
 	}
@@ -137,7 +139,7 @@ func TestLifecycleAdmissionNativeGraphAttachAndReplay(t *testing.T) {
 	provider := runtime.NewFake()
 	manager := session.NewManagerWithOptions(sessionRows, provider)
 	info, err := manager.CreateSession(context.Background(), session.CreateOptions{
-		Template: "api/worker", Command: "test-agent", WorkDir: t.TempDir(), Provider: "test-agent",
+		Template: "api/worker", Command: "test-agent", WorkDir: fixture.WorkerWorkDir, Provider: "test-agent",
 		ExtraMeta: map[string]string{"session_origin": "ephemeral"},
 	})
 	if err != nil {
@@ -657,6 +659,30 @@ func TestLifecycleAdmissionNativeGraphAttachAndReplay(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(closed, sourceAfterTail) {
 		t.Fatal("native workflow tail changed accepted source")
 	}
+	// Public references must resolve through the actual private transport for
+	// every separately owned execution, including the accepted source and drain.
+	for _, attempt := range []struct {
+		owner   beads.Bead
+		outcome string
+	}{{closed, "no-op"}, {completedStep, "pass"}, {tailClosed, "pass"}} {
+		var reference attemptevidence.Reference
+		if err := json.Unmarshal([]byte(attempt.owner.Metadata[beadmeta.AttemptEvidenceReferenceMetadataKey]), &reference); err != nil {
+			t.Fatalf("native attempt reference for %s: %v", attempt.owner.ID, err)
+		}
+		evidence, err := attemptevidence.Read(c.sourceLeg.store, attempt.owner.ID, reference.AttemptID)
+		if err != nil || evidence.Identity.OwnerBeadID != attempt.owner.ID || evidence.Identity.ExecutionBeadID != attempt.owner.ID || evidence.Identity.SessionID != info.ID || evidence.Identity.SessionGeneration != info.Generation || evidence.Identity.ClaimGeneration != "1" || evidence.Outcome != attempt.outcome || evidence.StoreRef != "rig:api" || evidence.SourceStatus != attemptevidence.StatusAvailable || evidence.CandidateStatus != attemptevidence.StatusAvailable || evidence.WorkspaceDiff.Status != attemptevidence.StatusAvailable {
+			t.Fatalf("native private attempt for %s lost its exact identity/outcome: %v", attempt.owner.ID, err)
+		}
+		archiveReader, ok := beads.PrivateEvidenceArchiveReaderFor(c.sourceLeg.store)
+		if !ok {
+			t.Fatal("native store lost its private archive transport")
+		}
+		archives, err := archiveReader.ListPrivateEvidenceArchives(attempt.owner.ID, reference.AttemptID)
+		if err != nil || len(archives) != 1 {
+			t.Fatalf("native attempt for %s has no unique archive: %v", attempt.owner.ID, err)
+		}
+	}
+	t.Log("native source, current step and drain archives bind exact owner/session/generation/outcome")
 	t.Log("native accepted-source tail claimed and completed with exact retry while preserving signed source closure")
 	t.Log("native worker hook discovered and claimed both initial step and accepted-source tail using real session storage")
 	t.Log("native current execution completed and replayed after a provider drain request")

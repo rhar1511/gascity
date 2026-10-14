@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"reflect"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/attemptevidence"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -644,8 +646,8 @@ func TestLifecycleSourceClaimRefusesChangedExecutionAuthority(t *testing.T) {
 }
 
 func TestLifecycleExecutionCompletionPreservesSourceAndRecovers(t *testing.T) {
-	for _, lost := range []bool{false, true} {
-		t.Run(map[bool]string{false: "normal", true: "lost response"}[lost], func(t *testing.T) {
+	for _, lostKind := range []string{"", "lifecycle_descendant_completion_v1", "lifecycle_descendant_attempt_evidence_v1"} {
+		t.Run(map[string]string{"": "normal", "lifecycle_descendant_completion_v1": "lost close response", "lifecycle_descendant_attempt_evidence_v1": "lost evidence response"}[lostKind], func(t *testing.T) {
 			setup, state, request := newLifecycleCoreGraphClaimProviderFixture(t)
 			claim, err := state.ClaimLifecycleWork(context.Background(), request)
 			if err != nil {
@@ -661,17 +663,27 @@ func TestLifecycleExecutionCompletionPreservesSourceAndRecovers(t *testing.T) {
 			}
 			request.Work, request.ExpectedRevision, request.ExpectedTransitionHead = step, step.Revision, claim.ReceiptID
 			finish := api.LifecycleExecutionCompletionTransitionRequest{Claim: request, Intent: api.LifecycleExecutionCompletionIntent{ClaimGeneration: claim.ClaimGeneration, Outcome: "pass"}}
-			if lost {
-				setup.store.loseNextPatchKind = "lifecycle_descendant_completion_v1"
-			}
+			setup.store.loseNextPatchKind = lostKind
 			before := len(setup.store.patchRequests)
 			completed, err := state.CompleteLifecycleExecution(context.Background(), finish)
 			if err != nil {
 				t.Fatalf("complete current execution: %v", err)
 			}
 			current, err := setup.store.Get(step.ID)
-			if err != nil || current.Status != "closed" || current.Metadata[beadmeta.OutcomeMetadataKey] != "pass" || current.Revision != completed.Revision || completed.ReceiptID == claim.ReceiptID || completed.Replayed != lost || len(setup.store.patchRequests) != before+1 {
+			var reference attemptevidence.Reference
+			if err != nil || json.Unmarshal([]byte(current.Metadata[beadmeta.AttemptEvidenceReferenceMetadataKey]), &reference) != nil {
+				t.Fatal("completed step has no sealed attempt reference")
+			}
+			evidence, err := attemptevidence.Read(setup.store, step.ID, reference.AttemptID)
+			if err != nil || evidence.Identity.SessionID != request.Session.ID || evidence.Identity.SessionGeneration != request.Session.Generation || evidence.Identity.ClaimGeneration != claim.ClaimGeneration || evidence.Outcome != "pass" || evidence.StoreRef != "rig:pilot" {
+				t.Fatalf("step completion lost its exact attempt evidence: %v", err)
+			}
+			if current.Status != "closed" || current.Metadata[beadmeta.OutcomeMetadataKey] != "pass" || current.Revision != completed.Revision || completed.ReceiptID == claim.ReceiptID || completed.Replayed != (lostKind != "") || len(setup.store.patchRequests) != before+2 {
 				t.Fatalf("completion result %+v, readback error %v", completed, err)
+			}
+			// Exact terminal replay must not need the original runtime or capture again.
+			if err := setup.cityStore.Delete(request.Session.ID); err != nil {
+				t.Fatal(err)
 			}
 			for _, fresh := range []bool{false, true} {
 				if fresh {
@@ -680,7 +692,7 @@ func TestLifecycleExecutionCompletionPreservesSourceAndRecovers(t *testing.T) {
 					finish.Claim.ExpectedTransitionHead = completed.ReceiptID
 				}
 				replay, err := state.CompleteLifecycleExecution(context.Background(), finish)
-				if err != nil || !replay.Replayed || replay.ReceiptID != completed.ReceiptID || replay.Revision != completed.Revision || len(setup.store.patchRequests) != before+1 {
+				if err != nil || !replay.Replayed || replay.ReceiptID != completed.ReceiptID || replay.Revision != completed.Revision || len(setup.store.patchRequests) != before+2 {
 					t.Fatalf("completion retry: %+v, %v", replay, err)
 				}
 			}
@@ -689,7 +701,7 @@ func TestLifecycleExecutionCompletionPreservesSourceAndRecovers(t *testing.T) {
 				t.Fatal("changed outcome replaced completed execution")
 			}
 			after, err := setup.store.Get(step.ID)
-			if err != nil || !reflect.DeepEqual(current, after) || len(setup.store.patchRequests) != before+1 {
+			if err != nil || !reflect.DeepEqual(current, after) || len(setup.store.patchRequests) != before+2 {
 				t.Fatal("completion retry changed step")
 			}
 			afterSource, err := setup.store.Get(source.ID)
@@ -700,8 +712,68 @@ func TestLifecycleExecutionCompletionPreservesSourceAndRecovers(t *testing.T) {
 	}
 }
 
+func TestLifecycleExecutionCompletionRepairsSealedAttemptBeforeClosing(t *testing.T) {
+	for _, interruption := range []string{"archive", "close"} {
+		for _, observation := range []string{"claim", "evidence"} {
+			t.Run(interruption+"/"+observation, func(t *testing.T) {
+				setup, state, request := newLifecycleCoreGraphClaimProviderFixture(t)
+				claim, err := state.ClaimLifecycleWork(context.Background(), request)
+				if err != nil {
+					t.Fatal(err)
+				}
+				step, err := setup.store.Get(request.Work.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				request.Work, request.ExpectedRevision, request.ExpectedTransitionHead = step, step.Revision, claim.ReceiptID
+				finish := api.LifecycleExecutionCompletionTransitionRequest{Claim: request, Intent: api.LifecycleExecutionCompletionIntent{ClaimGeneration: claim.ClaimGeneration, Outcome: "pass"}}
+				if interruption == "archive" {
+					setup.store.failNextEvidenceArchive = true
+				} else {
+					setup.store.failNextPatchKind = "lifecycle_descendant_completion_v1"
+				}
+				if _, err := state.CompleteLifecycleExecution(context.Background(), finish); err == nil {
+					t.Fatal("interrupted completion reported success")
+				}
+				pending, err := setup.store.Get(step.ID)
+				var reference attemptevidence.Reference
+				if err != nil || pending.Status != "in_progress" || pending.Metadata[beadmeta.OutcomeMetadataKey] != "" || json.Unmarshal([]byte(pending.Metadata[beadmeta.AttemptEvidenceReferenceMetadataKey]), &reference) != nil {
+					t.Fatal("interruption closed the step or lost its sealed attempt")
+				}
+				archives, err := setup.store.ListByMetadata(map[string]string{beadmeta.AttemptEvidenceArchiveOwnerIDMetadataKey: step.ID}, 0, beads.IncludeClosed)
+				if err != nil || (interruption == "archive" && len(archives) != 0) || (interruption == "close" && len(archives) != 1) {
+					t.Fatal("fixture did not interrupt the requested phase")
+				}
+				if observation == "evidence" {
+					finish.Claim.Work, finish.Claim.ExpectedRevision, finish.Claim.ExpectedTransitionHead = pending, pending.Revision, pending.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey]
+				}
+				writes := len(setup.store.patchRequests)
+				finish.Intent.Outcome = "fail"
+				if _, err := state.CompleteLifecycleExecution(context.Background(), finish); err == nil {
+					t.Fatal("changed outcome replaced sealed attempt")
+				}
+				afterRefusal, err := setup.store.Get(step.ID)
+				if err != nil || !reflect.DeepEqual(pending, afterRefusal) || len(setup.store.patchRequests) != writes {
+					t.Fatal("changed-outcome refusal mutated the step")
+				}
+				finish.Intent.Outcome = "pass"
+				completed, err := state.CompleteLifecycleExecution(context.Background(), finish)
+				if err != nil || !completed.Replayed {
+					t.Fatalf("retry did not finish sealed attempt: %+v, %v", completed, err)
+				}
+				closed, err := setup.store.Get(step.ID)
+				evidence, readErr := attemptevidence.Read(setup.store, step.ID, reference.AttemptID)
+				archives, archiveErr := setup.store.ListByMetadata(map[string]string{beadmeta.AttemptEvidenceArchiveOwnerIDMetadataKey: step.ID}, 0, beads.IncludeClosed)
+				if err != nil || readErr != nil || archiveErr != nil || closed.Status != "closed" || evidence.Outcome != "pass" || len(archives) != 1 || closed.Metadata[beadmeta.AttemptEvidenceReferenceMetadataKey] != pending.Metadata[beadmeta.AttemptEvidenceReferenceMetadataKey] || len(setup.store.patchRequests) != writes+1 {
+					t.Fatal("retry failed to archive the exact sealed attempt before close")
+				}
+			})
+		}
+	}
+}
+
 func TestLifecycleExecutionCompletionRefusesChangedAuthorityBeforeWrites(t *testing.T) {
-	for _, scenario := range []string{"missing anchor", "missing claim", "changed incarnation", "changed generation", "stale revision", "stale head", "changed instructions", "held step", "changed policy", "source as step", "operator outcome"} {
+	for _, scenario := range []string{"missing anchor", "missing claim", "changed incarnation", "replaced persisted incarnation", "replaced persisted generation", "changed generation", "stale revision", "stale head", "changed instructions", "held step", "changed policy", "source as step", "operator outcome"} {
 		t.Run(scenario, func(t *testing.T) {
 			setup, state, request := newLifecycleCoreGraphClaimProviderFixture(t)
 			claim, err := state.ClaimLifecycleWork(context.Background(), request)
@@ -721,6 +793,14 @@ func TestLifecycleExecutionCompletionRefusesChangedAuthorityBeforeWrites(t *test
 				delete(setup.store.patchReceipts, claim.ReceiptID)
 			case "changed incarnation":
 				finish.Claim.Session.InstanceToken = "other-runtime"
+			case "replaced persisted incarnation", "replaced persisted generation":
+				metadata := map[string]string{"instance_token": "replacement"}
+				if scenario == "replaced persisted generation" {
+					metadata = map[string]string{"generation": "2"}
+				}
+				if err := setup.cityStore.Update(request.Session.ID, beads.UpdateOpts{Metadata: metadata}); err != nil {
+					t.Fatal(err)
+				}
 			case "changed generation":
 				finish.Intent.ClaimGeneration = "2"
 			case "stale revision":

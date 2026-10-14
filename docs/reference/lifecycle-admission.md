@@ -201,17 +201,22 @@ The command derives the step and generation from the persisted current claim,
 then submits its exact revision and head through the authenticated controller.
 The controller verifies the protected anchor and incarnation-bound claim,
 current signed parent policy, holds, and compiled workflow membership. It
-atomically closes the step and records `gc.outcome` (`pass`, `fail`, or
-`skipped`). It does not close or accept the source. Reviewer acceptance still
+seals the attempt index and public reference in a protected evidence receipt,
+finishes the private archive, then atomically closes the step and records
+`gc.outcome` (`pass`, `fail`, or `skipped`). It does not close or accept the source. Reviewer acceptance still
 uses `gc beads completion prepare` and `gc beads completion accept`.
 
 The session's current claim stays on this step for retry and workflow lookup.
-An exact retry returns the original receipt without another mutation; a changed
-outcome conflicts. A later claim replaces the stamp normally. This path requires
+An archive or close failure leaves the step in progress with its sealed attempt.
+An exact retry from the claim or evidence receipt repairs that same archive
+before close; a changed outcome conflicts. Fresh or pending completion requires
+the persisted claim incarnation. An exact terminal retry returns the original
+receipt without another capture or mutation. A later claim replaces the stamp normally. This path requires
 the live session states allowed for claiming. A provider drain request leaves
 the current step eligible to finish and retry. Once drain acknowledgement marks
 the session pending stop, completion is refused, including retries. The core
-formula has not yet been switched to this command.
+formula uses this command after verified source acceptance, and claims its
+remaining drain step through the protected hook path.
 
 Generic `gc bd heartbeat` cannot refresh enrolled work: it lacks the current
 incarnation, claim and revision proof. A refusal leaves the source and execution

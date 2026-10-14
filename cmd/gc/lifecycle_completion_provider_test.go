@@ -58,9 +58,14 @@ func newLifecycleCompletionProviderFixture(t *testing.T) (lifecycleAdmissionTran
 }
 
 func TestLifecycleCompletionProviderCommitsAndRecoversExactAcceptance(t *testing.T) {
-	for _, mode := range []string{"legacy", "normal", "lost budget response", "failed close"} {
+	for _, mode := range []string{"legacy", "normal", "routed source without store marker", "lost budget response", "failed close"} {
 		t.Run(mode, func(t *testing.T) {
 			setup, state, request := newLifecycleCompletionProviderFixture(t)
+			if mode == "routed source without store marker" {
+				request.Work.Metadata = cloneLifecycleAdmissionMetadata(request.Work.Metadata)
+				delete(request.Work.Metadata, beadmeta.RootStoreRefMetadataKey)
+				setup.store.rows[request.Work.ID] = request.Work
+			}
 			wantBranch := request.Work.Metadata[beadmeta.WorkBranchMetadataKey]
 			wantOutcome := "no-op"
 			if mode != "legacy" {
@@ -105,12 +110,17 @@ func TestLifecycleCompletionProviderCommitsAndRecoversExactAcceptance(t *testing
 			if err != nil {
 				t.Fatalf("protected completion: %v", err)
 			}
-			if (mode == "normal" || mode == "legacy") && result.Replayed {
+			if (mode == "normal" || mode == "legacy" || mode == "routed source without store marker") && result.Replayed {
 				t.Fatal("first completion was reported as a replay")
 			}
 			closed, err := setup.store.Get(request.Work.ID)
 			if err != nil || closed.Status != "closed" || closed.Revision != result.Revision || result.WorkID != closed.ID || result.ReceiptID != closed.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey] || closed.Metadata[beadmeta.LifecycleCompletionReceiptMetadataKey] != request.Submission.CompletionReceipt {
 				t.Fatalf("completion did not commit exact accepted source: result=%+v err=%v", result, err)
+			}
+			if mode == "routed source without store marker" {
+				if _, stamped := closed.Metadata[beadmeta.RootStoreRefMetadataKey]; stamped {
+					t.Fatal("capture wrote an inferred source store marker")
+				}
 			}
 			if mode != "legacy" && (closed.Metadata[beadmeta.WorkOutcomeMetadataKey] != wantOutcome || closed.Metadata[beadmeta.WorkVerificationMetadataKey] != "existing behavior verified") {
 				t.Fatal("completion lost the signed work record")

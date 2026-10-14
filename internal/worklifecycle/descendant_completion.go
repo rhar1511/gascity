@@ -24,7 +24,7 @@ type DescendantCompletionRequest struct {
 // CompleteDescendantExecution verifies the immutable anchor and incarnation-
 // bound claim before appending a protected terminal patch. Verify must also
 // accept a closed step for exact replay, without relaxing parent authority.
-func CompleteDescendantExecution(cfg DescendantClaimConfig, request DescendantCompletionRequest) (ClaimIdentityResult, error) {
+func CompleteDescendantExecution(cfg DescendantCompletionConfig, request DescendantCompletionRequest) (ClaimIdentityResult, error) {
 	reader, sourceOK := beads.DecisionFrontierSourceReaderFor(cfg.Store)
 	anchors, anchorOK := beads.ControllerMetadataTransitionReceiptReaderFor(cfg.Store)
 	patches, patchOK := beads.RevisionTransitionPatchReceiptReaderFor(cfg.Store)
@@ -115,29 +115,9 @@ func CompleteDescendantExecution(cfg DescendantClaimConfig, request DescendantCo
 	if err != nil {
 		return ClaimIdentityResult{}, err
 	}
-	patch, err := transitionPatchWithHead(SourceWorkPatch{
-		Status:   &StringTransition{Expected: "in_progress", Value: "closed"},
-		Metadata: map[string]MetadataStringPatch{beadmeta.OutcomeMetadataKey: {Value: request.Outcome}},
-	}, TransitionStep("descendant_completion"), claimID, completionID)
-	if err != nil {
-		return ClaimIdentityResult{}, err
-	}
-	canonicalCompletion, err := transitionPatch(patch)
-	if err != nil {
-		return ClaimIdentityResult{}, err
-	}
-	write := beads.RevisionTransitionPatchRequest{
-		ReceiptID: completionID, Scope: cfg.Scope, Kind: descendantCompletionKind, Actor: cfg.Actor,
-		ExpectedVersion: claim.ToVersion, PriorReceiptID: claimID, PriorReceiptDigest: claimDigest, Patch: canonicalCompletion,
-	}
 	receipt, replay, err := patches.ReadRevisionTransitionPatchReceipt(completionID)
 	if err != nil {
 		return ClaimIdentityResult{}, err
-	}
-	if request.ExpectedRevision != claim.ToVersion || request.ExpectedTransitionHead != claimID {
-		if !replay || request.ExpectedRevision != receipt.ToVersion || request.ExpectedTransitionHead != completionID {
-			return ClaimIdentityResult{}, fmt.Errorf("completion observation is neither claim nor exact terminal receipt: %w", ErrTransitionChainStale)
-		}
 	}
 	if current.Assignee != cfg.Actor || current.Metadata[beadmeta.SessionIDMetadataKey] != request.SessionID || current.Metadata[beadmeta.ClaimGenerationMetadataKey] != request.ClaimGeneration {
 		return ClaimIdentityResult{}, fmt.Errorf("completion owner or generation changed: %w", ErrTransitionChainStale)
@@ -147,10 +127,30 @@ func CompleteDescendantExecution(cfg DescendantClaimConfig, request DescendantCo
 			return ClaimIdentityResult{}, fmt.Errorf("completion claim metadata changed: %w", ErrTransitionChainStale)
 		}
 	}
+	parent, err := prepareDescendantCompletionEvidence(cfg, request, current, binding, claim, claimDigest, op, receipt, replay)
+	if err != nil {
+		return ClaimIdentityResult{}, err
+	}
+	current = parent.current
+	patch, err := transitionPatchWithHead(SourceWorkPatch{
+		Status:   &StringTransition{Expected: "in_progress", Value: "closed"},
+		Metadata: map[string]MetadataStringPatch{beadmeta.OutcomeMetadataKey: {Value: request.Outcome}},
+	}, TransitionStep("descendant_completion"), parent.receipt.ReceiptID, completionID)
+	if err != nil {
+		return ClaimIdentityResult{}, err
+	}
+	canonicalCompletion, err := transitionPatch(patch)
+	if err != nil {
+		return ClaimIdentityResult{}, err
+	}
+	write := beads.RevisionTransitionPatchRequest{
+		ReceiptID: completionID, Scope: cfg.Scope, Kind: descendantCompletionKind, Actor: cfg.Actor,
+		ExpectedVersion: parent.receipt.ToVersion, PriorReceiptID: parent.receipt.ReceiptID, PriorReceiptDigest: parent.digest, Patch: canonicalCompletion,
+	}
 	recovered := false
 	if !replay {
-		if current.Status != "in_progress" || current.Revision != claim.ToVersion || current.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey] != claimID {
-			return ClaimIdentityResult{}, fmt.Errorf("completion requires the unchanged in-progress claim head: %w", ErrTransitionChainStale)
+		if current.Status != "in_progress" || current.Revision != parent.receipt.ToVersion || current.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey] != parent.receipt.ReceiptID {
+			return ClaimIdentityResult{}, fmt.Errorf("completion requires the unchanged in-progress evidence head: %w", ErrTransitionChainStale)
 		}
 		if _, exists := current.Metadata[beadmeta.OutcomeMetadataKey]; exists {
 			return ClaimIdentityResult{}, fmt.Errorf("completion outcome is already present: %w", ErrTransitionChainStale)
@@ -205,5 +205,5 @@ func CompleteDescendantExecution(cfg DescendantClaimConfig, request DescendantCo
 			return ClaimIdentityResult{}, fmt.Errorf("completion readback changed claim metadata: %w", ErrTransitionChainStale)
 		}
 	}
-	return ClaimIdentityResult{Receipt: receipt, ClaimGeneration: request.ClaimGeneration, Replayed: replay, Recovered: recovered}, nil
+	return ClaimIdentityResult{Receipt: receipt, ClaimGeneration: request.ClaimGeneration, Replayed: replay || parent.replayed, Recovered: recovered || parent.recovered}, nil
 }

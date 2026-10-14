@@ -45,6 +45,49 @@ func (s *lifecycleAttemptCaptureStore) CompareAndSetPrivateEvidenceMetadataKey(i
 	return true, nil
 }
 
+// captureLifecycleExecutionAttempt supplies snapshot/archive I/O to the domain
+// completion operation. The domain owns the separately bound Q54 evidence write.
+func captureLifecycleExecutionAttempt(ctx context.Context, cityPath string, cfg *config.City, cityStore beads.Store, leg classStoreCandidate, owner beads.Bead, expected session.Info, outcome string, seal func(key, value string) error) error {
+	verifySession := func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		current, err := session.NewStore(beads.SessionStore{Store: cliSessionStore(cityStore, cfg, cityPath)}).Get(expected.ID)
+		if err != nil || current.ID != owner.Metadata[beadmeta.SessionIDMetadataKey] || current.Generation != expected.Generation ||
+			current.InstanceToken != expected.InstanceToken || session.AssigneeIdentifier(current) != owner.Assignee {
+			return fmt.Errorf("execution capture has no exact persisted session incarnation: %w", worklifecycle.ErrTransitionChainEvidence)
+		}
+		return nil
+	}
+	if err := verifySession(); err != nil {
+		return err
+	}
+	if !rootStoreRefMatchesCandidate(owner.Metadata[beadmeta.RootStoreRefMetadataKey], leg.ref) {
+		return worklifecycle.ErrTransitionChainEvidence
+	}
+	// Generated steps can omit the root-store metadata. Their verified route
+	// supplies the owner for repository resolution without mutating the row.
+	owner.Metadata = maps.Clone(owner.Metadata)
+	owner.Metadata[beadmeta.RootStoreRefMetadataKey] = leg.ref
+	dirs := workRecordRepoDirs{cityPath: cityPath, legacy: cityPath, rigs: func() []config.Rig { return cfg.Rigs }}
+	spec, err := workbenchAttemptCaptureSpec(owner, dirs, cityPath, cfg, expected.Generation)
+	if err != nil {
+		return err
+	}
+	spec.Outcome = outcome
+	store := &lifecycleAttemptCaptureStore{
+		Store: leg.store, ownerID: owner.ID,
+		seal: func(key, value string) error {
+			if err := verifySession(); err != nil {
+				return err
+			}
+			return seal(key, value)
+		},
+	}
+	_, err = attemptevidence.Capture(ctx, store, spec)
+	return err
+}
+
 // applyLifecycleCompletionBudget seals capture in the same protected patch as
 // the acceptance budget, then repairs/verifies its archive before close. A
 // committed budget is replayed from its immutable capture, never a new snapshot.
@@ -55,6 +98,12 @@ func applyLifecycleCompletionBudget(ctx context.Context, cityPath string, cfg *c
 	}
 	prospective := transition.source
 	prospective.Metadata = maps.Clone(prospective.Metadata)
+	if !rootStoreRefMatchesCandidate(prospective.Metadata[beadmeta.RootStoreRefMetadataKey], leg.ref) {
+		return empty, worklifecycle.ErrTransitionChainEvidence
+	}
+	// The verified route owns this source even when its optional store marker
+	// is absent. Supply capture provenance locally; do not write inferred metadata.
+	prospective.Metadata[beadmeta.RootStoreRefMetadataKey] = leg.ref
 	request.Patch.Metadata = maps.Clone(request.Patch.Metadata)
 	for key, change := range request.Patch.Metadata {
 		prospective.Metadata[key] = change.Value
