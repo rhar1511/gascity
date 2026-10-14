@@ -620,7 +620,7 @@ func setupGraphWorkflowCityWithPrivateEvidence(t *testing.T, mode string) (strin
 	return setupWorkflowCityWithPrivateEvidence(t, func(cityName string) string {
 		startCommand := "GC_GRAPH_MODE=" + mode + " bash " + agentScript("graph-dispatch.sh")
 		cityToml := fmt.Sprintf(
-			"[workspace]\nname = %q\n\n[session]\nprovider = \"subprocess\"\n\n[daemon]\nformula_v2 = true\npatrol_interval = \"100ms\"\n\n[[agent]]\nname = \"worker\"\nmax_active_sessions = 1\nstart_command = %q\n\n[[named_session]]\ntemplate = \"worker\"\nmode = \"always\"\n",
+			"[workspace]\nname = %q\n\n[session]\nprovider = \"subprocess\"\n\n[orders]\nskip = [\"beads-health\", \"dolt-health\"]\n\n[daemon]\nformula_v2 = true\npatrol_interval = \"100ms\"\n\n[[agent]]\nname = \"worker\"\nmax_active_sessions = 1\nstart_command = %q\n\n[[named_session]]\ntemplate = \"worker\"\nmode = \"always\"\n",
 			cityName, startCommand,
 		)
 
@@ -792,7 +792,7 @@ func setupWorkflowCityWithPrivateEvidence(t *testing.T, config func(string) stri
 		t.Fatalf("read initialized graph city config: %v", err)
 	}
 	privateEvidenceConfig := fmt.Sprintf(
-		"\n[beads.private_evidence.%q]\nendpoint = %q\nproject_id = %q\ndatabase = %q\ntoken_file = %q\n",
+		"\n[beads.private_evidence.%q]\nendpoint = %q\nproject_id = %q\ndatabase = %q\ntoken_file = %q\nrevision_transitions = true\n",
 		transport.scopeRef, transport.endpoint, transport.projectID, transport.database, transport.tokenFile,
 	)
 	if err := os.WriteFile(cityConfigPath, append(contents, []byte(privateEvidenceConfig)...), 0o600); err != nil {

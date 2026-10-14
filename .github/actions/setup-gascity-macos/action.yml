@@ -19,6 +19,10 @@ inputs:
   bd-version:
     description: Beads release version to install (with leading v)
     required: true
+  qualified-integration-bd:
+    description: Build the exact fork source required by HTTP integration suites
+    required: false
+    default: "false"
   install-claude-cli:
     description: Whether to install the Claude CLI
     required: false
@@ -69,6 +73,8 @@ runs:
     - name: Install system dependencies (brew)
       if: ${{ inputs.install-system-deps == 'true' }}
       shell: bash
+      env:
+        QUALIFIED_INTEGRATION_BD: ${{ inputs.qualified-integration-bd }}
       run: |
         set -euo pipefail
         if ! command -v brew >/dev/null 2>&1; then
@@ -91,6 +97,9 @@ runs:
         lock_file="${RUNNER_TOOL_CACHE:-$HOME/.local}/gascity-brew.lock"
         mkdir -p "$(dirname "$lock_file")"
         pkgs=(tmux jq flock)
+        if [[ "$QUALIFIED_INTEGRATION_BD" == true ]]; then
+          pkgs+=(icu4c pkg-config)
+        fi
         install_missing() {
           local missing=()
           for pkg in "${pkgs[@]}"; do
@@ -145,6 +154,11 @@ runs:
           *$'\n'*|*$'\r'*) echo "bd test executable path contains a line break" >&2; exit 1 ;;
         esac
         printf 'BEADS_TEST_BD_BINARY=%s\n' "$bd_test_binary" >> "$GITHUB_ENV"
+
+    - name: Install qualified integration bd
+      if: ${{ inputs.qualified-integration-bd == 'true' }}
+      shell: bash
+      run: ${{ github.action_path }}/../../scripts/install-qualified-integration-bd.sh
 
     - name: Install Claude CLI
       if: ${{ inputs.install-claude-cli == 'true' }}

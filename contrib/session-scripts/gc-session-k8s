@@ -341,7 +341,7 @@ case "$op" in
       manifest=$(jq -n \
         --arg pod "$pod" \
         --arg ns "$NS" \
-        --arg label "$label" \
+        --arg session_label "$label" \
         --arg gc_agent_label "$gc_agent_label" \
         --arg session_name "$name" \
         --arg image "$IMAGE" \
@@ -362,7 +362,7 @@ case "$op" in
             namespace: $ns,
             labels: {
               app: "gc-agent",
-              "gc-session": $label,
+              "gc-session": $session_label,
               "gc-agent": $gc_agent_label
             },
             annotations: {
@@ -409,7 +409,7 @@ case "$op" in
       manifest=$(jq -n \
         --arg pod "$pod" \
         --arg ns "$NS" \
-        --arg label "$label" \
+        --arg session_label "$label" \
         --arg gc_agent_label "$gc_agent_label" \
         --arg session_name "$name" \
         --arg image "$IMAGE" \
@@ -430,7 +430,7 @@ case "$op" in
             namespace: $ns,
             labels: {
               app: "gc-agent",
-              "gc-session": $label,
+              "gc-session": $session_label,
               "gc-agent": $gc_agent_label
             },
             annotations: {

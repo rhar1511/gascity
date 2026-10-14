@@ -1720,15 +1720,27 @@ func PromoteWorkflowLaunchBead(store beads.Store, beadID string) error {
 	if beadID == "" {
 		return nil
 	}
-	bead, err := store.Get(beadID)
-	if err != nil {
-		return err
+	const maxPromotionAttempts = 3
+	var lastConflict error
+	for range maxPromotionAttempts {
+		bead, err := store.Get(beadID)
+		if err != nil {
+			return err
+		}
+		if !ShouldPromoteWorkflowLaunchStatus(bead.Status) {
+			return nil
+		}
+		status := "in_progress"
+		err = store.Update(beadID, beads.UpdateOpts{Status: &status})
+		if !beads.IsPreconditionFailed(err) {
+			return err
+		}
+		// A concurrent routing write may move the lifecycle revision after
+		// validation. Re-read eligibility before another fenced update; never
+		// renew an explicit caller-owned revision or retry ambiguous failures.
+		lastConflict = err
 	}
-	if !ShouldPromoteWorkflowLaunchStatus(bead.Status) {
-		return nil
-	}
-	status := "in_progress"
-	return store.Update(beadID, beads.UpdateOpts{Status: &status})
+	return lastConflict
 }
 
 // BeadCheckResult holds the result of pre-flight bead state checks.

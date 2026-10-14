@@ -145,7 +145,7 @@ func conformanceLabelWritesAreRevisionFenced(t *testing.T, name string, open fun
 	t.Run(name+"/label_writes_are_revision_fenced", func(t *testing.T) {
 		s := open(t)
 		w := conformanceWriterFor(t, s)
-		created, err := s.Create(beads.Bead{Title: "labels", Labels: []string{"keep", "remove"}})
+		created, err := s.Create(beads.Bead{Title: "labels", Labels: []string{"a-keep", "remove"}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -153,15 +153,15 @@ func conformanceLabelWritesAreRevisionFenced(t *testing.T, name string, open fun
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := w.UpdateIfMatch(created.ID, before.Revision, beads.UpdateOpts{Labels: []string{"added"}, RemoveLabels: []string{"remove"}}); err != nil {
+		if err := w.UpdateIfMatch(created.ID, before.Revision, beads.UpdateOpts{Labels: []string{"z-added"}, RemoveLabels: []string{"remove"}}); err != nil {
 			t.Fatalf("UpdateIfMatch labels: %v", err)
 		}
 		after, err := s.Get(created.ID)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !reflect.DeepEqual(after.Labels, []string{"keep", "added"}) || after.Revision == before.Revision {
-			t.Fatalf("label update = labels %v revision %d, want [keep added] and revision after %d", after.Labels, after.Revision, before.Revision)
+		if !reflect.DeepEqual(after.Labels, []string{"a-keep", "z-added"}) || after.Revision == before.Revision {
+			t.Fatalf("label update = labels %v revision %d, want [a-keep z-added] and revision after %d", after.Labels, after.Revision, before.Revision)
 		}
 		if err := w.UpdateIfMatch(created.ID, before.Revision, beads.UpdateOpts{Labels: []string{"stale"}}); err == nil {
 			t.Fatal("stale label update succeeded")
@@ -367,7 +367,8 @@ func conformanceRowBackedMutationFlavors(t *testing.T, name string, open func(t 
 		s := open(t)
 		w := conformanceWriterFor(t, s)
 		strPtr := func(s string) *string { return &s }
-		row, err := s.Create(beads.Bead{Title: "row-backed-mutations"})
+		initialPriority := 1
+		row, err := s.Create(beads.Bead{Title: "row-backed-mutations", Type: "bug", Priority: &initialPriority})
 		if err != nil {
 			t.Fatal(err)
 		}

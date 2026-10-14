@@ -353,6 +353,8 @@ select_candidate_from_queue() {
     local root_id=""
     local status_before=""
     local outcome_before=""
+    local state_json=""
+    local state_payload=""
 
     while IFS= read -r candidate; do
         [ -n "$candidate" ] || continue
@@ -379,8 +381,17 @@ select_candidate_from_queue() {
                 ;;
         esac
 
-        status_before=$(show_status "$bead_id" 2>/dev/null || true)
-        outcome_before=$(show_outcome "$bead_id" 2>/dev/null || true)
+        if ! state_json=$(refresh_bead_json "$bead_id"); then
+            trace "state-read-failed bead=$bead_id ref=$ref"
+            continue
+        fi
+        if ! state_payload=$(printf '%s\n' "$state_json" | json_payload) ||
+            [ -z "$state_payload" ] || ! printf '%s\n' "$state_payload" | jq -e . >/dev/null 2>&1; then
+            trace "state-read-failed bead=$bead_id ref=$ref reason=invalid-json"
+            continue
+        fi
+        status_before=$(printf '%s\n' "$state_payload" | jq_bead '.status')
+        outcome_before=$(printf '%s\n' "$state_payload" | jq_bead '.metadata["gc.outcome"]')
         if [ "$outcome_before" = "skipped" ]; then
             trace "skip-terminal bead=$bead_id ref=$ref status=$status_before outcome=$outcome_before"
             continue
