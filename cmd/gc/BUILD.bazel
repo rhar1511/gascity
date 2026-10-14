@@ -1229,6 +1229,7 @@ go_test(
         "lifecycle_admission_policy_test.go",
         "lifecycle_admission_test.go",
         "lifecycle_admission_transition_test.go",
+        "lifecycle_cached_revision_test.go",
         "lifecycle_claim_provider_test.go",
         "lifecycle_completion_provider_test.go",
         "lifecycle_completion_test.go",

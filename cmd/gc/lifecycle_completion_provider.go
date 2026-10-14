@@ -161,7 +161,7 @@ func (cs *controllerState) CompleteLifecycleWork(ctx context.Context, request ap
 	if err := reconcileLifecycleCompletionForLeg(ctx, cityName, cityPath, cfg, cityStore, rigStores, legs, selected, body.WorkID, scope, resolver, authority); err != nil {
 		return empty, err
 	}
-	closed, err := selected.store.Get(body.WorkID)
+	closed, err := beads.HandlesFor(selected.store).Live.Get(body.WorkID)
 	if err != nil {
 		return empty, err
 	}
