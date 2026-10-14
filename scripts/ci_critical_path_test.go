@@ -1561,7 +1561,11 @@ func TestDocsRenderCheckUsesMatchingSiteRoots(t *testing.T) {
 		{name: "static_asset", head: "error /inherited-page\nerror /new-image.png\n", wantExit: 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			repo := t.TempDir()
+			realRepo := t.TempDir()
+			repo := filepath.Join(t.TempDir(), "checkout")
+			if err := os.Symlink(realRepo, repo); err != nil {
+				t.Fatal(err)
+			}
 			writeTestFile(t, filepath.Join(repo, "docs", "docs.json"), "{}\n")
 			writeTestFile(t, filepath.Join(repo, "docs", "mint-output.txt"), "error /inherited-page\n")
 			writeTestFile(t, filepath.Join(repo, "engdocs", "outside.md"), "not part of the published site\n")
@@ -1613,8 +1617,19 @@ exit 1
 				t.Fatal(err)
 			}
 			lines := strings.Split(strings.TrimSpace(string(roots)), "\n")
-			if len(lines) != 2 || lines[0] != filepath.Join(repo, "docs") || filepath.Base(lines[1]) != "docs" {
+			if len(lines) != 2 || filepath.Base(lines[1]) != "docs" {
 				t.Fatalf("HEAD/base site roots = %q", lines)
+			}
+			wantRoot, err := os.Stat(filepath.Join(repo, "docs"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			gotRoot, err := os.Stat(lines[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !os.SameFile(gotRoot, wantRoot) {
+				t.Fatalf("HEAD site root = %q, want %q", lines[0], filepath.Join(repo, "docs"))
 			}
 			if tc.wantExit == 1 && !strings.Contains(string(out), "/new-page") {
 				t.Fatalf("new page failure missing: %s", out)
