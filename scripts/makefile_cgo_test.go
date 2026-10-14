@@ -405,3 +405,25 @@ func assertFieldsInOrder(t *testing.T, fields string, want ...string) {
 	}
 	t.Fatalf("fields are not in required order %v:\n%s", want, fields)
 }
+
+func TestMakefileMacCoveragePreservesSelectionWithUnitParallelism(t *testing.T) {
+	body, err := os.ReadFile(filepath.Join(repoRoot(t), "Makefile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, tail, ok := strings.Cut(string(body), "test-cover-mac: test-fsys-darwin-compile\n")
+	if !ok {
+		t.Fatal("Makefile has no Mac coverage target with Darwin compile prerequisite")
+	}
+	recipe, _, _ := strings.Cut(tail, "\n\n")
+	want := "\t$(TEST_ENV) GC_FAST_UNIT=1 go test -p=4 -timeout 10m -coverprofile=coverage.txt $(UNIT_COVER_PKGS_NONCMDGC)"
+	if recipe != want {
+		t.Errorf("Mac coverage recipe = %q, want %q", recipe, want)
+	}
+	if !strings.Contains(string(body), "scripts/go-test-observable test-mac -- -p=4 -count=1 -timeout 15m $(MAC_UNIT_PKGS)") {
+		t.Error("Mac coverage parallelism must match the existing unit sweep")
+	}
+	if got := readCriticalPathWorkflow(t, "mac-regression.yml").Jobs["mac-cover"].TimeoutMinutes.Value; got != "25" {
+		t.Errorf("Mac coverage job timeout = %q, want unchanged 25m", got)
+	}
+}

@@ -358,16 +358,71 @@ func TestProductMetricsTesthookProfileIsFocusedRequiredAndObservable(t *testing.
 	if !permitsSkip {
 		t.Error("ci-required must allow the path-gated tagged profile to skip")
 	}
+}
 
-	macJob := readCriticalPathWorkflow(t, "mac-regression.yml").Jobs["mac-cmd-gc-process"]
-	var macTaggedSteps []ciCriticalPathStep
-	for _, step := range macJob.Steps {
-		if strings.TrimSpace(step.Run) == "make test-productmetrics-testhook" {
-			macTaggedSteps = append(macTaggedSteps, step)
+func TestMacProductMetricsTesthookHasIndependentRequiredBudget(t *testing.T) {
+	wf := readCriticalPathWorkflow(t, "mac-regression.yml")
+	process := wf.Jobs["mac-cmd-gc-process"]
+	job, ok := wf.Jobs["mac-productmetrics-testhook"]
+	if !ok {
+		t.Fatal("Mac workflow has no independent productmetrics-testhook job")
+	}
+	if job.TimeoutMinutes.Value != "20" || process.TimeoutMinutes.Value != "20" {
+		t.Errorf("profile/process budgets = %q/%q, want independent 20m jobs", job.TimeoutMinutes.Value, process.TimeoutMinutes.Value)
+	}
+	if !slices.Equal(process.Strategy.Matrix.Shard, []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}) {
+		t.Errorf("ordinary process shards changed: %v", process.Strategy.Matrix.Shard)
+	}
+	if job.RunsOn != process.RunsOn || job.If != process.If || !slices.Equal(job.Needs, []string{"runner-policy", "gate"}) {
+		t.Errorf("tagged profile must retain the ordinary Mac runner and centralized smoke/full gate: %+v", job)
+	}
+	if job.ContinueOnError || len(job.Strategy.Matrix.Keys) != 0 {
+		t.Error("tagged profile must be one required non-matrix job")
+	}
+	if len(job.Steps) != 3 || len(process.Steps) != 3 {
+		t.Fatalf("profile/process steps = %d/%d, want exact checkout, setup and one owning command each", len(job.Steps), len(process.Steps))
+	}
+	for i := 0; i < 2; i++ {
+		got, want := job.Steps[i], process.Steps[i]
+		if got.Uses != want.Uses || !maps.Equal(got.With, want.With) || got.If != "" || got.ContinueOnError {
+			t.Errorf("tagged profile checkout/setup step %d differs from exact-head process setup", i)
 		}
 	}
-	if len(macTaggedSteps) != 1 || macTaggedSteps[0].If != "${{ matrix.shard == 6 }}" {
-		t.Errorf("Mac tagged profile steps = %v, want one execution on historical shard 6", macTaggedSteps)
+	command := job.Steps[2]
+	if strings.TrimSpace(command.Run) != "make test-productmetrics-testhook" || command.If != "" || command.ContinueOnError {
+		t.Errorf("tagged profile must execute the unchanged required command: %+v", command)
+	}
+	count := 0
+	for _, candidate := range wf.Jobs {
+		for _, step := range candidate.Steps {
+			if strings.Contains(step.Run, "make test-productmetrics-testhook") {
+				count++
+			}
+		}
+	}
+	if count != 1 {
+		t.Errorf("Mac tagged profile executions = %d, want exactly one independent job", count)
+	}
+	summary := wf.Jobs["mac-regression-summary"]
+	if !slices.Contains(summary.Needs, "mac-productmetrics-testhook") {
+		t.Fatal("Mac summary must depend on tagged profile")
+	}
+	var summarize ciCriticalPathStep
+	for _, step := range summary.Steps {
+		if step.Name == "Summarize" {
+			summarize = step
+		}
+	}
+	if summarize.Env["PRODUCTMETRICS_TESTHOOK"] != "${{ needs.mac-productmetrics-testhook.result }}" {
+		t.Error("Mac summary must read the actual tagged job result")
+	}
+	for _, marker := range []string{
+		`| Mac / productmetrics testhook | ${PRODUCTMETRICS_TESTHOOK} |`,
+		"if [[ \"$PRODUCTMETRICS_TESTHOOK\" != \"success\" ]]; then\n  fail=1\nfi",
+	} {
+		if !strings.Contains(summarize.Run, marker) {
+			t.Errorf("Mac summary missing required profile propagation %q", marker)
+		}
 	}
 }
 
@@ -783,6 +838,7 @@ func TestMacRegressionTierJobsGateOnCentralizedOutputs(t *testing.T) {
 		{"mac-quality", "needs.gate.outputs.run_smoke == 'true'"},
 		{"mac-unit", "needs.gate.outputs.run_smoke == 'true'"},
 		{"mac-cmd-gc-process", "needs.gate.outputs.run_smoke == 'true'"},
+		{"mac-productmetrics-testhook", "needs.gate.outputs.run_smoke == 'true'"},
 		{"mac-acceptance", "needs.gate.outputs.run_smoke == 'true'"},
 		{"mac-cover", "needs.gate.outputs.run_full == 'true'"},
 		{"mac-integration-packages", "needs.gate.outputs.run_full == 'true'"},

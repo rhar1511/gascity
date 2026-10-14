@@ -887,7 +887,7 @@ test-cover: test-fsys-darwin-compile
 ## test-cover-mac: Mac coverage sweep with cmd/gc excluded; cmd/gc runs via the Mac sharded job.
 ## Running the full test-cover cmd/gc shards sequentially on Mac would exceed the 25m job cap.
 test-cover-mac: test-fsys-darwin-compile
-	$(TEST_ENV) GC_FAST_UNIT=1 go test -timeout 10m -coverprofile=coverage.txt $(UNIT_COVER_PKGS_NONCMDGC)
+	$(TEST_ENV) GC_FAST_UNIT=1 go test -p=4 -timeout 10m -coverprofile=coverage.txt $(UNIT_COVER_PKGS_NONCMDGC)
 
 ## test-cover-noncmdgc: run unit coverage for all packages except cmd/gc (CI parallel half).
 test-cover-noncmdgc: test-fsys-darwin-compile
