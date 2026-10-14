@@ -50,7 +50,8 @@ func TestBeadsCreateRequiresExactExplicitInputBeforeResolvingTarget(t *testing.T
 
 func TestBeadsCreateUsesTypedAPIAndReportsStableIdentity(t *testing.T) {
 	var calls atomic.Int32
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	transport := roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		w := httptest.NewRecorder()
 		calls.Add(1)
 		if r.Method != http.MethodPost || r.URL.Path != "/v0/city/pilot/beads" || r.Header.Get("Idempotency-Key") != "qualification-1" {
 			t.Errorf("unexpected create request %s %s", r.Method, r.URL)
@@ -60,11 +61,14 @@ func TestBeadsCreateUsesTypedAPIAndReportsStableIdentity(t *testing.T) {
 		if err := json.NewEncoder(w).Encode(beads.Bead{ID: "co-1", Title: "Inspect workspace", Type: "task", Status: "open"}); err != nil {
 			t.Error(err)
 		}
-	}))
-	defer ts.Close()
+		return w.Result(), nil
+	})
+
 	old := beadsCreateTarget
 	t.Cleanup(func() { beadsCreateTarget = old })
-	beadsCreateTarget = func() (*api.Client, error) { return api.NewCityScopedClient(ts.URL, "pilot"), nil }
+	beadsCreateTarget = func() (*api.Client, error) {
+		return api.NewCityScopedClient("http://controller.test", "pilot", api.WithHTTPTransport(transport)), nil
+	}
 	stdout, stderr, err := executeBeadsCreateTest(t, "--rig=compute", "beads", "create", "Inspect workspace", "--description=Read only.", "--idempotency-key=qualification-1", "--json")
 	if err != nil || stderr != "" || calls.Load() != 1 {
 		t.Fatalf("err=%v stdout=%q stderr=%q requests=%d", err, stdout, stderr, calls.Load())
@@ -90,14 +94,18 @@ func TestBeadsCreateUnavailableTargetNeverFallsBack(t *testing.T) {
 
 func TestBeadsCreateTransportFailureNeverRetriesOrFallsBack(t *testing.T) {
 	var calls atomic.Int32
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	transport := roundTripperFunc(func(_ *http.Request) (*http.Response, error) {
+		w := httptest.NewRecorder()
 		calls.Add(1)
 		w.WriteHeader(http.StatusServiceUnavailable)
-	}))
-	defer ts.Close()
+		return w.Result(), nil
+	})
+
 	old := beadsCreateTarget
 	t.Cleanup(func() { beadsCreateTarget = old })
-	beadsCreateTarget = func() (*api.Client, error) { return api.NewCityScopedClient(ts.URL, "pilot"), nil }
+	beadsCreateTarget = func() (*api.Client, error) {
+		return api.NewCityScopedClient("http://controller.test", "pilot", api.WithHTTPTransport(transport)), nil
+	}
 	stdout, stderr, err := executeBeadsCreateTest(t, "--rig=compute", "beads", "create", "Inspect workspace", "--idempotency-key=qualification-1")
 	if err == nil || stdout != "" || stderr == "" || calls.Load() != 1 {
 		t.Fatalf("err=%v stdout=%q stderr=%q requests=%d", err, stdout, stderr, calls.Load())
@@ -107,17 +115,21 @@ func TestBeadsCreateTransportFailureNeverRetriesOrFallsBack(t *testing.T) {
 func TestBeadsCreateFullCLIJSONContract(t *testing.T) {
 	previousCity, previousRig := cityFlag, rigFlag
 	t.Cleanup(func() { cityFlag, rigFlag = previousCity, previousRig })
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	transport := roundTripperFunc(func(_ *http.Request) (*http.Response, error) {
+		w := httptest.NewRecorder()
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		if err := json.NewEncoder(w).Encode(beads.Bead{ID: "co-1", Title: "Inspect workspace", Type: "task", Status: "open"}); err != nil {
 			t.Error(err)
 		}
-	}))
-	defer ts.Close()
+		return w.Result(), nil
+	})
+
 	old := beadsCreateTarget
 	t.Cleanup(func() { beadsCreateTarget = old })
-	beadsCreateTarget = func() (*api.Client, error) { return api.NewCityScopedClient(ts.URL, "pilot"), nil }
+	beadsCreateTarget = func() (*api.Client, error) {
+		return api.NewCityScopedClient("http://controller.test", "pilot", api.WithHTTPTransport(transport)), nil
+	}
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"--city", t.TempDir(), "--rig=compute", "beads", "create", "Inspect workspace", "--idempotency-key=qualification-1", "--json"}, &stdout, &stderr)
 	if code != 0 {

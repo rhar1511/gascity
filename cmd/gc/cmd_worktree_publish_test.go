@@ -79,7 +79,8 @@ func TestWorktreePublishRequiresCompleteExplicitSnapshotBeforeTarget(t *testing.
 
 func TestWorktreePublishUsesExactSourceSnapshotAndTypedReceipt(t *testing.T) {
 	var calls atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	transport := roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		w := httptest.NewRecorder()
 		calls.Add(1)
 		if r.Method != http.MethodPost || r.URL.Path != "/v0/city/pilot/lifecycle/workspaces" {
 			t.Errorf("unexpected request %s %s", r.Method, r.URL)
@@ -95,11 +96,14 @@ func TestWorktreePublishUsesExactSourceSnapshotAndTypedReceipt(t *testing.T) {
 		if err := json.NewEncoder(w).Encode(api.LifecycleWorkspaceResult{WorkID: "source-1", ReceiptID: "workspace-1", Revision: -9, Replayed: true}); err != nil {
 			t.Error(err)
 		}
-	}))
-	defer server.Close()
+		return w.Result(), nil
+	})
+
 	old := worktreePublishTarget
 	t.Cleanup(func() { worktreePublishTarget = old })
-	worktreePublishTarget = func() (*api.Client, error) { return api.NewCityScopedClient(server.URL, "pilot"), nil }
+	worktreePublishTarget = func() (*api.Client, error) {
+		return api.NewCityScopedClient("http://controller.test", "pilot", api.WithHTTPTransport(transport)), nil
+	}
 	out, errOut, err := executeWorktreePublishTest(t, append(worktreePublishTestArgs(t), "--json"))
 	if err != nil || errOut != "" || calls.Load() != 1 {
 		t.Fatalf("error=%v stderr=%s requests=%d", err, errOut, calls.Load())
@@ -112,11 +116,18 @@ func TestWorktreePublishUsesExactSourceSnapshotAndTypedReceipt(t *testing.T) {
 
 func TestWorktreePublishControllerRefusalHasNoRetryOrRawFallback(t *testing.T) {
 	var calls atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { calls.Add(1); w.WriteHeader(http.StatusConflict) }))
-	defer server.Close()
+	transport := roundTripperFunc(func(_ *http.Request) (*http.Response, error) {
+		w := httptest.NewRecorder()
+		calls.Add(1)
+		w.WriteHeader(http.StatusConflict)
+		return w.Result(), nil
+	})
+
 	old := worktreePublishTarget
 	t.Cleanup(func() { worktreePublishTarget = old })
-	worktreePublishTarget = func() (*api.Client, error) { return api.NewCityScopedClient(server.URL, "pilot"), nil }
+	worktreePublishTarget = func() (*api.Client, error) {
+		return api.NewCityScopedClient("http://controller.test", "pilot", api.WithHTTPTransport(transport)), nil
+	}
 	if out, _, err := executeWorktreePublishTest(t, worktreePublishTestArgs(t)); err == nil || out != "" || calls.Load() != 1 {
 		t.Fatalf("error=%v output=%q requests=%d", err, out, calls.Load())
 	}
@@ -129,16 +140,20 @@ func TestWorktreePublishControllerRefusalHasNoRetryOrRawFallback(t *testing.T) {
 func TestWorktreePublishFullCLIJSONContract(t *testing.T) {
 	previousCity, previousRig := cityFlag, rigFlag
 	t.Cleanup(func() { cityFlag, rigFlag = previousCity, previousRig })
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	transport := roundTripperFunc(func(_ *http.Request) (*http.Response, error) {
+		w := httptest.NewRecorder()
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(api.LifecycleWorkspaceResult{WorkID: "source-1", ReceiptID: "workspace-1", Revision: -9}); err != nil {
 			t.Error(err)
 		}
-	}))
-	defer server.Close()
+		return w.Result(), nil
+	})
+
 	old := worktreePublishTarget
 	t.Cleanup(func() { worktreePublishTarget = old })
-	worktreePublishTarget = func() (*api.Client, error) { return api.NewCityScopedClient(server.URL, "pilot"), nil }
+	worktreePublishTarget = func() (*api.Client, error) {
+		return api.NewCityScopedClient("http://controller.test", "pilot", api.WithHTTPTransport(transport)), nil
+	}
 	args := append([]string{"--city", t.TempDir(), "worktree", "publish"}, worktreePublishTestArgs(t)...)
 	args = append(args, "--json")
 	var out, errOut bytes.Buffer

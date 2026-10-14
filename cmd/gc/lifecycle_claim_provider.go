@@ -125,6 +125,7 @@ func (cs *controllerState) transitionLifecycleWork(ctx context.Context, request 
 	if err != nil {
 		return api.LifecycleClaimTransitionResult{}, err
 	}
+	terminalReplay := completion != nil && observed.Status == "closed"
 	transition := func() (api.LifecycleClaimTransitionResult, error) {
 		if lineage, ok := lifecycleMaterializationFor(observed); ok && lineage.SourceID != observed.ID &&
 			observed.Metadata[beadmeta.LifecycleAdmissionReceiptV2MetadataKey] == "" {
@@ -205,11 +206,11 @@ func (cs *controllerState) transitionLifecycleWork(ctx context.Context, request 
 			}
 			var claimed worklifecycle.ClaimIdentityResult
 			if completion != nil {
-				completionConfig := worklifecycle.DescendantCompletionConfig{
-					DescendantClaimConfig: descendantConfig,
-					CaptureAttempt: func(owner beads.Bead, seal func(key, value string) error) error {
+				completionConfig := worklifecycle.DescendantCompletionConfig{DescendantClaimConfig: descendantConfig}
+				if !terminalReplay {
+					completionConfig.CaptureAttempt = func(owner beads.Bead, seal func(key, value string) error) error {
 						return captureLifecycleExecutionAttempt(ctx, cityPath, cfg, cityStore, selected, owner, request.Session, completion.Outcome, seal)
-					},
+					}
 				}
 				claimed, err = worklifecycle.CompleteDescendantExecution(completionConfig, worklifecycle.DescendantCompletionRequest{
 					ClaimIdentityRequest: claimRequest, ClaimGeneration: completion.ClaimGeneration, Outcome: completion.Outcome,
@@ -319,6 +320,13 @@ func (cs *controllerState) transitionLifecycleWork(ctx context.Context, request 
 			ClaimGeneration: claimed.ClaimGeneration, ReceiptID: claimed.Receipt.ReceiptID,
 			Replayed: claimed.Replayed, Recovered: claimed.Recovered,
 		}, nil
+	}
+	if terminalReplay {
+		// Exact terminal replay verifies the existing anchor, claim, sealed
+		// attempt and completion receipts. It must survive session/workspace
+		// cleanup. No capture callback is supplied, so a changed live snapshot
+		// cannot turn this read-only path into a first completion.
+		return transition()
 	}
 	return withLifecycleClaimWorkspace(cfg, cityPath, cityStore, selected.store, selected.ref, request, observed, transition)
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -26,7 +27,8 @@ func clientWorkspaceRequest() LifecycleWorkspaceSubmitRequest {
 func TestClientPublishLifecycleWorkspacePreservesExactSnapshotAndAttempt(t *testing.T) {
 	request := clientWorkspaceRequest()
 	var calls atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	transport := rtFunc(func(r *http.Request) (*http.Response, error) {
+		w := httptest.NewRecorder()
 		calls.Add(1)
 		if r.Method != http.MethodPost || r.URL.Path != "/v0/city/pilot/lifecycle/workspaces" || r.URL.RawQuery != "" || r.Header.Get("X-GC-Request") == "" {
 			t.Errorf("unexpected publication request: %s %s", r.Method, r.URL)
@@ -44,9 +46,10 @@ func TestClientPublishLifecycleWorkspacePreservesExactSnapshotAndAttempt(t *test
 		if err := json.NewEncoder(w).Encode(LifecycleWorkspaceResult{WorkID: request.WorkID, ReceiptID: "workspace-1", Revision: -9}); err != nil {
 			t.Error(err)
 		}
-	}))
-	defer server.Close()
-	got, err := NewCityScopedClient(server.URL, "pilot").PublishLifecycleWorkspace(context.Background(), request)
+		return w.Result(), nil
+	})
+
+	got, err := NewCityScopedClient("http://controller.test", "pilot", WithHTTPTransport(transport)).PublishLifecycleWorkspace(context.Background(), request)
 	if err != nil || calls.Load() != 1 || got.WorkID != request.WorkID || got.Revision != -9 || got.ReceiptID != "workspace-1" {
 		t.Fatalf("result=%+v error=%v calls=%d", got, err, calls.Load())
 	}
@@ -80,9 +83,14 @@ func TestClientPublishLifecycleWorkspaceDoesNotRetryRefusal(t *testing.T) {
 	for _, status := range []int{http.StatusForbidden, http.StatusConflict, http.StatusServiceUnavailable} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
 			var calls atomic.Int32
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { calls.Add(1); w.WriteHeader(status) }))
-			defer server.Close()
-			if _, err := NewCityScopedClient(server.URL, "pilot").PublishLifecycleWorkspace(context.Background(), clientWorkspaceRequest()); err == nil || calls.Load() != 1 {
+			transport := rtFunc(func(_ *http.Request) (*http.Response, error) {
+				w := httptest.NewRecorder()
+				calls.Add(1)
+				w.WriteHeader(status)
+				return w.Result(), nil
+			})
+
+			if _, err := NewCityScopedClient("http://controller.test", "pilot", WithHTTPTransport(transport)).PublishLifecycleWorkspace(context.Background(), clientWorkspaceRequest()); err == nil || calls.Load() != 1 {
 				t.Fatalf("error=%v calls=%d", err, calls.Load())
 			}
 		})
@@ -95,14 +103,16 @@ func TestClientPublishLifecycleWorkspaceRejectsUnboundReceipt(t *testing.T) {
 		{WorkID: "source-1", Revision: 9},
 		{WorkID: "source-1", ReceiptID: "workspace-1"},
 	} {
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		transport := rtFunc(func(_ *http.Request) (*http.Response, error) {
+			w := httptest.NewRecorder()
 			w.Header().Set("Content-Type", "application/json")
 			if err := json.NewEncoder(w).Encode(result); err != nil {
 				t.Error(err)
 			}
-		}))
-		_, err := NewCityScopedClient(server.URL, "pilot").PublishLifecycleWorkspace(context.Background(), clientWorkspaceRequest())
-		server.Close()
+			return w.Result(), nil
+		})
+		_, err := NewCityScopedClient("http://controller.test", "pilot", WithHTTPTransport(transport)).PublishLifecycleWorkspace(context.Background(), clientWorkspaceRequest())
+
 		if err == nil {
 			t.Fatalf("accepted unbound receipt %+v", result)
 		}
@@ -114,7 +124,8 @@ func TestClientPublishLifecycleWorkspacePreservesAuthenticatedWriteGrant(t *test
 	var bound GrantBinding
 	var actualHash string
 	var calls atomic.Int32
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	transport := rtFunc(func(r *http.Request) (*http.Response, error) {
+		w := httptest.NewRecorder()
 		calls.Add(1)
 		if r.Header.Get("Authorization") != "Bearer fixture-token" || r.Header.Get("X-GC-City-Write") != "fixture-grant" {
 			t.Error("existing authenticated transport lost")
@@ -130,17 +141,17 @@ func TestClientPublishLifecycleWorkspacePreservesAuthenticatedWriteGrant(t *test
 		if err := json.NewEncoder(w).Encode(LifecycleWorkspaceResult{WorkID: "source-1", ReceiptID: "workspace-1", Revision: -9, Replayed: true}); err != nil {
 			t.Error(err)
 		}
-	}))
-	defer server.Close()
-	client, err := NewRemoteCityScopedClient(server.URL, "pilot", RemoteOptions{
-		InsecureSkipVerify: true,
-		Token:              func() (string, error) { return "fixture-token", nil }, Grant: func(b GrantBinding) (string, error) {
+		return w.Result(), nil
+	})
+
+	client, err := NewRemoteCityScopedClient("https://controller.test", "pilot", RemoteOptions{
+		Token: func() (string, error) { return "fixture-token", nil }, Grant: func(b GrantBinding) (string, error) {
 			mu.Lock()
 			defer mu.Unlock()
 			bound = b
 			return "fixture-grant", nil
 		},
-	})
+	}, WithHTTPTransport(transport))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,11 +165,18 @@ func TestClientPublishLifecycleWorkspacePreservesAuthenticatedWriteGrant(t *test
 
 func TestClientPublishLifecycleWorkspaceHonorsCancellation(t *testing.T) {
 	var calls atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls.Add(1) }))
-	defer server.Close()
+	transport := rtFunc(func(r *http.Request) (*http.Response, error) {
+		if err := r.Context().Err(); err != nil {
+			return nil, err
+		}
+		calls.Add(1)
+		t.Error("canceled request context was not propagated to transport")
+		return nil, errors.New("unexpected uncanceled transport call")
+	})
+
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := NewCityScopedClient(server.URL, "pilot").PublishLifecycleWorkspace(ctx, clientWorkspaceRequest()); err == nil || calls.Load() != 0 {
+	if _, err := NewCityScopedClient("http://controller.test", "pilot", WithHTTPTransport(transport)).PublishLifecycleWorkspace(ctx, clientWorkspaceRequest()); !errors.Is(err, context.Canceled) || calls.Load() != 0 {
 		t.Fatalf("error=%v requests=%d", err, calls.Load())
 	}
 }

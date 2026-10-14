@@ -16,8 +16,9 @@ import (
 
 // Published custody is never inferred from the step's work_dir. Resolve the
 // admitted source and retain its genuine native creation lock across the typed
-// claim/completion, including exact retries. Existing non-workspace lifecycle
-// work remains valid; any custody field on either row requires the full proof.
+// claim/first completion, including claim retries. Closed completion receipts
+// replay separately without live custody. Existing non-workspace lifecycle work
+// remains valid; any custody field on either row requires the full proof.
 func withLifecycleClaimWorkspace(cfg *config.City, cityPath string, cityStore, store beads.Store, storeRef string, request api.LifecycleClaimTransitionRequest, observed beads.Bead, transition func() (api.LifecycleClaimTransitionResult, error)) (api.LifecycleClaimTransitionResult, error) {
 	empty := api.LifecycleClaimTransitionResult{}
 	sourceID := observed.ID
