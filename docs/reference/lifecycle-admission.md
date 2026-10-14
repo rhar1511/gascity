@@ -14,6 +14,21 @@ enabling admission. Controller transitions additionally require the host permit
 broker and fresh signed revocation evidence; an admission signing key does not
 grant that capability.
 
+## Preserve controller deployment settings
+
+The Linux host launcher builds an explicit controller environment. Its optional
+`--environment-file` is a JSON object of string values in a root-owned mode 0600
+file under trusted root-owned directories. Preserve required settings there when
+moving an existing supervisor to the host broker: session preservation, Go
+resource hints (`GOMAXPROCS`, `GOMEMLIMIT`), telemetry opt-outs (`DO_NOT_TRACK`,
+`GC_DISABLE_USAGE_METRICS`), dashboard `MODULES_ENABLED`, and scoped Dolt command
+policy (`GC_DOLT_REMOTE_<DB>`, `GC_DOLT_PULL_ALLOW_REMOTE_<DB>`). The Dolt suffix
+must name a database scope. Keep the service's CPU, memory, swap and task limits
+in its systemd unit as well; environment hints do not replace those limits.
+Reserved identity fields, arbitrary variables, loader/debug overrides and
+protected key material remain refused. Set
+`GC_SUPERVISOR_PRESERVE_SESSIONS_ON_SIGNAL` to `1` for a preserving cutover.
+
 ## Prepare, review, and attach
 
 Prepare against one exact local source store and configured worker pool:
