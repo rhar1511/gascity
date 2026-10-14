@@ -38,6 +38,35 @@ func TestPathLockIsExclusive(t *testing.T) {
 	}
 }
 
+func TestWithVerifiedHoldsProvisioningLockThroughoutCallback(t *testing.T) {
+	repo, base := initTestRepo(t)
+	root := t.TempDir()
+	spec := Spec{
+		RepoDir: repo, Root: root, Path: filepath.Join(root, "source"), Branch: "work/source", Base: base,
+		BeadID: "source-1", StoreRef: "rig:compute", Creator: "gc-worktree", Owner: "compute/worker", Generation: "1", Lifecycle: LifecycleActive,
+	}
+	report, err := Ensure(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec.BaseSHA, spec.AttemptID = report.Provenance.BaseSHA, report.Provenance.AttemptID
+	lockFile, err := lockFilePath(repo, spec.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := WithVerified(spec, func(Report) error {
+		if err := tryFlock(t, lockFile); err == nil {
+			t.Fatal("native cleanup/provisioning lock is not held")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tryFlock(t, lockFile); err != nil {
+		t.Fatal("native lock was not released", err)
+	}
+}
+
 // tryFlock attempts a non-blocking exclusive lock on an already-derived lock
 // file and releases it again on success.
 func tryFlock(t *testing.T, lockFile string) error {

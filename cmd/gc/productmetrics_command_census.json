@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "next_id": 219,
+  "next_id": 222,
   "permanent_ids": [
     {
       "name": "help",
@@ -375,6 +375,23 @@
       "classification": "beads-completion-prepare",
       "owner": "immediate",
       "id": 217
+    },
+    {
+      "path": "gc beads create",
+      "aliases": [],
+      "conditional_modes": [
+        "beads-machine-output"
+      ],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "beads-create",
+      "owner": "immediate",
+      "id": 219
     },
     {
       "path": "gc beads health",
@@ -4914,6 +4931,36 @@
       "classification": "worktree-ensure",
       "owner": "immediate",
       "id": 204
+    },
+    {
+      "path": "gc worktree prepare",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "worktree-prepare",
+      "owner": "immediate",
+      "id": 221
+    },
+    {
+      "path": "gc worktree publish",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "worktree-publish",
+      "owner": "immediate",
+      "id": 220
     },
     {
       "path": "gc worktree verify",

@@ -942,6 +942,13 @@ export const zLifecycleRecoverySubmitOutputBody = z.object({
     status: z.string()
 });
 
+export const zLifecycleWorkspaceResult = z.object({
+    receipt_id: z.string(),
+    replayed: z.boolean(),
+    revision: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    work_id: z.string()
+});
+
 export const zListBodyBead = z.object({
     items: z.array(zBead).nullable(),
     next_cursor: z.string().optional(),
@@ -3532,6 +3539,30 @@ export const zAuthorizedFrontier = z.object({
     reservation: zRevisionTransitionReceipt,
     rounds: z.array(zSessionEvidence).nullable(),
     session: zSessionEvidence
+});
+
+export const zSourceWorkspace = z.object({
+    attempt_id: z.string(),
+    base_ref: z.string(),
+    base_sha: z.string(),
+    branch: z.string(),
+    creator: z.string(),
+    generation: z.string(),
+    lifecycle: z.string(),
+    owner: z.string(),
+    path: z.string(),
+    repo_dir: z.string(),
+    root: z.string(),
+    source_id: z.string(),
+    store_ref: z.string()
+});
+
+export const zLifecycleWorkspaceSubmitRequest = z.object({
+    expected_revision: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    expected_transition_head: z.string().min(1).max(200),
+    source_store_ref: z.string().min(1).max(200),
+    work_id: z.string().min(1).max(200),
+    workspace: zSourceWorkspace
 });
 
 export const zStatus = z.object({
@@ -9530,6 +9561,21 @@ export const zSubmitLifecycleRecoveryRequestPath = z.object({
  * Accepted
  */
 export const zSubmitLifecycleRecoveryRequestResponse = zLifecycleRecoverySubmitOutputBody;
+
+export const zPublishAdmittedLifecycleWorkspaceBody = zLifecycleWorkspaceSubmitRequest;
+
+export const zPublishAdmittedLifecycleWorkspaceHeaders = z.object({
+    'X-GC-Request': z.string().min(1)
+});
+
+export const zPublishAdmittedLifecycleWorkspacePath = z.object({
+    cityName: z.string().min(1).regex(/\S/)
+});
+
+/**
+ * OK
+ */
+export const zPublishAdmittedLifecycleWorkspaceResponse = zLifecycleWorkspaceResult;
 
 export const zGetV0CityByCityNameMailPath = z.object({
     cityName: z.string().min(1).regex(/\S/)

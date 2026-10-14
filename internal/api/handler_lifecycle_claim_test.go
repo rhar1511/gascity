@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/worklifecycle"
@@ -166,6 +167,15 @@ func newLifecycleClaimTestStateWithRevision(t *testing.T, revision int64) (*life
 	}}, nil)
 	store.IDPrefix = "test"
 	store.HonorExplicitIDs = true
+	// Protected reciprocal claims require the same factory-enabled conditional
+	// writer as production; a raw unstamped MemStore deliberately defaults off.
+	_, err := beads.OpenStoreAtForCity(context.Background(), beads.StoreOpenOptions{
+		ScopeRoot: t.TempDir(), Provider: "file", ConditionalWrites: gate.Require,
+		OpenFileStore: func() (beads.Store, error) { return store, nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	base.cityBeadStore = store
 	base.sessionsBeadStore = store
 	base.stores = map[string]beads.Store{}

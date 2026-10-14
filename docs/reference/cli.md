@@ -343,7 +343,7 @@ gc bd release-if-current my-project-abc worker-1
 
 Manage the beads provider (backing store for issue tracking).
 
-Subcommands for reviewed admission, topology operations, health checking, diagnostics, exact-store
+Subcommands for task creation, reviewed admission, topology operations, health checking, diagnostics, exact-store
 metadata compare-and-set, and read-only list/show routed through the supervisor
 API with transparent fallback to direct bd reads.
 
@@ -356,6 +356,7 @@ gc beads
 | [gc beads admission](#gc-beads-admission) | Prepare and attach reviewed lifecycle admission |
 | [gc beads city](#gc-beads-city) | Manage canonical city endpoint topology |
 | [gc beads completion](#gc-beads-completion) | Prepare and submit reviewed lifecycle acceptance |
+| [gc beads create](#gc-beads-create) | Create an open, unassigned task through the controller API |
 | [gc beads health](#gc-beads-health) | Check beads provider health |
 | [gc beads list](#gc-beads-list) | List beads (API-routed with bd fallback) |
 | [gc beads metadata-cas](#gc-beads-metadata-cas) | Atomically compare and set one metadata key in an exact local store |
@@ -545,6 +546,31 @@ gc beads completion prepare <bead-id> [flags]
 | `--work-commit` | string |  | commit that delivered the reviewed work |
 | `--work-outcome` | string |  | reviewed work outcome: shipped, no-op, blocked, or abandoned |
 | `--work-verification` | string |  | work-record verification summary |
+
+## gc beads create
+
+Create an open, unassigned task in an explicitly named rig.
+
+Both --rig and --idempotency-key are required. The task receives no execution
+grant, owner or controller metadata. This command uses the existing typed API
+and never falls back to raw bd or direct store writes. A failed or ambiguous
+request must be inspected before retrying with the same key and identical input.
+
+```
+gc beads create <title> [flags]
+```
+
+**Example:**
+
+```
+gc --rig compute beads create "Inspect isolated workspace" --idempotency-key=qualification-1 --json
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--description` | string |  | task description (no authority metadata) |
+| `--idempotency-key` | string |  | explicit stable key for this exact task creation |
+| `--json` | bool |  | emit the canonical task creation receipt |
 
 ## gc beads health
 
@@ -5512,6 +5538,8 @@ gc worktree
 |------------|-------------|
 | [gc worktree cleanup](#gc-worktree-cleanup) | Remove an owned worktree after all safety gates pass |
 | [gc worktree ensure](#gc-worktree-ensure) | Ensure the worktree exists and satisfies all postconditions |
+| [gc worktree prepare](#gc-worktree-prepare) | Save verified native workspace input for explicit publication |
+| [gc worktree publish](#gc-worktree-publish) | Publish verified native ownership for an admitted source |
 | [gc worktree verify](#gc-worktree-verify) | Verify the worktree satisfies all postconditions without mutating |
 
 ## gc worktree cleanup
@@ -5572,6 +5600,57 @@ gc worktree ensure [flags]
 | `--repo` | string |  | repository directory the worktree belongs to (required) |
 | `--root` | string |  | configured per-rig worktree root; path must be its direct child (required) |
 | `--store-ref` | string |  | work bead store reference (required) |
+
+## gc worktree prepare
+
+Read the exact admitted source and verify its existing native workspace.
+Save a request once in an existing owner-only directory. --bead names the
+original native source owner; --work may name its same-store execution step.
+The saved revision, transition head and creation attempt never refresh on retry.
+Preparation does not publish custody, create a workspace, claim or launch work.
+
+```
+gc worktree prepare [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--attempt-id` | string |  | original native workspace creation attempt (required) |
+| `--base` | string |  | exact base ref used for this worktree (required) |
+| `--base-sha` | string |  | recorded base SHA to verify when reusing a worktree |
+| `--bead` | string |  | work bead bound to this worktree (required) |
+| `--branch` | string |  | branch that must be checked out (required) |
+| `--creator` | string |  | mechanism creating the worktree (required) |
+| `--generation` | string |  | provisioning generation fence (required) |
+| `--json` | bool |  | emit the report as JSON |
+| `--lifecycle` | string | `active` | worktree lifecycle state |
+| `--output` | string |  | new request file in an existing owner-only directory (required) |
+| `--owner` | string |  | single selected provisioning owner (required) |
+| `--path` | string |  | worktree path (required) |
+| `--repo` | string |  | repository directory the worktree belongs to (required) |
+| `--root` | string |  | configured per-rig worktree root; path must be its direct child (required) |
+| `--store-ref` | string |  | work bead store reference (required) |
+| `--work` | string |  | same-store source or execution step (defaults to --bead) |
+
+## gc worktree publish
+
+Publish the exact request saved by gc worktree prepare.
+
+Supply the saved request file and its exact-byte SHA-256 digest. The command
+validates that snapshot without refreshing its source revision, transition
+head, or native creation attempt. The controller independently verifies
+signed admission and genuine native ownership before publication.
+After an ambiguous response, retry with the same file and digest.
+
+```
+gc worktree publish [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | output JSON |
+| `--request-file` | string |  | immutable request saved by gc worktree prepare (required) |
+| `--request-sha256` | string |  | exact-byte SHA-256 returned by prepare (required) |
 
 ## gc worktree verify
 

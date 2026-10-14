@@ -2657,6 +2657,24 @@ type LifecycleRecoverySubmitOutputBody struct {
 	Status    string `json:"status"`
 }
 
+// LifecycleWorkspaceResult defines model for LifecycleWorkspaceResult.
+type LifecycleWorkspaceResult struct {
+	ReceiptId string `json:"receipt_id"`
+	Replayed  bool   `json:"replayed"`
+	Revision  int64  `json:"revision"`
+	WorkId    string `json:"work_id"`
+}
+
+// LifecycleWorkspaceSubmitRequest defines model for LifecycleWorkspaceSubmitRequest.
+type LifecycleWorkspaceSubmitRequest struct {
+	// ExpectedRevision Nonzero opaque signed source revision; equality only.
+	ExpectedRevision       int64           `json:"expected_revision"`
+	ExpectedTransitionHead string          `json:"expected_transition_head"`
+	SourceStoreRef         string          `json:"source_store_ref"`
+	WorkId                 string          `json:"work_id"`
+	Workspace              SourceWorkspace `json:"workspace"`
+}
+
 // ListBodyAgentPatch defines model for ListBodyAgentPatch.
 type ListBodyAgentPatch struct {
 	// Items The list of items.
@@ -5768,6 +5786,23 @@ type SourceIssueRef struct {
 	IssueId      string `json:"issue_id"`
 	Repository   string `json:"repository"`
 	TrackerKind  string `json:"tracker_kind"`
+}
+
+// SourceWorkspace defines model for SourceWorkspace.
+type SourceWorkspace struct {
+	AttemptId  string `json:"attempt_id"`
+	BaseRef    string `json:"base_ref"`
+	BaseSha    string `json:"base_sha"`
+	Branch     string `json:"branch"`
+	Creator    string `json:"creator"`
+	Generation string `json:"generation"`
+	Lifecycle  string `json:"lifecycle"`
+	Owner      string `json:"owner"`
+	Path       string `json:"path"`
+	RepoDir    string `json:"repo_dir"`
+	Root       string `json:"root"`
+	SourceId   string `json:"source_id"`
+	StoreRef   string `json:"store_ref"`
 }
 
 // Status defines model for Status.
@@ -10631,6 +10666,12 @@ type SubmitLifecycleRecoveryRequestParams struct {
 	XGCRequest string `json:"X-GC-Request"`
 }
 
+// PublishAdmittedLifecycleWorkspaceParams defines parameters for PublishAdmittedLifecycleWorkspace.
+type PublishAdmittedLifecycleWorkspaceParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
 // GetV0CityByCityNameMailParams defines parameters for GetV0CityByCityNameMail.
 type GetV0CityByCityNameMailParams struct {
 	// Index Event sequence number; when provided, blocks until a newer event arrives.
@@ -11359,6 +11400,9 @@ type CompleteLifecycleExecutionJSONRequestBody = LifecycleExecutionCompletionReq
 
 // SubmitLifecycleRecoveryRequestJSONRequestBody defines body for SubmitLifecycleRecoveryRequest for application/json ContentType.
 type SubmitLifecycleRecoveryRequestJSONRequestBody = RecoveryRequest
+
+// PublishAdmittedLifecycleWorkspaceJSONRequestBody defines body for PublishAdmittedLifecycleWorkspace for application/json ContentType.
+type PublishAdmittedLifecycleWorkspaceJSONRequestBody = LifecycleWorkspaceSubmitRequest
 
 // SendMailJSONRequestBody defines body for SendMail for application/json ContentType.
 type SendMailJSONRequestBody = MailSendInputBody
@@ -21198,6 +21242,11 @@ type ClientInterface interface {
 
 	SubmitLifecycleRecoveryRequest(ctx context.Context, cityName string, params *SubmitLifecycleRecoveryRequestParams, body SubmitLifecycleRecoveryRequestJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// PublishAdmittedLifecycleWorkspaceWithBody request with any body
+	PublishAdmittedLifecycleWorkspaceWithBody(ctx context.Context, cityName string, params *PublishAdmittedLifecycleWorkspaceParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	PublishAdmittedLifecycleWorkspace(ctx context.Context, cityName string, params *PublishAdmittedLifecycleWorkspaceParams, body PublishAdmittedLifecycleWorkspaceJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// GetV0CityByCityNameMail request
 	GetV0CityByCityNameMail(ctx context.Context, cityName string, params *GetV0CityByCityNameMailParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -23008,6 +23057,30 @@ func (c *Client) SubmitLifecycleRecoveryRequestWithBody(ctx context.Context, cit
 
 func (c *Client) SubmitLifecycleRecoveryRequest(ctx context.Context, cityName string, params *SubmitLifecycleRecoveryRequestParams, body SubmitLifecycleRecoveryRequestJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewSubmitLifecycleRecoveryRequestRequest(c.Server, cityName, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PublishAdmittedLifecycleWorkspaceWithBody(ctx context.Context, cityName string, params *PublishAdmittedLifecycleWorkspaceParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPublishAdmittedLifecycleWorkspaceRequestWithBody(c.Server, cityName, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PublishAdmittedLifecycleWorkspace(ctx context.Context, cityName string, params *PublishAdmittedLifecycleWorkspaceParams, body PublishAdmittedLifecycleWorkspaceJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPublishAdmittedLifecycleWorkspaceRequest(c.Server, cityName, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -30284,6 +30357,66 @@ func NewSubmitLifecycleRecoveryRequestRequestWithBody(server string, cityName st
 	return req, nil
 }
 
+// NewPublishAdmittedLifecycleWorkspaceRequest calls the generic PublishAdmittedLifecycleWorkspace builder with application/json body
+func NewPublishAdmittedLifecycleWorkspaceRequest(server string, cityName string, params *PublishAdmittedLifecycleWorkspaceParams, body PublishAdmittedLifecycleWorkspaceJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewPublishAdmittedLifecycleWorkspaceRequestWithBody(server, cityName, params, "application/json", bodyReader)
+}
+
+// NewPublishAdmittedLifecycleWorkspaceRequestWithBody generates requests for PublishAdmittedLifecycleWorkspace with any type of body
+func NewPublishAdmittedLifecycleWorkspaceRequestWithBody(server string, cityName string, params *PublishAdmittedLifecycleWorkspaceParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/lifecycle/workspaces", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
+	return req, nil
+}
+
 // NewGetV0CityByCityNameMailRequest generates requests for GetV0CityByCityNameMail
 func NewGetV0CityByCityNameMailRequest(server string, cityName string, params *GetV0CityByCityNameMailParams) (*http.Request, error) {
 	var err error
@@ -36850,6 +36983,11 @@ type ClientWithResponsesInterface interface {
 
 	SubmitLifecycleRecoveryRequestWithResponse(ctx context.Context, cityName string, params *SubmitLifecycleRecoveryRequestParams, body SubmitLifecycleRecoveryRequestJSONRequestBody, reqEditors ...RequestEditorFn) (*SubmitLifecycleRecoveryRequestResponse, error)
 
+	// PublishAdmittedLifecycleWorkspaceWithBodyWithResponse request with any body
+	PublishAdmittedLifecycleWorkspaceWithBodyWithResponse(ctx context.Context, cityName string, params *PublishAdmittedLifecycleWorkspaceParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PublishAdmittedLifecycleWorkspaceResponse, error)
+
+	PublishAdmittedLifecycleWorkspaceWithResponse(ctx context.Context, cityName string, params *PublishAdmittedLifecycleWorkspaceParams, body PublishAdmittedLifecycleWorkspaceJSONRequestBody, reqEditors ...RequestEditorFn) (*PublishAdmittedLifecycleWorkspaceResponse, error)
+
 	// GetV0CityByCityNameMailWithResponse request
 	GetV0CityByCityNameMailWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameMailParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameMailResponse, error)
 
@@ -39633,6 +39771,35 @@ func (r SubmitLifecycleRecoveryRequestResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r SubmitLifecycleRecoveryRequestResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type PublishAdmittedLifecycleWorkspaceResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON200                   *LifecycleWorkspaceResult
+	ApplicationproblemJSON400 *ErrorModel
+	ApplicationproblemJSON403 *ErrorModel
+	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON409 *ErrorModel
+	ApplicationproblemJSON422 *ErrorModel
+	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON503 *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r PublishAdmittedLifecycleWorkspaceResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r PublishAdmittedLifecycleWorkspaceResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -43392,6 +43559,23 @@ func (c *ClientWithResponses) SubmitLifecycleRecoveryRequestWithResponse(ctx con
 		return nil, err
 	}
 	return ParseSubmitLifecycleRecoveryRequestResponse(rsp)
+}
+
+// PublishAdmittedLifecycleWorkspaceWithBodyWithResponse request with arbitrary body returning *PublishAdmittedLifecycleWorkspaceResponse
+func (c *ClientWithResponses) PublishAdmittedLifecycleWorkspaceWithBodyWithResponse(ctx context.Context, cityName string, params *PublishAdmittedLifecycleWorkspaceParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PublishAdmittedLifecycleWorkspaceResponse, error) {
+	rsp, err := c.PublishAdmittedLifecycleWorkspaceWithBody(ctx, cityName, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePublishAdmittedLifecycleWorkspaceResponse(rsp)
+}
+
+func (c *ClientWithResponses) PublishAdmittedLifecycleWorkspaceWithResponse(ctx context.Context, cityName string, params *PublishAdmittedLifecycleWorkspaceParams, body PublishAdmittedLifecycleWorkspaceJSONRequestBody, reqEditors ...RequestEditorFn) (*PublishAdmittedLifecycleWorkspaceResponse, error) {
+	rsp, err := c.PublishAdmittedLifecycleWorkspace(ctx, cityName, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePublishAdmittedLifecycleWorkspaceResponse(rsp)
 }
 
 // GetV0CityByCityNameMailWithResponse request returning *GetV0CityByCityNameMailResponse
@@ -50137,6 +50321,81 @@ func ParseSubmitLifecycleRecoveryRequestResponse(rsp *http.Response) (*SubmitLif
 			return nil, err
 		}
 		response.JSON202 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 400:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON400 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON403 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON409 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParsePublishAdmittedLifecycleWorkspaceResponse parses an HTTP response from a PublishAdmittedLifecycleWorkspaceWithResponse call
+func ParsePublishAdmittedLifecycleWorkspaceResponse(rsp *http.Response) (*PublishAdmittedLifecycleWorkspaceResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &PublishAdmittedLifecycleWorkspaceResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest LifecycleWorkspaceResult
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 400:
 		var dest ErrorModel

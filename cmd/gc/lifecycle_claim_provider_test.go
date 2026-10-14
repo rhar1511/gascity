@@ -94,6 +94,33 @@ func TestLifecycleClaimProviderRechecksCanonicalReadiness(t *testing.T) {
 	}
 }
 
+// Persist the intended route before invoking the provider: its request is a
+// snapshot of a real session, not a replacement identity supplied by the caller.
+func persistLifecycleClaimFixtureRoute(t *testing.T, setup lifecycleAdmissionTransitionSetup, request *api.LifecycleClaimTransitionRequest) {
+	t.Helper()
+	store := sessionFrontDoor(setup.cityStore)
+	current, err := store.Get(request.Session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpdateMetadataInfo(current, session.MetadataPatch{
+		"template": request.Session.Template, "agent_name": request.Session.AgentName,
+		"pool_slot": request.Session.PoolSlot, "common_name": request.Session.CommonName,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// The missing-route fixture also removes the persisted identity labels.
+	if request.Session.Labels == nil {
+		if err := setup.cityStore.Update(current.ID, beads.UpdateOpts{RemoveLabels: current.Labels}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	request.Session, err = store.Get(current.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestLifecycleClaimProviderClaimsReadyWorkAndReplaysExactClaim(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
@@ -120,6 +147,7 @@ func TestLifecycleClaimProviderClaimsReadyWorkAndReplaysExactClaim(t *testing.T)
 			request.Session.Template = tc.template
 			request.Session.AgentName = tc.agentName
 			request.Session.PoolSlot = tc.poolSlot
+			persistLifecycleClaimFixtureRoute(t, setup, &request)
 			if tc.descendant {
 				marker, ok := lifecycleMaterializationFor(request.Work)
 				if !ok {
@@ -194,6 +222,7 @@ func TestLifecycleClaimProviderRejectsSessionOnDifferentConfiguredRouteBeforeWri
 		t.Run(tc.name, func(t *testing.T) {
 			setup, state, request := newLifecycleClaimProviderFixture(t)
 			tc.prepare(&setup, &request)
+			persistLifecycleClaimFixtureRoute(t, setup, &request)
 			beforeRequests := len(setup.store.patchRequests)
 			beforeReceipts := len(setup.store.patchReceipts)
 			beforeGenericWrites := setup.store.sourceGenericWrites
@@ -226,6 +255,7 @@ func TestLifecycleClaimProviderRejectsWrongRouteBeforeExactReplay(t *testing.T) 
 	setup.fixture.cfg.Agents = append(setup.fixture.cfg.Agents, config.Agent{Name: "other-worker", Dir: "pilot"})
 	request.Session.Template = "pilot/other-worker"
 	request.Session.AgentName = "pilot/other-worker"
+	persistLifecycleClaimFixtureRoute(t, setup, &request)
 	beforeRequests := len(setup.store.patchRequests)
 	beforeReceipts := len(setup.store.patchReceipts)
 	beforeGenericWrites := setup.store.sourceGenericWrites

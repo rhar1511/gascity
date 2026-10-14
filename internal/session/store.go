@@ -199,14 +199,32 @@ func (s *Store) ApplyPatchIfLifecycleUnchanged(expected Info, patch MetadataPatc
 // require-mode store that cannot fence returns an error. decide returning an
 // empty patch writes nothing. It reports whether a patch was written.
 func (s *Store) UpdateMetadataFenced(id string, attempts int, decide func(Info, PersistedResponse) MetadataPatch) (bool, error) {
+	return s.updateMetadataFenced(id, attempts, decide, false)
+}
+
+// UpdateMetadataAuthoritativeFenced reads each decision's exact persisted row
+// through the live handle and requires a nonzero revision and conditional writer.
+// The writer is resolved on the original store so cache invalidation and refresh
+// remain part of the commit. Ordinary UpdateMetadataFenced reads are unchanged.
+func (s *Store) UpdateMetadataAuthoritativeFenced(id string, attempts int, decide func(Info, PersistedResponse) MetadataPatch) (bool, error) {
+	return s.updateMetadataFenced(id, attempts, decide, true)
+}
+
+func (s *Store) updateMetadataFenced(id string, attempts int, decide func(Info, PersistedResponse) MetadataPatch, authoritative bool) (bool, error) {
 	writer, _, err := beads.ResolveConditionalWriter(s.store)
 	if err != nil {
 		return false, fmt.Errorf("updating session %q: %w", id, err)
 	}
+	if authoritative && writer == nil {
+		return false, beads.ErrConditionalWriteUnsupported
+	}
 	for attempt := 0; attempt < attempts; attempt++ {
-		bead, err := s.validatedBead(id)
+		bead, err := s.validatedBeadForRead(id, authoritative)
 		if err != nil {
 			return false, err
+		}
+		if authoritative && bead.Revision == 0 {
+			return false, fmt.Errorf("updating session %q: authoritative revision unavailable", id)
 		}
 		patch := decide(infoFromPersistedBead(bead), PersistedResponseFromBead(bead))
 		if len(patch) == 0 {

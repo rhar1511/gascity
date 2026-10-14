@@ -160,6 +160,9 @@ func (c *TransitionChain) ClaimIdentity(request ClaimIdentityRequest) (ClaimIden
 			continue
 		}
 		if previous, present := source.Metadata[optional.key]; present {
+			if previous == optional.value {
+				continue
+			}
 			value := previous
 			metadata[optional.key] = MetadataStringPatch{Expected: &value, Value: optional.value}
 		} else {

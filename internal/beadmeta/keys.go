@@ -341,6 +341,7 @@ const (
 	WorkDirMetadataKey             = "gc.work_dir"
 	WorkOutcomeMetadataKey         = "gc.work_outcome"
 	WorkVerificationMetadataKey    = "gc.work_verification"
+	WorktreeAttemptMetadataKey     = "gc.worktree_attempt_id"
 	WorktreeBaseRefMetadataKey     = "gc.worktree_base_ref"
 	WorktreeBaseSHAMetadataKey     = "gc.worktree_base_sha"
 	WorktreeCreatorMetadataKey     = "gc.worktree_creator"
@@ -349,6 +350,8 @@ const (
 	WorktreeOwnerMetadataKey       = "gc.worktree_owner"
 	WorktreeRepoMetadataKey        = "gc.worktree_repo"
 	WorktreeRootMetadataKey        = "gc.worktree_root"
+	WorktreeSourceBeadMetadataKey  = "gc.worktree_source_bead_id"
+	WorktreeSourceStoreMetadataKey = "gc.worktree_source_store_ref"
 	WorkflowIDMetadataKey          = "gc.workflow_id"
 	// WorkflowExpandedMetadataKey marks a graph.v2 workflow root that was
 	// compiled with real child steps beyond the root itself. Its absence
@@ -446,6 +449,18 @@ var executionIdentityMetadataKeys = map[string]struct{}{
 	Namespace + "execution_token":   {},
 }
 
+// Workspace custody is published by the typed controller after native and
+// admitted-source verification. Generic writers must not originate, retarget,
+// or clear any part of the tuple, including legacy path aliases.
+var workspaceCustodyMetadataKeys = map[string]struct{}{
+	WorkDirMetadataKey: {}, LegacyWorkDirMetadataKey: {}, WorkBranchMetadataKey: {},
+	WorktreeRepoMetadataKey: {}, WorktreeRootMetadataKey: {}, WorktreeBaseRefMetadataKey: {},
+	WorktreeBaseSHAMetadataKey: {}, WorktreeCreatorMetadataKey: {}, WorktreeOwnerMetadataKey: {},
+	WorktreeGenerationMetadataKey: {}, WorktreeLifecycleMetadataKey: {},
+	WorktreeSourceBeadMetadataKey: {}, WorktreeSourceStoreMetadataKey: {}, WorktreeAttemptMetadataKey: {},
+	TriggerBeadIDMetadataKey: {}, TriggerBeadStoreRefMetadataKey: {},
+}
+
 // IsExecutionCredentialMetadataKey reports metadata that grants execution
 // identity and therefore must never cross a generic bead boundary.
 func IsExecutionCredentialMetadataKey(key string) bool {
@@ -464,7 +479,8 @@ func IsExecutionIdentityMetadataKey(key string) bool {
 // protocol rather than generic bead create/update tooling.
 func IsGenericMutationReservedKey(key string) bool {
 	_, executionIdentity := executionIdentityMetadataKeys[key]
-	return executionIdentity ||
+	_, workspaceCustody := workspaceCustodyMetadataKeys[key]
+	return executionIdentity || workspaceCustody ||
 		key == ClaimedAtMetadataKey ||
 		key == NativeAuxRevisionMetadataKey ||
 		key == RSIExecutionBindingMetadataKey ||
@@ -822,6 +838,7 @@ var KnownMetadataKeys = []string{
 	WorkDirMetadataKey,
 	WorkOutcomeMetadataKey,
 	WorkVerificationMetadataKey,
+	WorktreeAttemptMetadataKey,
 	WorktreeBaseRefMetadataKey,
 	WorktreeBaseSHAMetadataKey,
 	WorktreeCreatorMetadataKey,
@@ -830,6 +847,8 @@ var KnownMetadataKeys = []string{
 	WorktreeOwnerMetadataKey,
 	WorktreeRepoMetadataKey,
 	WorktreeRootMetadataKey,
+	WorktreeSourceBeadMetadataKey,
+	WorktreeSourceStoreMetadataKey,
 	WorkflowIDMetadataKey,
 	WorkflowExpandedMetadataKey,
 }

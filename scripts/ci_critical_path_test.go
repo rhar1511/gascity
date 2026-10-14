@@ -609,10 +609,21 @@ func TestAcceptanceTargetsSeparateTierAFromExternalBdContracts(t *testing.T) {
 func TestMacAcceptanceRetainsExternalBdContract(t *testing.T) {
 	wf := readCriticalPathWorkflow(t, "mac-regression.yml")
 	job := wf.Jobs["mac-acceptance"]
+	if job.TimeoutMinutes.Value != "40" {
+		t.Error("Mac acceptance must retain its existing 40-minute job deadline")
+	}
 	var runsTierA, runsBDContract bool
 	for _, step := range job.Steps {
 		runsTierA = runsTierA || strings.TrimSpace(step.Run) == "make test-acceptance"
 		runsBDContract = runsBDContract || strings.TrimSpace(step.Run) == "make test-bd-cli-contract"
+		if strings.TrimSpace(step.Run) == "make test-acceptance" {
+			if step.Env["ACCEPTANCE_GO_TEST_FLAGS"] != "-count=1 -json" {
+				t.Error("Mac Tier A must run every test freshly and emit per-test JSON timing")
+			}
+			if step.Env["ACCEPTANCE_TIMEOUT"] != "20m" {
+				t.Error("Mac Tier A must retain its existing 20-minute package deadline")
+			}
+		}
 	}
 	if !runsTierA {
 		t.Error("Mac acceptance must retain hermetic Tier A")

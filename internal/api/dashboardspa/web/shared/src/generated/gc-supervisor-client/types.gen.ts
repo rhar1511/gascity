@@ -1825,6 +1825,27 @@ export type LifecycleRecoverySubmitOutputBody = {
     status: string;
 };
 
+export type LifecycleWorkspaceResult = {
+    receipt_id: string;
+    replayed: boolean;
+    revision: number;
+    work_id: string;
+};
+
+export type LifecycleWorkspaceSubmitRequest = {
+    /**
+     * Nonzero opaque signed source revision; equality only.
+     */
+    expected_revision: number;
+    expected_transition_head: string;
+    source_store_ref: string;
+    work_id: string;
+    /**
+     * Exact native Ensure evidence, independently verified by the controller before publication.
+     */
+    workspace: SourceWorkspace;
+};
+
 export type ListBodyAgentPatch = {
     /**
      * The list of items.
@@ -5478,6 +5499,22 @@ export type SourceIssueRef = {
     issue_id: string;
     repository: string;
     tracker_kind: string;
+};
+
+export type SourceWorkspace = {
+    attempt_id: string;
+    base_ref: string;
+    base_sha: string;
+    branch: string;
+    creator: string;
+    generation: string;
+    lifecycle: string;
+    owner: string;
+    path: string;
+    repo_dir: string;
+    root: string;
+    source_id: string;
+    store_ref: string;
 };
 
 export type Status = {
@@ -15961,6 +15998,66 @@ export type SubmitLifecycleRecoveryRequestResponses = {
 };
 
 export type SubmitLifecycleRecoveryRequestResponse = SubmitLifecycleRecoveryRequestResponses[keyof SubmitLifecycleRecoveryRequestResponses];
+
+export type PublishAdmittedLifecycleWorkspaceData = {
+    body: LifecycleWorkspaceSubmitRequest;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/lifecycle/workspaces';
+};
+
+export type PublishAdmittedLifecycleWorkspaceErrors = {
+    /**
+     * Bad Request
+     */
+    400: ErrorModel;
+    /**
+     * Forbidden
+     */
+    403: ErrorModel;
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type PublishAdmittedLifecycleWorkspaceError = PublishAdmittedLifecycleWorkspaceErrors[keyof PublishAdmittedLifecycleWorkspaceErrors];
+
+export type PublishAdmittedLifecycleWorkspaceResponses = {
+    /**
+     * OK
+     */
+    200: LifecycleWorkspaceResult;
+};
+
+export type PublishAdmittedLifecycleWorkspaceResponse = PublishAdmittedLifecycleWorkspaceResponses[keyof PublishAdmittedLifecycleWorkspaceResponses];
 
 export type GetV0CityByCityNameMailData = {
     body?: never;

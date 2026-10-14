@@ -228,7 +228,10 @@
               "beads-admission-prepare",
               "beads-admission-attach",
               "beads-completion-prepare",
-              "beads-completion-accept"
+              "beads-completion-accept",
+              "beads-create",
+              "worktree-publish",
+              "worktree-prepare"
             ]
           },
           "event_id": {

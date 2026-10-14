@@ -192,6 +192,9 @@ func ClaimDescendantIdentity(cfg DescendantClaimConfig, request ClaimIdentityReq
 			}
 			change := MetadataStringPatch{Value: optional.value}
 			if previous, present := current.Metadata[optional.key]; present {
+				if previous == optional.value {
+					continue
+				}
 				change.Expected = &previous
 			}
 			patch.Metadata[optional.key] = change
