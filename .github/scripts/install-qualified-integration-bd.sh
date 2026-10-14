@@ -3,8 +3,8 @@ set -euo pipefail
 
 # Opt-in test dependency for the HTTP snapshot and lifecycle integration suites.
 # The default released bd and its compatibility matrix remain separate.
-source_ref="3c3423cf09a9557a85d4bebf31a425f49511dfed"
-source_sha="51b9a43a8b72bf9ebf0ac617526709fe90390409f6689ed67db307eb83463614"
+source_ref="595bf2d411988d2864dfcec25c59d2a43affae3c"
+source_sha="f0b971f2032a9b4a8933e4ddc415897e679a48de5db4168acffa48b6bafe3b0e"
 source_url="https://codeload.github.com/rhar1511/beads/tar.gz/$source_ref"
 
 case "$(uname -s)" in

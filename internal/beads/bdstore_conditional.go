@@ -481,7 +481,7 @@ func (s *BdStore) DeleteIfMatch(id string, expectedRevision int64) error {
 			return err
 		}
 	}
-	args := []string{"delete", "--force", "--json", id, conditionalWriteFlag, strconv.FormatInt(expectedRevision, 10)}
+	args := []string{"delete", "--force", "--protect-active-references", "--json", id, conditionalWriteFlag, strconv.FormatInt(expectedRevision, 10)}
 	return s.runConditionalWrite(id, expectedRevision, args...)
 }
 

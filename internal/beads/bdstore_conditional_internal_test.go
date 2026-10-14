@@ -796,7 +796,7 @@ func TestCloseIfMatchAndDeleteIfMatchFenceArgvAndApply(t *testing.T) {
 		if !w.deleted {
 			t.Fatal("delete not applied")
 		}
-		if !argvContains(w.writeArgv, "delete", "--force", "--json", "ga-1", conditionalWriteFlag, "4") {
+		if !argvContains(w.writeArgv, "delete", "--force", "--protect-active-references", "--json", "ga-1", conditionalWriteFlag, "4") {
 			t.Fatalf("fenced delete argv missing expected flags: %v", w.writeArgv)
 		}
 	})
