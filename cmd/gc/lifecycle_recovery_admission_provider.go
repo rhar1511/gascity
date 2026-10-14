@@ -23,7 +23,7 @@ func (cs *controllerState) VerifyLifecycleRecoveryAdmission(ctx context.Context,
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if request.Work.ID == "" || request.WorkStore == nil || request.ExpectedRevision <= 0 ||
+	if request.Work.ID == "" || request.WorkStore == nil || request.ExpectedRevision == 0 ||
 		request.Work.Revision != request.ExpectedRevision {
 		return worklifecycle.ErrTransitionChainInvalid
 	}

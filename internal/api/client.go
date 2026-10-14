@@ -348,11 +348,11 @@ type SessionSubmitResponse struct {
 // LifecycleClaimResult is the controller-confirmed result of one enrolled
 // lifecycle claim and its reciprocal session stamp.
 type LifecycleClaimResult struct {
-	WorkID          string
-	Actor           string
-	ClaimGeneration string
-	ReceiptID       string
-	Replayed        bool
+	WorkID          string `json:"work_id"`
+	Actor           string `json:"actor"`
+	ClaimGeneration string `json:"claim_generation"`
+	ReceiptID       string `json:"receipt_id"`
+	Replayed        bool   `json:"replayed"`
 }
 
 // sseEvent is a parsed SSE frame from the event stream.
@@ -2039,6 +2039,9 @@ func (c *Client) ClaimLifecycleWork(parent context.Context, request LifecycleCla
 		ExpectedRevision: request.ExpectedRevision, ExpectedTransitionHead: request.ExpectedTransitionHead,
 		SessionId: request.SessionID, InstanceToken: request.InstanceToken, RuntimeEpoch: request.RuntimeEpoch,
 	}
+	if request.ExecutionClaim != nil {
+		body.ExecutionClaim = &genclient.LifecycleExecutionClaim{WorkId: request.ExecutionClaim.WorkID, ClaimGeneration: request.ExecutionClaim.ClaimGeneration}
+	}
 	resp, err := c.cw.ClaimAdmittedLifecycleWorkWithResponse(ctx, c.cityName, nil, body)
 	if err != nil {
 		return LifecycleClaimResult{}, &connError{err: fmt.Errorf("request failed: %w", err)}
@@ -2056,5 +2059,77 @@ func (c *Client) ClaimLifecycleWork(parent context.Context, request LifecycleCla
 		WorkID: resp.JSON200.WorkId, Actor: resp.JSON200.Actor,
 		ClaimGeneration: resp.JSON200.ClaimGeneration, ReceiptID: resp.JSON200.ReceiptId,
 		Replayed: resp.JSON200.Replayed,
+	}, nil
+}
+
+// CompleteLifecycleWork submits externally signed acceptance to the controller.
+// It preserves the caller's original observation for exact retry and never
+// falls back to a generic metadata or status write.
+func (c *Client) CompleteLifecycleWork(parent context.Context, request LifecycleCompletionSubmitRequest) (LifecycleCompletionResult, error) {
+	if err := c.requireCityScope(); err != nil {
+		return LifecycleCompletionResult{}, err
+	}
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, defaultClientTimeout)
+	defer cancel()
+	body := genclient.CompleteAdmittedLifecycleWorkJSONRequestBody{
+		WorkId: request.WorkID, SourceStoreRef: request.SourceStoreRef,
+		ExpectedRevision: request.ExpectedRevision, ExpectedTransitionHead: request.ExpectedTransitionHead,
+		CompletionReceipt: request.CompletionReceipt,
+	}
+	response, err := c.cw.CompleteAdmittedLifecycleWorkWithResponse(ctx, c.cityName, nil, body)
+	if err != nil {
+		return LifecycleCompletionResult{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if response == nil {
+		return LifecycleCompletionResult{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(response.StatusCode(), pdOf(response)); err != nil {
+		return LifecycleCompletionResult{}, err
+	}
+	if response.JSON200 == nil {
+		return LifecycleCompletionResult{}, fmt.Errorf("API returned %d with no body", response.StatusCode())
+	}
+	return LifecycleCompletionResult{
+		WorkID: response.JSON200.WorkId, ReceiptID: response.JSON200.ReceiptId,
+		Revision: response.JSON200.Revision, Replayed: response.JSON200.Replayed,
+	}, nil
+}
+
+// CompleteLifecycleExecution submits the current worker claim for protected
+// step completion. It has no generic write fallback or source acceptance authority.
+func (c *Client) CompleteLifecycleExecution(parent context.Context, request LifecycleExecutionCompletionRequest) (LifecycleCompletionResult, error) {
+	if err := c.requireCityScope(); err != nil {
+		return LifecycleCompletionResult{}, err
+	}
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, defaultClientTimeout)
+	defer cancel()
+	body := genclient.CompleteLifecycleExecutionJSONRequestBody{
+		WorkId: request.WorkID, SourceStoreRef: request.SourceStoreRef,
+		ExpectedRevision: request.ExpectedRevision, ExpectedTransitionHead: request.ExpectedTransitionHead,
+		SessionId: request.SessionID, InstanceToken: request.InstanceToken, RuntimeEpoch: request.RuntimeEpoch,
+		ClaimGeneration: request.ClaimGeneration, Outcome: genclient.LifecycleExecutionCompletionRequestOutcome(request.Outcome),
+	}
+	response, err := c.cw.CompleteLifecycleExecutionWithResponse(ctx, c.cityName, nil, body)
+	if err != nil {
+		return LifecycleCompletionResult{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if response == nil {
+		return LifecycleCompletionResult{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(response.StatusCode(), pdOf(response)); err != nil {
+		return LifecycleCompletionResult{}, err
+	}
+	if response.JSON200 == nil {
+		return LifecycleCompletionResult{}, fmt.Errorf("API returned %d with no body", response.StatusCode())
+	}
+	return LifecycleCompletionResult{
+		WorkID: response.JSON200.WorkId, ReceiptID: response.JSON200.ReceiptId,
+		Revision: response.JSON200.Revision, Replayed: response.JSON200.Replayed,
 	}, nil
 }

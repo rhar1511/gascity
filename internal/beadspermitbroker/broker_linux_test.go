@@ -162,6 +162,7 @@ func TestControllerEnvironmentFileAllowsExplicitSupervisorInputs(t *testing.T) {
 		"GC_COMPATIBILITY_AUTHORITY_DIR":"/etc/gc/compatibility-authority",
 		"GC_COMPATIBILITY_AUTHORITY_MAX_REVOCATION_AGE":"15m",
 		"GC_PR_HUMAN_TRUST":"trusted-reviewer",
+		"GC_SUPERVISOR_PRESERVE_SESSIONS_ON_SIGNAL":"1",
 		"ANTHROPIC_API_KEY":"provider-secret",
 		"GC_DOLT_HOST":"dolt.example.internal",
 		"GC_DOLT_LOGLEVEL":"warn",
@@ -202,6 +203,7 @@ func TestControllerEnvironmentFileAllowsExplicitSupervisorInputs(t *testing.T) {
 		"GC_COMPATIBILITY_AUTHORITY_DIR=/etc/gc/compatibility-authority",
 		"GC_COMPATIBILITY_AUTHORITY_MAX_REVOCATION_AGE=15m",
 		"GC_PR_HUMAN_TRUST=trusted-reviewer",
+		"GC_SUPERVISOR_PRESERVE_SESSIONS_ON_SIGNAL=1",
 		"ANTHROPIC_API_KEY=provider-secret",
 		"GC_DOLT_HOST=dolt.example.internal",
 		"GC_DOLT_LOGLEVEL=warn",
@@ -212,6 +214,39 @@ func TestControllerEnvironmentFileAllowsExplicitSupervisorInputs(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Errorf("explicit controller environment is missing %q: %q", want, joined)
 		}
+	}
+}
+
+func TestControllerEnvironmentFilePreservesDeploymentPolicyInputs(t *testing.T) {
+	for key, value := range map[string]string{
+		"DO_NOT_TRACK":                        "1",
+		"GC_DISABLE_USAGE_METRICS":            "1",
+		"GC_DOLT_REMOTE_PROJECT_A":            "origin",
+		"GC_DOLT_PULL_ALLOW_REMOTE_PROJECT_A": "1",
+		"GOMAXPROCS":                          "4",
+		"GOMEMLIMIT":                          "6GiB",
+		"MODULES_ENABLED":                     "canvas,health",
+	} {
+		t.Run(key, func(t *testing.T) {
+			data, err := json.Marshal(map[string]string{key: value})
+			if err != nil {
+				t.Fatal(err)
+			}
+			extras, err := parseControllerEnvironment(data)
+			if err != nil {
+				t.Fatalf("parse deployment policy input: %v", err)
+			}
+			environment, err := controllerEnvironmentWithExtras("/etc/gc/protected-authority", uint32(os.Getuid()), "/usr/local/bin:/usr/bin:/bin", extras)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(environment) != 6 || environment[5] != key+"="+value {
+				t.Fatalf("deployment policy input was changed or omitted: %#v", environment)
+			}
+			if !validLaunchPayload(launchPayload{Executable: "/usr/bin/gc", Arguments: []string{"/usr/bin/gc", "supervisor", "run"}, Environment: environment}) {
+				t.Fatal("child rejected the explicit deployment policy input")
+			}
+		})
 	}
 }
 
@@ -240,6 +275,10 @@ func TestControllerEnvironmentFileRejectsMalformedOrUnsafeEntries(t *testing.T) 
 		{name: "empty value", data: `{"LANG":""}`},
 		{name: "NUL value", data: `{"LANG":"x\u0000y"}`},
 		{name: "unrecognized name", data: `{"NOT_A_CONTROLLER_INPUT":"value"}`},
+		{name: "unscoped Dolt remote", data: `{"GC_DOLT_REMOTE_":"origin"}`},
+		{name: "unscoped Dolt pull permission", data: `{"GC_DOLT_PULL_ALLOW_REMOTE_":"1"}`},
+		{name: "unrecognized Go control", data: `{"GOMAXPROCS_EXTRA":"4"}`},
+		{name: "unrecognized module control", data: `{"MODULES_ENABLED_EXTRA":"canvas"}`},
 		{name: "LD_PRELOAD", data: `{"LD_PRELOAD":"/tmp/inject.so"}`},
 		{name: "LD_LIBRARY_PATH", data: `{"LD_LIBRARY_PATH":"/tmp/lib"}`},
 		{name: "DYLD injection", data: `{"DYLD_INSERT_LIBRARIES":"/tmp/inject.dylib"}`},
@@ -250,6 +289,8 @@ func TestControllerEnvironmentFileRejectsMalformedOrUnsafeEntries(t *testing.T) 
 		{name: "relative GC_HOME", data: `{"GC_HOME":"relative/home"}`},
 		{name: "relative CLAUDE_CONFIG_DIR", data: `{"CLAUDE_CONFIG_DIR":"relative/claude"}`},
 		{name: "unclean XDG_RUNTIME_DIR", data: `{"XDG_RUNTIME_DIR":"/run/../tmp"}`},
+		{name: "session preservation disabled", data: `{"GC_SUPERVISOR_PRESERVE_SESSIONS_ON_SIGNAL":"0"}`},
+		{name: "session preservation malformed", data: `{"GC_SUPERVISOR_PRESERVE_SESSIONS_ON_SIGNAL":"true"}`},
 		{name: "protected key material", data: `{"GC_BEADS_PROTECTED_KEY_TOKEN":"secret"}`},
 	} {
 		t.Run(test.name, func(t *testing.T) {

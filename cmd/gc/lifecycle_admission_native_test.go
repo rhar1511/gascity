@@ -1,0 +1,732 @@
+//go:build integration && beads_revision_transitions && linux
+
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"flag"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/attemptevidence"
+	"github.com/gastownhall/gascity/internal/beadmeta"
+	"github.com/gastownhall/gascity/internal/beads"
+	convoycore "github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/storeref"
+	"github.com/gastownhall/gascity/internal/worklifecycle"
+)
+
+var nativeAdmissionFixturePath = flag.String("native-admission-fixture", "", "private exact-backend admission fixture manifest")
+
+// This opt-in composition proof uses a private, already signed source and the
+// real backend's Q43/Q54 and graph-apply paths. The fixture signer uses the
+// existing test key broker; production root ownership remains a deployment gate.
+// Owner: gp-olwhg.9.8. The external bounded harness owns backend process cleanup.
+func TestLifecycleAdmissionNativeGraphAttachAndReplay(t *testing.T) {
+	if *nativeAdmissionFixturePath == "" {
+		t.Skip("requires an explicitly supplied private native-backend fixture")
+	}
+	data, err := os.ReadFile(*nativeAdmissionFixturePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fixture struct {
+		CityPath          string                        `json:"city_path"`
+		WorkerWorkDir     string                        `json:"worker_work_dir"`
+		SourceID          string                        `json:"source_id"`
+		Environment       map[string]string             `json:"environment"`
+		AdmissionKeyFile  string                        `json:"admission_key_file"`
+		AcceptanceKeyFile string                        `json:"acceptance_key_file"`
+		PermitKeyFile     string                        `json:"permit_key_file"`
+		Authority         hostBeadsPermitAuthorityEntry `json:"authority"`
+	}
+	if err := json.Unmarshal(data, &fixture); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(filepath.Clean(fixture.CityPath), "/var/tmp/gc-bounded-go.") ||
+		fixture.SourceID == "" || fixture.WorkerWorkDir != filepath.Join(filepath.Dir(fixture.CityPath), "worker-worktree") || fixture.Environment["GC_CITY"] != fixture.CityPath ||
+		fixture.Authority.CityName != "native-admission" || fixture.Authority.StoreRef != "rig:api" {
+		t.Fatal("fixture is not the exact private admission city/source")
+	}
+	clearGCEnv(t)
+	for key, value := range fixture.Environment {
+		t.Setenv(key, value)
+	}
+	var stderr strings.Builder
+	c, err := openBeadsAdmissionContext("rig:api", &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.close()
+	key, err := os.ReadFile(fixture.PermitKeyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zeroHostBeadsPermitBytes(key)
+	resolver := controllerPermitTestResolver(t, fixture.Authority, key)
+	leaf, ok := controllerBdWriteLeaf(c.sourceLeg.store)
+	if !ok {
+		t.Fatal("private source does not use the real BdStore")
+	}
+	if _, configured, err := hostProtectedDecisionFrontierWriterForStore(resolver, c.cfg, c.cityName, "rig:api", leaf); err != nil || !configured {
+		t.Fatalf("bind real protected backend: configured=%t err=%v", configured, err)
+	}
+	before, err := c.snapshot(fixture.SourceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.Metadata[beadmeta.LifecycleAdmissionReceiptV2MetadataKey] == "" || before.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey] != "" {
+		t.Fatal("fixture must contain exactly the operator admission, before controller attachment")
+	}
+	stderr.Reset()
+	reconcileLifecycleAdmissionWithPermitResolver(c.cityName, c.cityPath, c.cfg, c.cityStore, c.rigStores, nil, &stderr, resolver)
+	attached, err := c.snapshot(fixture.SourceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker, ok := lifecycleMaterializationFor(attached)
+	if !ok || marker.State != "attached" || marker.Workflow != "mol-do-work" || marker.WorkflowID == "" {
+		t.Fatalf("native graph did not attach: marker=%+v stderr=%s", marker, stderr.String())
+	}
+	root, err := c.sourceLeg.store.Get(marker.WorkflowID)
+	if err != nil || root.Metadata[beadmeta.FormulaContractMetadataKey] != beadmeta.FormulaContractGraphV2 {
+		t.Fatalf("real graph root: %+v err=%v", root, err)
+	}
+	members, err := convoycore.Members(c.sourceLeg.store, root.Metadata[beadmeta.InputConvoyIDMetadataKey], true)
+	if err != nil || len(members) != 1 || members[0].ID != fixture.SourceID {
+		t.Fatalf("real input convoy does not bind the signed source: %+v err=%v", members, err)
+	}
+	reader, ok := beads.RevisionTransitionPatchReceiptReaderFor(c.sourceLeg.store)
+	if !ok {
+		t.Fatal("real protected receipt reader unavailable")
+	}
+	head, found, err := reader.ReadRevisionTransitionPatchReceipt(attached.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey])
+	if err != nil || !found || head.Kind != "lifecycle_source_materialization_v1" || head.ToVersion != attached.Revision {
+		t.Fatalf("real attachment receipt: %+v found=%t err=%v", head, found, err)
+	}
+	parent, found, err := reader.ReadRevisionTransitionPatchReceipt(head.PriorReceiptID)
+	if err != nil || !found || parent.Kind != "lifecycle_source_reservation_v1" || parent.ExpectedVersion != before.Revision || head.ExpectedVersion != parent.ToVersion {
+		t.Fatalf("real reservation chain: %+v found=%t err=%v", parent, found, err)
+	}
+	stderr.Reset()
+	reconcileLifecycleAdmissionWithPermitResolver(c.cityName, c.cityPath, c.cfg, c.cityStore, c.rigStores, nil, &stderr, resolver)
+	replayed, err := c.snapshot(fixture.SourceID)
+	if err != nil || stderr.Len() != 0 || !reflect.DeepEqual(attached, replayed) {
+		t.Fatalf("native replay changed source or failed: err=%v stderr=%s", err, stderr.String())
+	}
+	t.Logf("native graph %s attached source %s through reservation %s and attachment %s; exact replay preserved revision %d", root.ID, fixture.SourceID, parent.ReceiptID, head.ReceiptID, attached.Revision)
+
+	// Exercise the worker order through authenticated HTTP: claim the generated
+	// step first, then its source without replacing execution attribution. The
+	// session manager uses a fake runtime; a real worker launch remains a gate.
+	state := &controllerState{
+		cfg: c.cfg, cityName: c.cityName, cityPath: c.cityPath,
+		cityBeadStore: c.cityStore, beadStores: c.rigStores,
+		beadsPermitResolver: resolver, graphStoreGeneration: 1,
+	}
+	sessionRows := c.cityStore
+	provider := runtime.NewFake()
+	manager := session.NewManagerWithOptions(sessionRows, provider)
+	info, err := manager.CreateSession(context.Background(), session.CreateOptions{
+		Template: "api/worker", Command: "test-agent", WorkDir: fixture.WorkerWorkDir, Provider: "test-agent",
+		ExtraMeta: map[string]string{"session_origin": "ephemeral"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	authenticated := &nativeAdmissionSessionState{controllerState: state, sessions: beads.SessionStore{Store: sessionRows}, t: t}
+	supervisor := api.NewSupervisorMux(nativeAdmissionCityResolver{authenticated}, nil, false, "native-test", "", time.Now())
+	server := httptest.NewServer(supervisor.Handler())
+	defer server.Close()
+	client := api.NewCityScopedClient(server.URL, c.cityName)
+
+	oldAlive, oldClient := apiRouteControllerAliveHook, apiRouteSupervisorClientHook
+	t.Cleanup(func() { apiRouteControllerAliveHook, apiRouteSupervisorClientHook = oldAlive, oldClient })
+	apiRouteControllerAliveHook = func(string) int { return os.Getpid() }
+	apiRouteSupervisorClientHook = func(path string) *api.Client {
+		if path != c.cityPath {
+			t.Fatalf("completion client resolved another city: %s", path)
+		}
+		return api.NewCityScopedClient(server.URL, c.cityName)
+	}
+	runtimeGeneration, err := strconv.Atoi(info.Generation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	continuationEpoch, err := strconv.Atoi(info.ContinuationEpoch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for key, value := range session.RuntimeEnvWithSessionContext(info, runtimeGeneration, continuationEpoch, info.InstanceToken) {
+		t.Setenv(key, value)
+	}
+	hookReadStore, err := lifecycleStoreForRef(c.cityPath, c.cfg, "rig:api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if writer, ok := beads.RevisionTransitionPatchWriterFor(hookReadStore); ok || writer != nil {
+		t.Fatal("worker receipt-reader store acquired protected patch-write capability")
+	}
+	claimViaHook := func(expectedID string) {
+		t.Helper()
+		var hookOut, hookErr strings.Builder
+		if code := run([]string{"--city", c.cityPath, "hook", "--claim", "--json"}, &hookOut, &hookErr); code != 0 {
+			var readyOut, readyErr strings.Builder
+			readyCode := run([]string{"--city", c.cityPath, "ready", "--json", "--metadata-field", beadmeta.RoutedToMetadataKey + "=" + info.Template}, &readyOut, &readyErr)
+			var rows []beads.Bead
+			if err := json.Unmarshal([]byte(readyOut.String()), &rows); err != nil {
+				t.Logf("native public ready on hook failure: exit=%d decode=%v stderr=%s", readyCode, err, readyErr.String())
+			} else {
+				for _, row := range rows {
+					t.Logf("native public ready candidate: id=%s status=%s revision=%d step=%s", row.ID, row.Status, row.Revision, row.Metadata[beadmeta.StepRefMetadataKey])
+				}
+			}
+			t.Fatalf("native worker hook claim exit %d: stdout=%s stderr=%s", code, hookOut.String(), hookErr.String())
+		}
+		var result hookClaimJSONResult
+		if err := json.Unmarshal([]byte(hookOut.String()), &result); err != nil {
+			t.Fatalf("native hook result: %v, output=%s, stderr=%s", err, hookOut.String(), hookErr.String())
+		}
+		if !result.OK || result.Action != "work" || result.BeadID != expectedID || result.Assignee != session.AssigneeIdentifier(info) {
+			t.Fatalf("native hook did not claim expected work: %+v, stderr=%s", result, hookErr.String())
+		}
+	}
+
+	request := api.LifecycleClaimTransitionRequest{
+		Work: attached, WorkStore: c.sourceLeg.store, WorkStoreRef: storeref.RigRef("api"),
+		Scope: worklifecycle.ScopeForStore(c.cityName, "rig:api"), Session: info,
+		Actor: session.AssigneeIdentifier(info), ExpectedRevision: attached.Revision,
+		ExpectedTransitionHead: head.ReceiptID,
+	}
+
+	ready, err := c.sourceLeg.store.Ready(beads.ReadyQuery{TierMode: beads.FederatedReadTier})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var step beads.Bead
+	for _, row := range ready {
+		if row.Metadata[beadmeta.RootBeadIDMetadataKey] == root.ID && row.Metadata[beadmeta.StepRefMetadataKey] == "mol-do-work.do-work" {
+			step = row
+			break
+		}
+	}
+	if step.ID == "" || step.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey] != "" {
+		t.Fatal("native graph has no unanchored ready worker step")
+	}
+	// Ready locates candidates; the managed hook re-reads each exact row before
+	// submitting its revision. CLI ready projections need not carry that revision.
+	projectedRevision := step.Revision
+	step, err = c.sourceLeg.store.Get(step.ID)
+	if err != nil || step.Revision == 0 {
+		t.Fatalf("hydrate exact native step revision: revision=%d err=%v", step.Revision, err)
+	}
+	t.Logf("native descendant ready revision %d hydrated to exact revision %d", projectedRevision, step.Revision)
+	stepBody := api.LifecycleClaimSubmitRequest{
+		WorkID: step.ID, SourceStoreRef: "rig:api", ExpectedRevision: step.Revision,
+		ExpectedTransitionHead: "", SessionID: info.ID, InstanceToken: info.InstanceToken, RuntimeEpoch: info.Generation,
+	}
+	claimViaHook(step.ID)
+	stepClaim, err := client.ClaimLifecycleWork(context.Background(), stepBody)
+	if err != nil || stepClaim.ClaimGeneration != "1" || !stepClaim.Replayed {
+		t.Fatalf("native descendant claim: %+v err=%v", stepClaim, err)
+	}
+	stepReceipt, found, err := reader.ReadRevisionTransitionPatchReceipt(stepClaim.ReceiptID)
+	if err != nil || !found || stepReceipt.IssueID != step.ID || stepReceipt.Kind != "lifecycle_descendant_claim_identity_v1" {
+		t.Fatalf("native descendant claim receipt: %+v found=%t err=%v", stepReceipt, found, err)
+	}
+	anchorReader, ok := beads.ControllerMetadataTransitionReceiptReaderFor(c.sourceLeg.store)
+	if !ok {
+		t.Fatal("native descendant anchor reader unavailable")
+	}
+	anchor, found, err := anchorReader.ControllerMetadataTransitionReceipt(step.ID, stepReceipt.PriorReceiptID)
+	if err != nil || !found || anchor.Kind != "lifecycle_descendant_anchor_v1" || anchor.IssueID != step.ID ||
+		anchor.ExpectedVersion != step.Revision || anchor.ToVersion != stepReceipt.ExpectedVersion {
+		t.Fatalf("native descendant anchor: %+v found=%t err=%v", anchor, found, err)
+	}
+	stepReadback, err := c.sourceLeg.store.Get(step.ID)
+	if err != nil || stepReadback.Status != "in_progress" || stepReadback.Assignee != request.Actor || stepReadback.Revision != stepReceipt.ToVersion ||
+		stepReadback.Metadata[beadmeta.SessionIDMetadataKey] != info.ID || stepReadback.Metadata[beadmeta.ClaimGenerationMetadataKey] != "1" ||
+		stepReadback.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey] != stepClaim.ReceiptID {
+		t.Fatalf("native descendant claim was not persisted exactly: %v", err)
+	}
+	stepReplay, err := client.ClaimLifecycleWork(context.Background(), stepBody)
+	if err != nil || !stepReplay.Replayed || stepReplay.ReceiptID != stepClaim.ReceiptID {
+		t.Fatalf("native descendant replay: %+v err=%v", stepReplay, err)
+	}
+	stepFinal, err := c.sourceLeg.store.Get(step.ID)
+	if err != nil || !reflect.DeepEqual(stepReadback, stepFinal) {
+		t.Fatalf("native descendant replay changed committed step: %v", err)
+	}
+	t.Logf("native descendant claim %s anchored step %s through %s; exact replay preserved revision %d", stepClaim.ReceiptID, step.ID, anchor.ReceiptID, stepFinal.Revision)
+	sourceBody := api.LifecycleClaimSubmitRequest{
+		WorkID: attached.ID, SourceStoreRef: "rig:api", ExpectedRevision: attached.Revision,
+		ExpectedTransitionHead: head.ReceiptID, SessionID: info.ID, InstanceToken: info.InstanceToken, RuntimeEpoch: info.Generation,
+		ExecutionClaim: &api.LifecycleExecutionClaim{WorkID: step.ID, ClaimGeneration: "1"},
+	}
+	for _, scenario := range []string{"stale incarnation", "stale execution generation"} {
+		refused := sourceBody
+		if scenario == "stale incarnation" {
+			refused.InstanceToken = "stale-incarnation"
+		} else {
+			refused.ExecutionClaim = &api.LifecycleExecutionClaim{WorkID: step.ID, ClaimGeneration: "2"}
+		}
+		if _, err := client.ClaimLifecycleWork(context.Background(), refused); err == nil {
+			t.Fatalf("accepted %s", scenario)
+		}
+		unchanged, err := c.snapshot(fixture.SourceID)
+		if err != nil || !reflect.DeepEqual(attached, unchanged) {
+			t.Fatalf("%s changed source", scenario)
+		}
+	}
+	var startOut, startErr strings.Builder
+	begin := []string{"--city", c.cityPath, "hook", "begin-source", fixture.SourceID, "--store-ref", "rig:api"}
+	for _, scenario := range []string{"missing incarnation", "missing current claim", "controller unavailable"} {
+		restore := func() {}
+		switch scenario {
+		case "missing incarnation":
+			t.Setenv("GC_INSTANCE_TOKEN", "")
+			restore = func() { t.Setenv("GC_INSTANCE_TOKEN", info.InstanceToken) }
+		case "missing current claim":
+			if _, err := session.NewStore(authenticated.sessions).SetCurrentClaimForGeneration(info.ID, "", ""); err != nil {
+				t.Fatal(err)
+			}
+			restore = func() {
+				if _, err := session.NewStore(authenticated.sessions).SetCurrentClaimForGeneration(info.ID, step.ID, "1"); err != nil {
+					t.Fatal(err)
+				}
+			}
+		case "controller unavailable":
+			savedClient := apiRouteSupervisorClientHook
+			apiRouteSupervisorClientHook = func(string) *api.Client { return nil }
+			restore = func() { apiRouteSupervisorClientHook = savedClient }
+		}
+		code := run(begin, &startOut, &startErr)
+		restore()
+		if code == 0 {
+			t.Fatalf("worker source start accepted %s", scenario)
+		}
+		unchanged, err := c.snapshot(fixture.SourceID)
+		if err != nil || !reflect.DeepEqual(attached, unchanged) {
+			t.Fatalf("worker source-start %s changed source", scenario)
+		}
+		startOut.Reset()
+		startErr.Reset()
+	}
+	if code := run(begin, &startOut, &startErr); code != 0 {
+		t.Fatalf("native worker source-start command exit %d: %s", code, startErr.String())
+	}
+	var claim api.LifecycleClaimResult
+	if err := json.Unmarshal([]byte(startOut.String()), &claim); err != nil {
+		t.Fatal(err)
+	}
+	if claim.WorkID != fixture.SourceID || claim.ClaimGeneration != "1" || claim.ReceiptID == "" || claim.Replayed {
+		t.Fatalf("real source claim: result=%+v err=%v", claim, err)
+	}
+	claimed, err := c.snapshot(fixture.SourceID)
+	if err != nil || claimed.Status != "in_progress" || claimed.Assignee != request.Actor ||
+		claimed.Metadata[beadmeta.SessionIDMetadataKey] != info.ID ||
+		claimed.Metadata[beadmeta.ClaimGenerationMetadataKey] != "1" ||
+		claimed.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey] != claim.ReceiptID {
+		t.Fatalf("real source claim was not persisted exactly: err=%v", err)
+	}
+	claimReceipt, found, err := reader.ReadRevisionTransitionPatchReceipt(claim.ReceiptID)
+	if err != nil || !found || claimReceipt.Kind != "lifecycle_source_claim_identity_v1" ||
+		claimReceipt.PriorReceiptID != head.ReceiptID || claimReceipt.ExpectedVersion != attached.Revision ||
+		claimReceipt.ToVersion != claimed.Revision {
+		t.Fatalf("real source claim receipt: %+v found=%t err=%v", claimReceipt, found, err)
+	}
+	claimReplay, err := client.ClaimLifecycleWork(context.Background(), sourceBody)
+	if err != nil || !claimReplay.Replayed || claimReplay.ReceiptID != claim.ReceiptID || claimReplay.ClaimGeneration != "1" {
+		t.Fatalf("real source claim replay: result=%+v err=%v", claimReplay, err)
+	}
+	claimReadback, err := c.snapshot(fixture.SourceID)
+	if err != nil || !reflect.DeepEqual(claimed, claimReadback) {
+		t.Fatalf("real source claim replay changed the committed source: err=%v", err)
+	}
+	heartbeatStep, err := c.sourceLeg.store.Get(step.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{fixture.SourceID, step.ID} {
+		var heartbeatOut, heartbeatErr strings.Builder
+		code := run([]string{"--city", c.cityPath, "bd", "--rig", "api", "heartbeat", id}, &heartbeatOut, &heartbeatErr)
+		if code == 0 || !strings.Contains(heartbeatErr.String(), "lifecycle admission is enabled; refusing raw bd command") ||
+			!strings.Contains(heartbeatErr.String(), "no lifecycle proof-aware write guard") {
+			t.Fatalf("enrolled heartbeat was not refused by its lifecycle guard: exit=%d stderr=%s", code, heartbeatErr.String())
+		}
+		sourceNow, sourceErr := c.snapshot(fixture.SourceID)
+		stepNow, stepErr := c.sourceLeg.store.Get(step.ID)
+		if sourceErr != nil || stepErr != nil || !reflect.DeepEqual(claimed, sourceNow) || !reflect.DeepEqual(heartbeatStep, stepNow) {
+			t.Fatal("refused enrolled heartbeat changed source or execution step")
+		}
+	}
+	t.Log("native enrolled source and execution heartbeats refused without changing work")
+	startOut.Reset()
+	startErr.Reset()
+	if code := run(begin, &startOut, &startErr); code != 0 {
+		t.Fatalf("native worker source-start retry exit %d: %s", code, startErr.String())
+	}
+	var cliReplay api.LifecycleClaimResult
+	if err := json.Unmarshal([]byte(startOut.String()), &cliReplay); err != nil {
+		t.Fatal(err)
+	}
+	if !cliReplay.Replayed || cliReplay.ReceiptID != claim.ReceiptID {
+		t.Fatalf("native worker source-start retry: %+v", cliReplay)
+	}
+	cliReadback, err := c.snapshot(fixture.SourceID)
+	if err != nil || !reflect.DeepEqual(claimed, cliReadback) {
+		t.Fatal("worker source-start retry changed source")
+	}
+	t.Log("native worker begin-source command and retry used current execution claim without signing keys")
+	t.Logf("native source claim %s committed generation 1 and exact replay preserved revision %d", claim.ReceiptID, claimed.Revision)
+
+	claimID, generation, err := session.NewStore(authenticated.sessions).CurrentClaim(info.ID)
+	if err != nil || claimID != step.ID || generation != "1" {
+		t.Fatalf("source start replaced execution attribution: %s/%s, %v", claimID, generation, err)
+	}
+	preservedStep, err := c.sourceLeg.store.Get(step.ID)
+	if err != nil || !reflect.DeepEqual(stepFinal, preservedStep) {
+		t.Fatal("source start changed the claimed step")
+	}
+	t.Log("native authenticated step-first source claim preserved execution attribution and rejected stale incarnation/generation")
+
+	completionBody := api.LifecycleExecutionCompletionRequest{
+		LifecycleExecutionCompletionIntent: api.LifecycleExecutionCompletionIntent{ClaimGeneration: "1", Outcome: "pass"},
+		WorkID:                             step.ID, SourceStoreRef: "rig:api", ExpectedRevision: stepFinal.Revision, ExpectedTransitionHead: stepClaim.ReceiptID,
+		SessionID: info.ID, InstanceToken: info.InstanceToken, RuntimeEpoch: info.Generation,
+	}
+	for _, scenario := range []string{"stale token", "stale epoch", "wrong generation", "wrong store", "stale revision", "stale head", "source as step", "operator outcome"} {
+		bad := completionBody
+		switch scenario {
+		case "stale token":
+			bad.InstanceToken = "another-runtime"
+		case "stale epoch":
+			bad.RuntimeEpoch = "999999"
+		case "wrong generation":
+			bad.ClaimGeneration = "2"
+		case "wrong store":
+			bad.SourceStoreRef = "city:native-admission"
+		case "stale revision":
+			bad.ExpectedRevision--
+		case "stale head":
+			bad.ExpectedTransitionHead = "unrelated-head"
+		case "source as step":
+			bad.WorkID = claimed.ID
+			bad.ExpectedRevision = claimed.Revision
+			bad.ExpectedTransitionHead = claim.ReceiptID
+		case "operator outcome":
+			bad.Outcome = "canceled"
+		}
+		if _, err := client.CompleteLifecycleExecution(context.Background(), bad); err == nil {
+			t.Fatalf("native completion accepted %s", scenario)
+		}
+		stepNow, err := c.sourceLeg.store.Get(step.ID)
+		if err != nil || !reflect.DeepEqual(stepFinal, stepNow) {
+			t.Fatalf("%s refusal changed native step", scenario)
+		}
+		sourceNow, err := c.snapshot(fixture.SourceID)
+		if err != nil || !reflect.DeepEqual(claimed, sourceNow) {
+			t.Fatalf("%s refusal changed native source", scenario)
+		}
+	}
+	t.Log("native execution completion refused eight stale or unauthorized requests without changing step or source")
+
+	// Exercise the public operator prepare/accept commands through the generated
+	// client, real supervisor HTTP handler, controller provider and native backend.
+	var commandOut, commandErr strings.Builder
+	prepare := []string{
+		"--city", c.cityPath, "beads", "completion", "prepare", fixture.SourceID, "--store-ref", "rig:api",
+		"--deliverable-ref", "fixture://native-claim", "--verification-ref", "fixture://native-claim-replay",
+		"--work-outcome", "no-op", "--work-verification", "native exact-replay checks",
+	}
+	t.Setenv("GC_WORK_RECORD_ENFORCE", "true")
+	if code := run(prepare, &commandOut, &commandErr); code != 0 {
+		t.Fatalf("native completion prepare exit %d: %s", code, commandErr.String())
+	}
+	draftPath := filepath.Join(filepath.Dir(*nativeAdmissionFixturePath), "reviewed-completion.json")
+	if err := os.WriteFile(draftPath, []byte(commandOut.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	unchanged, err := c.snapshot(fixture.SourceID)
+	if err != nil || !reflect.DeepEqual(claimed, unchanged) {
+		t.Fatal("operator preparation mutated the claimed source")
+	}
+	var reviewed beadsCompletionDraft
+	if err := json.Unmarshal([]byte(commandOut.String()), &reviewed); err != nil {
+		t.Fatal(err)
+	}
+	if reviewed.Receipt.WorkRecord == nil || reviewed.Receipt.WorkRecord.Outcome != "no-op" ||
+		reviewed.Receipt.WorkRecord.Verification != "native exact-replay checks" || reviewed.Receipt.WorkRecord.Commit != "" || reviewed.Receipt.Signature != "" {
+		t.Fatal("operator draft lost the unsigned typed work record")
+	}
+	refuse := func(name, keyFile, reason string, draft beadsCompletionDraft, want beads.Bead) {
+		t.Helper()
+		encoded, err := json.Marshal(draft)
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(filepath.Dir(draftPath), name+".json")
+		if err := os.WriteFile(path, encoded, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		var out, diagnostic strings.Builder
+		args := []string{"--city", c.cityPath, "beads", "completion", "accept", path, "--store-ref", "rig:api", "--key-file", keyFile}
+		if code := run(args, &out, &diagnostic); code == 0 || !strings.Contains(diagnostic.String(), reason) {
+			t.Fatalf("%s was not refused for %q: exit=%d diagnostic=%s", name, reason, code, diagnostic.String())
+		}
+		after, err := c.snapshot(fixture.SourceID)
+		if err != nil || !reflect.DeepEqual(want, after) {
+			t.Fatalf("%s changed source during refusal: %v", name, err)
+		}
+	}
+	refuse("admission-key", fixture.AdmissionKeyFile, "key does not match the acceptance authority", reviewed, claimed)
+	altered := reviewed
+	altered.Receipt.AcceptedBy = "another-reviewer"
+	refuse("altered-authority", fixture.AcceptanceKeyFile, "reviewed acceptance differs", altered, claimed)
+	altered = reviewed
+	altered.ExpectedRevision++
+	refuse("stale-review", fixture.AcceptanceKeyFile, "source changed since review", altered, claimed)
+	accept := []string{"--city", c.cityPath, "beads", "completion", "accept", draftPath, "--store-ref", "rig:api", "--key-file", fixture.AcceptanceKeyFile}
+	commandOut.Reset()
+	commandErr.Reset()
+	if code := run(accept, &commandOut, &commandErr); code != 0 {
+		t.Fatalf("native completion accept exit %d: %s", code, commandErr.String())
+	}
+	var completed api.LifecycleCompletionResult
+	if err := json.Unmarshal([]byte(commandOut.String()), &completed); err != nil {
+		t.Fatal(err)
+	}
+	closed, err := c.snapshot(fixture.SourceID)
+	if err != nil || closed.Status != "closed" || completed.Revision != closed.Revision || completed.ReceiptID != closed.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey] || completed.Replayed {
+		t.Fatalf("operator completion did not close its exact source: %+v err=%v", completed, err)
+	}
+	if closed.Metadata[beadmeta.WorkOutcomeMetadataKey] != "no-op" || closed.Metadata[beadmeta.WorkVerificationMetadataKey] != "native exact-replay checks" {
+		t.Fatal("signed completion lost the accepted typed work record")
+	}
+	closeReceipt, found, err := reader.ReadRevisionTransitionPatchReceipt(completed.ReceiptID)
+	if err != nil || !found || closeReceipt.Kind != "lifecycle_source_close_v1" || closeReceipt.ToVersion != closed.Revision {
+		t.Fatalf("native close receipt: found=%t err=%v", found, err)
+	}
+	budget, found, err := reader.ReadRevisionTransitionPatchReceipt(closeReceipt.PriorReceiptID)
+	attachedAcceptance, hasAcceptance := lifecyclePatchMetadataString(budget, beadmeta.LifecycleCompletionReceiptMetadataKey)
+	if err != nil || !found || !hasAcceptance || attachedAcceptance != closed.Metadata[beadmeta.LifecycleCompletionReceiptMetadataKey] || budget.ExpectedVersion != claimed.Revision || budget.PriorReceiptID != claim.ReceiptID {
+		t.Fatalf("operator acceptance is not bound to its observed claim: found=%t attached=%t err=%v", found, hasAcceptance, err)
+	}
+	if _, err := state.ClaimLifecycleWork(context.Background(), request); err == nil {
+		t.Fatal("closed source accepted a managed claim replay")
+	}
+	altered = reviewed
+	altered.Receipt.DeliverableRef = "fixture://replacement-deliverable"
+	refuse("replacement-acceptance", fixture.AcceptanceKeyFile, "source changed since review", altered, closed)
+	commandOut.Reset()
+	commandErr.Reset()
+	if code := run(accept, &commandOut, &commandErr); code != 0 {
+		t.Fatalf("native completion retry exit %d: %s", code, commandErr.String())
+	}
+	var replay api.LifecycleCompletionResult
+	if err := json.Unmarshal([]byte(commandOut.String()), &replay); err != nil {
+		t.Fatal(err)
+	}
+	after, err := c.snapshot(fixture.SourceID)
+	if err != nil || !replay.Replayed || replay.ReceiptID != completed.ReceiptID || !reflect.DeepEqual(closed, after) {
+		t.Fatal("operator retry changed closed work")
+	}
+	t.Logf("native signed completion %s followed acceptance budget %s; exact replay preserved revision %d", closeReceipt.ReceiptID, budget.ReceiptID, closed.Revision)
+	t.Log("native operator completion prepare/accept used generated client and real supervisor HTTP/controller path")
+	t.Log("native operator refusals preserved source for wrong key, altered authority, stale review and replacement acceptance")
+
+	// Execution completion closes only the current generated step. It does not
+	// supply or replace the separately reviewed source acceptance above.
+	var finishOut, finishErr strings.Builder
+	finish := []string{"--city", c.cityPath, "hook", "complete", "--store-ref", "rig:api", "--outcome", "pass"}
+	if code := run(finish, &finishOut, &finishErr); code != 0 {
+		t.Fatalf("native worker step-completion command exit %d: %s", code, finishErr.String())
+	}
+	var finishedStep api.LifecycleCompletionResult
+	if err := json.Unmarshal([]byte(finishOut.String()), &finishedStep); err != nil {
+		t.Fatal(err)
+	}
+	completedStep, err := c.sourceLeg.store.Get(step.ID)
+	if err != nil || finishedStep.WorkID != step.ID || finishedStep.ReceiptID == "" || finishedStep.Replayed ||
+		completedStep.Status != "closed" || completedStep.Revision != finishedStep.Revision ||
+		completedStep.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomePass || completedStep.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey] != finishedStep.ReceiptID {
+		t.Fatalf("native step completion result %+v, readback error %v", finishedStep, err)
+	}
+	sourceAfterStep, err := c.snapshot(fixture.SourceID)
+	if err != nil || !reflect.DeepEqual(closed, sourceAfterStep) {
+		t.Fatal("step completion changed the admitted source or its acceptance")
+	}
+	finishOut.Reset()
+	finishErr.Reset()
+	if code := run(finish, &finishOut, &finishErr); code != 0 {
+		t.Fatalf("native worker step-completion retry exit %d: %s", code, finishErr.String())
+	}
+	var finishedReplay api.LifecycleCompletionResult
+	if err := json.Unmarshal([]byte(finishOut.String()), &finishedReplay); err != nil {
+		t.Fatal(err)
+	}
+	replayedStep, err := c.sourceLeg.store.Get(step.ID)
+	if err != nil || !finishedReplay.Replayed || finishedReplay.ReceiptID != finishedStep.ReceiptID || !reflect.DeepEqual(completedStep, replayedStep) {
+		t.Fatal("step completion retry changed the committed step")
+	}
+	t.Log("native worker step completion closed only the execution step and exact retry preserved its receipt")
+
+	t.Log("native signed work record and source closure precede current-step completion")
+
+	// Reviewer acceptance closes the source before the signed workflow's tail.
+	// The remaining static step must still claim and finish through protected
+	// authority, without reopening or otherwise changing the accepted source.
+	tails, err := c.sourceLeg.store.Ready(beads.ReadyQuery{TierMode: beads.FederatedReadTier})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tail beads.Bead
+	for _, row := range tails {
+		if row.Metadata[beadmeta.RootBeadIDMetadataKey] == root.ID && row.Metadata[beadmeta.StepRefMetadataKey] == "mol-do-work.drain" {
+			tail = row
+			break
+		}
+	}
+	if tail.ID == "" {
+		t.Fatal("accepted source has no ready workflow tail")
+	}
+	tail, err = c.sourceLeg.store.Get(tail.ID)
+	if err != nil || tail.Revision == 0 {
+		t.Fatalf("hydrate exact tail: %v", err)
+	}
+	tailBody := api.LifecycleClaimSubmitRequest{
+		WorkID: tail.ID, SourceStoreRef: "rig:api", ExpectedRevision: tail.Revision, ExpectedTransitionHead: tail.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey],
+		SessionID: info.ID, InstanceToken: info.InstanceToken, RuntimeEpoch: info.Generation,
+	}
+	claimViaHook(tail.ID)
+	tailClaim, err := client.ClaimLifecycleWork(context.Background(), tailBody)
+	if err != nil {
+		t.Fatalf("native accepted-source tail claim: %v", err)
+	}
+	if tailClaim.WorkID != tail.ID || tailClaim.ReceiptID == "" || !tailClaim.Replayed {
+		t.Fatalf("native tail claim: %+v", tailClaim)
+	}
+	tailReplay, err := client.ClaimLifecycleWork(context.Background(), tailBody)
+	if err != nil || !tailReplay.Replayed || tailReplay.ReceiptID != tailClaim.ReceiptID {
+		t.Fatalf("native tail claim retry: %+v, %v", tailReplay, err)
+	}
+	var drainOut, drainErr strings.Builder
+	drain := newDrainOps(provider)
+	if code := doRuntimeDrain(drain, provider, events.Discard, info.SessionName, info.SessionName, true, &drainOut, &drainErr); code != 0 {
+		t.Fatalf("native managed runtime drain request exit=%d stderr=%s", code, drainErr.String())
+	}
+	if requested, err := drain.isDraining(info.SessionName); err != nil || !requested {
+		t.Fatalf("native runtime drain request missing: requested=%v err=%v", requested, err)
+	}
+	finishOut.Reset()
+	finishErr.Reset()
+	if code := run(finish, &finishOut, &finishErr); code != 0 {
+		t.Fatalf("native accepted-source tail completion exit %d: %s", code, finishErr.String())
+	}
+	var tailCompletion api.LifecycleCompletionResult
+	if err := json.Unmarshal([]byte(finishOut.String()), &tailCompletion); err != nil {
+		t.Fatal(err)
+	}
+	tailClosed, err := c.sourceLeg.store.Get(tail.ID)
+	if err != nil || tailCompletion.WorkID != tail.ID || tailCompletion.Replayed || tailClosed.Status != "closed" || tailClosed.Revision != tailCompletion.Revision || tailClosed.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey] != tailCompletion.ReceiptID {
+		t.Fatalf("native tail completion: %+v, %v", tailCompletion, err)
+	}
+	finishOut.Reset()
+	finishErr.Reset()
+	if code := run(finish, &finishOut, &finishErr); code != 0 {
+		t.Fatalf("native accepted-source tail completion retry exit %d: %s", code, finishErr.String())
+	}
+	var tailCompletionReplay api.LifecycleCompletionResult
+	if err := json.Unmarshal([]byte(finishOut.String()), &tailCompletionReplay); err != nil {
+		t.Fatal(err)
+	}
+	tailAfter, err := c.sourceLeg.store.Get(tail.ID)
+	if err != nil || !tailCompletionReplay.Replayed || tailCompletionReplay.ReceiptID != tailCompletion.ReceiptID || !reflect.DeepEqual(tailClosed, tailAfter) {
+		t.Fatal("native tail completion retry changed its terminal step")
+	}
+	sourceAfterTail, err := c.snapshot(fixture.SourceID)
+	if err != nil || !reflect.DeepEqual(closed, sourceAfterTail) {
+		t.Fatal("native workflow tail changed accepted source")
+	}
+	// Public references must resolve through the actual private transport for
+	// every separately owned execution, including the accepted source and drain.
+	for _, attempt := range []struct {
+		owner   beads.Bead
+		outcome string
+	}{{closed, "no-op"}, {completedStep, "pass"}, {tailClosed, "pass"}} {
+		var reference attemptevidence.Reference
+		if err := json.Unmarshal([]byte(attempt.owner.Metadata[beadmeta.AttemptEvidenceReferenceMetadataKey]), &reference); err != nil {
+			t.Fatalf("native attempt reference for %s: %v", attempt.owner.ID, err)
+		}
+		evidence, err := attemptevidence.Read(c.sourceLeg.store, attempt.owner.ID, reference.AttemptID)
+		if err != nil || evidence.Identity.OwnerBeadID != attempt.owner.ID || evidence.Identity.ExecutionBeadID != attempt.owner.ID || evidence.Identity.SessionID != info.ID || evidence.Identity.SessionGeneration != info.Generation || evidence.Identity.ClaimGeneration != "1" || evidence.Outcome != attempt.outcome || evidence.StoreRef != "rig:api" || evidence.SourceStatus != attemptevidence.StatusAvailable || evidence.CandidateStatus != attemptevidence.StatusAvailable || evidence.WorkspaceDiff.Status != attemptevidence.StatusAvailable {
+			t.Fatalf("native private attempt for %s lost its exact identity/outcome: %v", attempt.owner.ID, err)
+		}
+		archiveReader, ok := beads.PrivateEvidenceArchiveReaderFor(c.sourceLeg.store)
+		if !ok {
+			t.Fatal("native store lost its private archive transport")
+		}
+		archives, err := archiveReader.ListPrivateEvidenceArchives(attempt.owner.ID, reference.AttemptID)
+		if err != nil || len(archives) != 1 {
+			t.Fatalf("native attempt for %s has no unique archive: %v", attempt.owner.ID, err)
+		}
+	}
+	t.Log("native source, current step and drain archives bind exact owner/session/generation/outcome")
+	t.Log("native accepted-source tail claimed and completed with exact retry while preserving signed source closure")
+	t.Log("native worker hook discovered and claimed both initial step and accepted-source tail using real session storage")
+	t.Log("native current execution completed and replayed after a provider drain request")
+	if err := session.NewStore(authenticated.sessions).BeginDrainAckStopPending(info.ID, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	finishOut.Reset()
+	finishErr.Reset()
+	if code := run(finish, &finishOut, &finishErr); code == 0 {
+		t.Fatal("native completion accepted a session pending stop after drain acknowledgement")
+	}
+	stepAfterStop, stepErr := c.sourceLeg.store.Get(tail.ID)
+	sourceAfterStop, sourceErr := c.snapshot(fixture.SourceID)
+	if stepErr != nil || sourceErr != nil || !reflect.DeepEqual(tailClosed, stepAfterStop) || !reflect.DeepEqual(closed, sourceAfterStop) {
+		t.Fatal("stop-pending completion refusal changed execution or source")
+	}
+	t.Log("native stop-pending session refused completion replay without changing work")
+}
+
+type nativeAdmissionSessionState struct {
+	*controllerState
+	sessions beads.SessionStore
+	t        *testing.T
+}
+
+func (s *nativeAdmissionSessionState) SessionsBeadStore() beads.SessionStore { return s.sessions }
+
+type nativeAdmissionCityResolver struct{ state api.State }
+
+func (r nativeAdmissionCityResolver) ListCities() []api.CityInfo {
+	return []api.CityInfo{{Name: r.state.CityName(), Path: r.state.CityPath(), Running: true}}
+}
+
+func (r nativeAdmissionCityResolver) CityState(name string) api.State {
+	if name == r.state.CityName() {
+		return r.state
+	}
+	return nil
+}
+
+func (s *nativeAdmissionSessionState) CompleteLifecycleExecution(ctx context.Context, request api.LifecycleExecutionCompletionTransitionRequest) (api.LifecycleCompletionResult, error) {
+	result, err := s.controllerState.CompleteLifecycleExecution(ctx, request)
+	if err != nil {
+		s.t.Logf("native execution completion controller refusal: %v", err)
+	}
+	return result, err
+}

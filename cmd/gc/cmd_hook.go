@@ -63,6 +63,8 @@ With --claim: runs the standard startup claim protocol for one work item.
 	}
 	cmd.AddCommand(newHookRunCmd(stdout, stderr))
 	cmd.AddCommand(newHookCurrentCmd(stdout, stderr))
+	cmd.AddCommand(newHookBeginSourceCmd(stdout, stderr))
+	cmd.AddCommand(newHookCompleteCmd(stdout, stderr))
 	return cmd
 }
 
@@ -504,6 +506,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 			IdentityCandidates:            identityCandidates,
 			RouteTargets:                  routeTargets,
 			Env:                           queryEnv,
+			LifecycleInstanceToken:        strings.TrimSpace(os.Getenv("GC_INSTANCE_TOKEN")),
 			DrainAck:                      opts.DrainAck,
 			JSON:                          opts.JSON,
 			Lifecycle:                     cfg.Lifecycle,

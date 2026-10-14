@@ -163,11 +163,14 @@ type hookClaimOptions struct {
 	IdentityCandidates []string
 	RouteTargets       []string
 	Env                []string
-	DrainAck           bool
-	JSON               bool
-	Lifecycle          config.LifecycleConfig
-	LifecycleCity      *config.City
-	LifecycleCityPath  string
+	// LifecycleInstanceToken stays in-process for the controller request. Work
+	// query subprocesses receive the separately filtered Env without this token.
+	LifecycleInstanceToken string
+	DrainAck               bool
+	JSON                   bool
+	Lifecycle              config.LifecycleConfig
+	LifecycleCity          *config.City
+	LifecycleCityPath      string
 	// ResolveLifecycleStore returns the exact city/rig/class store named by
 	// trusted gc ready provenance. Lifecycle checks never substitute a
 	// different store when this resolver fails.

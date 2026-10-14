@@ -12,11 +12,13 @@ import (
 
 func TestLifecycleRecoveryAdmissionProviderRequiresQ43AndCurrentPolicy(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		mutate  func(*testing.T, *lifecycleAdmissionTransitionSetup)
-		wantErr bool
+		name         string
+		mutate       func(*testing.T, *lifecycleAdmissionTransitionSetup)
+		wantErr      bool
+		nextRevision int64
 	}{
 		{name: "exact attachment and current policy", wantErr: false},
+		{name: "negative revision", nextRevision: -1000},
 		{
 			name: "missing Q43 receipt",
 			mutate: func(t *testing.T, setup *lifecycleAdmissionTransitionSetup) {
@@ -39,6 +41,7 @@ func TestLifecycleRecoveryAdmissionProviderRequiresQ43AndCurrentPolicy(t *testin
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			setup := newLifecycleAdmissionTransitionSetup(t)
+			setup.store.nextPatchRevision = tc.nextRevision
 			reconcileLifecycleAdmissionWithPermitResolver(
 				"pilot", setup.fixture.cityPath, setup.fixture.cfg, setup.cityStore, setup.rigStores, nil,
 				io.Discard, setup.permitResolver,

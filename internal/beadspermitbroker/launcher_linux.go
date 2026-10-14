@@ -24,6 +24,7 @@ import (
 const (
 	childLaunchMode                     = "--internal-protected-authority-exec-child"
 	maxControllerEnvironmentBytes int64 = 64 << 10
+	preserveSessionsOnSignalEnv         = "GC_SUPERVISOR_PRESERVE_SESSIONS_ON_SIGNAL"
 )
 
 type launchPayload struct {
@@ -367,13 +368,16 @@ func readControllerEnvironmentFile(path string) (map[string]string, error) {
 }
 
 var allowedControllerEnvironmentExtras = map[string]struct{}{
+	preserveSessionsOnSignalEnv:                     {},
 	"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":      {},
 	"CLAUDE_CODE_EFFORT_LEVEL":                      {},
 	"CLAUDE_CODE_OAUTH_TOKEN":                       {},
 	"CLAUDE_CODE_SUBAGENT_MODEL":                    {},
 	"CLAUDE_CONFIG_DIR":                             {},
+	"DO_NOT_TRACK":                                  {},
 	"GC_COMPATIBILITY_AUTHORITY_DIR":                {},
 	"GC_COMPATIBILITY_AUTHORITY_MAX_REVOCATION_AGE": {},
+	"GC_DISABLE_USAGE_METRICS":                      {},
 	"GC_DOLT_HOST":                                  {},
 	"GC_DOLT_LOGLEVEL":                              {},
 	"GC_DOLT_PASSWORD":                              {},
@@ -381,9 +385,12 @@ var allowedControllerEnvironmentExtras = map[string]struct{}{
 	"GC_DOLT_USER":                                  {},
 	"GC_HOME":                                       {},
 	"GC_PR_HUMAN_TRUST":                             {},
+	"GOMAXPROCS":                                    {},
+	"GOMEMLIMIT":                                    {},
 	"LANG":                                          {},
 	"LC_ALL":                                        {},
 	"LC_CTYPE":                                      {},
+	"MODULES_ENABLED":                               {},
 	"SHELL":                                         {},
 	"T3CODE_HOME":                                   {},
 	"T3_HOME":                                       {},
@@ -408,11 +415,14 @@ func validateControllerEnvironmentExtra(key, value string) error {
 	if dangerousControllerEnvironmentKey(key) {
 		return fmt.Errorf("controller environment variable %q is forbidden", key)
 	}
-	if _, allowed := allowedControllerEnvironmentExtras[key]; !allowed && !processenv.IsProviderCredentialEnv(key) {
+	if _, allowed := allowedControllerEnvironmentExtras[key]; !allowed && !scopedDoltRemoteEnvironmentKey(key) && !processenv.IsProviderCredentialEnv(key) {
 		return fmt.Errorf("controller environment variable %q is not allowed", key)
 	}
 	if value == "" || strings.ContainsRune(value, '\x00') {
 		return fmt.Errorf("controller environment variable %q has an invalid value", key)
+	}
+	if key == preserveSessionsOnSignalEnv && value != "1" {
+		return fmt.Errorf("controller environment variable %q must be 1 when provided", key)
 	}
 	if isControllerEnvironmentPath(key) && !cleanAbsolutePath(value) {
 		return fmt.Errorf("controller environment path %q must be clean and absolute", key)
@@ -435,6 +445,17 @@ func validEnvironmentIdentifier(key string) bool {
 
 func isEnvironmentIdentifierStart(character byte) bool {
 	return character == '_' || character >= 'A' && character <= 'Z' || character >= 'a' && character <= 'z'
+}
+
+// The Dolt command pack names remote-selection policy by database. Preserve
+// explicit scope entries without admitting unrelated GC_ environment inputs.
+func scopedDoltRemoteEnvironmentKey(key string) bool {
+	for _, prefix := range []string{"GC_DOLT_REMOTE_", "GC_DOLT_PULL_ALLOW_REMOTE_"} {
+		if scope, ok := strings.CutPrefix(key, prefix); ok && scope != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func dangerousControllerEnvironmentKey(key string) bool {

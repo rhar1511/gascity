@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"maps"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -82,6 +85,43 @@ func TestEnrolledHookClaimUsesOnlyLifecycleTransitionPath(t *testing.T) {
 	}
 	if stdout.Len() == 0 {
 		t.Fatal("lifecycle claim result was not written")
+	}
+}
+
+func TestEnrolledHookClaimNeverReclaimsAnotherOwner(t *testing.T) {
+	for _, marker := range []string{beadmeta.LifecycleAdmissionReceiptV2MetadataKey, beadmeta.LifecycleTransitionHeadMetadataKey} {
+		for _, admissionEnabled := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/admission=%t", marker, admissionEnabled), func(t *testing.T) {
+				candidate := beads.Bead{
+					ID: "owned-1", Type: "task", Status: "in_progress", Assignee: "previous-session",
+					Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker", marker: "durable-evidence"},
+				}
+				opts := hookClaimOptions{
+					Assignee: "replacement-session", SessionID: "replacement-session", RouteTargets: []string{"worker"},
+					AutoReclaimStaleClaims: true, Lifecycle: config.LifecycleConfig{AdmissionEnabled: admissionEnabled},
+				}
+				opts.Lifecycle.RecoveryEnabled = false
+				ops := hookClaimOps{
+					ReclaimStale: func(context.Context, string, []string, string) (bool, string, error) {
+						t.Fatal("enrolled owner reached stale-lease reclaim")
+						return false, "", nil
+					},
+					Claim: func(context.Context, string, []string, string, string) (beads.Bead, bool, error) {
+						t.Fatal("enrolled owner reached generic claim")
+						return beads.Bead{}, false, nil
+					},
+					ClaimLifecycle: func(context.Context, beads.Bead, hookClaimOptions) (beads.Bead, hookLifecycleClaimResult, error) {
+						t.Fatal("enrolled owner reached replacement lifecycle claim")
+						return beads.Bead{}, hookLifecycleClaimResult{}, nil
+					},
+				}
+				var stdout, stderr bytes.Buffer
+				result := claimFirstEligibleHookCandidate([]beads.Bead{candidate}, opts, ops, "/work", &stdout, &stderr)
+				if result.terminal || stdout.Len() != 0 {
+					t.Fatalf("owned work was offered to replacement: result=%+v stdout=%s", result, stdout.String())
+				}
+			})
+		}
 	}
 }
 
@@ -506,4 +546,77 @@ func (s *lifecycleProjectionEnrolledReadStore) Get(id string) (beads.Bead, error
 	row.Metadata[beadmeta.LifecycleAdmissionReceiptV2MetadataKey] = "unverified-v2-receipt"
 	row.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey] = "claim-head-1"
 	return row, nil
+}
+
+func TestHookLifecycleClaimRequiresCurrentSourceProofBeforeControllerBoundary(t *testing.T) {
+	originalAlive, originalClient := apiRouteControllerAliveHook, apiRouteSupervisorClientHook
+	apiRouteControllerAliveHook = func(string) int { return 0 }
+	apiRouteSupervisorClientHook = func(string) *api.Client { return nil }
+	t.Cleanup(func() { apiRouteControllerAliveHook, apiRouteSupervisorClientHook = originalAlive, originalClient })
+	for _, tc := range []struct {
+		name         string
+		nextRevision int64
+		breakProof   string
+		source       bool
+	}{
+		{name: "positive revision"},
+		{name: "materialized source requires explicit begin-source", source: true},
+		{name: "negative revision", nextRevision: -1000},
+		{name: "missing Q43", nextRevision: -1000, breakProof: "q43"},
+		{name: "missing Q54", nextRevision: -1000, breakProof: "q54"},
+		{name: "changed policy", nextRevision: -1000, breakProof: "policy"},
+		{name: "no verifier", nextRevision: -1000, breakProof: "verifier"},
+		{name: "query environment cannot supply token", breakProof: "query-token"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setup, _, request := newLifecycleClaimProviderFixtureWithRevision(t, tc.nextRevision)
+			candidate := request.Work
+			if !tc.source {
+				marker, ok := lifecycleMaterializationFor(candidate)
+				if !ok {
+					t.Fatal("source fixture has no attached workflow")
+				}
+				candidate = lifecycleAdmissionV1StepCandidate(t, setup, marker)
+			}
+			candidate.SourceStoreRef = "rig:pilot"
+			candidate.LifecycleScope = request.Scope
+			if tc.nextRevision < 0 && request.Work.Revision >= 0 {
+				t.Fatal("fixture did not produce a negative source revision")
+			}
+			opts := lifecycleAdmissionV1ClaimOptions(setup)
+			opts.LifecycleCityPath = setup.fixture.cityPath
+			opts.IdentityCandidates = []string{request.Actor}
+			opts.Env = []string{"GC_SESSION_ID=" + request.Session.ID, "GC_RUNTIME_EPOCH=" + request.Session.Generation}
+			opts.LifecycleInstanceToken = request.Session.InstanceToken
+			switch tc.breakProof {
+			case "q43":
+				clear(setup.store.q43Receipts)
+			case "q54":
+				clear(setup.store.patchReceipts)
+			case "policy":
+				workflow := "other-review"
+				setup.fixture.cfg.Agents[0].DefaultSlingFormula = &workflow
+			case "verifier":
+				opts.VerifyLifecycleTransitionHead = nil
+			case "query-token":
+				opts.LifecycleInstanceToken = ""
+				opts.Env = append(opts.Env, "GC_INSTANCE_TOKEN="+request.Session.InstanceToken)
+			}
+			before := len(setup.store.patchRequests)
+			_, _, err := hookClaimLifecycleWork(context.Background(), candidate, opts)
+			expected := "controller claim API is unavailable"
+			if tc.breakProof != "" || tc.source {
+				expected = "exact admitted work source could not be re-read"
+			}
+			if tc.breakProof == "query-token" {
+				expected = "enrolled lifecycle claim requires GC_SESSION_ID, GC_INSTANCE_TOKEN, and canonical GC_RUNTIME_EPOCH"
+			}
+			if err == nil || !strings.Contains(err.Error(), expected) {
+				t.Fatalf("hook boundary error = %v, want %q", err, expected)
+			}
+			if len(setup.store.patchRequests) != before || setup.store.sourceGenericWrites != 0 {
+				t.Fatal("unavailable controller changed work")
+			}
+		})
+	}
 }

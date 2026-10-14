@@ -438,6 +438,23 @@ func TestEvaluateAdmissionReceiptKeepsEnrollmentAndBindsStoreScope(t *testing.T)
 	}
 }
 
+func TestCompletionSigningPreservesOptionalWorkRecord(t *testing.T) {
+	const legacy = `{"version":1,"work_item_id":"work-1","scope":"rig:pilot","admission_digest":"contract","deliverable_ref":"review:no-change","verification_ref":"checks:passed","accepted_by":"reviewer","accepted_at":"2026-10-13T12:00:00Z","signature":""}`
+	const withRecord = `{"version":1,"work_item_id":"work-1","scope":"rig:pilot","admission_digest":"contract","deliverable_ref":"review:no-change","verification_ref":"checks:passed","accepted_by":"reviewer","accepted_at":"2026-10-13T12:00:00Z","signature":"","work_record":{"outcome":"no-op","verification":"existing behavior verified"}}`
+	for name, wire := range map[string]string{"legacy": legacy, "typed no-op": withRecord} {
+		t.Run(name, func(t *testing.T) {
+			var receipt CompletionReceipt
+			if err := json.Unmarshal([]byte(wire), &receipt); err != nil {
+				t.Fatal(err)
+			}
+			payload, err := CompletionSigningBytes(receipt)
+			if err != nil || string(payload) != "gascity.lifecycle.completion.v1\n"+wire {
+				t.Fatalf("completion signing changed reviewed fields or legacy bytes: %s, %v", payload, err)
+			}
+		})
+	}
+}
+
 func TestEvaluateCompletionRequiresTrustedAcceptanceBoundToContract(t *testing.T) {
 	admissionPrivate, acceptancePrivate, _, cfg := lifecycleKeys(t)
 	bead, admission := admittedBead(t, admissionPrivate)

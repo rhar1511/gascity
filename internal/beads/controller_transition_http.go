@@ -50,6 +50,14 @@ func (c *privateEvidenceHTTPClient) transitionMetadata(ctx context.Context, issu
 	if !c.metadataTransitionScopeAllowed(plan.request.Scope, plan.request.Kind) {
 		return ControllerMetadataTransitionResult{}, controllerTransitionProtocolError("transition scope and kind do not match the configured store")
 	}
+	if plan.request.Kind == privateEvidenceLifecycleDescendantAnchorKind {
+		var head string
+		if plan.request.ProtectedPermit == "" || plan.request.Key != beadmeta.LifecycleTransitionHeadMetadataKey ||
+			plan.request.Expected != nil || plan.request.Value == nil ||
+			json.Unmarshal(*plan.request.Value, &head) != nil || head != plan.request.ReceiptID {
+			return ControllerMetadataTransitionResult{}, controllerTransitionProtocolError("descendant anchor requires a protected initial transition head")
+		}
+	}
 	body, err := encodeControllerMetadataTransition(plan)
 	if err != nil {
 		return ControllerMetadataTransitionResult{}, controllerTransitionProtocolError("request could not be encoded")

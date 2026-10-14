@@ -68,6 +68,10 @@ type Options struct {
 	// the intended assignee in metadata for later activation.
 	DeferAssignees bool
 
+	// RequireGraphApply refuses sequential creation when the graph must be born
+	// atomically with immutable routing metadata, including lifecycle lineage.
+	RequireGraphApply bool
+
 	actionAuthorization *FormulaActionAuthorization
 	actionPrepared      bool
 
@@ -938,13 +942,16 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 				result.actionAuthorization = opts.actionAuthorization
 				return result, nil
 			}
-			if !isTransientGraphApplyError(retryErr) {
+			if !isTransientGraphApplyError(retryErr) || opts.RequireGraphApply {
 				return nil, retryErr
 			}
 			graphApplyTracef("graph-apply transient-error fallback recipe=%s first_err=%v retry_err=%v", recipe.Name, err, retryErr)
 		} else {
 			graphApplyTracef("graph-apply unavailable recipe=%s store=%T", recipe.Name, store)
 		}
+	}
+	if opts.RequireGraphApply {
+		return nil, fmt.Errorf("recipe %q requires atomic graph apply", recipe.Name)
 	}
 	if err := revalidateRecipeAction(ctx, opts.ActionGate, recipe, store, opts.actionAuthorization); err != nil {
 		return nil, err

@@ -23,17 +23,18 @@ func hookClaimLifecycleWork(ctx context.Context, candidate beads.Bead, opts hook
 		return beads.Bead{}, hookLifecycleClaimResult{}, fmt.Errorf("controller city path is unavailable")
 	}
 	sessionID := hookClaimEnvValue(opts.Env, "GC_SESSION_ID")
-	instanceToken := hookClaimEnvValue(opts.Env, "GC_INSTANCE_TOKEN")
+	instanceToken := strings.TrimSpace(opts.LifecycleInstanceToken)
 	runtimeEpoch := hookClaimEnvValue(opts.Env, "GC_RUNTIME_EPOCH")
 	if sessionID == "" || instanceToken == "" || !canonicalHookClaimEpoch(runtimeEpoch) {
 		return beads.Bead{}, hookLifecycleClaimResult{}, fmt.Errorf("enrolled lifecycle claim requires GC_SESSION_ID, GC_INSTANCE_TOKEN, and canonical GC_RUNTIME_EPOCH")
 	}
 	store, current, ok := lifecycleAuthoritativeCandidate(candidate, opts)
-	if !ok || store == nil || current.ID != candidate.ID || current.Revision <= 0 {
+	if !ok || store == nil || current.ID != candidate.ID || current.Revision == 0 {
 		return beads.Bead{}, hookLifecycleClaimResult{}, fmt.Errorf("exact admitted work source could not be re-read from its trusted store")
 	}
 	head := strings.TrimSpace(current.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey])
-	if head == "" {
+	lineage, descendant := lifecycleMaterializationFor(current)
+	if head == "" && (!descendant || lineage.SourceID == current.ID) {
 		return beads.Bead{}, hookLifecycleClaimResult{}, fmt.Errorf("admitted work has no current Q54 transition head")
 	}
 	client, fallbackReason := supervisorFallthroughAPIClient(cityPath)

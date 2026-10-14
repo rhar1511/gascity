@@ -63,7 +63,7 @@ formula_compiler = ">=2.0.0"
 
 [[steps]]
 id = "work"
-title = "Review work"
+title = "Review {{convoy_id}}"
 description_file = "prompt.md"
 
 [steps.check]
@@ -75,6 +75,13 @@ path = "scripts/check.sh"
 `,
 			prepare: func(t *testing.T, fixture *lifecycleAdmissionPolicyFixture) {
 				t.Helper()
+				// Exercise the external-asset proof after a valid graph invocation,
+				// rather than stopping at the city-scoped graph refusal.
+				fixture.leg.ref = "rig:pilot"
+				fixture.receipt.Scope = worklifecycle.ScopeForStore("pilot", fixture.leg.ref)
+				if err := fixture.store.SetMetadata(fixture.receipt.WorkItemID, beadmeta.RootStoreRefMetadataKey, fixture.leg.ref); err != nil {
+					t.Fatal(err)
+				}
 				if err := os.WriteFile(filepath.Join(fixture.formulaDir, "prompt.md"), []byte("external description\n"), 0o600); err != nil {
 					t.Fatal(err)
 				}

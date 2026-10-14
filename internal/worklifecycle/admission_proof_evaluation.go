@@ -38,6 +38,29 @@ func EvaluateAdmissionWithTransitionProof(
 	return evaluateAdmissionWithProof(bead, cfg, scope, inputs, head, true)
 }
 
+// EvaluateCommittedCompletionWithTransitionProof verifies an already committed
+// source close for descendant execution. The verified Q54 close must still be
+// current, and its acceptance must remain trusted under the admission contract.
+// Receipt freshness applies at acceptance/close time, not again to workflow tails.
+func EvaluateCommittedCompletionWithTransitionProof(
+	bead beads.Bead,
+	cfg config.LifecycleConfig,
+	scope string,
+	inputs AdmissionProofInputsV2,
+	head TransitionHead,
+) CompletionDecision {
+	if bead.Status != "closed" || !head.verified || head.FromAttachment ||
+		head.Step != TransitionStepClose || head.ToVersion != bead.Revision ||
+		head.ReceiptID == "" || head.ReceiptID != bead.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey] {
+		return CompletionDecision{Reason: "source has no current verified close transition"}
+	}
+	admission := EvaluateAdmissionWithTransitionProof(bead, cfg, scope, inputs, head)
+	if !admission.Admitted {
+		return CompletionDecision{Reason: admission.Reason}
+	}
+	return evaluateCompletionReceiptProof(bead, cfg, scope, admission.Receipt)
+}
+
 func evaluateAdmissionWithProof(
 	bead beads.Bead,
 	cfg config.LifecycleConfig,
@@ -80,7 +103,7 @@ func evaluateAdmissionWithProof(
 func verifyAdvancedAdmissionProofAttachment(bead beads.Bead, receipt AdmissionReceiptV2, proof *AdmissionAttachmentProof, head TransitionHead) error {
 	if proof == nil || proof.SchemaVersion != 1 || proof.WorkItemID != bead.ID || proof.Scope != receipt.Scope ||
 		proof.FromRevision != receipt.ExpectedWorkRevision || proof.ToRevision == 0 || proof.ToRevision == proof.FromRevision ||
-		bead.Revision <= proof.ToRevision {
+		bead.Revision == 0 || bead.Revision == proof.ToRevision {
 		return fmt.Errorf("%w: historical Q43 proof does not identify an older revision of this receipt", ErrAdmissionAttachmentInvalid)
 	}
 	digest, err := AdmissionDigestV2(receipt)

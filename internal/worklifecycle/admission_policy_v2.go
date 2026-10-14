@@ -21,7 +21,7 @@ const (
 	// AdmissionPolicyProjectionV2Version versions the canonical input schema
 	// hashed by DigestAdmissionPolicyV2. Change it when the projected fields or
 	// their meaning changes.
-	AdmissionPolicyProjectionV2Version = 3
+	AdmissionPolicyProjectionV2Version = 4
 
 	admissionPolicyProjectionV2Domain = "gascity.lifecycle.routing-formula-policy.v2\n"
 	// AdmissionRouteResolverV2Version identifies the exact canonical-target
@@ -40,6 +40,10 @@ const (
 	// AdmissionWorkflowPlacementGraph records that the workflow is stored in
 	// the selected graph store.
 	AdmissionWorkflowPlacementGraph = "graph"
+
+	// AdmissionGraphInvocationSingleSourceV2 authorizes a generated input convoy
+	// containing exactly one source in the same rig store as the graph workflow.
+	AdmissionGraphInvocationSingleSourceV2 = "single-source-convoy-v1"
 )
 
 var errAdmissionPolicyV2Invalid = errors.New("admission policy v2 input is invalid")
@@ -324,27 +328,38 @@ type AdmissionStorePlacementV2 struct {
 // or dependency must set the matching completeness flag false; the digest
 // rejects it.
 type AdmissionPolicyProjectionV2 struct {
-	SourceScope                          string                     `json:"source_scope"`
-	RouteResolverVersion                 string                     `json:"route_resolver_version"`
-	Target                               CanonicalAdmissionPoolV2   `json:"target"`
-	Workflow                             string                     `json:"workflow"`
-	FormulaSources                       []AdmissionFormulaSourceV2 `json:"formula_sources"`
-	FormulaSourceCount                   int                        `json:"formula_source_count"`
-	ExternalAssets                       []AdmissionExternalAssetV2 `json:"external_assets"`
-	ExternalAssetCount                   int                        `json:"external_asset_count"`
-	ExternalAssetClosureComplete         bool                       `json:"external_asset_closure_complete"`
-	CheckPathCount                       int                        `json:"check_path_count"`
-	CheckMappingsComplete                bool                       `json:"check_mappings_complete"`
-	CheckClosures                        []AdmissionCheckClosureV2  `json:"check_closures"`
-	FormulaCompilerCapability            string                     `json:"formula_compiler_capability"`
-	FormulaCompilerImplementationVersion string                     `json:"formula_compiler_implementation_version"`
-	FormulaProvenanceSchemaVersion       int                        `json:"formula_provenance_schema_version"`
-	FormulaSchemaVersion                 string                     `json:"formula_schema_version"`
-	FormulaV2Enabled                     bool                       `json:"formula_v2_enabled"`
-	EffectiveCompileVariables            map[string]string          `json:"effective_compile_variables"`
-	EffectiveComposedFormulaIDs          []string                   `json:"effective_composed_formula_ids"`
-	MergeStrategy                        string                     `json:"merge_strategy"`
-	StorePlacement                       AdmissionStorePlacementV2  `json:"store_placement"`
+	SourceScope                          string                      `json:"source_scope"`
+	RouteResolverVersion                 string                      `json:"route_resolver_version"`
+	Target                               CanonicalAdmissionPoolV2    `json:"target"`
+	Workflow                             string                      `json:"workflow"`
+	FormulaSources                       []AdmissionFormulaSourceV2  `json:"formula_sources"`
+	FormulaSourceCount                   int                         `json:"formula_source_count"`
+	ExternalAssets                       []AdmissionExternalAssetV2  `json:"external_assets"`
+	ExternalAssetCount                   int                         `json:"external_asset_count"`
+	ExternalAssetClosureComplete         bool                        `json:"external_asset_closure_complete"`
+	CheckPathCount                       int                         `json:"check_path_count"`
+	CheckMappingsComplete                bool                        `json:"check_mappings_complete"`
+	CheckClosures                        []AdmissionCheckClosureV2   `json:"check_closures"`
+	FormulaCompilerCapability            string                      `json:"formula_compiler_capability"`
+	FormulaCompilerImplementationVersion string                      `json:"formula_compiler_implementation_version"`
+	FormulaProvenanceSchemaVersion       int                         `json:"formula_provenance_schema_version"`
+	FormulaSchemaVersion                 string                      `json:"formula_schema_version"`
+	FormulaV2Enabled                     bool                        `json:"formula_v2_enabled"`
+	GraphInvocation                      *AdmissionGraphInvocationV2 `json:"graph_invocation,omitempty"`
+	EffectiveCompileVariables            map[string]string           `json:"effective_compile_variables"`
+	EffectiveComposedFormulaIDs          []string                    `json:"effective_composed_formula_ids"`
+	MergeStrategy                        string                      `json:"merge_strategy"`
+	StorePlacement                       AdmissionStorePlacementV2   `json:"store_placement"`
+}
+
+// AdmissionGraphInvocationV2 binds a graph's generated runtime input to its
+// signed source. PreviewConvoyID is a read-only compiler placeholder; attachment
+// verification must replace only that variable and prove exact convoy membership.
+type AdmissionGraphInvocationV2 struct {
+	Version         string `json:"version"`
+	SourceID        string `json:"source_id"`
+	SourceStoreRef  string `json:"source_store_ref"`
+	PreviewConvoyID string `json:"preview_convoy_id"`
 }
 
 // DigestAdmissionPolicyV2 validates and hashes a canonical projection of the
@@ -420,6 +435,20 @@ func canonicalAdmissionPolicyProjectionV2(input AdmissionPolicyProjectionV2) (Ad
 	}
 	if err := validateAdmissionStorePlacementV2(input.SourceScope, input.StorePlacement); err != nil {
 		return AdmissionPolicyProjectionV2{}, err
+	}
+	if input.GraphInvocation != nil {
+		inv := input.GraphInvocation
+		rig, scoped := storeref.ScopeRigContext(inv.SourceStoreRef)
+		if input.FormulaSchemaVersion != "graph.v2" || inv.Version != AdmissionGraphInvocationSingleSourceV2 || !scoped || rig == "" ||
+			!validCanonicalText(inv.SourceID) || !validCanonicalText(inv.PreviewConvoyID) ||
+			inv.SourceStoreRef != input.StorePlacement.SourceStoreRef || !input.FormulaV2Enabled ||
+			input.StorePlacement.GraphPlacementMode != AdmissionGraphPlacementSourceRig ||
+			input.StorePlacement.WorkflowStoreRef != inv.SourceStoreRef || input.StorePlacement.GraphStoreRef != inv.SourceStoreRef ||
+			input.EffectiveCompileVariables["convoy_id"] != inv.PreviewConvoyID {
+			return AdmissionPolicyProjectionV2{}, admissionPolicyV2Error("graph invocation lacks an exact co-resident source and compile input")
+		}
+		invocation := *inv
+		input.GraphInvocation = &invocation
 	}
 
 	sources := append([]AdmissionFormulaSourceV2(nil), input.FormulaSources...)

@@ -10,6 +10,7 @@ go_library(
         "graph_apply.go",
         "molecule.go",
         "native_step_topology.go",
+        "verify_step.go",
         "workflow_bead.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/molecule",

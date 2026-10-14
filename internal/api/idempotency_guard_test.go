@@ -64,6 +64,16 @@ var exemptFromIdempotency = map[string]bool{
 	// stamp after an ambiguous response, so a separate HTTP idempotency key would
 	// create a competing identity. Proof: LifecycleClaimIdentity replay tests.
 	"claim-admitted-lifecycle-work": true,
+	// Completion acts on existing admitted work. Signed source acceptance binds
+	// one budget/close chain; execution completion binds the current incarnation,
+	// claim generation and protected step receipt. Exact retries return that
+	// receipt, while changed acceptance or outcome conflicts. Each request must
+	// revalidate current authority rather than reuse an HTTP response cache.
+	// Proof: TestLifecycleCompletionProviderCommitsAndRecoversExactAcceptance,
+	// TestLifecycleExecutionCompletionPreservesSourceAndRecovers, and the native
+	// TestLifecycleAdmissionNativeGraphAttachAndReplay HTTP composition.
+	"complete-admitted-lifecycle-work": true,
+	"complete-lifecycle-execution":     true,
 
 	// Signed recovery requests use the mandatory body request_id, work ID and
 	// authoritative scope to derive one durable intent ID. Exact replay returns

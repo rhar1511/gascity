@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -61,14 +62,33 @@ func prepareLifecycleQ54Claim(t *testing.T, setup lifecycleAdmissionTransitionSe
 		t.Fatalf("build current Q54 transition context after admission: %v; admission logs=%s", err, admissionLogs.String())
 	}
 	provider := runtime.NewFake()
-	manager := session.NewManagerWithOptions(setup.store, provider)
+	manager := session.NewManagerWithOptions(setup.cityStore, provider)
 	info, err := manager.CreateSession(context.Background(), session.CreateOptions{
 		Template: "worker", Command: "claude", WorkDir: t.TempDir(), Provider: "claude",
 	})
 	if err != nil {
 		t.Fatalf("create live recovery session: %v", err)
 	}
+	actor := session.AssigneeIdentifier(info)
+	permitIssuer, _, authorized := setup.permitResolver.resolve("pilot", leg.ref)
+	if !authorized {
+		t.Fatal("fixture has no claim permit authority")
+	}
+	claimChain, err := newLifecycleAdmissionTransitionChain(setup.store, setup.fixture.cfg.Lifecycle, setup.receipt.Scope, actor, permitIssuer,
+		worklifecycle.CurrentAdmissionPolicyResolverFunc(func(beads.Bead, worklifecycle.AdmissionReceiptV2) (worklifecycle.AdmissionPolicyProjectionV2, error) {
+			return setup.policy.projection, nil
+		}),
+		worklifecycle.AttachedWorkflowEvidenceVerifierFunc(func(source beads.Bead, signed worklifecycle.AdmissionReceiptV2, policy worklifecycle.AdmissionPolicyProjectionV2, evidence worklifecycle.AttachedWorkflowEvidence) error {
+			return verifyLifecycleAttachedWorkflow(setup.store, setup.policy.deps.GraphStore, source, signed, policy, evidence)
+		}))
+	if err != nil {
+		t.Fatal(err)
+	}
 	claimGeneration := "17"
+	claimOperation, err := worklifecycle.ClaimIdentityOperationID(info.ID, info.InstanceToken, info.Generation, claimGeneration)
+	if err != nil {
+		t.Fatal(err)
+	}
 	claimPatch := worklifecycle.SourceWorkPatch{
 		Metadata: map[string]worklifecycle.MetadataStringPatch{
 			beadmeta.ClaimGenerationMetadataKey: {Value: claimGeneration},
@@ -76,18 +96,17 @@ func prepareLifecycleQ54Claim(t *testing.T, setup lifecycleAdmissionTransitionSe
 			beadmeta.SessionIDMetadataKey:       {Value: info.ID},
 		},
 		Status:   &worklifecycle.StringTransition{Expected: "open", Value: "in_progress"},
-		Assignee: &worklifecycle.StringTransition{Expected: "", Value: info.ID},
+		Assignee: &worklifecycle.StringTransition{Expected: "", Value: actor},
 	}
-	_, err = transition.chain.Apply(worklifecycle.TransitionRequest{
+	_, err = claimChain.Apply(worklifecycle.TransitionRequest{
 		IssueID: setup.source.ID, Step: worklifecycle.TransitionStepClaimIdentity,
-		OperationID: lifecycleTransitionOperationID("claim-identity", setup.source.ID, setup.receipt.Scope,
-			transition.admissionDigest, info.ID+"-"+claimGeneration),
+		OperationID:    claimOperation,
 		PriorReceiptID: transition.head.ReceiptID, Evidence: transition.evidence, Patch: claimPatch,
 	})
 	if err != nil {
 		t.Fatalf("apply typed Q54 claim: %v", err)
 	}
-	front := session.NewStore(beads.SessionStore{Store: setup.store})
+	front := session.NewStore(beads.SessionStore{Store: setup.cityStore})
 	if _, err := front.SetCurrentClaimForGeneration(info.ID, setup.source.ID, claimGeneration); err != nil {
 		t.Fatalf("set reciprocal session claim: %v", err)
 	}
@@ -114,7 +133,7 @@ func lifecycleRecoveryRequest(t *testing.T, setup lifecycleAdmissionTransitionSe
 	t.Helper()
 	request, err := worklifecycle.SignRecoveryRequest(worklifecycle.RecoveryRequest{
 		Version: 1, RequestID: requestID, Action: "nudge", Scope: setup.receipt.Scope,
-		WorkItemID: setup.source.ID, ExpectedRevision: revision, Owner: claim.info.ID,
+		WorkItemID: setup.source.ID, ExpectedRevision: revision, Owner: session.AssigneeIdentifier(claim.info),
 		ClaimGeneration: "17", SessionID: claim.info.ID, SessionGeneration: claim.info.Generation,
 		Message:   "Please report current progress and the exact verification result.",
 		IssuedAt:  time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano),
@@ -140,7 +159,7 @@ func persistLifecycleRecoveryIntent(t *testing.T, store beads.Store, request wor
 func runLifecycleRecovery(setup lifecycleAdmissionTransitionSetup, claim lifecycleQ54ClaimFixture, stderr *strings.Builder) {
 	reconcileLifecycleRecoveryRequestsWithPermitResolver(
 		context.Background(), "pilot", setup.fixture.cityPath, setup.fixture.cfg, setup.cityStore, setup.rigStores,
-		beads.SessionStore{Store: setup.store}, claim.provider, stderr, setup.permitResolver, nil,
+		beads.SessionStore{Store: setup.cityStore}, claim.provider, stderr, setup.permitResolver, nil,
 	)
 }
 
@@ -180,6 +199,25 @@ func TestLifecycleRecoveryQ54ReservesExactRequestBeforeOneDeliveryAndReplaysRead
 	persistLifecycleRecoveryIntent(t, setup.store, request)
 
 	var logs strings.Builder
+	setup.fixture.cfg.Lifecycle.RecoveryEnabled = false
+	beforeDisabled, err := setup.store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	patchesBeforeDisabled := len(setup.store.patchRequests)
+	sessionBeforeDisabled, err := setup.cityStore.Get(claim.info.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runLifecycleRecovery(setup, claim, &logs)
+	sessionAfterDisabled, sessionErr := setup.cityStore.Get(claim.info.ID)
+	afterDisabled, err := setup.store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+	if err != nil || sessionErr != nil || !reflect.DeepEqual(sessionBeforeDisabled, sessionAfterDisabled) || !reflect.DeepEqual(beforeDisabled, afterDisabled) ||
+		len(setup.store.patchRequests) != patchesBeforeDisabled || setup.store.sourceGenericWrites != 0 ||
+		claim.provider.CountCalls("Nudge", claim.info.SessionName) != 0 {
+		t.Fatalf("disabled recovery changed work, intent, session or delivery: err=%v logs=%s", err, logs.String())
+	}
+	setup.fixture.cfg.Lifecycle.RecoveryEnabled = true
 	runLifecycleRecovery(setup, claim, &logs)
 	if got := claim.provider.CountCalls("Nudge", claim.info.SessionName); got != 1 {
 		t.Fatalf("first exact recovery request sent %d nudges, want one; logs=%s", got, logs.String())
@@ -247,7 +285,7 @@ func TestLifecycleRecoveryQ54RechecksWorkflowAtEffectBoundary(t *testing.T) {
 			return
 		}
 		closed := "closed"
-		if err := setup.store.MemStore.Update(workflow.ID, beads.UpdateOpts{Status: &closed}); err != nil {
+		if err := setup.store.lifecycleAdmissionBackingStore.Update(workflow.ID, beads.UpdateOpts{Status: &closed}); err != nil {
 			t.Errorf("close attached workflow after recovery reservation: %v", err)
 		}
 	}

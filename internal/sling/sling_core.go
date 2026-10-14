@@ -610,10 +610,11 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 				return result, fmt.Errorf("instantiating %s %q on %s: %w", errLabel, formulaName, beadID, err)
 			}
 			mResult, err := InstantiateSlingFormula(context.Background(), formulaName, searchPaths, molecule.Options{
-				Title:            opts.Title,
-				Vars:             formulaVars,
-				IdempotencyKey:   opts.MaterializationID,
-				PriorityOverride: BeadPriorityOverride(deps.Store, graphInv.InputConvoy),
+				Title:             opts.Title,
+				Vars:              formulaVars,
+				IdempotencyKey:    opts.MaterializationID,
+				RequireGraphApply: opts.GraphOnlyMaterialization,
+				PriorityOverride:  BeadPriorityOverride(deps.Store, graphInv.InputConvoy),
 			}, "", opts.ScopeKind, opts.ScopeRef, a, deps, opts.Force)
 			if err != nil {
 				return result, fmt.Errorf("instantiating %s %q on %s: %w", errLabel, formulaName, beadID, err)
@@ -1769,7 +1770,7 @@ func isGraphSlingFormula(ctx context.Context, formulaName string, searchPaths []
 
 func prepareGraphV2FormulaInvocation(ctx context.Context, formulaName, targetID string, opts SlingOpts, deps SlingDeps, a config.Agent) (graphv2.Invocation, bool, error) {
 	searchPaths := SlingFormulaSearchPaths(deps, a)
-	vars := buildGraphV2SlingFormulaVars(formulaName, targetID, opts.Vars, a, deps)
+	vars := BuildGraphV2SlingFormulaVars(formulaName, targetID, opts.Vars, a, deps)
 	beforeInputConvoy := func(ctx context.Context, recipe *formula.Recipe, vars map[string]string) error {
 		if !deps.RequireFormulaActionGate && deps.FormulaActionGate == nil {
 			return nil

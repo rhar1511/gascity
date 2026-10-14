@@ -1,0 +1,17 @@
+[Unit]
+Description=Refresh signed Beads revocations for Gas City scope %i
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+UMask=0077
+ExecStart=/usr/bin/python3 -I /usr/local/libexec/gascity/refresh_protected_revocations.py --authority /etc/gascity/protected-mutation/%i/authority.json --private-key /etc/gascity/protected-mutation-keys/%i-revocations.pem
+TimeoutStartSec=30s
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateNetwork=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/etc/gascity/protected-mutation/%i
+CapabilityBoundingSet=

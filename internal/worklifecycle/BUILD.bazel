@@ -6,7 +6,11 @@ go_library(
         "admission_attachment.go",
         "admission_policy_v2.go",
         "admission_proof_evaluation.go",
+        "attempt_evidence.go",
         "claim_transition.go",
+        "descendant_attempt_evidence.go",
+        "descendant_claim.go",
+        "descendant_completion.go",
         "receipt.go",
         "recovery.go",
         "recovery_escalation_request.go",
@@ -18,6 +22,7 @@ go_library(
     visibility = ["//:__subpackages__"],
     deps = [
         "//internal/agentutil",
+        "//internal/attemptevidence",
         "//internal/beadmeta",
         "//internal/beads",
         "//internal/config",
@@ -26,6 +31,7 @@ go_library(
         "//internal/qualification",
         "//internal/storebinding",
         "//internal/storeref",
+        "//internal/workrecord",
     ],
 )
 
@@ -44,6 +50,7 @@ go_test(
     ],
     embed = [":worklifecycle"],
     deps = [
+        "//internal/attemptevidence",
         "//internal/beadmeta",
         "//internal/beads",
         "//internal/config",
@@ -51,6 +58,7 @@ go_test(
         "//internal/fsys",
         "//internal/storebinding",
         "//internal/testenv",
+        "//internal/workrecord",
     ],
 )
 

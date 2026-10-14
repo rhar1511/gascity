@@ -60,15 +60,22 @@ var (
 
 const redactedPrivateEvidenceDiagnostic = "[private attempt-evidence output redacted]"
 
-const privateEvidenceLifecycleAdmissionAttachmentKind = "lifecycle_admission_v2_attach"
+const (
+	privateEvidenceLifecycleAdmissionAttachmentKind = "lifecycle_admission_v2_attach"
+	privateEvidenceLifecycleDescendantAnchorKind    = "lifecycle_descendant_anchor_v1"
+)
 
 var privateEvidenceLifecyclePatchKinds = map[string]struct{}{
-	"lifecycle_source_reservation_v1":       {},
-	"lifecycle_source_materialization_v1":   {},
-	"lifecycle_source_claim_identity_v1":    {},
-	"lifecycle_source_recovery_budget_v1":   {},
-	"lifecycle_source_completion_budget_v1": {},
-	"lifecycle_source_close_v1":             {},
+	"lifecycle_descendant_attempt_evidence_v1": {},
+	"lifecycle_descendant_completion_v1":       {},
+	"lifecycle_descendant_claim_identity_v1":   {},
+	"lifecycle_source_reservation_v1":          {},
+	"lifecycle_source_materialization_v1":      {},
+	"lifecycle_source_claim_identity_v1":       {},
+	"lifecycle_source_recovery_budget_v1":      {},
+	"lifecycle_source_recovery_escalation_v1":  {},
+	"lifecycle_source_completion_budget_v1":    {},
+	"lifecycle_source_close_v1":                {},
 }
 
 func redactPrivateEvidenceDiagnostic(value string) string {
@@ -171,10 +178,51 @@ type privateEvidenceHTTPClient struct {
 	database                  string
 	scopeRef                  string
 	lifecycleScope            string
+	lifecycleReadScope        string
+	admissionScope            string
 	token                     string
 	revisionTransitions       bool
 	revisionTransitionPatches bool
 	client                    *http.Client
+}
+
+// WithBdStorePrivateEvidenceAdmissionScope binds the exact receipt scope for
+// operator-signed admission attachments. It does not enable atomic source
+// patches or grant the controller's host-authorized lifecycle scope. Callers
+// must verify the configured admission signer and use the outer store's
+// admission attachment adapter, which validates the signed receipt and its
+// exact reviewed source revision.
+func WithBdStorePrivateEvidenceAdmissionScope(scope string) BdStoreOption {
+	return func(store *BdStore) {
+		if store == nil || store.privateEvidenceHTTP == nil || store.privateEvidenceHTTPInitErr != nil {
+			return
+		}
+		if !validPrivateEvidenceLifecycleScope(scope, store.privateEvidenceHTTP.scopeRef) {
+			store.privateEvidenceHTTPInitErr = fmt.Errorf("%w: admission receipt scope is invalid", ErrPrivateEvidenceHTTPUnavailable)
+			return
+		}
+		client := *store.privateEvidenceHTTP
+		client.admissionScope = scope
+		store.privateEvidenceHTTP = &client
+	}
+}
+
+// WithBdStorePrivateEvidenceLifecycleReadScope binds receipt reads to an exact
+// lifecycle scope derived from the trusted city/store configuration. It grants
+// neither lifecycle metadata writes nor protected patch writes.
+func WithBdStorePrivateEvidenceLifecycleReadScope(scope string) BdStoreOption {
+	return func(store *BdStore) {
+		if store == nil || store.privateEvidenceHTTP == nil || store.privateEvidenceHTTPInitErr != nil {
+			return
+		}
+		if !store.privateEvidenceHTTP.revisionTransitions || !validPrivateEvidenceLifecycleScope(scope, store.privateEvidenceHTTP.scopeRef) {
+			store.privateEvidenceHTTPInitErr = fmt.Errorf("%w: lifecycle receipt read scope is invalid", ErrPrivateEvidenceHTTPUnavailable)
+			return
+		}
+		client := *store.privateEvidenceHTTP
+		client.lifecycleReadScope = scope
+		store.privateEvidenceHTTP = &client
+	}
 }
 
 // WithBdStorePrivateEvidenceLifecycleScope binds the additional lifecycle
@@ -523,6 +571,10 @@ func (c *privateEvidenceHTTPClient) metadataTransitionScopeAllowed(scope, kind s
 		return false
 	}
 	if kind == privateEvidenceLifecycleAdmissionAttachmentKind {
+		return (c.lifecycleScope != "" && scope == c.lifecycleScope) ||
+			(c.admissionScope != "" && scope == c.admissionScope)
+	}
+	if kind == privateEvidenceLifecycleDescendantAnchorKind {
 		return c.lifecycleScope != "" && scope == c.lifecycleScope
 	}
 	if scope == c.scopeRef {
@@ -543,6 +595,24 @@ func (c *privateEvidenceHTTPClient) patchTransitionScopeAllowed(scope, kind stri
 		return true
 	}
 	return false
+}
+
+func (c *privateEvidenceHTTPClient) metadataReceiptScopeAllowed(scope, kind string) bool {
+	if c == nil {
+		return false
+	}
+	return c.metadataTransitionScopeAllowed(scope, kind) ||
+		(c.lifecycleReadScope != "" && scope == c.lifecycleReadScope &&
+			(kind == privateEvidenceLifecycleAdmissionAttachmentKind || kind == privateEvidenceLifecycleDescendantAnchorKind))
+}
+
+func (c *privateEvidenceHTTPClient) patchReceiptScopeAllowed(scope, kind string) bool {
+	if c == nil {
+		return false
+	}
+	_, lifecycleKind := privateEvidenceLifecyclePatchKinds[kind]
+	return (c.revisionTransitionPatches && c.patchTransitionScopeAllowed(scope, kind)) ||
+		(c.lifecycleReadScope != "" && scope == c.lifecycleReadScope && lifecycleKind)
 }
 
 func validPrivateEvidenceScopeRef(scope string) bool {

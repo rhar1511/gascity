@@ -13,9 +13,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/attemptevidence"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/workrecord"
 )
 
 func TestTransitionChainAppliesEveryLifecycleStepWithExactPermitBinding(t *testing.T) {
@@ -1351,6 +1353,11 @@ type transitionChainFixture struct {
 
 func newTransitionChainFixture(t *testing.T) *transitionChainFixture {
 	t.Helper()
+	return newTransitionChainFixtureWithCompletion(t, true)
+}
+
+func newTransitionChainFixtureWithCompletion(t *testing.T, seedCompletion bool) *transitionChainFixture {
+	t.Helper()
 	policy := validAdmissionPolicyProjectionV2(t)
 	scope := policy.SourceScope
 	admissionPublic, admissionPrivate, err := ed25519.GenerateKey(rand.Reader)
@@ -1406,7 +1413,9 @@ func newTransitionChainFixture(t *testing.T) *transitionChainFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	work.Metadata[beadmeta.LifecycleCompletionReceiptMetadataKey] = completionReceipt
+	if seedCompletion {
+		work.Metadata[beadmeta.LifecycleCompletionReceiptMetadataKey] = completionReceipt
+	}
 	store := &transitionChainTestStore{
 		source: work, q43Receipts: map[string]beads.ControllerMetadataTransitionReceipt{},
 		patchReceipts: map[string]beads.RevisionTransitionPatchReceipt{}, nextRevision: 1000,
@@ -1683,4 +1692,252 @@ func cloneRawMessagePointer(raw *json.RawMessage) *json.RawMessage {
 	}
 	cloned := append(json.RawMessage(nil), (*raw)...)
 	return &cloned
+}
+
+// Acceptance arrives after work, not before admission or the worker claim.
+func TestTransitionChainAttachesCompletionAfterClaim(t *testing.T) {
+	fixture := newTransitionChainFixtureWithCompletion(t, false)
+	claim := applyTestClaim(t, fixture, applyTestAttachment(t, fixture, applyTestReservation(t, fixture)))
+	completion := fixture.completionReceiptValue(t, func(receipt *CompletionReceipt) {
+		receipt.WorkRecord = &workrecord.Record{
+			Outcome: "shipped", Commit: strings.Repeat("a", 40), Branch: "reviewed-branch", Verification: "required checks passed",
+		}
+	})
+	request := fixture.completionBudgetRequest(t, claim.Receipt, completion)
+	request.Patch.Metadata[beadmeta.LifecycleCompletionReceiptMetadataKey] = MetadataStringPatch{Value: completion}
+	priorBranch := "work-branch"
+	request.Patch.Metadata[beadmeta.WorkOutcomeMetadataKey] = MetadataStringPatch{Value: "shipped"}
+	request.Patch.Metadata[beadmeta.WorkCommitMetadataKey] = MetadataStringPatch{Value: strings.Repeat("a", 40)}
+	request.Patch.Metadata[beadmeta.WorkBranchMetadataKey] = MetadataStringPatch{Expected: &priorBranch, Value: "reviewed-branch"}
+	request.Patch.Metadata[beadmeta.WorkVerificationMetadataKey] = MetadataStringPatch{Value: "required checks passed"}
+	claimedSource, err := fixture.store.DecisionFrontierSourceSnapshot(fixture.work.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := attemptevidence.Identity{
+		Kind: attemptevidence.KindWorkbench, OwnerBeadID: fixture.work.ID, ExecutionBeadID: fixture.work.ID,
+		SessionID: claimedSource.Metadata[beadmeta.SessionIDMetadataKey], SessionGeneration: "1",
+		ClaimGeneration: claimedSource.Metadata[beadmeta.ClaimGenerationMetadataKey],
+	}
+	attemptID, err := attemptevidence.AttemptID(identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capture := attemptevidence.MakeUnavailable(attemptevidence.CaptureSpec{
+		Identity: identity, StoreRef: "source-store", Outcome: "shipped", Now: func() time.Time { return fixture.now },
+	}, attemptID, "fixture_workspace_absent")
+	encodedCapture, err := json.Marshal(capture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encodedReference, err := json.Marshal(attemptevidence.EvidenceReference(capture, "source-store"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	indexKey := attemptevidence.OwnerIndexKey(attemptID)
+	request.Patch.Metadata[indexKey] = MetadataStringPatch{Value: string(encodedCapture)}
+	request.Patch.Metadata[beadmeta.AttemptEvidenceReferenceMetadataKey] = MetadataStringPatch{Value: string(encodedReference)}
+	beforeWrites := len(fixture.store.patchRequests)
+	budget, err := fixture.chain.Apply(request)
+	if err != nil {
+		t.Fatalf("attach acceptance after claimed work: %v", err)
+	}
+	current, err := fixture.store.DecisionFrontierSourceSnapshot(fixture.work.ID)
+	if err != nil || current.Status != "in_progress" || current.Metadata[beadmeta.LifecycleCompletionReceiptMetadataKey] != completion || current.Revision != budget.Receipt.ToVersion {
+		t.Fatalf("acceptance and budget were not committed at the same in-progress revision: %+v err=%v", current, err)
+	}
+	for key, want := range map[string]string{
+		beadmeta.WorkOutcomeMetadataKey: "shipped", beadmeta.WorkCommitMetadataKey: strings.Repeat("a", 40),
+		beadmeta.WorkBranchMetadataKey: "reviewed-branch", beadmeta.WorkVerificationMetadataKey: "required checks passed",
+	} {
+		if current.Metadata[key] != want {
+			t.Fatalf("accepted work-record field %s = %q, want %q", key, current.Metadata[key], want)
+		}
+	}
+	if current.Metadata[indexKey] != string(encodedCapture) || current.Metadata[beadmeta.AttemptEvidenceReferenceMetadataKey] != string(encodedReference) {
+		t.Fatal("completion budget lost the exact sealed attempt index or reference")
+	}
+	decision, err := fixture.chain.VerifyCompletionReceipt(fixture.work.ID, fixture.evidence)
+	if err != nil || !decision.Accepted {
+		t.Fatalf("current acceptance proof: %+v err=%v", decision, err)
+	}
+	replay, err := fixture.chain.Apply(request)
+	if err != nil || !replay.Replayed || replay.Receipt.ReceiptID != budget.Receipt.ReceiptID || len(fixture.store.patchRequests) != beforeWrites+1 {
+		t.Fatalf("acceptance replay wrote again: %+v err=%v", replay, err)
+	}
+	closed, err := fixture.chain.Apply(closeTestRequest(fixture, budget, completion))
+	if err != nil {
+		t.Fatalf("close after protected acceptance: %v", err)
+	}
+	final, err := fixture.store.DecisionFrontierSourceSnapshot(fixture.work.ID)
+	if err != nil || final.Status != "closed" || final.Revision != closed.Receipt.ToVersion {
+		t.Fatalf("final source: %+v err=%v", final, err)
+	}
+	fixture.now = fixture.now.Add(8 * 24 * time.Hour)
+	replay, err = fixture.chain.Apply(request)
+	if err != nil || !replay.Replayed || replay.Receipt.ReceiptID != budget.Receipt.ReceiptID {
+		t.Fatalf("historical acceptance replay after freshness window: %+v err=%v", replay, err)
+	}
+}
+
+func TestTransitionChainCompletionAttachmentRefusesInvalidProofBeforeWrites(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		edit  func(*CompletionReceipt)
+		patch func(*TransitionRequest)
+		seed  bool
+	}{
+		{name: "wrong work", edit: func(r *CompletionReceipt) { r.WorkItemID = "other" }},
+		{name: "wrong scope", edit: func(r *CompletionReceipt) { r.Scope = "city:other" }},
+		{name: "wrong admission", edit: func(r *CompletionReceipt) { r.AdmissionDigest = strings.Repeat("x", 43) }},
+		{name: "wrong authority", edit: func(r *CompletionReceipt) { r.AcceptedBy = "other" }},
+		{name: "expired", edit: func(r *CompletionReceipt) { r.AcceptedAt = "2026-09-01T00:00:00Z" }},
+		{name: "future", edit: func(r *CompletionReceipt) { r.AcceptedAt = "2026-10-30T00:00:00Z" }},
+		{name: "untrusted signature", patch: func(r *TransitionRequest) {
+			v := r.Patch.Metadata[beadmeta.LifecycleCompletionReceiptMetadataKey]
+			var receipt CompletionReceipt
+			if err := json.Unmarshal([]byte(v.Value), &receipt); err != nil {
+				panic(err)
+			}
+			receipt.Signature = base64.RawURLEncoding.EncodeToString(make([]byte, ed25519.SignatureSize))
+			raw, _ := json.Marshal(receipt)
+			v.Value = string(raw)
+			r.Patch.Metadata[beadmeta.LifecycleCompletionReceiptMetadataKey] = v
+			budget, _ := BuildCompletionBudgetMetadata(receipt.WorkItemID, receipt.Scope, receipt.AdmissionDigest, v.Value)
+			r.Patch.Metadata[beadmeta.LifecycleCompletionBudgetMetadataKey] = MetadataStringPatch{Value: budget}
+		}},
+		{name: "mismatched digest", patch: func(r *TransitionRequest) {
+			v := r.Patch.Metadata[beadmeta.LifecycleCompletionReceiptMetadataKey]
+			v.Value += " "
+			r.Patch.Metadata[beadmeta.LifecycleCompletionReceiptMetadataKey] = v
+		}},
+		{name: "replace acceptance", seed: true, patch: func(r *TransitionRequest) {
+			v := r.Patch.Metadata[beadmeta.LifecycleCompletionReceiptMetadataKey]
+			prior := v.Value
+			v.Expected = &prior
+			r.Patch.Metadata[beadmeta.LifecycleCompletionReceiptMetadataKey] = v
+		}},
+		{name: "existing acceptance", seed: true},
+		{name: "unsigned work record", patch: func(r *TransitionRequest) {
+			r.Patch.Metadata[beadmeta.WorkOutcomeMetadataKey] = MetadataStringPatch{Value: "no-op"}
+		}},
+		{name: "missing signed work record", edit: func(r *CompletionReceipt) {
+			r.WorkRecord = &workrecord.Record{Outcome: "no-op"}
+		}},
+		{name: "different signed work record", edit: func(r *CompletionReceipt) {
+			r.WorkRecord = &workrecord.Record{Outcome: "no-op"}
+		}, patch: func(r *TransitionRequest) {
+			r.Patch.Metadata[beadmeta.WorkOutcomeMetadataKey] = MetadataStringPatch{Value: "shipped"}
+		}},
+		{name: "unsigned extra delivery field", edit: func(r *CompletionReceipt) {
+			r.WorkRecord = &workrecord.Record{Outcome: "no-op"}
+		}, patch: func(r *TransitionRequest) {
+			r.Patch.Metadata[beadmeta.WorkOutcomeMetadataKey] = MetadataStringPatch{Value: "no-op"}
+			r.Patch.Metadata[beadmeta.WorkCommitMetadataKey] = MetadataStringPatch{Value: strings.Repeat("a", 40)}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newTransitionChainFixtureWithCompletion(t, tc.seed)
+			claim := applyTestClaim(t, fixture, applyTestAttachment(t, fixture, applyTestReservation(t, fixture)))
+			completion := fixture.completionReceiptValue(t, tc.edit)
+			request := fixture.completionBudgetRequest(t, claim.Receipt, completion)
+			request.Patch.Metadata[beadmeta.LifecycleCompletionReceiptMetadataKey] = MetadataStringPatch{Value: completion}
+			if tc.patch != nil {
+				tc.patch(&request)
+			}
+			before, _ := fixture.store.DecisionFrontierSourceSnapshot(fixture.work.ID)
+			writes, permits := len(fixture.store.patchRequests), len(fixture.permits.requests)
+			if _, err := fixture.chain.Apply(request); err == nil {
+				t.Fatal("invalid acceptance attachment succeeded")
+			}
+			after, _ := fixture.store.DecisionFrontierSourceSnapshot(fixture.work.ID)
+			if !reflect.DeepEqual(before, after) || len(fixture.store.patchRequests) != writes || len(fixture.permits.requests) != permits {
+				t.Fatal("refused acceptance reached protected permit or source mutation")
+			}
+		})
+	}
+}
+
+func TestTransitionChainCompletionRefusesUnboundAttemptEvidence(t *testing.T) {
+	for _, name := range []string{"owner", "session", "generation", "store", "outcome", "reference", "index key", "missing reference", "missing index", "duplicate index", "overwrite", "noncanonical"} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newTransitionChainFixtureWithCompletion(t, false)
+			claim := applyTestClaim(t, fixture, applyTestAttachment(t, fixture, applyTestReservation(t, fixture)))
+			completion := fixture.completionReceiptValue(t, nil)
+			request := fixture.completionBudgetRequest(t, claim.Receipt, completion)
+			request.Patch.Metadata[beadmeta.LifecycleCompletionReceiptMetadataKey] = MetadataStringPatch{Value: completion}
+			before, err := fixture.store.DecisionFrontierSourceSnapshot(fixture.work.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			identity := attemptevidence.Identity{
+				Kind: attemptevidence.KindWorkbench, OwnerBeadID: before.ID, ExecutionBeadID: before.ID,
+				SessionID: before.Metadata[beadmeta.SessionIDMetadataKey], SessionGeneration: "1",
+				ClaimGeneration: before.Metadata[beadmeta.ClaimGenerationMetadataKey],
+			}
+			switch name {
+			case "owner":
+				identity.OwnerBeadID, identity.ExecutionBeadID = "other", "other"
+			case "session":
+				identity.SessionID = "other-session"
+			case "generation":
+				identity.ClaimGeneration = "2"
+			}
+			attemptID, err := attemptevidence.AttemptID(identity)
+			if err != nil {
+				t.Fatal(err)
+			}
+			capture := attemptevidence.MakeUnavailable(attemptevidence.CaptureSpec{
+				Identity: identity, StoreRef: "source-store", Now: func() time.Time { return fixture.now },
+			}, attemptID, "fixture_workspace_absent")
+			if name == "store" {
+				capture.StoreRef, capture.Permission.StoreRef = "other-store", "other-store"
+			}
+			if name == "outcome" {
+				capture.Outcome = "shipped"
+			}
+			encoded, err := json.Marshal(capture)
+			if err != nil {
+				t.Fatal(err)
+			}
+			reference := attemptevidence.EvidenceReference(capture, capture.StoreRef)
+			if name == "reference" {
+				reference.WorkID = "other"
+			}
+			encodedReference, err := json.Marshal(reference)
+			if err != nil {
+				t.Fatal(err)
+			}
+			key := attemptevidence.OwnerIndexKey(attemptID)
+			if name == "index key" {
+				key = beadmeta.AttemptEvidenceIndexPrefix + strings.Repeat("0", 64)
+			}
+			index := MetadataStringPatch{Value: string(encoded)}
+			if name == "overwrite" {
+				expected := "previous"
+				index.Expected = &expected
+			}
+			if name == "noncanonical" {
+				index.Value = " " + index.Value
+			}
+			request.Patch.Metadata[key] = index
+			request.Patch.Metadata[beadmeta.AttemptEvidenceReferenceMetadataKey] = MetadataStringPatch{Value: string(encodedReference)}
+			switch name {
+			case "missing reference":
+				delete(request.Patch.Metadata, beadmeta.AttemptEvidenceReferenceMetadataKey)
+			case "missing index":
+				delete(request.Patch.Metadata, key)
+			case "duplicate index":
+				request.Patch.Metadata[beadmeta.AttemptEvidenceIndexPrefix+strings.Repeat("f", 64)] = index
+			}
+			writes, permits := len(fixture.store.patchRequests), len(fixture.permits.requests)
+			if _, err := fixture.chain.Apply(request); !errors.Is(err, ErrTransitionChainEvidence) && !errors.Is(err, ErrTransitionChainInvalid) {
+				t.Fatalf("unbound attempt evidence was not refused: %v", err)
+			}
+			after, err := fixture.store.DecisionFrontierSourceSnapshot(before.ID)
+			if err != nil || !reflect.DeepEqual(before, after) || len(fixture.store.patchRequests) != writes || len(fixture.permits.requests) != permits {
+				t.Fatal("unbound attempt evidence changed work or consumed authority")
+			}
+		})
+	}
 }

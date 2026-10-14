@@ -239,6 +239,61 @@ func TestControllerMetadataTransitionLifecycleScopeUsesExactAttachmentKind(t *te
 	}
 }
 
+func TestControllerMetadataTransitionDescendantAnchorRequiresExactScopeAndPermit(t *testing.T) {
+	request := controllerTransitionTestRequest()
+	request.Scope = "city:alpha/rig:fixture"
+	request.Kind = "lifecycle_descendant_anchor_v1"
+	request.Key = "gc.lifecycle.transition_head.v1"
+	request.Expected = nil
+	value := json.RawMessage(`"receipt/1"`)
+	request.Value = &value
+	request.ProtectedPermit = "opaque-controller-permit"
+	receipt := json.RawMessage(`{"receipt_id":"receipt/1","issue_id":"gc/one","scope":"city:alpha/rig:fixture","kind":"lifecycle_descendant_anchor_v1","actor":"controller","expected_version":"7","to_version":"8","key":"gc.lifecycle.transition_head.v1","value":"receipt/1","payload":{"ticket":"private-marker"}}`)
+	base := controllerTransitionTestHandler(&receipt, false)
+	transport := &controllerTransitionTestTransport{handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/v0/beads/context" {
+			writeControllerTransitionTestContext(w, "project-a", "gc_fixture", []string{
+				"issues.transitionMetadata", "issues.transitionReceipt.get", "project.enforce", "issues.protectedMutation",
+			})
+			return
+		}
+		base.ServeHTTP(w, r)
+	})}
+	store := controllerTransitionTestStoreWithLifecycleScope(t, transport, request.Scope)
+	if result, err := store.TransitionMetadata("gc/one", request); err != nil || !result.Applied {
+		t.Fatalf("protected same-scope descendant anchor failed: %+v, %v", result, err)
+	}
+	if _, found, err := store.ControllerMetadataTransitionReceipt("gc/one", request.ReceiptID); err != nil || !found {
+		t.Fatalf("read protected same-scope descendant anchor: found=%t err=%v", found, err)
+	}
+	for _, tc := range []struct {
+		name   string
+		mutate func(*ControllerMetadataTransitionRequest)
+	}{
+		{"wrong city", func(r *ControllerMetadataTransitionRequest) { r.Scope = "city:beta/rig:fixture" }},
+		{"wrong rig", func(r *ControllerMetadataTransitionRequest) { r.Scope = "city:alpha/rig:other" }},
+		{"store scope", func(r *ControllerMetadataTransitionRequest) { r.Scope = "rig:fixture" }},
+		{"missing permit", func(r *ControllerMetadataTransitionRequest) { r.ProtectedPermit = "" }},
+		{"wrong marker", func(r *ControllerMetadataTransitionRequest) { r.Key = "gc.other" }},
+		{"existing marker", func(r *ControllerMetadataTransitionRequest) { r.Expected = &value }},
+		{"different head", func(r *ControllerMetadataTransitionRequest) {
+			other := json.RawMessage(`"another-receipt"`)
+			r.Value = &other
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bad := request
+			tc.mutate(&bad)
+			if _, err := store.TransitionMetadata("gc/one", bad); err == nil {
+				t.Fatal("invalid descendant bootstrap was accepted")
+			}
+			if transport.postCount != 1 {
+				t.Fatal("refused bootstrap reached mutation transport")
+			}
+		})
+	}
+}
+
 func TestControllerMetadataTransitionHTTPRejectsInvalidProtectedPermitBeforeHandshake(t *testing.T) {
 	tests := []struct {
 		name   string

@@ -343,7 +343,7 @@ gc bd release-if-current my-project-abc worker-1
 
 Manage the beads provider (backing store for issue tracking).
 
-Subcommands for topology operations, health checking, diagnostics, exact-store
+Subcommands for reviewed admission, topology operations, health checking, diagnostics, exact-store
 metadata compare-and-set, and read-only list/show routed through the supervisor
 API with transparent fallback to direct bd reads.
 
@@ -353,11 +353,66 @@ gc beads
 
 | Subcommand | Description |
 |------------|-------------|
+| [gc beads admission](#gc-beads-admission) | Prepare and attach reviewed lifecycle admission |
 | [gc beads city](#gc-beads-city) | Manage canonical city endpoint topology |
+| [gc beads completion](#gc-beads-completion) | Prepare and submit reviewed lifecycle acceptance |
 | [gc beads health](#gc-beads-health) | Check beads provider health |
 | [gc beads list](#gc-beads-list) | List beads (API-routed with bd fallback) |
 | [gc beads metadata-cas](#gc-beads-metadata-cas) | Atomically compare and set one metadata key in an exact local store |
 | [gc beads show](#gc-beads-show) | Show a single bead (API-routed with bd fallback) |
+
+## gc beads admission
+
+Prepare and attach reviewed lifecycle admission
+
+```
+gc beads admission
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc beads admission attach](#gc-beads-admission-attach) | Sign a reviewed draft and atomically attach its admission receipt |
+| [gc beads admission prepare](#gc-beads-admission-prepare) | Prepare an unsigned admission draft from the exact current source and policy |
+
+## gc beads admission attach
+
+Recompute the current source and policy, verify the reviewed draft, and
+sign it with the configured primary admission authority. The key must be an
+owner-only Ed25519 PKCS#8 PEM file in an owner-only directory. Unsupported file
+ownership checks fail closed. No private key is printed or placed in metadata.
+
+Attachment uses the exact source revision and durable transition receipt.
+An exact retry recovers the same attachment without another source write.
+This command does not launch a worker or clear any dispatch hold.
+
+```
+gc beads admission attach <reviewed-draft.json> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--key-file` | string |  | owner-only PKCS#8 file for the configured primary admission signer |
+| `--store-ref` | string |  | exact local source store named in the reviewed draft |
+
+## gc beads admission prepare
+
+Emit a JSON draft containing the unsigned v2 admission receipt and its
+current routing and workflow policy. Review the work item and this draft before
+signing. Preparation does not enroll work or change its metadata. The exact
+local store is required; no cross-store ID lookup or fallback is performed.
+
+```
+gc beads admission prepare <bead-id> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--acceptance-authority` | string |  | configured acceptance signer identity |
+| `--deliverable` | string |  | reviewed deliverable contract |
+| `--merge` | string | `mr` | delivery strategy: mr, direct, or local |
+| `--route` | string |  | exact configured rig-qualified worker pool |
+| `--store-ref` | string |  | exact local source store: city:&lt;name&gt; or rig:&lt;name&gt; |
+| `--verification` | string |  | reviewed verification contract |
 
 ## gc beads city
 
@@ -439,6 +494,57 @@ gc beads city use-managed [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--dry-run` | bool |  | show the canonical changes without writing files |
+
+## gc beads completion
+
+Prepare and submit reviewed lifecycle acceptance
+
+```
+gc beads completion
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc beads completion accept](#gc-beads-completion-accept) | Sign reviewed acceptance and complete work through the controller |
+| [gc beads completion prepare](#gc-beads-completion-prepare) | Prepare an unsigned acceptance draft without changing work |
+
+## gc beads completion accept
+
+Verify the reviewed draft against the current signed admission, sign with
+its configured acceptance authority, and submit the exact observed source head
+to the controller. The key must be an owner-only Ed25519 PKCS#8 PEM file in an
+owner-only directory. The key remains local and is never sent to the controller.
+
+Retain the reviewed draft. Retrying the same draft recovers its committed
+acceptance and close without another completion attempt. A controller is
+required; this command has no generic metadata or status-write fallback.
+
+```
+gc beads completion accept <reviewed-draft.json> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--key-file` | string |  | owner-only PKCS#8 file for the configured acceptance signer |
+| `--store-ref` | string |  | exact source store named in the reviewed draft |
+
+## gc beads completion prepare
+
+Prepare an unsigned acceptance draft without changing work
+
+```
+gc beads completion prepare <bead-id> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--deliverable-ref` | string |  | reviewed delivered artifact reference |
+| `--store-ref` | string |  | exact city or rig work store |
+| `--verification-ref` | string |  | reviewed verification evidence reference |
+| `--work-branch` | string |  | branch containing the reviewed commit |
+| `--work-commit` | string |  | commit that delivered the reviewed work |
+| `--work-outcome` | string |  | reviewed work outcome: shipped, no-op, blocked, or abandoned |
+| `--work-verification` | string |  | work-record verification summary |
 
 ## gc beads health
 
@@ -2119,8 +2225,51 @@ gc hook [agent] [flags]
 
 | Subcommand | Description |
 |------------|-------------|
+| [gc hook begin-source](#gc-hook-begin-source) | Begin admitted source work while retaining the current execution step |
+| [gc hook complete](#gc-hook-complete) | Complete the current protected execution step |
 | [gc hook current](#gc-hook-current) | Print the work bead this session most recently claimed |
 | [gc hook run](#gc-hook-run) | Run a managed hook command with a hard timeout |
+
+## gc hook begin-source
+
+Begin the admitted source of this session's currently claimed generated step.
+The session's current step and generation come from its persisted claim, never
+from a launcher bead ID. The controller verifies the managed incarnation,
+protected step claim, signed parent policy and workflow membership before
+claiming the source. The execution step remains the session's current claim.
+
+Requires GC_SESSION_ID, GC_INSTANCE_TOKEN, GC_RUNTIME_EPOCH and a running
+controller. Prints the durable source claim receipt as JSON. Exact retries
+return the existing claim. No signing key or generic write fallback is used.
+
+```
+gc hook begin-source <source-id> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--store-ref` | string |  | exact city or rig store shared by the source and execution step |
+
+## gc hook complete
+
+Complete the persisted current execution claim through the controller.
+Requires GC_SESSION_ID, GC_INSTANCE_TOKEN and GC_RUNTIME_EPOCH. Verifies the
+protected claim, current parent policy and exact workflow membership. Closes
+only the step, records its outcome and returns the durable receipt as JSON.
+The source still requires separately signed reviewer acceptance.
+
+The current claim stamp is retained for retry and workflow lookup. An exact
+retry returns the same receipt; a changed outcome conflicts. Requires a running
+controller and a verified parent source; no generic write fallback is used.
+
+```
+gc hook complete [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--outcome` | string |  | step outcome: pass, fail, or skipped |
+| `--store-ref` | string |  | exact city or rig store containing the execution step |
 
 ## gc hook current
 

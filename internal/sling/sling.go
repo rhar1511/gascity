@@ -1143,7 +1143,9 @@ func BuildSlingFormulaVars(formulaName, beadID string, userVars []string, a conf
 	return buildSlingFormulaVars(formulaName, beadID, userVars, a, deps, true)
 }
 
-func buildGraphV2SlingFormulaVars(formulaName, beadID string, userVars []string, a config.Agent, deps SlingDeps) map[string]string {
+// BuildGraphV2SlingFormulaVars resolves graph invocation inputs without injecting
+// reserved variables. The graph invocation layer supplies those from its target.
+func BuildGraphV2SlingFormulaVars(formulaName, beadID string, userVars []string, a config.Agent, deps SlingDeps) map[string]string {
 	return buildSlingFormulaVars(formulaName, beadID, userVars, a, deps, false)
 }
 

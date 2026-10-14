@@ -8,6 +8,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -16,10 +19,142 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/bootstrap/packs/core"
+	"github.com/gastownhall/gascity/internal/config"
+	convoycore "github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/graphv2"
 	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 	"github.com/gastownhall/gascity/internal/worklifecycle"
 )
+
+// The configured graph workflow must attach through the same protected source
+// transition chain as a legacy formula, with its input convoy bound to one source.
+func TestLifecycleAdmissionTransitionCoreGraphWorkflowAttachAndReplay(t *testing.T) {
+	setup := newLifecycleAdmissionCoreGraphSetup(t)
+	fixture := setup.fixture
+	setup.rigStores["pilot"] = wrapStoreWithBeadPolicies(setup.store, fixture.cfg)
+	var stderr strings.Builder
+	reconcileLifecycleAdmissionWithPermitResolver("pilot", fixture.cityPath, fixture.cfg, setup.cityStore, setup.rigStores, nil, &stderr, setup.permitResolver)
+	attached, err := setup.store.Get(setup.source.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker, ok := lifecycleMaterializationFor(attached)
+	if !ok || marker.State != "attached" || marker.WorkflowID == "" {
+		t.Fatalf("core graph admission did not attach: marker=%+v stderr=%s", marker, stderr.String())
+	}
+	root, err := setup.store.Get(marker.WorkflowID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if root.Metadata[beadmeta.FormulaContractMetadataKey] != beadmeta.FormulaContractGraphV2 {
+		t.Fatalf("materialized workflow contract = %q, want graph.v2", root.Metadata[beadmeta.FormulaContractMetadataKey])
+	}
+	members, err := convoycore.Members(setup.store, root.Metadata[beadmeta.InputConvoyIDMetadataKey], false)
+	if err != nil || len(members) != 1 || members[0].ID != setup.source.ID {
+		t.Fatalf("workflow input members = %+v, err=%v; want only %s", members, err, setup.source.ID)
+	}
+	if len(setup.store.patchRequests) != 2 || setup.store.sourceGenericWrites != 0 {
+		t.Fatalf("source writes: protected=%d generic=%d; want reservation and attachment only", len(setup.store.patchRequests), setup.store.sourceGenericWrites)
+	}
+	stderr.Reset()
+	reconcileLifecycleAdmissionWithPermitResolver("pilot", fixture.cityPath, fixture.cfg, setup.cityStore, setup.rigStores, nil, &stderr, setup.permitResolver)
+	if stderr.Len() != 0 || len(setup.store.patchRequests) != 2 || setup.store.sourceGenericWrites != 0 {
+		t.Fatalf("graph admission replay changed source or failed: protected=%d generic=%d stderr=%s", len(setup.store.patchRequests), setup.store.sourceGenericWrites, stderr.String())
+	}
+}
+
+func newLifecycleAdmissionCoreGraphSetup(t *testing.T) lifecycleAdmissionTransitionSetup {
+	t.Helper()
+	formulaText, err := core.PackFS.ReadFile("formulas/mol-do-work.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := newLifecycleAdmissionPolicyFixture(t, string(formulaText))
+	if err := os.WriteFile(filepath.Join(fixture.formulaDir, "mol-do-work.toml"), formulaText, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fixture.receipt.Workflow = "mol-do-work"
+	fixture.cfg.Agents[0].DefaultSlingFormula = &fixture.receipt.Workflow
+	fixture.cfg.Agents = append(fixture.cfg.Agents, config.Agent{
+		Name: config.ControlDispatcherAgentName, Dir: "pilot",
+		StartCommand: config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+		ProcessNames: []string{"gc"}, MaxActiveSessions: intPtr(1),
+	})
+	backing, err := beads.OpenSQLiteStore(t.TempDir(), beads.WithSQLiteStoreIDPrefix("pilot-rig"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sqlite := backing.(*beads.SQLiteStore)
+	t.Cleanup(func() {
+		if err := sqlite.CloseStore(); err != nil {
+			t.Errorf("close graph store: %v", err)
+		}
+	})
+	return newLifecycleAdmissionTransitionSetupWithBacking(t, fixture, sqlite, false)
+}
+
+func TestLifecycleAdmissionCoreGraphRejectsTamperedInvocation(t *testing.T) {
+	setup := newLifecycleAdmissionCoreGraphSetup(t)
+	fixture := setup.fixture
+	var stderr strings.Builder
+	reconcileLifecycleAdmissionWithPermitResolver("pilot", fixture.cityPath, fixture.cfg, setup.cityStore, setup.rigStores, nil, &stderr, setup.permitResolver)
+	attached, err := setup.store.Get(setup.source.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker, ok := lifecycleMaterializationFor(attached)
+	if !ok || marker.State != "attached" {
+		t.Fatalf("graph did not attach: %+v stderr=%s", marker, stderr.String())
+	}
+	root, err := setup.store.Get(marker.WorkflowID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projection := setup.policy.projection
+	if err := verifyLifecycleGraphInvocation(setup.store, root, setup.source.ID, projection); err != nil {
+		t.Fatalf("valid graph invocation: %v", err)
+	}
+	for _, test := range []struct {
+		name  string
+		key   string
+		value string
+	}{
+		{"missing convoy", beadmeta.InputConvoyIDMetadataKey, ""},
+		{"source as convoy", beadmeta.InputConvoyIDMetadataKey, setup.source.ID},
+		{"preview convoy", beadmeta.InputConvoyIDMetadataKey, projection.GraphInvocation.PreviewConvoyID},
+		{"unsigned variable", beadmeta.FormulaVarPrefix + "unsigned", "injected"},
+		{"changed convoy variable", beadmeta.FormulaVarPrefix + graphv2.ConvoyIDVar, "different"},
+		{"changed runtime variables", graphv2.RuntimeVarsMetadataKey, "{}"},
+		{"changed root key", beadmeta.Graphv2RootKeyMetadataKey, "different"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			mutated := root
+			mutated.Metadata = maps.Clone(root.Metadata)
+			mutated.Metadata[test.key] = test.value
+			if err := verifyLifecycleGraphInvocation(setup.store, mutated, setup.source.ID, projection); err == nil {
+				t.Fatal("tampered graph invocation was accepted")
+			}
+		})
+	}
+	// An extra closed source is still an extra authorization target.
+	extra, err := setup.store.Create(beads.Bead{Title: "Unrelated closed source", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := setup.store.Close(extra.ID); err != nil {
+		t.Fatal(err)
+	}
+	convoyID := root.Metadata[beadmeta.InputConvoyIDMetadataKey]
+	if err := setup.store.DepAdd(convoyID, extra.ID, convoycore.TrackingDepType); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyLifecycleGraphInvocation(setup.store, root, setup.source.ID, projection); err == nil {
+		t.Fatal("input convoy with an extra closed source was accepted")
+	}
+}
 
 func TestLifecycleAdmissionTransitionReservationGraphOnlyAttachAndReplay(t *testing.T) {
 	setup := newLifecycleAdmissionTransitionSetup(t)
@@ -291,7 +426,7 @@ func TestLifecycleAdmissionTransitionHoldsReopenedBlockerBeforeAttachment(t *tes
 				if reopened {
 					return
 				}
-				roots, err := setup.store.MemStore.ListByMetadata(identity, 0, beads.WithBothTiers)
+				roots, err := setup.store.lifecycleAdmissionBackingStore.ListByMetadata(identity, 0, beads.WithBothTiers)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -343,7 +478,7 @@ func TestLifecycleAdmissionTransitionHoldsReopenedBlockerBeforeAttachment(t *tes
 			reconcileLifecycleAdmissionWithPermitResolver("pilot", setup.fixture.cityPath, setup.fixture.cfg, setup.cityStore, setup.rigStores, nil, &stderr, setup.permitResolver)
 			current, err = setup.store.Get(setup.source.ID)
 			marker, ok = lifecycleMaterializationFor(current)
-			roots, rootsErr := setup.store.MemStore.ListByMetadata(identity, 0, beads.WithBothTiers)
+			roots, rootsErr := setup.store.lifecycleAdmissionBackingStore.ListByMetadata(identity, 0, beads.WithBothTiers)
 			var workflowRoots []beads.Bead
 			for _, root := range roots {
 				if root.ParentID == "" {
@@ -560,13 +695,13 @@ func leaveLifecycleAdmissionReservation(t *testing.T, setup lifecycleAdmissionTr
 
 func lifecycleAdmissionV1StepCandidate(t *testing.T, setup lifecycleAdmissionTransitionSetup, marker lifecycleMaterialization) beads.Bead {
 	t.Helper()
-	rows, err := setup.store.MemStore.List(beads.ListQuery{Status: "open", Live: true})
+	rows, err := setup.store.lifecycleAdmissionBackingStore.List(beads.ListQuery{Status: "open", Live: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, row := range rows {
 		lineage, ok := lifecycleMaterializationFor(row)
-		if ok && row.ID != setup.source.ID && lineage.State == "lineage_pending" && lineage.SourceID == setup.source.ID {
+		if ok && row.ID != setup.source.ID && row.ID != marker.WorkflowID && row.Type != "molecule" && lineage.State == "lineage_pending" && lineage.SourceID == setup.source.ID {
 			row.SourceStoreRef = marker.WorkflowStoreRef
 			row.LifecycleScope = marker.Scope
 			return row
@@ -600,15 +735,16 @@ func encodeAdmissionTestKey(key ed25519.PublicKey) string {
 }
 
 type lifecycleAdmissionTransitionSetup struct {
-	fixture        *lifecycleAdmissionPolicyFixture
-	cityStore      beads.Store
-	rigStores      map[string]beads.Store
-	store          *lifecycleAdmissionTransitionTestStore
-	source         beads.Bead
-	receipt        worklifecycle.AdmissionReceiptV2
-	policy         lifecycleAdmissionPolicy
-	q43            worklifecycle.AdmissionAttachmentProof
-	permitResolver *hostBeadsPermitResolver
+	acceptancePrivate ed25519.PrivateKey
+	fixture           *lifecycleAdmissionPolicyFixture
+	cityStore         beads.Store
+	rigStores         map[string]beads.Store
+	store             *lifecycleAdmissionTransitionTestStore
+	source            beads.Bead
+	receipt           worklifecycle.AdmissionReceiptV2
+	policy            lifecycleAdmissionPolicy
+	q43               worklifecycle.AdmissionAttachmentProof
+	permitResolver    *hostBeadsPermitResolver
 }
 
 // lifecycleAdmissionNoPatchStore preserves Q43 verification while hiding the
@@ -638,7 +774,17 @@ func newLifecycleAdmissionTransitionSetup(t *testing.T) lifecycleAdmissionTransi
 func newLifecycleAdmissionTransitionSetupWithCompletion(t *testing.T, withCompletion bool, closedBlockerIDs ...string) lifecycleAdmissionTransitionSetup {
 	t.Helper()
 	fixture := newLifecycleAdmissionPolicyFixture(t, "formula = \"review\"\nversion = 1\n\n[[steps]]\nid = \"work\"\ntitle = \"Review work\"\n")
+	return newLifecycleAdmissionTransitionSetupWithFixture(t, fixture, withCompletion, closedBlockerIDs...)
+}
+
+func newLifecycleAdmissionTransitionSetupWithFixture(t *testing.T, fixture *lifecycleAdmissionPolicyFixture, withCompletion bool, closedBlockerIDs ...string) lifecycleAdmissionTransitionSetup {
+	t.Helper()
 	base := &beads.MemStore{IDPrefix: "pilot-rig", HonorExplicitIDs: true}
+	return newLifecycleAdmissionTransitionSetupWithBacking(t, fixture, base, withCompletion, closedBlockerIDs...)
+}
+
+func newLifecycleAdmissionTransitionSetupWithBacking(t *testing.T, fixture *lifecycleAdmissionPolicyFixture, base lifecycleAdmissionBackingStore, withCompletion bool, closedBlockerIDs ...string) lifecycleAdmissionTransitionSetup {
+	t.Helper()
 	source, err := base.Create(beads.Bead{
 		ID: "pilot-rig-work-1", Title: "review", Type: "task", Status: "open",
 		Labels:   []string{worklifecycle.AdmissionIntentLabel},
@@ -664,7 +810,7 @@ func newLifecycleAdmissionTransitionSetupWithCompletion(t *testing.T, withComple
 		t.Fatal(err)
 	}
 	store := &lifecycleAdmissionTransitionTestStore{
-		MemStore: base, sourceID: source.ID,
+		lifecycleAdmissionBackingStore: base, sourceID: source.ID,
 		q43Receipts:           map[string]beads.ControllerMetadataTransitionReceipt{},
 		patchReceipts:         map[string]beads.RevisionTransitionPatchReceipt{},
 		rows:                  map[string]beads.Bead{},
@@ -728,7 +874,11 @@ func newLifecycleAdmissionTransitionSetupWithCompletion(t *testing.T, withComple
 		if signErr != nil {
 			t.Fatal(signErr)
 		}
-		finalBase := &beads.MemStore{IDPrefix: "pilot-rig", HonorExplicitIDs: true}
+		finalBase, openErr := beads.OpenFileStore(fsys.OSFS{}, filepath.Join(t.TempDir(), "completion.json"), beads.WithFileStoreIDPrefix("pilot-rig"))
+		if openErr != nil {
+			t.Fatal(openErr)
+		}
+		finalBase.HonorExplicitIDs = true
 		metadata := cloneLifecycleAdmissionMetadata(source.Metadata)
 		metadata[beadmeta.LifecycleCompletionReceiptMetadataKey] = completionReceipt
 		finalSource, createErr := finalBase.Create(beads.Bead{
@@ -739,7 +889,7 @@ func newLifecycleAdmissionTransitionSetupWithCompletion(t *testing.T, withComple
 			t.Fatal(createErr)
 		}
 		store = &lifecycleAdmissionTransitionTestStore{
-			MemStore: finalBase, sourceID: source.ID,
+			lifecycleAdmissionBackingStore: finalBase, sourceID: source.ID,
 			q43Receipts:   map[string]beads.ControllerMetadataTransitionReceipt{},
 			patchReceipts: map[string]beads.RevisionTransitionPatchReceipt{}, rows: map[string]beads.Bead{},
 		}
@@ -777,26 +927,41 @@ func newLifecycleAdmissionTransitionSetupWithCompletion(t *testing.T, withComple
 	permitResolver := controllerPermitTestResolver(t, entry, key)
 	return lifecycleAdmissionTransitionSetup{
 		fixture: fixture, cityStore: cityStore, rigStores: rigStores, store: store,
-		source: source, receipt: receipt, policy: policy, q43: q43, permitResolver: permitResolver,
+		source: source, receipt: receipt, policy: policy, q43: q43, permitResolver: permitResolver, acceptancePrivate: acceptancePrivate,
 	}
 }
 
+type lifecycleAdmissionBackingStore interface {
+	beads.Store
+	beads.ConditionalWriter
+}
+
 type lifecycleAdmissionTransitionTestStore struct {
-	*beads.MemStore
-	mu                    sync.Mutex
-	sourceID              string
-	rows                  map[string]beads.Bead
-	workflowReadOverrides map[string]beads.Bead
-	q43Receipts           map[string]beads.ControllerMetadataTransitionReceipt
-	patchReceipts         map[string]beads.RevisionTransitionPatchReceipt
-	patchRequests         []beads.RevisionTransitionPatchRequest
-	sourceGenericWrites   int
-	loseNextPatchKind     string
-	rejectNextPatchKind   string
-	failNextPatchKind     string
-	afterNextPatch        func(kind string)
-	afterSourceSnapshot   func()
-	afterWorkflowRead     func()
+	lifecycleAdmissionBackingStore
+	mu                      sync.Mutex
+	sourceID                string
+	rows                    map[string]beads.Bead
+	workflowReadOverrides   map[string]beads.Bead
+	q43Receipts             map[string]beads.ControllerMetadataTransitionReceipt
+	patchReceipts           map[string]beads.RevisionTransitionPatchReceipt
+	patchRequests           []beads.RevisionTransitionPatchRequest
+	sourceGenericWrites     int
+	nextPatchRevision       int64
+	loseNextPatchKind       string
+	rejectNextPatchKind     string
+	failNextPatchKind       string
+	failNextEvidenceArchive bool
+	afterNextPatch          func(kind string)
+	afterSourceSnapshot     func()
+	afterWorkflowRead       func()
+}
+
+func (s *lifecycleAdmissionTransitionTestStore) Create(b beads.Bead) (beads.Bead, error) {
+	if beads.HasAttemptEvidenceArchiveMarkers(b) && s.failNextEvidenceArchive {
+		s.failNextEvidenceArchive = false
+		return beads.Bead{}, errors.New("injected evidence archive failure")
+	}
+	return s.lifecycleAdmissionBackingStore.Create(b)
 }
 
 var (
@@ -806,6 +971,10 @@ var (
 	_ beads.RevisionTransitionPatchReceiptReaderHandleProvider      = (*lifecycleAdmissionTransitionTestStore)(nil)
 	_ beads.DecisionFrontierSourceReaderHandleProvider              = (*lifecycleAdmissionTransitionTestStore)(nil)
 )
+
+func (s *lifecycleAdmissionTransitionTestStore) GraphApplyHandle() (beads.GraphApplyStore, bool) {
+	return beads.GraphApplyFor(s.lifecycleAdmissionBackingStore)
+}
 
 func (s *lifecycleAdmissionTransitionTestStore) Get(id string) (beads.Bead, error) {
 	s.mu.Lock()
@@ -821,11 +990,11 @@ func (s *lifecycleAdmissionTransitionTestStore) Get(id string) (beads.Bead, erro
 		return row, nil
 	}
 	s.mu.Unlock()
-	return s.MemStore.Get(id)
+	return s.lifecycleAdmissionBackingStore.Get(id)
 }
 
 func (s *lifecycleAdmissionTransitionTestStore) List(query beads.ListQuery) ([]beads.Bead, error) {
-	rows, err := s.MemStore.List(query)
+	rows, err := s.lifecycleAdmissionBackingStore.List(query)
 	if err != nil {
 		return nil, err
 	}
@@ -833,7 +1002,7 @@ func (s *lifecycleAdmissionTransitionTestStore) List(query beads.ListQuery) ([]b
 }
 
 func (s *lifecycleAdmissionTransitionTestStore) ListByMetadata(filters map[string]string, limit int, tiers ...beads.QueryOpt) ([]beads.Bead, error) {
-	rows, err := s.MemStore.ListByMetadata(filters, limit, tiers...)
+	rows, err := s.lifecycleAdmissionBackingStore.ListByMetadata(filters, limit, tiers...)
 	if err == nil && len(rows) != 0 && s.afterWorkflowRead != nil {
 		s.afterWorkflowRead()
 	}
@@ -841,7 +1010,7 @@ func (s *lifecycleAdmissionTransitionTestStore) ListByMetadata(filters map[strin
 }
 
 func (s *lifecycleAdmissionTransitionTestStore) Ready(queries ...beads.ReadyQuery) ([]beads.Bead, error) {
-	rows, err := s.MemStore.Ready(queries...)
+	rows, err := s.lifecycleAdmissionBackingStore.Ready(queries...)
 	if err != nil {
 		return nil, err
 	}
@@ -870,20 +1039,20 @@ func (s *lifecycleAdmissionTransitionTestStore) overlayLifecycleAdmissionRowsFor
 		if current, ok := s.rows[row.ID]; ok {
 			row = current
 		}
-		if query.Status != "" && row.Status != query.Status || query.Type != "" && row.Type != query.Type {
+		if !query.Matches(row) {
 			continue
 		}
 		row.Metadata = cloneLifecycleAdmissionMetadata(row.Metadata)
 		filtered = append(filtered, row)
 	}
 	for id, current := range s.rows {
-		if seen[id] || query.Status != "" && current.Status != query.Status || query.Type != "" && current.Type != query.Type {
+		if seen[id] || !query.Matches(current) {
 			continue
 		}
 		current.Metadata = cloneLifecycleAdmissionMetadata(current.Metadata)
 		filtered = append(filtered, current)
 	}
-	return filtered
+	return beads.ApplyListQuery(filtered, query)
 }
 
 func (s *lifecycleAdmissionTransitionTestStore) DecisionFrontierSourceReaderHandle() (beads.DecisionFrontierSourceReader, bool) {
@@ -903,7 +1072,11 @@ func (s *lifecycleAdmissionTransitionTestStore) ControllerMetadataTransitionWrit
 }
 
 func (s *lifecycleAdmissionTransitionTestStore) StableCreateIDResolveTarget() beads.Store {
-	return s.MemStore
+	return s.lifecycleAdmissionBackingStore
+}
+
+func (s *lifecycleAdmissionTransitionTestStore) PrivatePayloadValueTransportTarget() beads.Store {
+	return s.lifecycleAdmissionBackingStore
 }
 
 func (s *lifecycleAdmissionTransitionTestStore) ControllerMetadataTransitionReceiptReaderHandle() (beads.ControllerMetadataTransitionReceiptReader, bool) {
@@ -916,8 +1089,8 @@ func (s *lifecycleAdmissionTransitionTestStore) TransitionMetadata(issueID strin
 	if prior, ok := s.q43Receipts[request.ReceiptID]; ok {
 		return beads.ControllerMetadataTransitionResult{Applied: true, Replayed: true, Receipt: &prior}, nil
 	}
-	current, err := s.MemStore.Get(issueID)
-	if err != nil || issueID != s.sourceID || current.Revision != request.ExpectedVersion || request.Expected != nil ||
+	current, err := s.currentLocked(issueID)
+	if err != nil || current.Revision != request.ExpectedVersion || request.Expected != nil ||
 		request.Value == nil || current.Metadata[request.Key] != "" {
 		return beads.ControllerMetadataTransitionResult{}, errors.New("Q43 test transition precondition failed")
 	}
@@ -925,12 +1098,24 @@ func (s *lifecycleAdmissionTransitionTestStore) TransitionMetadata(issueID strin
 	if err := json.Unmarshal(*request.Value, &next); err != nil {
 		return beads.ControllerMetadataTransitionResult{}, err
 	}
-	if err := s.MemStore.UpdateIfMatch(issueID, request.ExpectedVersion, beads.UpdateOpts{Metadata: map[string]string{request.Key: next}}); err != nil {
-		return beads.ControllerMetadataTransitionResult{}, err
-	}
-	committed, err := s.MemStore.Get(issueID)
-	if err != nil {
-		return beads.ControllerMetadataTransitionResult{}, err
+	var committed beads.Bead
+	if issueID == s.sourceID {
+		if err := s.lifecycleAdmissionBackingStore.UpdateIfMatch(issueID, request.ExpectedVersion, beads.UpdateOpts{Metadata: map[string]string{request.Key: next}}); err != nil {
+			return beads.ControllerMetadataTransitionResult{}, err
+		}
+		committed, err = s.lifecycleAdmissionBackingStore.Get(issueID)
+		if err != nil {
+			return beads.ControllerMetadataTransitionResult{}, err
+		}
+	} else {
+		if request.Kind != "lifecycle_descendant_anchor_v1" || request.Key != beadmeta.LifecycleTransitionHeadMetadataKey || request.ProtectedPermit == "" || next != request.ReceiptID {
+			return beads.ControllerMetadataTransitionResult{}, errors.New("Q43 child anchor requires protected lifecycle authority")
+		}
+		committed = current
+		committed.Metadata = cloneLifecycleAdmissionMetadata(current.Metadata)
+		committed.Metadata[request.Key] = next
+		committed.Revision++
+		s.rows[issueID] = committed
 	}
 	receipt := beads.ControllerMetadataTransitionReceipt{
 		ReceiptID: request.ReceiptID, IssueID: issueID, Scope: request.Scope, Kind: request.Kind, Actor: request.Actor,
@@ -974,7 +1159,7 @@ func (s *lifecycleAdmissionTransitionTestStore) TransitionPatch(issueID string, 
 		return beads.RevisionTransitionPatchResult{Applied: true, Replayed: true, Receipt: &prior}, nil
 	}
 	current, err := s.currentLocked(issueID)
-	if err != nil || issueID != s.sourceID || current.Revision != request.ExpectedVersion || request.ProtectedPermit == "" {
+	if err != nil || current.Revision != request.ExpectedVersion || request.ProtectedPermit == "" {
 		return beads.RevisionTransitionPatchResult{}, beads.ErrRevisionTransitionPatchPrecondition
 	}
 	if request.Kind == s.rejectNextPatchKind {
@@ -1019,7 +1204,12 @@ func (s *lifecycleAdmissionTransitionTestStore) TransitionPatch(issueID string, 
 		}
 		current.Assignee = request.Patch.Assignee.Value
 	}
-	current.Revision++
+	if s.nextPatchRevision != 0 {
+		current.Revision = s.nextPatchRevision
+		s.nextPatchRevision++
+	} else {
+		current.Revision++
+	}
 	s.rows[issueID] = current
 	receipt := beads.RevisionTransitionPatchReceipt{
 		ReceiptID: request.ReceiptID, IssueID: issueID, Scope: request.Scope, Kind: request.Kind, Actor: request.Actor,
@@ -1044,7 +1234,7 @@ func (s *lifecycleAdmissionTransitionTestStore) currentLocked(id string) (beads.
 		current.Metadata = cloneLifecycleAdmissionMetadata(current.Metadata)
 		return current, nil
 	}
-	return s.MemStore.Get(id)
+	return s.lifecycleAdmissionBackingStore.Get(id)
 }
 
 func (s *lifecycleAdmissionTransitionTestStore) Update(id string, opts beads.UpdateOpts) error {
@@ -1053,7 +1243,7 @@ func (s *lifecycleAdmissionTransitionTestStore) Update(id string, opts beads.Upd
 		s.sourceGenericWrites++
 		s.mu.Unlock()
 	}
-	return s.MemStore.Update(id, opts)
+	return s.lifecycleAdmissionBackingStore.Update(id, opts)
 }
 
 func (s *lifecycleAdmissionTransitionTestStore) SetMetadata(id, key, value string) error {
@@ -1062,7 +1252,7 @@ func (s *lifecycleAdmissionTransitionTestStore) SetMetadata(id, key, value strin
 		s.sourceGenericWrites++
 		s.mu.Unlock()
 	}
-	return s.MemStore.SetMetadata(id, key, value)
+	return s.lifecycleAdmissionBackingStore.SetMetadata(id, key, value)
 }
 
 func (s *lifecycleAdmissionTransitionTestStore) SetMetadataBatch(id string, values map[string]string) error {
@@ -1071,7 +1261,7 @@ func (s *lifecycleAdmissionTransitionTestStore) SetMetadataBatch(id string, valu
 		s.sourceGenericWrites++
 		s.mu.Unlock()
 	}
-	return s.MemStore.SetMetadataBatch(id, values)
+	return s.lifecycleAdmissionBackingStore.SetMetadataBatch(id, values)
 }
 
 func (s *lifecycleAdmissionTransitionTestStore) UpdateIfMatch(id string, version int64, opts beads.UpdateOpts) error {
@@ -1080,16 +1270,28 @@ func (s *lifecycleAdmissionTransitionTestStore) UpdateIfMatch(id string, version
 		s.sourceGenericWrites++
 		s.mu.Unlock()
 	}
-	return s.MemStore.UpdateIfMatch(id, version, opts)
+	return s.lifecycleAdmissionBackingStore.UpdateIfMatch(id, version, opts)
 }
 
 func (s *lifecycleAdmissionTransitionTestStore) DepAdd(issueID, dependsOnID, depType string) error {
-	if issueID == s.sourceID || dependsOnID == s.sourceID {
+	// Dependency mutations advance the owner's revision. For an incoming
+	// convoy edge, measure the real backing source revision so a provider
+	// that also mutates the target cannot hide behind the Q54 test overlay.
+	before, err := s.lifecycleAdmissionBackingStore.Get(s.sourceID)
+	if err != nil {
+		return err
+	}
+	writeErr := s.lifecycleAdmissionBackingStore.DepAdd(issueID, dependsOnID, depType)
+	after, readErr := s.lifecycleAdmissionBackingStore.Get(s.sourceID)
+	if readErr != nil {
+		return errors.Join(writeErr, readErr)
+	}
+	if issueID == s.sourceID || before.Revision != after.Revision {
 		s.mu.Lock()
 		s.sourceGenericWrites++
 		s.mu.Unlock()
 	}
-	return s.MemStore.DepAdd(issueID, dependsOnID, depType)
+	return writeErr
 }
 
 func cloneLifecycleAdmissionMetadata(metadata map[string]string) map[string]string {

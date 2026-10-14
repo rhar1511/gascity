@@ -1,0 +1,11 @@
+[Unit]
+Description=Keep Beads revocations current for Gas City scope %i
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=60s
+AccuracySec=1s
+Unit=gascity-beads-revocations@%i.service
+
+[Install]
+WantedBy=timers.target

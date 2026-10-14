@@ -737,6 +737,50 @@ func TestInstantiateFallsBackWhenNativeGraphApplyCycleCheckTimesOut(t *testing.T
 	}
 }
 
+func TestInstantiateRequiredGraphApplyNeverCreatesSequentialBeads(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		enabled       bool
+		hasApplier    bool
+		deferRouting  bool
+		transientFail bool
+	}{
+		{name: "capability absent", enabled: true},
+		{name: "feature disabled", hasApplier: true},
+		{name: "routing deferred", enabled: true, hasApplier: true, deferRouting: true},
+		{name: "transient failure exhausted", enabled: true, hasApplier: true, transientFail: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			previous := IsGraphApplyEnabled()
+			SetGraphApplyEnabled(tc.enabled)
+			t.Cleanup(func() { SetGraphApplyEnabled(previous) })
+			backing := beads.NewMemStore()
+			var store beads.Store = backing
+			if tc.hasApplier {
+				applier := &graphApplySpyStore{MemStore: backing}
+				if tc.transientFail {
+					applier.err = fmt.Errorf("bd create --graph: timed out after 45s")
+				}
+				store = applier
+			}
+			recipe := &formula.Recipe{Name: "wf", Steps: []formula.RecipeStep{
+				{ID: "wf", Title: "Workflow", Type: "task", IsRoot: true},
+				{ID: "wf.work", Title: "Work", Type: "task", Assignee: "worker"},
+			}}
+			result, err := Instantiate(t.Context(), store, recipe, Options{
+				RequireGraphApply: true, DeferAssignees: tc.deferRouting,
+			})
+			if err == nil || result != nil {
+				t.Fatalf("required atomic graph creation returned result=%+v err=%v", result, err)
+			}
+			rows, err := backing.ListOpen()
+			if err != nil || len(rows) != 0 {
+				t.Fatalf("refused atomic graph creation left rows=%+v err=%v", rows, err)
+			}
+		})
+	}
+}
+
 func TestInstantiateDoesNotFallbackForNonTransientGraphApplyError(t *testing.T) {
 	store := &graphApplySpyStore{
 		MemStore: beads.NewMemStore(),

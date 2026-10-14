@@ -5007,16 +5007,18 @@
       "LifecycleClaimSubmitRequest": {
         "additionalProperties": false,
         "properties": {
+          "execution_claim": {
+            "$ref": "#/components/schemas/LifecycleExecutionClaim",
+            "description": "Begin this source while retaining the exact currently claimed generated execution step. The controller verifies signed workflow membership."
+          },
           "expected_revision": {
-            "description": "Source revision observed by the claim candidate query.",
+            "description": "Nonzero opaque signed source revision observed by the claim candidate query; compare only for equality.",
             "format": "int64",
-            "minimum": 1,
             "type": "integer"
           },
           "expected_transition_head": {
-            "description": "Lifecycle transition head observed by the claim candidate query.",
+            "description": "Observed lifecycle transition head; empty only for a generated step awaiting its first protected anchor.",
             "maxLength": 200,
-            "minLength": 1,
             "type": "string"
           },
           "instance_token": {
@@ -5057,6 +5059,155 @@
           "session_id",
           "instance_token",
           "runtime_epoch"
+        ],
+        "type": "object"
+      },
+      "LifecycleCompletionResult": {
+        "additionalProperties": false,
+        "properties": {
+          "receipt_id": {
+            "type": "string"
+          },
+          "replayed": {
+            "type": "boolean"
+          },
+          "revision": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "work_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "work_id",
+          "receipt_id",
+          "revision",
+          "replayed"
+        ],
+        "type": "object"
+      },
+      "LifecycleCompletionSubmitRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "completion_receipt": {
+            "description": "Canonical acceptance JSON signed by the authority named in this admission.",
+            "maxLength": 65536,
+            "minLength": 1,
+            "type": "string"
+          },
+          "expected_revision": {
+            "description": "Nonzero opaque signed source revision; compare only for equality.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "expected_transition_head": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "source_store_ref": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "work_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "work_id",
+          "source_store_ref",
+          "expected_revision",
+          "expected_transition_head",
+          "completion_receipt"
+        ],
+        "type": "object"
+      },
+      "LifecycleExecutionClaim": {
+        "additionalProperties": false,
+        "properties": {
+          "claim_generation": {
+            "maxLength": 32,
+            "minLength": 1,
+            "type": "string"
+          },
+          "work_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "work_id",
+          "claim_generation"
+        ],
+        "type": "object"
+      },
+      "LifecycleExecutionCompletionRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "claim_generation": {
+            "maxLength": 32,
+            "minLength": 1,
+            "type": "string"
+          },
+          "expected_revision": {
+            "description": "Opaque nonzero revision; compare only for equality.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "expected_transition_head": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "instance_token": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "outcome": {
+            "enum": [
+              "pass",
+              "fail",
+              "skipped"
+            ],
+            "type": "string"
+          },
+          "runtime_epoch": {
+            "maxLength": 32,
+            "minLength": 1,
+            "type": "string"
+          },
+          "session_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "source_store_ref": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "work_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "work_id",
+          "source_store_ref",
+          "expected_revision",
+          "expected_transition_head",
+          "session_id",
+          "instance_token",
+          "runtime_epoch",
+          "claim_generation",
+          "outcome"
         ],
         "type": "object"
       },
@@ -41933,7 +42084,7 @@
     },
     "/v0/city/{cityName}/lifecycle/claims": {
       "post": {
-        "description": "Authenticates the current managed session incarnation, atomically appends a Q54 ClaimIdentity transition for exact admitted work, then stamps and verifies the reciprocal session claim.",
+        "description": "Authenticates the current managed session incarnation, atomically appends a Q54 ClaimIdentity transition for exact admitted work, then stamps and verifies the reciprocal session claim. With execution_claim, verifies the current generated step belongs to this source and preserves that step as the session claim.",
         "operationId": "claim-admitted-lifecycle-work",
         "parameters": [
           {
@@ -42093,6 +42244,334 @@
           }
         },
         "summary": "Claim admitted work through its durable lifecycle transition"
+      }
+    },
+    "/v0/city/{cityName}/lifecycle/completions": {
+      "post": {
+        "description": "Reconstructs current admission and transition authority, atomically attaches signed acceptance and its completion budget, then closes through a protected transition. Exact retries recover the same receipts.",
+        "operationId": "complete-admitted-lifecycle-work",
+        "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LifecycleCompletionSubmitRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LifecycleCompletionResult"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Bad Request",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Forbidden",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Not Found",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Conflict",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Service Unavailable",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          }
+        },
+        "summary": "Complete admitted work with separately signed acceptance"
+      }
+    },
+    "/v0/city/{cityName}/lifecycle/executions/complete": {
+      "post": {
+        "description": "Authenticates the managed incarnation and reciprocal current claim, verifies protected descendant authority and appends a terminal step receipt. Retains the current claim for retry and workflow lookup. Does not accept or close the admitted source.",
+        "operationId": "complete-lifecycle-execution",
+        "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LifecycleExecutionCompletionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LifecycleCompletionResult"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Bad Request",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Forbidden",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Not Found",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Conflict",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Service Unavailable",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          }
+        },
+        "summary": "Complete the current protected execution step"
       }
     },
     "/v0/city/{cityName}/lifecycle/recovery-requests": {

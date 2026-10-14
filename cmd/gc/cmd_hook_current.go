@@ -11,8 +11,8 @@ import (
 	"github.com/gastownhall/gascity/internal/session"
 )
 
-// hookCurrentSessionFrontDoor is the session-front-door seam `gc hook current`
-// reads through, overridable in tests.
+// hookCurrentSessionFrontDoor is the session-front-door seam used to read the
+// current execution claim by hook current and begin-source, overridable in tests.
 var hookCurrentSessionFrontDoor = sessionCurrentClaimFrontDoor
 
 func newHookCurrentCmd(stdout, stderr io.Writer) *cobra.Command {
