@@ -1,6 +1,7 @@
 package sling
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -323,5 +324,98 @@ func TestForcedGraphV2ReplacementRollbackRestoresInTheGraphStore(t *testing.T) {
 	}
 	if restored.Status == "closed" {
 		t.Errorf("displaced root %s is still closed after the failed replacement rolled back; the restore ran against a store that does not hold it, so the city lost both workflows", first.WorkflowID)
+	}
+}
+
+type workflowLaunchConflictStore struct {
+	beads.Store
+	writes        int
+	conflicts     int
+	afterConflict string
+	refusal       error
+}
+
+func (s *workflowLaunchConflictStore) Update(id string, opts beads.UpdateOpts) error {
+	s.writes++
+	if s.refusal != nil {
+		return s.refusal
+	}
+	if s.conflicts > 0 {
+		s.conflicts--
+		if s.afterConflict != "" {
+			status := s.afterConflict
+			if err := s.Store.Update(id, beads.UpdateOpts{Status: &status}); err != nil {
+				return err
+			}
+		}
+		return &beads.PreconditionFailedError{ID: id, Expected: 1, Current: 2}
+	}
+	return s.Store.Update(id, opts)
+}
+
+func TestPromoteWorkflowLaunchBeadRechecksAfterRevisionConflict(t *testing.T) {
+	for _, status := range []string{"open", "closed", "blocked", "in_progress"} {
+		t.Run(status, func(t *testing.T) {
+			base := beads.NewMemStore()
+			root, err := base.Create(beads.Bead{Title: "workflow root", Status: "open"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			store := &workflowLaunchConflictStore{Store: base, conflicts: 1, afterConflict: status}
+			if err := PromoteWorkflowLaunchBead(store, root.ID); err != nil {
+				t.Fatal(err)
+			}
+			got, err := base.Get(root.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := status
+			wantWrites := 1
+			if status == "open" {
+				want = "in_progress"
+				wantWrites = 2
+			}
+			if got.Status != want || store.writes != wantWrites {
+				t.Fatalf("status=%q writes=%d, want status=%q writes=%d", got.Status, store.writes, want, wantWrites)
+			}
+		})
+	}
+}
+
+func TestPromoteWorkflowLaunchBeadDoesNotRetryNonConflict(t *testing.T) {
+	base := beads.NewMemStore()
+	root, err := base.Create(beads.Bead{Title: "workflow root", Status: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	refusal := errors.New("transport unavailable")
+	store := &workflowLaunchConflictStore{Store: base, refusal: refusal}
+	if err := PromoteWorkflowLaunchBead(store, root.ID); !errors.Is(err, refusal) {
+		t.Fatalf("error=%v, want refusal", err)
+	}
+	if store.writes != 1 {
+		t.Fatalf("writes=%d, want1", store.writes)
+	}
+}
+
+func TestPromoteWorkflowLaunchBeadBoundsRevisionConflicts(t *testing.T) {
+	base := beads.NewMemStore()
+	root, err := base.Create(beads.Bead{Title: "workflow root", Status: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &workflowLaunchConflictStore{Store: base, conflicts: 100}
+	if err := PromoteWorkflowLaunchBead(store, root.ID); !beads.IsPreconditionFailed(err) {
+		t.Fatalf("error=%v, want retained conflict", err)
+	}
+	if store.writes != 3 {
+		t.Fatalf("writes=%d, want bounded3", store.writes)
+	}
+	got, err := base.Get(root.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "open" {
+		t.Fatalf("status=%q, want open", got.Status)
 	}
 }

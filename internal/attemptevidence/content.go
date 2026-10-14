@@ -218,13 +218,14 @@ func storePayloadBytes(store beads.Store, digest string, content []byte) error {
 		// any duplicate-ID or ambiguous-commit result is resolved by exact ID
 		// readback and digest verification.
 		row, readErr := backend.Get(rowID)
-		if readErr == nil && validatePayloadRow(row, digest, int64(len(content)), content) == nil {
-			return nil
+		if readErr == nil {
+			readErr = validatePayloadRow(row, digest, int64(len(content)), content)
 		}
-		if readErr != nil && !errors.Is(readErr, beads.ErrNotFound) {
+		if readErr != nil {
 			return errors.Join(fmt.Errorf("creating content-addressed payload %s: %w", digest, err), readErr)
 		}
-		return fmt.Errorf("creating content-addressed payload %s: %w (exact readback failed: %w)", digest, err, readErr)
+		// A verified canonical row resolves the ambiguous insert, but not the
+		// complete payload set. Continue through the shared duplicate scan.
 	}
 	row, err := backend.Get(rowID)
 	if err != nil {

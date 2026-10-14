@@ -134,7 +134,7 @@ write_timing_artifact() {
   fi
 
   if ! jq -s -e \
-    --arg module "$timing_module_path" \
+    --arg module_path "$timing_module_path" \
     --arg shard_id "$timing_shard_id" \
     --arg variant "$timing_variant" \
     --arg commit_sha "$timing_commit_sha" \
@@ -148,10 +148,10 @@ write_timing_artifact() {
     --arg runner_arch "$timing_runner_arch" \
     --argjson runner_cpu_count "$timing_runner_cpu_count" \
     '
-      def relative_package($module):
-        if $module == "" then .
-        elif . == $module then "."
-        elif startswith($module + "/") then .[($module | length) + 1:]
+      def relative_package($module_path):
+        if $module_path == "" then .
+        elif . == $module_path then "."
+        elif startswith($module_path + "/") then .[($module_path | length) + 1:]
         else .
         end;
 
@@ -169,7 +169,7 @@ write_timing_artifact() {
         end
       | map(
           . as $event
-          | ($event.Package | relative_package($module)) as $package_id
+          | ($event.Package | relative_package($module_path)) as $package_id
           | if $event.Test == null then
               {
                 unit_id: $package_id,

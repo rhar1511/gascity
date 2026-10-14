@@ -1049,6 +1049,7 @@ jobs:
         with:
           dolt-version: ${{ env.DOLT_VERSION }}
           bd-version: ${{ env.BD_VERSION }}
+          qualified-integration-bd: "true"
           install-claude-cli: "false"
       - name: Run integration shard
         run: ${{ matrix.command }}
@@ -1076,6 +1077,7 @@ jobs:
         with:
           dolt-version: ${{ env.DOLT_VERSION }}
           bd-version: ${{ env.BD_VERSION }}
+          qualified-integration-bd: "true"
           install-claude-cli: "false"
       - name: Run full REST shard
         run: ./scripts/test-integration-shard rest-full-${{ matrix.shard }}-of-16

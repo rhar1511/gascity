@@ -45,6 +45,7 @@ var globalBoolFlags = map[string]bool{
 // defines every subcommand this package knows about — see Known/Subcommands.
 //
 // Sourced from `bd <sub> --help` (bd 1.3.1, 2026-09-29).
+// Qualified source 3c3423cf (2026-10-14) adds revision fences and ready --flat.
 var valueFlagsBySub = map[string]map[string]bool{
 	"create": {
 		"--acceptance": true, "--append-notes": true, "-a": true, "--assignee": true,
@@ -72,18 +73,18 @@ var valueFlagsBySub = map[string]map[string]bool{
 		"--title": true, "--spec-id": true, "--unset-metadata": true,
 		// The compare-and-set guards. Pinned as well as discovered: help
 		// discovery swallows its own errors, so a bd that is missing, renamed
-		// or slow leaves the pinned table as the only answer, and these two
+		// or slow leaves the pinned table as the only answer, and these guards
 		// are the flags whose absence broke fenced dispatch in every rig.
-		"--if-assignee": true, "--if-status": true,
+		"--if-assignee": true, "--if-status": true, "--if-revision": true,
 	},
 	"close": {
-		"-r": true, "--reason": true, "--reason-file": true, "--session": true,
+		"-r": true, "--reason": true, "--reason-file": true, "--session": true, "--if-revision": true,
 	},
 	"reopen": {
 		"-r": true, "--reason": true,
 	},
 	"delete": {
-		"--from-file": true,
+		"--from-file": true, "--if-revision": true,
 	},
 	"ready": {
 		"-a": true, "--assignee": true, "--exclude-label": true, "--exclude-type": true,
@@ -141,7 +142,8 @@ var valueFlagsBySub = map[string]map[string]bool{
 // boolFlagsBySub holds each subcommand's boolean (no-value) flags beyond the
 // global set. Same keying convention as valueFlagsBySub.
 //
-// Sourced from `bd <sub> --help` (bd 1.3.1, 2026-09-29). A flag whose
+// Sourced from `bd <sub> --help` (bd 1.3.1, 2026-09-29).
+// Qualified source 595bf2d4 (2026-10-14) adds ready --flat and safe deletion. A flag whose
 // help renders as `string[="default"]` — cobra's NoOptDefVal — belongs here,
 // not in valueFlagsBySub: it never consumes the next argv token, so
 // `bd list --deps all` leaves "all" positional.
@@ -163,9 +165,10 @@ var boolFlagsBySub = map[string]map[string]bool{
 	"reopen": {},
 	"delete": {
 		"--cascade": true, "--dry-run": true, "-f": true, "--force": true,
+		"--protect-active-references": true,
 	},
 	"ready": {
-		"--brief": true, "--claim": true, "--explain": true, "--gated": true,
+		"--brief": true, "--claim": true, "--explain": true, "--gated": true, "--flat": true,
 		"--include-deferred": true, "--include-ephemeral": true, "--plain": true,
 		"--pretty": true, "-u": true, "--unassigned": true,
 	},

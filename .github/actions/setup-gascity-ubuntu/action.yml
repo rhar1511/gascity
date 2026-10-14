@@ -22,6 +22,10 @@ inputs:
       installs bd itself (used by the cross-version contract "current" cell).
     required: false
     default: ""
+  qualified-integration-bd:
+    description: Build the exact fork source required by HTTP integration suites
+    required: false
+    default: "false"
   install-claude-cli:
     description: Whether to install the Claude CLI
     required: false
@@ -73,6 +77,16 @@ runs:
           *$'\n'*|*$'\r'*) echo "bd test executable path contains a line break" >&2; exit 1 ;;
         esac
         printf 'BEADS_TEST_BD_BINARY=%s\n' "$bd_test_binary" >> "$GITHUB_ENV"
+
+    - name: Install qualified Beads build dependencies
+      if: ${{ inputs.qualified-integration-bd == 'true' }}
+      shell: bash
+      run: sudo apt-get install -y libicu-dev pkg-config
+
+    - name: Install qualified integration bd
+      if: ${{ inputs.qualified-integration-bd == 'true' }}
+      shell: bash
+      run: ${{ github.action_path }}/../../scripts/install-qualified-integration-bd.sh
 
     - name: Install Claude CLI
       if: ${{ inputs.install-claude-cli == 'true' }}
