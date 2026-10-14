@@ -40,7 +40,7 @@ func buildLifecycleTransitionContext(
 		strings.TrimSpace(workID) == "" || strings.TrimSpace(scope) == "" || permitResolver == nil {
 		return lifecycleTransitionContext{}, worklifecycle.ErrTransitionChainUnavailable
 	}
-	current, err := leg.store.Get(workID)
+	current, err := beads.HandlesFor(leg.store).Live.Get(workID)
 	if err != nil || current.ID != workID || current.Revision == 0 || !rootStoreRefMatchesCandidate(current.Metadata[beadmeta.RootStoreRefMetadataKey], leg.ref) {
 		return lifecycleTransitionContext{}, fmt.Errorf("read exact admitted source from %s: %w", leg.ref, worklifecycle.ErrTransitionChainEvidence)
 	}

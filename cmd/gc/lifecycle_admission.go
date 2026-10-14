@@ -313,7 +313,7 @@ func reconcileLifecycleAdmissionWithPermitResolver(
 							beadmeta.MergeStrategyMetadataKey:            {Value: receipt.MergeStrategy},
 						}},
 					})
-					current, getErr := leg.store.Get(current.ID)
+					current, getErr := beads.HandlesFor(leg.store).Live.Get(current.ID)
 					attachedHead, headErr := chain.CurrentHead(current.ID, evidence)
 					if replayErr != nil || attachedResult.Receipt.ReceiptID == "" || getErr != nil || headErr != nil ||
 						attachedHead.FromAttachment || attachedHead.ReceiptID != attachedResult.Receipt.ReceiptID || attachedHead.ToVersion != current.Revision {
@@ -321,7 +321,7 @@ func reconcileLifecycleAdmissionWithPermitResolver(
 					}
 					return nil
 				}
-				current, err = leg.store.Get(current.ID)
+				current, err = beads.HandlesFor(leg.store).Live.Get(current.ID)
 				if err != nil || current.Metadata[beadmeta.LifecycleMaterializationMetadataKey] != reservationValue {
 					fmt.Fprintf(stderr, "lifecycle admission: reservation for %s did not read back exactly; workflow materialization held\n", bead.ID) //nolint:errcheck
 					return nil
@@ -425,7 +425,7 @@ func reconcileLifecycleAdmissionWithPermitResolver(
 					fmt.Fprintf(stderr, "lifecycle admission: encoding attached workflow evidence for %s: %v\n", bead.ID, err) //nolint:errcheck
 					return nil
 				}
-				current, err = leg.store.Get(bead.ID)
+				current, err = beads.HandlesFor(leg.store).Live.Get(bead.ID)
 				if err != nil || current.Metadata[beadmeta.LifecycleMaterializationMetadataKey] != reservationValue {
 					fmt.Fprintf(stderr, "lifecycle admission: source reservation for %s changed before attachment; work remains held\n", bead.ID) //nolint:errcheck
 					return nil
@@ -1517,7 +1517,8 @@ func lifecycleLineageCurrent(candidate beads.Bead, lineage lifecycleMaterializat
 	if err != nil || sourceStore == nil {
 		return false
 	}
-	source, err := sourceStore.Get(lineage.SourceID)
+	// List-backed caches may omit revisions. Admission proof comparisons need the live source.
+	source, err := beads.HandlesFor(sourceStore).Live.Get(lineage.SourceID)
 	if err != nil {
 		return false
 	}

@@ -161,7 +161,7 @@ func (cs *controllerState) transitionLifecycleWork(ctx context.Context, request 
 			if err := verifyLifecycleClaimSessionRoute(cfg, request.Session, lifecycleAdmissionPolicy{target: *target}, marker.Route); err != nil {
 				return worklifecycle.DescendantBinding{}, err
 			}
-			parent, err := selected.store.Get(marker.SourceID)
+			parent, err := beads.HandlesFor(selected.store).Live.Get(marker.SourceID)
 			if err != nil {
 				return worklifecycle.DescendantBinding{}, err
 			}
