@@ -86,13 +86,7 @@ func TestBdStoreDecisionFrontierSourceSnapshotExactBinaryIntegration(t *testing.
 		}
 		// This fixture owns the proxied workspace and its detached proxy. Stop
 		// that proxy before t.TempDir removes the control files used to verify it.
-		stopCtx, stopCancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer stopCancel()
-		cmd := exec.CommandContext(stopCtx, bdBinary, "dolt", "stop")
-		cmd.Dir, cmd.Env = workspace, env
-		if output, err := cmd.CombinedOutput(); err != nil {
-			t.Errorf("stop fixture-owned Beads proxy: %v\noutput:\n%s", err, output)
-		}
+		bdSourceSnapshotIntegrationRun(t, context.Background(), 30*time.Second, env, workspace, bdBinary, "dolt", "stop")
 	})
 	bdSourceSnapshotIntegrationRun(t, ctx, 4*time.Minute, env, workspace, bdBinary,
 		"init", "--quiet", "--proxied-server", "--proxied-server-external-host", "127.0.0.1",
