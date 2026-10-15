@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 )
@@ -139,6 +140,27 @@ func TestScanWithRootStatVanished(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Fatalf("scanWithRoot returned %d runtimes for a vanished process, want 0", len(got))
+	}
+}
+
+func TestScanWithRootDoesNotReportReparentedZombie(t *testing.T) {
+	root := t.TempDir()
+	const pid = 500
+	buildFakeProc(t, root, pid, map[string]string{"GC_SESSION_ID": "ga-reaped"})
+	path := filepath.Join(root, strconv.Itoa(pid), "stat")
+	stat, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(strings.Replace(string(stat), ") S 1 ", ") Z 1 ", 1)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := scanWithRoot(root, "ga-reaped")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("zombie with stale GC_SESSION_ID was reported as live: %+v", got)
 	}
 }
 

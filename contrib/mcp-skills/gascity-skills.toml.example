@@ -1,0 +1,6 @@
+# Copy into an explicitly selected city/pack MCP catalog only after installing
+# the binary and selecting a reviewed Git skill root. Never auto-enabled.
+name = "gascity-skills"
+description = "Read-only Git skill catalog; loading and approval belong to host"
+command = "/absolute/path/to/gascity-mcp-skills"
+args = ["--catalog", "team=/absolute/path/to/pack/skills"]
