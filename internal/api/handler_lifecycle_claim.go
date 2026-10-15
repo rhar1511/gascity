@@ -180,7 +180,7 @@ func (s *Server) humaHandleLifecycleClaimSubmit(ctx context.Context, input *Life
 	if body.ExecutionClaim != nil {
 		transition, err = claimLifecycleSourceKeepingExecution(ctx, sessionStore, body, request, provider)
 	} else {
-		transition, err = provider.ClaimLifecycleWork(ctx, request)
+		transition, err = claimLifecycleWorkKeepingSession(ctx, sessionStore, body, request, provider)
 	}
 	if err != nil {
 		return nil, lifecycleClaimTransitionError(err)
@@ -188,14 +188,7 @@ func (s *Server) humaHandleLifecycleClaimSubmit(ctx context.Context, input *Life
 	if !canonicalLifecycleClaimInteger(transition.ClaimGeneration) || strings.TrimSpace(transition.ReceiptID) == "" {
 		return nil, apierr.ServiceUnavailable.Msg("controller returned an invalid durable claim result")
 	}
-	if body.ExecutionClaim == nil {
-		if err := stampLifecycleClaimReciprocal(sessionStore, info, body, work.ID, transition.ClaimGeneration); err != nil {
-			if errors.Is(err, errLifecycleClaimSessionChanged) {
-				return nil, apierr.ConflictWrongState.Msg("managed session incarnation changed before reciprocal claim stamp")
-			}
-			return nil, apierr.ServiceUnavailable.Msg("reciprocal session claim could not be stamped and verified")
-		}
-	}
+
 	out := &LifecycleClaimSubmitOutput{}
 	out.Body.WorkID = work.ID
 	out.Body.Actor = actor
@@ -224,38 +217,29 @@ func lifecycleClaimSessionMatches(info session.Info, request LifecycleClaimSubmi
 		!canonicalLifecycleClaimInteger(info.Generation) {
 		return false
 	}
-	base := session.ProjectLifecycle(session.LifecycleInputFromInfo(info)).BaseState
-	switch base {
-	case session.BaseStateNone, session.BaseStateStartPending, session.BaseStateCreating, session.BaseStateActive:
-		return true
-	default:
-		return false
-	}
+	return session.CanClaimWork(info)
 }
 
-var errLifecycleClaimSessionChanged = errors.New("lifecycle claim session incarnation changed")
-
-func stampLifecycleClaimReciprocal(store *session.Store, expected session.Info, request LifecycleClaimSubmitRequest, workID, generation string) error {
-	return session.WithSessionMutationLock(expected.ID, func() error {
-		current, err := store.Get(expected.ID)
-		if err != nil || !lifecycleClaimSessionMatches(current, request) ||
-			current.InstanceToken != expected.InstanceToken || current.Generation != expected.Generation {
-			return errors.Join(errLifecycleClaimSessionChanged, err)
+// The session primitive owns the lock, authoritative reads, and conditional
+// reciprocal stamp. The API supplies only the authenticated durable transition.
+func claimLifecycleWorkKeepingSession(ctx context.Context, sessions *session.Store, body LifecycleClaimSubmitRequest, request LifecycleClaimTransitionRequest, provider LifecycleClaimTransitionProvider) (LifecycleClaimTransitionResult, error) {
+	var result LifecycleClaimTransitionResult
+	err := sessions.CommitWorkClaim(request.Session, func(current session.Info, _ session.PersistedResponse) (string, string, error) {
+		if !lifecycleClaimSessionMatches(current, body) || session.AssigneeIdentifier(current) != request.Actor {
+			return "", "", session.ErrWorkClaimSessionChanged
 		}
-		if _, err := store.SetCurrentClaimForGeneration(current.ID, workID, generation); err != nil {
-			return err
+		request.Session = current
+		var err error
+		result, err = provider.ClaimLifecycleWork(ctx, request)
+		if err != nil {
+			return "", "", err
 		}
-		claimID, claimGeneration, err := store.CurrentClaim(current.ID)
-		if err != nil || claimID != workID || claimGeneration != generation {
-			return errors.Join(errors.New("reciprocal session claim readback differs from transition"), err)
+		if !canonicalLifecycleClaimInteger(result.ClaimGeneration) || strings.TrimSpace(result.ReceiptID) == "" {
+			return "", "", errors.New("controller returned an invalid durable claim result")
 		}
-		readback, err := store.Get(current.ID)
-		if err != nil || !lifecycleClaimSessionMatches(readback, request) ||
-			readback.InstanceToken != expected.InstanceToken || readback.Generation != expected.Generation {
-			return errors.Join(errLifecycleClaimSessionChanged, err)
-		}
-		return nil
+		return request.Work.ID, result.ClaimGeneration, nil
 	})
+	return result, err
 }
 
 func canonicalLifecycleClaimInteger(raw string) bool {
@@ -280,7 +264,7 @@ func lifecycleClaimRequestSourceStoreRef(city string, ref storeref.StoreRef) (st
 
 func lifecycleClaimTransitionError(err error) error {
 	switch {
-	case errors.Is(err, worklifecycle.ErrTransitionChainStale), errors.Is(err, worklifecycle.ErrTransitionChainEvidence),
+	case errors.Is(err, session.ErrWorkClaimSessionChanged), errors.Is(err, worklifecycle.ErrTransitionChainStale), errors.Is(err, worklifecycle.ErrTransitionChainEvidence),
 		errors.Is(err, worklifecycle.ErrTransitionChainReceipt), errors.Is(err, worklifecycle.ErrTransitionChainInvalid):
 		return apierr.ConflictWrongState.Msg("admitted work or its current lifecycle transition head changed")
 	case errors.Is(err, worklifecycle.ErrTransitionChainUnavailable), errors.Is(err, worklifecycle.ErrTransitionChainPermit):

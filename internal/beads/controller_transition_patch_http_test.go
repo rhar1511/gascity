@@ -227,6 +227,7 @@ func TestControllerTransitionPatchHTTPPostsCanonicalRequestAndReceipt(t *testing
 
 func TestControllerTransitionPatchLifecycleScopeMatchesQ43ScopeAndRecovers(t *testing.T) {
 	for _, kind := range []string{
+		"lifecycle_source_workspace_v1",
 		"lifecycle_source_reservation_v1",
 		"lifecycle_descendant_claim_identity_v1",
 		"lifecycle_descendant_attempt_evidence_v1",

@@ -722,7 +722,7 @@ func (r apiBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 	if r.store == nil {
 		return fmt.Errorf("sling routing requires a store to check lifecycle enrollment")
 	}
-	current, err := r.store.Get(req.BeadID)
+	current, err := beads.HandlesFor(r.store).Live.Get(req.BeadID)
 	if err != nil {
 		if !req.Force || !errors.Is(err, beads.ErrNotFound) {
 			return fmt.Errorf("reading bead %s before routing: %w", req.BeadID, err)
@@ -772,14 +772,15 @@ func (r apiBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 		}
 		return fmt.Errorf("setting gc.routed_to on %s: %w", req.BeadID, err)
 	}
-	if current.Revision == 0 {
-		return fmt.Errorf("built-in sling routing on %s requires a nonzero observed revision", req.BeadID)
+	revision, present := beads.ObservedRevision(current)
+	if !present {
+		return fmt.Errorf("built-in sling routing on %s requires an observed revision", req.BeadID)
 	}
 	writer, ok := beads.ConditionalWriterFor(r.store)
 	if !ok {
 		return fmt.Errorf("built-in sling routing requires a conditional writer: %w", beads.ErrConditionalWriteUnsupported)
 	}
-	if err := writer.UpdateIfMatch(req.BeadID, current.Revision, beads.UpdateOpts{Metadata: map[string]string{
+	if err := writer.UpdateIfMatch(req.BeadID, revision, beads.UpdateOpts{Metadata: map[string]string{
 		beadmeta.RoutedToMetadataKey: routedTo,
 	}}); err != nil {
 		return fmt.Errorf("conditionally setting gc.routed_to on %s: %w", req.BeadID, err)

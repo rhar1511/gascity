@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "gc://schemas/worktree/publish/result.schema.json",
+  "title": "gc worktree publish result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "ok",
+    "work_id",
+    "source_store_ref",
+    "receipt_id",
+    "revision",
+    "replayed"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1"
+    },
+    "ok": {
+      "const": true
+    },
+    "work_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "source_store_ref": {
+      "type": "string",
+      "minLength": 1
+    },
+    "receipt_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "revision": {
+      "type": "integer",
+      "not": {
+        "const": 0
+      }
+    },
+    "replayed": {
+      "type": "boolean"
+    }
+  }
+}

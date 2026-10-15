@@ -89,6 +89,37 @@ func TestValidateBeadsMetadataCASRequest(t *testing.T) {
 	}
 }
 
+func TestBeadsMetadataCASRefusesWorkspaceCustody(t *testing.T) {
+	for _, key := range []string{
+		"gc.worktree_source_bead_id", "gc.worktree_source_store_ref", "gc.worktree_attempt_id",
+		"gc.work_dir", "work_dir", "gc.work_branch", "gc.worktree_repo", "gc.worktree_root",
+		"gc.worktree_base_ref", "gc.worktree_base_sha", "gc.worktree_creator", "gc.worktree_owner",
+		"gc.worktree_generation", "gc.worktree_lifecycle", "gc.trigger_bead_id", "gc.trigger_bead_store_ref",
+	} {
+		for _, change := range [][2]string{{"", "forged"}, {"original", "forged"}, {"original", ""}} {
+			r := beadsMetadataCASRequest{
+				beadID: "test-1", storeRef: "rig:test", key: key,
+				expected: change[0], next: change[1], format: "json",
+				storeRefSet: true, keySet: true, expectedSet: true, nextSet: true,
+			}
+			if err := validateBeadsMetadataCASRequest(r); err == nil || !strings.Contains(err.Error(), "reserved") {
+				t.Fatalf("public CAS may originate/replace/clear %s: %v", key, err)
+			}
+			// Exercise the actual public command too. It must refuse at argument
+			// validation, before city resolution or opening any store.
+			var stdout, stderr bytes.Buffer
+			cmd := newBeadsMetadataCASCmd(&stdout, &stderr)
+			cmd.SetArgs([]string{
+				r.beadID, "--store-ref=" + r.storeRef, "--key=" + key,
+				"--expected=" + r.expected, "--next=" + r.next, "--format=json",
+			})
+			if err := cmd.Execute(); err == nil || !strings.Contains(stderr.String(), "reserved") || stdout.Len() != 0 {
+				t.Fatalf("CAS command did not refuse reserved key %s before execution: %v, stdout=%s stderr=%s", key, err, stdout.String(), stderr.String())
+			}
+		}
+	}
+}
+
 func TestResolveBeadsMetadataCASOutputMode(t *testing.T) {
 	t.Parallel()
 

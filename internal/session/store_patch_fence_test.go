@@ -382,3 +382,75 @@ func TestUpdateMetadataFencedRedecidesOverAConcurrentSuspend(t *testing.T) {
 		})
 	}
 }
+
+type revisionlessAuthoritativeSessionStore struct {
+	*beads.MemStore
+}
+
+func (s *revisionlessAuthoritativeSessionStore) Get(id string) (beads.Bead, error) {
+	row, err := s.MemStore.Get(id)
+	row.Revision = 0
+	return row, err
+}
+
+func TestUpdateMetadataAuthoritativeFencedRefusesUnavailableFence(t *testing.T) {
+	for _, missingWriter := range []bool{false, true} {
+		name := "missing authoritative revision"
+		if missingWriter {
+			name = "missing conditional writer"
+		}
+		t.Run(name, func(t *testing.T) {
+			backing := beads.NewMemStore()
+			row := seedPatchFenceSession(t, backing, "s-authoritative")
+			var store beads.Store = backing
+			if !missingWriter {
+				projection := &revisionlessAuthoritativeSessionStore{MemStore: backing}
+				opened, err := beads.OpenStoreAtForCity(context.Background(), beads.StoreOpenOptions{
+					ScopeRoot: t.TempDir(), Provider: "file", ConditionalWrites: gate.Require,
+					OpenFileStore: func() (beads.Store, error) { return projection, nil },
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				store = opened.Store
+			}
+			called := false
+			written, err := NewStore(beads.SessionStore{Store: store}).UpdateMetadataAuthoritativeFenced(row.ID, 1, func(Info, PersistedResponse) MetadataPatch {
+				called = true
+				return MetadataPatch{"work_dir": "/unexpected"}
+			})
+			if err == nil || written || called {
+				t.Fatalf("missing fence reached decision or write: written=%t called=%t error=%v", written, called, err)
+			}
+			after, err := backing.Get(row.ID)
+			if err != nil || after.Revision != row.Revision || after.Metadata["work_dir"] != row.Metadata["work_dir"] {
+				t.Fatalf("refusal changed original row: %v", err)
+			}
+		})
+	}
+}
+
+func TestUpdateMetadataAuthoritativeFencedPreservesConcurrentIncarnation(t *testing.T) {
+	backing := beads.NewMemStore()
+	opened, err := beads.OpenStoreAtForCity(context.Background(), beads.StoreOpenOptions{
+		ScopeRoot: t.TempDir(), Provider: "file", ConditionalWrites: gate.Require,
+		OpenFileStore: func() (beads.Store, error) { return backing, nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	row := seedPatchFenceSession(t, backing, "s-racing-authoritative")
+	written, err := NewStore(beads.SessionStore{Store: opened.Store}).UpdateMetadataAuthoritativeFenced(row.ID, 1, func(Info, PersistedResponse) MetadataPatch {
+		if err := backing.SetMetadata(row.ID, "instance_token", "replacement"); err != nil {
+			t.Fatal(err)
+		}
+		return MetadataPatch{"work_dir": "/unexpected"}
+	})
+	if err != nil || written {
+		t.Fatalf("stale revision wrote after concurrent incarnation: written=%t error=%v", written, err)
+	}
+	after, err := backing.Get(row.ID)
+	if err != nil || after.Metadata["instance_token"] != "replacement" || after.Metadata["work_dir"] != row.Metadata["work_dir"] {
+		t.Fatalf("concurrent incarnation was not preserved: %v", err)
+	}
+}

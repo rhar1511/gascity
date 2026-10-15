@@ -17,6 +17,7 @@ go_library(
         "recovery_request.go",
         "scope.go",
         "transition_chain.go",
+        "workspace_publication.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/worklifecycle",
     visibility = ["//:__subpackages__"],
@@ -47,6 +48,7 @@ go_test(
         "recovery_test.go",
         "testenv_import_test.go",
         "transition_chain_test.go",
+        "workspace_publication_test.go",
     ],
     embed = [":worklifecycle"],
     deps = [

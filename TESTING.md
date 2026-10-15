@@ -741,9 +741,10 @@ enumeration. The serial `make test-cmd-gc-process` target runs the ordinary
 suite and then this profile; `make test-cmd-gc-process-parallel` and
 `make test-local-full-parallel` add one independent
 `productmetrics-testhook` job beside the ordinary shards.
-The existing macOS `mac-cmd-gc-process` matrix runs the same profile once on
-shard 6 so the Darwin production composition remains covered without another
-Mac runner.
+The macOS `mac-productmetrics-testhook` job runs the same profile once under
+the ordinary process shards' smoke/full gate, with its own 20-minute budget.
+Its result is required by the Mac summary; the twelve ordinary process shards
+retain their separate 20-minute budgets.
 
 #### PR static-check scope
 

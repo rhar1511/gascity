@@ -49,6 +49,11 @@ func unreadScope(t *testing.T) string {
 	return scope
 }
 
+// statusDeadlineNoticeWriter observes writes while retaining the original sink.
+type statusDeadlineNoticeWriter func([]byte) (int, error)
+
+func (w statusDeadlineNoticeWriter) Write(p []byte) (int, error) { return w(p) }
+
 // TestStatusListUnderADeadlineIsUnchangedByTheUnreadStoreNotice is the
 // deadline-safety proof, and it fails on any diagnostic that asks bd a question
 // of its own inside List or Ready.
@@ -105,13 +110,60 @@ func TestStatusListUnderADeadlineIsUnchangedByTheUnreadStoreNotice(t *testing.T)
 			if silenced {
 				t.Setenv(beads.AllowUnreadStoreReadEnvVar, "1")
 			}
-			store := beads.NewBdStore(unreadScope(t), runner, beads.WithBdStoreNoticeSink(&strings.Builder{}))
+			// The List goroutine may outlive a timeout. Observe only per-arm atomic
+			// phase samples; never inspect the sink or wait for that goroutine.
+			origin := time.Now()
+			var scopeCalls, scopeEnter, scopeReturn, childDeadline atomic.Int64
+			var queryCalls, queryEnter, queryReturn, unexpectedCalls atomic.Int64
+			var noticeCalls, noticeEnter, noticeReturn atomic.Int64
+			notices := &strings.Builder{}
+			sink := statusDeadlineNoticeWriter(func(p []byte) (int, error) {
+				noticeCalls.Add(1)
+				noticeEnter.Store(time.Since(origin).Nanoseconds())
+				n, err := notices.Write(p)
+				noticeReturn.Store(time.Since(origin).Nanoseconds())
+				return n, err
+			})
+			observedRunner := func(dir, name string, args ...string) ([]byte, error) {
+				queryCalls.Add(1)
+				queryEnter.Store(time.Since(origin).Nanoseconds())
+				if name+" "+strings.Join(args, " ") != read {
+					unexpectedCalls.Add(1)
+				}
+				out, err := runner(dir, name, args...)
+				queryReturn.Store(time.Since(origin).Nanoseconds())
+				return out, err
+			}
+			store := beads.NewBdStore(unreadScope(t), observedRunner, beads.WithBdStoreNoticeSink(sink))
 			state := newFakeState(t)
-			state.scopedStoreFn = func(context.Context, beads.Store) (beads.Store, error) { return store, nil }
+			state.scopedStoreFn = func(ctx context.Context, _ beads.Store) (beads.Store, error) {
+				scopeCalls.Add(1)
+				scopeEnter.Store(time.Since(origin).Nanoseconds())
+				if deadline, ok := ctx.Deadline(); ok {
+					childDeadline.Store(deadline.Sub(origin).Nanoseconds())
+				}
+				scopeReturn.Store(time.Since(origin).Nanoseconds())
+				return store, nil
+			}
 
 			start := time.Now()
 			rows, err := statusListStoreWithTimeout(caller, state, store, beads.ListQuery{AllowScan: true})
 			elapsed := time.Since(start)
+			defer func() {
+				if !t.Failed() {
+					return
+				}
+				// These are independent snapshots, not a completed or coherent trace.
+				// Offsets are monotonic since origin; zero means not observed yet.
+				t.Logf("[status-unread-deadline] call_start=%s elapsed=%s budget=%s returned_error=%t child_deadline=%s",
+					start.Sub(origin), elapsed, statusStoreReadTimeout, err != nil, time.Duration(childDeadline.Load()))
+				t.Logf("[status-unread-deadline] scope_calls=%d latest_enter=%s latest_return=%s",
+					scopeCalls.Load(), time.Duration(scopeEnter.Load()), time.Duration(scopeReturn.Load()))
+				t.Logf("[status-unread-deadline] query_calls=%d unexpected_calls=%d latest_enter=%s latest_return=%s",
+					queryCalls.Load(), unexpectedCalls.Load(), time.Duration(queryEnter.Load()), time.Duration(queryReturn.Load()))
+				t.Logf("[status-unread-deadline] notice_calls=%d latest_enter=%s latest_return=%s",
+					noticeCalls.Load(), time.Duration(noticeEnter.Load()), time.Duration(noticeReturn.Load()))
+			}()
 
 			if err != nil {
 				t.Fatalf("statusListStoreWithTimeout = (%d rows, %v) after %s; want (0, nil) — bd answered this List successfully and a diagnostic may not spend the caller's deadline",

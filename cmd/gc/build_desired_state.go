@@ -3775,9 +3775,12 @@ func bindPoolSessionTriggerBead(bp *agentBuildParams, cfgAgent *config.Agent, qu
 	if info.ID == "" {
 		return info, nil
 	}
-	workDir, err := verifiedPoolTriggerWorkDir(bp, cfgAgent, qualifiedName, request)
+	workDir, ownership, err := verifiedPoolTriggerWorkspace(bp, cfgAgent, qualifiedName, request)
 	if err != nil {
 		return info, err
+	}
+	if ownership != nil {
+		return bindPoolLifecycleWorkspace(bp, cfgAgent, qualifiedName, info, request)
 	}
 	patch := computePoolTriggerBindingPatch(info, request, workDir)
 	if len(patch) == 0 {
@@ -3896,6 +3899,11 @@ func bindNamedSessionTriggerBead(store beads.Store, info session.Info, cityName 
 var errPoolTriggerWorktreeEvidence = errors.New("pool trigger worktree evidence")
 
 func verifiedPoolTriggerWorkDir(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, request SessionRequest) (string, error) {
+	path, _, err := verifiedPoolTriggerWorkspace(bp, cfgAgent, qualifiedName, request)
+	return path, err
+}
+
+func verifiedLegacyPoolTriggerWorkDir(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, request SessionRequest) (string, error) {
 	if strings.TrimSpace(request.WorktreeError) != "" {
 		return "", fmt.Errorf("%w invalid: %s", errPoolTriggerWorktreeEvidence, request.WorktreeError)
 	}
@@ -4972,9 +4980,12 @@ func poolTriggerMetadata(bp *agentBuildParams, cfgAgent *config.Agent, qualified
 	if workspace := packWorkspaceSlug(request); workspace != "" {
 		metadata[beadmeta.PackWorkspaceMetadataKey] = workspace
 	}
-	workDir, err := verifiedPoolTriggerWorkDir(bp, cfgAgent, qualifiedName, request)
+	workDir, ownership, err := verifiedPoolTriggerWorkspace(bp, cfgAgent, qualifiedName, request)
 	if err != nil {
 		return nil, err
+	}
+	for key, value := range ownership {
+		metadata[key] = value
 	}
 	if workDir != "" {
 		metadata[beadmeta.WorkDirMetadataKey] = workDir

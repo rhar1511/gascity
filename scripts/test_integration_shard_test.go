@@ -63,6 +63,7 @@ func TestIntegrationShardPreservesQualifiedBeadsExecutables(t *testing.T) {
 	got := readCapturedGoEnv(t, fixture.envCapturePath)
 	for key, want := range map[string]string{
 		"BEADS_TEST_BD_BINARY":   bdPath,
+		"GC_INTEGRATION_REAL_BD": bdPath,
 		"BEADS_TEST_DOLT_BINARY": doltPath,
 		"GC_DOLT_PORT":           "unset",
 		"BEADS_DOLT_SERVER_PORT": "unset",
@@ -70,6 +71,18 @@ func TestIntegrationShardPreservesQualifiedBeadsExecutables(t *testing.T) {
 		if got[key] != want {
 			t.Errorf("child %s = %q, want %q", key, got[key], want)
 		}
+	}
+}
+
+func TestIntegrationShardDoesNotInheritAmbientRealBeadsOverride(t *testing.T) {
+	fixture := newIntegrationShardFixture(t)
+	out, err := fixture.runShardWithEnv(t, "bdstore", "GC_INTEGRATION_REAL_BD=/ambient/not-selected/bd")
+	if err != nil {
+		t.Fatalf("integration shard failed: %v\n%s", err, out)
+	}
+	got := readCapturedGoEnv(t, fixture.envCapturePath)
+	if got["GC_INTEGRATION_REAL_BD"] != "" {
+		t.Fatalf("ambient real bd reached child: %q", got["GC_INTEGRATION_REAL_BD"])
 	}
 }
 
@@ -89,6 +102,7 @@ func TestNestedIntegrationShardPreservesQualifiedBeadsExecutables(t *testing.T) 
 	got := readCapturedGoEnv(t, fixture.envCapturePath)
 	for key, want := range map[string]string{
 		"BEADS_TEST_BD_BINARY":   bdPath,
+		"GC_INTEGRATION_REAL_BD": bdPath,
 		"BEADS_TEST_DOLT_BINARY": doltPath,
 		"GC_DOLT_PORT":           "unset",
 		"BEADS_DOLT_SERVER_PORT": "unset",
@@ -176,6 +190,7 @@ qualified-beads-shard:
 			for key, want := range map[string]string{
 				"CGO_ENABLED":            wantMode,
 				"BEADS_TEST_BD_BINARY":   bdPath,
+				"GC_INTEGRATION_REAL_BD": bdPath,
 				"BEADS_TEST_DOLT_BINARY": doltPath,
 				"GC_DOLT_PORT":           "unset",
 				"BEADS_DOLT_SERVER_PORT": "unset",
@@ -748,6 +763,7 @@ case "$1" in
       printf 'GOMEMLIMIT=%s\n' "${GOMEMLIMIT-unset}"
       printf 'GOMAXPROCS=%s\n' "${GOMAXPROCS-unset}"
       printf 'BEADS_TEST_BD_BINARY=%s\n' "${BEADS_TEST_BD_BINARY-unset}"
+      printf 'GC_INTEGRATION_REAL_BD=%s\n' "${GC_INTEGRATION_REAL_BD-unset}"
       printf 'BEADS_TEST_DOLT_BINARY=%s\n' "${BEADS_TEST_DOLT_BINARY-unset}"
       printf 'GC_DOLT_PORT=%s\n' "${GC_DOLT_PORT-unset}"
       printf 'BEADS_DOLT_SERVER_PORT=%s\n' "${BEADS_DOLT_SERVER_PORT-unset}"

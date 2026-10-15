@@ -1,7 +1,10 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,6 +13,8 @@ import (
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func jsonUnmarshalString(s string, v interface{}) error {
@@ -83,6 +88,28 @@ func TestJsonlArchiveDoctorCheck_MalformedArchiveRepo(t *testing.T) {
 	}
 	if result.FixHint == "" {
 		t.Fatalf("expected a fix hint on malformed archive")
+	}
+
+	// An existing but incomplete .git reaches the real Git child rather than
+	// the missing-.git guard. Preserve the blocking result and capture only
+	// safe error metadata. This fixture is not proof of the hosted cause.
+	if err := os.Mkdir(filepath.Join(archiveDir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	result = runJsonlArchiveCheck(t, cityDir, env)
+	if result.Status != doctor.StatusError {
+		t.Fatalf("incomplete repo status = %v, want Error", result.Status)
+	}
+	for _, want := range []string{"querying archive remotes: exit status 128;", "captured_stderr_bytes=", "captured_stderr_sha256=", "post_error_snapshot={git=directory HEAD=missing config=missing objects=missing refs=missing}"} {
+		if !strings.Contains(result.Message, want) {
+			t.Errorf("message = %q, missing %q", result.Message, want)
+		}
+	}
+	if strings.Contains(result.Message, archiveDir) || strings.Contains(result.Message, "fatal:") {
+		t.Fatalf("message exposes raw Git diagnostic: %q", result.Message)
+	}
+	if !strings.Contains(result.FixHint, "remote -v") {
+		t.Fatalf("original remote-query hint was lost: %q", result.FixHint)
 	}
 }
 
@@ -533,4 +560,57 @@ func TestFormatArchivePushFailureMessage(t *testing.T) {
 			t.Errorf("formatArchivePushFailureMessage(%d, %q) = %q, want %q", tt.count, tt.stderr, got, tt.want)
 		}
 	}
+}
+
+// Stubbed errors verify telemetry safety; only the existing real-Git cases
+// exercise the subprocess, and neither establishes the hosted failure's cause.
+func TestArchiveGitFailureDiagnosticSafeLabels(t *testing.T) {
+	archiveDir := t.TempDir()
+	secret := "https://private-user:private-token@example.invalid/private-repo"
+	for _, tt := range []struct{ stderr, class string }{
+		{"fatal: not a git repository: " + secret, "not_repository"},
+		{"fatal: detected dubious ownership in repository at " + secret, "dubious_ownership"},
+		{"fatal: bad config line 1 in file " + secret, "invalid_config"},
+		{"fatal: unable to read config file " + secret, "config_read"},
+		{secret + ": Permission denied", "permission_denied"},
+		{"unclassified error " + secret, "unknown"},
+		{"", "unknown"},
+	} {
+		t.Run(tt.class+fmt.Sprint(len(tt.stderr)), func(t *testing.T) {
+			err := fmt.Errorf("sensitive wrapper %s: %w", secret, &exec.ExitError{Stderr: []byte(tt.stderr)})
+			got := archiveGitFailureDiagnostic(archiveDir, err)
+			want := fmt.Sprintf("exit status -1; stderr_class=%s captured_stderr_bytes=%d captured_stderr_sha256=%x post_error_snapshot={git=missing HEAD=not_inspected config=not_inspected objects=not_inspected refs=not_inspected}", tt.class, len(tt.stderr), sha256.Sum256([]byte(tt.stderr)))
+			assert.Equal(t, want, got)
+			for _, forbidden := range []string{secret, archiveDir, "sensitive wrapper", "fatal:"} {
+				assert.NotContains(t, got, forbidden, "diagnostic exposes sensitive input")
+			}
+		})
+	}
+	got := archiveGitFailureDiagnostic(archiveDir, errors.New(secret))
+	assert.True(t, strings.HasPrefix(got, "exit status -1; stderr_class=unknown captured_stderr_bytes=0 "), "non-exit error was not safely classified: %q", got)
+	assert.NotContains(t, got, secret)
+}
+
+func TestArchiveGitFailureDiagnosticPostErrorSnapshot(t *testing.T) {
+	archiveDir := t.TempDir()
+	gitDir := filepath.Join(archiveDir, ".git")
+	require.NoError(t, os.MkdirAll(filepath.Join(gitDir, "objects"), 0o755))
+	secret := "private-token-and-config-contents"
+	for _, name := range []string{"HEAD", "config"} {
+		require.NoError(t, os.WriteFile(filepath.Join(gitDir, name), []byte(secret), 0o600))
+	}
+	got := archiveGitFailureDiagnostic(archiveDir, errors.New(secret))
+	assert.Contains(t, got, "post_error_snapshot={git=directory HEAD=regular config=regular objects=directory refs=missing}")
+	assert.NotContains(t, got, secret)
+	// A worktree gitfile is metadata only; its content is never followed.
+	gitFileArchive := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(gitFileArchive, ".git"), []byte("gitdir: "+gitDir), 0o600))
+	got = archiveGitFailureDiagnostic(gitFileArchive, errors.New(secret))
+	assert.Contains(t, got, "post_error_snapshot={git=regular HEAD=not_inspected config=not_inspected objects=not_inspected refs=not_inspected}")
+	assert.NotContains(t, got, gitDir)
+	linkedArchive := t.TempDir()
+	require.NoError(t, os.Symlink(gitDir, filepath.Join(linkedArchive, ".git")))
+	got = archiveGitFailureDiagnostic(linkedArchive, errors.New(secret))
+	assert.Contains(t, got, "post_error_snapshot={git=symlink HEAD=not_inspected config=not_inspected objects=not_inspected refs=not_inspected}")
+	assert.NotContains(t, got, gitDir)
 }

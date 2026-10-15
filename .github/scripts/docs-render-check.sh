@@ -81,7 +81,7 @@ BASE_TREE="$WORK_TMP/base-docs"
 
 # --- HEAD check --------------------------------------------------------------
 HEAD_EXIT=0
-run_mint "." "$HEAD_OUT" || HEAD_EXIT=$?
+run_mint "$DOCS_DIR" "$HEAD_OUT" || HEAD_EXIT=$?
 
 if [[ $HEAD_EXIT -eq 0 ]]; then
     echo "docs-render-check: no broken links in HEAD — PASS" >&2
@@ -101,7 +101,7 @@ fi
 mkdir -p "$BASE_TREE"
 if git archive "$BASE_REF" -- "$DOCS_DIR" 2>/dev/null | tar -x -C "$BASE_TREE"; then
     BASE_EXIT=0
-    run_mint "$BASE_TREE" "$BASE_OUT" || BASE_EXIT=$?
+    run_mint "$BASE_TREE/$DOCS_DIR" "$BASE_OUT" || BASE_EXIT=$?
     BASE_LINKS="$WORK_TMP/base-links.txt"
     parse_mint_broken_links "$BASE_OUT" | sort -u >"$BASE_LINKS"
     # Net-new = in HEAD but NOT in BASE.

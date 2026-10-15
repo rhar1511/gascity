@@ -523,6 +523,18 @@ func newLifecycleAdmissionTransitionChain(
 	policyResolver worklifecycle.CurrentAdmissionPolicyResolver,
 	workflowVerifier worklifecycle.AttachedWorkflowEvidenceVerifier,
 ) (*worklifecycle.TransitionChain, error) {
+	return newLifecycleAdmissionTransitionChainWithWorkspace(store, admissionConfig, scope, actor, permitIssuer, policyResolver, workflowVerifier, nil)
+}
+
+func newLifecycleAdmissionTransitionChainWithWorkspace(
+	store beads.Store,
+	admissionConfig config.LifecycleConfig,
+	scope, actor string,
+	permitIssuer beads.ControllerProtectedMutationPermitIssuer,
+	policyResolver worklifecycle.CurrentAdmissionPolicyResolver,
+	workflowVerifier worklifecycle.AttachedWorkflowEvidenceVerifier,
+	workspaceVerifier worklifecycle.NativeWorkspaceVerifier,
+) (*worklifecycle.TransitionChain, error) {
 	patchWriter, patchWriterOK := beads.RevisionTransitionPatchWriterFor(store)
 	patchReceiptReader, patchReceiptReaderOK := beads.RevisionTransitionPatchReceiptReaderFor(store)
 	sourceReader, sourceReaderOK := beads.DecisionFrontierSourceReaderFor(store)
@@ -536,7 +548,7 @@ func newLifecycleAdmissionTransitionChain(
 		PatchWriter: patchWriter, PatchReceiptReader: patchReceiptReader,
 		SourceReader: sourceReader, AttachmentReceiptReader: attachmentReceiptReader,
 		PermitIssuer: permitIssuer, PolicyResolver: policyResolver,
-		WorkflowEvidenceVerifier: workflowVerifier, Now: time.Now,
+		WorkflowEvidenceVerifier: workflowVerifier, WorkspaceVerifier: workspaceVerifier, Now: time.Now,
 	})
 }
 

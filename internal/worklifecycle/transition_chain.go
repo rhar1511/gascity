@@ -69,6 +69,8 @@ const (
 	TransitionStepReservation TransitionStep = "reservation"
 	// TransitionStepAttachedMaterialization attaches the admitted workflow evidence.
 	TransitionStepAttachedMaterialization TransitionStep = "attached_materialization"
+	// TransitionStepWorkspacePublication publishes verified native source ownership.
+	TransitionStepWorkspacePublication TransitionStep = "workspace_publication"
 	// TransitionStepClaimIdentity writes the exact execution claim identity.
 	TransitionStepClaimIdentity TransitionStep = "claim_identity"
 	// TransitionStepRecoveryBudget consumes one signed recovery-request attempt.
@@ -84,6 +86,7 @@ const (
 const (
 	transitionKindReservation             = "lifecycle_source_reservation_v1"
 	transitionKindAttachedMaterialization = "lifecycle_source_materialization_v1"
+	transitionKindWorkspacePublication    = "lifecycle_source_workspace_v1"
 	transitionKindClaimIdentity           = "lifecycle_source_claim_identity_v1"
 	transitionKindRecoveryBudget          = "lifecycle_source_recovery_budget_v1"
 	transitionKindRecoveryEscalation      = "lifecycle_source_recovery_escalation_v1"
@@ -105,7 +108,9 @@ type TransitionChainConfig struct {
 	PermitIssuer             beads.ControllerProtectedMutationPermitIssuer
 	PolicyResolver           CurrentAdmissionPolicyResolver
 	WorkflowEvidenceVerifier AttachedWorkflowEvidenceVerifier
-	Now                      func() time.Time
+	// WorkspaceVerifier is required only for a fresh workspace publication.
+	WorkspaceVerifier NativeWorkspaceVerifier
+	Now               func() time.Time
 }
 
 // CurrentAdmissionPolicyResolver recomputes the exact route/formula projection
@@ -169,6 +174,7 @@ type TransitionChain struct {
 	permitIssuer             beads.ControllerProtectedMutationPermitIssuer
 	policyResolver           CurrentAdmissionPolicyResolver
 	workflowEvidenceVerifier AttachedWorkflowEvidenceVerifier
+	workspaceVerifier        NativeWorkspaceVerifier
 	now                      func() time.Time
 }
 
@@ -187,7 +193,7 @@ func NewTransitionChain(config TransitionChainConfig) (*TransitionChain, error) 
 		patchWriter: config.PatchWriter, patchReceiptReader: config.PatchReceiptReader,
 		sourceReader: config.SourceReader, attachmentReceiptReader: config.AttachmentReceiptReader,
 		permitIssuer: config.PermitIssuer, policyResolver: config.PolicyResolver,
-		workflowEvidenceVerifier: config.WorkflowEvidenceVerifier, now: config.Now,
+		workflowEvidenceVerifier: config.WorkflowEvidenceVerifier, workspaceVerifier: config.WorkspaceVerifier, now: config.Now,
 	}, nil
 }
 
@@ -401,6 +407,11 @@ func (c *TransitionChain) Apply(request TransitionRequest) (TransitionResult, er
 	}
 	if request.Step == TransitionStepAttachedMaterialization {
 		if err := c.verifyAttachedWorkflow(source, evidence, request.Patch); err != nil {
+			return TransitionResult{}, err
+		}
+	}
+	if request.Step == TransitionStepWorkspacePublication {
+		if err := c.verifyFreshWorkspace(source, evidence, request.Patch); err != nil {
 			return TransitionResult{}, err
 		}
 	}
@@ -661,6 +672,11 @@ func (c *TransitionChain) verifyParentChain(issueID, receiptID string, attachmen
 		if err := validateTransitionPredecessor(parentInfo.Step, upstream); err != nil {
 			return transitionParent{}, fmt.Errorf("stored lifecycle receipt has an invalid predecessor: %w", errors.Join(ErrTransitionChainReceipt, err))
 		}
+		if parentInfo.Step == TransitionStepClaimIdentity {
+			if err := validateWorkspaceClaim(parentInfo.Patch, upstream); err != nil {
+				return transitionParent{}, fmt.Errorf("stored claim changed published workspace: %w", errors.Join(ErrTransitionChainReceipt, err))
+			}
+		}
 		if parentInfo.Step == TransitionStepRecoveryBudget {
 			if _, err := validateRecoveryBudgetAppend(parentInfo.Patch, upstream.Patch, upstream.Step, issueID, c.scope,
 				parentReceipt.ExpectedVersion); err != nil {
@@ -696,8 +712,10 @@ func validateTransitionPredecessor(step TransitionStep, parent transitionParent)
 		allowed = parent.Attachment
 	case TransitionStepAttachedMaterialization:
 		allowed = parent.Step == TransitionStepReservation
-	case TransitionStepClaimIdentity:
+	case TransitionStepWorkspacePublication:
 		allowed = parent.Step == TransitionStepAttachedMaterialization
+	case TransitionStepClaimIdentity:
+		allowed = parent.Step == TransitionStepAttachedMaterialization || parent.Step == TransitionStepWorkspacePublication
 	case TransitionStepRecoveryBudget:
 		allowed = parent.Step == TransitionStepClaimIdentity || parent.Step == TransitionStepRecoveryBudget
 	case TransitionStepRecoveryEscalation:
@@ -1126,6 +1144,10 @@ func transitionPatch(patch SourceWorkPatch) (beads.RevisionTransitionIssuePatch,
 }
 
 func validateTransitionStepPatch(step TransitionStep, patch SourceWorkPatch) error {
+	if step == TransitionStepWorkspacePublication {
+		_, err := sourceWorkspaceFromPatch(patch)
+		return err
+	}
 	allowed := map[TransitionStep]map[string]struct{}{
 		TransitionStepReservation:             {beadmeta.LifecycleMaterializationMetadataKey: {}},
 		TransitionStepAttachedMaterialization: {beadmeta.LifecycleMaterializationMetadataKey: {}},
@@ -1303,6 +1325,10 @@ func sameTransitionMaterializationContract(left, right transitionMaterialization
 
 func (c *TransitionChain) validateTransitionStepPatchEvidence(request TransitionRequest, source beads.Bead, evidence verifiedTransitionEvidence, parent transitionParent) error {
 	switch request.Step {
+	case TransitionStepWorkspacePublication:
+		return validateWorkspaceAdmission(request.Patch, source.ID, evidence)
+	case TransitionStepClaimIdentity:
+		return validateWorkspaceClaim(request.Patch, parent)
 	case TransitionStepReservation:
 		marker, err := parseTransitionMaterialization(request.Patch.Metadata[beadmeta.LifecycleMaterializationMetadataKey].Value)
 		if err != nil || !transitionMaterializationMatchesEvidence(marker, source, evidence) {
@@ -1464,6 +1490,10 @@ func validateStoredTransitionPatchReceipt(receipt beads.RevisionTransitionPatchR
 	// policy proof. Their source may since have advanced, so only fields carried
 	// by each immutable patch receipt are checked here.
 	switch step {
+	case TransitionStepWorkspacePublication:
+		if err := validateWorkspaceAdmission(callerPatch, issueID, evidence); err != nil {
+			return transitionParent{}, errors.Join(ErrTransitionChainReceipt, err)
+		}
 	case TransitionStepReservation, TransitionStepAttachedMaterialization:
 		if !transitionPatchEvidenceMatchesMarker(step, sourcePatch, issueID, evidence) {
 			return transitionParent{}, fmt.Errorf("stored parent patch differs from current admission proof: %w", ErrTransitionChainReceipt)
@@ -1660,6 +1690,8 @@ func transitionStepKind(step TransitionStep) string {
 		return transitionKindReservation
 	case TransitionStepAttachedMaterialization:
 		return transitionKindAttachedMaterialization
+	case TransitionStepWorkspacePublication:
+		return transitionKindWorkspacePublication
 	case TransitionStepClaimIdentity:
 		return transitionKindClaimIdentity
 	case TransitionStepRecoveryBudget:
@@ -1677,7 +1709,7 @@ func transitionStepKind(step TransitionStep) string {
 
 func transitionStepForKind(kind string) (TransitionStep, bool) {
 	for _, step := range []TransitionStep{
-		TransitionStepReservation, TransitionStepAttachedMaterialization, TransitionStepClaimIdentity,
+		TransitionStepReservation, TransitionStepAttachedMaterialization, TransitionStepWorkspacePublication, TransitionStepClaimIdentity,
 		TransitionStepRecoveryBudget, TransitionStepRecoveryEscalation, TransitionStepCompletionBudget, TransitionStepClose,
 	} {
 		if transitionStepKind(step) == kind {

@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -153,6 +156,66 @@ func (c *jsonlArchiveDoctorCheck) archiveHasOrigin(archiveRepo string) (bool, er
 	return false, nil
 }
 
+// archiveGitFailureDiagnostic projects only fixed labels from the original
+// child error. Output retains bounded stderr on ExitError; neither its bytes
+// nor arbitrary error text may enter doctor output. The filesystem observations
+// are post-error snapshots, not an atomic view of the failing child.
+func archiveGitFailureDiagnostic(archiveRepo string, err error) string {
+	exitCode := -1
+	var stderr []byte
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		exitCode = exitErr.ExitCode()
+		stderr = exitErr.Stderr
+	}
+	class := "unknown"
+	for _, candidate := range []struct{ text, class string }{
+		{"fatal: not a git repository", "not_repository"},
+		{"fatal: detected dubious ownership", "dubious_ownership"},
+		{"fatal: bad config line", "invalid_config"},
+		{"fatal: unable to read config file", "config_read"},
+		{"Permission denied", "permission_denied"},
+	} {
+		if bytes.Contains(stderr, []byte(candidate.text)) {
+			class = candidate.class
+			break
+		}
+	}
+	gitDir := filepath.Join(archiveRepo, ".git")
+	gitKind := archiveGitPathKind(gitDir)
+	snapshot := "git=" + gitKind
+	for _, name := range []string{"HEAD", "config", "objects", "refs"} {
+		kind := "not_inspected"
+		// Do not follow a .git symlink or read a worktree gitfile's contents.
+		if gitKind == "directory" {
+			kind = archiveGitPathKind(filepath.Join(gitDir, name))
+		}
+		snapshot += " " + name + "=" + kind
+	}
+	return fmt.Sprintf("exit status %d; stderr_class=%s captured_stderr_bytes=%d captured_stderr_sha256=%x post_error_snapshot={%s}",
+		exitCode, class, len(stderr), sha256.Sum256(stderr), snapshot)
+}
+
+func archiveGitPathKind(path string) string {
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return "missing"
+	}
+	if err != nil {
+		return "stat_error"
+	}
+	switch {
+	case info.Mode()&os.ModeSymlink != 0:
+		return "symlink"
+	case info.IsDir():
+		return "directory"
+	case info.Mode().IsRegular():
+		return "regular"
+	default:
+		return "other"
+	}
+}
+
 func (c *jsonlArchiveDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 	r := &doctor.CheckResult{Name: c.Name()}
 
@@ -198,7 +261,7 @@ func (c *jsonlArchiveDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResul
 	hasOrigin, err := c.archiveHasOrigin(archiveRepo)
 	if err != nil {
 		r.Status = doctor.StatusError
-		r.Message = fmt.Sprintf("querying archive remotes: %v", err)
+		r.Message = "querying archive remotes: " + archiveGitFailureDiagnostic(archiveRepo, err)
 		r.FixHint = fmt.Sprintf(`run "git -C %s remote -v" to diagnose`, archiveRepo)
 		return r
 	}

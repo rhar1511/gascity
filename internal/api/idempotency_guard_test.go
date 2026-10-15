@@ -64,6 +64,14 @@ var exemptFromIdempotency = map[string]bool{
 	// stamp after an ambiguous response, so a separate HTTP idempotency key would
 	// create a competing identity. Proof: LifecycleClaimIdentity replay tests.
 	"claim-admitted-lifecycle-work": true,
+	// Workspace publication acts on an existing admitted source; it does not
+	// create a workspace or claim work. The saved source snapshot and native
+	// tuple derive one protected transition identity. Exact replay returns its
+	// receipt; changed intent refuses. A separate HTTP key would compete with
+	// that identity. Proof: TestLifecycleWorkspaceProviderPublishesOnceWithoutClaimOrGenericWrites,
+	// TestLifecycleWorkspaceProviderRefusesChangedIntentBeforeMutation, and
+	// TestWorkspacePublicationRequiresNativeProofAndPreservesExactRetry.
+	"publish-admitted-lifecycle-workspace": true,
 	// Completion acts on existing admitted work. Signed source acceptance binds
 	// one budget/close chain; execution completion binds the current incarnation,
 	// claim generation and protected step receipt. Exact retries return that

@@ -262,7 +262,11 @@ bd() {
 
 func TestGraphDispatchWorkspaceOwnsCommittedRepository(t *testing.T) {
 	ambient := t.TempDir()
-	workspace := filepath.Join(t.TempDir(), "attempt")
+	workspaceRoot, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := filepath.Join(workspaceRoot, "attempt")
 	gitAt := func(dir string, args ...string) string {
 		t.Helper()
 		gitArgs := []string{"-C", dir, "-c", "user.name=Graph fixture", "-c", "user.email=graph-fixture@example.invalid", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null"}

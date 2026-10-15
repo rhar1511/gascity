@@ -36,6 +36,21 @@ func buildLifecycleTransitionContext(
 	permitResolver *hostBeadsPermitResolver,
 	authority qualification.CompatibilityAuthority,
 ) (lifecycleTransitionContext, error) {
+	return buildLifecycleTransitionContextWithWorkspace(cityName, cityPath, cfg, cityStore, rigStores, legs, leg, workID, scope, permitResolver, authority, nil)
+}
+
+func buildLifecycleTransitionContextWithWorkspace(
+	cityName, cityPath string,
+	cfg *config.City,
+	cityStore beads.Store,
+	rigStores map[string]beads.Store,
+	legs []classStoreCandidate,
+	leg classStoreCandidate,
+	workID, scope string,
+	permitResolver *hostBeadsPermitResolver,
+	authority qualification.CompatibilityAuthority,
+	workspaceVerifier worklifecycle.NativeWorkspaceVerifier,
+) (lifecycleTransitionContext, error) {
 	if cfg == nil || leg.store == nil || strings.TrimSpace(leg.ref) == "" ||
 		strings.TrimSpace(workID) == "" || strings.TrimSpace(scope) == "" || permitResolver == nil {
 		return lifecycleTransitionContext{}, worklifecycle.ErrTransitionChainUnavailable
@@ -104,8 +119,8 @@ func buildLifecycleTransitionContext(
 		}
 		return verifyLifecycleAttachedWorkflow(leg.store, resolved.deps.GraphStore, source, signed, currentPolicy, evidence)
 	})
-	chain, err := newLifecycleAdmissionTransitionChain(
-		leg.store, cfg.Lifecycle, scope, permitPolicy.Actor, permitIssuer, policyResolver, workflowVerifier,
+	chain, err := newLifecycleAdmissionTransitionChainWithWorkspace(
+		leg.store, cfg.Lifecycle, scope, permitPolicy.Actor, permitIssuer, policyResolver, workflowVerifier, workspaceVerifier,
 	)
 	if err != nil {
 		return lifecycleTransitionContext{}, fmt.Errorf("construct durable lifecycle transition chain: %w", err)

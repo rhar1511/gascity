@@ -94,6 +94,33 @@ func TestLifecycleClaimProviderRechecksCanonicalReadiness(t *testing.T) {
 	}
 }
 
+// Persist the intended route before invoking the provider: its request is a
+// snapshot of a real session, not a replacement identity supplied by the caller.
+func persistLifecycleClaimFixtureRoute(t *testing.T, setup lifecycleAdmissionTransitionSetup, request *api.LifecycleClaimTransitionRequest) {
+	t.Helper()
+	store := sessionFrontDoor(setup.cityStore)
+	current, err := store.Get(request.Session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpdateMetadataInfo(current, session.MetadataPatch{
+		"template": request.Session.Template, "agent_name": request.Session.AgentName,
+		"pool_slot": request.Session.PoolSlot, "common_name": request.Session.CommonName,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// The missing-route fixture also removes the persisted identity labels.
+	if request.Session.Labels == nil {
+		if err := setup.cityStore.Update(current.ID, beads.UpdateOpts{RemoveLabels: current.Labels}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	request.Session, err = store.Get(current.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestLifecycleClaimProviderClaimsReadyWorkAndReplaysExactClaim(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
@@ -120,6 +147,7 @@ func TestLifecycleClaimProviderClaimsReadyWorkAndReplaysExactClaim(t *testing.T)
 			request.Session.Template = tc.template
 			request.Session.AgentName = tc.agentName
 			request.Session.PoolSlot = tc.poolSlot
+			persistLifecycleClaimFixtureRoute(t, setup, &request)
 			if tc.descendant {
 				marker, ok := lifecycleMaterializationFor(request.Work)
 				if !ok {
@@ -194,6 +222,7 @@ func TestLifecycleClaimProviderRejectsSessionOnDifferentConfiguredRouteBeforeWri
 		t.Run(tc.name, func(t *testing.T) {
 			setup, state, request := newLifecycleClaimProviderFixture(t)
 			tc.prepare(&setup, &request)
+			persistLifecycleClaimFixtureRoute(t, setup, &request)
 			beforeRequests := len(setup.store.patchRequests)
 			beforeReceipts := len(setup.store.patchReceipts)
 			beforeGenericWrites := setup.store.sourceGenericWrites
@@ -226,6 +255,7 @@ func TestLifecycleClaimProviderRejectsWrongRouteBeforeExactReplay(t *testing.T) 
 	setup.fixture.cfg.Agents = append(setup.fixture.cfg.Agents, config.Agent{Name: "other-worker", Dir: "pilot"})
 	request.Session.Template = "pilot/other-worker"
 	request.Session.AgentName = "pilot/other-worker"
+	persistLifecycleClaimFixtureRoute(t, setup, &request)
 	beforeRequests := len(setup.store.patchRequests)
 	beforeReceipts := len(setup.store.patchReceipts)
 	beforeGenericWrites := setup.store.sourceGenericWrites
@@ -974,6 +1004,89 @@ func TestLifecycleDescendantClaimAfterAcceptedSourceClose(t *testing.T) {
 			after, err := setup.store.Get(source.ID)
 			if err != nil || !reflect.DeepEqual(source, after) {
 				t.Fatal("tail operation changed accepted source")
+			}
+		})
+	}
+}
+
+func TestLifecycleExecutionCompletionTerminalReplayRetainsReceiptFences(t *testing.T) {
+	for _, scenario := range []string{"missing anchor", "missing claim", "missing completion", "missing evidence", "forged completion", "changed outcome", "changed incarnation", "changed generation", "stale revision", "stale head", "changed step head", "reopened during verification"} {
+		t.Run(scenario, func(t *testing.T) {
+			setup, state, request := newLifecycleCoreGraphClaimProviderFixture(t)
+			claim, err := state.ClaimLifecycleWork(context.Background(), request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			step, err := setup.store.Get(request.Work.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request.Work, request.ExpectedRevision, request.ExpectedTransitionHead = step, step.Revision, claim.ReceiptID
+			finish := api.LifecycleExecutionCompletionTransitionRequest{Claim: request, Intent: api.LifecycleExecutionCompletionIntent{ClaimGeneration: claim.ClaimGeneration, Outcome: "pass"}}
+			completed, err := state.CompleteLifecycleExecution(context.Background(), finish)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := setup.cityStore.Delete(request.Session.ID); err != nil {
+				t.Fatal(err)
+			}
+			current, err := setup.store.Get(step.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			raceObserved := false
+			switch scenario {
+			case "missing anchor":
+				delete(setup.store.q43Receipts, setup.store.patchReceipts[claim.ReceiptID].PriorReceiptID)
+			case "missing claim":
+				delete(setup.store.patchReceipts, claim.ReceiptID)
+			case "missing completion":
+				delete(setup.store.patchReceipts, completed.ReceiptID)
+			case "missing evidence":
+				delete(setup.store.patchReceipts, setup.store.patchReceipts[completed.ReceiptID].PriorReceiptID)
+			case "forged completion":
+				receipt := setup.store.patchReceipts[completed.ReceiptID]
+				receipt.Actor = "different-owner"
+				setup.store.patchReceipts[completed.ReceiptID] = receipt
+			case "changed outcome":
+				finish.Intent.Outcome = "fail"
+			case "changed incarnation":
+				finish.Claim.Session.InstanceToken = "different-incarnation"
+			case "changed generation":
+				finish.Intent.ClaimGeneration = "2"
+			case "stale revision":
+				finish.Claim.ExpectedRevision--
+			case "stale head":
+				finish.Claim.ExpectedTransitionHead = "unrelated-head"
+			case "changed step head":
+				current.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey] = "unrelated-head"
+				setup.store.rows[step.ID] = current
+			case "reopened during verification":
+				setup.store.afterSourceSnapshot = func() {
+					setup.store.afterSourceSnapshot = nil
+					raceObserved = true
+					current = step
+					setup.store.rows[step.ID] = step
+				}
+			}
+			source, err := setup.store.Get(setup.source.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			patches, anchors := len(setup.store.patchRequests), len(setup.store.q43Receipts)
+			if _, err := state.CompleteLifecycleExecution(context.Background(), finish); err == nil {
+				t.Fatalf("accepted terminal replay with %s", scenario)
+			}
+			if scenario == "reopened during verification" && !raceObserved {
+				t.Fatal("terminal receipt verification did not reach the injected snapshot race")
+			}
+			after, err := setup.store.Get(step.ID)
+			if err != nil || !reflect.DeepEqual(current, after) || len(setup.store.patchRequests) != patches || len(setup.store.q43Receipts) != anchors {
+				t.Fatal("refused terminal replay wrote a transition or changed execution")
+			}
+			afterSource, err := setup.store.Get(source.ID)
+			if err != nil || !reflect.DeepEqual(source, afterSource) {
+				t.Fatal("refused terminal replay changed its admitted source")
 			}
 		})
 	}

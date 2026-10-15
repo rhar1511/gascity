@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -257,6 +258,213 @@ func TestAPIBeadRouterRefusesCustomQueryWhenLifecycleAdmissionEnabled(t *testing
 	}
 	if after.Metadata[beadmeta.RoutedToMetadataKey] != "" {
 		t.Fatalf("refused custom route wrote gc.routed_to=%q", after.Metadata[beadmeta.RoutedToMetadataKey])
+	}
+}
+
+// Only the bd command boundary is scripted. Revision presence is decoded by
+// the real BdStore and copied by the real cache, never assigned on a Bead.
+type apiRouteRevisionTransport struct {
+	listRevision     json.RawMessage
+	detailRevision   json.RawMessage
+	detailReads      int
+	enrolled         bool
+	conflictOnUpdate bool
+	updates          [][]string
+	routedTo         string
+}
+
+func (f *apiRouteRevisionTransport) run(_ string, name string, args ...string) ([]byte, error) {
+	if name != "bd" || len(args) == 0 {
+		return nil, errors.New("unexpected route revision command")
+	}
+	if len(args) == 2 && args[1] == "--help" {
+		switch args[0] {
+		case "update", "close", "assign", "delete":
+			return []byte("--if-revision"), nil
+		}
+	}
+	switch args[0] {
+	case "show", "list":
+		revision := f.listRevision
+		metadata := map[string]string{}
+		if args[0] == "show" {
+			f.detailReads++
+			revision = f.detailRevision
+			if f.enrolled {
+				metadata[beadmeta.LifecycleAdmissionReceiptV2MetadataKey] = "attached admission"
+			}
+			if f.routedTo != "" {
+				metadata[beadmeta.RoutedToMetadataKey] = f.routedTo
+			}
+		}
+		row := map[string]any{
+			"id": "route-1", "title": "router revision", "status": "open", "issue_type": "task",
+			"metadata": metadata, "labels": []string{}, "dependencies": []any{}, "is_blocked": false,
+		}
+		if revision != nil {
+			row["revision"] = revision
+		}
+		return json.Marshal([]any{row})
+	case "query":
+		return []byte("[]"), nil
+	case "dep":
+		if len(args) > 1 && args[1] == "list" {
+			return []byte("[]"), nil
+		}
+	case "update":
+		f.updates = append(f.updates, append([]string(nil), args...))
+		if f.conflictOnUpdate {
+			f.detailRevision = json.RawMessage(`"9"`)
+			f.enrolled = true
+		}
+		var expected string
+		var metadata string
+		guards := 0
+		for i, arg := range args {
+			if i+1 < len(args) {
+				switch arg {
+				case "--if-revision":
+					guards++
+					expected = args[i+1]
+				case "--set-metadata":
+					metadata = args[i+1]
+				}
+			}
+		}
+		if guards != 1 || metadata != beadmeta.RoutedToMetadataKey+"=myrig/worker" {
+			return nil, errors.New("route update lost its exact revision guard or metadata")
+		}
+		current := string(f.detailRevision)
+		if strings.HasPrefix(current, `"`) {
+			if err := json.Unmarshal(f.detailRevision, &current); err != nil {
+				return nil, err
+			}
+		}
+		currentToken, err := strconv.ParseInt(current, 10, 64)
+		if err != nil {
+			return nil, err
+		}
+		guard, err := strconv.ParseInt(expected, 10, 64)
+		if err != nil {
+			return nil, err
+		}
+		if guard != currentToken {
+			out, err := json.Marshal(map[string]any{"code": "precondition_failed", "id": "route-1", "expected_revision": guard, "current_revision": currentToken, "mutates": false})
+			return out, errors.Join(errors.New("conditional conflict"), err)
+		}
+		f.routedTo = "myrig/worker"
+		f.detailRevision = json.RawMessage(`"11"`)
+		return []byte("[]"), nil
+	}
+	return nil, errors.New("unexpected route revision arguments")
+}
+
+func apiRouteRevisionStore(t *testing.T, f *apiRouteRevisionTransport, cached bool) beads.Store {
+	t.Helper()
+	backing := beads.NewBdStoreWithPrefix(t.TempDir(), f.run, "route")
+	if !cached {
+		return backing
+	}
+	cache := beads.NewCachingStore(backing, nil)
+	if err := cache.Prime(t.Context()); err != nil {
+		t.Fatalf("prime router cache: %v", err)
+	}
+	if !cache.IsLive() {
+		t.Fatal("router cache is not live")
+	}
+	before := f.detailReads
+	if _, err := cache.Get("route-1"); err != nil || f.detailReads != before {
+		t.Fatalf("initial Get did not use list-backed cache: %v", err)
+	}
+	return cache
+}
+
+func TestAPIBeadRouterUsesLivePublishedRevision(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		detail json.RawMessage
+		want   string
+	}{
+		{name: "missing list token", detail: json.RawMessage(`"37"`), want: "37"},
+		{name: "published string zero", detail: json.RawMessage(`"0"`), want: "0"},
+		{name: "published integer zero", detail: json.RawMessage(`0`), want: "0"},
+		{name: "absent detail"},
+		{name: "null detail", detail: json.RawMessage(`null`)},
+	} {
+		for _, cached := range []bool{false, true} {
+			name := tc.name + "/direct"
+			if cached {
+				name = tc.name + "/cache"
+			}
+			t.Run(name, func(t *testing.T) {
+				f := &apiRouteRevisionTransport{detailRevision: tc.detail}
+				store := apiRouteRevisionStore(t, f, cached)
+				state := newFakeMutatorState(t)
+				router := apiBeadRouter{server: New(state), cfg: state.cfg, store: store}
+				err := router.Route(t.Context(), sling.RouteRequest{BeadID: "route-1", Target: "myrig/worker"})
+				if tc.want == "" {
+					if err == nil || !strings.Contains(err.Error(), "observed revision") || len(f.updates) != 0 || f.routedTo != "" {
+						t.Fatalf("missing revision route = %v, attempts=%d route=%q", err, len(f.updates), f.routedTo)
+					}
+					return
+				}
+				if err != nil || len(f.updates) != 1 || f.routedTo != "myrig/worker" {
+					t.Fatalf("published revision route = %v, attempts=%d route=%q", err, len(f.updates), f.routedTo)
+				}
+				args := f.updates[0]
+				if len(args) < 2 || args[len(args)-2] != "--if-revision" || args[len(args)-1] != tc.want {
+					t.Fatalf("route changed or omitted the observed revision: %q", args)
+				}
+				// A writer obtained from the backing store would leave the
+				// original cache stale. Read through the original owner here.
+				after, err := store.Get("route-1")
+				if err != nil || after.Metadata[beadmeta.RoutedToMetadataKey] != "myrig/worker" || after.Revision != 11 {
+					t.Fatalf("route did not update the original store/cache: %+v, %v", after, err)
+				}
+			})
+		}
+	}
+}
+
+func TestAPIBeadRouterChecksLiveEnrollmentBeforeEffects(t *testing.T) {
+	for _, custom := range []bool{false, true} {
+		name := "built-in"
+		if custom {
+			name = "custom"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := &apiRouteRevisionTransport{listRevision: json.RawMessage(`"7"`), detailRevision: json.RawMessage(`"8"`), enrolled: true}
+			store := apiRouteRevisionStore(t, f, true)
+			state := newFakeMutatorState(t)
+			if custom {
+				state.cfg.Agents[0].SlingQuery = "custom-dispatch {}"
+			}
+			server := New(state)
+			runnerCalls := 0
+			server.SlingRunnerFunc = func(string, string, map[string]string) (string, error) { runnerCalls++; return "", nil }
+			err := (apiBeadRouter{server: server, cfg: state.cfg, store: store}).Route(t.Context(), sling.RouteRequest{BeadID: "route-1", Target: "myrig/worker"})
+			if !errors.Is(err, beads.ErrLifecycleMutationBlocked) || runnerCalls != 0 || len(f.updates) != 0 || f.routedTo != "" {
+				t.Fatalf("live enrollment route=%v, runners=%d, attempts=%d, route=%q", err, runnerCalls, len(f.updates), f.routedTo)
+			}
+		})
+	}
+}
+
+func TestAPIBeadRouterKeepsZeroGuardWhenAdmissionWins(t *testing.T) {
+	f := &apiRouteRevisionTransport{listRevision: json.RawMessage(`"0"`), detailRevision: json.RawMessage(`"0"`), conflictOnUpdate: true}
+	store := apiRouteRevisionStore(t, f, true)
+	state := newFakeMutatorState(t)
+	err := (apiBeadRouter{server: New(state), cfg: state.cfg, store: store}).Route(t.Context(), sling.RouteRequest{BeadID: "route-1", Target: "myrig/worker"})
+	var conflict *beads.PreconditionFailedError
+	if !errors.As(err, &conflict) || conflict.Expected != 0 || conflict.Current != 9 || conflict.ID != "route-1" {
+		t.Fatalf("route did not preserve original zero guard: %v", err)
+	}
+	if len(f.updates) != 1 || f.routedTo != "" || !f.enrolled {
+		t.Fatalf("conflicting route changed state or retried: attempts=%d route=%q enrolled=%t", len(f.updates), f.routedTo, f.enrolled)
+	}
+	after, err := store.Get("route-1")
+	if err != nil || after.Revision != 9 || after.Metadata[beadmeta.LifecycleAdmissionReceiptV2MetadataKey] != "attached admission" || after.Metadata[beadmeta.RoutedToMetadataKey] != "" {
+		t.Fatalf("original cache did not observe winning admission after conflict: %+v, %v", after, err)
 	}
 }
 

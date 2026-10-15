@@ -7,6 +7,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/spf13/cobra"
@@ -138,6 +139,9 @@ func validateBeadsMetadataCASRequest(request beadsMetadataCASRequest) error {
 	if !validMetadataCASToken(request.key, metadataCASMaxKeyBytes) {
 		return fmt.Errorf("invalid metadata key %q: must be 1-%d ASCII letters, digits, dot, underscore, or hyphen and start with a letter or digit",
 			request.key, metadataCASMaxKeyBytes)
+	}
+	if err := beadmeta.ValidateGenericMetadata(map[string]string{request.key: request.next}); err != nil {
+		return err
 	}
 	if _, _, err := parseBeadsMetadataCASStoreRef(request.storeRef); err != nil {
 		return err

@@ -108,3 +108,24 @@ func TestGenericMutationReservesEveryExecutionIdentityAlias(t *testing.T) {
 		t.Fatalf("ordinary metadata rejected: %v", err)
 	}
 }
+
+func TestGenericMutationReservesWorkspaceCustody(t *testing.T) {
+	keys := []string{
+		"gc.worktree_source_bead_id", "gc.worktree_source_store_ref", "gc.worktree_attempt_id",
+		WorkDirMetadataKey, LegacyWorkDirMetadataKey, WorkBranchMetadataKey,
+		WorktreeRepoMetadataKey, WorktreeRootMetadataKey, WorktreeBaseRefMetadataKey,
+		WorktreeBaseSHAMetadataKey, WorktreeCreatorMetadataKey, WorktreeOwnerMetadataKey,
+		WorktreeGenerationMetadataKey, WorktreeLifecycleMetadataKey,
+		TriggerBeadIDMetadataKey, TriggerBeadStoreRefMetadataKey,
+	}
+	for _, key := range keys {
+		for _, value := range []string{"chosen", ""} {
+			if !IsGenericMutationReservedKey(key) || ValidateGenericMetadata(map[string]string{key: value}) == nil {
+				t.Errorf("generic writer can originate/replace/clear workspace custody %q", key)
+			}
+		}
+	}
+	if err := ValidateGenericMetadata(map[string]string{"replacement_launcher_audit": "public evidence"}); err != nil {
+		t.Fatalf("public audit link rejected: %v", err)
+	}
+}

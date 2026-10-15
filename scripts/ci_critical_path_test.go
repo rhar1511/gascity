@@ -358,16 +358,71 @@ func TestProductMetricsTesthookProfileIsFocusedRequiredAndObservable(t *testing.
 	if !permitsSkip {
 		t.Error("ci-required must allow the path-gated tagged profile to skip")
 	}
+}
 
-	macJob := readCriticalPathWorkflow(t, "mac-regression.yml").Jobs["mac-cmd-gc-process"]
-	var macTaggedSteps []ciCriticalPathStep
-	for _, step := range macJob.Steps {
-		if strings.TrimSpace(step.Run) == "make test-productmetrics-testhook" {
-			macTaggedSteps = append(macTaggedSteps, step)
+func TestMacProductMetricsTesthookHasIndependentRequiredBudget(t *testing.T) {
+	wf := readCriticalPathWorkflow(t, "mac-regression.yml")
+	process := wf.Jobs["mac-cmd-gc-process"]
+	job, ok := wf.Jobs["mac-productmetrics-testhook"]
+	if !ok {
+		t.Fatal("Mac workflow has no independent productmetrics-testhook job")
+	}
+	if job.TimeoutMinutes.Value != "20" || process.TimeoutMinutes.Value != "20" {
+		t.Errorf("profile/process budgets = %q/%q, want independent 20m jobs", job.TimeoutMinutes.Value, process.TimeoutMinutes.Value)
+	}
+	if !slices.Equal(process.Strategy.Matrix.Shard, []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}) {
+		t.Errorf("ordinary process shards changed: %v", process.Strategy.Matrix.Shard)
+	}
+	if job.RunsOn != process.RunsOn || job.If != process.If || !slices.Equal(job.Needs, []string{"runner-policy", "gate"}) {
+		t.Errorf("tagged profile must retain the ordinary Mac runner and centralized smoke/full gate: %+v", job)
+	}
+	if job.ContinueOnError || len(job.Strategy.Matrix.Keys) != 0 {
+		t.Error("tagged profile must be one required non-matrix job")
+	}
+	if len(job.Steps) != 3 || len(process.Steps) != 3 {
+		t.Fatalf("profile/process steps = %d/%d, want exact checkout, setup and one owning command each", len(job.Steps), len(process.Steps))
+	}
+	for i := 0; i < 2; i++ {
+		got, want := job.Steps[i], process.Steps[i]
+		if got.Uses != want.Uses || !maps.Equal(got.With, want.With) || got.If != "" || got.ContinueOnError {
+			t.Errorf("tagged profile checkout/setup step %d differs from exact-head process setup", i)
 		}
 	}
-	if len(macTaggedSteps) != 1 || macTaggedSteps[0].If != "${{ matrix.shard == 6 }}" {
-		t.Errorf("Mac tagged profile steps = %v, want one execution on historical shard 6", macTaggedSteps)
+	command := job.Steps[2]
+	if strings.TrimSpace(command.Run) != "make test-productmetrics-testhook" || command.If != "" || command.ContinueOnError {
+		t.Errorf("tagged profile must execute the unchanged required command: %+v", command)
+	}
+	count := 0
+	for _, candidate := range wf.Jobs {
+		for _, step := range candidate.Steps {
+			if strings.Contains(step.Run, "make test-productmetrics-testhook") {
+				count++
+			}
+		}
+	}
+	if count != 1 {
+		t.Errorf("Mac tagged profile executions = %d, want exactly one independent job", count)
+	}
+	summary := wf.Jobs["mac-regression-summary"]
+	if !slices.Contains(summary.Needs, "mac-productmetrics-testhook") {
+		t.Fatal("Mac summary must depend on tagged profile")
+	}
+	var summarize ciCriticalPathStep
+	for _, step := range summary.Steps {
+		if step.Name == "Summarize" {
+			summarize = step
+		}
+	}
+	if summarize.Env["PRODUCTMETRICS_TESTHOOK"] != "${{ needs.mac-productmetrics-testhook.result }}" {
+		t.Error("Mac summary must read the actual tagged job result")
+	}
+	for _, marker := range []string{
+		`| Mac / productmetrics testhook | ${PRODUCTMETRICS_TESTHOOK} |`,
+		"if [[ \"$PRODUCTMETRICS_TESTHOOK\" != \"success\" ]]; then\n  fail=1\nfi",
+	} {
+		if !strings.Contains(summarize.Run, marker) {
+			t.Errorf("Mac summary missing required profile propagation %q", marker)
+		}
 	}
 }
 
@@ -606,13 +661,48 @@ func TestAcceptanceTargetsSeparateTierAFromExternalBdContracts(t *testing.T) {
 	}
 }
 
+func TestMacGraphIntegrationJobsSelectQualifiedBeads(t *testing.T) {
+	wf := readCriticalPathWorkflow(t, "mac-regression.yml")
+	for _, name := range []string{"mac-integration-packages", "mac-integration-rest", "mac-integration-review-formulas"} {
+		t.Run(name, func(t *testing.T) {
+			job, ok := wf.Jobs[name]
+			if !ok {
+				t.Fatalf("missing integration job %s", name)
+			}
+			setups := 0
+			for _, step := range job.Steps {
+				if step.Uses == "./.github/actions/setup-gascity-macos" {
+					setups++
+					if step.With["qualified-integration-bd"] != "true" {
+						t.Error("HTTP graph integrations must select the existing qualified Beads fixture")
+					}
+				}
+			}
+			if setups != 1 {
+				t.Fatalf("setup count = %d, want one exact fixture selection", setups)
+			}
+		})
+	}
+}
+
 func TestMacAcceptanceRetainsExternalBdContract(t *testing.T) {
 	wf := readCriticalPathWorkflow(t, "mac-regression.yml")
 	job := wf.Jobs["mac-acceptance"]
+	if job.TimeoutMinutes.Value != "40" {
+		t.Error("Mac acceptance must retain its existing 40-minute job deadline")
+	}
 	var runsTierA, runsBDContract bool
 	for _, step := range job.Steps {
 		runsTierA = runsTierA || strings.TrimSpace(step.Run) == "make test-acceptance"
 		runsBDContract = runsBDContract || strings.TrimSpace(step.Run) == "make test-bd-cli-contract"
+		if strings.TrimSpace(step.Run) == "make test-acceptance" {
+			if step.Env["ACCEPTANCE_GO_TEST_FLAGS"] != "-count=1 -json" {
+				t.Error("Mac Tier A must run every test freshly and emit per-test JSON timing")
+			}
+			if step.Env["ACCEPTANCE_TIMEOUT"] != "20m" {
+				t.Error("Mac Tier A must retain its existing 20-minute package deadline")
+			}
+		}
 	}
 	if !runsTierA {
 		t.Error("Mac acceptance must retain hermetic Tier A")
@@ -772,6 +862,7 @@ func TestMacRegressionTierJobsGateOnCentralizedOutputs(t *testing.T) {
 		{"mac-quality", "needs.gate.outputs.run_smoke == 'true'"},
 		{"mac-unit", "needs.gate.outputs.run_smoke == 'true'"},
 		{"mac-cmd-gc-process", "needs.gate.outputs.run_smoke == 'true'"},
+		{"mac-productmetrics-testhook", "needs.gate.outputs.run_smoke == 'true'"},
 		{"mac-acceptance", "needs.gate.outputs.run_smoke == 'true'"},
 		{"mac-cover", "needs.gate.outputs.run_full == 'true'"},
 		{"mac-integration-packages", "needs.gate.outputs.run_full == 'true'"},
@@ -1532,6 +1623,96 @@ func TestVulnerabilityVerdictRunsWithoutReportingDirectory(t *testing.T) {
 				if !errors.As(runErr, &failure) || failure.ExitCode() != exit {
 					t.Fatalf("must retain native scanner exit %d: %v; output=%s", exit, runErr, output)
 				}
+			}
+		})
+	}
+}
+
+// Exercise the checker itself: HEAD and its archived baseline must use the
+// same site root, while actual new page failures still fail the comparison.
+func TestDocsRenderCheckUsesMatchingSiteRoots(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		head     string
+		wantExit int
+	}{
+		{name: "inherited_page", head: "error /inherited-page\n", wantExit: 0},
+		{name: "new_page", head: "error /inherited-page\nerror /new-page\n", wantExit: 1},
+		{name: "static_asset", head: "error /inherited-page\nerror /new-image.png\n", wantExit: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			realRepo := t.TempDir()
+			repo := filepath.Join(t.TempDir(), "checkout")
+			if err := os.Symlink(realRepo, repo); err != nil {
+				t.Fatal(err)
+			}
+			writeTestFile(t, filepath.Join(repo, "docs", "docs.json"), "{}\n")
+			writeTestFile(t, filepath.Join(repo, "docs", "mint-output.txt"), "error /inherited-page\n")
+			writeTestFile(t, filepath.Join(repo, "engdocs", "outside.md"), "not part of the published site\n")
+			env := []string{
+				"PATH=" + os.Getenv("PATH"), "HOME=" + t.TempDir(),
+				"TMPDIR=" + t.TempDir(), "GIT_CONFIG_NOSYSTEM=1",
+				"GIT_CONFIG_GLOBAL=" + os.DevNull,
+			}
+			git := func(args ...string) {
+				t.Helper()
+				cmd := testCommand("git", args...)
+				cmd.Dir, cmd.Env = repo, env
+				if out, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("git %v: %v\n%s", args, err, out)
+				}
+			}
+			git("init", "-q")
+			git("add", "docs", "engdocs")
+			git("-c", "user.name=Docs test", "-c", "user.email=docs@example.test", "-c", "commit.gpgsign=false", "commit", "-qm", "baseline")
+			writeTestFile(t, filepath.Join(repo, "docs", "mint-output.txt"), tc.head)
+			mint := filepath.Join(t.TempDir(), "mint")
+			writeExecutable(t, mint, `#!/bin/sh
+printf '%s\n' "$PWD" >> "$MINT_ROOT_LOG"
+if [ ! -f docs.json ]; then
+    printf 'error /outside-site-root\n'
+    exit 1
+fi
+cat mint-output.txt
+exit 1
+`)
+			rootLog := filepath.Join(t.TempDir(), "roots")
+			cmd := testCommand("bash", filepath.Join(repoRoot(t), ".github", "scripts", "docs-render-check.sh"), "HEAD")
+			cmd.Dir = repo
+			cmd.Env = append(slices.Clone(env), "MINT_CMD="+mint, "MINT_ROOT_LOG="+rootLog)
+			out, err := cmd.CombinedOutput()
+			code := 0
+			if err != nil {
+				var exitErr *exec.ExitError
+				if !errors.As(err, &exitErr) {
+					t.Fatalf("run docs checker: %v\n%s", err, out)
+				}
+				code = exitErr.ExitCode()
+			}
+			if code != tc.wantExit {
+				t.Fatalf("exit = %d, want %d\n%s", code, tc.wantExit, out)
+			}
+			roots, err := os.ReadFile(rootLog)
+			if err != nil {
+				t.Fatal(err)
+			}
+			lines := strings.Split(strings.TrimSpace(string(roots)), "\n")
+			if len(lines) != 2 || filepath.Base(lines[1]) != "docs" {
+				t.Fatalf("HEAD/base site roots = %q", lines)
+			}
+			wantRoot, err := os.Stat(filepath.Join(repo, "docs"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			gotRoot, err := os.Stat(lines[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !os.SameFile(gotRoot, wantRoot) {
+				t.Fatalf("HEAD site root = %q, want %q", lines[0], filepath.Join(repo, "docs"))
+			}
+			if tc.wantExit == 1 && !strings.Contains(string(out), "/new-page") {
+				t.Fatalf("new page failure missing: %s", out)
 			}
 		})
 	}

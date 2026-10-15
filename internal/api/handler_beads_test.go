@@ -697,6 +697,63 @@ func TestGenericBeadAPIRejectsExecutionIdentityWrites(t *testing.T) {
 	}
 }
 
+func TestGenericBeadAPIRejectsWorkspaceCustodyWrites(t *testing.T) {
+	keys := []string{
+		"gc.worktree_source_bead_id", "gc.worktree_source_store_ref", "gc.worktree_attempt_id",
+		beadmeta.WorkDirMetadataKey, beadmeta.LegacyWorkDirMetadataKey, beadmeta.WorkBranchMetadataKey,
+		beadmeta.WorktreeRepoMetadataKey, beadmeta.WorktreeRootMetadataKey, beadmeta.WorktreeBaseRefMetadataKey,
+		beadmeta.WorktreeBaseSHAMetadataKey, beadmeta.WorktreeCreatorMetadataKey, beadmeta.WorktreeOwnerMetadataKey,
+		beadmeta.WorktreeGenerationMetadataKey, beadmeta.WorktreeLifecycleMetadataKey,
+		beadmeta.TriggerBeadIDMetadataKey, beadmeta.TriggerBeadStoreRefMetadataKey,
+	}
+	state := newFakeState(t)
+	store := state.stores["myrig"]
+	metadata := map[string]string{}
+	for _, key := range keys {
+		metadata[key] = "original"
+	}
+	row, err := store.Create(beads.Bead{Title: "native workspace owner", Metadata: metadata})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := newTestCityHandler(t, state)
+	for _, key := range keys {
+		for _, value := range []string{"forged", ""} {
+			for _, target := range []struct{ method, path string }{
+				{http.MethodPost, "/beads"},
+				{http.MethodPost, "/bead/" + row.ID + "/update"},
+				{http.MethodPatch, "/bead/" + row.ID},
+			} {
+				payload := map[string]any{"title": "forged", "metadata": map[string]string{key: value}}
+				if target.path == "/beads" {
+					payload["rig"] = "myrig"
+				}
+				body, err := json.Marshal(payload)
+				if err != nil {
+					t.Fatal(err)
+				}
+				req := httptest.NewRequest(target.method, cityURL(state, target.path), bytes.NewReader(body))
+				req.Header.Set("Content-Type", "application/json")
+				req.Header.Set("X-GC-Request", "true")
+				rec := httptest.NewRecorder()
+				h.ServeHTTP(rec, req)
+				if rec.Code != http.StatusForbidden {
+					t.Fatalf("%s %s key %s value %q = %d, want 403: %s", target.method, target.path, key, value, rec.Code, rec.Body.String())
+				}
+			}
+		}
+	}
+	after, err := store.Get(row.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range keys {
+		if after.Metadata[key] != "original" {
+			t.Fatalf("generic writer changed %s", key)
+		}
+	}
+}
+
 type genericMutationRaceStore struct {
 	*beads.MemStore
 	beforeUpdate func()

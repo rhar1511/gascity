@@ -18,13 +18,13 @@ func newBeadsCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short: "Manage the beads provider",
 		Long: `Manage the beads provider (backing store for issue tracking).
 
-Subcommands for reviewed admission, topology operations, health checking, diagnostics, exact-store
+Subcommands for task creation, reviewed admission, topology operations, health checking, diagnostics, exact-store
 metadata compare-and-set, and read-only list/show routed through the supervisor
 API with transparent fallback to direct bd reads.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if len(args) == 0 {
-				fmt.Fprintln(stderr, "gc beads: missing subcommand (admission, city, completion, health, list, metadata-cas, show)") //nolint:errcheck // best-effort stderr
+				fmt.Fprintln(stderr, "gc beads: missing subcommand (admission, city, completion, create, health, list, metadata-cas, show)") //nolint:errcheck // best-effort stderr
 			} else {
 				fmt.Fprintf(stderr, "gc beads: unknown subcommand %q\n", args[0]) //nolint:errcheck // best-effort stderr
 			}
@@ -34,6 +34,7 @@ API with transparent fallback to direct bd reads.`,
 	cmd.AddCommand(
 		newBeadsAdmissionCmd(stdout, stderr),
 		newBeadsCompletionCmd(stdout, stderr),
+		newBeadsCreateCmd(stdout, stderr),
 		newBeadsCityCmd(stdout, stderr),
 		newBeadsHealthCmd(stdout, stderr),
 		newBeadsListCmd(stdout, stderr),

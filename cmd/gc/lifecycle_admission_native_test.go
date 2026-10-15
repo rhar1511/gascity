@@ -3,8 +3,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"net/http/httptest"
 	"os"
@@ -42,14 +46,15 @@ func TestLifecycleAdmissionNativeGraphAttachAndReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	var fixture struct {
-		CityPath          string                        `json:"city_path"`
-		WorkerWorkDir     string                        `json:"worker_work_dir"`
-		SourceID          string                        `json:"source_id"`
-		Environment       map[string]string             `json:"environment"`
-		AdmissionKeyFile  string                        `json:"admission_key_file"`
-		AcceptanceKeyFile string                        `json:"acceptance_key_file"`
-		PermitKeyFile     string                        `json:"permit_key_file"`
-		Authority         hostBeadsPermitAuthorityEntry `json:"authority"`
+		WorkspacePrepareArgs []string                      `json:"workspace_prepare_args"`
+		CityPath             string                        `json:"city_path"`
+		WorkerWorkDir        string                        `json:"worker_work_dir"`
+		SourceID             string                        `json:"source_id"`
+		Environment          map[string]string             `json:"environment"`
+		AdmissionKeyFile     string                        `json:"admission_key_file"`
+		AcceptanceKeyFile    string                        `json:"acceptance_key_file"`
+		PermitKeyFile        string                        `json:"permit_key_file"`
+		Authority            hostBeadsPermitAuthorityEntry `json:"authority"`
 	}
 	if err := json.Unmarshal(data, &fixture); err != nil {
 		t.Fatal(err)
@@ -232,6 +237,15 @@ func TestLifecycleAdmissionNativeGraphAttachAndReplay(t *testing.T) {
 		t.Fatalf("hydrate exact native step revision: revision=%d err=%v", step.Revision, err)
 	}
 	t.Logf("native descendant ready revision %d hydrated to exact revision %d", projectedRevision, step.Revision)
+	if len(fixture.WorkspacePrepareArgs) != 0 {
+		attached, info = nativeWorkspacePipeline(t, c, client, info, attached, step, fixture.WorkspacePrepareArgs)
+		head, found, err = reader.ReadRevisionTransitionPatchReceipt(attached.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey])
+		if err != nil || !found || head.ToVersion != attached.Revision || head.Kind != "lifecycle_source_workspace_v1" {
+			t.Fatalf("native workspace publication chain: %+v found=%t err=%v", head, found, err)
+		}
+		request.Work, request.Session = attached, info
+		request.ExpectedRevision, request.ExpectedTransitionHead = attached.Revision, head.ReceiptID
+	}
 	stepBody := api.LifecycleClaimSubmitRequest{
 		WorkID: step.ID, SourceStoreRef: "rig:api", ExpectedRevision: step.Revision,
 		ExpectedTransitionHead: "", SessionID: info.ID, InstanceToken: info.InstanceToken, RuntimeEpoch: info.Generation,
@@ -729,4 +743,218 @@ func (s *nativeAdmissionSessionState) CompleteLifecycleExecution(ctx context.Con
 		s.t.Logf("native execution completion controller refusal: %v", err)
 	}
 	return result, err
+}
+
+// nativeWorkspacePipeline extends the existing real-backend lifecycle proof.
+// It uses the already running fixture HTTP controller and original native
+// creation arguments; no metadata is manufactured to authorize a claim.
+func nativeWorkspacePipeline(t *testing.T, c *beadsAdmissionContext, client *api.Client, info session.Info, source, step beads.Bead, nativeArgs []string) (beads.Bead, session.Info) {
+	t.Helper()
+	// Compare both fresh contexts against the same immutable native receipt.
+	// The controller's already configured store must not mask a CLI read-scope
+	// omission, and granting read scope must not grant protected patch writes.
+	var scopeErr strings.Builder
+	unscoped, err := openBeadsAdmissionContext("rig:api", &scopeErr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unscoped.close()
+	unscopedAdapter, err := worklifecycle.NewAdmissionAttachmentAdapter(unscoped.sourceLeg.store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := worklifecycle.ScopeForStore(c.cityName, "rig:api")
+	if _, _, err := unscopedAdapter.VerifyForTransition(source.ID, c.cfg.Lifecycle, scope); !errors.Is(err, beads.ErrDecisionFrontierTransitionReceiptCorrupt) {
+		t.Fatalf("fresh unscoped lifecycle receipt must refuse: %v", err)
+	}
+	scoped, err := openNativeWorkspacePrepareContext("rig:api", &scopeErr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer scoped.close()
+	if writer, ok := beads.RevisionTransitionPatchWriterFor(scoped.sourceLeg.store); ok || writer != nil {
+		t.Fatal("workspace preparation acquired protected patch-write authority")
+	}
+	scopedAdapter, err := worklifecycle.NewAdmissionAttachmentAdapter(scoped.sourceLeg.store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verified, proof, err := scopedAdapter.VerifyForTransition(source.ID, c.cfg.Lifecycle, scope)
+	if err != nil || !reflect.DeepEqual(verified, source) || proof.WorkItemID != source.ID || proof.Scope != scope || proof.ReceiptID == "" {
+		t.Fatalf("exact read-only native attachment proof: %+v error=%v", proof, err)
+	}
+	afterRead, err := c.snapshot(source.ID)
+	if err != nil || !reflect.DeepEqual(source, afterRead) {
+		t.Fatal("read-scope composition mutated the native source")
+	}
+	t.Log("native workspace exact receipt refuses without read scope and verifies with read-only trusted scope")
+	requestDir := filepath.Join(filepath.Dir(c.cityPath), "workspace-requests")
+	if err := os.Mkdir(requestDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	requestPath := filepath.Join(requestDir, "prepared.json")
+	prepareArgs := append([]string{"--city", c.cityPath, "worktree", "prepare"}, nativeArgs...)
+	prepareArgs = append(prepareArgs, "--work", step.ID, "--output", requestPath)
+	var stdout, stderr strings.Builder
+	if code := run(prepareArgs, &stdout, &stderr); code != 0 {
+		t.Fatalf("native workspace prepare: exit=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	var prepared worktreePrepareResult
+	if err := json.Unmarshal([]byte(stdout.String()), &prepared); err != nil || !prepared.OK || prepared.SourceID != source.ID || prepared.SelectedWorkID != step.ID {
+		t.Fatalf("native source/step preparation: %+v error=%v", prepared, err)
+	}
+	saved, err := os.ReadFile(requestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(saved)
+	stat, err := os.Stat(requestPath)
+	if err != nil || stat.Mode().Perm() != 0o600 || prepared.RequestSHA256 != hex.EncodeToString(digest[:]) {
+		t.Fatalf("native immutable request mode or digest: error=%v", err)
+	}
+	unchanged := func(wantSource, wantStep beads.Bead) {
+		t.Helper()
+		gotSource, sourceErr := c.snapshot(source.ID)
+		gotStep, stepErr := c.sourceLeg.store.Get(step.ID)
+		if sourceErr != nil || stepErr != nil || !reflect.DeepEqual(wantSource, gotSource) || !reflect.DeepEqual(wantStep, gotStep) {
+			t.Fatalf("native workspace operation unexpectedly changed source/step: %v %v", sourceErr, stepErr)
+		}
+		current, readErr := os.ReadFile(requestPath)
+		if readErr != nil || !bytes.Equal(saved, current) {
+			t.Fatal("native workspace operation rewrote immutable request")
+		}
+	}
+	unchanged(source, step)
+	stdout.Reset()
+	stderr.Reset()
+	if code := run(prepareArgs, &stdout, &stderr); code == 0 {
+		t.Fatal("native prepare overwrote an existing immutable request")
+	}
+	unchanged(source, step)
+	t.Log("native workspace immutable prepare binds source and execution step without changing either")
+
+	request, err := readWorktreePublishRequest(requestPath, prepared.RequestSHA256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, scenario := range []string{"source", "store", "attempt"} {
+		bad := request
+		switch scenario {
+		case "source":
+			bad.WorkID, bad.Workspace.SourceID = step.ID, step.ID
+		case "store":
+			bad.SourceStoreRef, bad.Workspace.StoreRef = "rig:foreign", "rig:foreign"
+		case "attempt":
+			bad.Workspace.AttemptID = "stale-native-attempt"
+		}
+		if _, err := client.PublishLifecycleWorkspace(context.Background(), bad); err == nil {
+			t.Fatalf("native publication accepted wrong %s", scenario)
+		}
+		unchanged(source, step)
+	}
+	args := []string{"--city", c.cityPath, "worktree", "publish", "--request-file", requestPath, "--request-sha256", strings.Repeat("0", 64), "--json"}
+	stdout.Reset()
+	stderr.Reset()
+	if code := run(args, &stdout, &stderr); code == 0 {
+		t.Fatal("native workspace publication accepted wrong exact-byte digest")
+	}
+	unchanged(source, step)
+	t.Log("native workspace source store attempt and digest refusals preserve both rows and saved request")
+
+	args[len(args)-2] = prepared.RequestSHA256
+	var first worktreePublishResult
+	for attempt := 0; attempt < 2; attempt++ {
+		stdout.Reset()
+		stderr.Reset()
+		if code := run(args, &stdout, &stderr); code != 0 {
+			t.Fatalf("native HTTP workspace publish attempt %d: exit=%d stderr=%s", attempt, code, stderr.String())
+		}
+		var receipt worktreePublishResult
+		if err := json.Unmarshal([]byte(stdout.String()), &receipt); err != nil || !receipt.OK || receipt.WorkID != source.ID || receipt.SourceStoreRef != "rig:api" || receipt.ReceiptID == "" || receipt.Revision == 0 {
+			t.Fatalf("native workspace receipt: %+v error=%v", receipt, err)
+		}
+		if attempt == 0 {
+			if receipt.Replayed || receipt.Revision == source.Revision {
+				t.Fatal("first native workspace publication did not commit a new transition")
+			}
+			first = receipt
+			source, err = c.snapshot(source.ID)
+			if err != nil || source.Revision != receipt.Revision || source.Metadata[beadmeta.LifecycleTransitionHeadMetadataKey] != receipt.ReceiptID {
+				t.Fatalf("native publication readback: %v", err)
+			}
+			for key, patch := range request.Workspace.PublicationPatch().Metadata {
+				if source.Metadata[key] != patch.Value {
+					t.Fatalf("native publication lost custody field %s", key)
+				}
+			}
+		} else if !receipt.Replayed || receipt.ReceiptID != first.ReceiptID || receipt.Revision != first.Revision {
+			t.Fatalf("native saved-request retry changed receipt: first=%+v retry=%+v", first, receipt)
+		}
+		unchanged(source, step)
+	}
+	t.Log("native workspace typed HTTP publication and exact saved-request retry preserve receipt and revision")
+
+	bp := &agentBuildParams{city: c.cfg, cityName: c.cityName, cityPath: c.cityPath, beadStore: c.cityStore, sessionCensusRigStores: c.rigStores}
+	if len(c.cfg.Agents) == 0 || c.cfg.Agents[0].QualifiedName() != "api/worker" {
+		t.Fatal("native fixture worker route changed")
+	}
+	binding := SessionRequest{WorkBeadID: step.ID, WorkStoreRef: "rig:api", SessionBeadID: info.ID}
+	beforeSession, err := c.cityStore.Get(info.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, scenario := range []string{"store", "session"} {
+		bad := binding
+		if scenario == "store" {
+			bad.WorkStoreRef = "rig:foreign"
+		} else {
+			bad.SessionBeadID = "another-native-session"
+		}
+		if _, err := bindPoolSessionTriggerBead(bp, &c.cfg.Agents[0], "api/worker", info, bad); err == nil {
+			t.Fatalf("native pool binding accepted wrong %s", scenario)
+		}
+		afterSession, err := c.cityStore.Get(info.ID)
+		if err != nil || !reflect.DeepEqual(beforeSession, afterSession) {
+			t.Fatal("refused native binding changed original session")
+		}
+		unchanged(source, step)
+	}
+	// Compare the manager's returned view with the persisted session projection
+	// without exposing incarnation tokens or provider environment values.
+	persistedInfo, err := sessionFrontDoor(c.cityStore).Get(info.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	managerFields, storedFields := reflect.ValueOf(info), reflect.ValueOf(persistedInfo)
+	for i := 0; i < managerFields.NumField(); i++ {
+		if reflect.DeepEqual(managerFields.Field(i).Interface(), storedFields.Field(i).Interface()) {
+			continue
+		}
+		name := managerFields.Type().Field(i).Name
+		switch name {
+		case "CreatedAt", "LastActive", "LastNudgeDeliveredAt", "State", "Transport", "Attached", "Labels":
+			t.Logf("native session projection differs field=%s manager=%v persisted=%v", name, managerFields.Field(i).Interface(), storedFields.Field(i).Interface())
+		default:
+			t.Logf("native session projection differs field=%s values=redacted", name)
+		}
+	}
+	bound, err := bindPoolSessionTriggerBead(bp, &c.cfg.Agents[0], "api/worker", info, binding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bound.ID != info.ID || bound.SessionKey != info.SessionKey || bound.InstanceToken != info.InstanceToken || bound.Generation != info.Generation || bound.WorkDir != request.Workspace.Path || bound.WorkDirCanonical != request.Workspace.Path {
+		t.Fatal("native pool binding replaced existing identity or source workspace")
+	}
+	persisted, err := c.cityStore.Get(info.ID)
+	if err != nil || persisted.Metadata[beadmeta.TriggerBeadIDMetadataKey] != step.ID {
+		t.Fatalf("native session execution trigger: %v", err)
+	}
+	for key, patch := range request.Workspace.PublicationPatch().Metadata {
+		if persisted.Metadata[key] != patch.Value {
+			t.Fatalf("native session/source custody mismatch at %s", key)
+		}
+	}
+	unchanged(source, step)
+	t.Log("native workspace source-owned conditional pool binding preserves session identity and rejects foreign store session")
+	return source, bound
 }

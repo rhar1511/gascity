@@ -336,8 +336,28 @@ jobs:
           install-claude-cli: "false"
       - name: Run cmd/gc process shard
         run: make test-cmd-gc-process-shard CMD_GC_PROCESS_SHARD=${{ matrix.shard }} CMD_GC_PROCESS_TOTAL=12
+
+  # Keep the tagged profile's budget independent of the ordinary shards.
+  mac-productmetrics-testhook:
+    name: Mac / productmetrics testhook
+    needs:
+      - runner-policy
+      - gate
+    if: needs.gate.outputs.run_smoke == 'true'
+    runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: ${{ inputs.head_repo || github.repository }}
+          ref: ${{ inputs.head_sha || github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-gascity-macos
+        with:
+          dolt-version: ${{ env.DOLT_VERSION }}
+          bd-version: ${{ env.BD_VERSION }}
+          install-claude-cli: "false"
       - name: Run product metrics testhook profile
-        if: ${{ matrix.shard == 6 }}
         run: make test-productmetrics-testhook
 
   # Tier A acceptance — smoke-level gate on every PR.
@@ -368,6 +388,8 @@ jobs:
           # mediates the supervisor lifecycle; bump the go-test timeout
           # so the whole binary doesn't panic mid-test.
           ACCEPTANCE_TIMEOUT: 20m
+          # Record every case and duration against the freshly built CLI.
+          ACCEPTANCE_GO_TEST_FLAGS: -count=1 -json
         run: make test-acceptance
       - name: Run external bd CLI contract
         run: make test-bd-cli-contract
@@ -621,6 +643,7 @@ jobs:
         with:
           dolt-version: ${{ env.DOLT_VERSION }}
           bd-version: ${{ env.BD_VERSION }}
+          qualified-integration-bd: "true"
           install-claude-cli: "true"
       - name: Install tools
         run: make install-tools
@@ -646,6 +669,7 @@ jobs:
       - mac-quality
       - mac-unit
       - mac-cmd-gc-process
+      - mac-productmetrics-testhook
       - mac-acceptance
       - mac-cover
       - mac-integration-packages
@@ -662,6 +686,7 @@ jobs:
           QUALITY: ${{ needs.mac-quality.result }}
           UNIT: ${{ needs.mac-unit.result }}
           CMD_GC: ${{ needs.mac-cmd-gc-process.result }}
+          PRODUCTMETRICS_TESTHOOK: ${{ needs.mac-productmetrics-testhook.result }}
           ACCEPTANCE: ${{ needs.mac-acceptance.result }}
           # Best-effort jobs: use outputs.outcome (not needs.*.result).
           COVER: ${{ needs.mac-cover.outputs.outcome || needs.mac-cover.result }}
@@ -703,6 +728,7 @@ jobs:
           | Mac / quality | ${QUALITY} |
           | Mac / make test-mac | ${UNIT} |
           | Mac / cmd-gc process | ${CMD_GC} |
+          | Mac / productmetrics testhook | ${PRODUCTMETRICS_TESTHOOK} |
           | Mac / acceptance (Tier A) | ${ACCEPTANCE} |
           | Mac / test-cover-mac (best-effort) | ${COVER} |
           | Mac / integration packages | ${INT_PACKAGES} |
@@ -712,6 +738,9 @@ jobs:
           EOF
 
           fail=0
+          if [[ "$PRODUCTMETRICS_TESTHOOK" != "success" ]]; then
+            fail=1
+          fi
           for result in "$QUALITY" "$UNIT" "$CMD_GC" "$ACCEPTANCE" "$INT_PACKAGES" "$INT_REST"; do
             # Skipped is acceptable (e.g. when run outside the needs-mac trigger set)
             case "$result" in

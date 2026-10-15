@@ -381,7 +381,7 @@ func TestGoTestShardWithoutTimingPreservesDirectProductContract(t *testing.T) {
 		"GOEXPERIMENT": "", "GOPROXY": "", "GOPRIVATE": "", "GONOPROXY": "", "GONOSUMDB": "",
 		"GOSUMDB": "", "GOINSECURE": "", "GOVCS": "", "GOWORK": "", "GC_FAST_UNIT": "0",
 		"CGO_ENABLED": "0", "CGO_CPPFLAGS": "", "CGO_LDFLAGS": "", "GC_TEST_SHARD_INDEX": "1", "GC_TEST_SHARD_TOTAL": "2",
-		"BEADS_TEST_BD_BINARY": "", "BEADS_TEST_DOLT_BINARY": "",
+		"BEADS_TEST_BD_BINARY": "", "BEADS_TEST_DOLT_BINARY": "", "GC_INTEGRATION_REAL_BD": "",
 		"GOMEMLIMIT": "1GiB", "GOMAXPROCS": "2",
 	}
 	got := fixtureEnvironment(t, readFixtureFile(t, fixture.productEnvFile))

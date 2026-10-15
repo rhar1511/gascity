@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "gc://schemas/beads/create/result.schema.json",
+  "title": "gc beads create result",
+  "description": "Receipt for an open, unassigned task created in an exact rig through the controller API.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "ok", "bead_id", "store_ref", "idempotency_key"],
+  "properties": {
+    "schema_version": {"const": "1"},
+    "ok": {"const": true},
+    "bead_id": {"type": "string", "minLength": 1},
+    "store_ref": {"type": "string", "maxLength": 259, "pattern": "^rig:[A-Za-z0-9][A-Za-z0-9._-]*$"},
+    "idempotency_key": {"type": "string", "maxLength": 255, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"}
+  }
+}
