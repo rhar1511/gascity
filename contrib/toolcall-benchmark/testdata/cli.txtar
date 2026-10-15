@@ -1,0 +1,32 @@
+# The CLI scores declared offline fixtures, not live tool execution.
+exec toolcallbench --suite suite.json --baseline baseline.example.json --candidate candidate.example.json --improver improver
+stdout '"regressions": 0'
+stdout '"improvements": 10'
+
+# Pre-call projection contains no answers or category labels.
+exec toolcallbench --suite suite.json --contexts
+stdout '"suite_sha256":'
+! stdout '"accepted"'
+! stdout '"permitted"'
+! stdout '"category"'
+
+# Invalid input produces an error, never a report.
+! exec toolcallbench --suite suite.json
+stderr 'required:'
+! exec toolcallbench --suite suite.json --baseline missing.json --candidate candidate.example.json --improver improver
+stderr 'baseline:'
+! exec toolcallbench --suite suite.json --contexts --baseline baseline.example.json
+stderr 'contexts mode'
+! exec toolcallbench --suite suite.json --contexts extra-argument
+stderr 'unexpected positional'
+
+# Atomic output supports evaluator-owned artifacts.
+exec toolcallbench --suite suite.json --baseline baseline.example.json --candidate candidate.example.json --improver improver --out report.json
+! stdout .
+exists report.json
+
+# Report output must not overwrite its frozen suite or captured evidence.
+! exec toolcallbench --suite suite.json --baseline baseline.example.json --candidate candidate.example.json --improver improver --out suite.json
+stderr 'output aliases input'
+! exec toolcallbench --suite suite.json --baseline baseline.example.json --candidate candidate.example.json --improver improver --out baseline.example.json
+stderr 'output aliases input'
