@@ -185,7 +185,10 @@ func TestGraphWorkflowSuccessPath(t *testing.T) {
 }
 
 func TestGraphProxyProofRejectsReachableUnownedPortMirror(t *testing.T) {
-	cityDir := t.TempDir()
+	cityDir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve test-owned city directory: %v", err)
+	}
 	beadsDir := filepath.Join(cityDir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
 		t.Fatalf("create fixture Beads directory: %v", err)
@@ -1550,6 +1553,69 @@ func graphProcessOwnsListeningPort(pid, port int) bool {
 	return false
 }
 
+func TestGraphPrivateEvidenceServiceEnvBindsFixtureTempAuthority(t *testing.T) {
+	cityRoot := filepath.Join(string(filepath.Separator), "private", "fixture-owned")
+	cityDir := filepath.Join(cityRoot, "city")
+	identity := graphBeadsIdentity{projectID: "fixture-project", database: graphFixtureCityDatabase}
+	for _, inheritedTemp := range []string{"", filepath.Join(string(filepath.Separator), "foreign-temp")} {
+		t.Run("inherited_temp="+inheritedTemp, func(t *testing.T) {
+			cityValues := map[string]string{
+				"PATH":                   "/fixture-tools:/usr/bin:/bin",
+				"TMPDIR":                 inheritedTemp,
+				"HOME":                   "/foreign-home",
+				"GC_DOLT_HOST":           "foreign.invalid",
+				"BEADS_SERVE_TOKEN_FILE": "/foreign-token",
+			}
+			env := graphPrivateEvidenceServiceEnv(cityDir, identity, cityValues)
+			values := parseEnvList(env)
+			if values["TMPDIR"] != cityRoot || !filepath.IsAbs(values["TMPDIR"]) {
+				t.Fatalf("service temp authority = %q, want exact owned root %q", values["TMPDIR"], cityRoot)
+			}
+			if !graphPathWithin(values["TMPDIR"], values["BEADS_DIR"]) || values["BEADS_DIR"] != filepath.Join(cityDir, ".beads") {
+				t.Fatal("service temp authority does not contain its exact Beads directory")
+			}
+			if values["HOME"] != filepath.Join(cityRoot, "bd-home") || values["PATH"] != cityValues["PATH"] || values["BEADS_DOLT_DATABASE"] != identity.database {
+				t.Fatal("service environment lost its owned home, selected tool path, or database")
+			}
+			for _, key := range []string{"GC_DOLT_HOST", "BEADS_SERVE_TOKEN_FILE"} {
+				if _, ok := values[key]; ok {
+					t.Fatalf("service environment inherited ambient %s", key)
+				}
+			}
+		})
+	}
+}
+
+func graphPrivateEvidenceServiceEnv(cityDir string, expected graphBeadsIdentity, cityValues map[string]string) []string {
+	cityRoot := filepath.Dir(cityDir)
+	wantBeadsDir := filepath.Join(cityDir, ".beads")
+	proxyRoot := filepath.Join(wantBeadsDir, proxyendpoint.DefaultRootDirName)
+	return []string{
+		"TMPDIR=" + cityRoot,
+		"HOME=" + filepath.Join(cityRoot, "bd-home"),
+		"XDG_CONFIG_HOME=" + filepath.Join(cityRoot, "bd-config"),
+		"XDG_DATA_HOME=" + filepath.Join(cityRoot, "bd-data"),
+		"BEADS_DIR=" + wantBeadsDir,
+		"BEADS_PROXIED_SERVER_ROOT_PATH=" + proxyRoot,
+		"BEADS_DOLT_DATA_DIR=" + proxyRoot,
+		"BEADS_DOLT_SHARED_SERVER=0",
+		"BEADS_SHARED_SERVER_DIR=",
+		"BEADS_DOLT_PROXIED_SERVER=1",
+		"BEADS_DOLT_SERVER_MODE=",
+		"BEADS_DOLT_SERVER_SOCKET=",
+		"BEADS_PROXIED_SERVER_CONFIG=",
+		"BEADS_PROXIED_SERVER_LOG=",
+		"BEADS_DOLT_DATABASE=" + expected.database,
+		integrationDisposableBeadsDirEnv + "=" + wantBeadsDir,
+		"BEADS_DOLT_AUTO_START=0",
+		"BD_EXPORT_AUTO=false",
+		"GC_BEADS_TRANSPORT=proxied",
+		"GC_BEADS_TARGET=local",
+		"PATH=" + cityValues["PATH"],
+		"GOMAXPROCS=2",
+	}
+}
+
 func startGraphPrivateEvidenceService(t *testing.T, cityEnv []string, cityDir, cityName string, expected graphBeadsIdentity) graphPrivateEvidenceTransport {
 	t.Helper()
 	cityRoot := filepath.Dir(cityDir)
@@ -1576,41 +1642,19 @@ func startGraphPrivateEvidenceService(t *testing.T, cityEnv []string, cityDir, c
 		t.Fatalf("protect disposable graph controller token: %v", err)
 	}
 	proxyRoot := filepath.Join(wantBeadsDir, proxyendpoint.DefaultRootDirName)
-	serviceEnv := []string{
-		"HOME=" + filepath.Join(cityRoot, "bd-home"),
-		"XDG_CONFIG_HOME=" + filepath.Join(cityRoot, "bd-config"),
-		"XDG_DATA_HOME=" + filepath.Join(cityRoot, "bd-data"),
-		"BEADS_DIR=" + wantBeadsDir,
-		"BEADS_PROXIED_SERVER_ROOT_PATH=" + proxyRoot,
-		"BEADS_DOLT_DATA_DIR=" + proxyRoot,
-		"BEADS_DOLT_SHARED_SERVER=0",
-		"BEADS_SHARED_SERVER_DIR=",
-		"BEADS_DOLT_PROXIED_SERVER=1",
-		"BEADS_DOLT_SERVER_MODE=",
-		"BEADS_DOLT_SERVER_SOCKET=",
-		"BEADS_PROXIED_SERVER_CONFIG=",
-		"BEADS_PROXIED_SERVER_LOG=",
-		"BEADS_DOLT_DATABASE=" + expected.database,
-		integrationDisposableBeadsDirEnv + "=" + wantBeadsDir,
-		"BEADS_DOLT_AUTO_START=0",
-		"BD_EXPORT_AUTO=false",
-		"GC_BEADS_TRANSPORT=proxied",
-		"GC_BEADS_TARGET=local",
-		"PATH=" + cityValues["PATH"],
-		"GOMAXPROCS=2",
-	}
+	serviceEnv := graphPrivateEvidenceServiceEnv(cityDir, expected, cityValues)
 	for _, dir := range []string{filepath.Join(cityRoot, "bd-home"), filepath.Join(cityRoot, "bd-config"), filepath.Join(cityRoot, "bd-data")} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			t.Fatalf("create isolated Beads service config directory: %v", err)
 		}
 	}
 	serviceValues := parseEnvList(serviceEnv)
-	for _, name := range []string{"HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "BEADS_DIR", "BEADS_PROXIED_SERVER_ROOT_PATH", "BEADS_DOLT_DATA_DIR", integrationDisposableBeadsDirEnv} {
+	for _, name := range []string{"TMPDIR", "HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "BEADS_DIR", "BEADS_PROXIED_SERVER_ROOT_PATH", "BEADS_DOLT_DATA_DIR", integrationDisposableBeadsDirEnv} {
 		if !filepath.IsAbs(serviceValues[name]) {
 			t.Fatalf("graph Beads service %s must be an absolute fixture path", name)
 		}
 	}
-	if serviceValues["BEADS_DIR"] != wantBeadsDir || serviceValues[integrationDisposableBeadsDirEnv] != wantBeadsDir ||
+	if serviceValues["TMPDIR"] != cityRoot || serviceValues["BEADS_DIR"] != wantBeadsDir || serviceValues[integrationDisposableBeadsDirEnv] != wantBeadsDir ||
 		serviceValues["BEADS_PROXIED_SERVER_ROOT_PATH"] != proxyRoot || serviceValues["BEADS_DOLT_DATA_DIR"] != proxyRoot {
 		t.Fatal("graph Beads service environment does not match its disposable proxied root")
 	}
@@ -1619,7 +1663,7 @@ func startGraphPrivateEvidenceService(t *testing.T, cityEnv []string, cityDir, c
 			t.Fatalf("graph Beads service environment contains %s", name)
 		}
 	}
-	for _, name := range []string{"HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME"} {
+	for _, name := range []string{"TMPDIR", "HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME"} {
 		if !graphPathWithin(cityRoot, serviceValues[name]) {
 			t.Fatalf("graph Beads service %s escaped its disposable fixture root", name)
 		}
