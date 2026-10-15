@@ -365,15 +365,25 @@ jobs:
 
   # Tier A acceptance — smoke-level gate on every PR.
   mac-acceptance:
-    name: Mac / acceptance (Tier A)
+    name: Mac / acceptance (Tier A / ${{ matrix.shard_name }})
     needs:
       - runner-policy
       - gate
     if: needs.gate.outputs.run_smoke == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
-    # Cold ARM run reached the 26m job limit despite both commands passing.
-    # Budget the 20m Tier A and 10m CLI contract deadlines plus setup/cleanup.
+    # The passing proxied-default journey consumed 12m46s before the shared
+    # 20m package budget expired later in Tier A. Run it separately from the
+    # complementary tests; retain 20m per invocation and 40m per job.
+    # The external CLI contract runs once, after the other-tests partition.
     timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard_name: proxied-default
+            command: -run ^TestBeadsProxiedDefault$
+          - shard_name: other-tests
+            command: -skip ^TestBeadsProxiedDefault$
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -392,9 +402,11 @@ jobs:
           # so the whole binary doesn't panic mid-test.
           ACCEPTANCE_TIMEOUT: 20m
           # Record every case and duration against the freshly built CLI.
-          ACCEPTANCE_GO_TEST_FLAGS: -count=1 -json
+          # Required complementary partitions retain all tests and assertions.
+          ACCEPTANCE_GO_TEST_FLAGS: -count=1 -json ${{ matrix.command }}
         run: make test-acceptance
       - name: Run external bd CLI contract
+        if: matrix.shard_name == 'other-tests'
         run: make test-bd-cli-contract
 
   # Unit coverage pass — the Linux `Check` job's equivalent of

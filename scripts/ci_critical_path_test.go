@@ -691,17 +691,41 @@ func TestMacAcceptanceRetainsExternalBdContract(t *testing.T) {
 	if job.TimeoutMinutes.Value != "40" {
 		t.Error("Mac acceptance must retain its existing 40-minute job deadline")
 	}
+	if job.ContinueOnError {
+		t.Error("Both acceptance partitions must remain required")
+	}
+	if job.Strategy.FailFast == nil || *job.Strategy.FailFast {
+		t.Error("Both acceptance partitions must finish even when one fails")
+	}
+	if !slices.Equal(job.Strategy.Matrix.Keys, []string{"include"}) {
+		t.Fatalf("acceptance matrix keys = %v, want only include", job.Strategy.Matrix.Keys)
+	}
+	// These anchored Go selectors are complementary for every root name,
+	// including future tests. No test is removed from the required suite.
+	wantPartitions := []ciCriticalPathMatrixEntry{
+		{ShardName: "proxied-default", Command: "-run ^TestBeadsProxiedDefault$"},
+		{ShardName: "other-tests", Command: "-skip ^TestBeadsProxiedDefault$"},
+	}
+	if !slices.Equal(job.Strategy.Matrix.Include, wantPartitions) {
+		t.Fatalf("acceptance partitions = %v, want %v", job.Strategy.Matrix.Include, wantPartitions)
+	}
 	var runsTierA, runsBDContract bool
 	for _, step := range job.Steps {
 		runsTierA = runsTierA || strings.TrimSpace(step.Run) == "make test-acceptance"
 		runsBDContract = runsBDContract || strings.TrimSpace(step.Run) == "make test-bd-cli-contract"
 		if strings.TrimSpace(step.Run) == "make test-acceptance" {
-			if step.Env["ACCEPTANCE_GO_TEST_FLAGS"] != "-count=1 -json" {
-				t.Error("Mac Tier A must run every test freshly and emit per-test JSON timing")
+			if step.If != "" {
+				t.Error("Tier A must execute in both required partitions")
+			}
+			if step.Env["ACCEPTANCE_GO_TEST_FLAGS"] != "-count=1 -json ${{ matrix.command }}" {
+				t.Error("Mac Tier A must run each partition freshly and emit per-test JSON timing")
 			}
 			if step.Env["ACCEPTANCE_TIMEOUT"] != "20m" {
 				t.Error("Mac Tier A must retain its existing 20-minute package deadline")
 			}
+		}
+		if strings.TrimSpace(step.Run) == "make test-bd-cli-contract" && step.If != "matrix.shard_name == 'other-tests'" {
+			t.Error("The external bd CLI contract must run once after the other-tests partition")
 		}
 	}
 	if !runsTierA {
