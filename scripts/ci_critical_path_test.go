@@ -661,6 +661,30 @@ func TestAcceptanceTargetsSeparateTierAFromExternalBdContracts(t *testing.T) {
 	}
 }
 
+func TestMacGraphIntegrationJobsSelectQualifiedBeads(t *testing.T) {
+	wf := readCriticalPathWorkflow(t, "mac-regression.yml")
+	for _, name := range []string{"mac-integration-packages", "mac-integration-rest", "mac-integration-review-formulas"} {
+		t.Run(name, func(t *testing.T) {
+			job, ok := wf.Jobs[name]
+			if !ok {
+				t.Fatalf("missing integration job %s", name)
+			}
+			setups := 0
+			for _, step := range job.Steps {
+				if step.Uses == "./.github/actions/setup-gascity-macos" {
+					setups++
+					if step.With["qualified-integration-bd"] != "true" {
+						t.Error("HTTP graph integrations must select the existing qualified Beads fixture")
+					}
+				}
+			}
+			if setups != 1 {
+				t.Fatalf("setup count = %d, want one exact fixture selection", setups)
+			}
+		})
+	}
+}
+
 func TestMacAcceptanceRetainsExternalBdContract(t *testing.T) {
 	wf := readCriticalPathWorkflow(t, "mac-regression.yml")
 	job := wf.Jobs["mac-acceptance"]
