@@ -1422,7 +1422,27 @@ func TestNotifyImageRebuildsRunsOnlyInCanonicalRepository(t *testing.T) {
 }
 
 func TestMacQualityRetainsBoundedLintFailureDiagnostics(t *testing.T) {
-	job := readCriticalPathWorkflow(t, "mac-regression.yml").Jobs["mac-quality"]
+	wf := readCriticalPathWorkflow(t, "mac-regression.yml")
+	job := wf.Jobs["mac-quality"]
+	qualitySetups := 0
+	for name, candidate := range wf.Jobs {
+		for _, step := range candidate.Steps {
+			if step.Uses != "./.github/actions/setup-gascity-macos" {
+				continue
+			}
+			if name == "mac-quality" {
+				qualitySetups++
+				if step.With["install-system-deps"] != "false" {
+					t.Error("Mac quality must opt out of unused Homebrew system dependencies")
+				}
+			} else if value := step.With["install-system-deps"]; value != "" && value != "true" {
+				t.Errorf("Mac runtime job %s must retain system dependency setup", name)
+			}
+		}
+	}
+	if qualitySetups != 1 {
+		t.Errorf("Mac quality setup count = %d, want exactly one", qualitySetups)
+	}
 	if job.ContinueOnError {
 		t.Fatal("Mac quality must fail when lint fails")
 	}

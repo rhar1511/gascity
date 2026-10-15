@@ -224,6 +224,9 @@ jobs:
           dolt-version: ${{ env.DOLT_VERSION }}
           bd-version: ${{ env.BD_VERSION }}
           install-claude-cli: "false"
+          # Static quality gates need no runtime Homebrew tools. The pinned
+          # bd/Dolt archives have embedded digests; runtime jobs retain setup.
+          install-system-deps: "false"
       - name: Install tools
         run: make install-tools
       - name: Get golangci-lint + Go toolchain versions for cache key
