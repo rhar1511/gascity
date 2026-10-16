@@ -24,8 +24,8 @@ GITHUB_RUNNERS = {
     "runner_16vcpu": "ubuntu-latest",
     "runner_32vcpu": "ubuntu-latest",
     "runner_macos": "macos-15",
-    # Full lint needs headroom above its 6 GiB Go heap limit. The standard
-    # Intel Mac has 14 GB; keep runtime regression jobs on the 7 GB ARM Mac.
+    # Full lint uses a 12 GiB soft Go memory target on the 14 GB Intel Mac.
+    # Keep runtime regression jobs on the 7 GB ARM Mac.
     "runner_macos_quality": "macos-15-intel",
 }
 

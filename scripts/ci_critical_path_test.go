@@ -1486,6 +1486,9 @@ func TestMacQualityRetainsBoundedLintFailureDiagnostics(t *testing.T) {
 	if lint.ContinueOnError || lint.If != "" {
 		t.Fatal("Mac lint must remain an unconditional required check")
 	}
+	if got := lint.Env["LINT_GOMEMLIMIT"]; got != "12GiB" {
+		t.Errorf("Mac quality lint memory limit = %q, want 12GiB on the 14 GB quality runner", got)
+	}
 	for _, marker := range []string{
 		"set -o pipefail",
 		"make lint LINT_FLAGS=",

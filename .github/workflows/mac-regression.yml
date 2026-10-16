@@ -257,6 +257,9 @@ jobs:
         env:
           GOLANGCI_LINT_CACHE: ${{ github.workspace }}/.cache/golangci-lint
           GOMAXPROCS: "2"
+          # Native samples show GC pressure near the default 6 GiB target.
+          # Use the 14 GB quality runner headroom; retain full scope and deadlines.
+          LINT_GOMEMLIMIT: 12GiB
         # Retain the full gate. The outer deadline includes setup time;
         # forced termination records incomplete profiles and fails the check.
         # Bound concurrent analysis on memory-constrained hosted Macs. The
