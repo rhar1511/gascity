@@ -1123,9 +1123,16 @@ func validateSessionAuthorityMetadata(metadata, current map[string]string) error
 // refused per-bead close: each tears down an entire subtree rather than one bead.
 func (s *Server) humaHandleBeadDelete(ctx context.Context, input *BeadDeleteInput) (*OKResponse, error) {
 	id := input.ID
-	store, current, err := s.resolveBeadOwner(id)
+	store, _, err := s.resolveBeadOwner(id)
 	if err != nil {
 		return nil, err
+	}
+	// Residency may resolve through a list cache without an authoritative
+	// revision. Refresh before the guards and retain the original store for CAS
+	// and cache invalidation.
+	current, err := beads.HandlesFor(store).Live.Get(id)
+	if err != nil {
+		return nil, beadOwnerError(id, err)
 	}
 	if err := rejectPRActionLedgerMutation(current); err != nil {
 		return nil, err
@@ -1148,10 +1155,11 @@ func (s *Server) humaHandleBeadDelete(ctx context.Context, input *BeadDeleteInpu
 		return nil, apierr.SessionConflict.Msg("session request lifecycle metadata is protected")
 	}
 	writer, ok := beads.ConditionalWriterFor(store)
-	if !ok || !beads.InspectConditionalWrites(store).Capable || current.Revision == 0 {
+	revision, present := beads.ObservedRevision(current)
+	if !ok || !beads.InspectConditionalWrites(store).Capable || !present {
 		return nil, apierr.SessionConflict.Msg("bead cannot be deleted without conditional-write protection")
 	}
-	if err := writer.UpdateIfMatch(id, current.Revision, beads.UpdateOpts{Status: &closed}); err != nil {
+	if err := writer.UpdateIfMatch(id, revision, beads.UpdateOpts{Status: &closed}); err != nil {
 		var stale *beads.PreconditionFailedError
 		if errors.As(err, &stale) {
 			return nil, apierr.ConflictConcurrentModify.Msg("conflict: bead " + id + " changed before delete")

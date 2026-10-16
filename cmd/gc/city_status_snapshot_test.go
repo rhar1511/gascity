@@ -193,8 +193,8 @@ func TestLoadStatusSessionSnapshotTimesOut(t *testing.T) {
 // be killed when its budget expires, instead of surviving to
 // bdCommandTimeout the way the pre-fix abandon-the-goroutine pattern let
 // it. Mirrors TestScopedBdStoreForCityKillsChildOnCtxCancel's pidfile
-// pattern, driven through loadStatusSessionSnapshot itself so the whole
-// call site — not just scopedBdStoreForCity in isolation — is covered.
+// pattern, driven through the production snapshot helper. The public wrapper
+// deadline is covered separately by TestLoadStatusSessionSnapshotTimesOut.
 func TestLoadStatusSessionSnapshotKillsBdChildOnTimeout(t *testing.T) {
 	processgrouptest.RequireRealProcessSignals(t)
 	if _, err := exec.LookPath("sh"); err != nil {
@@ -218,14 +218,33 @@ func TestLoadStatusSessionSnapshotKillsBdChildOnTimeout(t *testing.T) {
 
 	realStore := bdStoreForCity(cityDir, cityDir)
 
+	t.Cleanup(func() { processgrouptest.KillFromPIDFile(t, pidFile) })
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
 	var stderr bytes.Buffer
+	loaded := make(chan *sessionBeadSnapshot, 1)
+	go func() {
+		loaded <- loadStatusSessionSnapshotWithContext(ctx, cityDir, &config.City{}, realStore, &stderr)
+	}()
+	// The public wrapper's configured deadline has its own timeout proof.
+	// Here the same production read must cancel an already-running bd child.
+	childPid := waitForNonEmptyFileContent(t, pidFile, 5*time.Second)
 	start := time.Now()
-	_ = loadStatusSessionSnapshot(cityDir, &config.City{}, realStore, &stderr)
+	cancelReadAfterTimeout(t, cancel, statusSessionSnapshotTimeout)
+	select {
+	case snapshot := <-loaded:
+		if snapshot.LoadError() == nil {
+			t.Fatal("snapshot unexpectedly loaded from a sleeping bd stub")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("loadStatusSessionSnapshot blocked more than 10s; want bounded by statusSessionSnapshotTimeout")
+	}
+	if cause := context.Cause(ctx); !errors.Is(cause, context.DeadlineExceeded) {
+		t.Fatalf("read completed before its 200ms cancellation deadline: %v", cause)
+	}
 	if elapsed := time.Since(start); elapsed > 10*time.Second {
 		t.Fatalf("loadStatusSessionSnapshot blocked %s; want bounded by statusSessionSnapshotTimeout", elapsed)
 	}
-
-	childPid := waitForNonEmptyFileContent(t, pidFile, 5*time.Second)
 	for range 50 {
 		if err := exec.Command("kill", "-0", childPid).Run(); err != nil {
 			return // child is gone

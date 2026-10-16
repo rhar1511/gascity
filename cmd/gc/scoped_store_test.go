@@ -377,23 +377,39 @@ func TestScopedBdStoreForCityKillsChildOnCtxCancel(t *testing.T) {
 		"wait\n")
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-	defer cancel()
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
 
 	store, err := scopedBdStoreForCity(ctx, cityDir)
 	if err != nil {
 		t.Fatalf("scopedBdStoreForCity: %v", err)
 	}
 
+	t.Cleanup(func() { processgrouptest.KillFromPIDFile(t, pidFile) })
+	listed := make(chan error, 1)
+	go func() {
+		_, listErr := store.List(beads.ListQuery{AllowScan: true})
+		listed <- listErr
+	}()
+	// The deadline tests cancellation of a running child, not native executable
+	// cold-start latency. Establish child readiness before starting its 200ms.
+	childPid := waitForNonEmptyFileContent(t, pidFile, 5*time.Second)
 	start := time.Now()
-	if _, listErr := store.List(beads.ListQuery{AllowScan: true}); listErr == nil {
-		t.Fatal("List unexpectedly succeeded against a sleeping bd stub")
+	cancelReadAfterTimeout(t, cancel, 200*time.Millisecond)
+	select {
+	case listErr := <-listed:
+		if listErr == nil {
+			t.Fatal("List unexpectedly succeeded against a sleeping bd stub")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("List blocked more than 10s; the 200ms ctx deadline was not honored")
+	}
+	if cause := context.Cause(ctx); !errors.Is(cause, context.DeadlineExceeded) {
+		t.Fatalf("read completed before its 200ms cancellation deadline: %v", cause)
 	}
 	if elapsed := time.Since(start); elapsed > 10*time.Second {
 		t.Fatalf("List blocked %s; the 200ms ctx deadline was not honored", elapsed)
 	}
-
-	childPid := waitForNonEmptyFileContent(t, pidFile, 5*time.Second)
 	for range 50 {
 		if err := exec.Command("kill", "-0", childPid).Run(); err != nil {
 			return // child is gone
@@ -402,6 +418,18 @@ func TestScopedBdStoreForCityKillsChildOnCtxCancel(t *testing.T) {
 	}
 	_ = exec.Command("kill", "-KILL", childPid).Run()
 	t.Fatalf("bd child process %s survived scopedBdStoreForCity's ctx cancellation", childPid)
+}
+
+// cancelReadAfterTimeout starts the asserted cancellation budget after the
+// process fixture is ready, keeping OS startup outside the deadline under test.
+func cancelReadAfterTimeout(t *testing.T, cancel context.CancelCauseFunc, timeout time.Duration) {
+	t.Helper()
+	deadlineCtx, cancelDeadline := context.WithTimeout(context.Background(), timeout)
+	stop := context.AfterFunc(deadlineCtx, func() { cancel(context.Cause(deadlineCtx)) })
+	t.Cleanup(func() {
+		stop()
+		cancelDeadline()
+	})
 }
 
 func waitForNonEmptyFileContent(t *testing.T, path string, timeout time.Duration) string {

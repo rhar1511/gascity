@@ -36,6 +36,8 @@ import (
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/test/integration/runisolation"
 	"github.com/gastownhall/gascity/test/tmuxtest"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 )
 
@@ -875,7 +877,7 @@ func setupWorkflowCityWithPrivateEvidence(t *testing.T, config func(string) stri
 	}
 	if err := json.Unmarshal([]byte(strings.TrimSpace(reloadOut)), &reload); err != nil ||
 		reload.SchemaVersion != "1" || !reload.OK || reload.Command != "reload" || reload.Action != "reload" ||
-		!graphFixturePathEquals(reload.CityPath, cityDir) ||
+		!graphFixtureReloadPathEquals(reload.CityPath, cityDir) ||
 		(reload.Outcome != "applied" && reload.Outcome != "no_change") || strings.TrimSpace(reload.Revision) == "" {
 		t.Fatalf("controller did not confirm loading the private-evidence configuration: output=%q", strings.TrimSpace(reloadOut))
 	}
@@ -1418,6 +1420,43 @@ func graphFixturePathIsReal(path string) bool {
 	}
 	resolved, err := filepath.EvalSymlinks(filepath.Clean(path))
 	return err == nil && filepath.Clean(resolved) == filepath.Clean(path)
+}
+
+// Reload JSON names the city using GC's canonical spelling. Derive that
+// spelling only from the existing real fixture root; never normalize or adopt
+// an arbitrary response path. Proxy/process guards retain strict physical paths.
+func graphFixtureReloadPathEquals(path, expected string) bool {
+	return graphFixturePathIsReal(expected) && path == pathutil.NormalizePathForCompare(expected)
+}
+
+func TestGraphFixtureReloadPathMatchesOnlyCanonicalBoundCity(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	canonical := pathutil.NormalizePathForCompare(root)
+	assert.True(t, graphFixtureReloadPathEquals(canonical, root))
+	assert.True(t, graphFixturePathEquals(root, root), "physical guard unchanged")
+	t.Logf("controller_alias_distinct=%t", canonical != root)
+	if canonical != root {
+		assert.False(t, graphFixturePathEquals(canonical, root), "original reload predicate rejects the controller alias")
+	}
+	alias := root + "-alias"
+	require.NoError(t, os.Symlink(root, alias))
+	t.Cleanup(func() { require.NoError(t, os.Remove(alias)) })
+	foreign, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	for _, tc := range []struct{ name, response, expected string }{
+		{"relative response", ".", root},
+		{"foreign response", pathutil.NormalizePathForCompare(foreign), root},
+		{"arbitrary same-inode alias", alias, root},
+		{"symlink bound root", canonical, alias},
+		{"missing bound root", canonical, filepath.Join(root, "missing")},
+		{"relative bound root", canonical, "."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.False(t, graphFixtureReloadPathEquals(tc.response, tc.expected))
+		})
+	}
+	assert.False(t, graphFixturePathEquals(alias, root), "strict proxy/process authority must still reject aliases")
 }
 
 func graphFixturePathEquals(path, expected string) bool {

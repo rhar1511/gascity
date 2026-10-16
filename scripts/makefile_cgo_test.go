@@ -4,8 +4,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestMakefileLinuxCGOPathsIncludeExistingSystemLibLayouts(t *testing.T) {
@@ -416,14 +420,98 @@ func TestMakefileMacCoveragePreservesSelectionWithUnitParallelism(t *testing.T) 
 		t.Fatal("Makefile has no Mac coverage target with Darwin compile prerequisite")
 	}
 	recipe, _, _ := strings.Cut(tail, "\n\n")
-	want := "\t$(TEST_ENV) GC_FAST_UNIT=1 go test -p=4 -timeout 10m -coverprofile=coverage.txt $(UNIT_COVER_PKGS_NONCMDGC)"
-	if recipe != want {
-		t.Errorf("Mac coverage recipe = %q, want %q", recipe, want)
-	}
+	assert.Contains(t, recipe, "$(TEST_ENV) GC_FAST_UNIT=1 go test -p=4 -timeout 10m -coverprofile=coverage.txt $(MAC_COVER_PKGS)")
+	assert.Contains(t, recipe, "invalid MAC_COVER_GROUP")
+	assert.Contains(t, recipe, "empty Mac coverage group")
 	if !strings.Contains(string(body), "scripts/go-test-observable test-mac -- -p=4 -count=1 -timeout 15m $(MAC_UNIT_PKGS)") {
 		t.Error("Mac coverage parallelism must match the existing unit sweep")
 	}
 	if got := readCriticalPathWorkflow(t, "mac-regression.yml").Jobs["mac-cover"].TimeoutMinutes.Value; got != "25" {
 		t.Errorf("Mac coverage job timeout = %q, want unchanged 25m", got)
 	}
+}
+
+// These bounded real-Make controls retain process debt through the existing
+// testCommand boundary. Owner gp-olwhg.9.8; review by 2026-11-15. Fake Go only
+// records argv: this proves package accounting, not native coverage runtime.
+func TestMakefileMacCoveragePartitionsEverySelectedPackageOnce(t *testing.T) {
+	const prefix = "github.com/gastownhall/gascity/"
+	all := []string{prefix + "internal/api", prefix + "future", prefix + "scripts", prefix + "scripts/future", prefix + "test", prefix + "test/future"}
+	var combined []string
+	for _, group := range []string{"all", "other", "scripts-tests"} {
+		t.Run(group, func(t *testing.T) {
+			args, fast, err := runMacCoverageMakeFixture(t, group, all)
+			require.NoError(t, err)
+			assert.Equal(t, "1", fast)
+			require.GreaterOrEqual(t, len(args), 5)
+			assert.Equal(t, []string{"test", "-p=4", "-timeout", "10m", "-coverprofile=coverage.txt"}, args[:5])
+			want := all
+			switch group {
+			case "other":
+				want = all[:2]
+			case "scripts-tests":
+				want = all[2:]
+			}
+			assert.Equal(t, want, args[5:])
+			if group != "all" {
+				combined = append(combined, args[5:]...)
+			}
+		})
+	}
+	slices.Sort(combined)
+	want := slices.Clone(all)
+	slices.Sort(want)
+	assert.Equal(t, want, combined, "all selected packages exactly once, including future packages")
+}
+
+func TestMakefileMacCoverageRefusesUnknownOrEmptyGroups(t *testing.T) {
+	for _, tc := range []struct {
+		name, group string
+		packages    []string
+	}{
+		{"unknown", "foreign", []string{"github.com/gastownhall/gascity/internal/api"}},
+		{"empty other", "other", []string{"github.com/gastownhall/gascity/scripts"}},
+		{"empty scripts", "scripts-tests", []string{"github.com/gastownhall/gascity/internal/api"}},
+		{"empty all", "all", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args, _, err := runMacCoverageMakeFixture(t, tc.group, tc.packages)
+			assert.Error(t, err)
+			assert.Empty(t, args, "empty selection must not fall back to current package")
+		})
+	}
+}
+
+func runMacCoverageMakeFixture(t *testing.T, group string, packages []string) ([]string, string, error) {
+	t.Helper()
+	tmp := t.TempDir()
+	bin := filepath.Join(tmp, "bin")
+	require.NoError(t, os.Mkdir(bin, 0o755))
+	writeExecutable(t, filepath.Join(bin, "uname"), "#!/bin/sh\necho Fixture\n")
+	writeExecutable(t, filepath.Join(bin, "gc"), "#!/bin/sh\nexit 99\n")
+	writeExecutable(t, filepath.Join(bin, "go"), `#!/bin/sh
+set -eu
+case "$1" in
+  env) printf '%s\n' "$HOME" ;;
+  test) printf '%s\n' "$@" > "$COVER_ARGS"; printf '%s' "${GC_FAST_UNIT:-}" > "$COVER_FAST" ;;
+  *) exit 99 ;;
+esac
+`)
+	argsPath := filepath.Join(tmp, "args")
+	fastPath := filepath.Join(tmp, "fast")
+	cmd := makeCommand("--no-print-directory", "-f", filepath.Join(repoRoot(t), "Makefile"), "-o", "test-fsys-darwin-compile", "test-cover-mac", "MAC_COVER_GROUP="+group, "UNIT_COVER_PKGS_NONCMDGC="+strings.Join(packages, " "), "TEST_ENV=env", "CGO_ENABLED=0")
+	cmd.Dir = tmp
+	cmd.Env = append(filteredMakefileCGOTestEnv(), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"), "HOME="+tmp, "COVER_ARGS="+argsPath, "COVER_FAST="+fastPath)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Logf("coverage make refused: %s", output)
+	}
+	args, readErr := os.ReadFile(argsPath)
+	if readErr != nil {
+		require.ErrorIs(t, readErr, os.ErrNotExist)
+		return nil, "", err
+	}
+	fast, readErr := os.ReadFile(fastPath)
+	require.NoError(t, readErr)
+	return strings.Fields(string(args)), string(fast), err
 }
