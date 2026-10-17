@@ -33,6 +33,8 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/proxyendpoint"
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/test/integration/runisolation"
 	"github.com/gastownhall/gascity/test/tmuxtest"
@@ -374,6 +376,25 @@ func TestGraphFixtureBDLauncherAcceptsOnlyBoundPathSpellings(t *testing.T) {
 				t.Fatalf("conflicting input reached recorder: err=%v out=%q", err, out)
 			}
 		})
+	}
+}
+
+func assertGraphFixturePinsBoundBDLauncher(t *testing.T, cityDir string) {
+	t.Helper()
+	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("load graph fixture config: %v", err)
+	}
+	want := filepath.Join(filepath.Dir(cityDir), "fixture-bin", "bd")
+	if got := cfg.Workspace.Env["BD_BIN"]; got != want {
+		t.Fatalf("graph fixture workspace BD_BIN = %q, want bound launcher %q", got, want)
+	}
+	info, err := os.Lstat(want)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o111 == 0 {
+		t.Fatal("graph fixture bd pin must be a regular executable owned by its fixture")
+	}
+	if resolved, err := filepath.EvalSymlinks(want); err != nil || resolved != want || !graphPathWithin(filepath.Dir(cityDir), want) {
+		t.Fatal("graph fixture bd pin must retain its exact physical fixture path")
 	}
 }
 
@@ -808,6 +829,9 @@ func setupWorkflowCityWithPrivateEvidence(t *testing.T, config func(string) stri
 	t.Cleanup(cleanupFixture)
 
 	cityToml := config(cityName)
+	// Controller store calls must use the same authority-restoring launcher
+	// as PATH-based fixture commands.
+	cityToml += fmt.Sprintf("\n[workspace.env]\nBD_BIN = %q\n", launcher)
 	configPath := filepath.Join(t.TempDir(), "graph-workflow.toml")
 	if err := os.WriteFile(configPath, []byte(cityToml), 0o644); err != nil {
 		t.Fatalf("writing graph workflow config: %v", err)
@@ -824,6 +848,7 @@ func setupWorkflowCityWithPrivateEvidence(t *testing.T, config func(string) stri
 	if err != nil {
 		t.Fatalf("gc init --file failed: %v\noutput: %s", err, out)
 	}
+	assertGraphFixturePinsBoundBDLauncher(t, cityDir)
 	identity := readGraphFixtureBeadsIdentity(t, cityDir)
 	if identity.database != graphFixtureCityDatabase {
 		t.Fatalf("graph fixture database = %q, want the init-bound city database %q", identity.database, graphFixtureCityDatabase)

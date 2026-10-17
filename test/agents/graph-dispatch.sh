@@ -9,6 +9,12 @@ set -euo pipefail
 cd "$GC_CITY"
 export BEADS_DIR="$GC_CITY/.beads"
 
+# gc hook's generated work query invokes bare bd in child shells.
+# Keep those calls on the same pinned launcher as direct worker commands.
+case "${BD_BIN:-}" in
+    */*) export PATH="${BD_BIN%/*}:$PATH" ;;
+esac
+
 MODE="${GC_GRAPH_MODE:-success}"
 REPORT_FILE="$GC_CITY/graph-workflow-steps.log"
 TRACE_FILE="$GC_CITY/graph-workflow-trace.log"
@@ -134,13 +140,13 @@ close_with_result() {
     # outcomes (they read it back via show_outcome), so failing silently
     # is safer than failing loudly.
     if [ "$outcome" = "pass" ]; then
-        if ! bd update "$bead_id" "${workspace_args[@]}" --set-metadata "gc.outcome=pass" --status closed 2>/dev/null; then
+        if ! "${BD_BIN:-bd}" update "$bead_id" "${workspace_args[@]}" --set-metadata "gc.outcome=pass" --status closed 2>/dev/null; then
             trace "close-rejected bead=$bead_id outcome=$outcome (likely already closed by controller)"
         fi
         return 0
     fi
 
-    if ! bd update "$bead_id" \
+    if ! "${BD_BIN:-bd}" update "$bead_id" \
         "${workspace_args[@]}" \
         --set-metadata "gc.outcome=fail" \
         --set-metadata "gc.failure_class=$failure_class" \
@@ -200,34 +206,34 @@ set_formula_verdict() {
             if ref_matches_suffix_list "$ref" "${GC_GRAPH_ITERATE_VERDICT_SUFFIXES:-}"; then
                 verdict="iterate"
             fi
-            bd update "$bead_id" --set-metadata "review.verdict=$verdict" >/dev/null
+            "${BD_BIN:-bd}" update "$bead_id" --set-metadata "review.verdict=$verdict" >/dev/null
             trace "set-verdict bead=$bead_id key=review.verdict value=$verdict"
             ;;
         *.apply-design-changes*)
-            bd update "$bead_id" --set-metadata "design_review.verdict=done" >/dev/null
+            "${BD_BIN:-bd}" update "$bead_id" --set-metadata "design_review.verdict=done" >/dev/null
             trace "set-verdict bead=$bead_id key=design_review.verdict value=done"
             ;;
         *.apply-code-fixes*)
-            bd update "$bead_id" --set-metadata "code_review.verdict=done" >/dev/null
+            "${BD_BIN:-bd}" update "$bead_id" --set-metadata "code_review.verdict=done" >/dev/null
             trace "set-verdict bead=$bead_id key=code_review.verdict value=done"
             ;;
     esac
 }
 
 show_status() {
-    timeout 10 bd show --json "$1" | json_payload | jq_bead '.status'
+    timeout 10 "${BD_BIN:-bd}" show --json "$1" | json_payload | jq_bead '.status'
 }
 
 show_outcome() {
-    timeout 10 bd show --json "$1" | json_payload | jq_bead '.metadata["gc.outcome"]'
+    timeout 10 "${BD_BIN:-bd}" show --json "$1" | json_payload | jq_bead '.metadata["gc.outcome"]'
 }
 
 show_assignee() {
-    timeout 10 bd show --json "$1" | json_payload | jq_bead '.assignee'
+    timeout 10 "${BD_BIN:-bd}" show --json "$1" | json_payload | jq_bead '.assignee'
 }
 
 refresh_bead_json() {
-    timeout 10 bd show --json "$1" 2>/dev/null
+    timeout 10 "${BD_BIN:-bd}" show --json "$1" 2>/dev/null
 }
 
 owned_status_ok() {
@@ -303,9 +309,9 @@ is_currently_blocked() {
     local blocked_json=""
 
     if [ -n "$root_id" ]; then
-        blocked_json=$(timeout 10 bd blocked --json --parent "$root_id" 2>/dev/null || true)
+        blocked_json=$(timeout 10 "${BD_BIN:-bd}" blocked --json --parent "$root_id" 2>/dev/null || true)
     else
-        blocked_json=$(timeout 10 bd blocked --json 2>/dev/null || true)
+        blocked_json=$(timeout 10 "${BD_BIN:-bd}" blocked --json 2>/dev/null || true)
     fi
 
     printf '%s\n' "$blocked_json" | json_payload | jq -e --arg id "$bead_id" '
@@ -321,7 +327,7 @@ fetch_ready_queue() {
     # dispatcher. Read that assigned queue directly so empty polls do not spend
     # their budget in gc hook/native-store preflight. Keep the full hook path
     # available for tests that explicitly need generic routed work.
-    if ready=$(timeout 10 bd ready --assignee="$ASSIGNEE" --json --limit=0 2>/dev/null); then
+    if ready=$(timeout 10 "${BD_BIN:-bd}" ready --assignee="$ASSIGNEE" --json --limit=0 2>/dev/null); then
         if printf '%s\n' "$ready" | json_payload | jq -e 'if type == "array" then length > 0 else . != null end' >/dev/null 2>&1; then
             printf '%s\n' "$ready"
             return 0
@@ -340,7 +346,7 @@ fetch_in_progress_queue() {
     fi
     # Claims belong to the canonical actor (alias or session bead ID), not
     # necessarily the provider-facing runtime session name.
-    timeout 10 bd list --assignee "$BEADS_ACTOR" --status=in_progress --json 2>/dev/null
+    timeout 10 "${BD_BIN:-bd}" list --assignee "$BEADS_ACTOR" --status=in_progress --json 2>/dev/null
 }
 
 select_candidate_from_queue() {
@@ -476,7 +482,7 @@ while true; do
     claimed_here="false"
     if [ "$is_claimable_work" = "true" ] && [ "$owns_bead" != "true" ]; then
         ack_drain_if_idle || true
-        if ! claimed=$(timeout 10 bd update "$bead_id" --claim --json 2>/dev/null); then
+        if ! claimed=$(timeout 10 "${BD_BIN:-bd}" update "$bead_id" --claim --json 2>/dev/null); then
             trace "claim-miss bead=$bead_id assignee=$ASSIGNEE"
             sleep 0.2
             continue
@@ -494,7 +500,7 @@ while true; do
     target_id=""
     work_dir=""
     if [ -n "$root_id" ]; then
-        if ! root_json=$(timeout 10 bd show --json "$root_id" 2>/dev/null); then
+        if ! root_json=$(timeout 10 "${BD_BIN:-bd}" show --json "$root_id" 2>/dev/null); then
             trace "root-show-failed bead=$bead_id root=$root_id"
             sleep 1
             continue
@@ -502,7 +508,7 @@ while true; do
         target_id=$(printf '%s\n' "$root_json" | json_payload | jq_bead '.metadata["gc.input_convoy_id"]')
     fi
     if [ -n "$target_id" ]; then
-        if ! target_json=$(timeout 10 bd show --json "$target_id" 2>/dev/null); then
+        if ! target_json=$(timeout 10 "${BD_BIN:-bd}" show --json "$target_id" 2>/dev/null); then
             trace "target-show-failed bead=$bead_id target=$target_id"
             sleep 1
             continue
@@ -513,7 +519,7 @@ while true; do
     if is_currently_blocked "$bead_id" "$root_id"; then
         trace "skip-blocked bead=$bead_id ref=$ref assignee=$ASSIGNEE"
         if [ "$is_claimable_work" = "true" ]; then
-            if ! timeout 10 bd update "$bead_id" --assignee "" --status open >/dev/null 2>&1; then
+            if ! timeout 10 "${BD_BIN:-bd}" update "$bead_id" --assignee "" --status open >/dev/null 2>&1; then
                 trace "release-failed bead=$bead_id ref=$ref"
             else
                 trace "released bead=$bead_id ref=$ref"
@@ -599,7 +605,7 @@ while true; do
     # false positives. Teardown beads must still run after body failure.
     sibling_hard_fail="false"
     if [ "$kind" != "cleanup" ] && [ -n "$root_id" ]; then
-        if sibling_json=$(timeout 10 bd list --all --limit=0 --json 2>/dev/null); then
+        if sibling_json=$(timeout 10 "${BD_BIN:-bd}" list --all --limit=0 --json 2>/dev/null); then
             if printf '%s\n' "$sibling_json" | json_payload | jq -e \
                 --arg root "$root_id" --arg self "$bead_id" '
                     if type == "array" then
@@ -616,7 +622,7 @@ while true; do
     fi
     if [ "$sibling_hard_fail" = "true" ] && [[ "$ref" != *.cleanup-worktree* ]]; then
         trace "skip-sibling-hard-fail bead=$bead_id ref=$ref root=$root_id (sibling has outcome=fail class=hard; closing self as skipped)"
-        bd update "$bead_id" --set-metadata "gc.outcome=skipped" --status closed 2>/dev/null || \
+        "${BD_BIN:-bd}" update "$bead_id" --set-metadata "gc.outcome=skipped" --status closed 2>/dev/null || \
             trace "skip-close-failed bead=$bead_id ref=$ref"
         continue
     fi
@@ -626,7 +632,7 @@ while true; do
             if [ -z "$work_dir" ]; then
                 work_dir="$GC_CITY/worktrees/$target_id"
                 setup_graph_workspace "$work_dir"
-                bd update "$target_id" --set-metadata "work_dir=$work_dir"
+                "${BD_BIN:-bd}" update "$target_id" --set-metadata "work_dir=$work_dir"
                 trace "workspace-setup target=$target_id work_dir=$work_dir"
             fi
             ;;
@@ -651,7 +657,7 @@ while true; do
             printf 'implemented\n' > "$work_dir/implemented.txt"
             ;;
         *.submit*)
-            bd update "$target_id" --set-metadata "submitted=true"
+            "${BD_BIN:-bd}" update "$target_id" --set-metadata "submitted=true"
             trace "submitted target=$target_id"
             ;;
         *.cleanup-worktree*)
@@ -659,7 +665,7 @@ while true; do
                 rm -rf "$work_dir"
                 trace "cleanup removed work_dir=$work_dir"
             fi
-            bd update "$target_id" --unset-metadata work_dir
+            "${BD_BIN:-bd}" update "$target_id" --unset-metadata work_dir
             trace "cleanup unset work_dir target=$target_id"
             ;;
     esac

@@ -74,6 +74,10 @@ func TestProxyRefusesOutsideDisposableBeadsDirectory(t *testing.T) {
 	if code := run([]string{"init"}, &stdout, &stderr); code == 0 {
 		t.Fatal("run(init) succeeded with a Beads directory outside the disposable fixture")
 	}
+	const wantRefusal = "bd shim: refusing real bd outside the disposable fixture: beads directory does not match fixture\n"
+	if got := stderr.String(); got != wantRefusal {
+		t.Fatalf("run(init) refusal = %q, want %q", got, wantRefusal)
+	}
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
 		t.Fatalf("real bd marker exists after refusing unsafe target; stat err=%v", err)
 	}
