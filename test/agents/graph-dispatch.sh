@@ -140,14 +140,14 @@ close_with_result() {
     # outcomes (they read it back via show_outcome), so failing silently
     # is safer than failing loudly.
     if [ "$outcome" = "pass" ]; then
-        if ! "${BD_BIN:-bd}" update "$bead_id" "${workspace_args[@]}" --set-metadata "gc.outcome=pass" --status closed 2>/dev/null; then
+        if ! "${BD_BIN:-bd}" update "$bead_id" ${workspace_args[@]+"${workspace_args[@]}"} --set-metadata "gc.outcome=pass" --status closed 2>/dev/null; then
             trace "close-rejected bead=$bead_id outcome=$outcome (likely already closed by controller)"
         fi
         return 0
     fi
 
     if ! "${BD_BIN:-bd}" update "$bead_id" \
-        "${workspace_args[@]}" \
+        ${workspace_args[@]+"${workspace_args[@]}"} \
         --set-metadata "gc.outcome=fail" \
         --set-metadata "gc.failure_class=$failure_class" \
         --set-metadata "gc.failure_reason=$failure_reason" \

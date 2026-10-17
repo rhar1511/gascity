@@ -1913,9 +1913,7 @@ func TestIsolatedCommandEnvServiceManagersUnavailable(t *testing.T) {
 	} {
 		t.Run(tc.name+"/"+strings.Join(tc.args, "_"), func(t *testing.T) {
 			shim := filepath.Join(filepath.Dir(parseEnvList(env)["GC_HOME"]), "bin", tc.name)
-			cmd := exec.Command(shim, tc.args...)
-			cmd.Env = env
-			out, err := cmd.CombinedOutput()
+			out, err := runCommand("", env, integrationGCCommandTimeout, shim, tc.args...)
 			var exitErr *exec.ExitError
 			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
 				t.Fatalf("isolated %s %v: want unavailable exit 1, got %v: %s", tc.name, tc.args, err, out)

@@ -72,7 +72,10 @@ trace() { :; }
 	for _, outcome := range []string{"pass", "fail"} {
 		for _, workspace := range []string{"", "/tmp/actual worker workspace"} {
 			t.Run(outcome+workspace, func(t *testing.T) {
-				out, err := runGraphHarnessFunction(ledger+fn+"\nclose_with_result attempt \"$OUTCOME\" hard injected\n", []string{
+				// Match the shipped macOS interpreter even when PATH selects newer Bash.
+				source := "exec /bin/bash -s <<'GRAPH_CLOSE_HARNESS'\nset -euo pipefail\n" +
+					ledger + fn + "\nclose_with_result attempt \"$OUTCOME\" hard injected\nGRAPH_CLOSE_HARNESS\n"
+				out, err := runGraphHarnessFunction(source, []string{
 					"OUTCOME=" + outcome, "work_dir=" + workspace,
 				})
 				if err != nil {
