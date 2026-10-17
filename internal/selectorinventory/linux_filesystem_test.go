@@ -447,3 +447,138 @@ func TestLinuxFilesystemRegularReadCapsBytesAtBothLimits(t *testing.T) {
 		})
 	}
 }
+
+func TestLinuxFilesystemPathRevalidationAllowsAncestorSiblingCreation(t *testing.T) {
+	dir := t.TempDir()
+	ancestor := filepath.Join(dir, "source")
+	root := filepath.Join(ancestor, "units")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	opened, err := openLinuxTreePathNoFollow(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer opened.close()
+	// Leave the sibling present: ancestor link count deterministically changes.
+	if err := os.Mkdir(filepath.Join(ancestor, "unrelated"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := opened.revalidate(); err != nil {
+		t.Fatalf("unchanged selected root rejected after ancestor sibling creation: %v", err)
+	}
+}
+
+func TestLinuxFilesystemPathRevalidationRejectsSelectedRootContentChange(t *testing.T) {
+	root := t.TempDir()
+	opened, err := openLinuxTreePathNoFollow(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer opened.close()
+	if err := os.Mkdir(filepath.Join(root, "new-child"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := opened.revalidate(); !errors.Is(err, errLinuxTreeRace) {
+		t.Fatalf("selected root content change returned %v, want race", err)
+	}
+}
+
+func TestLinuxFilesystemPathRevalidationRejectsAncestorPermissionChange(t *testing.T) {
+	dir := t.TempDir()
+	ancestor := filepath.Join(dir, "source")
+	root := filepath.Join(ancestor, "units")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	opened, err := openLinuxTreePathNoFollow(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer opened.close()
+	if err := os.Chmod(ancestor, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := opened.revalidate(); err == nil {
+		t.Fatal("ancestor permission change accepted")
+	}
+}
+
+func TestLinuxFilesystemPathRevalidationRejectsAncestorSymlinkReplacement(t *testing.T) {
+	dir := t.TempDir()
+	ancestor := filepath.Join(dir, "source")
+	root := filepath.Join(ancestor, "units")
+	backup := filepath.Join(dir, "old-source")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	opened, err := openLinuxTreePathNoFollow(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer opened.close()
+	if err := os.Rename(ancestor, backup); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(backup, ancestor); err != nil {
+		t.Fatal(err)
+	}
+	if err := opened.revalidate(); err == nil {
+		t.Fatal("ancestor symlink replacement accepted")
+	}
+}
+
+func TestLinuxFilesystemAncestorComparisonPreservesBoundaryChanges(t *testing.T) {
+	base := unix.Stat_t{Dev: 1, Ino: 2, Mode: unix.S_IFDIR | 0o700, Uid: 3, Gid: 4, Rdev: 5, Nlink: 2, Size: 4096}
+	tests := []struct {
+		name   string
+		mutate func(*unix.Stat_t)
+	}{
+		{"device", func(s *unix.Stat_t) { s.Dev++ }},
+		{"inode", func(s *unix.Stat_t) { s.Ino++ }},
+		{"permissions", func(s *unix.Stat_t) { s.Mode ^= 0o010 }},
+		{"type", func(s *unix.Stat_t) { s.Mode = unix.S_IFREG | 0o700 }},
+		{"owner", func(s *unix.Stat_t) { s.Uid++ }},
+		{"group", func(s *unix.Stat_t) { s.Gid++ }},
+		{"device identity", func(s *unix.Stat_t) { s.Rdev++ }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			changed := base
+			test.mutate(&changed)
+			if sameLinuxTreeAncestor(base, changed) {
+				t.Fatal("ancestor boundary mutation accepted")
+			}
+			if sameLinuxTreeVersion(base, changed) {
+				t.Fatal("full selected-object mutation accepted")
+			}
+		})
+	}
+}
+
+func TestLinuxFilesystemAncestorContentComparisonKeepsSelectedObjectsStrict(t *testing.T) {
+	base := unix.Stat_t{Dev: 1, Ino: 2, Mode: unix.S_IFDIR | 0o700, Uid: 3, Gid: 4, Rdev: 5, Nlink: 2, Size: 4096}
+	tests := []struct {
+		name   string
+		mutate func(*unix.Stat_t)
+	}{
+		{"link count", func(s *unix.Stat_t) { s.Nlink++ }},
+		{"size", func(s *unix.Stat_t) { s.Size++ }},
+		{"mtime seconds", func(s *unix.Stat_t) { s.Mtim.Sec++ }},
+		{"mtime nanoseconds", func(s *unix.Stat_t) { s.Mtim.Nsec++ }},
+		{"ctime seconds", func(s *unix.Stat_t) { s.Ctim.Sec++ }},
+		{"ctime nanoseconds", func(s *unix.Stat_t) { s.Ctim.Nsec++ }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			changed := base
+			test.mutate(&changed)
+			if !sameLinuxTreeAncestor(base, changed) {
+				t.Fatal("ancestor content mutation rejected")
+			}
+			if sameLinuxTreeVersion(base, changed) {
+				t.Fatal("selected root/descendant content mutation accepted")
+			}
+		})
+	}
+}
