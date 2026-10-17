@@ -5771,10 +5771,10 @@ esac
 exit 0
 `)
 
-	// LATENCY_WARN_S=0 makes the latency check fire on every run because
-	// PROBE_END - PROBE_START >= 0 always. That guarantees the advisory
-	// mail path executes regardless of probe duration.
-	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, "GC_DOCTOR_LATENCY_WARN_S=0")
+	writeDogBackwardClock(t, binDir)
+
+	// Force a connection warning independently of clock movement.
+	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, "GC_DOCTOR_CONN_WARN_PCT=0")
 	if !strings.Contains(out, "server: ok") {
 		t.Fatalf("doctor should report server ok when probe succeeds, output:\n%s", out)
 	}
@@ -5783,7 +5783,7 @@ exit 0
 		t.Fatalf("read gc log: %v", err)
 	}
 	if !strings.Contains(string(gcLog), "Dolt health advisory") {
-		t.Fatalf("advisory mail did not fire; latency-WARN should have triggered, log:\n%s", gcLog)
+		t.Fatalf("advisory mail did not fire; connection-WARN should have triggered, log:\n%s", gcLog)
 	}
 	if !strings.Contains(string(gcLog), "mail send human -s Dolt health advisory [MEDIUM]") {
 		t.Fatalf("advisory escalation must use the generic default recipient, log:\n%s", gcLog)
@@ -5812,6 +5812,24 @@ case "$*" in
     ;;
 esac
 exit 0
+`)
+}
+
+// writeDogBackwardClock makes mailbox tests independent of wall-clock progress.
+// The real latency policy is covered separately in test/dolt/latency_test.sh.
+func writeDogBackwardClock(t *testing.T, binDir string) {
+	t.Helper()
+	writeExecutable(t, filepath.Join(binDir, "date"), `#!/bin/sh
+if [ "$#" -ne 1 ] || [ "$1" != "+%s%3N" ]; then
+    printf 'unexpected controlled date arguments\n' >&2
+    exit 1
+fi
+if [ -e "$0.tick" ]; then
+    printf '1700000000000\n'
+else
+    : > "$0.tick"
+    printf '1700000000100\n'
+fi
 `)
 }
 
@@ -5845,9 +5863,10 @@ func TestDoctorScriptAdvisorySweepPrecedesFreshSend(t *testing.T) {
 	binDir := t.TempDir()
 	gcLogPath := writeDogFakeGC(t, binDir)
 	writeDogHealthyFakeDolt(t, binDir)
+	writeDogBackwardClock(t, binDir)
 
-	// LATENCY_WARN_S=0 forces the advisory path on every run.
-	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, "GC_DOCTOR_LATENCY_WARN_S=0")
+	// A zero connection threshold forces the advisory even when time moves back.
+	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, "GC_DOCTOR_CONN_WARN_PCT=0")
 	if !strings.Contains(out, "server: ok") {
 		t.Fatalf("doctor should report server ok when probe succeeds, output:\n%s", out)
 	}
@@ -5855,10 +5874,10 @@ func TestDoctorScriptAdvisorySweepPrecedesFreshSend(t *testing.T) {
 	sweepAt := strings.Index(gcLog, dogAdvisorySweepInvocation)
 	sendAt := strings.Index(gcLog, "mail send human -s Dolt health advisory [MEDIUM]")
 	if sweepAt < 0 {
-		t.Fatalf("advisory send did not sweep superseded advisories, log:\n%s", gcLog)
+		t.Fatalf("advisory send did not sweep superseded advisories, log:\n%s\nscript output:\n%s", gcLog, out)
 	}
 	if sendAt < 0 {
-		t.Fatalf("advisory mail did not fire; latency-WARN should have triggered, log:\n%s", gcLog)
+		t.Fatalf("advisory mail did not fire; connection-WARN should have triggered, log:\n%s", gcLog)
 	}
 	if sweepAt > sendAt {
 		t.Fatalf("sweep must precede the fresh send (or it would archive the new advisory), log:\n%s", gcLog)
@@ -5878,6 +5897,7 @@ func TestDoctorScriptHealthySweepsRecordedAdvisory(t *testing.T) {
 	binDir := t.TempDir()
 	gcLogPath := writeDogFakeGC(t, binDir)
 	writeDogHealthyFakeDolt(t, binDir)
+	writeDogBackwardClock(t, binDir)
 
 	statePath := filepath.Join(t.TempDir(), "doctor-advisory-state")
 	if err := os.WriteFile(statePath, []byte("latency \n"), 0o600); err != nil {
@@ -5914,6 +5934,7 @@ func TestDoctorScriptSteadyHealthySkipsSweep(t *testing.T) {
 	binDir := t.TempDir()
 	gcLogPath := writeDogFakeGC(t, binDir)
 	writeDogHealthyFakeDolt(t, binDir)
+	writeDogBackwardClock(t, binDir)
 
 	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir)
 	if !strings.Contains(out, "server: ok") {
@@ -5937,17 +5958,18 @@ func TestDoctorScriptSuppressedTickSkipsSweepAndSend(t *testing.T) {
 	binDir := t.TempDir()
 	gcLogPath := writeDogFakeGC(t, binDir)
 	writeDogHealthyFakeDolt(t, binDir)
+	writeDogBackwardClock(t, binDir)
 
 	statePath := filepath.Join(t.TempDir(), "doctor-advisory-state")
-	// "latency " (trailing space) is the exact signature a latency-only warning
-	// run records; seeding it makes the LATENCY_WARN_S=0 run below a suppressed
-	// repeat tick.
-	if err := os.WriteFile(statePath, []byte("latency \n"), 0o600); err != nil {
+	// "conn " (trailing space) is the exact signature a connection-only warning
+	// run records; seeding it makes the zero connection-threshold run below a
+	// suppressed repeat tick.
+	if err := os.WriteFile(statePath, []byte("conn \n"), 0o600); err != nil {
 		t.Fatalf("seed advisory state: %v", err)
 	}
 
 	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir,
-		"GC_DOCTOR_LATENCY_WARN_S=0",
+		"GC_DOCTOR_CONN_WARN_PCT=0",
 		"GC_DOCTOR_ADVISORY_STATE_FILE="+statePath)
 	if !strings.Contains(out, "server: ok") {
 		t.Fatalf("doctor should report server ok when probe succeeds, output:\n%s", out)

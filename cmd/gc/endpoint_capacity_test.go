@@ -11,6 +11,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -759,6 +762,31 @@ func TestCommitStartResult_CapacityValveReturnsSessionToLegacyAfterPeerSuccesses
 				t.Fatalf("valve tripped on round %d for a template refused only as part of the herd", i+1)
 			}
 			refuseAt(t, e, "other", "other")
+		}
+	})
+
+	t.Run("saturated herd boundaries reset selective refusal evidence", func(t *testing.T) {
+		e := newCapacityEnv(t, true)
+		for round := 0; round < 2*capacityValveThreshold; round++ {
+			e.makeProbeDue()
+			peerSuccess(t, e)
+			row, ok := e.guard.Admit(capacityTestEndpoint, "row", "row")
+			require.True(t, ok, "closed endpoint must admit the healthy herd row")
+			require.False(t, row.probe, "herd row must not be the probe")
+			peer, ok := e.guard.Admit(capacityTestEndpoint, "peer", "peer")
+			require.True(t, ok, "closed endpoint must admit the peer herd row")
+			require.False(t, peer.probe, "herd peer must not be the probe")
+			// A healthy row can finish last in one saturated herd and first
+			// in the next. That interval contains a probe success but no
+			// peer refusal; the intervening saturated intervals must reset
+			// that misleading evidence instead of accumulating it forever.
+			if round%2 == 0 {
+				assert.False(t, peer.Resolve(verdictCapacity), "saturated peer must not be valved")
+			}
+			assert.False(t, row.Resolve(verdictCapacity), "healthy herd row must not be valved at boundary %d", round)
+			if round%2 != 0 {
+				assert.False(t, peer.Resolve(verdictCapacity), "saturated peer must not be valved")
+			}
 		}
 	})
 

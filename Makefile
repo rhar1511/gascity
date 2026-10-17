@@ -885,10 +885,17 @@ test-cover: test-fsys-darwin-compile
 	done
 	./scripts/merge-coverprofiles coverage.txt coverage.noncmdgc.txt coverage.cmdgc.*.txt
 
-## test-cover-mac: Mac coverage sweep with cmd/gc excluded; cmd/gc runs via the Mac sharded job.
-## Running the full test-cover cmd/gc shards sequentially on Mac would exceed the 25m job cap.
+# Preserve the full local sweep by default. Hosted coverage partitions that
+# exact package set into two disjoint groups under the same 25m job budget.
+MAC_COVER_GROUP ?= all
+MAC_COVER_SCRIPTS_TEST_PKGS = $(filter github.com/gastownhall/gascity/scripts github.com/gastownhall/gascity/scripts/% github.com/gastownhall/gascity/test github.com/gastownhall/gascity/test/%,$(UNIT_COVER_PKGS_NONCMDGC))
+MAC_COVER_PKGS = $(if $(filter all,$(MAC_COVER_GROUP)),$(UNIT_COVER_PKGS_NONCMDGC),$(if $(filter other,$(MAC_COVER_GROUP)),$(filter-out $(MAC_COVER_SCRIPTS_TEST_PKGS),$(UNIT_COVER_PKGS_NONCMDGC)),$(MAC_COVER_SCRIPTS_TEST_PKGS)))
+
+## test-cover-mac: unchanged coverage scope, optionally partitioned for hosted Mac jobs.
 test-cover-mac: test-fsys-darwin-compile
-	$(TEST_ENV) GC_FAST_UNIT=1 go test -p=4 -timeout 10m -coverprofile=coverage.txt $(UNIT_COVER_PKGS_NONCMDGC)
+	@case "$(MAC_COVER_GROUP)" in all|other|scripts-tests) ;; *) echo "invalid MAC_COVER_GROUP" >&2; exit 1 ;; esac
+	@test -n "$(strip $(MAC_COVER_PKGS))" || { echo "empty Mac coverage group" >&2; exit 1; }
+	$(TEST_ENV) GC_FAST_UNIT=1 go test -p=4 -timeout 10m -coverprofile=coverage.txt $(MAC_COVER_PKGS)
 
 ## test-cover-noncmdgc: run unit coverage for all packages except cmd/gc (CI parallel half).
 test-cover-noncmdgc: test-fsys-darwin-compile

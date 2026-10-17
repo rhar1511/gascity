@@ -455,6 +455,12 @@ type statusObservationTarget struct {
 }
 
 func loadStatusSessionSnapshot(cityPath string, cfg *config.City, store beads.Store, stderr io.Writer) *sessionBeadSnapshot {
+	reqCtx, cancel := context.WithTimeout(context.Background(), statusSessionSnapshotTimeout)
+	defer cancel()
+	return loadStatusSessionSnapshotWithContext(reqCtx, cityPath, cfg, store, stderr)
+}
+
+func loadStatusSessionSnapshotWithContext(reqCtx context.Context, cityPath string, cfg *config.City, store beads.Store, stderr io.Writer) *sessionBeadSnapshot {
 	if store == nil {
 		return newSessionBeadSnapshotFromInfos(nil)
 	}
@@ -481,8 +487,6 @@ func loadStatusSessionSnapshot(cityPath string, cfg *config.City, store beads.St
 	// made class-preserving (clone what it unwrapped, or refuse to unwrap a
 	// relocated store so this keeps reading through the routed store) as part of
 	// the split, where a real infra store makes the fix testable.
-	reqCtx, cancel := context.WithTimeout(context.Background(), statusSessionSnapshotTimeout)
-	defer cancel()
 	readStore := store
 	if scoped, err := scopedStoreLike(reqCtx, cityPath, cfg, store); err != nil {
 		if stderr != nil {
@@ -515,7 +519,7 @@ func loadStatusSessionSnapshot(cityPath string, cfg *config.City, store beads.St
 			return newSessionBeadSnapshotFromInfos(nil)
 		}
 		return result.snapshot
-	case <-time.After(statusSessionSnapshotTimeout):
+	case <-reqCtx.Done():
 		if stderr != nil {
 			fmt.Fprintf(stderr, "gc status: loading session snapshot timed out after %s; continuing with runtime-only status\n", statusSessionSnapshotTimeout) //nolint:errcheck // best-effort stderr
 		}

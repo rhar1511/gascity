@@ -430,7 +430,7 @@ class StackDiagnosticTests(unittest.TestCase):
             self.assertEqual((directory/"stack-01.txt").read_bytes(), b"fixture stack")
             self.assertIn("memory", result)
             self.assertEqual(capture.call_args_list[1].args[0],
-                             ["/usr/bin/sample", "41", "5", "10", "-file", "/dev/stdout"])
+                             ["/usr/bin/sample", "41", "1", "10", "-file", "/dev/stdout"])
             self.assertEqual(capture.call_args_list[1].args[2], 1024*1024)
 
     def test_sampling_disabled_keeps_original_command_contract(self):

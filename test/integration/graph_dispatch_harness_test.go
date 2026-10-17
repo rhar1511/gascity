@@ -72,7 +72,10 @@ trace() { :; }
 	for _, outcome := range []string{"pass", "fail"} {
 		for _, workspace := range []string{"", "/tmp/actual worker workspace"} {
 			t.Run(outcome+workspace, func(t *testing.T) {
-				out, err := runGraphHarnessFunction(ledger+fn+"\nclose_with_result attempt \"$OUTCOME\" hard injected\n", []string{
+				// Match the shipped macOS interpreter even when PATH selects newer Bash.
+				source := "exec /bin/bash -s <<'GRAPH_CLOSE_HARNESS'\nset -euo pipefail\n" +
+					ledger + fn + "\nclose_with_result attempt \"$OUTCOME\" hard injected\nGRAPH_CLOSE_HARNESS\n"
+				out, err := runGraphHarnessFunction(source, []string{
 					"OUTCOME=" + outcome, "work_dir=" + workspace,
 				})
 				if err != nil {
@@ -304,5 +307,135 @@ func TestGraphDispatchWorkspaceOwnsCommittedRepository(t *testing.T) {
 	}
 	if after := gitAt(ambient, "rev-parse", "HEAD"); after != before {
 		t.Fatalf("workspace initialization changed ambient HEAD: %s -> %s", before, after)
+	}
+}
+
+func TestGraphDispatchUsesPinnedBDLauncher(t *testing.T) {
+	script := agentScript("graph-dispatch.sh")
+	var fns strings.Builder
+	for _, name := range []string{"json_payload", "fetch_ready_queue", "close_with_result"} {
+		fns.WriteString(extractShellFunc(t, script, name))
+		fns.WriteString("\n")
+	}
+	root := t.TempDir()
+	launcher := filepath.Join(root, "bound launcher")
+	marker := filepath.Join(root, "wrong-bd")
+	ledger := filepath.Join(root, "calls")
+	if err := os.WriteFile(launcher, []byte(`#!/bin/bash
+printf '%s\n' "$*" >> "$CALLS"
+case "$1" in
+    ready) printf '[{"id":"attempt"}]\n' ;;
+    update) ;;
+    *) exit 1 ;;
+esac
+`), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "bd"), []byte("#!/bin/sh\n: > \"$WRONG_BD\"\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const harness = `
+set -euo pipefail
+timeout() { [ "$1" = 10 ]; shift; "$@"; }
+should_use_hook_fallback() { return 1; }
+trace() { :; }
+`
+	out, err := runGraphHarnessFunction(harness+fns.String()+`
+fetch_ready_queue
+close_with_result attempt pass
+close_with_result attempt fail hard injected
+`, []string{
+		"PATH=" + root + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"BD_BIN=" + launcher, "CALLS=" + ledger, "WRONG_BD=" + marker,
+		"ASSIGNEE=worker", "work_dir=/tmp/attempt workspace",
+	})
+	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+		t.Fatalf("worker invoked bd from PATH instead of the pinned launcher: %v", statErr)
+	}
+	if err != nil {
+		t.Fatalf("pinned launcher read/write failed: %v: %s", err, out)
+	}
+	calls, err := os.ReadFile(ledger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "ready --assignee=worker --json --limit=0\n" +
+		"update attempt --set-metadata gc.work_dir=/tmp/attempt workspace --set-metadata gc.outcome=pass --status closed\n" +
+		"update attempt --set-metadata gc.work_dir=/tmp/attempt workspace --set-metadata gc.outcome=fail --set-metadata gc.failure_class=hard --set-metadata gc.failure_reason=injected --status closed\n"
+	if string(calls) != want {
+		t.Fatalf("launcher calls = %q, want %q", calls, want)
+	}
+}
+
+func TestGraphDispatchPinsNestedHookBDLauncher(t *testing.T) {
+	script := agentScript("graph-dispatch.sh")
+	data, err := os.ReadFile(script)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bootstrap, _, ok := strings.Cut(string(data), "MODE=")
+	if !ok {
+		t.Fatal("graph worker bootstrap boundary not found")
+	}
+	var fns strings.Builder
+	for _, name := range []string{"json_payload", "fetch_ready_queue", "should_use_hook_fallback"} {
+		fns.WriteString(extractShellFunc(t, script, name))
+		fns.WriteString("\n")
+	}
+	root := t.TempDir()
+	bound := filepath.Join(root, "bound tools")
+	hostile := filepath.Join(root, "hostile tools")
+	for _, dir := range []string{bound, hostile} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for path, source := range map[string]string{
+		filepath.Join(bound, "bd"): `#!/bin/bash
+printf '%s\n' "$*" >> "$CALLS"
+if [ "${2:-}" = --assignee=worker ]; then
+ printf '[]\n'
+else
+ printf '[{"id":"attempt"}]\n'
+fi
+`,
+		filepath.Join(hostile, "bd"): "#!/bin/sh\n: > \"$WRONG_BD\"\nexit 1\n",
+		filepath.Join(hostile, "gc"): "#!/bin/sh\n[ \"$1\" = hook ] || exit 1\nexec bd ready --json --limit=0\n",
+	} {
+		if err := os.WriteFile(path, []byte(source), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const timeout = `
+timeout() {
+ case "$1" in 10|35) ;; *) return 1 ;; esac
+ shift
+ "$@"
+}
+`
+	marker := filepath.Join(root, "wrong-bd")
+	ledger := filepath.Join(root, "calls")
+	out, runErr := runGraphHarnessFunction(bootstrap+timeout+fns.String()+"\nfetch_ready_queue\n", []string{
+		"GC_CITY=" + root, "BD_BIN=" + filepath.Join(bound, "bd"),
+		"PATH=" + hostile + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"CALLS=" + ledger, "WRONG_BD=" + marker, "ASSIGNEE=worker",
+		"GC_SESSION_ORIGIN=named", "HOOK_TIMEOUT=35",
+	})
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("nested hook invoked PATH bd instead of bound launcher: %v", err)
+	}
+	if runErr != nil {
+		t.Fatalf("nested hook failed: %v: %s", runErr, out)
+	}
+	if got := strings.TrimSpace(string(out)); got != `[{"id":"attempt"}]` {
+		t.Fatalf("hook queue=%q, want initial attempt", got)
+	}
+	calls, err := os.ReadFile(ledger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "ready --assignee=worker --json --limit=0\nready --json --limit=0\n"
+	if string(calls) != want {
+		t.Fatalf("nested launcher calls=%q, want %q", calls, want)
 	}
 }

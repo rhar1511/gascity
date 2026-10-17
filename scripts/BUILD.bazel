@@ -74,6 +74,8 @@ go_test(
         "//internal/testpolicy/timingplancli",
         "//internal/testpolicy/timingsummary",
         "//internal/testutil",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
         "@in_gopkg_yaml_v3//:yaml_v3",
     ],
 )

@@ -32,7 +32,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	realBD := strings.TrimSpace(os.Getenv("GC_INTEGRATION_REAL_BD"))
 	if err := requireDisposableBeadsDir(args, authority); err != nil {
-		fmt.Fprintln(stderr, "bd shim: refusing real bd outside the disposable fixture") //nolint:errcheck
+		fmt.Fprintf(stderr, "bd shim: refusing real bd outside the disposable fixture: %v\n", err) //nolint:errcheck
 		return 1
 	}
 	if len(args) == 0 {

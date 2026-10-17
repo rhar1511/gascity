@@ -553,12 +553,17 @@ exit %d
 func writeRecordingTimeout(t *testing.T, binDir string) string {
 	t.Helper()
 	logPath := filepath.Join(binDir, "timeout.log")
-	writeExecutable(t, filepath.Join(binDir, "timeout"), fmt.Sprintf(`#!/bin/sh
+	recorder := fmt.Sprintf(`#!/bin/sh
 printf 'timeout %%s\n' "$*" >> %s
 [ "$1" = "--kill-after=2" ] && shift
 shift
 exec "$@"
-`, shellQuote(logPath)))
+`, shellQuote(logPath))
+	// The bounded helper prefers gtimeout on macOS; own both names so an
+	// installed coreutils binary cannot bypass this fixture's recorder.
+	for _, name := range []string{"timeout", "gtimeout"} {
+		writeExecutable(t, filepath.Join(binDir, name), recorder)
+	}
 	return logPath
 }
 

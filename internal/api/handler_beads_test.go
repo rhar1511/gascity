@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -21,6 +23,8 @@ import (
 	"github.com/gastownhall/gascity/internal/importsvc"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionauthority"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 type prefixedAliasStore struct {
@@ -2805,6 +2809,173 @@ func TestBeadDelete(t *testing.T) {
 	if got.Status != "closed" {
 		t.Errorf("Status = %q, want %q", got.Status, "closed")
 	}
+}
+
+// Script only the command transport: real BdStore decoding and CachingStore
+// must preserve the difference between an absent token and a published zero.
+type apiDeleteRevisionTransport struct {
+	base   apiRouteRevisionTransport
+	closed bool
+	race   bool
+}
+
+func (f *apiDeleteRevisionTransport) run(dir, name string, args ...string) ([]byte, error) {
+	if name == "bd" && len(args) > 0 && args[0] == "update" && (len(args) != 2 || args[1] != "--help") {
+		f.base.updates = append(f.base.updates, append([]string(nil), args...))
+		var guard, status string
+		guards := 0
+		for i, arg := range args {
+			if i+1 >= len(args) {
+				continue
+			}
+			switch arg {
+			case "--if-revision":
+				guard = args[i+1]
+				guards++
+			case "--status":
+				status = args[i+1]
+			}
+		}
+		if guards != 1 || status != "closed" {
+			return nil, errors.New("delete lost its exact conditional close")
+		}
+		if f.race {
+			f.base.detailRevision = json.RawMessage(`"9"`)
+			f.base.enrolled = true
+		}
+		current := string(f.base.detailRevision)
+		if strings.HasPrefix(current, `"`) {
+			if err := json.Unmarshal(f.base.detailRevision, &current); err != nil {
+				return nil, err
+			}
+		}
+		token, err := strconv.ParseInt(current, 10, 64)
+		if err != nil {
+			return nil, err
+		}
+		expected, err := strconv.ParseInt(guard, 10, 64)
+		if err != nil {
+			return nil, err
+		}
+		if expected != token {
+			out, err := json.Marshal(map[string]any{"code": "precondition_failed", "id": "route-1", "expected_revision": expected, "current_revision": token, "mutates": false})
+			return out, errors.Join(errors.New("conditional conflict"), err)
+		}
+		f.closed = true
+		f.base.detailRevision = json.RawMessage(`"11"`)
+		return []byte("[]"), nil
+	}
+	data, err := f.base.run(dir, name, args...)
+	if err != nil || !f.closed || len(args) == 0 || args[0] != "show" {
+		return data, err
+	}
+	var rows []map[string]json.RawMessage
+	if err := json.Unmarshal(data, &rows); err != nil {
+		return nil, err
+	}
+	rows[0]["status"] = json.RawMessage(`"closed"`)
+	return json.Marshal(rows)
+}
+
+func apiDeleteRevisionStore(t *testing.T, f *apiDeleteRevisionTransport, cached bool) beads.Store {
+	t.Helper()
+	backing := beads.NewBdStoreWithPrefix(t.TempDir(), f.run, "route")
+	if !cached {
+		return backing
+	}
+	cache := beads.NewCachingStore(backing, nil)
+	require.NoError(t, cache.Prime(t.Context()), "prime delete cache")
+	require.True(t, cache.IsLive(), "delete fixture cache is live")
+	return cache
+}
+
+func TestBeadDeleteUsesLiveObservedRevision(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		revision json.RawMessage
+		want     string
+	}{
+		{name: "list omits revision", revision: json.RawMessage(`"37"`), want: "37"},
+		{name: "published string zero", revision: json.RawMessage(`"0"`), want: "0"},
+		{name: "published integer zero", revision: json.RawMessage(`0`), want: "0"},
+		{name: "missing detail revision"},
+		{name: "null detail revision", revision: json.RawMessage(`null`)},
+	} {
+		for _, cached := range []bool{false, true} {
+			name := tc.name + "/direct"
+			if cached {
+				name = tc.name + "/cache"
+			}
+			t.Run(name, func(t *testing.T) {
+				f := &apiDeleteRevisionTransport{base: apiRouteRevisionTransport{detailRevision: tc.revision}}
+				store := apiDeleteRevisionStore(t, f, cached)
+				state := newFakeState(t)
+				state.stores["myrig"] = store
+				req := httptest.NewRequest(http.MethodDelete, cityURL(state, "/bead/route-1"), nil)
+				req.Header.Set("X-GC-Request", "true")
+				rec := httptest.NewRecorder()
+				newTestCityHandler(t, state).ServeHTTP(rec, req)
+				if tc.want == "" {
+					assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+					assert.Empty(t, f.base.updates, "missing token must not write")
+					assert.False(t, f.closed, "missing token must not close")
+					return
+				}
+				assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+				assert.True(t, f.closed, "observed delete must close")
+				require.Len(t, f.base.updates, 1)
+				args := f.base.updates[0]
+				require.GreaterOrEqual(t, len(args), 2)
+				assert.Equal(t, "--if-revision", args[len(args)-2])
+				assert.Equal(t, tc.want, args[len(args)-1], "delete preserves observed guard")
+				after, err := store.Get("route-1")
+				require.NoError(t, err)
+				assert.Equal(t, "closed", after.Status, "original cache invalidated")
+				assert.EqualValues(t, 11, after.Revision)
+			})
+		}
+	}
+}
+
+func TestBeadDeleteCASLosesToAdmission(t *testing.T) {
+	for _, cached := range []bool{false, true} {
+		t.Run(strconv.FormatBool(cached), func(t *testing.T) {
+			f := &apiDeleteRevisionTransport{base: apiRouteRevisionTransport{detailRevision: json.RawMessage(`"0"`)}, race: true}
+			store := apiDeleteRevisionStore(t, f, cached)
+			state := newFakeState(t)
+			state.stores["myrig"] = store
+			req := httptest.NewRequest(http.MethodDelete, cityURL(state, "/bead/route-1"), nil)
+			req.Header.Set("X-GC-Request", "true")
+			rec := httptest.NewRecorder()
+			newTestCityHandler(t, state).ServeHTTP(rec, req)
+			assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+			assert.Contains(t, rec.Body.String(), "changed before delete")
+			assert.Len(t, f.base.updates, 1)
+			assert.False(t, f.closed, "racing delete must not close")
+			after, err := store.Get("route-1")
+			require.NoError(t, err)
+			assert.Equal(t, "open", after.Status, "original cache invalidated")
+			assert.NotEmpty(t, after.Metadata[beadmeta.LifecycleAdmissionReceiptV2MetadataKey], "concurrent admission retained")
+		})
+	}
+}
+
+type apiDeleteWithoutConditionalWriter struct{ beads.Store }
+
+func TestBeadDeleteStillRequiresConditionalWriter(t *testing.T) {
+	state := newFakeState(t)
+	f := &apiDeleteRevisionTransport{base: apiRouteRevisionTransport{detailRevision: json.RawMessage(`"37"`)}}
+	backing := apiDeleteRevisionStore(t, f, false)
+	state.stores["myrig"] = apiDeleteWithoutConditionalWriter{Store: backing}
+	req := httptest.NewRequest(http.MethodDelete, cityURL(state, "/bead/route-1"), nil)
+	req.Header.Set("X-GC-Request", "true")
+	rec := httptest.NewRecorder()
+	newTestCityHandler(t, state).ServeHTTP(rec, req)
+	after, err := backing.Get("route-1")
+	assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	require.NoError(t, err)
+	assert.Equal(t, "open", after.Status)
+	assert.Empty(t, f.base.updates, "conditional writer is mandatory")
 }
 
 func TestBeadDeleteNotFound(t *testing.T) {
