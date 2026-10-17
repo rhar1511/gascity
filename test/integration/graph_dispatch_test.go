@@ -92,7 +92,7 @@ func TestGraphWorkflowSuccessPath(t *testing.T) {
 
 	workflow := waitForWorkflowAndTeardown(t, cityDir, transport, workflowID, graphWorkflowCloseTimeout())
 	if got := metaValue(workflow, "gc.outcome"); got != "pass" {
-		t.Fatalf("workflow outcome = %q, want pass", got)
+		t.Fatalf("workflow outcome = %q, want pass; fixture diagnostics:\n%s", got, graphWorkflowFailedOutcomeDiagnostics(cityDir, transport, workflow))
 	}
 
 	body := findGraphWorkflowBeadByRefSuffixOverHTTP(t, transport, workflowID, ".body")
@@ -2150,6 +2150,61 @@ func waitForGraphWorkflowRootForInputConvoyOverHTTP(t *testing.T, cityDir string
 	return workflowID
 }
 
+// graphWorkflowFailedOutcomeDiagnostics runs only after a terminal outcome failed
+// its assertion, while the fixture service and files still exist.
+func graphWorkflowFailedOutcomeDiagnostics(cityDir string, transport graphPrivateEvidenceTransport, root graphBead) string {
+	const maxOutputBytes = 256 << 10
+	const maxIssueBytes = 64 << 10
+	const maxIssues = 128
+	const maxFieldBytes = 512
+	field := func(value string) string {
+		value = redactGraphPrivateEvidenceToken(value, transport.token)
+		if len(value) > maxFieldBytes {
+			return value[:maxFieldBytes] + "[truncated]"
+		}
+		return value
+	}
+	var out strings.Builder
+	appendIssue := func(issue graphBead) {
+		selected := map[string]string{"id": field(issue.ID), "ref": field(issue.Ref), "status": field(issue.Status)}
+		for _, key := range []string{
+			beadmeta.RootBeadIDMetadataKey, beadmeta.ScopeRoleMetadataKey,
+			beadmeta.KindMetadataKey, beadmeta.StepRefMetadataKey,
+			"gc.outcome", "gc.failure_class", "gc.failure_reason",
+			"review.verdict", "design_review.verdict", "code_review.verdict",
+		} {
+			selected[key] = field(metaValue(issue, key))
+		}
+		// A string-only map cannot fail JSON encoding. Quoting also prevents
+		// control characters in a metadata value from forging log lines.
+		data, _ := json.Marshal(selected)
+		out.Write(data)
+		out.WriteByte('\n')
+	}
+	appendIssue(root)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	issues, err := readGraphIssuesOverHTTP(ctx, transport)
+	if err != nil {
+		fmt.Fprintf(&out, "issue verdict read unavailable: %s\n", field(err.Error()))
+	} else {
+		for i, issue := range issues {
+			if i >= maxIssues || out.Len() >= maxIssueBytes {
+				out.WriteString("[issue verdicts truncated]\n")
+				break
+			}
+			appendIssue(issue)
+		}
+	}
+	out.WriteString(readGraphFailureDiagnostics(cityDir, transport.token))
+	// Redact before truncation so clipping cannot expose a token prefix.
+	text := redactGraphPrivateEvidenceToken(out.String(), transport.token)
+	if len(text) > maxOutputBytes {
+		return text[:maxOutputBytes-len("\n[diagnostics truncated]")] + "\n[diagnostics truncated]"
+	}
+	return text
+}
+
 // readGraphFailureDiagnostics only reads fixture-owned logs after a failure.
 // Keep both the number of startup logs and each log tail bounded for CI output.
 func readGraphFailureDiagnostics(cityDir, token string) string {
@@ -2442,4 +2497,96 @@ func TestGraphAttemptReadbackVerifiesCompactManifestAndHydratedDiffs(t *testing.
 			}
 		})
 	}
+}
+
+func TestGraphWorkflowFailedOutcomeDiagnostics(t *testing.T) {
+	root := graphBead{ID: "root", Ref: "graph.v2", Status: "closed", Metadata: map[string]any{"gc.outcome": "fail"}}
+	newTransport := func(t *testing.T, issues []graphBead, status int, token string) graphPrivateEvidenceTransport {
+		t.Helper()
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/v0/beads/issues" || r.Method != http.MethodGet {
+				t.Errorf("unexpected diagnostic request: %s %s", r.Method, r.URL.Path)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(status)
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": issues, "has_more": false})
+		}))
+		t.Cleanup(server.Close)
+		client := newGraphPrivateEvidenceHTTPClient()
+		t.Cleanup(client.CloseIdleConnections)
+		return graphPrivateEvidenceTransport{endpoint: server.URL, client: client, token: token}
+	}
+	t.Run("root and child verdicts", func(t *testing.T) {
+		child := graphBead{ID: "child", Ref: "graph.body.preflight", Status: "closed", Metadata: map[string]any{
+			"gc.root_bead_id": "root", "gc.scope_role": "member", "gc.outcome": "fail",
+			"gc.failure_class": "hard", "gc.failure_reason": "preflight_failed", "review.verdict": "iterate",
+		}}
+		got := graphWorkflowFailedOutcomeDiagnostics(t.TempDir(), newTransport(t, []graphBead{child}, http.StatusOK, ""), root)
+		for _, want := range []string{`"id":"root"`, `"id":"child"`, `"gc.outcome":"fail"`, `"gc.root_bead_id":"root"`, `"gc.failure_class":"hard"`, `"gc.failure_reason":"preflight_failed"`, `"review.verdict":"iterate"`} {
+			if !strings.Contains(got, want) {
+				t.Errorf("missing selected verdict field %q", want)
+			}
+		}
+	})
+	t.Run("arbitrary metadata excluded", func(t *testing.T) {
+		child := graphBead{ID: "child", Title: "private-title-sentinel", Metadata: map[string]any{
+			"private.payload": "private-payload-sentinel", "gc.failure_reason": "safe-selected-reason",
+		}}
+		got := graphWorkflowFailedOutcomeDiagnostics(t.TempDir(), newTransport(t, []graphBead{child}, http.StatusOK, ""), root)
+		if !strings.Contains(got, "safe-selected-reason") {
+			t.Fatal("selected reason was lost with excluded fields")
+		}
+		for _, forbidden := range []string{"private.payload", "private-payload-sentinel", "private-title-sentinel"} {
+			if strings.Contains(got, forbidden) {
+				t.Errorf("diagnostic disclosed unselected data %q", forbidden)
+			}
+		}
+	})
+	t.Run("redact before field clipping", func(t *testing.T) {
+		const token = "SECRET_TOKEN_CROSSING_FIELD_BOUNDARY"
+		child := graphBead{ID: "child", Metadata: map[string]any{"gc.failure_reason": strings.Repeat("x", 500) + token + strings.Repeat("z", 100)}}
+		got := graphWorkflowFailedOutcomeDiagnostics(t.TempDir(), newTransport(t, []graphBead{child}, http.StatusOK, token), root)
+		if strings.Contains(got, "SECRET") || !strings.Contains(got, "[redacted]") || !strings.Contains(got, "[truncated]") {
+			t.Fatal("field was not redacted before clipping at the boundary")
+		}
+	})
+	t.Run("redact log tail boundary", func(t *testing.T) {
+		const token = "SECRET_TOKEN_CROSSING_LOG_TAIL_BOUNDARY"
+		cityDir := t.TempDir()
+		// Put the retained tail's first byte inside the token. The existing
+		// log reader must discard that partial line, then redact complete lines.
+		content := "discard-prefix-" + token + "\ncomplete " + token + "\n" + strings.Repeat("x", (16<<10)-len(token)-len("\ncomplete ")-len("\n")-8)
+		if err := os.WriteFile(filepath.Join(cityDir, "graph-workflow-trace.log"), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		got := graphWorkflowFailedOutcomeDiagnostics(cityDir, newTransport(t, nil, http.StatusOK, token), root)
+		if strings.Contains(got, "SECRET") || strings.Contains(got, "BOUNDARY") || !strings.Contains(got, "complete [redacted]") {
+			t.Fatal("log tail leaked a token fragment or lost redacted retained evidence")
+		}
+	})
+	t.Run("hard output cap with marker", func(t *testing.T) {
+		cityDir := t.TempDir()
+		for i := 0; i < 16; i++ {
+			path := filepath.Join(citylayout.SessionDiagnosticsDir(cityDir), fmt.Sprintf("%02d", i), "start-stderr.log")
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(strings.Repeat("x", 16<<10)), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		got := graphWorkflowFailedOutcomeDiagnostics(cityDir, newTransport(t, nil, http.StatusOK, ""), root)
+		if len(got) > 256<<10 || !strings.HasSuffix(got, "[diagnostics truncated]") {
+			t.Fatalf("diagnostic bytes=%d, want <=256KiB with explicit truncation marker", len(got))
+		}
+	})
+	t.Run("unavailable HTTP retains root failure", func(t *testing.T) {
+		got := graphWorkflowFailedOutcomeDiagnostics(t.TempDir(), newTransport(t, nil, http.StatusServiceUnavailable, ""), root)
+		if !strings.Contains(got, `"id":"root"`) || !strings.Contains(got, `"gc.outcome":"fail"`) || !strings.Contains(got, "issue verdict read unavailable:") || !strings.Contains(got, "HTTP 503") {
+			t.Fatal("unavailable observation hid the original terminal root failure or HTTP error")
+		}
+		if root.Status != "closed" || metaValue(root, "gc.outcome") != "fail" {
+			t.Fatal("diagnostic read changed the original workflow state")
+		}
+	})
 }
