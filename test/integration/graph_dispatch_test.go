@@ -889,7 +889,7 @@ func setupWorkflowCityWithPrivateEvidence(t *testing.T, config func(string) stri
 	}
 	reloadOut, reloadErr := runGCDoltWithEnv(env, cityDir, "reload", "--json", "--timeout", "45s", cityDir)
 	if reloadErr != nil {
-		t.Fatalf("reload graph city after enabling private-evidence transport: %v\noutput: %s", reloadErr, reloadOut)
+		t.Fatalf("reload graph city after enabling private-evidence transport: %v\noutput: %s\nfixture diagnostics:\n%s", reloadErr, reloadOut, readGraphFailureDiagnostics(cityDir, transport.token))
 	}
 	var reload struct {
 		SchemaVersion string `json:"schema_version"`
@@ -1977,7 +1977,7 @@ func waitForWorkflowAndTeardown(t *testing.T, cityDir string, transport graphPri
 			return false, "workflow bead status is " + bead.Status, nil
 		})
 	if err != nil {
-		t.Fatalf("timed out waiting for workflow bead %s to close: %v; control trace:\n%s", beadID, err, readGraphWorkflowTraceFiles(cityDir))
+		t.Fatalf("timed out waiting for workflow bead %s to close: %v; fixture diagnostics:\n%s", beadID, err, readGraphFailureDiagnostics(cityDir, transport.token))
 	}
 	return closed
 }
@@ -2145,21 +2145,71 @@ func waitForGraphWorkflowRootForInputConvoyOverHTTP(t *testing.T, cityDir string
 			return false, "workflow root is not listed yet", nil
 		})
 	if err != nil {
-		t.Fatalf("timed out waiting for graph.v2 workflow root for input convoy %s: %v; control trace:\n%s", convoyID, err, readGraphWorkflowTraceFiles(cityDir))
+		t.Fatalf("timed out waiting for graph.v2 workflow root for input convoy %s: %v; fixture diagnostics:\n%s", convoyID, err, readGraphFailureDiagnostics(cityDir, transport.token))
 	}
 	return workflowID
 }
 
-func readGraphWorkflowTraceFiles(cityDir string) string {
-	tracePaths := []string{
+// readGraphFailureDiagnostics only reads fixture-owned logs after a failure.
+// Keep both the number of startup logs and each log tail bounded for CI output.
+func readGraphFailureDiagnostics(cityDir, token string) string {
+	const maxStartupLogs = 16
+	paths := []string{
 		citylayout.ControlDispatcherTraceDefaultPath(cityDir),
 		citylayout.ControlDispatcherTraceDefaultPathFor(cityDir, "core.control-dispatcher"),
+		filepath.Join(cityDir, "graph-workflow-trace.log"),
+		filepath.Join(cityDir, "graph-workflow-steps.log"),
 	}
-	var traces []string
-	for _, path := range tracePaths {
-		traces = append(traces, fmt.Sprintf("%s:\n%s", path, readOptionalFile(path)))
+	if env, ok := cityCommandEnv.Load(cityDir); ok {
+		if gcHome := parseEnvList(env.([]string))["GC_HOME"]; filepath.IsAbs(gcHome) {
+			paths = append(paths, filepath.Join(gcHome, "supervisor.log"))
+		}
 	}
-	return strings.Join(traces, "\n\n")
+	startupLogs, err := filepath.Glob(filepath.Join(citylayout.SessionDiagnosticsDir(cityDir), "*", "start-stderr.log"))
+	if err != nil {
+		return redactGraphPrivateEvidenceToken(fmt.Sprintf("enumerate fixture startup logs: %v", err), token)
+	}
+	var diagnostics []string
+	if len(startupLogs) > maxStartupLogs {
+		diagnostics = append(diagnostics, fmt.Sprintf("startup logs truncated: showing %d of %d", maxStartupLogs, len(startupLogs)))
+		startupLogs = startupLogs[:maxStartupLogs]
+	}
+	paths = append(paths, startupLogs...)
+	for _, path := range paths {
+		diagnostics = append(diagnostics, fmt.Sprintf("%s:\n%s", path, readGraphDiagnosticTail(path)))
+	}
+	return redactGraphPrivateEvidenceToken(strings.Join(diagnostics, "\n\n"), token)
+}
+
+func readGraphDiagnosticTail(path string) string {
+	const maxBytes = 16 << 10
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Sprintf("inspect %s failed: %v", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Sprintf("refusing non-regular diagnostic file %s", path)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return fmt.Sprintf("open %s failed: %v", path, err)
+	}
+	defer file.Close() //nolint:errcheck
+	offset := max(int64(0), info.Size()-maxBytes)
+	data, err := io.ReadAll(io.NewSectionReader(file, offset, maxBytes))
+	if err != nil {
+		return fmt.Sprintf("read %s failed: %v", path, err)
+	}
+	if offset > 0 {
+		// Discard a partial first line, so token redaction never starts mid-token.
+		if newline := bytes.IndexByte(data, '\n'); newline >= 0 {
+			data = data[newline+1:]
+		} else {
+			data = nil
+		}
+		return "[earlier log bytes omitted]\n" + string(data)
+	}
+	return string(data)
 }
 
 func readOptionalFile(path string) string {

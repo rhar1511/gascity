@@ -635,6 +635,8 @@ func TestIntegrationTestListingSkipsRuntimeSetup(t *testing.T) {
 	missing := t.TempDir()
 	env := os.Environ()
 	for _, name := range []string{
+		"TEST_TOTAL_SHARDS",
+		"TEST_SHARD_INDEX",
 		"GC_SESSION",
 		runisolation.EnvName,
 		"GC_INTEGRATION_SUPERVISOR_STOP_HELPER",
