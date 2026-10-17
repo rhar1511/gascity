@@ -1883,15 +1883,63 @@ func newIsolatedCommandEnvWithoutSupervisor(t *testing.T, useDolt bool) (string,
 	if err := os.MkdirAll(shimDir, 0o755); err != nil {
 		t.Fatalf("creating isolated shim dir: %v", err)
 	}
+	// This fixture starts a detached supervisor itself. Model unavailable
+	// service managers so is-active/status probes cannot report a nonexistent
+	// managed service as ready, and never invoke the host service managers.
 	for _, name := range []string{"systemctl", "launchctl"} {
 		path := filepath.Join(shimDir, name)
-		if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
 			t.Fatalf("writing %s shim: %v", name, err)
 		}
 	}
 	envMap := parseEnvList(env)
 	env = replaceEnv(env, "PATH", prependPath(shimDir, envMap["PATH"]))
 	return gcHome, env
+}
+
+// The fixture starts its own supervisor process. Host service managers must
+// remain unreachable, including probes that otherwise manufacture readiness.
+func TestIsolatedCommandEnvServiceManagersUnavailable(t *testing.T) {
+	_, env := newIsolatedCommandEnvWithoutSupervisor(t, false)
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"systemctl", []string{"--user", "show-environment"}},
+		{"systemctl", []string{"--user", "is-active", "--quiet", "gc-supervisor.service"}},
+		{"systemctl", []string{"--user", "daemon-reload"}},
+		{"launchctl", []string{"print", "gui/0/gc.supervisor"}},
+		{"launchctl", []string{"load", "/unused/test.plist"}},
+	} {
+		t.Run(tc.name+"/"+strings.Join(tc.args, "_"), func(t *testing.T) {
+			shim := filepath.Join(filepath.Dir(parseEnvList(env)["GC_HOME"]), "bin", tc.name)
+			cmd := exec.Command(shim, tc.args...)
+			cmd.Env = env
+			out, err := cmd.CombinedOutput()
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+				t.Fatalf("isolated %s %v: want unavailable exit 1, got %v: %s", tc.name, tc.args, err, out)
+			}
+		})
+	}
+}
+
+func TestIsolatedCommandEnvDoesNotReportUnstartedSupervisorRunning(t *testing.T) {
+	_, env := newIsolatedCommandEnvWithoutSupervisor(t, false)
+	out, err := runGCWithEnv(env, "", "supervisor", "status", "--json")
+	if err != nil {
+		t.Fatalf("reading isolated supervisor status: %v: %s", err, out)
+	}
+	var status struct {
+		Running bool `json:"running"`
+		PID     int  `json:"pid"`
+	}
+	if err := json.Unmarshal([]byte(out), &status); err != nil {
+		t.Fatalf("decoding isolated supervisor status: %v: %s", err, out)
+	}
+	if status.Running || status.PID != 0 {
+		t.Fatalf("unstarted isolated supervisor reported running: %s", out)
+	}
 }
 
 func newIsolatedEnvRoot(t *testing.T, useDolt bool) (string, string, []string) {
