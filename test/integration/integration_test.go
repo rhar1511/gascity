@@ -469,12 +469,9 @@ func TestMain(m *testing.M) {
 		}
 	}
 
-	// Agents resolve gc/bd/dolt from PATH (their scripts cannot see runfiles
-	// paths), and integrationEnvFor prepends integrationToolBinDir to PATH.
-	// Under bazel gcBinary/bdBinary point directly at runfiles binaries, so
-	// link them into the tool bin dir the way the go-build path materializes
-	// them there. Symlinks keep the 100MB+ gc binary out of every test's
-	// sandbox copy; copy is the fallback when linking fails.
+	// Agents resolve gc/bd/dolt from PATH, so stage runfiles binaries in the
+	// tool directory. Owned cleanup requires regular files throughout its root;
+	// legacy runs can keep the runfiles symlink optimization.
 	for name, bin := range map[string]string{
 		"gc":   gcBinary,
 		"bd":   bdBinary,
@@ -483,16 +480,8 @@ func TestMain(m *testing.M) {
 		if bin == "" || filepath.Dir(bin) == integrationToolBinDir {
 			continue
 		}
-		dst := filepath.Join(integrationToolBinDir, name)
-		_ = os.Remove(dst)
-		if err := os.Symlink(bin, dst); err != nil {
-			data, readErr := os.ReadFile(bin)
-			if readErr != nil {
-				panic("integration: staging " + name + " into tool bin dir: " + readErr.Error())
-			}
-			if err := os.WriteFile(dst, data, 0o755); err != nil {
-				panic("integration: staging " + name + " into tool bin dir: " + err.Error())
-			}
+		if err := stageIntegrationToolBinary(runMode, bin, filepath.Join(integrationToolBinDir, name)); err != nil {
+			panic("integration: staging " + name + " into tool bin dir: " + err.Error())
 		}
 	}
 
@@ -517,6 +506,35 @@ func TestMain(m *testing.M) {
 		code = 1
 	}
 	os.Exit(code)
+}
+
+func stageIntegrationToolBinary(mode runisolation.Mode, source, destination string) error {
+	if err := os.Remove(destination); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if mode == runisolation.Legacy {
+		if err := os.Symlink(source, destination); err == nil {
+			return nil
+		}
+	}
+	input, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	defer input.Close() //nolint:errcheck // read-only fixture source
+	info, err := input.Stat()
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("tool source is not a regular file: %s", source)
+	}
+	output, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o755)
+	if err != nil {
+		return err
+	}
+	_, copyErr := io.Copy(output, input)
+	return errors.Join(copyErr, output.Close())
 }
 
 func installIntegrationSignalSweeper(mode runisolation.Mode, subprocess bool) func() {
@@ -629,6 +647,61 @@ func TestIntegrationSupervisorStopHelperProcess(t *testing.T) {
 		return
 	}
 	select {}
+}
+
+func TestStagedIntegrationToolsRespectOwnedCleanup(t *testing.T) {
+	for _, mode := range []runisolation.Mode{runisolation.Owned, runisolation.Legacy} {
+		t.Run(fmt.Sprintf("mode_%d", mode), func(t *testing.T) {
+			sourceDir, root := t.TempDir(), t.TempDir()
+			if err := os.Chmod(root, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			toolDir := filepath.Join(root, "tools")
+			binDir := filepath.Join(toolDir, "bin")
+			if err := os.MkdirAll(binDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			for _, name := range []string{"gc", "bd"} {
+				content := []byte("#!/bin/sh\nprintf '" + name + "'\n")
+				source, destination := filepath.Join(sourceDir, name), filepath.Join(binDir, name)
+				if err := os.WriteFile(source, content, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := stageIntegrationToolBinary(mode, source, destination); err != nil {
+					t.Fatal(err)
+				}
+				info, err := os.Lstat(destination)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if mode == runisolation.Owned && (!info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0) {
+					t.Fatalf("owned %s must be a regular executable, got %v", name, info.Mode())
+				}
+				if mode == runisolation.Legacy && info.Mode()&os.ModeSymlink == 0 {
+					t.Fatalf("legacy %s must retain its runfiles symlink", name)
+				}
+				if got, err := os.ReadFile(destination); err != nil || !bytes.Equal(got, content) {
+					t.Fatalf("staged %s content = %q, %v; want %q", name, got, err, content)
+				}
+			}
+			err := runisolation.CleanupOwnedRoot(root, toolDir, filepath.Join(toolDir, "gc-home"), func() error { return nil }, func(string, string) ([]int, error) { return nil, nil })
+			if mode == runisolation.Owned {
+				if err != nil {
+					t.Fatalf("cleanup of materialized owned tools: %v", err)
+				}
+				if _, err := os.Lstat(root); !os.IsNotExist(err) {
+					t.Fatalf("owned root still exists after verified cleanup: %v", err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), "marker or symlink") {
+				t.Fatalf("owned cleanup must reject legacy symlinks, got %v", err)
+			}
+			for _, name := range []string{"gc", "bd"} {
+				if _, err := os.Stat(filepath.Join(sourceDir, name)); err != nil {
+					t.Fatalf("cleanup affected external %s source: %v", name, err)
+				}
+			}
+		})
+	}
 }
 
 func TestIntegrationTestListingSkipsRuntimeSetup(t *testing.T) {
