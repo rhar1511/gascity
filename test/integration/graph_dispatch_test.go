@@ -57,13 +57,6 @@ type graphConvoyCreateResult struct {
 	ConvoyID string `json:"convoy_id"`
 }
 
-func beadType(bead graphBead) string {
-	if bead.Type != "" {
-		return bead.Type
-	}
-	return bead.IssueType
-}
-
 func metaValue(bead graphBead, key string) string {
 	if bead.Metadata == nil {
 		return ""
@@ -1496,7 +1489,6 @@ func graphFixturePathEquals(path, expected string) bool {
 }
 
 func graphProcessFlag(args []string, flag string) (value string, found, valid bool) {
-	valid = true
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		if arg == flag {
