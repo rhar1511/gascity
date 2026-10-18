@@ -1115,9 +1115,9 @@ func bdListIssueRows(data []byte) ([]json.RawMessage, error) {
 	return raw, nil
 }
 
-// toBead converts a bdIssue to a Gas City Bead. CreatedAt is truncated to
-// second precision because dolt stores timestamps at second granularity —
-// bd create may return sub-second precision that bd show then truncates.
+// toBead converts a bdIssue to a Gas City Bead. CreatedAt is rounded to
+// second precision to match Dolt's persisted creation timestamp. The create
+// response may still carry the unrounded sub-second value.
 func (b *bdIssue) toBead() Bead {
 	from := b.From
 	if from == "" && b.Metadata != nil {
@@ -1144,7 +1144,7 @@ func (b *bdIssue) toBead() Bead {
 		Status:                status,
 		Type:                  b.IssueType,
 		Priority:              cloneIntPtr(b.Priority),
-		CreatedAt:             b.CreatedAt.Truncate(time.Second),
+		CreatedAt:             b.CreatedAt.Round(time.Second),
 		UpdatedAt:             b.UpdatedAt.Truncate(time.Second),
 		Assignee:              b.Assignee,
 		From:                  from,

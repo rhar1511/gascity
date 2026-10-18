@@ -110,6 +110,48 @@ func TestBdStoreCreate(t *testing.T) {
 	}
 }
 
+// TestBdStoreCreateEchoMatchesDurableCreatedAt pins the timestamp used as a
+// session identity against the accepted backend's create/show wire responses.
+func TestBdStoreCreateEchoMatchesDurableCreatedAt(t *testing.T) {
+	for _, tc := range []struct {
+		name, echo, persisted string
+	}{
+		{"before half second", "2026-10-18T13:26:19.23553229Z", "2026-10-18T13:26:19Z"},
+		{"after half second", "2026-10-18T13:26:19.743013483Z", "2026-10-18T13:26:20Z"},
+		{"whole second", "2026-10-18T13:26:20Z", "2026-10-18T13:26:20Z"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := fakeRunner(map[string]struct {
+				out []byte
+				err error
+			}{
+				`bd create --json session -t gc:session`: {
+					out: []byte(fmt.Sprintf(`{"id":"bd-session","title":"session","status":"open","issue_type":"gc:session","created_at":%q}`, tc.echo)),
+				},
+				`bd show --json bd-session`: {
+					out: []byte(fmt.Sprintf(`[{"id":"bd-session","title":"session","status":"open","issue_type":"gc:session","created_at":%q}]`, tc.persisted)),
+				},
+			})
+			store := beads.NewBdStore("/city", runner)
+			created, err := store.Create(beads.Bead{Title: "session", Type: "gc:session"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := store.Get(created.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want, err := time.Parse(time.RFC3339Nano, tc.persisted)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !created.CreatedAt.Equal(want) || !got.CreatedAt.Equal(want) {
+				t.Fatalf("session creation identity: echo=%s durable=%s want=%s", created.CreatedAt, got.CreatedAt, want)
+			}
+		})
+	}
+}
+
 func TestBdStoreCreateDefaultsTypeToTask(t *testing.T) {
 	var gotArgs []string
 	runner := func(_, _ string, args ...string) ([]byte, error) {
