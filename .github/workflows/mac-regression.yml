@@ -224,6 +224,9 @@ jobs:
           dolt-version: ${{ env.DOLT_VERSION }}
           bd-version: ${{ env.BD_VERSION }}
           install-claude-cli: "false"
+          # Static quality gates need no runtime Homebrew tools. The pinned
+          # bd/Dolt archives have embedded digests; runtime jobs retain setup.
+          install-system-deps: "false"
       - name: Install tools
         run: make install-tools
       - name: Get golangci-lint + Go toolchain versions for cache key
@@ -254,6 +257,9 @@ jobs:
         env:
           GOLANGCI_LINT_CACHE: ${{ github.workspace }}/.cache/golangci-lint
           GOMAXPROCS: "2"
+          # Native samples show GC pressure near the default 6 GiB target.
+          # Use the 14 GB quality runner headroom; retain full scope and deadlines.
+          LINT_GOMEMLIMIT: 12GiB
         # Retain the full gate. The outer deadline includes setup time;
         # forced termination records incomplete profiles and fails the check.
         # Bound concurrent analysis on memory-constrained hosted Macs. The
@@ -362,15 +368,25 @@ jobs:
 
   # Tier A acceptance — smoke-level gate on every PR.
   mac-acceptance:
-    name: Mac / acceptance (Tier A)
+    name: Mac / acceptance (Tier A / ${{ matrix.shard_name }})
     needs:
       - runner-policy
       - gate
     if: needs.gate.outputs.run_smoke == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
-    # Cold ARM run reached the 26m job limit despite both commands passing.
-    # Budget the 20m Tier A and 10m CLI contract deadlines plus setup/cleanup.
+    # The passing proxied-default journey consumed 12m46s before the shared
+    # 20m package budget expired later in Tier A. Run it separately from the
+    # complementary tests; retain 20m per invocation and 40m per job.
+    # The external CLI contract runs once, after the other-tests partition.
     timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard_name: proxied-default
+            command: -run ^TestBeadsProxiedDefault$
+          - shard_name: other-tests
+            command: -skip ^TestBeadsProxiedDefault$
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -389,25 +405,31 @@ jobs:
           # so the whole binary doesn't panic mid-test.
           ACCEPTANCE_TIMEOUT: 20m
           # Record every case and duration against the freshly built CLI.
-          ACCEPTANCE_GO_TEST_FLAGS: -count=1 -json
+          # Required complementary partitions retain all tests and assertions.
+          ACCEPTANCE_GO_TEST_FLAGS: -count=1 -json ${{ matrix.command }}
         run: make test-acceptance
       - name: Run external bd CLI contract
+        if: matrix.shard_name == 'other-tests'
         run: make test-bd-cli-contract
 
   # Unit coverage pass — the Linux `Check` job's equivalent of
   # `make test-cover`. Kept best-effort while we discover Mac-specific
   # failures; continue-on-error is on the test step (not the job) so the
   # job's result still reflects the actual outcome for the summary.
-  mac-cover:
-    name: Mac / test-cover
+  mac-cover-shards:
+    name: Mac / test-cover / ${{ matrix.shard_name }}
     needs:
       - runner-policy
       - gate
     if: needs.gate.outputs.run_full == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
     timeout-minutes: 25
-    outputs:
-      outcome: ${{ steps.cover.outcome }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard_name: other
+          - shard_name: scripts-tests
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -424,7 +446,64 @@ jobs:
       - name: Run test-cover-mac
         id: cover
         continue-on-error: true
-        run: make test-cover-mac
+        run: make test-cover-mac MAC_COVER_GROUP=${{ matrix.shard_name }}
+      - name: Record actual coverage outcome
+        if: ${{ always() }}
+        env:
+          COVER_OUTCOME: ${{ steps.cover.outcome }}
+        run: printf '%s\n' "$COVER_OUTCOME" > coverage.status
+      - name: Upload coverage artifact
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: mac-coverage-${{ github.run_id }}-${{ matrix.shard_name }}
+          path: |
+            coverage.txt
+            coverage.status
+          if-no-files-found: ignore
+
+  mac-cover:
+    name: Mac / test-cover
+    needs:
+      - runner-policy
+      - gate
+      - mac-cover-shards
+    if: always() && needs.gate.outputs.run_full == 'true'
+    runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
+    timeout-minutes: 25
+    outputs:
+      outcome: ${{ steps.cover.outcome }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: ${{ inputs.head_repo || github.repository }}
+          ref: ${{ inputs.head_sha || github.sha }}
+          persist-credentials: false
+      - name: Download other coverage
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: mac-coverage-${{ github.run_id }}-other
+          path: coverage-parts/other
+      - name: Download scripts and tests coverage
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: mac-coverage-${{ github.run_id }}-scripts-tests
+          path: coverage-parts/scripts-tests
+      - name: Merge complete successful coverage
+        id: cover
+        continue-on-error: true
+        env:
+          SHARDS_RESULT: ${{ needs.mac-cover-shards.result }}
+        run: |
+          set -euo pipefail
+          test "$SHARDS_RESULT" = success
+          for group in other scripts-tests; do
+            test -s "coverage-parts/$group/coverage.txt"
+            test "$(cat "coverage-parts/$group/coverage.status")" = success
+          done
+          ./scripts/merge-coverprofiles coverage.txt coverage-parts/other/coverage.txt coverage-parts/scripts-tests/coverage.txt
       - name: Upload coverage artifact
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

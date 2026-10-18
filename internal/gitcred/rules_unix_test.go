@@ -5,6 +5,7 @@ package gitcred
 import (
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 )
 
@@ -22,14 +23,18 @@ func TestStatOwnerReportsRealOwnership(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat: %v", err)
 	}
+	var expected syscall.Stat_t
+	if err := syscall.Stat(path, &expected); err != nil {
+		t.Fatalf("syscall.Stat: %v", err)
+	}
 	uid, gid, ok := statOwner(info)
 	if !ok {
 		t.Fatalf("statOwner reported no Unix ownership for %s", path)
 	}
-	if uid != uint32(os.Geteuid()) {
-		t.Fatalf("uid = %d, want %d", uid, os.Geteuid())
+	if uid != expected.Uid {
+		t.Fatalf("uid = %d, want %d", uid, expected.Uid)
 	}
-	if gid != uint32(os.Getegid()) {
-		t.Fatalf("gid = %d, want %d", gid, os.Getegid())
+	if gid != expected.Gid {
+		t.Fatalf("gid = %d, want %d", gid, expected.Gid)
 	}
 }

@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 )
 
@@ -691,17 +693,41 @@ func TestMacAcceptanceRetainsExternalBdContract(t *testing.T) {
 	if job.TimeoutMinutes.Value != "40" {
 		t.Error("Mac acceptance must retain its existing 40-minute job deadline")
 	}
+	if job.ContinueOnError {
+		t.Error("Both acceptance partitions must remain required")
+	}
+	if job.Strategy.FailFast == nil || *job.Strategy.FailFast {
+		t.Error("Both acceptance partitions must finish even when one fails")
+	}
+	if !slices.Equal(job.Strategy.Matrix.Keys, []string{"include"}) {
+		t.Fatalf("acceptance matrix keys = %v, want only include", job.Strategy.Matrix.Keys)
+	}
+	// These anchored Go selectors are complementary for every root name,
+	// including future tests. No test is removed from the required suite.
+	wantPartitions := []ciCriticalPathMatrixEntry{
+		{ShardName: "proxied-default", Command: "-run ^TestBeadsProxiedDefault$"},
+		{ShardName: "other-tests", Command: "-skip ^TestBeadsProxiedDefault$"},
+	}
+	if !slices.Equal(job.Strategy.Matrix.Include, wantPartitions) {
+		t.Fatalf("acceptance partitions = %v, want %v", job.Strategy.Matrix.Include, wantPartitions)
+	}
 	var runsTierA, runsBDContract bool
 	for _, step := range job.Steps {
 		runsTierA = runsTierA || strings.TrimSpace(step.Run) == "make test-acceptance"
 		runsBDContract = runsBDContract || strings.TrimSpace(step.Run) == "make test-bd-cli-contract"
 		if strings.TrimSpace(step.Run) == "make test-acceptance" {
-			if step.Env["ACCEPTANCE_GO_TEST_FLAGS"] != "-count=1 -json" {
-				t.Error("Mac Tier A must run every test freshly and emit per-test JSON timing")
+			if step.If != "" {
+				t.Error("Tier A must execute in both required partitions")
+			}
+			if step.Env["ACCEPTANCE_GO_TEST_FLAGS"] != "-count=1 -json ${{ matrix.command }}" {
+				t.Error("Mac Tier A must run each partition freshly and emit per-test JSON timing")
 			}
 			if step.Env["ACCEPTANCE_TIMEOUT"] != "20m" {
 				t.Error("Mac Tier A must retain its existing 20-minute package deadline")
 			}
+		}
+		if strings.TrimSpace(step.Run) == "make test-bd-cli-contract" && step.If != "matrix.shard_name == 'other-tests'" {
+			t.Error("The external bd CLI contract must run once after the other-tests partition")
 		}
 	}
 	if !runsTierA {
@@ -864,7 +890,8 @@ func TestMacRegressionTierJobsGateOnCentralizedOutputs(t *testing.T) {
 		{"mac-cmd-gc-process", "needs.gate.outputs.run_smoke == 'true'"},
 		{"mac-productmetrics-testhook", "needs.gate.outputs.run_smoke == 'true'"},
 		{"mac-acceptance", "needs.gate.outputs.run_smoke == 'true'"},
-		{"mac-cover", "needs.gate.outputs.run_full == 'true'"},
+		{"mac-cover-shards", "needs.gate.outputs.run_full == 'true'"},
+		{"mac-cover", "always() && needs.gate.outputs.run_full == 'true'"},
 		{"mac-integration-packages", "needs.gate.outputs.run_full == 'true'"},
 		{"mac-integration-bdstore", "needs.gate.outputs.run_full == 'true'"},
 		{"mac-integration-rest", "needs.gate.outputs.run_full == 'true'"},
@@ -1422,7 +1449,27 @@ func TestNotifyImageRebuildsRunsOnlyInCanonicalRepository(t *testing.T) {
 }
 
 func TestMacQualityRetainsBoundedLintFailureDiagnostics(t *testing.T) {
-	job := readCriticalPathWorkflow(t, "mac-regression.yml").Jobs["mac-quality"]
+	wf := readCriticalPathWorkflow(t, "mac-regression.yml")
+	job := wf.Jobs["mac-quality"]
+	qualitySetups := 0
+	for name, candidate := range wf.Jobs {
+		for _, step := range candidate.Steps {
+			if step.Uses != "./.github/actions/setup-gascity-macos" {
+				continue
+			}
+			if name == "mac-quality" {
+				qualitySetups++
+				if step.With["install-system-deps"] != "false" {
+					t.Error("Mac quality must opt out of unused Homebrew system dependencies")
+				}
+			} else if value := step.With["install-system-deps"]; value != "" && value != "true" {
+				t.Errorf("Mac runtime job %s must retain system dependency setup", name)
+			}
+		}
+	}
+	if qualitySetups != 1 {
+		t.Errorf("Mac quality setup count = %d, want exactly one", qualitySetups)
+	}
 	if job.ContinueOnError {
 		t.Fatal("Mac quality must fail when lint fails")
 	}
@@ -1441,6 +1488,9 @@ func TestMacQualityRetainsBoundedLintFailureDiagnostics(t *testing.T) {
 	}
 	if lint.ContinueOnError || lint.If != "" {
 		t.Fatal("Mac lint must remain an unconditional required check")
+	}
+	if got := lint.Env["LINT_GOMEMLIMIT"]; got != "12GiB" {
+		t.Errorf("Mac quality lint memory limit = %q, want 12GiB on the 14 GB quality runner", got)
 	}
 	for _, marker := range []string{
 		"set -o pipefail",
@@ -1714,6 +1764,88 @@ exit 1
 			if tc.wantExit == 1 && !strings.Contains(string(out), "/new-page") {
 				t.Fatalf("new page failure missing: %s", out)
 			}
+		})
+	}
+}
+
+func TestMacCoverageRequiresBothCompleteSuccessfulProfiles(t *testing.T) {
+	wf := readCriticalPathWorkflow(t, "mac-regression.yml")
+	shards, ok := wf.Jobs["mac-cover-shards"]
+	require.True(t, ok, "coverage must partition the exact package set")
+	assert.Equal(t, "25", shards.TimeoutMinutes.Value)
+	require.NotNil(t, shards.Strategy.FailFast)
+	assert.False(t, *shards.Strategy.FailFast)
+	var groups []string
+	for _, row := range shards.Strategy.Matrix.Include {
+		groups = append(groups, row.ShardName)
+	}
+	assert.Equal(t, []string{"other", "scripts-tests"}, groups)
+	aggregate := wf.Jobs["mac-cover"]
+	assert.Contains(t, aggregate.Needs, "mac-cover-shards")
+	assert.Equal(t, "always() && needs.gate.outputs.run_full == 'true'", aggregate.If)
+	assert.Equal(t, "25", aggregate.TimeoutMinutes.Value)
+	assert.Equal(t, "${{ steps.cover.outcome }}", aggregate.Outputs["outcome"])
+	var merge string
+	for _, step := range aggregate.Steps {
+		if step.ID == "cover" {
+			assert.True(t, step.ContinueOnError, "retain best-effort policy and expose actual step outcome")
+			merge = step.Run
+			assert.Equal(t, "${{ needs.mac-cover-shards.result }}", step.Env["SHARDS_RESULT"])
+		}
+	}
+	require.Contains(t, merge, "./scripts/merge-coverprofiles")
+	const canceledOutcome = "cancelled" //nolint:misspell // GitHub Actions uses this exact conclusion token.
+	// Existing shared constructor: bounded Bash/stdlib merger controls only,
+	// owner gp-olwhg.9.8, review by 2026-11-15; no runtime-debt reduction claim.
+	for _, mode := range []string{"complete", "failure", canceledOutcome, "skipped", "missing profile", "missing status", "wrong mode", "canceled job", "failed job", "skipped job"} {
+		t.Run(mode, func(t *testing.T) {
+			tmp := t.TempDir()
+			require.NoError(t, os.Mkdir(filepath.Join(tmp, "scripts"), 0o755))
+			require.NoError(t, os.Symlink(filepath.Join(repoRoot(t), "scripts", "merge-coverprofiles"), filepath.Join(tmp, "scripts", "merge-coverprofiles")))
+			for _, group := range groups {
+				dir := filepath.Join(tmp, "coverage-parts", group)
+				require.NoError(t, os.MkdirAll(dir, 0o755))
+				profile := "mode: set\ncommon.go:1.1,2.1 1 0\n" + group + ".go:1.1,2.1 1 1\n"
+				status := "success"
+				if group == "scripts-tests" {
+					profile = strings.Replace(profile, "1 0", "1 1", 1)
+					switch mode {
+					case "failure", canceledOutcome, "skipped":
+						status = mode
+					case "wrong mode":
+						profile = strings.Replace(profile, "mode: set", "mode: count", 1)
+					}
+				}
+				if mode != "missing profile" || group != "scripts-tests" {
+					require.NoError(t, os.WriteFile(filepath.Join(dir, "coverage.txt"), []byte(profile), 0o600))
+				}
+				if mode != "missing status" || group != "scripts-tests" {
+					require.NoError(t, os.WriteFile(filepath.Join(dir, "coverage.status"), []byte(status+"\n"), 0o600))
+				}
+			}
+			cmd := testCommand("bash", "-c", merge)
+			cmd.Dir = tmp
+			jobResult := "success"
+			switch mode {
+			case "canceled job":
+				jobResult = canceledOutcome
+			case "failed job":
+				jobResult = "failure"
+			case "skipped job":
+				jobResult = "skipped"
+			}
+			cmd.Env = append(os.Environ(), "SHARDS_RESULT="+jobResult)
+			output, err := cmd.CombinedOutput()
+			if mode != "complete" {
+				assert.Error(t, err, string(output))
+				_, statErr := os.Stat(filepath.Join(tmp, "coverage.txt"))
+				assert.ErrorIs(t, statErr, os.ErrNotExist)
+				return
+			}
+			require.NoError(t, err, string(output))
+			profile, err := os.ReadFile(filepath.Join(tmp, "coverage.txt"))
+			require.NoError(t, err)
+			assert.Equal(t, "mode: set\ncommon.go:1.1,2.1 1 1\nother.go:1.1,2.1 1 1\nscripts-tests.go:1.1,2.1 1 1\n", string(profile))
 		})
 	}
 }

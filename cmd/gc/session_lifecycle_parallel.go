@@ -261,6 +261,10 @@ type preparedStart struct {
 }
 
 type startResult struct {
+	// attemptInfo retains the original attempt lease across async refresh.
+	// candidate.info is refreshed for other commit decisions; using its newer
+	// last_woke_at here could release a different attempt on the same incarnation.
+	attemptInfo     sessionpkg.Info
 	prepared        preparedStart
 	err             error
 	outcome         TraceOutcomeCode
@@ -2112,6 +2116,9 @@ func settleUncommittedAsyncStart(result startResult, refresh asyncStartRefreshVe
 // twin the gates compare against.
 func refreshAsyncStartResult(result startResult, store beads.Store, stderr io.Writer) (startResult, asyncStartRefreshVerdict) {
 	preparedInfo := result.prepared.candidate.info
+	if result.attemptInfo.ID == "" {
+		result.attemptInfo = preparedInfo
+	}
 	if store == nil || strings.TrimSpace(preparedInfo.ID) == "" {
 		return result, asyncStartRefreshVerdict{commit: true}
 	}
@@ -2563,6 +2570,11 @@ func commitStartResultTraced(
 	info := result.prepared.candidate.info
 	name := result.prepared.candidate.name()
 	tp := result.prepared.candidate.tp
+	if result.attemptInfo.ID == "" {
+		// Synchronous results have not passed through async refresh: their
+		// candidate still carries the original attempt lease.
+		result.attemptInfo = info
+	}
 	// A capacity refusal is checked first, ahead of every failure arm
 	// including the terminal-error classifier: the endpoint refused, so
 	// nothing about this session is terminal or crash-looping.
@@ -2978,6 +2990,12 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 			// recovery — see TestGastown_Reconciler_SessionRestartsAfterExit.
 			if releaseBeadScopedPoolRuntime(info, result.provider, stderr) {
 				rollbackPendingCreate(info, sessFront, clk.Now().UTC(), stderr)
+			}
+		} else {
+			// The configured identity survives, but Start has returned: its
+			// completed attempt must not suppress the next tick as in flight.
+			if _, err := sessFront.ReleaseCompletedPendingStartLease(result.attemptInfo); err != nil {
+				fmt.Fprintf(stderr, "session reconciler: releasing completed start lease for %s: %v\n", name, err) //nolint:errcheck
 			}
 		}
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, string(result.outcome), result.started, result.finished, result.err, result.phases)

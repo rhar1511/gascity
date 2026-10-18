@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"errors"
 	"reflect"
 	"testing"
@@ -9,6 +10,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 )
 
 // recordingStore seeds a session bead into a recording-fake store and
@@ -920,5 +922,112 @@ func TestUpdateMetadataInfoFailedWritePersistsNothingAndReturnsInputUnchanged(t 
 		if v := after.Metadata[k]; v != "" {
 			t.Errorf("durable row key %q = %q after failed Update, want unset (all-or-nothing)", k, v)
 		}
+	}
+}
+
+func TestReleaseCompletedPendingStartLease(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		patch  map[string]string
+		closed bool
+		want   bool
+	}{
+		{name: "completed failure", want: true},
+		{name: "new incarnation", patch: map[string]string{"instance_token": "new-token"}},
+		{name: "new generation", patch: map[string]string{"generation": "3"}},
+		{name: "new attempt timestamp", patch: map[string]string{"last_woke_at": "2026-10-18T00:00:01Z"}},
+		{name: "active", patch: map[string]string{"state": "active"}},
+		{name: "claim cleared", patch: map[string]string{"pending_create_claim": ""}},
+		{name: "closed", closed: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := sessionBeadFixture("failed-start", "open", map[string]string{
+				"state": "creating", "pending_create_claim": "true", "generation": "2", "instance_token": "token-2",
+				"last_woke_at": "2026-10-18T00:00:00Z", "pending_create_started_at": "2026-10-17T23:59:00Z",
+				"session_name": "helper", "held_until": "2026-10-19T00:00:00Z", "wake_request": "explicit",
+			})
+			mem := beads.NewMemStoreFrom(1, []beads.Bead{b}, nil)
+			front := NewStore(beads.SessionStore{Store: mem})
+			expected, err := front.Get(b.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(tc.patch) > 0 {
+				if err := mem.SetMetadataBatch(b.ID, tc.patch); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.closed {
+				if err := mem.Close(b.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, err := mem.Get(b.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			applied, err := front.ReleaseCompletedPendingStartLease(expected)
+			if err != nil || applied != tc.want {
+				t.Fatalf("release = (%v, %v), want applied=%v", applied, err, tc.want)
+			}
+			after, err := mem.Get(b.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.want {
+				before.Metadata["last_woke_at"] = ""
+			}
+			if after.Status != before.Status || !reflect.DeepEqual(after.Metadata, before.Metadata) {
+				t.Fatalf("release changed unrelated lifecycle facts: before=%#v after=%#v", before, after)
+			}
+		})
+	}
+}
+
+func TestReleaseCompletedPendingStartLeasePreservesConcurrentAttempt(t *testing.T) {
+	b := sessionBeadFixture("failed-start", "open", map[string]string{
+		"state": "creating", "pending_create_claim": "true", "generation": "2", "instance_token": "token-2",
+		"last_woke_at": "2026-10-18T00:00:00Z",
+	})
+	mem := beads.NewMemStoreFrom(1, []beads.Bead{b}, nil)
+	opened, err := beads.OpenStoreAtForCity(context.Background(), beads.StoreOpenOptions{
+		ScopeRoot: t.TempDir(), Provider: "file", ConditionalWrites: gate.Require,
+		OpenFileStore: func() (beads.Store, error) { return mem, nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	front := NewStore(beads.SessionStore{Store: opened.Store})
+	expected, err := front.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newLease := "2026-10-18T00:00:01Z"
+	hookFired := false
+	// The existing resolver-aware wrapper injects the other attempt after
+	// the command's fresh read, while the write still targets the require-
+	// stamped store. An unstamped MemStore would select the legacy path.
+	race := &afterGetStore{Store: opened.Store, afterGet: func(id string) {
+		hookFired = true
+		if err := mem.SetMetadata(id, "last_woke_at", newLease); err != nil {
+			t.Fatal(err)
+		}
+	}}
+	front = NewStore(beads.SessionStore{Store: race})
+	if writer, _, err := beads.ResolveConditionalWriter(beads.SessionStore{Store: race}); err != nil || writer == nil {
+		t.Fatalf("require fixture must resolve a conditional writer: writer=%v err=%v", writer, err)
+	}
+	if applied, err := front.ReleaseCompletedPendingStartLease(expected); err != nil || applied {
+		t.Fatalf("stale revision release = (%v, %v), want refused", applied, err)
+	}
+	if !hookFired {
+		t.Fatal("concurrent write hook did not execute")
+	}
+	after, err := mem.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Metadata["last_woke_at"] != newLease {
+		t.Fatalf("new lease overwritten: %#v", after.Metadata)
 	}
 }

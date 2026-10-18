@@ -143,7 +143,7 @@ def stack_observation(processes, group, executable, directory, index, deadline, 
     # Redirect sample's documented -file output to its captured pipe. Without
     # -file it also creates an uncontrolled report in /tmp.
     record["sample"], output = capture_observation(
-        ["/usr/bin/sample", str(target["pid"]), "5", "10", "-file", "/dev/stdout"],
+        ["/usr/bin/sample", str(target["pid"]), "1", "10", "-file", "/dev/stdout"],
         min(deadline, time.monotonic()+6), STACK_BYTES, stopped)
     (directory / f"stack-{index:02d}.txt").write_bytes(output)
     record["target_after"] = processes.identity(target["pid"])

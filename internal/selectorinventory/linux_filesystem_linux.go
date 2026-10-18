@@ -275,7 +275,11 @@ func (p *linuxOpenedTreePath) revalidate() error {
 		return errLinuxTreeRace
 	}
 	for i := range p.components {
-		if p.components[i].path != fresh.components[i].path || !sameLinuxTreeVersion(p.components[i].info, fresh.components[i].info) {
+		same := sameLinuxTreeAncestor(p.components[i].info, fresh.components[i].info)
+		if i == len(p.components)-1 {
+			same = sameLinuxTreeVersion(p.components[i].info, fresh.components[i].info)
+		}
+		if p.components[i].path != fresh.components[i].path || !same {
 			return errLinuxTreeRace
 		}
 	}
@@ -381,7 +385,11 @@ func openLinuxTreePathNoFollow(configuredPath string) (*linuxOpenedTreePath, err
 			opened.close()
 			return nil, linuxTreeOperationFailure(statErr, linuxTreeErrorAfterObservation)
 		}
-		if !sameLinuxTreeVersion(info, namedInfo) {
+		same := sameLinuxTreeAncestor(info, namedInfo)
+		if index == len(parts)-1 {
+			same = sameLinuxTreeVersion(info, namedInfo)
+		}
+		if !same {
 			_ = unix.Close(next)
 			opened.close()
 			return nil, errLinuxTreeRace
@@ -758,9 +766,16 @@ func entryKindFromMode(mode uint32) TreeEntryKind {
 	}
 }
 
+// sameLinuxTreeAncestor compares ancestor path identity and current stat permissions;
+// unrelated directory contents may change. It does not attest ACL-only metadata
+// history. Selected roots and descendants require the complete version comparison.
+func sameLinuxTreeAncestor(left, right unix.Stat_t) bool {
+	return left.Dev == right.Dev && left.Ino == right.Ino && left.Mode == right.Mode &&
+		left.Uid == right.Uid && left.Gid == right.Gid && left.Rdev == right.Rdev
+}
+
 func sameLinuxTreeVersion(left, right unix.Stat_t) bool {
-	return left.Dev == right.Dev && left.Ino == right.Ino && left.Mode == right.Mode && left.Uid == right.Uid &&
-		left.Gid == right.Gid && left.Nlink == right.Nlink && left.Rdev == right.Rdev && left.Size == right.Size &&
+	return sameLinuxTreeAncestor(left, right) && left.Nlink == right.Nlink && left.Size == right.Size &&
 		left.Mtim == right.Mtim && left.Ctim == right.Ctim
 }
 

@@ -446,6 +446,10 @@ func (st *endpointCapacityState) noteRefusal(sessionID, template string, probe b
 	v := prev
 	if seen && st.successes > prev.successes && otherRefusals == prev.otherRefusals {
 		v.count++
+	} else if otherRefusals != prev.otherRefusals {
+		// Peer refusals show shared saturation. Discard selective-failure
+		// evidence so unrelated herd completion order cannot accumulate it.
+		v.count = 0
 	}
 	if probe {
 		if v.streak == 0 {

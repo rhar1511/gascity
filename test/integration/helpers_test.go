@@ -15,8 +15,10 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/builtinpacks"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/test/tmuxtest"
 )
 
@@ -458,7 +460,37 @@ func waitForExpectedTmuxSessions(t *testing.T, cityDir string, expectedAgents []
 	cmd := exec.Command("tmux", "-L", socketName, "list-sessions", "-F", "#{session_name}")
 	listOut, _ := cmd.CombinedOutput()
 	sessionOut, _ := gc(cityDir, "session", "list", "--state", "all")
-	t.Fatalf("expected tmux sessions never appeared on socket %q\nsessions:\n%s\ntmux:\n%s", socketName, sessionOut, listOut)
+	t.Fatalf("expected tmux sessions never appeared on socket %q\nsessions:\n%s\ntmux:\n%s\nstartup diagnostics:\n%s", socketName, sessionOut, listOut, readExpectedSessionStartupDiagnostics(cityDir, expectedAgents))
+}
+
+// readExpectedSessionStartupDiagnostics reads bounded logs only after startup fails.
+func readExpectedSessionStartupDiagnostics(cityDir string, expectedAgents []string) string {
+	const maxSessions = 16
+	var paths, diagnostics []string
+	var secrets []string
+	if env, ok := cityCommandEnv.Load(cityDir); ok {
+		values := parseEnvList(env.([]string))
+		secrets = runtime.SecretEnvValues(values)
+		if gcHome := values["GC_HOME"]; filepath.IsAbs(gcHome) {
+			paths = append(paths, filepath.Join(gcHome, "supervisor.log"))
+		}
+	}
+	if len(expectedAgents) > maxSessions {
+		diagnostics = append(diagnostics, fmt.Sprintf("startup logs truncated: showing %d of %d expected sessions", maxSessions, len(expectedAgents)))
+		expectedAgents = expectedAgents[:maxSessions]
+	}
+	for _, agent := range expectedAgents {
+		name := strings.ReplaceAll(agent, "/", "--")
+		if name == "" || name == "." || name == ".." || filepath.Base(name) != name {
+			diagnostics = append(diagnostics, "refusing invalid expected session diagnostic path")
+			continue
+		}
+		paths = append(paths, filepath.Join(citylayout.SessionDiagnosticsDir(cityDir), name, "start-stderr.log"))
+	}
+	for _, path := range paths {
+		diagnostics = append(diagnostics, fmt.Sprintf("%s:\n%s", path, readGraphDiagnosticTail(path)))
+	}
+	return runtime.RedactSecrets(strings.Join(diagnostics, "\n\n"), secrets)
 }
 
 // writeAgentsToml writes a city.toml with the given agents.

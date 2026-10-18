@@ -26,6 +26,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/tmux"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/session/sessiontest"
 	"github.com/gastownhall/gascity/internal/sessionauthority"
@@ -4619,6 +4620,139 @@ func TestCommitAsyncStartResultWithContext_RollsBackCanceledPendingCreateSuccess
 	}
 	if pendingCreateStartInFlightInfo(sessiontest.SeedBead(t, updated), clk, 0) {
 		t.Fatal("canceled async success left the pending-create bead leased")
+	}
+}
+
+// TestReconcileSessionBeads_ConfiguredNamedSessionRetriesCompletedProviderFailure
+// exercises the pending-create path used when a conservative tmux socket probe
+// refuses a launch, then the server becomes healthy. Keeping the configured
+// identity must not leave a completed failed attempt leased as still in flight.
+func TestReconcileSessionBeads_ConfiguredNamedSessionRetriesCompletedProviderFailure(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "helper", StartCommand: "true"}},
+		NamedSessions: []config.NamedSession{{Template: "helper", Mode: "always"}},
+	}
+	name := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "helper")
+	env.desiredState[name] = TemplateParams{Command: "test-cmd", SessionName: name, TemplateName: "helper"}
+	refusal := fmt.Errorf("creating session: %w: protocol=no-server observation=live-unix-socket", tmux.ErrServerDegraded)
+	env.sp.StartErrors[name] = refusal
+	b := env.createSessionBead(name, "helper")
+	env.setSessionMetadata(&b, map[string]string{
+		"session_name_explicit":      "true",
+		"pending_create_claim":       "true",
+		"state":                      "creating",
+		"continuation_epoch":         "1",
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "helper",
+		namedSessionModeMetadata:     "always",
+	})
+	starts := func() int {
+		n := 0
+		for _, call := range env.sp.Calls {
+			if call.Method == "Start" && call.Name == name {
+				n++
+			}
+		}
+		return n
+	}
+	if got := env.reconcileWithPoolDesiredAndDrainOps([]beads.Bead{b}, nil, nil); got != 0 {
+		t.Fatalf("failed start woken = %d, want 0", got)
+	}
+	if got := starts(); got != 1 {
+		t.Fatalf("provider starts = %d, want one refused attempt", got)
+	}
+	if env.sp.IsRunning(name) {
+		t.Fatal("refused start must not create a runtime")
+	}
+	if !strings.Contains(env.stderr.String(), refusal.Error()) {
+		t.Fatalf("provider refusal must remain visible: %s", env.stderr.String())
+	}
+	failed, err := env.store.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failed.Status != "open" || failed.Metadata["session_name"] != name || failed.Metadata["pending_create_claim"] != "true" {
+		t.Fatalf("failed attempt lost configured identity or pending claim: %#v", failed)
+	}
+	if got := failed.Metadata["last_woke_at"]; got != "" {
+		t.Errorf("completed failed attempt last_woke_at = %q, want no in-flight lease", got)
+	}
+	// Change only the provider outcome. A fresh tick uses the actual persisted
+	// row, before the normal startup lease can expire.
+	delete(env.sp.StartErrors, name)
+	env.clk.Advance(time.Second)
+	if got := env.reconcileWithPoolDesiredAndDrainOps([]beads.Bead{failed}, nil, nil); got != 1 {
+		t.Errorf("healthy next tick woken = %d, want 1; stderr: %s", got, env.stderr.String())
+	}
+	if got := starts(); got != 2 {
+		t.Errorf("provider starts = %d, want refused attempt plus healthy retry", got)
+	}
+	if !env.sp.IsRunning(name) {
+		t.Error("configured named session did not converge after provider recovery")
+	}
+	recovered, err := env.store.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered.Status != "open" || recovered.Metadata["session_name"] != name || recovered.Metadata["pending_create_claim"] != "" {
+		t.Errorf("retry must complete on the same configured session bead: %#v", recovered)
+	}
+}
+
+func TestCommitStartResult_ConfiguredProviderFailurePreservesNewerAttempt(t *testing.T) {
+	testConfiguredProviderFailurePreservesNewerAttempt(t, false)
+}
+
+func TestCommitAsyncStartResult_ConfiguredProviderFailurePreservesNewerAttempt(t *testing.T) {
+	testConfiguredProviderFailurePreservesNewerAttempt(t, true)
+}
+
+func testConfiguredProviderFailurePreservesNewerAttempt(t *testing.T, async bool) {
+	for _, key := range []string{"instance_token", "last_woke_at"} {
+		t.Run(key, func(t *testing.T) {
+			store := beads.NewMemStore()
+			clk := &clock.Fake{Time: time.Date(2026, 10, 18, 0, 0, 0, 0, time.UTC)}
+			b, err := store.Create(beads.Bead{ID: "gc-helper", Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: creatingMeta(map[string]string{
+				"session_name": "helper", "template": "helper", "generation": "2", "instance_token": "old-token",
+				"pending_create_claim": "true", "last_woke_at": clk.Now().Format(time.RFC3339),
+			})})
+			if err != nil {
+				t.Fatal(err)
+			}
+			result := startResult{
+				prepared: preparedStart{candidate: startCandidate{info: sessiontest.SeedBead(t, b), configured: true, tp: TemplateParams{SessionName: "helper", TemplateName: "helper"}}},
+				err:      tmux.ErrServerDegraded, outcome: TraceOutcomeProviderError, started: clk.Now(), finished: clk.Now(), rollbackPending: true,
+			}
+			value := "new-token"
+			if key == "last_woke_at" {
+				value = clk.Now().Add(time.Second).Format(time.RFC3339)
+			}
+			if err := store.SetMetadata(b.ID, key, value); err != nil {
+				t.Fatal(err)
+			}
+			before, err := store.Get(b.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var committed bool
+			if async {
+				committed = commitAsyncStartResultWithContext(context.Background(), result, nil, store, clk, events.Discard, 0, ioDiscard{}, ioDiscard{}, nil)
+			} else {
+				committed = commitStartResult(result, sessionFrontDoor(store), clk, events.Discard, 0, ioDiscard{}, ioDiscard{})
+			}
+			if committed {
+				t.Fatal("failed start committed")
+			}
+			after, err := store.Get(b.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if before.Status != after.Status || !reflect.DeepEqual(before.Metadata, after.Metadata) {
+				t.Fatalf("late failure changed newer attempt: before=%#v after=%#v", before, after)
+			}
+		})
 	}
 }
 
