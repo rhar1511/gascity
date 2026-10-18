@@ -5013,26 +5013,37 @@ func executePlannedPoolSessionBeadCreate(
 }
 
 func beadIdentifiesAsCanonical(bead beads.Bead, canonical string) bool {
-	canonical = strings.TrimSpace(canonical)
-	if canonical == "" {
-		return false
-	}
-	return strings.TrimSpace(bead.Metadata["agent_name"]) == canonical ||
-		strings.TrimSpace(bead.Metadata["alias"]) == canonical ||
-		strings.TrimSpace(bead.Title) == canonical ||
-		containsString(bead.Labels, "agent:"+canonical)
+	return sessionIdentifiesAsCanonical(canonical, bead.Metadata["agent_name"], bead.Metadata["alias"], bead.Metadata["session_name"], bead.Title, bead.Labels)
 }
 
 // infoIdentifiesAsCanonical is the session.Info mirror of beadIdentifiesAsCanonical.
 func infoIdentifiesAsCanonical(i session.Info, canonical string) bool {
+	return sessionIdentifiesAsCanonical(canonical, i.AgentName, i.Alias, i.SessionNameMetadata, i.Title, i.Labels)
+}
+
+// A title is a legacy identity fallback. Concrete session identities take
+// precedence because a manual session may retain its template's display title.
+func sessionIdentifiesAsCanonical(canonical, agentName, alias, sessionName, title string, labels []string) bool {
 	canonical = strings.TrimSpace(canonical)
 	if canonical == "" {
 		return false
 	}
-	return strings.TrimSpace(i.AgentName) == canonical ||
-		strings.TrimSpace(i.Alias) == canonical ||
-		strings.TrimSpace(i.Title) == canonical ||
-		containsString(i.Labels, "agent:"+canonical)
+	agentName = strings.TrimSpace(agentName)
+	alias = strings.TrimSpace(alias)
+	sessionName = strings.TrimSpace(sessionName)
+	if agentName == canonical || alias == canonical || sessionName == canonical || sessionName == poolIdentitySessionName(canonical, canonical) {
+		return true
+	}
+	hasConcreteIdentity := agentName != "" || alias != "" || sessionName != ""
+	for _, label := range labels {
+		if identity, ok := strings.CutPrefix(label, "agent:"); ok && strings.TrimSpace(identity) != "" {
+			if identity == canonical {
+				return true
+			}
+			hasConcreteIdentity = true
+		}
+	}
+	return !hasConcreteIdentity && strings.TrimSpace(title) == canonical
 }
 
 type poolSessionIdentifierLockFunc func(string, []string, func() error) error

@@ -228,6 +228,55 @@ func TestCanonicalSingletonFreshSelectionIsUnique(t *testing.T) {
 	}
 }
 
+func TestCanonicalSingletonDistinguishesDisplayTitleFromConcreteIdentity(t *testing.T) {
+	const canonical = "types/worker"
+	const adhoc = "types/worker-adhoc-5c3963037d"
+	maxSessions := 1
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker", Dir: "types", MaxActiveSessions: &maxSessions}}}
+	tests := []struct {
+		name        string
+		agentName   string
+		alias       string
+		sessionName string
+		labels      []string
+		wantHeld    bool
+	}{
+		{name: "held manual adhoc title", agentName: adhoc, alias: adhoc, sessionName: "worker-adhoc-5c3963037d", labels: []string{"gc:session", "template:" + canonical}},
+		{name: "concrete session name", sessionName: "worker-adhoc-5c3963037d"},
+		{name: "adhoc agent label", labels: []string{"agent:" + adhoc}},
+		{name: "legacy title only", wantHeld: true},
+		{name: "canonical agent", agentName: canonical, wantHeld: true},
+		{name: "canonical alias", agentName: adhoc, alias: canonical, wantHeld: true},
+		{name: "canonical session name", agentName: adhoc, sessionName: canonical, wantHeld: true},
+		{name: "encoded canonical session name", sessionName: "types--worker", wantHeld: true},
+		{name: "canonical agent label", agentName: adhoc, labels: []string{"agent:" + canonical}, wantHeld: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			info := sessionpkg.Info{
+				ID: "held-manual", Template: canonical, Title: canonical,
+				AgentName: tt.agentName, Alias: tt.alias, SessionNameMetadata: tt.sessionName,
+				SessionOrigin: "manual", MetadataState: string(sessionpkg.StateAsleep), Labels: tt.labels,
+			}
+			used := map[int]bool{}
+			slot, err := claimFreshPoolSlotInfo(freshSlotTestParams(cfg, info), &cfg.Agents[0], used)
+			if tt.wantHeld {
+				if !errors.Is(err, errPoolSessionNameUnavailable) || used[0] {
+					t.Fatalf("canonical holder: slot=%d used=%v err=%v", slot, used, err)
+				}
+			} else if err != nil || slot != 0 || !used[0] {
+				t.Fatalf("adhoc holder must leave canonical slot free: slot=%d used=%v err=%v", slot, used, err)
+			}
+			bead := beads.Bead{ID: info.ID, Title: info.Title, Labels: info.Labels, Metadata: map[string]string{
+				"agent_name": tt.agentName, "alias": tt.alias, "session_name": tt.sessionName,
+			}}
+			if got := beadIdentifiesAsCanonical(bead, canonical); got != tt.wantHeld {
+				t.Fatalf("bead canonical identity=%v, want %v", got, tt.wantHeld)
+			}
+		})
+	}
+}
+
 func TestCanonicalSingletonCannotPlanTwoFreshRows(t *testing.T) {
 	maxSessions := 1
 	agent := config.Agent{Name: "worker", MaxActiveSessions: &maxSessions}
