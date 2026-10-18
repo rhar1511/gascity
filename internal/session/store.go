@@ -102,6 +102,31 @@ func (s *Store) CommitStartedIfCurrent(expected Info, patch MetadataPatch) (bool
 	return applied, err
 }
 
+// ReleaseCompletedPendingStartLease releases a failed start's in-flight marker
+// while preserving its pending claim and configured identity for a later retry.
+// A late completion cannot release a newer incarnation or a newer attempt's
+// timestamp. The session mutation lock serializes local incarnation allocation;
+// UpdateMetadataFenced also protects the read/write window where conditional
+// writes are available. Legacy stores retain that helper's reread-only limit.
+func (s *Store) ReleaseCompletedPendingStartLease(expected Info) (bool, error) {
+	if !expected.PendingCreateClaim || strings.TrimSpace(expected.LastWokeAt) == "" {
+		return false, nil
+	}
+	applied := false
+	err := WithSessionMutationLock(expected.ID, func() error {
+		var err error
+		applied, err = s.UpdateMetadataFenced(expected.ID, 3, func(current Info, _ PersistedResponse) MetadataPatch {
+			if !current.PendingCreateClaim || !LeaseFromInfo(expected).CanRollback(LeaseFromInfo(current)) ||
+				current.LastWokeAt != expected.LastWokeAt {
+				return nil
+			}
+			return MetadataPatch{"last_woke_at": ""}
+		})
+		return err
+	})
+	return applied, err
+}
+
 // WithPendingCreateRollback runs the rollback transaction only while the exact
 // observed creation is still pending. Completion and incarnation allocation use
 // the same process-local lock. fn must not acquire that lock again or call a
