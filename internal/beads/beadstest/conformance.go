@@ -177,6 +177,9 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 		if got.Status != created.Status {
 			t.Errorf("Get Status = %q, create echo Status = %q", got.Status, created.Status)
 		}
+		if !got.CreatedAt.Equal(created.CreatedAt) {
+			t.Errorf("CreatedAt: Get=%s, create echo=%s — backend must echo the durable creation identity", got.CreatedAt, created.CreatedAt)
+		}
 		for k, v := range meta {
 			if created.Metadata[k] != v {
 				t.Errorf("create echo Metadata[%q] = %q, want %q", k, created.Metadata[k], v)
