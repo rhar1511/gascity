@@ -2,6 +2,8 @@ module github.com/gastownhall/gascity
 
 go 1.26.9
 
+replace github.com/steveyegge/beads => github.com/rhar1511/beads v1.3.2-0.20261013010644-3c3423cf09a9
+
 require (
 	github.com/BurntSushi/toml v1.6.0
 	github.com/Masterminds/semver/v3 v3.4.0

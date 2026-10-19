@@ -27,6 +27,8 @@ go_library(
         "//internal/beadmeta",
         "//internal/beads",
         "//internal/testpolicy/waiverclock",
+        "@org_golang_x_mod//modfile",
+        "@org_golang_x_mod//module",
     ],
 )
 
@@ -43,6 +45,7 @@ go_test(
         "//internal/beads",
         "//internal/testenv",
         "//internal/testpolicy/waiverclock",
+        "@org_golang_x_mod//module",
     ],
 )
 
