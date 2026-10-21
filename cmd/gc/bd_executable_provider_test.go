@@ -47,9 +47,8 @@ func main() {
 	binary := filepath.Join(dir, "bd")
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, filepath.Join(runtime.GOROOT(), "bin", "go"), "build", "-o", binary, "./cmd/bd")
-	cmd.Dir = dir
-	if out, err := cmd.CombinedOutput(); err != nil {
+	runner := beads.ExecCommandRunnerWithEnvContext(ctx, nil)
+	if out, err := runner(dir, filepath.Join(runtime.GOROOT(), "bin", "go"), "build", "-o", binary, "./cmd/bd"); err != nil {
 		t.Fatalf("fixture build: %v\n%s", err, out)
 	}
 	return binary

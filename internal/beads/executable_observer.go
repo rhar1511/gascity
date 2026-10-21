@@ -16,21 +16,27 @@ type ExecutableObserver struct {
 }
 
 func runObservedCommand(cmd *exec.Cmd, observe *ExecutableObserver) ([]byte, error) {
+	return runObservedCommandOutput(cmd, observe, (*exec.Cmd).Output)
+}
+
+// runObservedCommandOutput owns callback ordering and error composition. The
+// production adapter supplies exec.Cmd.Output; policy tests script only that port.
+func runObservedCommandOutput(cmd *exec.Cmd, observe *ExecutableObserver, output func(*exec.Cmd) ([]byte, error)) ([]byte, error) {
 	if observe == nil {
-		return cmd.Output()
+		return output(cmd)
 	}
 	if observe.BeginAttempt == nil || observe.Observe == nil {
 		return nil, errors.New("executable observer requires both callbacks")
 	}
 	observe.BeginAttempt()
 	if cmd.Err != nil {
-		return cmd.Output()
+		return output(cmd)
 	}
 	finish, err := observe.Observe(cmd)
 	if err != nil {
 		return nil, fmt.Errorf("observe selected executable: %w", err)
 	}
-	out, commandErr := cmd.Output()
+	out, commandErr := output(cmd)
 	if finish != nil {
 		if err := finish(); err != nil {
 			return out, errors.Join(commandErr, fmt.Errorf("finish selected executable observation: %w", err))

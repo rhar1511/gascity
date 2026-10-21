@@ -114,6 +114,7 @@ go_test(
         "event_payload_contract_test.go",
         "event_payload_test.go",
         "exec_timeout_linux_test.go",
+        "executable_observer_policy_test.go",
         "export_test.go",
         "factory_test.go",
         "filestore_atomic_close_test.go",
