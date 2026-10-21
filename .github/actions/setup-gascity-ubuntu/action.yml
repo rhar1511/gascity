@@ -23,7 +23,7 @@ inputs:
     required: false
     default: ""
   qualified-integration-bd:
-    description: Build the exact fork source required by HTTP integration suites
+    description: Build the authenticated released CLI paired with the native Go library
     required: false
     default: "false"
   install-claude-cli:
@@ -76,7 +76,7 @@ runs:
         case "$bd_test_binary" in
           *$'\n'*|*$'\r'*) echo "bd test executable path contains a line break" >&2; exit 1 ;;
         esac
-        printf 'BEADS_TEST_BD_BINARY=%s\n' "$bd_test_binary" >> "$GITHUB_ENV"
+        printf 'BEADS_TEST_BD_BINARY=%s\nBEADS_TEST_UPSTREAM_BD_BINARY=%s\n' "$bd_test_binary" "$bd_test_binary" >> "$GITHUB_ENV"
 
     - name: Install qualified Beads build dependencies
       if: ${{ inputs.qualified-integration-bd == 'true' }}

@@ -2,6 +2,9 @@ package scripts_test
 
 import (
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -24,6 +27,11 @@ import (
 // deps.env the single source of truth and fails loudly the moment an anchor
 // moves without the others.
 func TestBDVersionPins(t *testing.T) {
+	t.Run("qualified native CLI installer protocol", testQualifiedNativeBDInstallerProtocol)
+	t.Run("native CI pair wiring", testNativeCIPairWiring)
+	t.Run("native mail fixture input capture", testNativeMailFixtureInputCapture)
+	t.Run("native rig worktree fixture selection", testNativeRigWorktreeFixtureSelection)
+	t.Run("native Bazel integration selection", testNativeBazelIntegrationSelection)
 	root := repoRoot(t)
 	env := readDotenv(t, filepath.Join(root, "deps.env"))
 
@@ -425,5 +433,522 @@ func assertWorkflowPins(t *testing.T, root, key, want string) {
 	})
 	if err != nil {
 		t.Fatalf("walk workflows: %v", err)
+	}
+}
+
+// testQualifiedNativeBDInstallerProtocol exercises the real installer with a
+// deterministic Go/tool protocol. These doubles prove selection and refusal,
+// not release authenticity or native schema parity; those remain real CI gates.
+func testQualifiedNativeBDInstallerProtocol(t *testing.T) {
+	root := repoRoot(t)
+	installer := readFile(t, root, ".github/scripts/install-qualified-integration-bd.sh")
+	const module = "github.com/rhar1511/beads"
+	const version = "v1.3.2"
+	const ref = "11863eb43b8807adaa4aa0f2e9b8fd4aeb83f624"
+	const sum = "h1:aQ6Di/V7qmK8F54HJhYMn0j3qCbUiHI7UdwEcp+EsNc="
+	const modSum = "h1:3GXUkW2Ju+qM/wiuj8XT6owIVUZzUkBZtdAIC4IVid4="
+	type scenario struct {
+		name, os, arch, pinModule, pinVersion, pinRef, sumText string
+		consumer, resolved, downloaded, buildinfo              string
+		graphBefore, graphAfter                                string
+		buildFail, smokeFail, crossHost, wantFailure           bool
+		resolveFail, initialModDrift, modDrift, stageSumDrift  bool
+	}
+	consumer := `{"Require":[{"Path":"` + module + `","Version":"` + version + `"}],"Replace":null}`
+	resolved := `{"Path":"` + module + `","Version":"` + version + `","Sum":"` + sum + `"}`
+	download := `{"Path":"` + module + `","Version":"` + version + `","Sum":"` + sum + `","GoModSum":"` + modSum + `"}`
+	buildinfo := "\tpath\t" + module + "/cmd/bd\n\tmod\t" + module + "\t" + version + "\t" + sum + "\n\tbuild\tCGO_ENABLED=1\n\tbuild\tGOOS=linux\n\tbuild\tGOARCH=amd64\n"
+	sumText := module + " " + version + " " + sum + "\n" + module + " " + version + "/go.mod " + modSum + "\n"
+	graph := `{"Path":"example.com/consumer","Main":true}` + "\n" + resolved + "\n" + `{"Path":"example.com/existing","Version":"v1.2.3"}` + "\n"
+	cases := []scenario{
+		{name: "released Linux native pair"},
+		{name: "released Darwin native pair", os: "darwin", arch: "arm64"},
+		{name: "unknown distribution", pinModule: "github.com/steveyegge/beads", wantFailure: true},
+		{name: "unknown release", pinVersion: "v1.3.3", wantFailure: true},
+		{name: "unknown source", pinRef: strings.Repeat("a", 40), wantFailure: true},
+		{name: "wrong consumer zip sum", sumText: strings.ReplaceAll(sumText, sum, "h1:wrong"), wantFailure: true},
+		{name: "missing consumer gomod sum", sumText: module + " " + version + " " + sum + "\n", wantFailure: true},
+		{name: "duplicate consumer sum", sumText: sumText + module + " " + version + " " + sum + "\n", wantFailure: true},
+		{name: "consumer version drift", consumer: strings.ReplaceAll(consumer, version, "v1.3.1"), wantFailure: true},
+		{name: "indirect consumer", consumer: strings.Replace(consumer, `"Version":"`+version+`"`, `"Version":"`+version+`","Indirect":true`, 1), wantFailure: true},
+		{name: "local replacement", consumer: strings.Replace(consumer, `"Replace":null`, `"Replace":[{"Old":{"Path":"`+module+`"},"New":{"Path":"../beads"}}]`, 1), wantFailure: true},
+		{name: "remote replacement", consumer: strings.Replace(consumer, `"Replace":null`, `"Replace":[{"Old":{"Path":"`+module+`"},"New":{"Path":"example.com/beads","Version":"v1.3.2"}}]`, 1), wantFailure: true},
+		{name: "resolved replacement", resolved: strings.TrimSuffix(resolved, "}") + `,"Replace":{"Path":"../beads"}}`, wantFailure: true},
+		{name: "resolved version drift", resolved: strings.ReplaceAll(resolved, version, "v1.3.1"), wantFailure: true},
+		{name: "resolved sum drift", resolved: strings.ReplaceAll(resolved, sum, "h1:wrong"), wantFailure: true},
+		{name: "download sum drift", downloaded: strings.ReplaceAll(download, sum, "h1:wrong"), wantFailure: true},
+		{name: "download gomod drift", downloaded: strings.ReplaceAll(download, modSum, "h1:wrong"), wantFailure: true},
+		{name: "cross host", crossHost: true, wantFailure: true},
+		{name: "build failure", buildFail: true, wantFailure: true},
+		{name: "devel binary", buildinfo: strings.ReplaceAll(buildinfo, version+"\t"+sum, "(devel)"), wantFailure: true},
+		{name: "binary module mismatch", buildinfo: strings.ReplaceAll(buildinfo, module, "github.com/steveyegge/beads"), wantFailure: true},
+		{name: "binary checksum mismatch", buildinfo: strings.ReplaceAll(buildinfo, sum, "h1:wrong"), wantFailure: true},
+		{name: "binary replacement", buildinfo: buildinfo + "\t=>\t../beads\t(devel)\n", wantFailure: true},
+		{name: "binary without CGO", buildinfo: strings.ReplaceAll(buildinfo, "CGO_ENABLED=1", "CGO_ENABLED=0"), wantFailure: true},
+		{name: "pure go binary", buildinfo: buildinfo + "\tbuild\t-tags=gms_pure_go\n", wantFailure: true},
+		{name: "wrong binary host", buildinfo: strings.ReplaceAll(buildinfo, "GOOS=linux", "GOOS=darwin"), wantFailure: true},
+		{name: "wrong binary architecture", buildinfo: strings.ReplaceAll(buildinfo, "GOARCH=amd64", "GOARCH=arm64"), wantFailure: true},
+		{name: "smoke failure", smokeFail: true, wantFailure: true},
+		{name: "CLI package resolution failure", resolveFail: true, wantFailure: true},
+		{name: "initial graph go mod drift", initialModDrift: true, wantFailure: true},
+		{name: "CLI resolution go mod drift", modDrift: true, wantFailure: true},
+		{name: "selected graph version drift", graphAfter: strings.ReplaceAll(graph, "v1.2.3", "v1.2.4"), wantFailure: true},
+		{name: "selected graph addition", graphAfter: graph + `{"Path":"example.com/added","Version":"v1.0.0"}`, wantFailure: true},
+		{name: "selected graph removal", graphAfter: resolved + "\n", wantFailure: true},
+		{name: "initial graph replacement", graphBefore: strings.ReplaceAll(graph, `"Version":"v1.2.3"`, `"Version":"v1.2.3","Replace":{"Path":"../local"}`), wantFailure: true},
+		{name: "selected graph replacement", graphAfter: strings.ReplaceAll(graph, `"Version":"v1.2.3"`, `"Version":"v1.2.3","Replace":{"Path":"../local"}`), wantFailure: true},
+		{name: "stage release checksum drift", stageSumDrift: true, wantFailure: true},
+		{name: "empty initial selected graph", graphBefore: " \n", wantFailure: true},
+		{name: "duplicate selected graph module", graphAfter: graph + resolved, wantFailure: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := t.TempDir()
+			write := func(rel, text string, mode os.FileMode) string {
+				t.Helper()
+				path := filepath.Join(fixture, rel)
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte(text), mode); err != nil {
+					t.Fatal(err)
+				}
+				return path
+			}
+			or := func(value, fallback string) string {
+				if value != "" {
+					return value
+				}
+				return fallback
+			}
+			osName, arch := or(tc.os, "linux"), or(tc.arch, "amd64")
+			info := or(tc.buildinfo, buildinfo)
+			if tc.os != "" {
+				info = strings.ReplaceAll(info, "GOOS=linux", "GOOS="+osName)
+				info = strings.ReplaceAll(info, "GOARCH=amd64", "GOARCH="+arch)
+			}
+			write("consumer.json", or(tc.consumer, consumer), 0o644)
+			write("resolved.json", or(tc.resolved, resolved), 0o644)
+			write("download.json", or(tc.downloaded, download), 0o644)
+			write("buildinfo", info, 0o644)
+			write("graph-before.json", or(tc.graphBefore, graph), 0o644)
+			write("graph-after.json", or(tc.graphAfter, graph), 0o644)
+			gomod := "module example.com/consumer\n\ngo 1.26.0\n\nrequire " + module + " " + version + "\n"
+			write("repo/go.mod", gomod, 0o644)
+			checksums := or(tc.sumText, sumText)
+			write("repo/go.sum", checksums, 0o644)
+			write("repo/deps.env", "BEADS_LIBRARY_MODULE="+or(tc.pinModule, module)+"\nBEADS_LIBRARY_VERSION="+or(tc.pinVersion, version)+"\nBEADS_LIBRARY_REF="+or(tc.pinRef, ref)+"\n", 0o644)
+			script := write("repo/.github/scripts/install-qualified-integration-bd.sh", installer, 0o755)
+			write("old/bd", "original archive executable\n", 0o755)
+			write("mock-bd", "#!/bin/sh\n[ \"$1\" = version ] || exit 99\n[ \"$SMOKE_FAIL\" = false ] || exit 29\nprintf 'fixture bd\\n'\n", 0o755)
+			write("bin/go", `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "$FIXTURE/calls"
+case "$*" in
+  'env GOOS'|'env GOARCH') ;;
+  *) case "$PWD" in "$FIXTURE/runner-temp"/gascity-qualified-bd.*/consumer) ;; *) echo 'Go module operation escaped the private consumer stage' >&2; exit 96 ;; esac ;;
+esac
+case "$*" in
+  'env GOOS') if [[ "$CROSS_HOST" == true ]]; then echo cross; else echo "$FIXTURE_OS"; fi ;;
+  'env GOARCH') echo "$FIXTURE_ARCH" ;;
+  'mod edit -json') cat "$FIXTURE/consumer.json" ;;
+  'list -mod=readonly -m -json github.com/rhar1511/beads') cat "$FIXTURE/resolved.json" ;;
+  'mod download -json github.com/rhar1511/beads@v1.3.2') cat "$FIXTURE/download.json" ;;
+  'list -mod=mod -m -json all')
+    [[ "$INITIAL_MOD_DRIFT" == false ]] || printf '# changed during initial graph load\n' >> go.mod
+    cat "$FIXTURE/graph-before.json" ;;
+  'list -mod=mod -deps github.com/rhar1511/beads/cmd/bd')
+    [[ "$RESOLVE_FAIL" == false ]] || exit 32
+    printf 'example.com/cli-only v1.0.0 h1:fixture-cli-sum\n' >> go.sum
+    [[ "$MOD_DRIFT" == false ]] || printf '# changed during CLI resolution\n' >> go.mod
+    [[ "$STAGE_SUM_DRIFT" == false ]] || printf 'github.com/rhar1511/beads v1.3.2 h1:wrong\n' >> go.sum
+    echo github.com/rhar1511/beads/cmd/bd ;;
+  'list -mod=readonly -m -json all') cat "$FIXTURE/graph-after.json" ;;
+  'mod verify') ;;
+  'build -mod=readonly -trimpath -o '*)
+    [[ "$#" == 6 && "$6" == github.com/rhar1511/beads/cmd/bd && "$CGO_ENABLED" == 1 && "$GOWORK" == off && "$GOENV" == off && "$GOTOOLCHAIN" == local && -z "$GOFLAGS" ]] || exit 97
+    [[ "$BUILD_FAIL" == false ]] || exit 31
+    grep -q '^example.com/cli-only v1.0.0 h1:fixture-cli-sum$' go.sum || { echo 'CLI-only sums were not hydrated in private stage' >&2; exit 95; }
+    cp "$FIXTURE/mock-bd" "$5" ;;
+  'version -m '*) cat "$FIXTURE/buildinfo" ;;
+  *) echo "unexpected Go operation: $*" >&2; exit 98 ;;
+esac
+`, 0o755)
+			write("bin/uname", "#!/bin/sh\ncase \"$1\" in -s) if [ \"$FIXTURE_OS\" = darwin ]; then echo Darwin; else echo Linux; fi ;; -m) if [ \"$FIXTURE_ARCH\" = arm64 ]; then echo arm64; else echo x86_64; fi ;; *) exit 99 ;; esac\n", 0o755)
+			write("bin/pkg-config", "#!/bin/sh\ncase \"$1\" in --exists) exit 0 ;; --cflags) echo -I/fixture/icu ;; --libs) echo -licui18n ;; *) exit 99 ;; esac\n", 0o755)
+			for _, tool := range []string{"curl", "git", "tar", "brew"} {
+				write("bin/"+tool, "#!/bin/sh\necho 'unexpected source/network/Homebrew operation' >&2\nexit 99\n", 0o755)
+			}
+			for _, dir := range []string{"runner-temp", "cache", "home"} {
+				if err := os.MkdirAll(filepath.Join(fixture, dir), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// Reuse the package's existing subprocess owner; no new constructor.
+			cmd := testCommand("bash", script)
+			cmd.Dir = filepath.Join(fixture, "repo")
+			cmd.Env = []string{
+				"PATH=" + filepath.Join(fixture, "bin") + string(os.PathListSeparator) + os.Getenv("PATH"),
+				"HOME=" + filepath.Join(fixture, "home"), "FIXTURE=" + fixture,
+				"FIXTURE_OS=" + osName, "FIXTURE_ARCH=" + arch,
+				fmt.Sprintf("BUILD_FAIL=%t", tc.buildFail), fmt.Sprintf("SMOKE_FAIL=%t", tc.smokeFail), fmt.Sprintf("CROSS_HOST=%t", tc.crossHost),
+				fmt.Sprintf("RESOLVE_FAIL=%t", tc.resolveFail), fmt.Sprintf("INITIAL_MOD_DRIFT=%t", tc.initialModDrift), fmt.Sprintf("MOD_DRIFT=%t", tc.modDrift), fmt.Sprintf("STAGE_SUM_DRIFT=%t", tc.stageSumDrift),
+				"RUNNER_TEMP=" + filepath.Join(fixture, "runner-temp"), "RUNNER_TOOL_CACHE=" + filepath.Join(fixture, "cache"),
+				"GITHUB_ENV=" + filepath.Join(fixture, "github-env"), "GITHUB_PATH=" + filepath.Join(fixture, "github-path"),
+				"GOFLAGS=-tags=gms_pure_go", "GOWORK=/ambient/go.work", "GOENV=/ambient/goenv",
+			}
+			out, err := cmd.CombinedOutput()
+			if (err != nil) != tc.wantFailure {
+				t.Fatalf("installer error=%v, want failure=%v\n%s", err, tc.wantFailure, out)
+			}
+			selected := filepath.Join(fixture, "cache", "gascity-qualified-bd", ref, osName+"-"+arch, "bd")
+			for _, path := range []string{"github-env", "github-path"} {
+				data, readErr := os.ReadFile(filepath.Join(fixture, path))
+				switch {
+				case tc.wantFailure:
+					if readErr == nil && len(data) != 0 {
+						t.Errorf("failed installer published %s: %s", path, data)
+					}
+				case readErr != nil:
+					t.Fatal(readErr)
+				case path == "github-env":
+					for _, key := range []string{"BEADS_TEST_BD_BINARY", "GC_INTEGRATION_REAL_BD", "GC_ACCEPTANCE_BD_BIN"} {
+						if !strings.Contains(string(data), key+"="+selected+"\n") {
+							t.Errorf("missing exact selection %s: %s", key, data)
+						}
+					}
+				case string(data) != filepath.Dir(selected)+"\n":
+					t.Errorf("PATH publication=%q", data)
+				}
+			}
+			if tc.wantFailure {
+				if _, err := os.Stat(selected); !os.IsNotExist(err) {
+					t.Errorf("failed installer retained selected executable: %v", err)
+				}
+			} else {
+				calls := readFile(t, fixture, "calls")
+				if !strings.Contains(calls, "build -mod=readonly -trimpath -o ") || !strings.Contains(calls, " "+module+"/cmd/bd\n") || strings.Contains(calls, "./cmd/bd") {
+					t.Errorf("did not build dependency package from consumer: %s", calls)
+				}
+				for _, required := range []string{"list -mod=mod -m -json all\n", "list -mod=mod -deps " + module + "/cmd/bd\n", "list -mod=readonly -m -json all\n"} {
+					if !strings.Contains(calls, required) {
+						t.Errorf("missing private graph hydration command %q: %s", required, calls)
+					}
+				}
+				if got := readFile(t, filepath.Dir(selected), "consumer.go.mod"); got != gomod {
+					t.Errorf("installed graph go.mod drifted: %s", got)
+				}
+				if got := readFile(t, filepath.Dir(selected), "consumer.go.sum"); !strings.Contains(got, "example.com/cli-only v1.0.0 h1:fixture-cli-sum\n") {
+					t.Errorf("installed graph does not retain hydrated private CLI sums: %s", got)
+				}
+				provenance := readFile(t, filepath.Dir(selected), "source-provenance")
+				if provenance != module+" "+version+" "+sum+" "+ref+"\n" {
+					t.Errorf("provenance=%q", provenance)
+				}
+			}
+			if matches, err := filepath.Glob(filepath.Join(fixture, "runner-temp", "gascity-qualified-bd.*")); err != nil || len(matches) != 0 {
+				t.Errorf("private scratch remains: %v %v", matches, err)
+			}
+			for path, want := range map[string]string{"repo/go.mod": gomod, "repo/go.sum": checksums, "old/bd": "original archive executable\n"} {
+				if got := readFile(t, fixture, path); got != want {
+					t.Errorf("installer modified %s", path)
+				}
+			}
+		})
+	}
+}
+
+func testNativeCIPairWiring(t *testing.T) {
+	root := repoRoot(t)
+	for _, suite := range []string{"acceptance", "integration"} {
+		build := readFile(t, root, "test/"+suite+"/BUILD.bazel")
+		if !strings.Contains(build, "\"@com_github_rhar1511_beads//cmd/bd:bd\"") || strings.Contains(build, "\"@bd_bin_v1_3_1//:bd\"") {
+			t.Errorf("Bazel %s must receive the linked owner module CLI, not the independent upstream archive", suite)
+		}
+	}
+	for workflow, jobs := range map[string][]string{
+		"ci.yml":             {"beads-topology-acceptance", "beads-proxied-native-acceptance", "cmd-gc-process"},
+		"mac-regression.yml": {"mac-acceptance", "mac-integration-packages", "mac-integration-rest", "mac-integration-review-formulas", "mac-cmd-gc-process"},
+		"nightly.yml":        {"beads-proxied-perf", "integration-sqlite-coordstore"},
+		"rc-gate.yml":        {"ubuntu_acceptance_a"},
+	} {
+		wf := readCriticalPathWorkflow(t, workflow)
+		for _, name := range jobs {
+			job, ok := wf.Jobs[name]
+			if !ok {
+				t.Fatalf("%s missing paired job %s", workflow, name)
+			}
+			setups := 0
+			for _, step := range job.Steps {
+				if strings.HasPrefix(step.Uses, "./.github/actions/setup-gascity-") {
+					setups++
+					if step.With["qualified-integration-bd"] != "true" {
+						t.Errorf("%s/%s does not select authenticated native pair", workflow, name)
+					}
+				}
+				if strings.Contains(step.Run, "BD_CURRENT_REF") || strings.Contains(step.Run, "git clone") {
+					t.Errorf("%s/%s overrides the native pair with an independent upstream source build", workflow, name)
+				}
+			}
+			if setups != 1 {
+				t.Errorf("%s/%s setup count=%d, want1", workflow, name, setups)
+			}
+		}
+	}
+	mac := readCriticalPathWorkflow(t, "mac-regression.yml")
+	foundArchiveContract := false
+	for _, step := range mac.Jobs["mac-acceptance"].Steps {
+		if step.Run == "make test-bd-cli-contract" {
+			foundArchiveContract = true
+			if step.Env["EXTRA_TEST_ENV"] != "GC_ACCEPTANCE_BD_BIN=${{ env.BEADS_TEST_UPSTREAM_BD_BINARY }}" {
+				t.Error("Mac independent archive CLI contract lost its original selected distribution")
+			}
+		}
+	}
+	if !foundArchiveContract {
+		t.Fatal("Mac independent archive CLI contract is missing")
+	}
+	for _, platform := range []string{"ubuntu", "macos"} {
+		action := readFile(t, root, ".github/actions/setup-gascity-"+platform+"/action.yml")
+		if !strings.Contains(action, "BEADS_TEST_UPSTREAM_BD_BINARY=%s") {
+			t.Errorf("%s setup does not retain the separately installed archive selection", platform)
+		}
+	}
+	ci := readCriticalPathWorkflow(t, "ci.yml")
+	for _, name := range []string{"contract-acceptance-previous", "contract-acceptance-current"} {
+		for _, step := range ci.Jobs[name].Steps {
+			if step.With["qualified-integration-bd"] == "true" || strings.Contains(step.Run, "install-qualified-integration-bd") {
+				t.Errorf("native pair replaced independent upstream compatibility cell %s", name)
+			}
+		}
+	}
+}
+
+// testNativeMailFixtureInputCapture keeps one selected test executable path
+// across both canonical scrubs without preserving live BEADS credentials.
+func testNativeMailFixtureInputCapture(t *testing.T) {
+	path := filepath.Join(repoRoot(t), "cmd/gc/cmd_mail_test.go")
+	file, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const input = "selectedNativeMailFixtureInput"
+	captures := 0
+	for _, decl := range file.Decls {
+		decl, ok := decl.(*ast.GenDecl)
+		if !ok || decl.Tok != token.VAR {
+			continue
+		}
+		for _, spec := range decl.Specs {
+			value, ok := spec.(*ast.ValueSpec)
+			if !ok || len(value.Names) != 1 || value.Names[0].Name != input || len(value.Values) != 1 {
+				continue
+			}
+			call, ok := value.Values[0].(*ast.CallExpr)
+			if !ok || len(call.Args) != 1 {
+				t.Fatal("native mail fixture input must be captured once at package initialization")
+			}
+			selector, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || selector.Sel.Name != "Getenv" {
+				t.Fatal("native mail fixture input must read only its selected test key")
+			}
+			owner, ok := selector.X.(*ast.Ident)
+			argument, stringArg := call.Args[0].(*ast.BasicLit)
+			if !ok || owner.Name != "os" || !stringArg || argument.Value != `"BEADS_TEST_BD_BINARY"` {
+				t.Fatal("native mail fixture input must capture only BEADS_TEST_BD_BINARY, never backend credentials")
+			}
+			captures++
+		}
+	}
+	if captures != 1 {
+		t.Fatalf("native mail fixture package-init input captures=%d, want1", captures)
+	}
+	var gate, validation token.Pos
+	bound := false
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok {
+			continue
+		}
+		ast.Inspect(fn.Body, func(node ast.Node) bool {
+			if assign, ok := node.(*ast.AssignStmt); ok {
+				for _, left := range assign.Lhs {
+					if name, ok := left.(*ast.Ident); ok && name.Name == input {
+						t.Error("captured native mail fixture input must never be updated by a test")
+					}
+				}
+			}
+			call, ok := node.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			if fn.Name.Name == "selectedNativeMailFixtureBD" {
+				if selector, ok := call.Fun.(*ast.SelectorExpr); ok && selector.Sel.Name == "Getenv" {
+					t.Error("native mail validation must take captured input, not read the scrubbed environment")
+				}
+			}
+			if fn.Name.Name != "TestCmdMailInbox_NormalizesCanonicalManagedProviderEnvAndReadsInbox" {
+				return true
+			}
+			callee, ok := call.Fun.(*ast.Ident)
+			if !ok {
+				return true
+			}
+			switch callee.Name {
+			case "startPasswordedDoltServer":
+				gate = call.Pos()
+			case "selectedNativeMailFixtureBD":
+				validation = call.Pos()
+				if len(call.Args) == 2 {
+					argument, ok := call.Args[1].(*ast.Ident)
+					bound = ok && argument.Name == input
+				}
+			}
+			return true
+		})
+	}
+	if !bound || gate == token.NoPos || validation <= gate {
+		t.Fatal("native mail fixture must validate the captured selected path after its existing real-Dolt slow gate")
+	}
+}
+
+func testNativeRigWorktreeFixtureSelection(t *testing.T) {
+	file, err := parser.ParseFile(token.NewFileSet(), filepath.Join(repoRoot(t), "cmd/gc/cmd_bd_test.go"), nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fixture *ast.FuncDecl
+	for _, decl := range file.Decls {
+		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name.Name == "TestBdRigWorktreeStoreConsistentAcrossRawBdGcBdAndProviderStore" {
+			fixture = fn
+		}
+	}
+	if fixture == nil {
+		t.Fatal("rig worktree fixture is missing")
+	}
+	var gate, validation token.Pos
+	bound, pinnedConfig := false, false
+	ast.Inspect(fixture.Body, func(node ast.Node) bool {
+		if value, ok := node.(*ast.BasicLit); ok && value.Kind == token.STRING && strings.Contains(value.Value, "[workspace.env]") && strings.Contains(value.Value, "BD_BIN = ") {
+			pinnedConfig = true
+		}
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		callee, ok := call.Fun.(*ast.Ident)
+		if !ok {
+			return true
+		}
+		switch callee.Name {
+		case "waitTestRealBDPath", "buildPinnedBDBinaryForTests":
+			t.Error("native rig fixture must not substitute the pure-Go compatibility builder")
+		case "startPasswordedDoltServer":
+			gate = call.Pos()
+		case "selectedNativeMailFixtureBD":
+			validation = call.Pos()
+			if len(call.Args) == 2 {
+				argument, ok := call.Args[1].(*ast.Ident)
+				bound = ok && argument.Name == "selectedNativeMailFixtureInput"
+			}
+		}
+		return true
+	})
+	if !bound || gate == token.NoPos || validation <= gate {
+		t.Error("native rig fixture must validate the genuine captured executable after its existing real-Dolt gate")
+	}
+	if !pinnedConfig {
+		t.Error("native rig fixture must bind workspace.env.BD_BIN for gc/provider preflight as well as raw bd")
+	}
+}
+
+func testNativeBazelIntegrationSelection(t *testing.T) {
+	file, err := parser.ParseFile(token.NewFileSet(), filepath.Join(repoRoot(t), "test/integration/integration_test.go"), nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var main, selector *ast.FuncDecl
+	for _, decl := range file.Decls {
+		if fn, ok := decl.(*ast.FuncDecl); ok {
+			switch fn.Name.Name {
+			case "TestMain":
+				main = fn
+			case "bazelIntegrationBDBinary":
+				selector = fn
+			}
+		}
+	}
+	if main == nil || selector == nil {
+		t.Fatal("Bazel integration must own an explicit fail-closed owner-module selector")
+	}
+	guarded, missingFails := false, false
+	ast.Inspect(main.Body, func(node ast.Node) bool {
+		branch, ok := node.(*ast.IfStmt)
+		if !ok || branch.Init == nil {
+			return true
+		}
+		assignment, ok := branch.Init.(*ast.AssignStmt)
+		if !ok || len(assignment.Rhs) != 1 {
+			return true
+		}
+		call, ok := assignment.Rhs[0].(*ast.CallExpr)
+		if !ok || len(call.Args) != 1 {
+			return true
+		}
+		callee, ok := call.Fun.(*ast.Ident)
+		argument, named := call.Args[0].(*ast.Ident)
+		if !ok || callee.Name != "binaryOverride" || !named || argument.Name != "integrationRealBDBinaryEnv" {
+			return true
+		}
+		// Keep the valid explicit override branch before Bazel resolution; the
+		// non-Bazel go-install branch must remain outside the Bazel branch.
+		override, ok := branch.Else.(*ast.IfStmt)
+		if !ok {
+			return true
+		}
+		bazel, ok := override.Else.(*ast.IfStmt)
+		if !ok {
+			return true
+		}
+		condition, ok := bazel.Cond.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		predicate, ok := condition.Fun.(*ast.SelectorExpr)
+		if !ok || predicate.Sel.Name != "IsBazel" {
+			return true
+		}
+		ast.Inspect(bazel.Body, func(node ast.Node) bool {
+			if call, ok := node.(*ast.CallExpr); ok {
+				if name, ok := call.Fun.(*ast.Ident); ok && name.Name == "bazelIntegrationBDBinary" {
+					guarded = true
+				}
+			}
+			return true
+		})
+		return true
+	})
+	ast.Inspect(selector.Body, func(node ast.Node) bool {
+		if call, ok := node.(*ast.CallExpr); ok {
+			switch callee := call.Fun.(type) {
+			case *ast.Ident:
+				if callee.Name == "panic" && len(call.Args) == 1 {
+					if text, ok := call.Args[0].(*ast.BasicLit); ok && strings.Contains(text.Value, "@com_github_rhar1511_beads//cmd/bd:bd") {
+						missingFails = true
+					}
+				}
+				if callee.Name == "buildPinnedIntegrationBDBinary" || callee.Name == "runfilesBinaryAt" {
+					t.Error("Bazel selector must not fall back to builds or archive data")
+				}
+			case *ast.SelectorExpr:
+				if callee.Sel.Name == "LookPath" || callee.Sel.Name == "Command" || callee.Sel.Name == "CommandContext" {
+					t.Error("Bazel selector must not fall back to ambient PATH or processes")
+				}
+			}
+		}
+		return true
+	})
+	if !guarded || !missingFails {
+		t.Error("Bazel owner selection must follow the explicit override and fail explicitly when its declared runfile is missing")
 	}
 }

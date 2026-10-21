@@ -135,6 +135,10 @@ jobs:
         with:
           filters: |
             mac_sensitive:
+              - 'go.mod'
+              - 'go.sum'
+              - 'deps.env'
+              - '.github/scripts/install-qualified-integration-bd.sh'
               - 'cmd/gc/**'
               - 'internal/pathutil/**'
               - 'internal/fsys/**'
@@ -227,6 +231,23 @@ jobs:
           # Static quality gates need no runtime Homebrew tools. The pinned
           # bd/Dolt archives have embedded digests; runtime jobs retain setup.
           install-system-deps: "false"
+      - name: Resolve Mac quality Go cache paths
+        id: quality-go-cache-paths
+        run: |
+          set -euo pipefail
+          go_cache=$(go env GOCACHE)
+          module_cache=$(go env GOMODCACHE)
+          go_version=$(go env GOVERSION)
+          printf 'gocache=%s\ngomodcache=%s\ngoversion=%s\n' "$go_cache" "$module_cache" "$go_version" >> "$GITHUB_OUTPUT"
+      - name: Restore Mac quality Go caches
+        id: quality-go-cache-restore
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ${{ steps.quality-go-cache-paths.outputs.gocache }}
+            ${{ steps.quality-go-cache-paths.outputs.gomodcache }}
+          # Exact-key only; no prefix fallback across toolchains or module pins.
+          key: ${{ runner.os }}-${{ runner.arch }}-mac-quality-go-v1-${{ steps.quality-go-cache-paths.outputs.goversion }}-${{ hashFiles('go.mod', 'go.sum') }}
       - name: Install tools
         run: make install-tools
       - name: Get golangci-lint + Go toolchain versions for cache key
@@ -283,6 +304,14 @@ jobs:
           name: mac-lint-${{ inputs.head_sha || github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ env.MAC_LINT_DIR }}
           if-no-files-found: error
+      - name: Save Mac quality Go caches
+        if: ${{ !cancelled() && steps.quality-go-cache-paths.outcome == 'success' && steps.quality-go-cache-restore.outcome == 'success' && steps.quality-go-cache-restore.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ${{ steps.quality-go-cache-paths.outputs.gocache }}
+            ${{ steps.quality-go-cache-paths.outputs.gomodcache }}
+          key: ${{ steps.quality-go-cache-restore.outputs.cache-primary-key }}
       - name: Format
         run: make fmt-check
       - name: Vet
@@ -339,6 +368,7 @@ jobs:
         with:
           dolt-version: ${{ env.DOLT_VERSION }}
           bd-version: ${{ env.BD_VERSION }}
+          qualified-integration-bd: "true"
           install-claude-cli: "false"
       - name: Run cmd/gc process shard
         run: make test-cmd-gc-process-shard CMD_GC_PROCESS_SHARD=${{ matrix.shard }} CMD_GC_PROCESS_TOTAL=12
@@ -397,6 +427,7 @@ jobs:
         with:
           dolt-version: ${{ env.DOLT_VERSION }}
           bd-version: ${{ env.BD_VERSION }}
+          qualified-integration-bd: "true"
           install-claude-cli: "true"
       - name: Run acceptance tests (Tier A)
         env:
@@ -410,6 +441,9 @@ jobs:
         run: make test-acceptance
       - name: Run external bd CLI contract
         if: matrix.shard_name == 'other-tests'
+        env:
+          # Keep this independent archive-CLI cell on the installed upstream release.
+          EXTRA_TEST_ENV: GC_ACCEPTANCE_BD_BIN=${{ env.BEADS_TEST_UPSTREAM_BD_BINARY }}
         run: make test-bd-cli-contract
 
   # Unit coverage pass — the Linux `Check` job's equivalent of

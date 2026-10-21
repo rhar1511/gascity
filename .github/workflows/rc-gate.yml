@@ -143,6 +143,7 @@ jobs:
         with:
           dolt-version: ${{ env.DOLT_VERSION }}
           bd-version: ${{ env.BD_VERSION }}
+          qualified-integration-bd: "true"
           install-claude-cli: "true"
       - name: Validate Ollama Claude configuration
         run: |

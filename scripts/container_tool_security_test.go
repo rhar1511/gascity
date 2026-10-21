@@ -167,9 +167,10 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 	}{
 		{"fsspec", "2026.6.0", "2026.6.0", false},
 		{"gitpython", "3.1.60", "3.2.0", false},
-		{"aiohttp", "3.14.3", "3.14.3", false},
+		{"aiohttp", "3.14.4", "3.14.4", false},
 		{"anyio", "4.14.2", "4.14.2", false},
-		{"pillow", "12.3.0", "12.3.0", false},
+		{"certifi", "2026.10.19", "2026.10.19", false},
+		{"pillow", "13.0.0", "13.0.0", false},
 		{"urllib3", "2.8.0", "2.8.0", false},
 		{"pyjwt", "2.14.0", "2.15.1", true},
 		{"cryptography", "50.0.0", "50.0.0", true},

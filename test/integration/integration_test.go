@@ -393,11 +393,7 @@ func TestMain(m *testing.M) {
 	} else if ok {
 		realBDBinary = override
 	} else if bazeltest.IsBazel() {
-		// Under bazel the pinned bd ships prebuilt in runfiles as a data dep
-		// (http_archive of the same release the go-test CI installs).
-		if bd := runfilesBinaryAt("bd_bin_v1_3_1", "bd"); bd != "" {
-			realBDBinary = bd
-		}
+		realBDBinary = bazelIntegrationBDBinary()
 	} else {
 		var err error
 		realBDBinary, err = buildPinnedIntegrationBDBinary(tmpDir)
@@ -3302,6 +3298,23 @@ func (mainTB) Logf(format string, args ...any) {}
 func statOK(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+// bazelIntegrationBDBinary resolves the declared owner-module CLI. A missing
+// data dependency is a tooling failure, never an ambient/archive/build fallback.
+func bazelIntegrationBDBinary() string {
+	for _, rf := range []string{os.Getenv("RUNFILES_DIR"), os.Getenv("TEST_SRCDIR")} {
+		if rf == "" {
+			continue
+		}
+		for _, repo := range []string{"gazelle++go_deps+com_github_rhar1511_beads", "com_github_rhar1511_beads"} {
+			bin := filepath.Join(rf, repo, "cmd", "bd", "bd_", "bd")
+			if info, err := os.Stat(bin); err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0 {
+				return bin
+			}
+		}
+	}
+	panic("integration: Bazel owner-module bd runfile is missing; expected @com_github_rhar1511_beads//cmd/bd:bd (cmd/bd/bd_/bd) under RUNFILES_DIR or TEST_SRCDIR; rebuild the declared integration data dependency")
 }
 
 // runfilesBinaryAt resolves a file inside an external repository (e.g. a
