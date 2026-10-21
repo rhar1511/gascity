@@ -144,8 +144,10 @@ add_unit_core_job() {
   # of only the repository root. Reject partial discovery and an empty selection
   # before invoking tests; command substitution does not propagate failure into
   # the old `go test $(go list ...)` form.
+  # Discovery needs package names, not binary VCS metadata. As in Makefile
+  # build, avoid Go stamping an enclosing repository instead of this worktree.
   add_job "unit-core" \
-    "packages=\$(go list ./...) || exit \$?; packages=\$(printf '%s\\n' \"\$packages\" | grep -v '^github.com/gastownhall/gascity/cmd/gc$') || { echo 'unit-core: no packages selected' >&2; exit 1; }; [[ -n \"\$packages\" ]] || { echo 'unit-core: no packages selected' >&2; exit 1; }; GC_FAST_UNIT=1 go test -count=1 -timeout ${go_test_timeout} \$packages"
+    "packages=\$(go list -buildvcs=false ./...) || exit \$?; packages=\$(printf '%s\\n' \"\$packages\" | grep -v '^github.com/gastownhall/gascity/cmd/gc$') || { echo 'unit-core: no packages selected' >&2; exit 1; }; [[ -n \"\$packages\" ]] || { echo 'unit-core: no packages selected' >&2; exit 1; }; GC_FAST_UNIT=1 go test -count=1 -timeout ${go_test_timeout} \$packages"
 }
 
 # Runs as a direct shell job rather than through a `go test` wrapper because a
