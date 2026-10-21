@@ -279,7 +279,9 @@ func fakeWorkerBinary(t *testing.T) string {
 			return
 		}
 		fakeWorkerBinaryPath = filepath.Join(buildDir, "fake-worker")
-		cmd := exec.Command("go", "build", "-o", fakeWorkerBinaryPath, "./internal/worker/fakecmd")
+		// This disposable fixture has no shipping VCS identity. Native worktrees
+		// can sit below a non-repository marker, as in the ACP fixture build.
+		cmd := exec.Command("go", "build", "-buildvcs=false", "-o", fakeWorkerBinaryPath, "./internal/worker/fakecmd")
 		cmd.Dir = root
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
