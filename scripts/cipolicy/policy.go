@@ -94,7 +94,14 @@ const (
 	// Reviewed v1.5.0 integration: stable Beads v1.3.1 pins only.
 	// Human-approved integration-only opt-in: checksum-pinned fork bd for
 	// source snapshots and revision-aware HTTP writes; release lanes unchanged.
-	expectedCIExecutionHash     = "5888a8c0e64340ba2b4601a78a14b5534e8a39ec9aefd2f4b1c971339e48ebc6"
+	// Reviewed native-pair setup: qualified opt-in now builds the authenticated
+	// released consumer module. Native topology/perf/Tier A select that pair;
+	// upstream default/minimum/current distributions remain independent.
+	// The native mail process fixture also selects that genuine CGO CLI.
+	// Reviewed process preparation: one native compile/cache producer; unchanged
+	// twelve test commands and budgets, exact-source/run cache required before
+	// native CLI/test builds; selected producer/process skips fail the aggregate.
+	expectedCIExecutionHash     = "06ec2428db65bc14f1fc5396196ce7522b6e463c4ee72f4dc0aaa381d6cda56b"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,
@@ -108,13 +115,13 @@ const (
 	// TestFreshInit_ClaudeUnrestricted, mirroring RC Gate's acceptance C shards;
 	// same job, env, secrets and runner. Then the Beads v1.3.0 -> v1.3.1-rc.2
 	// pin, followed by stable v1.3.1: workflow and job BD_VERSION values only.
-	expectedNightlyExecutionHash = "183db1faaa748f8bacd7d7de970ddc40ea87a65892bc37083ca40175cc4c2ea1"
+	expectedNightlyExecutionHash = "7587e74d498d5915d139fd363314fe9dfae0871a12d7aeddf1de68981288cd16"
 	// Reviewed setup delta: export the exact installed public bd path for
 	// integration input provenance, refusing unsafe or PATH-shadowed inputs.
 	// Version pins, provider installation, permissions and gates stay pinned.
 	// Human-approved optional fork build installs ICU and verifies the pinned
 	// source archive before compiling; the default released bd is unchanged.
-	expectedSetupActionHash = "7af0d833904eec4bb76293c52f922fff308ccdf001f35712515c4305e0884921"
+	expectedSetupActionHash = "ad1758d8e1126af1d32a7ebab050a83f21b3e2ca9872485e436dcd411ef3e3c1"
 )
 
 var requiredFilterPaths = map[string][]string{
@@ -147,6 +154,7 @@ var requiredFilterPaths = map[string][]string{
 		"go.mod",
 		"go.sum",
 		"deps.env",
+		".github/scripts/install-qualified-integration-bd.sh",
 		"cmd/gc/**",
 		"internal/**",
 		"examples/bd/**",
@@ -223,6 +231,7 @@ var requiredFilterPaths = map[string][]string{
 		".github/actions/setup-gascity-ubuntu/**",
 		".github/scripts/install-dolt-archive.sh",
 		".github/scripts/install-bd-archive.sh",
+		".github/scripts/install-qualified-integration-bd.sh",
 		".github/scripts/install-claude-native.sh",
 		"internal/beads/**",
 		"internal/events/**",

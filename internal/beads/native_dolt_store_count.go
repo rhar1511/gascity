@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	beadslib "github.com/steveyegge/beads"
+	beadslib "github.com/rhar1511/beads"
 )
 
 // Count implements the optional Counter capability with the pinned beads

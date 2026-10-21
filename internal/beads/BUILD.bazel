@@ -19,8 +19,8 @@ go_library(
         "//internal/pidutil",
         "//internal/rollout/gate",
         "//internal/telemetry",
-        "@com_github_steveyegge_beads//:beads",
-        "@com_github_steveyegge_beads//issueops",
+        "@com_github_rhar1511_beads//:beads",
+        "@com_github_rhar1511_beads//issueops",
         "@org_modernc_sqlite//:sqlite",
     ] + select({
         "@rules_go//go/platform:android": [
@@ -114,6 +114,7 @@ go_test(
         "event_payload_contract_test.go",
         "event_payload_test.go",
         "exec_timeout_linux_test.go",
+        "executable_observer_policy_test.go",
         "export_test.go",
         "factory_test.go",
         "filestore_atomic_close_test.go",
@@ -202,10 +203,10 @@ go_test(
     ) + [
         "//:go.mod",
         "//:repo_source_tree",
-        "@com_github_steveyegge_beads//internal/storage/issueops:drift_srcs",
-        "@com_github_steveyegge_beads//internal/storage/schema:drift_srcs",
-        "@com_github_steveyegge_beads//internal/storage/schema:migrations",
-        "@com_github_steveyegge_beads//internal/types:drift_srcs",
+        "@com_github_rhar1511_beads//internal/storage/issueops:drift_srcs",
+        "@com_github_rhar1511_beads//internal/storage/schema:drift_srcs",
+        "@com_github_rhar1511_beads//internal/storage/schema:migrations",
+        "@com_github_rhar1511_beads//internal/types:drift_srcs",
     ],
     embed = [":beads"],
     deps = [
@@ -222,9 +223,9 @@ go_test(
         "//internal/runproj",
         "//internal/testenv",
         "//internal/testutil",
-        "@com_github_steveyegge_beads//:beads",
-        "@com_github_steveyegge_beads//backend",
-        "@com_github_steveyegge_beads//issueops",
+        "@com_github_rhar1511_beads//:beads",
+        "@com_github_rhar1511_beads//backend",
+        "@com_github_rhar1511_beads//issueops",
     ] + select({
         "@rules_go//go/platform:aix": [
             "//internal/processgroup/processgrouptest",

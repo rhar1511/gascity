@@ -1363,14 +1363,10 @@ func TestBdRigWorktreeStoreConsistentAcrossRawBdGcBdAndProviderStore(t *testing.
 		}
 	}
 
-	bdPath := waitTestRealBDPath(t)
 	doltPath, err := exec.LookPath("dolt")
 	if err != nil {
 		t.Skip("dolt not installed")
 	}
-	setEnv(map[string]string{
-		"PATH": strings.Join([]string{filepath.Dir(bdPath), filepath.Dir(doltPath), os.Getenv("PATH")}, string(os.PathListSeparator)),
-	})
 
 	cityPath := t.TempDir()
 	rigPath, err := writeManagedBdWaitTestCityScaffold(cityPath)
@@ -1387,6 +1383,20 @@ func TestBdRigWorktreeStoreConsistentAcrossRawBdGcBdAndProviderStore(t *testing.
 	// Cover the fe server's own repo root (the actual live-process dir, not
 	// just cityPath) and the relocated dolt identity HOME (ga-7dgcg6).
 	requireNoLeakedDoltAfterForPaths(t, cityPath, feRepoDir, os.Getenv("HOME"))
+
+	bdPath := selectedNativeMailFixtureBD(t, selectedNativeMailFixtureInput)
+	setEnv(map[string]string{
+		"PATH": strings.Join([]string{filepath.Dir(bdPath), filepath.Dir(doltPath), os.Getenv("PATH")}, string(os.PathListSeparator)),
+	})
+	cityConfigPath := filepath.Join(cityPath, "city.toml")
+	cityConfig, err := os.ReadFile(cityConfigPath)
+	if err != nil {
+		t.Fatalf("ReadFile(city.toml): %v", err)
+	}
+	cityConfig = append(cityConfig, []byte("\n[workspace.env]\nBD_BIN = "+strconv.Quote(bdPath)+"\n")...)
+	if err := os.WriteFile(cityConfigPath, cityConfig, 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
 
 	for _, scope := range []struct {
 		name     string
@@ -1453,17 +1463,6 @@ func TestBdRigWorktreeStoreConsistentAcrossRawBdGcBdAndProviderStore(t *testing.
 	if err := nativeStorage.Close(); err != nil {
 		t.Fatalf("close native fixture storage: %v", err)
 	}
-
-	// Database identity is authoritative for this direct fixture. Keep the
-	// optional bd-context cross-check strict and fast without replacing the real
-	// raw bd and gc bd processes exercised below.
-	originalRunner := beadsExecCommandRunnerWithEnv
-	beadsExecCommandRunnerWithEnv = func(map[string]string) beads.CommandRunner {
-		return func(string, string, ...string) ([]byte, error) {
-			return nil, errors.New("bd context unavailable in direct-Dolt fixture")
-		}
-	}
-	t.Cleanup(func() { beadsExecCommandRunnerWithEnv = originalRunner })
 
 	worktreeDir := filepath.Join(cityPath, ".gc", "worktrees", "frontend", "polecats", "polecat-1")
 	if err := os.MkdirAll(filepath.Join(worktreeDir, ".beads"), 0o755); err != nil {

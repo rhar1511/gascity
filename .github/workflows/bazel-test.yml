@@ -167,9 +167,9 @@ jobs:
           # Unit arm runs in the default configuration so its cache keys stay
           # stable; tagged suites get their own invocations because
           # --define=gotags reconfigures every action under it (a full-world
-          # define would double the farm's cache entries). bd/dolt ship as
-          # pinned prebuilt release binaries via MODULE.bazel http_archive
-          # data deps, so workers need no network or system bd.
+          # define would double the farm's cache entries). The acceptance bd is
+          # built from the linked owner module; Dolt is a pinned prebuilt
+          # data dependency. Workers need no network or system bd.
           # --test_timeout stays at or below 1100s: the scheduler caps action
           # timeouts at 1200s and rejects anything larger as NO STATUS.
           if [ -f .bazelrc.local ]; then

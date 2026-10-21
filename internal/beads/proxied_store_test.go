@@ -13,7 +13,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads/proxyendpoint"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
-	beadslib "github.com/steveyegge/beads"
+	beadslib "github.com/rhar1511/beads"
 )
 
 // recordingLeaf wraps a Store and records the name of every method called

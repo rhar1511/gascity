@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
@@ -23,10 +24,12 @@ func newBeadsPreflightChecker(cityPath, provider string) contract.PreflightCheck
 
 func preflightBDContextReader(cityPath string) func(scope string) (contract.PreflightBDContext, error) {
 	return func(scope string) (contract.PreflightBDContext, error) {
-		out, err := bdCommandRunnerForCity(cityPath)(scope, "bd", "context", "--json")
+		observation := &contract.BeadsExecutableObservation{}
+		out, err := bdCommandRunnerForCity(cityPath, &beads.ExecutableObserver{BeginAttempt: observation.BeginAttempt, Observe: observation.Observe})(scope, "bd", "context", "--json")
 		if err != nil {
-			return contract.PreflightBDContext{}, err
+			return contract.PreflightBDContext{CLIArtifact: observation.Artifact()}, err
 		}
+
 		var raw struct {
 			Backend       string `json:"backend"`
 			DoltMode      string `json:"dolt_mode"`
@@ -34,13 +37,14 @@ func preflightBDContextReader(cityPath string) func(scope string) (contract.Pref
 			SchemaVersion int    `json:"schema_version"`
 		}
 		if err := json.Unmarshal(out, &raw); err != nil {
-			return contract.PreflightBDContext{}, fmt.Errorf("parse bd context --json: %w", err)
+			return contract.PreflightBDContext{CLIArtifact: observation.Artifact()}, fmt.Errorf("%w: parse bd context --json: %w", contract.ErrBDContextProtocol, err)
 		}
 		return contract.PreflightBDContext{
 			Backend:       raw.Backend,
 			DoltMode:      raw.DoltMode,
 			BDVersion:     raw.BDVersion,
 			SchemaVersion: raw.SchemaVersion,
+			CLIArtifact:   observation.Artifact(),
 		}, nil
 	}
 }

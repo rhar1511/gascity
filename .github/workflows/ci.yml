@@ -129,6 +129,7 @@ jobs:
               - 'go.mod'
               - 'go.sum'
               - 'deps.env'
+              - '.github/scripts/install-qualified-integration-bd.sh'
               - '.github/scripts/install-bd-archive.sh'
               - '.github/scripts/install-dolt-archive.sh'
               - '.github/actions/setup-gascity-ubuntu/**'
@@ -212,6 +213,7 @@ jobs:
               - '.github/actions/setup-gascity-ubuntu/**'
               - '.github/scripts/install-dolt-archive.sh'
               - '.github/scripts/install-bd-archive.sh'
+              - '.github/scripts/install-qualified-integration-bd.sh'
               - '.github/scripts/install-claude-native.sh'
               - 'internal/beads/**'
               - 'internal/events/**'
@@ -530,39 +532,13 @@ jobs:
       GC_ACCEPTANCE_TOPOLOGY_MATRIX: "1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      # bd-version is empty: this job builds bd from BD_CURRENT_REF below,
-      # exactly as contract-acceptance-current does, so the bd on PATH and the
-      # beads library in go.mod reach the same upstream commit.
+      # The native CLI must match the authenticated library linked into gc.
       - uses: ./.github/actions/setup-gascity-ubuntu
         with:
           dolt-version: ${{ env.DOLT_VERSION }}
           bd-version: ""
+          qualified-integration-bd: "true"
           install-claude-cli: "false"
-      - name: Resolve bd current pin
-        id: bd
-        run: |
-          set -euo pipefail
-          ref="$(grep -E '^BD_CURRENT_REF=' deps.env | cut -d= -f2)"
-          ver="$(grep -E '^BD_CURRENT_VERSION=' deps.env | cut -d= -f2)"
-          if [ -z "$ref" ] || [ -z "$ver" ]; then
-            echo "::error::BD_CURRENT_REF/BD_CURRENT_VERSION missing or empty in deps.env" >&2
-            exit 1
-          fi
-          echo "ref=$ref" >> "$GITHUB_OUTPUT"
-          echo "ver=$ver" >> "$GITHUB_OUTPUT"
-      - name: Build bd ${{ steps.bd.outputs.ver }} from source @ ${{ steps.bd.outputs.ref }}
-        run: |
-          set -euo pipefail
-          src="${RUNNER_TEMP}/beads-src"
-          git clone --filter=blob:none https://github.com/gastownhall/beads "$src"
-          git -C "$src" checkout "${{ steps.bd.outputs.ref }}"
-          mkdir -p "${HOME}/.local/bin"
-          go -C "$src" build -tags gms_pure_go -o "${HOME}/.local/bin/bd" ./cmd/bd
-          echo "GC_ACCEPTANCE_BD_BIN=${HOME}/.local/bin/bd" >> "$GITHUB_ENV"
-          echo "${HOME}/.local/bin" >> "$GITHUB_PATH"
-      # Fail here rather than inside a test: a bd that is missing or too old is
-      # a broken job, and the tests below would otherwise be asked to decide it
-      # one skip at a time.
       - name: Verify bd supports proxied-server
         run: |
           set -euo pipefail
@@ -606,7 +582,12 @@ jobs:
           {
             echo "## Beads topology acceptance"
             echo
-            echo "bd pin: ${{ steps.bd.outputs.ver }} @ ${{ steps.bd.outputs.ref }}"
+            if [[ -n "${GC_ACCEPTANCE_BD_BIN:-}" ]]; then
+              echo "bd pair: ${GC_ACCEPTANCE_BD_BIN}"
+              cat "$(dirname "$GC_ACCEPTANCE_BD_BIN")/source-provenance"
+            else
+              echo "Native bd selection was not published; inspect the failed setup step."
+            fi
             echo
             echo "### Skipped"
             echo
@@ -651,35 +632,13 @@ jobs:
       GC_REQUIRE_ACCEPTANCE_TOOLING: "1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      # bd-version is empty: this job builds bd from BD_CURRENT_REF below,
-      # exactly as the topology job does.
+      # The native CLI must match the authenticated library linked into gc.
       - uses: ./.github/actions/setup-gascity-ubuntu
         with:
           dolt-version: ${{ env.DOLT_VERSION }}
           bd-version: ""
+          qualified-integration-bd: "true"
           install-claude-cli: "false"
-      - name: Resolve bd current pin
-        id: bd
-        run: |
-          set -euo pipefail
-          ref="$(grep -E '^BD_CURRENT_REF=' deps.env | cut -d= -f2)"
-          ver="$(grep -E '^BD_CURRENT_VERSION=' deps.env | cut -d= -f2)"
-          if [ -z "$ref" ] || [ -z "$ver" ]; then
-            echo "::error::BD_CURRENT_REF/BD_CURRENT_VERSION missing or empty in deps.env" >&2
-            exit 1
-          fi
-          echo "ref=$ref" >> "$GITHUB_OUTPUT"
-          echo "ver=$ver" >> "$GITHUB_OUTPUT"
-      - name: Build bd ${{ steps.bd.outputs.ver }} from source @ ${{ steps.bd.outputs.ref }}
-        run: |
-          set -euo pipefail
-          src="${RUNNER_TEMP}/beads-src"
-          git clone --filter=blob:none https://github.com/gastownhall/beads "$src"
-          git -C "$src" checkout "${{ steps.bd.outputs.ref }}"
-          mkdir -p "${HOME}/.local/bin"
-          go -C "$src" build -tags gms_pure_go -o "${HOME}/.local/bin/bd" ./cmd/bd
-          echo "GC_ACCEPTANCE_BD_BIN=${HOME}/.local/bin/bd" >> "$GITHUB_ENV"
-          echo "${HOME}/.local/bin" >> "$GITHUB_PATH"
       - name: Verify bd supports proxied-server
         run: |
           set -euo pipefail
@@ -703,7 +662,12 @@ jobs:
           {
             echo "## Beads proxied-native acceptance"
             echo
-            echo "bd pin: ${{ steps.bd.outputs.ver }} @ ${{ steps.bd.outputs.ref }}"
+            if [[ -n "${GC_ACCEPTANCE_BD_BIN:-}" ]]; then
+              echo "bd pair: ${GC_ACCEPTANCE_BD_BIN}"
+              cat "$(dirname "$GC_ACCEPTANCE_BD_BIN")/source-provenance"
+            else
+              echo "Native bd selection was not published; inspect the failed setup step."
+            fi
             echo
             echo "### Skipped"
             echo
@@ -850,11 +814,49 @@ jobs:
           version: "~> v2"
           args: check
 
+  cmd-gc-process-build:
+    name: cmd/gc process / shared cold preparation
+    needs:
+      - runner-policy
+      - changes
+    if: needs.changes.outputs.cmd_gc_process == 'true'
+    runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
+    timeout-minutes: 15
+    env:
+      DOLT_VERSION: "2.1.7"
+      BD_VERSION: "v1.3.1"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: ./.github/actions/setup-gascity-ubuntu
+        id: setup
+        with:
+          dolt-version: ${{ env.DOLT_VERSION }}
+          bd-version: ${{ env.BD_VERSION }}
+          qualified-integration-bd: "true"
+          process-build-cache: prepare
+          install-claude-cli: "false"
+      - name: Compile the ordinary process test binary without running tests
+        run: make build-cmd-gc-tests CMD_GC_TEST_BINARY="$RUNNER_TEMP/cmd-gc-process.test"
+      - name: Save completed native process build cache
+        if: ${{ steps.setup.outputs.process-cache-hit != 'true' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          key: ${{ steps.setup.outputs.process-cache-key }}
+          path: ${{ steps.setup.outputs.process-cache-path }}
+      - name: Verify the prepared cache is available before starting shards
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          key: ${{ steps.setup.outputs.process-cache-key }}
+          path: ${{ steps.setup.outputs.process-cache-path }}
+          lookup-only: "true"
+          fail-on-cache-miss: "true"
+
   cmd-gc-process:
     name: cmd/gc process / shard ${{ matrix.shard }} of 12
     needs:
       - runner-policy
       - changes
+      - cmd-gc-process-build
     if: needs.changes.outputs.cmd_gc_process == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
     timeout-minutes: 10
@@ -871,6 +873,8 @@ jobs:
         with:
           dolt-version: ${{ env.DOLT_VERSION }}
           bd-version: ${{ env.BD_VERSION }}
+          qualified-integration-bd: "true"
+          process-build-cache: require
           install-claude-cli: "false"
       - name: Run cmd/gc process shard
         env:
@@ -1939,6 +1943,7 @@ jobs:
       - ci-integration
       - beads-topology-acceptance
       - beads-proxied-native-acceptance
+      - cmd-gc-process-build
       - cmd-gc-process
       - cmd-gc-productmetrics-testhook
       - credential-provider-windows
@@ -1954,6 +1959,7 @@ jobs:
     runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
     env:
       NEEDS_JSON: ${{ toJSON(needs) }}
+      CMD_GC_PROCESS_REQUIRED: ${{ needs.changes.outputs.cmd_gc_process }}
     steps:
       - name: Summarize required gates
         run: |
@@ -1969,7 +1975,6 @@ jobs:
               # proxied-native job shares that filter (round3 D-F17).
               "beads-topology-acceptance",
               "beads-proxied-native-acceptance",
-              "cmd-gc-process",
               "cmd-gc-productmetrics-testhook",
               "credential-provider-windows",
               "preflight-unit-cover-noncmdgc",
@@ -1979,6 +1984,8 @@ jobs:
               "k8s-session",
               "openclaw-bridge",
           }
+          if os.environ["CMD_GC_PROCESS_REQUIRED"] == "false":
+              allow_skipped.update({"cmd-gc-process-build", "cmd-gc-process"})
           failed = {}
           for job, meta in sorted(needs.items()):
               result = meta.get("result", "unknown")

@@ -94,6 +94,7 @@ jobs:
         with:
           dolt-version: ${{ env.DOLT_VERSION }}
           bd-version: ${{ env.BD_VERSION }}
+          qualified-integration-bd: "true"
           install-claude-cli: "true"
       - name: Install tools
         run: make install-tools
@@ -108,9 +109,8 @@ jobs:
   # is a statement about the runner, and the plan leaves the number to "the
   # GC_ACCEPTANCE_PERF nightly lane" — which did not exist, so nothing
   # enforced it (round3 review, completeness). This is that lane: the same
-  # test the PR topology job runs, with the gate on. bd is built from
-  # BD_CURRENT_REF exactly as the PR jobs build it, so the bd on PATH and the
-  # beads library in go.mod reach the same upstream commit.
+  # test the PR topology job runs, with the gate on. Its selected native bd
+  # is built from the same authenticated released module as the linked library.
   beads-proxied-perf:
     name: Beads / proxied-native perf lane
     runs-on: ubuntu-latest
@@ -124,29 +124,8 @@ jobs:
         with:
           dolt-version: ${{ env.DOLT_VERSION }}
           bd-version: ""
+          qualified-integration-bd: "true"
           install-claude-cli: "false"
-      - name: Resolve bd current pin
-        id: bd
-        run: |
-          set -euo pipefail
-          ref="$(grep -E '^BD_CURRENT_REF=' deps.env | cut -d= -f2)"
-          ver="$(grep -E '^BD_CURRENT_VERSION=' deps.env | cut -d= -f2)"
-          if [ -z "$ref" ] || [ -z "$ver" ]; then
-            echo "::error::BD_CURRENT_REF/BD_CURRENT_VERSION missing or empty in deps.env" >&2
-            exit 1
-          fi
-          echo "ref=$ref" >> "$GITHUB_OUTPUT"
-          echo "ver=$ver" >> "$GITHUB_OUTPUT"
-      - name: Build bd ${{ steps.bd.outputs.ver }} from source @ ${{ steps.bd.outputs.ref }}
-        run: |
-          set -euo pipefail
-          src="${RUNNER_TEMP}/beads-src"
-          git clone --filter=blob:none https://github.com/gastownhall/beads "$src"
-          git -C "$src" checkout "${{ steps.bd.outputs.ref }}"
-          mkdir -p "${HOME}/.local/bin"
-          go -C "$src" build -tags gms_pure_go -o "${HOME}/.local/bin/bd" ./cmd/bd
-          echo "GC_ACCEPTANCE_BD_BIN=${HOME}/.local/bin/bd" >> "$GITHUB_ENV"
-          echo "${HOME}/.local/bin" >> "$GITHUB_PATH"
       - name: Verify bd supports proxied-server
         run: |
           set -euo pipefail

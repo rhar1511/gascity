@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"debug/buildinfo"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"testing"
@@ -1558,6 +1561,56 @@ func (r *recordingMailInboxReader) Inbox(recipient string) ([]mail.Message, erro
 	return r.inbox[recipient], nil
 }
 
+// Capture this one test-control path before TestMain and per-test live-env
+// scrubs. It is never updated or forwarded as backend/session credentials.
+var selectedNativeMailFixtureInput = os.Getenv("BEADS_TEST_BD_BINARY")
+
+// selectedNativeMailFixtureBD reads the executable selected by normal CI setup.
+// It neither builds a replacement nor accepts display strings as native proof.
+func selectedNativeMailFixtureBD(t *testing.T, selected string) string {
+	t.Helper()
+	path := strings.TrimSpace(selected)
+	if path == "" || !filepath.IsAbs(path) {
+		t.Fatal("native mail fixture requires an absolute BEADS_TEST_BD_BINARY from the qualified native setup")
+	}
+	stat, err := os.Stat(path)
+	if err != nil || !stat.Mode().IsRegular() || stat.Mode().Perm()&0o111 == 0 {
+		t.Fatalf("native mail fixture selected executable %q is not a regular executable: %v", path, err)
+	}
+	info, err := buildinfo.ReadFile(path)
+	if err != nil {
+		t.Fatalf("native mail fixture real executable build info: %v", err)
+	}
+	const module = "github.com/rhar1511/beads"
+	linked, ok := debug.ReadBuildInfo()
+	if !ok {
+		t.Fatal("native mail fixture linked build info is unavailable")
+	}
+	var library *debug.Module
+	for _, dep := range linked.Deps {
+		if dep != nil && dep.Path == module {
+			if library != nil {
+				t.Fatal("native mail fixture linked Beads module is ambiguous")
+			}
+			library = dep
+		}
+	}
+	if library == nil || library.Replace != nil || library.Version == "" || !strings.HasPrefix(library.Sum, "h1:") {
+		t.Fatal("native mail fixture needs the actual unreplaced released linked module and checksum")
+	}
+	if info.Path != module+"/cmd/bd" || info.Main.Path != module || info.Main.Replace != nil || info.Main.Version != library.Version || info.Main.Sum != library.Sum {
+		t.Fatalf("native mail fixture selected module does not match the real linked library: selected=%+v linked=%+v", info.Main, library)
+	}
+	settings := make(map[string]string, len(info.Settings))
+	for _, setting := range info.Settings {
+		settings[setting.Key] = setting.Value
+	}
+	if settings["CGO_ENABLED"] != "1" || settings["GOOS"] != runtime.GOOS || settings["GOARCH"] != runtime.GOARCH || strings.Contains(settings["-tags"], "gms_pure_go") {
+		t.Fatalf("native mail fixture requires a genuine native CGO build for %s/%s, not the pure-Go compatibility builder: settings=%v", runtime.GOOS, runtime.GOARCH, settings)
+	}
+	return path
+}
+
 func TestCmdMailInbox_NormalizesCanonicalManagedProviderEnvAndReadsInbox(t *testing.T) {
 	clearInheritedBeadsEnv(t)
 	cityDir := t.TempDir()
@@ -1568,7 +1621,9 @@ func TestCmdMailInbox_NormalizesCanonicalManagedProviderEnvAndReadsInbox(t *test
 	_, port, _, cleanupDolt := startPasswordedDoltServer(t, filepath.Join(t.TempDir(), "hq"), setupQueries...)
 	defer cleanupDolt()
 
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+	bdPath := selectedNativeMailFixtureBD(t, selectedNativeMailFixtureInput)
+	cityConfig := fmt.Sprintf("[workspace]\nname = \"test-city\"\n[workspace.env]\nBD_BIN = %q\n", bdPath)
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityConfig), 0o644); err != nil {
 		t.Fatalf("WriteFile(city.toml): %v", err)
 	}
 	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
@@ -1614,16 +1669,9 @@ func TestCmdMailInbox_NormalizesCanonicalManagedProviderEnvAndReadsInbox(t *test
 		t.Fatalf("close native fixture storage: %v", err)
 	}
 
-	// Native-store preflight treats an unreachable `bd context` as an optional
-	// cross-check when the real database identity matches. Keep that edge strict
-	// and fast so this test does not inherit or migrate with an ambient bd binary.
-	originalRunner := beadsExecCommandRunnerWithEnv
-	beadsExecCommandRunnerWithEnv = func(map[string]string) beads.CommandRunner {
-		return func(string, string, ...string) ([]byte, error) {
-			return nil, errors.New("bd context unavailable in direct-Dolt fixture")
-		}
-	}
-	t.Cleanup(func() { beadsExecCommandRunnerWithEnv = originalRunner })
+	// Preflight observes this exact released native executable, including when
+	// context is unavailable. No non-observed runner double can supply its
+	// source proof; the real private database and native-open checks stay active.
 
 	canonicalProvider := "exec:" + gcBeadsBdScriptPath(cityDir)
 	t.Setenv("GC_BEADS", canonicalProvider)
@@ -1638,7 +1686,8 @@ func TestCmdMailInbox_NormalizesCanonicalManagedProviderEnvAndReadsInbox(t *test
 		t.Fatalf("openStoreResultAtForCity(%q) with canonical GC_BEADS=%q: %v", cityDir, canonicalProvider, err)
 	}
 	if got := result.Diagnostic.Store; got != beads.BeadsStoreNameNativeDoltStore {
-		t.Fatalf("store selected for canonical GC_BEADS=%q = %q, want %q; diagnostic: %+v", canonicalProvider, got, beads.BeadsStoreNameNativeDoltStore, result.Diagnostic)
+		preflight, preflightErr := newBeadsPreflightChecker(cityDir, "bd").Check(cityDir)
+		t.Fatalf("store selected for canonical GC_BEADS=%q = %q, want %q; diagnostic: %+v; preflight checks: %+v (error: %v)", canonicalProvider, got, beads.BeadsStoreNameNativeDoltStore, result.Diagnostic, preflight.Checks, preflightErr)
 	}
 	mp := beadmail.New(result.Store)
 	if _, err := mp.Send("mayor", "human", "status", "hello from canonical provider"); err != nil {

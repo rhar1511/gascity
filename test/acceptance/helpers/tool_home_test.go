@@ -15,7 +15,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/schema"
+	"github.com/rhar1511/beads/schema"
 )
 
 // These tests are the guard for the 2026-09-29 incident, in which an acceptance

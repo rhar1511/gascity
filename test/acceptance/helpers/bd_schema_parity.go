@@ -10,7 +10,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/steveyegge/beads/schema"
+	"github.com/rhar1511/beads/schema"
 )
 
 // bdSchemaProbeTimeout bounds the probe. It opens a throwaway SQLite database
@@ -65,7 +65,7 @@ func RequireBdSchemaParity(bdPath string) error {
 			"The acceptance matrix cannot characterize a topology through a mismatched pair — on the external shapes it "+
 			"shows up as a gc store fallback or as bd locked out of its own database, not as a version error.\n"+
 			"Build bd from the module this tree pins:\n"+
-			"  GOFLAGS=-mod=mod go build -o <path>/bd github.com/steveyegge/beads/cmd/bd\n"+
+			"  GOFLAGS=-mod=mod go build -o <path>/bd github.com/rhar1511/beads/cmd/bd\n"+
 			"then point GC_ACCEPTANCE_BD_BIN at it",
 		bdPath, bdVersion, abs(bdVersion-libVersion), relation, libVersion)
 }

@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads/proxyendpoint"
-	beadslib "github.com/steveyegge/beads"
+	beadslib "github.com/rhar1511/beads"
 )
 
 // Typed classification of a native read failure, ahead of the text table.

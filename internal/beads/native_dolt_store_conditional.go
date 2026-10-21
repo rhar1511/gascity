@@ -9,7 +9,7 @@ import (
 	"fmt"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
-	beadslib "github.com/steveyegge/beads"
+	beadslib "github.com/rhar1511/beads"
 )
 
 var (

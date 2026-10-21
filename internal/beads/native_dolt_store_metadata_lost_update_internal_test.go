@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"testing"
 
-	beadslib "github.com/steveyegge/beads"
+	beadslib "github.com/rhar1511/beads"
 )
 
 // lostUpdateStorage models the two backend properties the metadata write path

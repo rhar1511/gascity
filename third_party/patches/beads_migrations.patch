@@ -46,3 +46,14 @@ diff -ruN a/internal/types/BUILD.bazel b/internal/types/BUILD.bazel
 +    srcs = ["types.go"],
 +    visibility = ["//visibility:public"],
 +)
+diff -ruN a/cmd/bd/BUILD.bazel b/cmd/bd/BUILD.bazel
+--- a/cmd/bd/BUILD.bazel	2026-10-21 00:00:00.000000000 +0000
++++ b/cmd/bd/BUILD.bazel	2026-10-21 00:00:00.000000000 +0000
+@@ -0,0 +1,7 @@
++# The journal contract compares GC's constant with the pinned CLI source.
++filegroup(
++    name = "journal_srcs",
++    srcs = ["migrate_dolt_mode.go"],
++    visibility = ["//visibility:public"],
++)
++

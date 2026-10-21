@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 
-	beadslib "github.com/steveyegge/beads"
+	beadslib "github.com/rhar1511/beads"
 
 	"github.com/gastownhall/gascity/internal/beads/proxyendpoint"
 )

@@ -10,7 +10,7 @@ import (
 	"sync"
 	"testing"
 
-	beadslib "github.com/steveyegge/beads"
+	beadslib "github.com/rhar1511/beads"
 )
 
 // metadataStressRounds is how many writes each of the two writers issues. It is

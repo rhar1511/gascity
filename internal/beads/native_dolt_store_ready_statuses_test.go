@@ -5,7 +5,7 @@ import (
 	"reflect"
 	"testing"
 
-	beadslib "github.com/steveyegge/beads"
+	beadslib "github.com/rhar1511/beads"
 )
 
 // workFilterMatchesStatus mirrors the backing store's status selection for

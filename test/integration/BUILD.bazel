@@ -67,10 +67,9 @@ go_test(
         "//test/integration/filebdshim",
         "//:go.mod",
         "//:repo_source_tree",
-        # Pinned prebuilt release binaries (see MODULE.bazel): hermetic bd and
-        # dolt for the dolt-backed integration shapes, same versions the
-        # go-test CI installs via install-bd-archive.sh / install-dolt-archive.sh.
-        "@bd_bin_v1_3_1//:bd",
+        # Pair bd with the linked Beads library; the upstream archive remains
+        # a separate compatibility-matrix input in MODULE.bazel.
+        "@com_github_rhar1511_beads//cmd/bd",
         "@dolt_bin_v2_1_7//:dolt-linux-amd64/bin/dolt",
     ],
     shard_count = 4,

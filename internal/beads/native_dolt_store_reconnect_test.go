@@ -15,8 +15,8 @@ import (
 	"testing"
 	"time"
 
-	beadslib "github.com/steveyegge/beads"
-	"github.com/steveyegge/beads/backend"
+	beadslib "github.com/rhar1511/beads"
+	"github.com/rhar1511/beads/backend"
 )
 
 // These tests exercise the native read-path reconnect: a read against the

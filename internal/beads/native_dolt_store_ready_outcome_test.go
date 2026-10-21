@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	beadslib "github.com/steveyegge/beads"
+	beadslib "github.com/rhar1511/beads"
 )
 
 // readyOutcomeBatchStorage is a beadslib.Storage that answers the three reads

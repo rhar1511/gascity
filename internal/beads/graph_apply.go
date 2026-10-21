@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	beadslib "github.com/steveyegge/beads"
+	beadslib "github.com/rhar1511/beads"
 )
 
 // GraphApplyStore is an optional store capability for atomically creating a

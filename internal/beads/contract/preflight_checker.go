@@ -2,6 +2,7 @@ package contract
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"runtime/debug"
@@ -15,10 +16,13 @@ import (
 
 // PreflightBDContext is the bd-reported backend state for a beads scope.
 type PreflightBDContext struct {
-	Backend       string
-	DoltMode      string
-	BDVersion     string
+	Backend   string
+	DoltMode  string
+	BDVersion string
+	// SchemaVersion is the bd JSON wire-format version, not a database cursor.
 	SchemaVersion int
+	// CLIArtifact is read from the executable selected for this exact context call.
+	CLIArtifact BeadsArtifact
 }
 
 // PreflightChecker evaluates whether a beads scope may use native storage.
@@ -41,7 +45,7 @@ type PreflightChecker struct {
 	// _project_id beadslib still verifies at open time — refusing to connect, and
 	// falling back to BdStore, on mismatch. Nil defaults to no deferral (Warn).
 	DeferIdentityToNativeOpen func(scope string) bool
-	// BeadsLibraryVersion is the linked github.com/steveyegge/beads module
+	// BeadsLibraryVersion is the linked github.com/rhar1511/beads module
 	// version. Empty means infer it from build info.
 	BeadsLibraryVersion string
 	// BeadsLibraryReplaced reports whether a go.mod replace directive supplied
@@ -49,6 +53,9 @@ type PreflightChecker struct {
 	// replacement rather than a beads release. Set together with
 	// BeadsLibraryVersion; leaving both zero infers them from build info.
 	BeadsLibraryReplaced bool
+	// BeadsLibraryArtifact overrides linked build info for focused unit tests.
+	// Production callers leave it nil. Display versions alone never bind source.
+	BeadsLibraryArtifact *BeadsArtifact
 }
 
 // Check runs the beads backend preflight for scope and returns typed diagnostics.
@@ -307,104 +314,31 @@ func (c PreflightChecker) checkIdentityMatch(scope string, metadata preflightMet
 
 func (c PreflightChecker) checkVersionCompat(ctx PreflightBDContext, err error) PreflightCheckResult {
 	library := c.linkedBeadsLibrary()
-	libraryVersion := strings.TrimPrefix(library.Version, "v")
 	details := PreflightDetails{
 		BDVersion:           ctx.BDVersion,
-		BeadsLibraryVersion: libraryVersion,
+		BeadsLibraryVersion: strings.TrimPrefix(library.Version, "v"),
 		SchemaVersion:       ctx.SchemaVersion,
 	}
-	if err != nil {
-		// Unreachable bd context cannot confirm bd/beads version parity; degrade
-		// (opt-in) rather than hard-block. A real version skew is still caught
-		// below once bd context is readable.
-		return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckWarn, "bd context is unreachable; cannot confirm bd/beads version compatibility", details)
+	if errors.Is(err, ErrBDContextProtocol) {
+		return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckFail, "bd context JSON protocol is invalid", details)
 	}
-	if ctx.SchemaVersion <= 0 {
-		return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckFail, "bd context did not report a schema version", details)
+	if err == nil && ctx.SchemaVersion != 1 {
+		return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckFail, "bd context JSON wire-format version is missing or unsupported", details)
 	}
-	if ctx.BDVersion == "" {
-		return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckWarn, "bd/beads version compatibility could not be confirmed", details)
+	linked := BeadsArtifact{ModulePath: library.ModulePath, Version: library.Version, Sum: library.Sum, Replaced: library.Replaced}
+	if reason := linked.unconfirmedSourceReason(); reason != "" {
+		return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckWarn, "linked Beads source is unconfirmed: "+reason, details)
 	}
-	if reason := library.unconfirmableReason(); reason != "" {
-		// The compare below only means something when both sides name the same
-		// released beads artifact. When the linked library does not — a source
-		// build, a replaced module, or a pseudo-version naming an untagged
-		// commit — the two strings can never be equal, and answering "mismatch"
-		// reports a verdict the check never had the evidence to reach. The
-		// schema version is validated above and is the real compatibility
-		// signal, so an unconfirmable library version must not take the native
-		// store offline; only a *confirmed* mismatch (below) should.
-		return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckPass, "bd/beads schema compatible; linked library version unconfirmed ("+reason+")", details)
+	if reason := ctx.CLIArtifact.unconfirmedSourceReason(); reason != "" {
+		return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckWarn, "selected bd CLI source is unconfirmed: "+reason, details)
 	}
-	if strings.TrimPrefix(ctx.BDVersion, "v") != libraryVersion {
-		if newerSemverCompatibleBD(ctx.BDVersion, libraryVersion) {
-			return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckPass, "bd version is a newer semver-compatible release of the linked beads library version", details)
-		}
-		if samePrereleaseSeries(ctx.BDVersion, libraryVersion) {
-			return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckPass, "bd and the linked beads library are prereleases of the same release", details)
-		}
-		return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckFail, "bd version differs from linked beads library version", details)
+	if linked.ModulePath != ctx.CLIArtifact.ModulePath || linked.Version != ctx.CLIArtifact.Version || linked.Sum != ctx.CLIArtifact.Sum {
+		return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckFail, "selected bd CLI and linked Beads module source differ", details)
 	}
-	return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckPass, "bd and linked beads library versions match", details)
-}
-
-// newerSemverCompatibleBD reports whether bdVersion is a semver-compatible
-// upgrade of libraryVersion: the same major version, and not older. Per
-// semver, only a major bump breaks compatibility, so a newer bd release
-// within the linked library's major version — the common case when an
-// unversioned Homebrew dependency drifts ahead of gc's pinned go.mod release
-// (gastownhall/gascity#5164) — is safe to treat as compatible rather than a
-// hard version mismatch. Returns false (falling back to the exact-match
-// behavior already applied above) whenever either version does not parse as
-// valid semver, so this only ever widens what passes, never what fails.
-func newerSemverCompatibleBD(bdVersion, libraryVersion string) bool {
-	bdCanonical := "v" + strings.TrimPrefix(strings.TrimSpace(bdVersion), "v")
-	libCanonical := "v" + strings.TrimPrefix(strings.TrimSpace(libraryVersion), "v")
-	if !semver.IsValid(bdCanonical) || !semver.IsValid(libCanonical) {
-		return false
-	}
-	if semver.Major(bdCanonical) != semver.Major(libCanonical) {
-		return false
-	}
-	return semver.Compare(bdCanonical, libCanonical) >= 0
-}
-
-// samePrereleaseSeries reports whether both versions are prereleases of the same
-// MAJOR.MINOR.PATCH release — v1.3.0-rc.1 and v1.3.0-rc.2, in either order.
-//
-// newerSemverCompatibleBD deliberately refuses an OLDER bd, because an older bd
-// may not understand a newer library's schema. For the pairing this widening
-// was written for, that risk was checked rather than assumed: v1.3.0-rc.1 and
-// v1.3.0-rc.2 embed a byte-identical internal/storage/schema, both computing
-// LatestVersion() == 66, so neither can carry schema skew against the other.
-// That is a verified property of THAT pair, not a law of RC series: nothing
-// stops an rc.N from being cut precisely to land a schema change, and this
-// predicate compares version strings only, never schema versions. A future
-// same-series pin move must re-prove the schema premise for its own pair.
-//
-// gascity's own pins do not currently produce that pairing (BD_VERSION and
-// BD_CURRENT_VERSION are both v1.3.0-rc.2), so this widening is not load-bearing
-// for the current bump. It is kept so that an operator running a bd from
-// elsewhere in a series whose schema identity has been checked is not refused
-// a native store for a skew that pair does not carry.
-//
-// Kept deliberately narrow: BOTH sides must be prereleases and the release they
-// are candidates for must be identical, so every cross-release skew, and an RC
-// paired with its own final release, still fails. semver.Compare's prerelease
-// ordering is intentionally not consulted: ordering rc.1 before rc.2 says
-// nothing about which of them embeds which schema, so it is no substitute
-// for the by-hand check recorded above.
-func samePrereleaseSeries(bdVersion, libraryVersion string) bool {
-	bd := "v" + strings.TrimPrefix(strings.TrimSpace(bdVersion), "v")
-	lib := "v" + strings.TrimPrefix(strings.TrimSpace(libraryVersion), "v")
-	if !semver.IsValid(bd) || !semver.IsValid(lib) {
-		return false
-	}
-	bdPre, libPre := semver.Prerelease(bd), semver.Prerelease(lib)
-	if bdPre == "" || libPre == "" {
-		return false
-	}
-	return strings.TrimSuffix(semver.Canonical(bd), bdPre) == strings.TrimSuffix(semver.Canonical(lib), libPre)
+	// Module identity is independent of a context command's availability or its
+	// displayed bd_version. Native open still verifies schema, project identity,
+	// nonmutation and capabilities; a matching module does not assert those facts.
+	return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckPass, "selected bd CLI and linked Beads released module identities match; database compatibility remains enforced at native open", details)
 }
 
 func (c PreflightChecker) checkContractShape(metadata preflightMetadata) PreflightCheckResult {
@@ -434,11 +368,14 @@ func preflightFallbackReason(checks []PreflightCheckResult) string {
 }
 
 // beadsModulePath is the module path of the beads library gc links.
-const beadsModulePath = "github.com/steveyegge/beads"
+const beadsModulePath = "github.com/rhar1511/beads"
 
 // linkedBeadsLibrary resolves the beads library this binary links, preferring
 // the configured override so tests need not depend on their own build info.
 func (c PreflightChecker) linkedBeadsLibrary() beadsLibrary {
+	if a := c.BeadsLibraryArtifact; a != nil {
+		return beadsLibrary{ModulePath: a.ModulePath, Version: a.Version, Sum: a.Sum, Replaced: a.Replaced}
+	}
 	if version := strings.TrimSpace(c.BeadsLibraryVersion); version != "" || c.BeadsLibraryReplaced {
 		return beadsLibrary{Version: version, Replaced: c.BeadsLibraryReplaced}
 	}
@@ -451,32 +388,14 @@ func (c PreflightChecker) linkedBeadsLibrary() beadsLibrary {
 
 // beadsLibrary describes the beads library a binary actually links.
 type beadsLibrary struct {
+	ModulePath string
+	Sum        string
 	// Version is the module version recorded in build info, empty when unknown.
 	Version string
 	// Replaced reports whether a go.mod replace directive supplied the code.
 	// A replacement's version numbers belong to the replacement, not to beads,
 	// so they say nothing about which bd release the library agrees with.
 	Replaced bool
-}
-
-// unconfirmableReason names why the library version cannot be compared to a bd
-// release version, or returns "" when the comparison is meaningful.
-func (b beadsLibrary) unconfirmableReason() string {
-	version := strings.TrimPrefix(strings.TrimSpace(b.Version), "v")
-	switch {
-	case version == "" || version == "(devel)":
-		// A source build reports "(devel)" (or nothing) even though gc and bd
-		// are built from the same tree.
-		return "source build"
-	case b.Replaced:
-		return "replaced module"
-	case !comparableReleaseVersion(version):
-		// A pseudo-version names an untagged commit, not a release. gc pins
-		// beads at one whenever it tracks beads ahead of its last tag.
-		return "pseudo-version"
-	default:
-		return ""
-	}
 }
 
 // comparableReleaseVersion reports whether version names a released beads
@@ -499,9 +418,9 @@ func linkedBeadsLibraryFrom(info *debug.BuildInfo) beadsLibrary {
 		if dep.Replace != nil {
 			// Report the replacement's own version — including the empty one a
 			// local-path replace records — never the require line it displaced.
-			return beadsLibrary{Version: dep.Replace.Version, Replaced: true}
+			return beadsLibrary{ModulePath: dep.Replace.Path, Version: dep.Replace.Version, Sum: dep.Replace.Sum, Replaced: true}
 		}
-		return beadsLibrary{Version: dep.Version}
+		return beadsLibrary{ModulePath: dep.Path, Version: dep.Version, Sum: dep.Sum}
 	}
 	return beadsLibrary{}
 }
@@ -567,7 +486,7 @@ func degradedOnlyByUnreachableBDContext(checks []PreflightCheckResult) bool {
 // is unreachable.
 func isBDContextDependentCheck(id PreflightCheckID) bool {
 	switch id {
-	case PreflightCheckBDContextAgreement, PreflightCheckDoltModeSafe, PreflightCheckVersionCompat:
+	case PreflightCheckBDContextAgreement, PreflightCheckDoltModeSafe:
 		return true
 	default:
 		return false

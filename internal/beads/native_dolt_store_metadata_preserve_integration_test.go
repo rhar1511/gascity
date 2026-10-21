@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	beadslib "github.com/steveyegge/beads"
+	beadslib "github.com/rhar1511/beads"
 )
 
 // openRealNativeDoltStoreForMetadata opens a NativeDoltStore over REAL

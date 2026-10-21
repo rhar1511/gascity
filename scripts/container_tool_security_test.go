@@ -167,9 +167,10 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 	}{
 		{"fsspec", "2026.6.0", "2026.6.0", false},
 		{"gitpython", "3.1.60", "3.2.0", false},
-		{"aiohttp", "3.14.3", "3.14.3", false},
+		{"aiohttp", "3.14.4", "3.14.4", false},
 		{"anyio", "4.14.2", "4.14.2", false},
-		{"pillow", "12.3.0", "12.3.0", false},
+		{"certifi", "2026.10.19", "2026.10.19", false},
+		{"pillow", "13.0.0", "13.0.0", false},
 		{"urllib3", "2.8.0", "2.8.0", false},
 		{"pyjwt", "2.14.0", "2.15.1", true},
 		{"cryptography", "50.0.0", "50.0.0", true},
@@ -292,6 +293,7 @@ func TestRebuiltToolsForcePatchedXModules(t *testing.T) {
 		"ARG XTEXT_VERSION=0.42.0",
 		"ARG XMOD_VERSION=0.41.0",
 		"ARG THRIFT_VERSION=0.24.0",
+		"ARG COMPRESS_VERSION=1.18.7",
 	} {
 		if !strings.Contains(base, arg) {
 			t.Errorf("contrib/k8s/Dockerfile.base missing %q", arg)
@@ -301,16 +303,18 @@ func TestRebuiltToolsForcePatchedXModules(t *testing.T) {
 	// All gh x-module overrides must survive the final module graph selection.
 	// Dolt takes no x/mod override because no x/mod package is linked into its binary.
 	ghModules := map[string]string{
-		"golang.org/x/crypto": "XCRYPTO_VERSION",
-		"golang.org/x/net":    "XNET_VERSION",
-		"golang.org/x/text":   "XTEXT_VERSION",
-		"golang.org/x/mod":    "XMOD_VERSION",
+		"golang.org/x/crypto":           "XCRYPTO_VERSION",
+		"golang.org/x/net":              "XNET_VERSION",
+		"golang.org/x/text":             "XTEXT_VERSION",
+		"golang.org/x/mod":              "XMOD_VERSION",
+		"github.com/klauspost/compress": "COMPRESS_VERSION",
 	}
 	doltModules := map[string]string{
-		"golang.org/x/crypto":      "XCRYPTO_VERSION",
-		"golang.org/x/net":         "XNET_VERSION",
-		"golang.org/x/text":        "XTEXT_VERSION",
-		"github.com/apache/thrift": "THRIFT_VERSION",
+		"golang.org/x/crypto":           "XCRYPTO_VERSION",
+		"golang.org/x/net":              "XNET_VERSION",
+		"golang.org/x/text":             "XTEXT_VERSION",
+		"github.com/apache/thrift":      "THRIFT_VERSION",
+		"github.com/klauspost/compress": "COMPRESS_VERSION",
 	}
 	// Each `go get` is looked for inside its own stanza. gh and Dolt share the x/text
 	// override verbatim, so a file-wide search lets one stand in for the other and a
@@ -337,6 +341,19 @@ func TestRebuiltToolsForcePatchedXModules(t *testing.T) {
 			if !strings.Contains(base, assert) {
 				t.Errorf("contrib/k8s/Dockerfile.base must assert %s embeds patched %s; missing %q", bin, module, assert)
 			}
+		}
+	}
+
+	for binary, stanza := range stanzas {
+		compression := strings.Index(stanza, `"github.com/klauspost/compress@v${COMPRESS_VERSION}"`)
+		for _, previous := range []string{"XCRYPTO_VERSION", "XNET_VERSION", "XTEXT_VERSION", "XMOD_VERSION", "THRIFT_VERSION"} {
+			if index := strings.Index(stanza, `@v${`+previous+`}`); index >= compression {
+				t.Errorf("%s must select patched compression after its other module overrides", binary)
+			}
+		}
+		selected := `test "$(go list -m -f '{{if .Replace}}replaced{{else}}{{.Version}}{{end}}' github.com/klauspost/compress)" = "v${COMPRESS_VERSION}"`
+		if !strings.Contains(stanza, selected) {
+			t.Errorf("%s must reject a replaced or rolled-back compression module before compiling", binary)
 		}
 	}
 
@@ -674,7 +691,7 @@ func TestTrivyIgnoreKeepsReviewedBridgeEntries(t *testing.T) {
 // changing this repository's go.mod does not change their embedded Go stdlib.
 func TestContainerSupplierToolchainsAndBDXModules(t *testing.T) {
 	root := repoRoot(t)
-	const toolchain = "golang:1.26.9-bookworm@sha256:d9c68c2c51161e12fd77e4c6320687c9cd86e1af1e3ad6e6cd63ff970641453c"
+	const toolchain = "golang:1.26.10-bookworm@sha256:632dff7351799a5a9954a48dc06670ade72ee44e8c351cdc0e5a57af2fea21af"
 	for path, binaries := range map[string][]string{
 		"contrib/k8s/Dockerfile.base":       {"gh", "dolt"},
 		"contrib/k8s/Dockerfile.agent":      {"bd"},
@@ -685,7 +702,7 @@ func TestContainerSupplierToolchainsAndBDXModules(t *testing.T) {
 			t.Errorf("%s must bind its supplier builder to the immutable patched compiler without automatic toolchain switching", path)
 		}
 		for _, binary := range binaries {
-			want := `go version -m /out/` + binary + ` | grep -Fq "/out/` + binary + `: go1.26.9"`
+			want := `go version -m /out/` + binary + ` | grep -Fq "/out/` + binary + `: go1.26.10"`
 			if !strings.Contains(dockerfile, want) {
 				t.Errorf("%s must assert %s embeds patched Go; missing %q", path, binary, want)
 			}

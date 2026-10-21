@@ -683,7 +683,7 @@ func waitTestRealBDPath(t *testing.T) string {
 }
 
 // buildPinnedBDBinaryForTests builds the bd CLI from the exact
-// github.com/steveyegge/beads module version this repo's go.mod requires, so
+// github.com/rhar1511/beads module version this repo's go.mod requires, so
 // the binary's compiled-in schema/migration knowledge always matches
 // gascity's own in-process beads code (internal/beads imports that same
 // module directly). A bd resolved by searching PATH/home-dir locations
@@ -711,15 +711,15 @@ func buildPinnedBDBinaryForTests() (string, error) {
 	}
 
 	cmd := exec.Command("go", "install", "-tags", "gms_pure_go",
-		"github.com/steveyegge/beads/cmd/bd@"+version)
+		"github.com/rhar1511/beads/cmd/bd@"+version)
 	cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GOBIN="+buildDir)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return "", fmt.Errorf("go install github.com/steveyegge/beads/cmd/bd@%s: %w\n%s", version, err, out)
+		return "", fmt.Errorf("go install github.com/rhar1511/beads/cmd/bd@%s: %w\n%s", version, err, out)
 	}
 	return filepath.Join(buildDir, "bd"), nil
 }
 
-// pinnedBeadsModuleVersion reports the github.com/steveyegge/beads version
+// pinnedBeadsModuleVersion reports the github.com/rhar1511/beads version
 // this test binary was actually built against, read from this process's own
 // embedded build info rather than a `go list -m` subprocess or a go.mod text
 // scan: debug.ReadBuildInfo reflects the exact resolved dependency graph
@@ -732,7 +732,7 @@ func pinnedBeadsModuleVersion() (string, error) {
 		return "", fmt.Errorf("read build info: not available (binary not built with module support)")
 	}
 	for _, dep := range bi.Deps {
-		if dep.Path != "github.com/steveyegge/beads" {
+		if dep.Path != "github.com/rhar1511/beads" {
 			continue
 		}
 		if dep.Replace != nil {
@@ -740,7 +740,7 @@ func pinnedBeadsModuleVersion() (string, error) {
 		}
 		return dep.Version, nil
 	}
-	return "", fmt.Errorf("github.com/steveyegge/beads not found in build info deps")
+	return "", fmt.Errorf("github.com/rhar1511/beads not found in build info deps")
 }
 
 // TestBuildPinnedBDBinaryForTestsUsesGoModSource locks in the fix for
@@ -748,7 +748,7 @@ func pinnedBeadsModuleVersion() (string, error) {
 // old waitTestRealBDPath behavior, still used elsewhere via
 // findPreferredBinary) carries no guarantee of matching the schema/migration
 // knowledge baked into gascity's own in-process beads code, which is compiled
-// from the exact github.com/steveyegge/beads version go.mod pins. Confirmed
+// from the exact github.com/rhar1511/beads version go.mod pins. Confirmed
 // live: the same ~/.local/bin/bd path reported two different version stamps
 // across two consecutive invocations in this same fleet sandbox, and
 // ga-r9cvmi's own notes captured a deterministic v49-vs-v53 schema mismatch
@@ -798,7 +798,7 @@ func TestBuildPinnedBDBinaryForTestsUsesGoModSource(t *testing.T) {
 	foundPinnedModule := false
 	for _, line := range strings.Split(string(metadata), "\n") {
 		fields := strings.Fields(line)
-		if len(fields) >= 3 && fields[0] == "mod" && fields[1] == "github.com/steveyegge/beads" && fields[2] == pinned {
+		if len(fields) >= 3 && fields[0] == "mod" && fields[1] == "github.com/rhar1511/beads" && fields[2] == pinned {
 			foundPinnedModule = true
 			break
 		}

@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	beadslib "github.com/steveyegge/beads"
+	beadslib "github.com/rhar1511/beads"
 )
 
 func TestAbsentMetadataKeyFiltersBeforeLimit(t *testing.T) {

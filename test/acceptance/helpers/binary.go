@@ -69,7 +69,8 @@ func FindModuleRoot() string {
 	}
 }
 
-// FindBD returns the path to the bd binary, or empty string if not found.
+// FindBD returns the selected bd binary, or empty string if unavailable outside
+// Bazel. A missing declared owner-module runfile under Bazel is a tooling error.
 func FindBD() string {
 	if override := strings.TrimSpace(os.Getenv("GC_ACCEPTANCE_BD_BIN")); override != "" {
 		if bin, err := filepath.Abs(override); err == nil {
@@ -78,18 +79,21 @@ func FindBD() string {
 			}
 		}
 	}
-	// Under bazel the pinned bd ships prebuilt in runfiles as a data dep
-	// (http_archive of the same release the go-test CI installs); prefer it
-	// over PATH so remote workers without a system bd run the bd shapes.
+	// Under Bazel, bd is built from the owner module supplying the linked
+	// schema and shipped as a data dependency. Prefer its runfile over PATH;
+	// the independent upstream archive has a different compatibility role.
 	if bazeltest.IsBazel() {
 		for _, rf := range []string{os.Getenv("RUNFILES_DIR"), os.Getenv("TEST_SRCDIR")} {
 			if rf == "" {
 				continue
 			}
-			if bin := filepath.Join(rf, "+http_archive+bd_bin_v1_3_1", "bd"); statBinary(bin) {
-				return bin
+			for _, repo := range []string{"gazelle++go_deps+com_github_rhar1511_beads", "com_github_rhar1511_beads"} {
+				if bin := filepath.Join(rf, repo, "cmd", "bd", "bd_", "bd"); statBinary(bin) {
+					return bin
+				}
 			}
 		}
+		panic("acceptance: Bazel owner-module bd runfile is missing; expected @com_github_rhar1511_beads//cmd/bd:bd (cmd/bd/bd_/bd) under RUNFILES_DIR or TEST_SRCDIR; rebuild the declared acceptance data dependency")
 	}
 	p, err := exec.LookPath("bd")
 	if err != nil {

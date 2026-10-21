@@ -95,7 +95,7 @@ func ExecCommandRunnerWithEnvContextWithoutAmbientBeads(ctx context.Context, env
 }
 
 func execCommandRunnerWithEnv(parent context.Context, env map[string]string, withoutAmbientBeads bool) CommandRunner {
-	return execCommandRunner(parent, env, withoutAmbientBeads, processEnvSnapshotExcludingNativeDoltOpen)
+	return execCommandRunner(parent, env, withoutAmbientBeads, processEnvSnapshotExcludingNativeDoltOpen, nil)
 }
 
 // ExecCommandRunnerWithExactEnvContext is like ExecCommandRunnerWithEnvContext,
@@ -105,10 +105,17 @@ func execCommandRunnerWithEnv(parent context.Context, env map[string]string, wit
 // invariant than the WithoutAmbientBeads pair, which strips only BEADS_*:
 // here the mutation runs in exactly the environment the query ran in.
 func ExecCommandRunnerWithExactEnvContext(ctx context.Context, env map[string]string) CommandRunner {
-	return execCommandRunner(ctx, env, false, func() []string { return nil })
+	return execCommandRunner(ctx, env, false, func() []string { return nil }, nil)
 }
 
-func execCommandRunner(parent context.Context, env map[string]string, withoutAmbientBeads bool, baseEnvFn func() []string) CommandRunner {
+// ExecCommandRunnerWithExecutableObserver preserves the existing environment
+// projection and command lifecycle while inspecting the actual selected path.
+// Hosted callers set withoutAmbientBeads to retain their namespace scrubbing.
+func ExecCommandRunnerWithExecutableObserver(env map[string]string, withoutAmbientBeads bool, observe *ExecutableObserver) CommandRunner {
+	return execCommandRunner(context.Background(), env, withoutAmbientBeads, processEnvSnapshotExcludingNativeDoltOpen, observe)
+}
+
+func execCommandRunner(parent context.Context, env map[string]string, withoutAmbientBeads bool, baseEnvFn func() []string, observe *ExecutableObserver) CommandRunner {
 	return func(dir, name string, args ...string) ([]byte, error) {
 		baseEnv := baseEnvFn()
 		execName := name
@@ -155,7 +162,7 @@ func execCommandRunner(parent context.Context, env map[string]string, withoutAmb
 		cmd.Env = execEnvFor(name, baseEnv, overrides)
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
-		out, err := cmd.Output()
+		out, err := runObservedCommand(cmd, observe)
 
 		recordBDExecTelemetry(name, dir, args, start, out, stderr.String(), err)
 

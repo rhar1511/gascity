@@ -4,6 +4,7 @@ package beads
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -19,7 +20,7 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
-	beadslib "github.com/steveyegge/beads"
+	beadslib "github.com/rhar1511/beads"
 )
 
 // TestNativeDoltStoreRegularUpdateEventRecording verifies that calling
@@ -129,6 +130,134 @@ func TestNativeDoltStoreEphemeralMailSend(t *testing.T) {
 // bringing that implementation detail into production code.
 type testRawDBGetter interface {
 	DB() *sql.DB
+}
+
+// TestNativeDoltStoreSchema73ReadPreservesSchemaAndHead exercises the linked
+// library's schema73/28 through a private server and a fresh native GC handle.
+// The library initializes this fixture; this is a compatibility and unchanged
+// read proof, independent of the old-library/new-database regression fixture.
+func TestNativeDoltStoreSchema73ReadPreservesSchemaAndHead(t *testing.T) {
+	ctx := context.Background()
+	scopeRoot := t.TempDir()
+	port := startTestDoltServer(t)
+	beadsDir := filepath.Join(scopeRoot, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("create fixture .beads: %v", err)
+	}
+	metadata := fmt.Sprintf(`{"backend":"dolt","database":"beads","dolt_mode":"server","dolt_server_host":"127.0.0.1","dolt_server_port":%d}`, port)
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadata), 0o600); err != nil {
+		t.Fatalf("write fixture metadata: %v", err)
+	}
+	env := map[string]string{
+		"BEADS_DOLT_AUTO_START":      "0",
+		"BEADS_DOLT_SERVER_MODE":     "1",
+		"BEADS_DOLT_SERVER_HOST":     "127.0.0.1",
+		"BEADS_DOLT_SERVER_PORT":     strconv.Itoa(port),
+		"BEADS_DOLT_SERVER_DATABASE": "beads",
+		"BEADS_DOLT_SERVER_USER":     "root",
+	}
+	restore, err := withNativeDoltOpenEnv(env)
+	if err != nil {
+		t.Fatalf("project fixture environment: %v", err)
+	}
+	storage, err := beadslib.OpenBestAvailable(ctx, beadsDir)
+	restore()
+	if err != nil {
+		t.Fatalf("initialize linked library fixture: %v", err)
+	}
+	seed := newNativeDoltStoreWithStorageAndPrefix(storage, "schema73-fixture", "sc")
+	t.Cleanup(func() {
+		if err := seed.CloseStore(); err != nil {
+			t.Errorf("close fixture initializer: %v", err)
+		}
+	})
+	if err := storage.SetConfig(ctx, "issue_prefix", "sc"); err != nil {
+		t.Fatalf("set fixture prefix: %v", err)
+	}
+	created, err := seed.Create(Bead{Title: "schema73 native read"})
+	if err != nil {
+		t.Fatalf("create fixture bead: %v", err)
+	}
+	if err := seed.CloseStore(); err != nil {
+		t.Fatalf("close fixture initializer: %v", err)
+	}
+	db, err := sql.Open("mysql", fmt.Sprintf("root@tcp(127.0.0.1:%d)/beads", port))
+	if err != nil {
+		t.Fatalf("open fixture observer: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	type columnShape struct {
+		Table, Column, Type, Nullable, Extra string
+		Default                              sql.NullString
+	}
+	snapshot := func() string {
+		t.Helper()
+		var main, ignored int
+		var head string
+		if err := db.QueryRowContext(ctx, "SELECT COALESCE(MAX(version),0) FROM schema_migrations").Scan(&main); err != nil {
+			t.Fatalf("read fixture main cursor: %v", err)
+		}
+		if err := db.QueryRowContext(ctx, "SELECT COALESCE(MAX(version),0) FROM ignored_schema_migrations").Scan(&ignored); err != nil {
+			t.Fatalf("read fixture ignored cursor: %v", err)
+		}
+		if err := db.QueryRowContext(ctx, "SELECT DOLT_HASHOF('HEAD')").Scan(&head); err != nil {
+			t.Fatalf("read fixture HEAD: %v", err)
+		}
+		if main != 73 || ignored != 28 || head == "" {
+			t.Fatalf("fixture schema/HEAD = %d/%d/%q, want schema73/28 and a committed HEAD", main, ignored, head)
+		}
+		// Ignored and uncommitted DDL can change columns without moving either
+		// migration cursor or HEAD. Observe all columns in this private database.
+		rows, err := db.QueryContext(ctx, `SELECT table_name, column_name, column_type, is_nullable, column_default, extra
+			FROM information_schema.columns WHERE table_schema = DATABASE()
+			ORDER BY table_name, ordinal_position`)
+		if err != nil {
+			t.Fatalf("read fixture column schema: %v", err)
+		}
+		defer rows.Close()
+		var columns []columnShape
+		for rows.Next() {
+			var column columnShape
+			if err := rows.Scan(&column.Table, &column.Column, &column.Type, &column.Nullable, &column.Default, &column.Extra); err != nil {
+				t.Fatalf("scan fixture column schema: %v", err)
+			}
+			columns = append(columns, column)
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("read fixture column schema rows: %v", err)
+		}
+		if len(columns) == 0 {
+			t.Fatal("fixture column schema is empty")
+		}
+		encoded, err := json.Marshal(columns)
+		if err != nil {
+			t.Fatalf("encode fixture column schema: %v", err)
+		}
+		return fmt.Sprintf("%d/%d/%s/columns:%d:%x", main, ignored, head, len(columns), sha256.Sum256(encoded))
+	}
+	before := snapshot()
+	store, err := newNativeDoltStoreAt(ctx, scopeRoot, env)
+	if err != nil {
+		t.Fatalf("native open of schema73 fixture: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.CloseStore(); err != nil {
+			t.Errorf("close native reader: %v", err)
+		}
+	})
+	got, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("native Get: %v", err)
+	}
+	if got.ID != created.ID || got.Title != created.Title {
+		t.Fatalf("native Get = %+v, want fixture bead %+v", got, created)
+	}
+	if err := store.CloseStore(); err != nil {
+		t.Fatalf("close native reader: %v", err)
+	}
+	if after := snapshot(); after != before {
+		t.Fatalf("native read moved schema or HEAD: before %s, after %s", before, after)
+	}
 }
 
 // TestNativeDoltStoreOpenPreservesMissingIDDefaults verifies the v59 contract:

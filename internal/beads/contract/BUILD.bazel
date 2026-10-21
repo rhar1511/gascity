@@ -13,7 +13,11 @@ go_library(
         "metadata.go",
         "mode.go",
         "preflight.go",
+        "preflight_artifact.go",
         "preflight_checker.go",
+        "preflight_executable.go",
+        "preflight_executable_linux.go",
+        "preflight_executable_other.go",
         "shared_server.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/beads/contract",
@@ -32,6 +36,7 @@ go_library(
 go_test(
     name = "contract_test",
     srcs = [
+        "artifact_identity_test.go",
         "backend_registry_test.go",
         "config_overlay_test.go",
         "connection_bd_external_binding_test.go",
@@ -53,6 +58,7 @@ go_test(
         "preflight_test.go",
         "shared_server_test.go",
         "testenv_import_test.go",
+        "unknown_cli_identity_test.go",
     ],
     data = glob(
         ["**"],
@@ -60,6 +66,7 @@ go_test(
     ) + [
         "//:go.mod",
         "//:repo_source_tree",
+        "@com_github_rhar1511_beads//cmd/bd:journal_srcs",
     ],
     embed = [":contract"],
     deps = [

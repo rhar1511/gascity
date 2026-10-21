@@ -65,7 +65,7 @@ func TestOpenStoreAtForCityEligibleNativeReturnsInjectedNativeStore(t *testing.T
 	result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
 		ScopeRoot:        scope,
 		Provider:         "bd",
-		PreflightChecker: factoryPreflightChecker(scope, factoryPreflightDoltMetadata(), contract.PreflightBDContext{Backend: "dolt", DoltMode: "server"}),
+		PreflightChecker: factoryConfirmedSourcePreflightChecker(scope, factoryPreflightDoltMetadata(), contract.PreflightBDContext{Backend: "dolt", DoltMode: "server"}),
 		OpenBdStore: func() (Store, error) {
 			t.Fatal("OpenBdStore called for native-eligible scope")
 			return nil, nil
@@ -126,7 +126,7 @@ func TestOpenStoreAtForCityContextDriftFallsBackWithPreflightDiagnostic(t *testi
 	result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
 		ScopeRoot:        scope,
 		Provider:         "bd",
-		PreflightChecker: factoryPreflightChecker(scope, factoryPreflightDoltMetadata(), contract.PreflightBDContext{Backend: "postgres"}),
+		PreflightChecker: factoryConfirmedSourcePreflightChecker(scope, factoryPreflightDoltMetadata(), contract.PreflightBDContext{Backend: "postgres"}),
 		OpenBdStore: func() (Store, error) {
 			bdOpened = true
 			return NewMemStore(), nil
@@ -200,7 +200,7 @@ func TestOpenStoreAtForCityNativeOpenFailureFallsBackWithDiagnostic(t *testing.T
 	result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
 		ScopeRoot:        scope,
 		Provider:         "bd",
-		PreflightChecker: factoryPreflightChecker(scope, factoryPreflightDoltMetadata(), contract.PreflightBDContext{Backend: "dolt", DoltMode: "server"}),
+		PreflightChecker: factoryConfirmedSourcePreflightChecker(scope, factoryPreflightDoltMetadata(), contract.PreflightBDContext{Backend: "dolt", DoltMode: "server"}),
 		OpenBdStore: func() (Store, error) {
 			bdOpened = true
 			return fallback, nil
@@ -237,7 +237,7 @@ func TestOpenStoreAtForCityExecBdContractFallbackUsesExecStore(t *testing.T) {
 	scope := "/city"
 	provider := "exec:/tmp/gc-beads-bd.sh"
 	execStore := NewMemStore()
-	checker := factoryPreflightChecker(scope, factoryPreflightDoltMetadata(), contract.PreflightBDContext{Backend: "dolt", DoltMode: "server"})
+	checker := factoryConfirmedSourcePreflightChecker(scope, factoryPreflightDoltMetadata(), contract.PreflightBDContext{Backend: "dolt", DoltMode: "server"})
 	checker.Provider = provider
 
 	result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
@@ -284,7 +284,7 @@ func TestOpenStoreAtForCityExecutableHooksBlockNativeStore(t *testing.T) {
 	result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
 		ScopeRoot:        scope,
 		Provider:         "bd",
-		PreflightChecker: factoryPreflightChecker(scope, factoryPreflightDoltMetadata(), contract.PreflightBDContext{Backend: "dolt", DoltMode: "server"}),
+		PreflightChecker: factoryConfirmedSourcePreflightChecker(scope, factoryPreflightDoltMetadata(), contract.PreflightBDContext{Backend: "dolt", DoltMode: "server"}),
 		OpenBdStore: func() (Store, error) {
 			return fallback, nil
 		},
@@ -330,7 +330,7 @@ func TestOpenStoreAtForCityConfigMarkerIsNotProxiedAuthority(t *testing.T) {
 	result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
 		ScopeRoot:        scope,
 		Provider:         "bd",
-		PreflightChecker: factoryPreflightChecker(scope, factoryPreflightDoltMetadata(), contract.PreflightBDContext{Backend: "dolt", DoltMode: "server"}),
+		PreflightChecker: factoryConfirmedSourcePreflightChecker(scope, factoryPreflightDoltMetadata(), contract.PreflightBDContext{Backend: "dolt", DoltMode: "server"}),
 		OpenBdStore: func() (Store, error) {
 			t.Fatal("a config.yaml marker alone routed the scope to the bd provider")
 			return nil, nil
@@ -366,7 +366,7 @@ func TestOpenStoreAtForCityMetadataProxiedModeBlocksNativeStore(t *testing.T) {
 	result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
 		ScopeRoot:        scope,
 		Provider:         "bd",
-		PreflightChecker: factoryPreflightChecker(scope, factoryPreflightDoltMetadata(), contract.PreflightBDContext{Backend: "dolt", DoltMode: "server"}),
+		PreflightChecker: factoryConfirmedSourcePreflightChecker(scope, factoryPreflightDoltMetadata(), contract.PreflightBDContext{Backend: "dolt", DoltMode: "server"}),
 		OpenBdStore:      func() (Store, error) { return fallback, nil },
 		OpenNativeStore: func() (Store, error) {
 			t.Fatal("OpenNativeStore called for a proxied metadata binding")
@@ -397,7 +397,7 @@ func TestOpenStoreAtForCityUnknownPersistedDoltModeFallsBack(t *testing.T) {
 	result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
 		ScopeRoot:        scope,
 		Provider:         "bd",
-		PreflightChecker: factoryPreflightChecker(scope, `{"backend":"dolt","dolt_mode":"mystery","project_id":"gc-local"}`, contract.PreflightBDContext{Backend: "dolt", DoltMode: "server"}),
+		PreflightChecker: factoryConfirmedSourcePreflightChecker(scope, `{"backend":"dolt","dolt_mode":"mystery","project_id":"gc-local"}`, contract.PreflightBDContext{Backend: "dolt", DoltMode: "server"}),
 		OpenBdStore:      func() (Store, error) { return fallback, nil },
 		OpenNativeStore: func() (Store, error) {
 			t.Fatal("OpenNativeStore called for unknown persisted dolt mode")
@@ -423,7 +423,7 @@ func TestOpenStoreAtForCityUnreadableConfigFailsClosed(t *testing.T) {
 	result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
 		ScopeRoot:        scope,
 		Provider:         "bd",
-		PreflightChecker: factoryPreflightChecker(scope, factoryPreflightDoltMetadata(), contract.PreflightBDContext{Backend: "dolt", DoltMode: "server"}),
+		PreflightChecker: factoryConfirmedSourcePreflightChecker(scope, factoryPreflightDoltMetadata(), contract.PreflightBDContext{Backend: "dolt", DoltMode: "server"}),
 		OpenBdStore:      func() (Store, error) { return fallback, nil },
 		OpenNativeStore: func() (Store, error) {
 			t.Fatal("OpenNativeStore called with unreadable config")
@@ -452,7 +452,7 @@ func TestOpenStoreAtForCityUnknownConfigDoltModeFallsBack(t *testing.T) {
 	result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
 		ScopeRoot:        scope,
 		Provider:         "bd",
-		PreflightChecker: factoryPreflightChecker(scope, factoryPreflightDoltMetadata(), contract.PreflightBDContext{Backend: "dolt", DoltMode: "server"}),
+		PreflightChecker: factoryConfirmedSourcePreflightChecker(scope, factoryPreflightDoltMetadata(), contract.PreflightBDContext{Backend: "dolt", DoltMode: "server"}),
 		OpenBdStore:      func() (Store, error) { return fallback, nil },
 		OpenNativeStore: func() (Store, error) {
 			t.Fatal("OpenNativeStore called for unknown config dolt mode")
@@ -485,7 +485,7 @@ func TestOpenStoreAtForCityGCStampedHooksDoNotBlockNativeStore(t *testing.T) {
 	result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
 		ScopeRoot:        scope,
 		Provider:         "bd",
-		PreflightChecker: factoryPreflightChecker(scope, factoryPreflightDoltMetadata(), contract.PreflightBDContext{Backend: "dolt", DoltMode: "server"}),
+		PreflightChecker: factoryConfirmedSourcePreflightChecker(scope, factoryPreflightDoltMetadata(), contract.PreflightBDContext{Backend: "dolt", DoltMode: "server"}),
 		OpenBdStore: func() (Store, error) {
 			t.Fatal("OpenBdStore called: gc-stamped hooks should not block native store")
 			return nil, nil
@@ -526,7 +526,7 @@ func TestOpenStoreAtForCityEmbeddedStampMarkerStillBlocksNativeStore(t *testing.
 	result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
 		ScopeRoot:        scope,
 		Provider:         "bd",
-		PreflightChecker: factoryPreflightChecker(scope, factoryPreflightDoltMetadata(), contract.PreflightBDContext{Backend: "dolt", DoltMode: "server"}),
+		PreflightChecker: factoryConfirmedSourcePreflightChecker(scope, factoryPreflightDoltMetadata(), contract.PreflightBDContext{Backend: "dolt", DoltMode: "server"}),
 		OpenBdStore:      func() (Store, error) { return fallback, nil },
 		OpenNativeStore: func() (Store, error) {
 			t.Fatal("OpenNativeStore called for embedded-marker non-gc hook")
@@ -544,26 +544,74 @@ func TestOpenStoreAtForCityEmbeddedStampMarkerStillBlocksNativeStore(t *testing.
 	}
 }
 
-func factoryPreflightChecker(scope, metadata string, ctx contract.PreflightBDContext) contract.PreflightChecker {
+// factoryConfirmedSourcePreflightChecker supplies an explicitly synthetic matched
+// source pair for store-selection tests. This is comparison data, not evidence
+// of any real executable, release, module contents or database.
+func factoryConfirmedSourcePreflightChecker(scope, metadata string, ctx contract.PreflightBDContext) contract.PreflightChecker {
 	files := fsys.NewFake()
 	files.Dirs[filepath.Join(scope, ".beads")] = true
 	files.Files[filepath.Join(scope, ".beads", "metadata.json")] = []byte(metadata)
 	if ctx.BDVersion == "" {
-		ctx.BDVersion = "1.0.4"
+		ctx.BDVersion = "1.3.2"
 	}
 	if ctx.SchemaVersion == 0 {
 		ctx.SchemaVersion = 1
 	}
+	artifact := contract.BeadsArtifact{
+		ModulePath: "github.com/rhar1511/beads",
+		Version:    "v1.3.2",
+		Sum:        "h1:" + strings.Repeat("A", 43) + "=",
+	}
+	ctx.CLIArtifact = artifact
 	return contract.PreflightChecker{
-		FS:                  files,
-		Provider:            "bd",
-		BeadsLibraryVersion: "1.0.4",
+		FS:                   files,
+		Provider:             "bd",
+		BeadsLibraryArtifact: &artifact,
 		BDContext: func(string) (contract.PreflightBDContext, error) {
 			return ctx, nil
 		},
 		DatabaseProjectID: func(string) (string, bool, error) {
 			return "gc-local", true, nil
 		},
+	}
+}
+
+// The source-confirmed fixture above must not make unknown source identities
+// eligible when the production factory composes the preflight checker.
+func TestOpenStoreAtForCityUnconfirmedSourceRetainsFallback(t *testing.T) {
+	t.Setenv(nativeForceFallbackEnv, "")
+	for _, missing := range []string{"library", "CLI"} {
+		t.Run(missing, func(t *testing.T) {
+			scope := "/city"
+			checker := factoryConfirmedSourcePreflightChecker(scope, factoryPreflightDoltMetadata(), contract.PreflightBDContext{Backend: "dolt", DoltMode: "server"})
+			if missing == "library" {
+				checker.BeadsLibraryArtifact = &contract.BeadsArtifact{}
+			} else {
+				reader := checker.BDContext
+				checker.BDContext = func(scope string) (contract.PreflightBDContext, error) {
+					ctx, err := reader(scope)
+					ctx.CLIArtifact = contract.BeadsArtifact{}
+					return ctx, err
+				}
+			}
+			fallback := NewMemStore()
+			result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
+				ScopeRoot:        scope,
+				Provider:         "bd",
+				PreflightChecker: checker,
+				OpenBdStore:      func() (Store, error) { return fallback, nil },
+				OpenNativeStore: func() (Store, error) {
+					t.Fatal("native store opened with unconfirmed source")
+					return nil, nil
+				},
+			})
+			if err != nil {
+				t.Fatalf("OpenStoreAtForCity: %v", err)
+			}
+			if result.Store != fallback || result.Diagnostic.NativeStoreEligible || result.Diagnostic.PreflightGate != string(contract.PreflightCheckVersionCompat) {
+				t.Fatalf("unconfirmed %s source did not retain version fallback: store=%T diagnostic=%+v", missing, result.Store, result.Diagnostic)
+			}
+		})
 	}
 }
 
@@ -630,7 +678,7 @@ func TestOpenStoreAtForCityStampsConditionalWritesMode(t *testing.T) {
 		result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
 			ScopeRoot:         scope,
 			Provider:          "bd",
-			PreflightChecker:  factoryPreflightChecker(scope, factoryPreflightDoltMetadata(), contract.PreflightBDContext{Backend: "dolt", DoltMode: "server"}),
+			PreflightChecker:  factoryConfirmedSourcePreflightChecker(scope, factoryPreflightDoltMetadata(), contract.PreflightBDContext{Backend: "dolt", DoltMode: "server"}),
 			ConditionalWrites: gate.Auto,
 			OpenBdStore: func() (Store, error) {
 				t.Fatal("OpenBdStore called for native-eligible scope")
@@ -661,7 +709,7 @@ func TestOpenStoreAtForCityStampsConditionalWritesMode(t *testing.T) {
 
 	t.Run("exec-bd-contract fallback path stamps a carrier store", func(t *testing.T) {
 		provider := "exec:/tmp/gc-beads-bd.sh"
-		checker := factoryPreflightChecker(scope, factoryPreflightDoltMetadata(), contract.PreflightBDContext{Backend: "dolt", DoltMode: "server"})
+		checker := factoryConfirmedSourcePreflightChecker(scope, factoryPreflightDoltMetadata(), contract.PreflightBDContext{Backend: "dolt", DoltMode: "server"})
 		checker.Provider = provider
 		result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
 			ScopeRoot:         scope,
@@ -1227,7 +1275,7 @@ func TestOpenStoreAtForCityProxiedFlagOnLeavesNonProxiedScopesAlone(t *testing.T
 			metadata: `{"backend":"dolt","dolt_mode":"server"}`,
 			provider: "bd",
 			preflight: func(scope string) contract.PreflightChecker {
-				return factoryPreflightChecker(scope, factoryPreflightDoltMetadata(), serverCtx)
+				return factoryConfirmedSourcePreflightChecker(scope, factoryPreflightDoltMetadata(), serverCtx)
 			},
 			wantStore: storeNameNativeDoltStore,
 		},
@@ -1236,7 +1284,7 @@ func TestOpenStoreAtForCityProxiedFlagOnLeavesNonProxiedScopesAlone(t *testing.T
 			metadata: `{"backend":"dolt","dolt_mode":"embedded"}`,
 			provider: "bd",
 			preflight: func(scope string) contract.PreflightChecker {
-				return factoryPreflightChecker(scope, factoryPreflightDoltMetadata(), serverCtx)
+				return factoryConfirmedSourcePreflightChecker(scope, factoryPreflightDoltMetadata(), serverCtx)
 			},
 			wantStore: storeNameNativeDoltStore,
 		},
@@ -1244,7 +1292,7 @@ func TestOpenStoreAtForCityProxiedFlagOnLeavesNonProxiedScopesAlone(t *testing.T
 			name:     "a scope with no persisted mode (preflight decides)",
 			provider: "bd",
 			preflight: func(scope string) contract.PreflightChecker {
-				return factoryPreflightChecker(scope, factoryPreflightDoltMetadata(), serverCtx)
+				return factoryConfirmedSourcePreflightChecker(scope, factoryPreflightDoltMetadata(), serverCtx)
 			},
 			wantStore: storeNameNativeDoltStore,
 		},
@@ -1253,7 +1301,7 @@ func TestOpenStoreAtForCityProxiedFlagOnLeavesNonProxiedScopesAlone(t *testing.T
 			config:   "dolt.mode: proxied-server\n",
 			provider: "bd",
 			preflight: func(scope string) contract.PreflightChecker {
-				return factoryPreflightChecker(scope, factoryPreflightDoltMetadata(), serverCtx)
+				return factoryConfirmedSourcePreflightChecker(scope, factoryPreflightDoltMetadata(), serverCtx)
 			},
 			wantStore: storeNameNativeDoltStore,
 		},
@@ -1262,7 +1310,7 @@ func TestOpenStoreAtForCityProxiedFlagOnLeavesNonProxiedScopesAlone(t *testing.T
 			metadata: `{"backend":"dolt","dolt_mode":"server"}`,
 			provider: "bd",
 			preflight: func(scope string) contract.PreflightChecker {
-				return factoryPreflightChecker(scope, factoryPreflightDoltMetadata(),
+				return factoryConfirmedSourcePreflightChecker(scope, factoryPreflightDoltMetadata(),
 					contract.PreflightBDContext{Backend: "dolt", DoltMode: "embedded"})
 			},
 			wantStore: storeNameBdStore,

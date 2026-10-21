@@ -91,7 +91,7 @@ go_test(
         "//internal/storybench",
         "//internal/testenv",
         "//internal/testutil",
-        "@com_github_steveyegge_beads//:beads",
+        "@com_github_rhar1511_beads//:beads",
     ],
 )
 

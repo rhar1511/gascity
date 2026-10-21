@@ -393,11 +393,7 @@ func TestMain(m *testing.M) {
 	} else if ok {
 		realBDBinary = override
 	} else if bazeltest.IsBazel() {
-		// Under bazel the pinned bd ships prebuilt in runfiles as a data dep
-		// (http_archive of the same release the go-test CI installs).
-		if bd := runfilesBinaryAt("bd_bin_v1_3_1", "bd"); bd != "" {
-			realBDBinary = bd
-		}
+		realBDBinary = bazelIntegrationBDBinary()
 	} else {
 		var err error
 		realBDBinary, err = buildPinnedIntegrationBDBinary(tmpDir)
@@ -830,10 +826,10 @@ func buildPinnedIntegrationBDBinary(tmpDir string) (string, error) {
 	// CGO_ENABLED=1 + gms_pure_go is the embedded-capable bd build (per beads
 	// INSTALLING.md): the pinned bd's `bd init` defaults to embedded Dolt,
 	// which a CGO_ENABLED=0 binary refuses at runtime.
-	cmd := exec.Command("go", "install", "-tags", "gms_pure_go", "github.com/steveyegge/beads/cmd/bd@"+version)
+	cmd := exec.Command("go", "install", "-tags", "gms_pure_go", "github.com/rhar1511/beads/cmd/bd@"+version)
 	cmd.Env = append(integrationPinnedBdBuildEnv(os.Environ()), "CGO_ENABLED=1", "GOBIN="+binDir)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return "", fmt.Errorf("go install github.com/steveyegge/beads/cmd/bd@%s: %w\n%s", version, err, out)
+		return "", fmt.Errorf("go install github.com/rhar1511/beads/cmd/bd@%s: %w\n%s", version, err, out)
 	}
 	return filepath.Join(binDir, "bd"), nil
 }
@@ -854,16 +850,16 @@ func pinnedBdStoreCommandRunner() beads.CommandRunner {
 }
 
 func pinnedIntegrationBeadsModuleVersion() (string, error) {
-	cmd := exec.Command("go", "list", "-m", "-f", "{{.Version}}", "github.com/steveyegge/beads")
+	cmd := exec.Command("go", "list", "-m", "-f", "{{.Version}}", "github.com/rhar1511/beads")
 	cmd.Dir = findModuleRoot()
 	cmd.Env = integrationPinnedBdBuildEnv(os.Environ())
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("resolve github.com/steveyegge/beads module version: %w\n%s", err, out)
+		return "", fmt.Errorf("resolve github.com/rhar1511/beads module version: %w\n%s", err, out)
 	}
 	version := strings.TrimSpace(string(out))
 	if version == "" {
-		return "", errors.New("github.com/steveyegge/beads module version is empty")
+		return "", errors.New("github.com/rhar1511/beads module version is empty")
 	}
 	return version, nil
 }
@@ -915,7 +911,7 @@ func integrationPinnedBdBuildEnv(base []string) []string {
 // go.mod to pin. TestBDVersionPins in scripts/bd_version_pin_test.go reads it
 // by name out of this file and asserts it matches go.mod — see
 // TestPinnedIntegrationBeadsModuleVersion for why it is a literal.
-const wantPinnedBeadsModuleVersion = "v1.3.1"
+const wantPinnedBeadsModuleVersion = "v1.3.2"
 
 func TestPinnedIntegrationBeadsModuleVersion(t *testing.T) {
 	version, err := pinnedIntegrationBeadsModuleVersion()
@@ -3302,6 +3298,23 @@ func (mainTB) Logf(format string, args ...any) {}
 func statOK(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+// bazelIntegrationBDBinary resolves the declared owner-module CLI. A missing
+// data dependency is a tooling failure, never an ambient/archive/build fallback.
+func bazelIntegrationBDBinary() string {
+	for _, rf := range []string{os.Getenv("RUNFILES_DIR"), os.Getenv("TEST_SRCDIR")} {
+		if rf == "" {
+			continue
+		}
+		for _, repo := range []string{"gazelle++go_deps+com_github_rhar1511_beads", "com_github_rhar1511_beads"} {
+			bin := filepath.Join(rf, repo, "cmd", "bd", "bd_", "bd")
+			if info, err := os.Stat(bin); err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0 {
+				return bin
+			}
+		}
+	}
+	panic("integration: Bazel owner-module bd runfile is missing; expected @com_github_rhar1511_beads//cmd/bd:bd (cmd/bd/bd_/bd) under RUNFILES_DIR or TEST_SRCDIR; rebuild the declared integration data dependency")
 }
 
 // runfilesBinaryAt resolves a file inside an external repository (e.g. a

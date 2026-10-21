@@ -26,29 +26,55 @@ import (
 
 const defaultManagedDoltHost = "127.0.0.1"
 
+// beginBDExecutableAttempt invalidates prior proof before environment or
+// executable selection can fail. Validate the whole record first, so a partial
+// observer cannot panic or start a partial attempt.
+func beginBDExecutableAttempt(observe ...*beads.ExecutableObserver) error {
+	if len(observe) > 1 {
+		return errors.New("at most one executable observer is supported")
+	}
+	if len(observe) == 0 || observe[0] == nil {
+		return nil
+	}
+	o := observe[0]
+	if o.BeginAttempt == nil || o.Observe == nil {
+		return errors.New("executable observer requires both callbacks")
+	}
+	o.BeginAttempt()
+	return nil
+}
+
 // bdCommandRunnerForCity centralizes bd subprocess env construction so all
 // GC-managed bd calls resolve Dolt against the same city-scoped runtime.
 // Env is rebuilt on each call so GC_DOLT_PORT reflects the current managed
 // dolt port (which can change across city restarts).
-func bdCommandRunnerForCity(cityPath string) beads.CommandRunner {
+func bdCommandRunnerForCity(cityPath string, observe ...*beads.ExecutableObserver) beads.CommandRunner {
 	completeBinding, err := scopeHasCompleteStorageBinding(scopeMetadataJSONPath(cityPath))
 	if err != nil {
-		return func(_, _ string, _ ...string) ([]byte, error) { return nil, err }
+		return func(_, _ string, _ ...string) ([]byte, error) {
+			if observerErr := beginBDExecutableAttempt(observe...); observerErr != nil {
+				return nil, observerErr
+			}
+			return nil, err
+		}
 	}
 	if completeBinding {
-		return bdContextCommandRunnerForCity(cityPath)
+		return bdContextCommandRunnerForCity(cityPath, observe...)
 	}
 	return bdCommandRunnerWithManagedRetryErr(cityPath, func(dir string) (map[string]string, error) {
 		env, err := bdRuntimeEnvWithError(cityPath)
 		env["BEADS_DIR"] = filepath.Join(dir, ".beads")
 		return env, err
-	})
+	}, observe...)
 }
 
 // bdContextCommandRunnerForCity delegates complete external bindings to the
 // workspace-pinned bd without projecting or recovering a managed backend.
-func bdContextCommandRunnerForCity(cityPath string) beads.CommandRunner {
+func bdContextCommandRunnerForCity(cityPath string, observe ...*beads.ExecutableObserver) beads.CommandRunner {
 	return func(dir, name string, args ...string) ([]byte, error) {
+		if err := beginBDExecutableAttempt(observe...); err != nil {
+			return nil, err
+		}
 		env := cityRuntimeEnvMapForCity(cityPath)
 		if err := pinBdGCEnvironment(env); err != nil {
 			return nil, err
@@ -80,7 +106,7 @@ func bdContextCommandRunnerForCity(cityPath string) beads.CommandRunner {
 		if err := applyHostedBeadsCredentialEnv(env, cityPath); err != nil {
 			return nil, err
 		}
-		runner, err := beadsCommandRunnerForHostedCity(cityPath, env)
+		runner, err := beadsCommandRunnerForHostedCity(cityPath, env, observe...)
 		if err != nil {
 			return nil, err
 		}
@@ -715,10 +741,16 @@ func applyHostedBeadsCredentialEnv(env map[string]string, cityPath string) error
 // beadsCommandRunnerForHostedCity chooses the hermetic runner only for the
 // exact hosted Beads workspace binding. Explicit values in env remain valid
 // overrides; only the inherited BEADS_* namespace is withheld by the variant.
-func beadsCommandRunnerForHostedCity(cityPath string, env map[string]string) (beads.CommandRunner, error) {
+func beadsCommandRunnerForHostedCity(cityPath string, env map[string]string, observe ...*beads.ExecutableObserver) (beads.CommandRunner, error) {
 	selected, err := citySelectsHostedBeadsCredentialProvider(cityPath)
 	if err != nil {
 		return nil, err
+	}
+	if len(observe) > 1 {
+		return nil, fmt.Errorf("at most one executable observer is supported")
+	}
+	if len(observe) == 1 && observe[0] != nil {
+		return beads.ExecCommandRunnerWithExecutableObserver(env, selected, observe[0]), nil
 	}
 	if selected {
 		return beadsExecCommandRunnerWithEnvWithoutAmbientBeads(env), nil
@@ -1652,8 +1684,11 @@ func bdCommandRunnerWithManagedRetry(cityPath string, envFn func(dir string) map
 	})
 }
 
-func bdCommandRunnerWithManagedRetryErr(cityPath string, envFn func(dir string) (map[string]string, error)) beads.CommandRunner {
+func bdCommandRunnerWithManagedRetryErr(cityPath string, envFn func(dir string) (map[string]string, error), observe ...*beads.ExecutableObserver) beads.CommandRunner {
 	return func(dir, name string, args ...string) ([]byte, error) {
+		if err := beginBDExecutableAttempt(observe...); err != nil {
+			return nil, err
+		}
 		env, envErr := envFn(dir)
 		if envErr != nil {
 			return nil, envErr
@@ -1664,7 +1699,7 @@ func bdCommandRunnerWithManagedRetryErr(cityPath string, envFn func(dir string) 
 		// Legacy managed path: best effort. See pinBdGCEnvironmentBestEffort.
 		pinBdGCEnvironmentBestEffort(env)
 		ensureProjectedDoltEnvExplicit(env)
-		runner, runnerErr := beadsCommandRunnerForHostedCity(cityPath, env)
+		runner, runnerErr := beadsCommandRunnerForHostedCity(cityPath, env, observe...)
 		if runnerErr != nil {
 			return nil, runnerErr
 		}
@@ -1681,6 +1716,9 @@ func bdCommandRunnerWithManagedRetryErr(cityPath string, envFn func(dir string) 
 			}
 		}
 		bdCommandRetrySleep(bdCommandRetryBaseDelay)
+		if err := beginBDExecutableAttempt(observe...); err != nil {
+			return nil, err
+		}
 		retryEnv, retryEnvErr := envFn(dir)
 		if retryEnvErr != nil {
 			return nil, retryEnvErr
@@ -1690,7 +1728,7 @@ func bdCommandRunnerWithManagedRetryErr(cityPath string, envFn func(dir string) 
 		}
 		pinBdGCEnvironmentBestEffort(retryEnv)
 		ensureProjectedDoltEnvExplicit(retryEnv)
-		retryRunner, runnerErr := beadsCommandRunnerForHostedCity(cityPath, retryEnv)
+		retryRunner, runnerErr := beadsCommandRunnerForHostedCity(cityPath, retryEnv, observe...)
 		if runnerErr != nil {
 			return nil, runnerErr
 		}

@@ -52,17 +52,22 @@ counts="$(printf '%s\n' "$modules" | awk '
 	/^github.com\/aws\/aws-sdk-go-v2( |\/)/ {aws++}
 	/^github.com\/Azure\/azure-sdk-for-go( |\/)/ {azure++}
 	/^github.com\/dolthub\// {dolthub++}
-	/^github.com\/steveyegge\/beads / {beads++}
+	/^github.com\/rhar1511\/beads / {beads++}
+	/^github.com\/steveyegge\/beads / {upstreambeads++}
 	/^google\.golang\.org\/api / {googleapi++}
 	END {
-		printf "aws=%d azure=%d dolthub=%d beads=%d googleapi=%d\n",
-			aws, azure, dolthub, beads, googleapi
+		printf "aws=%d azure=%d dolthub=%d beads=%d upstreambeads=%d googleapi=%d\n",
+			aws, azure, dolthub, beads, upstreambeads, googleapi
 	}
 ')"
 eval "$counts"
 
 if [ "${beads:-0}" -ne 1 ]; then
-	echo "native dependency guard: expected exactly one github.com/steveyegge/beads module, got ${beads:-0}" >&2
+	echo "native dependency guard: expected exactly one github.com/rhar1511/beads module, got ${beads:-0}" >&2
+	exit 1
+fi
+if [ "${upstreambeads:-0}" -ne 0 ]; then
+	echo "native dependency guard: stale upstream github.com/steveyegge/beads module remains alongside the owner library" >&2
 	exit 1
 fi
 if [ "${aws:-0}" -gt "$max_aws_modules" ]; then

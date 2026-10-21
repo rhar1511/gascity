@@ -7,7 +7,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	beadslib "github.com/steveyegge/beads"
+	beadslib "github.com/rhar1511/beads"
 )
 
 // The pinned native backend stores labels in a separate table without touching

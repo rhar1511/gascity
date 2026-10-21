@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	beadslib "github.com/steveyegge/beads"
+	beadslib "github.com/rhar1511/beads"
 )
 
 // metadataPreserveGetter is a nativeIssueGetter returning a fixed issue.

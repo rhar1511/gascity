@@ -311,6 +311,52 @@ func TestLocalParallelPreservesQualifiedBeadsExecutables(t *testing.T) {
 	}
 }
 
+// TestUnitCoreDiscoveryInGitWorktree uses the real Go tool independently of
+// the recording-tool fixture used by runner environment-contract tests.
+func TestUnitCoreDiscoveryInGitWorktree(t *testing.T) {
+	repo := repoRoot(t)
+	cmd := shardTestCommand("bash", "-c", `
+set -uo pipefail
+LOCAL_PARALLEL="$1"
+unit_core_worktree_discovery() (
+    export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_OPTIONAL_LOCKS=0
+    unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
+    fixture_root="$(mktemp -d "${TMPDIR:-/var/tmp}/gc-worktree-discovery.XXXXXX")" || exit 1
+    fixture_repo="$fixture_root/repo"
+    fixture_tree="$fixture_root/parent/work"
+    trap 'git -C "$fixture_repo" worktree remove --force "$fixture_tree" >/dev/null 2>&1 || true; rm -rf "$fixture_root"' EXIT
+    mkdir -p "$fixture_repo/cmd/gc" "$fixture_repo/internal/discoveryfixture" "$fixture_root/parent/.git" || exit 1
+    printf 'module github.com/gastownhall/gascity\n\ngo 1.26.10\n' > "$fixture_repo/go.mod" || exit 1
+    printf 'package main\nfunc main() {}\n' > "$fixture_repo/cmd/gc/main.go" || exit 1
+    printf 'package main\nimport "testing"\nfunc TestMustRemainInCmdGCShard(t *testing.T) { t.Fatal("cmd/gc must not run in unit-core") }\n' > "$fixture_repo/cmd/gc/main_test.go" || exit 1
+    printf 'package discoveryfixture\nfunc Value() int { return 1 }\n' > "$fixture_repo/internal/discoveryfixture/probe.go" || exit 1
+    printf 'package discoveryfixture\nimport "testing"\nfunc TestDiscoveredPackageRuns(t *testing.T) { if Value() != 1 { t.Fatal("wrong fixture value") } }\n' > "$fixture_repo/internal/discoveryfixture/probe_test.go" || exit 1
+    git -C "$fixture_repo" -c init.defaultBranch=main init -q || exit 1
+    git -C "$fixture_repo" add -- go.mod cmd internal || exit 1
+    git -C "$fixture_repo" -c user.name=gc-test -c user.email=gc-test@test.local commit -qm fixture || exit 1
+    git -C "$fixture_repo" worktree add --detach --quiet "$fixture_tree" HEAD || exit 1
+    [[ -f "$fixture_tree/.git" ]] || exit 1
+    jobspecs=()
+    go_test_timeout=20m
+    eval "$(sed -n '/^add_job() {$/,/^}/p' "$LOCAL_PARALLEL")" || exit 1
+    eval "$(sed -n '/^add_unit_core_job() {$/,/^}/p' "$LOCAL_PARALLEL")" || exit 1
+    add_unit_core_job || exit 1
+    [[ ${#jobspecs[@]} -eq 1 && "${jobspecs[0]%%::*}" == unit-core ]] || exit 1
+    cd "$fixture_tree" || exit 1
+    output="$(bash -c "${jobspecs[0]#*::}" 2>&1)"
+    result=$?
+    printf '%s\n' "$output"
+    [[ "$result" -eq 0 ]] || exit "$result"
+    printf '%s\n' "$output" | grep -Eq '^ok[[:space:]]+github.com/gastownhall/gascity/internal/discoveryfixture([[:space:]]|$)' || exit 1
+)
+unit_core_worktree_discovery
+`, "gc-unit-core-worktree-discovery", filepath.Join(repo, "scripts", "test-local-parallel"))
+	cmd.Dir = repo
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("unit-core discovery in real Git worktree failed: %v\n%s", err, out)
+	}
+}
+
 func TestRuntimeTmuxIntegrationShardUsesCheckedManifestOnLinux(t *testing.T) {
 	repo := repoRoot(t)
 	manifest := parseRuntimeTmuxManifest(t, filepath.Join(repo, runtimeTmuxManifestRelativePath))
