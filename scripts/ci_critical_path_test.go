@@ -386,8 +386,22 @@ func TestMacProductMetricsTesthookHasIndependentRequiredBudget(t *testing.T) {
 	}
 	for i := 0; i < 2; i++ {
 		got, want := job.Steps[i], process.Steps[i]
-		if got.Uses != want.Uses || !maps.Equal(got.With, want.With) || got.If != "" || got.ContinueOnError {
-			t.Errorf("tagged profile checkout/setup step %d differs from exact-head process setup", i)
+		wantWith := want.With
+		if i == 1 {
+			// The ordinary shards exercise native Beads fixtures; the tagged
+			// metrics profile re-execs gc against private files and loopback TLS.
+			// Keep its default upstream setup and every other input identical.
+			if want.With["qualified-integration-bd"] != "true" {
+				t.Error("ordinary Mac process shards must select the qualified native CLI")
+			}
+			if _, present := got.With["qualified-integration-bd"]; present {
+				t.Error("tagged metrics profile must retain the default upstream CLI setup")
+			}
+			wantWith = maps.Clone(want.With)
+			delete(wantWith, "qualified-integration-bd")
+		}
+		if got.Uses != want.Uses || !maps.Equal(got.With, wantWith) || got.If != "" || got.ContinueOnError {
+			t.Errorf("tagged profile checkout/setup step %d differs beyond the required native CLI opt-in", i)
 		}
 	}
 	command := job.Steps[2]
@@ -805,7 +819,10 @@ func TestMacRegressionGateCentralizesTierRouting(t *testing.T) {
 	if !strings.Contains(filterStep.Uses, "dorny/paths-filter") {
 		t.Errorf("gate filter step uses = %q, want dorny/paths-filter (same tool review-formulas.yml uses)", filterStep.Uses)
 	}
-	wantFilterEntries := []string{"cmd/gc/**", "internal/pathutil/**", "internal/fsys/**", ".github/actions/setup-gascity-macos/**"}
+	wantFilterEntries := []string{
+		"go.mod", "go.sum", "deps.env", ".github/scripts/install-qualified-integration-bd.sh",
+		"cmd/gc/**", "internal/pathutil/**", "internal/fsys/**", ".github/actions/setup-gascity-macos/**",
+	}
 	filterValue := filterStep.With["filters"]
 	for _, entry := range wantFilterEntries {
 		if !strings.Contains(filterValue, "'"+entry+"'") {
@@ -813,7 +830,7 @@ func TestMacRegressionGateCentralizesTierRouting(t *testing.T) {
 		}
 	}
 	if gotEntries := regexp.MustCompile(`(?m)^\s*-\s*'[^']*'\s*$`).FindAllString(filterValue, -1); len(gotEntries) != len(wantFilterEntries) {
-		t.Errorf("gate filter mac_sensitive has %d path entries, want exactly %d (%v) — no broader glob than the paths that actually touch gc/cmd or fsys/pathutil behavior, or the macOS setup action every mac job runs", len(gotEntries), len(wantFilterEntries), wantFilterEntries)
+		t.Errorf("gate filter mac_sensitive has %d path entries, want exactly %d (%v) — no broader coverage than the native CLI module/pin/installer inputs and the original Mac code/setup paths", len(gotEntries), len(wantFilterEntries), wantFilterEntries)
 	}
 	if !hasDecide {
 		t.Fatal("gate job has no routing-decision step (id: gate)")
