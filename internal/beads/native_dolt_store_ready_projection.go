@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	beadslib "github.com/steveyegge/beads"
+	beadslib "github.com/rhar1511/beads"
 )
 
 // NativeDoltStore hands readiness to the cache — listIncludesCompleteDependencies

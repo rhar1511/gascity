@@ -24,7 +24,7 @@ func countingBDContext(calls map[string]int) func(string) (PreflightBDContext, e
 }
 
 func skipTestChecker(fs *fsys.Fake, provider string, bdContext func(string) (PreflightBDContext, error)) PreflightChecker {
-	return PreflightChecker{
+	checker := PreflightChecker{
 		FS:                  fs,
 		Provider:            provider,
 		BeadsLibraryVersion: "1.0.4",
@@ -33,6 +33,8 @@ func skipTestChecker(fs *fsys.Fake, provider string, bdContext func(string) (Pre
 			return "gc-rig", true, nil
 		},
 	}
+	bindSyntheticPreflightSource(&checker)
+	return checker
 }
 
 func writeSkipTestMetadata(fs *fsys.Fake, scope, metadata string) {

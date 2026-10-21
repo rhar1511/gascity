@@ -1,6 +1,7 @@
 package scripts_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -8,11 +9,13 @@ import (
 	"strings"
 	"testing"
 
+	"golang.org/x/mod/modfile"
+
 	"github.com/gastownhall/gascity/internal/deps"
 )
 
-// TestBDVersionPins keeps every independently-edited bd version anchor in
-// lockstep, the same way TestDoltVersionPins does for Dolt. Before this test the
+// TestBDVersionPins keeps upstream installation/matrix floors in sync and
+// validates the separate direct native-library anchors. Before this test the
 // bd floors drifted apart: deps.env BD_VERSION, the init hard-dependency floor
 // bdMinVersion, the ready-projection feature floor bdReadyProjectionMinVersion,
 // the bd_compatibility config enum, and the install-bd-archive.sh SHA table were
@@ -48,29 +51,13 @@ func TestBDVersionPins(t *testing.T) {
 	if !regexp.MustCompile(`^v?\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$`).MatchString(bdCurrent) {
 		t.Fatalf("deps.env BD_CURRENT_VERSION = %q, want a semver token", bdCurrent)
 	}
-	// The native Go store, the bleeding-edge contract-matrix cell, and the
-	// source-built agent image must all use the same upstream beads. A drift here
-	// can pair one schema catalog with another version's write behavior.
-	//
-	// The pin takes one of two shapes and both are checked, because upstream
-	// alternates between them: a pseudo-version, whose embedded 12-char commit
-	// must be BD_CURRENT_REF; or an exact release/prerelease tag, which must be
-	// BD_CURRENT_VERSION verbatim (BD_CURRENT_REF is then that tag's commit, which
-	// only the network could confirm -- the same trust boundary the pseudo-version
-	// form already had for its timestamp).
+	// The source-built upstream CLI matrix and image stay coupled below. The
+	// linked owner library has its own module/version/source anchors; a CLI
+	// distribution's version string is not its source provenance.
 	goMod := readFile(t, root, "go.mod")
-	goModMatch := regexp.MustCompile(`(?m)^\s*github\.com/steveyegge/beads\s+(v\S+)\s*$`).FindStringSubmatch(goMod)
-	if goModMatch == nil {
-		t.Fatal("go.mod missing a version pin for github.com/steveyegge/beads")
-	}
-	goModPin := goModMatch[1]
-	if pseudo := regexp.MustCompile(`-([0-9a-f]{12})$`).FindStringSubmatch(goModPin); pseudo != nil {
-		if got, want := pseudo[1], bdCurrentRef[:12]; got != want {
-			t.Fatalf("go.mod beads pseudo-version commit = %q, want BD_CURRENT_REF prefix %q", got, want)
-		}
-	} else if goModPin != bdCurrent {
-		t.Fatalf("go.mod pins github.com/steveyegge/beads to the tag %q but deps.env BD_CURRENT_VERSION = %q; a tag pin must name the same release the current matrix cell builds",
-			goModPin, bdCurrent)
+	goModPin, err := validateBeadsLibraryPins(env, goMod)
+	if err != nil {
+		t.Fatal(err)
 	}
 	// The integration suite installs bd from whatever go.mod names and pins the
 	// expected version in its own literal, so a bump that misses that literal
@@ -89,7 +76,7 @@ func TestBDVersionPins(t *testing.T) {
 		t.Fatalf("%s missing the wantPinnedBeadsModuleVersion const; it is the integration suite's beads pin anchor", integrationPinFile)
 	}
 	if integrationPin != goModPin {
-		t.Fatalf("%s pins wantPinnedBeadsModuleVersion = %q but go.mod pins github.com/steveyegge/beads to %q; the integration suite installs bd from go.mod, so the two must name the same version",
+		t.Fatalf("%s pins wantPinnedBeadsModuleVersion = %q but go.mod pins the owner Beads library to %q; the integration suite installs bd from go.mod, so the two must name the same version",
 			integrationPinFile, integrationPin, goModPin)
 	}
 
@@ -202,6 +189,86 @@ func TestBDVersionPins(t *testing.T) {
 	// 1.3.0" while the code refused outright below it.
 	assertDocStatesVersion(t, root, "engdocs/design/beads-proxied-local-default.md",
 		"bd ≥ "+freshProviderFloor, "the fresh provider-owned init floor")
+}
+
+// validateBeadsLibraryPins checks the direct stable library separately from
+// external CLI distributions. Public tag-to-source provenance is verified by
+// release qualification; this offline check rejects missing or divergent pins.
+func validateBeadsLibraryPins(env map[string]string, goMod string) (string, error) {
+	const modulePath = "github.com/rhar1511/beads"
+	if env["BEADS_LIBRARY_MODULE"] != modulePath {
+		return "", fmt.Errorf("BEADS_LIBRARY_MODULE must be %s", modulePath)
+	}
+	version := env["BEADS_LIBRARY_VERSION"]
+	if !regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+$`).MatchString(version) {
+		return "", fmt.Errorf("BEADS_LIBRARY_VERSION must name a stable release, got %q", version)
+	}
+	if !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(env["BEADS_LIBRARY_REF"]) {
+		return "", fmt.Errorf("BEADS_LIBRARY_REF must be the full immutable release-source commit")
+	}
+	file, err := modfile.Parse("go.mod", []byte(goMod), nil)
+	if err != nil {
+		return "", fmt.Errorf("parse direct library pin: %w", err)
+	}
+	found := 0
+	for _, required := range file.Require {
+		if required.Mod.Path == "github.com/steveyegge/beads" {
+			return "", fmt.Errorf("stale upstream Beads requirement remains")
+		}
+		if required.Mod.Path == modulePath {
+			found++
+			if required.Mod.Version != version || required.Indirect {
+				return "", fmt.Errorf("direct owner library pin %q must equal BEADS_LIBRARY_VERSION %q", required.Mod.Version, version)
+			}
+		}
+	}
+	if found != 1 {
+		return "", fmt.Errorf("expected exactly one direct %s requirement, got %d", modulePath, found)
+	}
+	for _, replacement := range file.Replace {
+		if replacement.Old.Path == modulePath || replacement.New.Path == modulePath {
+			return "", fmt.Errorf("owner library pin must not use a replacement")
+		}
+	}
+	return version, nil
+}
+
+func TestBeadsLibraryPinsRejectDrift(t *testing.T) {
+	const validMod = "module example.com/test\n\ngo 1.26.0\n\nrequire github.com/rhar1511/beads v1.3.2\n"
+	cases := []struct {
+		name, key, value, mod string
+		wantErr               bool
+	}{
+		{name: "direct stable library", mod: validMod},
+		{name: "wrong distribution", key: "BEADS_LIBRARY_MODULE", value: "github.com/steveyegge/beads", mod: validMod, wantErr: true},
+		{name: "missing release", key: "BEADS_LIBRARY_VERSION", mod: validMod, wantErr: true},
+		{name: "unreleased pseudo-version", key: "BEADS_LIBRARY_VERSION", value: "v1.3.2-0.20261013010644-3c3423cf09a9", mod: validMod, wantErr: true},
+		{name: "prerelease", key: "BEADS_LIBRARY_VERSION", value: "v1.3.2-rc.1", mod: validMod, wantErr: true},
+		{name: "unpinned source", key: "BEADS_LIBRARY_REF", value: "main", mod: validMod, wantErr: true},
+		{name: "missing source", key: "BEADS_LIBRARY_REF", mod: validMod, wantErr: true},
+		{name: "version drift", key: "BEADS_LIBRARY_VERSION", value: "v1.3.3", mod: validMod, wantErr: true},
+		{name: "missing module", mod: "module example.com/test\n", wantErr: true},
+		{name: "stale upstream also present", mod: validMod + "require github.com/steveyegge/beads v1.3.1\n", wantErr: true},
+		{name: "indirect library", mod: strings.Replace(validMod, "v1.3.2\n", "v1.3.2 // indirect\n", 1), wantErr: true},
+		{name: "replacement", mod: validMod + "replace github.com/rhar1511/beads => example.com/other v1.3.2\n", wantErr: true},
+		{name: "replacement target", mod: validMod + "replace example.com/other => github.com/rhar1511/beads v1.3.2\n", wantErr: true},
+		{name: "malformed go.mod", mod: "invalid module content", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := map[string]string{"BEADS_LIBRARY_MODULE": "github.com/rhar1511/beads", "BEADS_LIBRARY_VERSION": "v1.3.2", "BEADS_LIBRARY_REF": "11863eb43b8807adaa4aa0f2e9b8fd4aeb83f624"}
+			if tc.key != "" {
+				env[tc.key] = tc.value
+			}
+			version, err := validateBeadsLibraryPins(env, tc.mod)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("version=%q error=%v, want error=%v", version, err, tc.wantErr)
+			}
+			if err == nil && version != "v1.3.2" {
+				t.Fatalf("version=%q, want v1.3.2", version)
+			}
+		})
+	}
 }
 
 // assertDocStatesVersion fails when a doc no longer restates a version floor in

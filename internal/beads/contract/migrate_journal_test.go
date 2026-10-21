@@ -30,11 +30,14 @@ import (
 // resource census (verified — the untagged subprocess baseline rejects it) and
 // that ratchet is shrink-only, so the resolution is inlined instead.
 func TestMigrateJournalFileMatchesPinnedBeads(t *testing.T) {
-	modCache := goModuleCache(t)
 	version := pinnedBeadsVersion(t)
-	source, err := os.ReadFile(filepath.Join(modCache, "github.com/steveyegge/beads@"+version, "cmd", "bd", "migrate_dolt_mode.go"))
+	sourcePath := bazelJournalSource([]string{os.Getenv("RUNFILES_DIR"), os.Getenv("TEST_SRCDIR")})
+	if sourcePath == "" {
+		sourcePath = filepath.Join(goModuleCache(t), "github.com/rhar1511/beads@"+version, "cmd", "bd", "migrate_dolt_mode.go")
+	}
+	source, err := os.ReadFile(sourcePath)
 	if err != nil {
-		t.Skipf("pinned beads %s is not unpacked in the local module cache: %v", version, err)
+		t.Fatalf("read pinned beads %s journal source (comparison must not be skipped): %v", version, err)
 	}
 
 	const decl = `migrateJournalFileName = "`
@@ -49,6 +52,53 @@ func TestMigrateJournalFileMatchesPinnedBeads(t *testing.T) {
 	}
 	if got := rest[:end]; got != MigrateDoltModeJournalFile {
 		t.Fatalf("MigrateDoltModeJournalFile = %q, pinned bd writes %q", MigrateDoltModeJournalFile, got)
+	}
+}
+
+// bazelJournalSource finds the explicitly declared source file in the pinned
+// owner-module repository. Hermetic Bazel tests have no Go module cache.
+func bazelJournalSource(roots []string) string {
+	for _, root := range roots {
+		if root == "" {
+			continue
+		}
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if !strings.HasSuffix(entry.Name(), "go_deps+com_github_rhar1511_beads") {
+				continue
+			}
+			path := filepath.Join(root, entry.Name(), "cmd", "bd", "migrate_dolt_mode.go")
+			if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() {
+				return path
+			}
+		}
+	}
+	return ""
+}
+
+func TestBazelJournalSourceUsesDeclaredOwnerModule(t *testing.T) {
+	root := t.TempDir()
+	for _, repo := range []string{"gazelle++go_deps+com_github_steveyegge_beads", "gazelle++go_deps+com_github_rhar1511_beads_unrelated", "gazelle++go_deps+com_github_rhar1511_beads"} {
+		dir := filepath.Join(root, repo, "cmd", "bd")
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "migrate_dolt_mode.go"), []byte("fixture"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := filepath.Join(root, "gazelle++go_deps+com_github_rhar1511_beads", "cmd", "bd", "migrate_dolt_mode.go")
+	if got := bazelJournalSource([]string{"", filepath.Join(root, "missing"), root}); got != want {
+		t.Fatalf("bazelJournalSource() = %q, want %q", got, want)
+	}
+	if err := os.Remove(want); err != nil {
+		t.Fatal(err)
+	}
+	if got := bazelJournalSource([]string{root}); got != "" {
+		t.Fatalf("missing owner source resolved to %q", got)
 	}
 }
 
@@ -124,14 +174,14 @@ func pinnedBeadsVersion(t *testing.T) string {
 	}
 	for _, line := range strings.Split(string(data), "\n") {
 		fields := strings.Fields(strings.TrimSpace(line))
-		if len(fields) >= 2 && fields[0] == "github.com/steveyegge/beads" {
+		if len(fields) >= 2 && fields[0] == "github.com/rhar1511/beads" {
 			return fields[1]
 		}
-		if len(fields) >= 3 && fields[0] == "require" && fields[1] == "github.com/steveyegge/beads" {
+		if len(fields) >= 3 && fields[0] == "require" && fields[1] == "github.com/rhar1511/beads" {
 			return fields[2]
 		}
 	}
-	t.Fatal("go.mod does not require github.com/steveyegge/beads")
+	t.Fatal("go.mod does not require github.com/rhar1511/beads")
 	return ""
 }
 

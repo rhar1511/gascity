@@ -17,8 +17,8 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
-	beadslib "github.com/steveyegge/beads"
-	beadops "github.com/steveyegge/beads/issueops"
+	beadslib "github.com/rhar1511/beads"
+	beadops "github.com/rhar1511/beads/issueops"
 )
 
 func TestNativeDoltStoreCreateDelegatesToUpstreamStorage(t *testing.T) {

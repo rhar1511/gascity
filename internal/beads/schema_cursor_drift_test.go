@@ -150,7 +150,7 @@ func TestIgnoredSentinelsMatchPinnedBeads(t *testing.T) {
 }
 
 // pinnedCursorRealityFloorDigest is cursorRealityFloorDigest at the pinned
-// beads replacement (v1.3.2-0.20261013010644-3c3423cf09a9,
+// github.com/rhar1511/beads v1.3.2 release,
 // internal/storage/schema/schema.go: sentinel tables floor at 0
 // and short-circuit, then floored tables and columns clamp to the lowest
 // replayFloor of anything absent).

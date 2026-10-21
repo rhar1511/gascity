@@ -830,10 +830,10 @@ func buildPinnedIntegrationBDBinary(tmpDir string) (string, error) {
 	// CGO_ENABLED=1 + gms_pure_go is the embedded-capable bd build (per beads
 	// INSTALLING.md): the pinned bd's `bd init` defaults to embedded Dolt,
 	// which a CGO_ENABLED=0 binary refuses at runtime.
-	cmd := exec.Command("go", "install", "-tags", "gms_pure_go", "github.com/steveyegge/beads/cmd/bd@"+version)
+	cmd := exec.Command("go", "install", "-tags", "gms_pure_go", "github.com/rhar1511/beads/cmd/bd@"+version)
 	cmd.Env = append(integrationPinnedBdBuildEnv(os.Environ()), "CGO_ENABLED=1", "GOBIN="+binDir)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return "", fmt.Errorf("go install github.com/steveyegge/beads/cmd/bd@%s: %w\n%s", version, err, out)
+		return "", fmt.Errorf("go install github.com/rhar1511/beads/cmd/bd@%s: %w\n%s", version, err, out)
 	}
 	return filepath.Join(binDir, "bd"), nil
 }
@@ -854,16 +854,16 @@ func pinnedBdStoreCommandRunner() beads.CommandRunner {
 }
 
 func pinnedIntegrationBeadsModuleVersion() (string, error) {
-	cmd := exec.Command("go", "list", "-m", "-f", "{{.Version}}", "github.com/steveyegge/beads")
+	cmd := exec.Command("go", "list", "-m", "-f", "{{.Version}}", "github.com/rhar1511/beads")
 	cmd.Dir = findModuleRoot()
 	cmd.Env = integrationPinnedBdBuildEnv(os.Environ())
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("resolve github.com/steveyegge/beads module version: %w\n%s", err, out)
+		return "", fmt.Errorf("resolve github.com/rhar1511/beads module version: %w\n%s", err, out)
 	}
 	version := strings.TrimSpace(string(out))
 	if version == "" {
-		return "", errors.New("github.com/steveyegge/beads module version is empty")
+		return "", errors.New("github.com/rhar1511/beads module version is empty")
 	}
 	return version, nil
 }
@@ -915,7 +915,7 @@ func integrationPinnedBdBuildEnv(base []string) []string {
 // go.mod to pin. TestBDVersionPins in scripts/bd_version_pin_test.go reads it
 // by name out of this file and asserts it matches go.mod — see
 // TestPinnedIntegrationBeadsModuleVersion for why it is a literal.
-const wantPinnedBeadsModuleVersion = "v1.3.1"
+const wantPinnedBeadsModuleVersion = "v1.3.2"
 
 func TestPinnedIntegrationBeadsModuleVersion(t *testing.T) {
 	version, err := pinnedIntegrationBeadsModuleVersion()

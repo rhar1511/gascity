@@ -25,7 +25,7 @@ go_library(
         "//internal/bazeltest",
         "//internal/fsys",
         "//test/toolhome",
-        "@com_github_steveyegge_beads//schema",
+        "@com_github_rhar1511_beads//schema",
         "@org_golang_x_mod//semver",
     ],
 )
@@ -51,7 +51,7 @@ go_test(
     embed = [":helpers"],
     deps = [
         "//internal/testenv",
-        "@com_github_steveyegge_beads//schema",
+        "@com_github_rhar1511_beads//schema",
     ],
 )
 

@@ -7,7 +7,7 @@ import (
 	"sync"
 	"testing"
 
-	beadslib "github.com/steveyegge/beads"
+	beadslib "github.com/rhar1511/beads"
 )
 
 // nativeBlockedColumnStorage is a native beadslib backing that carries the one

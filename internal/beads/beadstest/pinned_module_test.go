@@ -16,7 +16,7 @@ func TestPinnedBeadsModuleDirResolvesEffectiveReplacement(t *testing.T) {
 	const (
 		upstreamVersion = "v1.3.1"
 		forkVersion     = "v1.3.2-0.20261013010644-3c3423cf09a9"
-		forkPath        = "github.com/rhar1511/beads"
+		forkPath        = "example.com/fixture-beads-fork"
 	)
 	cases := []struct {
 		name         string
@@ -31,54 +31,54 @@ func TestPinnedBeadsModuleDirResolvesEffectiveReplacement(t *testing.T) {
 		},
 		{
 			name:         "remote version",
-			replacements: "replace github.com/steveyegge/beads => " + forkPath + " " + forkVersion,
+			replacements: "replace github.com/rhar1511/beads => " + forkPath + " " + forkVersion,
 			moduleDir:    "cache/" + forkPath + "@" + forkVersion,
 			version:      forkVersion,
 		},
 		{
 			name: "exact version takes precedence over wildcard",
 			replacements: "replace (\n" +
-				"github.com/steveyegge/beads => example.com/wildcard v1.0.0\n" +
-				"github.com/steveyegge/beads " + upstreamVersion + " => " + forkPath + " " + forkVersion + "\n)",
+				"github.com/rhar1511/beads => example.com/wildcard v1.0.0\n" +
+				"github.com/rhar1511/beads " + upstreamVersion + " => " + forkPath + " " + forkVersion + "\n)",
 			moduleDir: "cache/" + forkPath + "@" + forkVersion,
 			version:   forkVersion,
 		},
 		{
 			name: "wildcard does not override earlier exact version",
 			replacements: "replace (\n" +
-				"github.com/steveyegge/beads " + upstreamVersion + " => " + forkPath + " " + forkVersion + "\n" +
-				"github.com/steveyegge/beads => example.com/wildcard v1.0.0\n)",
+				"github.com/rhar1511/beads " + upstreamVersion + " => " + forkPath + " " + forkVersion + "\n" +
+				"github.com/rhar1511/beads => example.com/wildcard v1.0.0\n)",
 			moduleDir: "cache/" + forkPath + "@" + forkVersion,
 			version:   forkVersion,
 		},
 		{
 			name:         "unmatched exact version leaves required version",
-			replacements: "replace github.com/steveyegge/beads v1.3.0 => " + forkPath + " " + forkVersion,
+			replacements: "replace github.com/rhar1511/beads v1.3.0 => " + forkPath + " " + forkVersion,
 			moduleDir:    "cache/" + PinnedBeadsModulePath + "@" + upstreamVersion,
 			version:      upstreamVersion,
 		},
 		{
 			name: "other version does not replace required version",
 			replacements: "replace (\n" +
-				"github.com/steveyegge/beads v1.3.0 => example.com/other v1.0.0\n" +
-				"github.com/steveyegge/beads => " + forkPath + " " + forkVersion + "\n)",
+				"github.com/rhar1511/beads v1.3.0 => example.com/other v1.0.0\n" +
+				"github.com/rhar1511/beads => " + forkPath + " " + forkVersion + "\n)",
 			moduleDir: "cache/" + forkPath + "@" + forkVersion,
 			version:   forkVersion,
 		},
 		{
 			name:         "escaped remote cache path and version",
-			replacements: "replace github.com/steveyegge/beads => example.com/Team/Beads v1.3.2-RC1",
+			replacements: "replace github.com/rhar1511/beads => example.com/Team/Beads v1.3.2-RC1",
 			moduleDir:    "cache/example.com/!team/!beads@v1.3.2-!r!c1",
 			version:      "v1.3.2-RC1",
 		},
 		{
 			name:         "relative local directory",
-			replacements: "replace github.com/steveyegge/beads => ../local-beads",
+			replacements: "replace github.com/rhar1511/beads => ../local-beads",
 			moduleDir:    "local-beads",
 		},
 		{
 			name:         "absolute local directory",
-			replacements: "replace github.com/steveyegge/beads => LOCAL_BEADS_DIR",
+			replacements: "replace github.com/rhar1511/beads => LOCAL_BEADS_DIR",
 			moduleDir:    "local-beads",
 		},
 	}
@@ -95,7 +95,7 @@ func TestPinnedBeadsModuleDirResolvesEffectiveReplacement(t *testing.T) {
 				}
 			}
 			replacements := strings.ReplaceAll(tc.replacements, "LOCAL_BEADS_DIR", fmt.Sprintf("%q", filepath.ToSlash(want)))
-			mod := "module example.com/fixture\n\ngo 1.26.0\n\nrequire github.com/steveyegge/beads " + upstreamVersion + "\n\n" + replacements + "\n"
+			mod := "module example.com/fixture\n\ngo 1.26.0\n\nrequire github.com/rhar1511/beads " + upstreamVersion + "\n\n" + replacements + "\n"
 			if err := os.WriteFile(filepath.Join(fixture, "go.mod"), []byte(mod), 0o600); err != nil {
 				t.Fatal(err)
 			}

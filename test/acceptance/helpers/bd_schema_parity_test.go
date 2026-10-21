@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/schema"
+	"github.com/rhar1511/beads/schema"
 )
 
 // The version bd reports is the one it ended at. "already at v66" and

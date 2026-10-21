@@ -9,7 +9,7 @@ import (
 	"sort"
 	"testing"
 
-	beadslib "github.com/steveyegge/beads"
+	beadslib "github.com/rhar1511/beads"
 )
 
 // nativeStoreMethodKind classifies one exported method of *NativeDoltStore.

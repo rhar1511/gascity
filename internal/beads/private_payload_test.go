@@ -13,7 +13,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/fsys"
-	beadslib "github.com/steveyegge/beads"
+	beadslib "github.com/rhar1511/beads"
 )
 
 func protectedAttemptEvidenceBead() Bead {

@@ -12,14 +12,14 @@ import (
 )
 
 // PinnedBeadsModulePath is the module gc links its native store against.
-const PinnedBeadsModulePath = "github.com/steveyegge/beads"
+const PinnedBeadsModulePath = "github.com/rhar1511/beads"
 
 // PinnedBeadsModuleDir resolves the unpacked source directory of the beads
 // version this module links, including a go.mod replacement, and FAILS the
 // calling test when it cannot.
 //
 // Failing rather than skipping is the point. The packages that call this import
-// github.com/steveyegge/beads, so if the test binary compiled at all then cmd/go
+// github.com/rhar1511/beads, so if the test binary compiled at all then cmd/go
 // resolved the pinned module — which means an absent directory does not say "the
 // module is not here", it says the resolution below disagreed with cmd/go's. That
 // is exactly the situation the drift check must shout about: a skip would let a
@@ -65,7 +65,7 @@ func bazelRunfilesBeadsModule() string {
 		}
 		for _, e := range entries {
 			name := e.Name()
-			if !strings.Contains(name, "go_deps+com_github_steveyegge_beads") {
+			if !strings.Contains(name, "go_deps+com_github_rhar1511_beads") {
 				continue
 			}
 			dir := filepath.Join(rf, name)

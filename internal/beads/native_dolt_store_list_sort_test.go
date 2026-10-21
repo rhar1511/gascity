@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	beadslib "github.com/steveyegge/beads"
+	beadslib "github.com/rhar1511/beads"
 )
 
 // A created-order ListQuery sort pushes down to the backing search

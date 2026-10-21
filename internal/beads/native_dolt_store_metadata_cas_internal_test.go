@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/rollout/gate"
-	beadslib "github.com/steveyegge/beads"
+	beadslib "github.com/rhar1511/beads"
 )
 
 // TestNativeDoltStoreMetadataCASPreservesMixedJSONSiblingTypes protects the

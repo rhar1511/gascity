@@ -7,7 +7,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	beadslib "github.com/steveyegge/beads"
+	beadslib "github.com/rhar1511/beads"
 )
 
 // serializationConflictErr is the verbatim error Dolt returns when a write
