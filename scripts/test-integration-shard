@@ -136,6 +136,11 @@ cmd_gc_integration_tests=(
   TestPhase2WorkerCoreRealTransportProof
   TestRigAddIncludeResolvesScopedRegistryPackName
   TestStorageGateServesACityFromItsBeadsWorkspace
+  TestBDCommandRunnerClearsObservationBeforeBindingReadError
+  TestBDHostedObserverUsesHermeticEnvironment
+  TestBDManagedRetryClearsObservationBeforeRetryEnvFailure
+  TestBDRunnerRejectsInvalidObservation
+  TestPreflightBDContextObservesSelectedWorkspaceExecutable
 )
 
 join_regex() {
