@@ -76,7 +76,8 @@ func TestRunObservedCommandPolicy(t *testing.T) {
 					t.Fatalf("missing original error %v in %v", wanted, err)
 				}
 			}
-			if tc.name == "command failure identity unchanged" && !errors.Is(err, sentinel) {
+			// This contract preserves the exact error object; errors.Is also accepts wrappers.
+			if tc.name == "command failure identity unchanged" && reflect.ValueOf(err) != reflect.ValueOf(sentinel) {
 				t.Fatal("command error identity changed")
 			}
 			if tc.lookupErr != nil && stale {
