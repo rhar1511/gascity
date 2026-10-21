@@ -1868,6 +1868,7 @@ func TestMacCoverageRequiresBothCompleteSuccessfulProfiles(t *testing.T) {
 }
 
 func TestCmdGCProcessBuildPreparationFailsClosed(t *testing.T) {
+	const canceledOutcome = "cancelled" //nolint:misspell // GitHub Actions uses this exact conclusion token.
 	wf := readCriticalPathWorkflow(t, "ci.yml")
 	build, ok := wf.Jobs["cmd-gc-process-build"]
 	require.True(t, ok, "cold native CLI and process compilation must complete before ten-minute shards start")
@@ -1919,7 +1920,7 @@ func TestCmdGCProcessBuildPreparationFailsClosed(t *testing.T) {
 		{"selected-producer-skipped", "true", "skipped", "skipped", 1},
 		{"selected-producer-failed", "true", "failure", "skipped", 1},
 		{"selected-process-skipped", "true", "success", "skipped", 1},
-		{"selected-process-canceled", "true", "success", "canceled", 1},
+		{"selected-process-canceled", "true", "success", canceledOutcome, 1},
 		{"unselected-failure", "false", "failure", "skipped", 1},
 		{"unknown-filter", "", "skipped", "skipped", 1},
 	} {
