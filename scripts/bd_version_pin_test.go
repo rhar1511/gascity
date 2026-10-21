@@ -662,7 +662,7 @@ func testNativeCIPairWiring(t *testing.T) {
 	root := repoRoot(t)
 	for _, suite := range []string{"acceptance", "integration"} {
 		build := readFile(t, root, "test/"+suite+"/BUILD.bazel")
-		if !strings.Contains(build, "\"@com_github_rhar1511_beads//cmd/bd:bd\"") || strings.Contains(build, "\"@bd_bin_v1_3_1//:bd\"") {
+		if (!strings.Contains(build, "\"@com_github_rhar1511_beads//cmd/bd\"") && !strings.Contains(build, "\"@com_github_rhar1511_beads//cmd/bd:bd\"")) || strings.Contains(build, "\"@bd_bin_v1_3_1//:bd\"") {
 			t.Errorf("Bazel %s must receive the linked owner module CLI, not the independent upstream archive", suite)
 		}
 	}

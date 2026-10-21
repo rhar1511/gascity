@@ -69,7 +69,7 @@ go_test(
         "//:repo_source_tree",
         # Pair bd with the linked Beads library; the upstream archive remains
         # a separate compatibility-matrix input in MODULE.bazel.
-        "@com_github_rhar1511_beads//cmd/bd:bd",
+        "@com_github_rhar1511_beads//cmd/bd",
         "@dolt_bin_v2_1_7//:dolt-linux-amd64/bin/dolt",
     ],
     shard_count = 4,

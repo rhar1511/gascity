@@ -26,6 +26,10 @@ inputs:
     description: Build the authenticated released CLI paired with the native Go library
     required: false
     default: "false"
+  process-build-cache:
+    description: Prepare or require this run's exact-source native process build cache
+    required: false
+    default: ""
   install-claude-cli:
     description: Whether to install the Claude CLI
     required: false
@@ -34,6 +38,17 @@ inputs:
     description: Claude Code version to install with the native binary installer
     required: false
     default: "2.1.123"
+
+outputs:
+  process-cache-key:
+    description: Exact source, run, platform and Go version cache key
+    value: ${{ steps.process-cache.outputs.key }}
+  process-cache-path:
+    description: Selected Go build cache directory
+    value: ${{ steps.process-cache.outputs.path }}
+  process-cache-hit:
+    description: Whether the exact prepared cache was restored
+    value: ${{ steps.restore-process-cache.outputs.cache-hit }}
 
 runs:
   using: composite
@@ -82,6 +97,45 @@ runs:
       if: ${{ inputs.qualified-integration-bd == 'true' }}
       shell: bash
       run: sudo apt-get install -y libicu-dev pkg-config
+
+    - name: Resolve native process build cache
+      id: process-cache
+      if: ${{ inputs.process-build-cache != '' }}
+      shell: bash
+      env:
+        CACHE_MODE: ${{ inputs.process-build-cache }}
+        NATIVE_PAIR: ${{ inputs.qualified-integration-bd }}
+        SOURCE_SHA: ${{ github.sha }}
+        RUN_ID: ${{ github.run_id }}
+        PLATFORM: ${{ runner.os }}-${{ runner.arch }}
+      run: |
+        set -euo pipefail
+        [[ "$CACHE_MODE" == prepare || "$CACHE_MODE" == require ]]
+        [[ "$NATIVE_PAIR" == true && "$PLATFORM" == Linux-X64 ]]
+        [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ && "$RUN_ID" =~ ^[1-9][0-9]*$ ]]
+        cache_path="$(go env GOCACHE)"
+        go_version="$(go env GOVERSION)"
+        [[ "$cache_path" == /* && "$cache_path" != *$'\n'* && "$cache_path" != *$'\r'* ]]
+        [[ "$go_version" =~ ^go[0-9]+\.[0-9]+\.[0-9]+$ ]]
+        printf 'key=gc-process-v1-%s-%s-%s-%s\npath=%s\n' "$PLATFORM" "$go_version" "$SOURCE_SHA" "$RUN_ID" "$cache_path" >> "$GITHUB_OUTPUT"
+
+    - name: Restore prepared native process build cache
+      id: restore-process-cache
+      if: ${{ inputs.process-build-cache != '' }}
+      uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      with:
+        key: ${{ steps.process-cache.outputs.key }}
+        path: ${{ steps.process-cache.outputs.path }}
+        fail-on-cache-miss: ${{ inputs.process-build-cache == 'require' }}
+
+    - name: Require exact prepared process cache before building
+      if: ${{ inputs.process-build-cache == 'require' }}
+      shell: bash
+      env:
+        EXACT_CACHE_HIT: ${{ steps.restore-process-cache.outputs.cache-hit }}
+      run: |
+        set -euo pipefail
+        [[ "$EXACT_CACHE_HIT" == true ]]
 
     - name: Install qualified integration bd
       if: ${{ inputs.qualified-integration-bd == 'true' }}

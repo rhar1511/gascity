@@ -814,11 +814,49 @@ jobs:
           version: "~> v2"
           args: check
 
+  cmd-gc-process-build:
+    name: cmd/gc process / shared cold preparation
+    needs:
+      - runner-policy
+      - changes
+    if: needs.changes.outputs.cmd_gc_process == 'true'
+    runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
+    timeout-minutes: 15
+    env:
+      DOLT_VERSION: "2.1.7"
+      BD_VERSION: "v1.3.1"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: ./.github/actions/setup-gascity-ubuntu
+        id: setup
+        with:
+          dolt-version: ${{ env.DOLT_VERSION }}
+          bd-version: ${{ env.BD_VERSION }}
+          qualified-integration-bd: "true"
+          process-build-cache: prepare
+          install-claude-cli: "false"
+      - name: Compile the ordinary process test binary without running tests
+        run: make build-cmd-gc-tests CMD_GC_TEST_BINARY="$RUNNER_TEMP/cmd-gc-process.test"
+      - name: Save completed native process build cache
+        if: ${{ steps.setup.outputs.process-cache-hit != 'true' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          key: ${{ steps.setup.outputs.process-cache-key }}
+          path: ${{ steps.setup.outputs.process-cache-path }}
+      - name: Verify the prepared cache is available before starting shards
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          key: ${{ steps.setup.outputs.process-cache-key }}
+          path: ${{ steps.setup.outputs.process-cache-path }}
+          lookup-only: "true"
+          fail-on-cache-miss: "true"
+
   cmd-gc-process:
     name: cmd/gc process / shard ${{ matrix.shard }} of 12
     needs:
       - runner-policy
       - changes
+      - cmd-gc-process-build
     if: needs.changes.outputs.cmd_gc_process == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
     timeout-minutes: 10
@@ -836,6 +874,7 @@ jobs:
           dolt-version: ${{ env.DOLT_VERSION }}
           bd-version: ${{ env.BD_VERSION }}
           qualified-integration-bd: "true"
+          process-build-cache: require
           install-claude-cli: "false"
       - name: Run cmd/gc process shard
         env:
@@ -1904,6 +1943,7 @@ jobs:
       - ci-integration
       - beads-topology-acceptance
       - beads-proxied-native-acceptance
+      - cmd-gc-process-build
       - cmd-gc-process
       - cmd-gc-productmetrics-testhook
       - credential-provider-windows
@@ -1919,6 +1959,7 @@ jobs:
     runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
     env:
       NEEDS_JSON: ${{ toJSON(needs) }}
+      CMD_GC_PROCESS_REQUIRED: ${{ needs.changes.outputs.cmd_gc_process }}
     steps:
       - name: Summarize required gates
         run: |
@@ -1934,7 +1975,6 @@ jobs:
               # proxied-native job shares that filter (round3 D-F17).
               "beads-topology-acceptance",
               "beads-proxied-native-acceptance",
-              "cmd-gc-process",
               "cmd-gc-productmetrics-testhook",
               "credential-provider-windows",
               "preflight-unit-cover-noncmdgc",
@@ -1944,6 +1984,8 @@ jobs:
               "k8s-session",
               "openclaw-bridge",
           }
+          if os.environ["CMD_GC_PROCESS_REQUIRED"] == "false":
+              allow_skipped.update({"cmd-gc-process-build", "cmd-gc-process"})
           failed = {}
           for job, meta in sorted(needs.items()):
               result = meta.get("result", "unknown")

@@ -98,7 +98,10 @@ const (
 	// released consumer module. Native topology/perf/Tier A select that pair;
 	// upstream default/minimum/current distributions remain independent.
 	// The native mail process fixture also selects that genuine CGO CLI.
-	expectedCIExecutionHash     = "5deace613b0c3ea3e8bc9a510dd3d4f86c06eada1f9f66b19e0f7d628b9b6cdc"
+	// Reviewed process preparation: one native compile/cache producer; unchanged
+	// twelve test commands and budgets, exact-source/run cache required before
+	// native CLI/test builds; selected producer/process skips fail the aggregate.
+	expectedCIExecutionHash     = "06ec2428db65bc14f1fc5396196ce7522b6e463c4ee72f4dc0aaa381d6cda56b"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,
@@ -118,7 +121,7 @@ const (
 	// Version pins, provider installation, permissions and gates stay pinned.
 	// Human-approved optional fork build installs ICU and verifies the pinned
 	// source archive before compiling; the default released bd is unchanged.
-	expectedSetupActionHash = "7e586bbae5aef0d92a1b005e2b9dbabb60019c5dae73ca32614157ad43c707f0"
+	expectedSetupActionHash = "ad1758d8e1126af1d32a7ebab050a83f21b3e2ca9872485e436dcd411ef3e3c1"
 )
 
 var requiredFilterPaths = map[string][]string{

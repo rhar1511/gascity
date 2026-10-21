@@ -1866,3 +1866,144 @@ func TestMacCoverageRequiresBothCompleteSuccessfulProfiles(t *testing.T) {
 		})
 	}
 }
+
+func TestCmdGCProcessBuildPreparationFailsClosed(t *testing.T) {
+	wf := readCriticalPathWorkflow(t, "ci.yml")
+	build, ok := wf.Jobs["cmd-gc-process-build"]
+	require.True(t, ok, "cold native CLI and process compilation must complete before ten-minute shards start")
+	process := wf.Jobs["cmd-gc-process"]
+	require.Equal(t, process.If, build.If)
+	require.Equal(t, process.RunsOn, build.RunsOn)
+	require.Equal(t, process.Env, build.Env)
+	require.Equal(t, "15", build.TimeoutMinutes.Value)
+	require.Equal(t, "10", process.TimeoutMinutes.Value)
+	require.False(t, build.ContinueOnError)
+	require.Equal(t, ciCriticalPathNeeds{"runner-policy", "changes", "cmd-gc-process-build"}, process.Needs)
+	require.Len(t, build.Steps, 5)
+	require.Equal(t, "./.github/actions/setup-gascity-ubuntu", build.Steps[1].Uses)
+	require.Equal(t, "true", build.Steps[1].With["qualified-integration-bd"])
+	require.Equal(t, "prepare", build.Steps[1].With["process-build-cache"])
+	require.Equal(t, "require", process.Steps[1].With["process-build-cache"])
+	require.Equal(t, "true", process.Steps[1].With["qualified-integration-bd"])
+	require.Equal(t, `make build-cmd-gc-tests CMD_GC_TEST_BINARY="$RUNNER_TEMP/cmd-gc-process.test"`, build.Steps[2].Run)
+	require.Empty(t, build.Steps[2].If)
+	require.False(t, build.Steps[2].ContinueOnError)
+	require.Equal(t, "actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830", build.Steps[3].Uses)
+	require.Equal(t, "${{ steps.setup.outputs.process-cache-hit != 'true' }}", build.Steps[3].If)
+	require.Equal(t, map[string]string{"key": "${{ steps.setup.outputs.process-cache-key }}", "path": "${{ steps.setup.outputs.process-cache-path }}"}, build.Steps[3].With)
+	require.Equal(t, "actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830", build.Steps[4].Uses)
+	require.Equal(t, map[string]string{"key": "${{ steps.setup.outputs.process-cache-key }}", "path": "${{ steps.setup.outputs.process-cache-path }}", "lookup-only": "true", "fail-on-cache-miss": "true"}, build.Steps[4].With)
+	require.Empty(t, build.Steps[4].If)
+	require.False(t, build.Steps[4].ContinueOnError)
+	makefile, err := os.ReadFile(filepath.Join(repoRoot(t), "Makefile"))
+	require.NoError(t, err)
+	require.Contains(t, string(makefile), `$(TEST_ENV) GC_FAST_UNIT=0 go test -c -o "$(CMD_GC_TEST_BINARY)" ./cmd/gc`)
+	// Exercise the actual required-summary program: neither a failed producer
+	// nor skipped/canceled selected shards may become an allowed path skip.
+	required := wf.Jobs["ci-required"]
+	require.Contains(t, required.Needs, "cmd-gc-process-build")
+	require.Equal(t, "${{ needs.changes.outputs.cmd_gc_process }}", required.Env["CMD_GC_PROCESS_REQUIRED"])
+	var program string
+	for _, step := range required.Steps {
+		if step.Name == "Summarize required gates" {
+			program = strings.TrimSuffix(strings.TrimPrefix(step.Run, "python3 - <<'PY'\n"), "PY\n")
+		}
+	}
+	require.NotEmpty(t, program)
+	for _, tc := range []struct {
+		name, wanted, build, process string
+		wantExit                     int
+	}{
+		{"selected-pass", "true", "success", "success", 0},
+		{"unselected-path-skip", "false", "skipped", "skipped", 0},
+		{"selected-producer-skipped", "true", "skipped", "skipped", 1},
+		{"selected-producer-failed", "true", "failure", "skipped", 1},
+		{"selected-process-skipped", "true", "success", "skipped", 1},
+		{"selected-process-canceled", "true", "success", "canceled", 1},
+		{"unselected-failure", "false", "failure", "skipped", 1},
+		{"unknown-filter", "", "skipped", "skipped", 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			needs := map[string]map[string]string{}
+			for _, job := range required.Needs {
+				needs[job] = map[string]string{"result": "success"}
+			}
+			needs["cmd-gc-process-build"]["result"] = tc.build
+			needs["cmd-gc-process"]["result"] = tc.process
+			data, err := json.Marshal(needs)
+			require.NoError(t, err)
+			cmd := shardTestCommand("python3", "-c", program)
+			cmd.Env = append(os.Environ(), "NEEDS_JSON="+string(data), "CMD_GC_PROCESS_REQUIRED="+tc.wanted, "GITHUB_STEP_SUMMARY="+filepath.Join(t.TempDir(), "summary"))
+			code, output := runShardCommand(t, cmd)
+			require.Equal(t, tc.wantExit, code, "%s", output)
+		})
+	}
+}
+
+func TestCmdGCProcessCacheIsExactAndRequiredBeforeNativeBuild(t *testing.T) {
+	body, err := os.ReadFile(filepath.Join(repoRoot(t), ".github/actions/setup-gascity-ubuntu/action.yml"))
+	require.NoError(t, err)
+	var action struct {
+		Runs struct {
+			Steps []ciCriticalPathStep `yaml:"steps"`
+		} `yaml:"runs"`
+	}
+	require.NoError(t, yaml.Unmarshal(body, &action))
+	var resolve, restore, hit ciCriticalPathStep
+	resolveIndex, restoreIndex, hitIndex, installIndex := -1, -1, -1, -1
+	for i, step := range action.Runs.Steps {
+		switch step.Name {
+		case "Resolve native process build cache":
+			resolve, resolveIndex = step, i
+		case "Restore prepared native process build cache":
+			restore, restoreIndex = step, i
+		case "Require exact prepared process cache before building":
+			hit, hitIndex = step, i
+		case "Install qualified integration bd":
+			installIndex = i
+		}
+	}
+	require.True(t, resolveIndex >= 0 && resolveIndex < restoreIndex && restoreIndex < hitIndex && hitIndex < installIndex)
+	require.Equal(t, map[string]string{"key": "${{ steps.process-cache.outputs.key }}", "path": "${{ steps.process-cache.outputs.path }}", "fail-on-cache-miss": "${{ inputs.process-build-cache == 'require' }}"}, restore.With)
+	require.Equal(t, "${{ inputs.process-build-cache == 'require' }}", hit.If)
+	require.Empty(t, resolve.With["restore-keys"])
+	for _, value := range []string{"", "false", "true"} {
+		cmd := shardTestCommand("bash", "-c", hit.Run)
+		cmd.Env = append(os.Environ(), "EXACT_CACHE_HIT="+value)
+		code, output := runShardCommand(t, cmd)
+		if value == "true" {
+			require.Zero(t, code, "%s", output)
+		} else {
+			require.NotZero(t, code, "%s", output)
+		}
+	}
+	for _, tc := range []struct {
+		name, mode, native, sha, run, platform string
+		valid                                  bool
+	}{
+		{"prepare", "prepare", "true", strings.Repeat("a", 40), "123", "Linux-X64", true},
+		{"require", "require", "true", strings.Repeat("b", 40), "124", "Linux-X64", true},
+		{"unknown-mode", "optional", "true", strings.Repeat("a", 40), "123", "Linux-X64", false},
+		{"wrong-cli", "require", "false", strings.Repeat("a", 40), "123", "Linux-X64", false},
+		{"invalid-sha", "require", "true", "main", "123", "Linux-X64", false},
+		{"invalid-run", "require", "true", strings.Repeat("a", 40), "", "Linux-X64", false},
+		{"cross-platform", "require", "true", strings.Repeat("a", 40), "123", "macOS-ARM64", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			outputFile := filepath.Join(t.TempDir(), "output")
+			cmd := shardTestCommand("bash", "-c", resolve.Run)
+			cmd.Env = append(os.Environ(), "CACHE_MODE="+tc.mode, "NATIVE_PAIR="+tc.native, "SOURCE_SHA="+tc.sha, "RUN_ID="+tc.run, "PLATFORM="+tc.platform, "GITHUB_OUTPUT="+outputFile)
+			code, output := runShardCommand(t, cmd)
+			if !tc.valid {
+				require.NotZero(t, code, "%s", output)
+				_, err := os.Stat(outputFile)
+				require.True(t, os.IsNotExist(err), "invalid identity must not publish a cache key")
+				return
+			}
+			require.Zero(t, code, "%s", output)
+			data, err := os.ReadFile(outputFile)
+			require.NoError(t, err)
+			require.Regexp(t, `^key=gc-process-v1-Linux-X64-go[0-9]+\.[0-9]+\.[0-9]+-`+tc.sha+`-`+tc.run+`\npath=/[^\r\n]+\n$`, string(data))
+		})
+	}
+}

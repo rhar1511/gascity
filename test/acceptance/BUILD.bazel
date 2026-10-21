@@ -57,7 +57,7 @@ go_test(
         "//:repo_source_tree",
         # Build bd from the same owner module that supplies the linked schema.
         # Dolt remains the pinned prebuilt tool from MODULE.bazel.
-        "@com_github_rhar1511_beads//cmd/bd:bd",
+        "@com_github_rhar1511_beads//cmd/bd",
         "@dolt_bin_v2_1_7//:dolt-linux-amd64/bin/dolt",
     ],
     shard_count = 2,
