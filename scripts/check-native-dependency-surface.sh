@@ -16,7 +16,11 @@ set -euo pipefail
 # v0.4.3, segmentio/encoding v0.5.4 and segmentio/asm v1.1.3. They serve the
 # opt-in standalone contrib/mcp-skills adapter; none links into cmd/gc.
 # All vendor-family caps and the native binary-size cap stay unchanged.
-max_modules="${GC_NATIVE_DEP_MAX_MODULES:-741}"
+# The released Beads v1.3.2 CLI tool declaration adds 19 selected modules
+# (741 -> 760) for the owner-module Bazel CLI target. The controller package
+# closure imports none of those 19; vendor-family and binary-size caps below
+# remain unchanged. This is an exact measured allowance with no growth margin.
+max_modules="${GC_NATIVE_DEP_MAX_MODULES:-760}"
 # max_binary_bytes re-baselined 2026-10-14 (gp-olwhg.9.8). Matching Go 1.26.9
 # CGO_ENABLED=0 builds with -trimpath -buildvcs=false measured:
 #   18943f295 (2026-09-27): 180,274,346 bytes, previous budget baseline
