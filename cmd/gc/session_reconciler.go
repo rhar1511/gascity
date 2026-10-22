@@ -3616,8 +3616,11 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// no re-projection needed. (The restart-handoff consume above folds a batch
 		// that excludes reset_committed_at, so that durable next-tick marker stays off
 		// this tick's snapshot exactly as the old raw refresh kept it off; #2345.)
+		// A parked identity must retain its continuation until it is eligible
+		// again; suppression of provider starts alone cannot protect its key.
 		infoAsleepDrift := infoByID[id]
 		skipAsleepDriftRepair := driftRestartedInPlace ||
+			infoAsleepDrift.SleepIntent == "user-hold" ||
 			pendingResumePreservingNamedRestartInfo(infoAsleepDrift, clk, startupTimeout)
 		if !alive && isNamedSessionInfo(infoByID[id]) && !skipAsleepDriftRepair {
 			template := tp.TemplateName
@@ -3626,7 +3629,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			}
 			storedHash := infoByID[id].StartedConfigHash
 			if template != "" && storedHash != "" {
-				if cfgAgent := findAgentByTemplate(cfg, template); cfgAgent != nil {
+				if cfgAgent := findAgentByTemplate(cfg, template); cfgAgent != nil && !isAgentEffectivelySuspendedWith(cfg, cityPath, cfgAgent, suspState) {
 					agentCfg := sessionCoreConfigForHashInfo(tp, infoByID[id])
 					currentHash := runtime.CoreFingerprint(agentCfg)
 					if storedHash != currentHash {

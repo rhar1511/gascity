@@ -29,6 +29,16 @@ func hostProtectedDecisionFrontierWriterForStore(
 	cityName, storeRef string,
 	store *beads.BdStore,
 ) (*beads.RemoteDecisionFrontierRecordWriter, bool, error) {
+	return hostProtectedDecisionFrontierWriterForTransport(resolver, cfg, cityName, storeRef, store, store)
+}
+
+func hostProtectedDecisionFrontierWriterForTransport(
+	resolver *hostBeadsPermitResolver,
+	cfg *config.City,
+	cityName, storeRef string,
+	store *beads.BdStore,
+	recordReader beads.DecisionFrontierMetadataRecordReader,
+) (*beads.RemoteDecisionFrontierRecordWriter, bool, error) {
 	if !controllerPermitScopeConfigured(resolver, cityName, storeRef) {
 		return nil, false, nil
 	}
@@ -75,7 +85,7 @@ func hostProtectedDecisionFrontierWriterForStore(
 	}
 	linkWriter, err := beads.NewRemoteDecisionFrontierLinkWriter(beads.RemoteDecisionFrontierLinkWriterConfig{
 		Actor: policy.Actor, AllowedDependencyTypes: []string{"blocks", "relates-to"},
-		RecordReader: store, PermitIssuer: issuer, ProtectedLinkWriter: batchWriter,
+		RecordReader: recordReader, PermitIssuer: issuer, ProtectedLinkWriter: batchWriter,
 	})
 	if err != nil {
 		return nil, true, fmt.Errorf("configure protected decision-frontier links for %s: %w", storeRef, err)
@@ -89,7 +99,7 @@ func hostProtectedDecisionFrontierWriterForStore(
 		Actor: policy.Actor, ProtectionClass: policy.ProtectionClass,
 		PermitIssuer: issuer, BatchWriter: batchWriter, LinkWriter: linkWriter,
 		MetadataTransitionScope: storeRef, MetadataTransitionKind: decisionFrontierRecordMetadataTransitionKind,
-		MetadataRecordReader: store, MetadataPermitIssuer: issuer,
+		MetadataRecordReader: recordReader, MetadataPermitIssuer: issuer,
 		MetadataTransitionWriter: transitionWriter, MetadataReceiptReader: receiptReader,
 	})
 	if err != nil {
@@ -131,10 +141,28 @@ func configureControllerProtectedDecisionFrontierStores(cs *controllerState, cfg
 			return err
 		}
 		leaf, ok := controllerBdWriteLeaf(store)
+		var native *beads.NativeDoltStore
 		if !ok {
-			return fmt.Errorf("configured host Beads authority for %s/%s requires a BdStore write leaf", scope.cityName, scope.storeRef)
+			native, _ = controllerPermitStoreLeaf(store).(*beads.NativeDoltStore)
+			if native == nil {
+				return fmt.Errorf("configured host Beads authority for %s/%s requires a BdStore write leaf", scope.cityName, scope.storeRef)
+			}
+			transport := cfg.Beads.PrivateEvidence[scope.storeRef]
+			// A native store needs a dedicated HTTP capability transport, not
+			// a CLI fallback or a fabricated proxied-store admission. Resolve
+			// the ordinary record reads through the native leaf below.
+			leaf = beads.NewBdStore("", func(string, string, ...string) ([]byte, error) {
+				return nil, errors.New("native controller protected transport is HTTP-only")
+			}, beads.WithBdStorePrivateEvidenceHTTP(beads.PrivateEvidenceHTTPConfig{
+				Endpoint: transport.Endpoint, ProjectID: transport.ProjectID, Database: transport.Database,
+				ScopeRef: scope.storeRef, TokenFile: transport.TokenFile, RevisionTransitions: transport.RevisionTransitions,
+			}))
 		}
-		writer, configured, err := hostProtectedDecisionFrontierWriterForStore(resolver, cfg, cs.cityName, scope.storeRef, leaf)
+		var reader beads.DecisionFrontierMetadataRecordReader = leaf
+		if native != nil {
+			reader = native
+		}
+		writer, configured, err := hostProtectedDecisionFrontierWriterForTransport(resolver, cfg, cs.cityName, scope.storeRef, leaf, reader)
 		if err != nil {
 			return err
 		}
@@ -142,6 +170,9 @@ func configureControllerProtectedDecisionFrontierStores(cs *controllerState, cfg
 			return fmt.Errorf("configured host Beads authority for %s/%s did not produce a protected writer", scope.cityName, scope.storeRef)
 		}
 		beads.WithBdStoreDecisionFrontierRecordWriter(writer)(leaf)
+		if native != nil {
+			beads.WithNativeControllerTransport(leaf)(native)
+		}
 		if advertised, ok := beads.DecisionFrontierRecordWriterFor(store); !ok || advertised == nil {
 			return fmt.Errorf("controller store %s failed to advertise its protected decision-frontier writer", scope.storeRef)
 		}
@@ -180,30 +211,33 @@ func controllerStoreForPermitScope(cs *controllerState, cfg *config.City, storeR
 }
 
 func controllerBdWriteLeaf(store beads.Store) (*beads.BdStore, bool) {
+	leaf, ok := controllerPermitStoreLeaf(store).(*beads.BdStore)
+	return leaf, ok && leaf != nil
+}
+
+func controllerPermitStoreLeaf(store beads.Store) beads.Store {
 	for range 8 {
 		if store == nil {
-			return nil, false
+			return nil
 		}
 		if base, _, ok := unwrapBeadPolicyStore(store); ok {
 			store = base
 			continue
 		}
 		switch typed := store.(type) {
-		case *beads.BdStore:
-			return typed, typed != nil
 		case *beads.CachingStore:
 			if typed == nil {
-				return nil, false
+				return nil
 			}
 			store = typed.Backing()
 		case beads.ProxiedStoreView:
 			if typed == nil || isNilProxiedStoreView(typed) {
-				return nil, false
+				return nil
 			}
 			store = typed.BdLeaf()
 		default:
-			return nil, false
+			return store
 		}
 	}
-	return nil, false
+	return nil
 }

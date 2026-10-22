@@ -116,6 +116,69 @@ func TestResetConfiguredNamedSessionForConfigDrift_PreservesSessionKeyOnContinua
 	}
 }
 
+func TestReconcileSessionBeads_SuspendedNamedSessionPreservesDriftedResume(t *testing.T) {
+	for _, hold := range []string{"template", "rig", "city", "session"} {
+		t.Run(hold, func(t *testing.T) {
+			env := newReconcilerTestEnv()
+			env.cfg = &config.City{
+				Workspace: config.Workspace{Name: "test-city", SuspendedOnStart: hold == "city"},
+				Providers: map[string]config.ProviderSpec{
+					"resume-only": {
+						Command: "true", PromptMode: "none",
+						ResumeFlag: "--session", ResumeStyle: "flag",
+					},
+				},
+				Agents: []config.Agent{{Name: "assistant", Provider: "resume-only", Suspended: hold == "template"}},
+			}
+			template := "assistant"
+			if hold == "rig" {
+				env.cfg.Agents[0].Dir = "repo"
+				env.cfg.Rigs = []config.Rig{{Name: "repo", Path: "repo", SuspendedOnStart: true}}
+				template = "repo/assistant"
+			}
+			env.cfg.NamedSessions = []config.NamedSession{{Template: template, Mode: "always"}}
+			name := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, template)
+			session := env.createSessionBead(name, template)
+			protected := map[string]string{
+				namedSessionMetadataKey:      "true",
+				namedSessionIdentityMetadata: template,
+				namedSessionModeMetadata:     "always",
+				"pin_awake":                  "true",
+				"session_key":                "ses_existing_conversation",
+				"started_config_hash":        runtime.CoreFingerprint(runtime.Config{Command: "previous-command"}),
+				"resume_flag":                "--session",
+				"resume_style":               "flag",
+				"continuation_reset_pending": "",
+			}
+			if hold == "session" {
+				protected["sleep_intent"] = "user-hold"
+				protected["held_until"] = env.clk.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+			}
+			env.setSessionMetadata(&session, protected)
+			for tick := 0; tick < 2; tick++ {
+				if woken := env.reconcile([]beads.Bead{session}); woken != 0 {
+					t.Fatalf("tick %d: woken = %d, want 0 for suspended session", tick, woken)
+				}
+				var err error
+				session, err = env.store.Get(session.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for key, want := range protected {
+					if got := session.Metadata[key]; got != want {
+						t.Errorf("tick %d: %s = %q, want preserved %q", tick, key, got, want)
+					}
+				}
+			}
+			for _, call := range env.sp.Calls {
+				if call.Method == "Start" || call.Method == "Stop" || call.Method == "Kill" {
+					t.Errorf("suspended asleep session triggered runtime mutation: %s", call.Method)
+				}
+			}
+		})
+	}
+}
+
 func TestReconcileSessionBeads_PreservesSessionKeyWhenNamedRestartDeferred(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{
