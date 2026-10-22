@@ -121,7 +121,9 @@ const (
 	// Version pins, provider installation, permissions and gates stay pinned.
 	// Human-approved optional fork build installs ICU and verifies the pinned
 	// source archive before compiling; the default released bd is unchanged.
-	expectedSetupActionHash = "ad1758d8e1126af1d32a7ebab050a83f21b3e2ca9872485e436dcd411ef3e3c1"
+	// Cache identity predicates explicitly exit on failure for Bash 3.2;
+	// accepted identities, cache keys and every other step remain unchanged.
+	expectedSetupActionHash = "81fe859deee9c52a187dffa250f47a6a2e819a9d9ec630b4503e887dca79e4a2"
 )
 
 var requiredFilterPaths = map[string][]string{

@@ -110,13 +110,13 @@ runs:
         PLATFORM: ${{ runner.os }}-${{ runner.arch }}
       run: |
         set -euo pipefail
-        [[ "$CACHE_MODE" == prepare || "$CACHE_MODE" == require ]]
-        [[ "$NATIVE_PAIR" == true && "$PLATFORM" == Linux-X64 ]]
-        [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ && "$RUN_ID" =~ ^[1-9][0-9]*$ ]]
+        [[ "$CACHE_MODE" == prepare || "$CACHE_MODE" == require ]] || exit 1
+        [[ "$NATIVE_PAIR" == true && "$PLATFORM" == Linux-X64 ]] || exit 1
+        [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ && "$RUN_ID" =~ ^[1-9][0-9]*$ ]] || exit 1
         cache_path="$(go env GOCACHE)"
         go_version="$(go env GOVERSION)"
-        [[ "$cache_path" == /* && "$cache_path" != *$'\n'* && "$cache_path" != *$'\r'* ]]
-        [[ "$go_version" =~ ^go[0-9]+\.[0-9]+\.[0-9]+$ ]]
+        [[ "$cache_path" == /* && "$cache_path" != *$'\n'* && "$cache_path" != *$'\r'* ]] || exit 1
+        [[ "$go_version" =~ ^go[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 1
         printf 'key=gc-process-v1-%s-%s-%s-%s\npath=%s\n' "$PLATFORM" "$go_version" "$SOURCE_SHA" "$RUN_ID" "$cache_path" >> "$GITHUB_OUTPUT"
 
     - name: Restore prepared native process build cache
