@@ -49,6 +49,7 @@ go_test(
         "tooling_test.go",
     ],
     embed = [":helpers"],
+    data = ["@com_github_rhar1511_beads//cmd/bd"],
     deps = [
         "//internal/testenv",
         "@com_github_rhar1511_beads//schema",

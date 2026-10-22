@@ -1472,13 +1472,7 @@ func TestBdRigWorktreeStoreConsistentAcrossRawBdGcBdAndProviderStore(t *testing.
 		t.Fatalf("WriteFile(redirect): %v", err)
 	}
 
-	providerResult, err := openStoreResultAtForCity(rigPath, cityPath)
-	if err != nil {
-		t.Fatalf("openStoreResultAtForCity(rig): %v", err)
-	}
-	if got, want := providerResult.Diagnostic.Store, beads.BeadsStoreNameNativeDoltStore; got != want {
-		t.Fatalf("provider store = %q, want %q; diagnostic: %+v", got, want, providerResult.Diagnostic)
-	}
+	providerResult := openObservedNativeFixtureStore(t, rigPath, cityPath)
 	providerStore := providerResult.Store
 	defer func() {
 		if err := closeBeadStoreHandle(providerStore); err != nil {

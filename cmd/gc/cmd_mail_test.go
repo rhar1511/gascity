@@ -1611,6 +1611,67 @@ func selectedNativeMailFixtureBD(t *testing.T, selected string) string {
 	return path
 }
 
+// openObservedNativeFixtureStore keeps the production executable observer and
+// requires the exact store contract of the running platform. Non-Linux builds
+// cannot claim descriptor-bound executable identity and must retain fallback.
+func openObservedNativeFixtureStore(t *testing.T, scope, city string) beads.StoreOpenResult {
+	t.Helper()
+	factory := openStoreFactoryForCity
+	defer func() { openStoreFactoryForCity = factory }()
+	var observed contract.PreflightBDContext
+	contextCalls := 0
+	openStoreFactoryForCity = func(ctx context.Context, opts beads.StoreOpenOptions) (beads.StoreOpenResult, error) {
+		readContext := opts.PreflightChecker.BDContext
+		if readContext == nil {
+			t.Fatal("native fixture is missing the production context reader")
+		}
+		opts.PreflightChecker.BDContext = func(scope string) (contract.PreflightBDContext, error) {
+			contextCalls++
+			started := time.Now()
+			state, probeErr := readContext(scope)
+			observed = state
+			if probeErr != nil {
+				message := strings.ReplaceAll(probeErr.Error(), "secret", "<redacted>")
+				if len(message) > 2048 {
+					message = message[:2048] + " [truncated]"
+				}
+				t.Logf("native context preflight: elapsed=%s error_type=%T error=%s", time.Since(started), probeErr, message)
+			}
+			return state, probeErr
+		}
+		return factory(ctx, opts)
+	}
+	result, err := openStoreResultAtForCity(scope, city)
+	accepted := false
+	defer func() {
+		if !accepted {
+			if closeErr := closeBeadStoreHandle(result.Store); closeErr != nil {
+				t.Errorf("close rejected native fixture store: %v", closeErr)
+			}
+		}
+	}()
+	if err != nil {
+		t.Fatalf("openStoreResultAtForCity(%q, %q): %v", scope, city, err)
+	}
+	if contextCalls != 1 {
+		t.Fatalf("native fixture context calls = %d, want exactly one original reader invocation", contextCalls)
+	}
+	want := beads.BeadsStoreNameNativeDoltStore
+	if runtime.GOOS != "linux" {
+		want = beads.BeadsStoreNameBdStore
+		if observed.CLIArtifact != (contract.BeadsArtifact{}) || result.Diagnostic.NativeStoreEligible {
+			t.Fatalf("unsupported executable observation claimed native eligibility: artifact=%+v diagnostic=%+v", observed.CLIArtifact, result.Diagnostic)
+		}
+	} else if !result.Diagnostic.NativeStoreEligible {
+		t.Fatalf("Linux native fixture lost native eligibility: %+v", result.Diagnostic)
+	}
+	if result.Diagnostic.Store != want {
+		t.Fatalf("provider store = %q, want %q on %s; diagnostic: %+v", result.Diagnostic.Store, want, runtime.GOOS, result.Diagnostic)
+	}
+	accepted = true
+	return result
+}
+
 func TestCmdMailInbox_NormalizesCanonicalManagedProviderEnvAndReadsInbox(t *testing.T) {
 	clearInheritedBeadsEnv(t)
 	cityDir := t.TempDir()
@@ -1669,9 +1730,7 @@ func TestCmdMailInbox_NormalizesCanonicalManagedProviderEnvAndReadsInbox(t *test
 		t.Fatalf("close native fixture storage: %v", err)
 	}
 
-	// Preflight observes this exact released native executable, including when
-	// context is unavailable. No non-observed runner double can supply its
-	// source proof; the real private database and native-open checks stay active.
+	// Keep the production observer and platform-specific native eligibility.
 
 	canonicalProvider := "exec:" + gcBeadsBdScriptPath(cityDir)
 	t.Setenv("GC_BEADS", canonicalProvider)
@@ -1681,14 +1740,7 @@ func TestCmdMailInbox_NormalizesCanonicalManagedProviderEnvAndReadsInbox(t *test
 		t.Fatalf("rawBeadsProvider() with canonical GC_BEADS=%q = %q, want bd", canonicalProvider, got)
 	}
 
-	result, err := openStoreResultAtForCity(cityDir, cityDir)
-	if err != nil {
-		t.Fatalf("openStoreResultAtForCity(%q) with canonical GC_BEADS=%q: %v", cityDir, canonicalProvider, err)
-	}
-	if got := result.Diagnostic.Store; got != beads.BeadsStoreNameNativeDoltStore {
-		preflight, preflightErr := newBeadsPreflightChecker(cityDir, "bd").Check(cityDir)
-		t.Fatalf("store selected for canonical GC_BEADS=%q = %q, want %q; diagnostic: %+v; preflight checks: %+v (error: %v)", canonicalProvider, got, beads.BeadsStoreNameNativeDoltStore, result.Diagnostic, preflight.Checks, preflightErr)
-	}
+	result := openObservedNativeFixtureStore(t, cityDir, cityDir)
 	mp := beadmail.New(result.Store)
 	if _, err := mp.Send("mayor", "human", "status", "hello from canonical provider"); err != nil {
 		t.Fatalf("mp.Send(): %v", err)

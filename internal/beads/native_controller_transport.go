@@ -156,7 +156,7 @@ func (w nativeControllerCapabilities) EnsureDecisionFrontierLink(sourceID, targe
 		if !ok {
 			return ErrDecisionFrontierCapabilityUnsupported
 		}
-		var err error = writer.EnsureDecisionFrontierLink(sourceID, targetID, depType)
+		err := writer.EnsureDecisionFrontierLink(sourceID, targetID, depType)
 		return err
 	})
 	return err
