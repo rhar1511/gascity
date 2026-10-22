@@ -578,6 +578,24 @@ func (s *emittingClassStore) ControllerMetadataTransitionWriterHandle() (beads.C
 	return beads.ControllerMetadataTransitionWriterFor(s.Store)
 }
 
+// PrivateEvidenceMetadataCASWriterHandle forwards owner-index writes without
+// exposing their private metadata through the generic bead event stream.
+func (s *emittingClassStore) PrivateEvidenceMetadataCASWriterHandle() (beads.PrivateEvidenceMetadataCASWriter, bool) {
+	if s == nil {
+		return nil, false
+	}
+	return beads.PrivateEvidenceMetadataCASWriterFor(s.Store)
+}
+
+// PrivateEvidenceArchiveReaderHandle keeps body-only private reads on the
+// backing store's typed transport, including its native lifetime fence.
+func (s *emittingClassStore) PrivateEvidenceArchiveReaderHandle() (beads.PrivateEvidenceArchiveReader, bool) {
+	if s == nil {
+		return nil, false
+	}
+	return beads.PrivateEvidenceArchiveReaderFor(s.Store)
+}
+
 // CreateDecisionFrontierRecord is a private controller write. It deliberately
 // does not call emitCreated: the record description can contain prompts,
 // answers, and immutable verification material that must not enter generic
