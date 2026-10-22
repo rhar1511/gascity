@@ -48,8 +48,8 @@ go_test(
         "tool_home_test.go",
         "tooling_test.go",
     ],
-    embed = [":helpers"],
     data = ["@com_github_rhar1511_beads//cmd/bd"],
+    embed = [":helpers"],
     deps = [
         "//internal/testenv",
         "@com_github_rhar1511_beads//schema",
