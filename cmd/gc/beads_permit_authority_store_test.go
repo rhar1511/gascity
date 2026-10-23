@@ -56,6 +56,71 @@ func TestControllerBdStoresInstallWriterForExactCityAndRigScopes(t *testing.T) {
 	})
 }
 
+func TestControllerNativeStoresInstallWriterWithoutReplacingNativeLeaf(t *testing.T) {
+	for _, scope := range []string{"city:alpha", "rig:repo"} {
+		t.Run(scope, func(t *testing.T) {
+			cityDir := t.TempDir()
+			server, transport := controllerPermitTestTransport(t)
+			defer server.Close()
+			entry, key := hostBeadsPermitTestEntry(t, "alpha", scope, "native-key", "native-key.pem")
+			entry.ProjectID, entry.Database = transport.ProjectID, transport.Database
+			resolver := controllerPermitTestResolver(t, entry, key)
+			cfg := controllerPermitTestConfig(transport)
+			cfg.Beads.PrivateEvidence[scope] = transport
+			cfg.Rigs = []config.Rig{{Name: "repo", Path: filepath.Join(cityDir, "repo"), Prefix: "rp"}}
+			native := beads.NewNativeDoltStoreOverStorageForTest(nil)
+			if writer, ok := beads.DecisionFrontierRecordWriterFor(native); ok || writer != nil {
+				t.Fatal("unconfigured native store advertised host authority")
+			}
+			cache := beads.NewCachingStore(native, nil)
+			store := wrapStoreWithBeadPolicies(cache, cfg)
+			cs := &controllerState{
+				cityName: "alpha", cityPath: cityDir,
+				cityBeadStore: store, beadStores: map[string]beads.Store{"repo": store},
+			}
+			if err := configureControllerProtectedDecisionFrontierStores(cs, cfg, resolver); err != nil {
+				t.Fatalf("configure native controller store: %v", err)
+			}
+			assertControllerDecisionFrontierWriter(t, store)
+			if cache.Backing() != native {
+				t.Fatalf("native query leaf was replaced by %T", cache.Backing())
+			}
+			if _, ok := beads.RevisionTransitionWriterFor(store); !ok {
+				t.Fatal("native controller omitted the receipt-backed lifecycle transition")
+			}
+			if _, ok := beads.DecisionFrontierSourceReaderFor(store); !ok {
+				t.Fatal("native controller omitted its authoritative source snapshot")
+			}
+			if err := native.CloseStore(); err != nil {
+				t.Fatal(err)
+			}
+			if writer, ok := beads.DecisionFrontierRecordWriterFor(store); ok || writer != nil {
+				t.Fatal("closed native store advertised a protected writer")
+			}
+		})
+	}
+}
+
+func TestControllerNativeStoreRefusesMismatchedProtectedAuthority(t *testing.T) {
+	server, transport := controllerPermitTestTransport(t)
+	defer server.Close()
+	entry, key := hostBeadsPermitTestEntry(t, "alpha", "city:alpha", "native-key", "native-key.pem")
+	entry.ProjectID, entry.Database = transport.ProjectID, transport.Database
+	resolver := controllerPermitTestResolver(t, entry, key)
+	cfg := controllerPermitTestConfig(transport)
+	invalid := transport
+	invalid.Database = "different-database"
+	cfg.Beads.PrivateEvidence["city:alpha"] = invalid
+	native := beads.NewNativeDoltStoreOverStorageForTest(nil)
+	cs := &controllerState{cityName: "alpha", cityPath: t.TempDir(), cityBeadStore: native}
+	if err := configureControllerProtectedDecisionFrontierStores(cs, cfg, resolver); err == nil {
+		t.Fatal("native controller accepted a mismatched protected transport")
+	}
+	if writer, ok := beads.DecisionFrontierRecordWriterFor(native); ok || writer != nil {
+		t.Fatal("failed native configuration left a protected writer attached")
+	}
+}
+
 func TestControllerBdStoreRefusesBrokenMatchingAuthorityAndOmitsUnmatchedAuthority(t *testing.T) {
 	cityDir := t.TempDir()
 	server, validTransport := controllerPermitTestTransport(t)

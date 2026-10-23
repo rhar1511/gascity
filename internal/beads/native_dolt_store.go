@@ -484,6 +484,12 @@ type NativeDoltStore struct {
 	condWritesStamp
 
 	localStrings *localSidecar // clone-local data; see Store.SetLocalString
+
+	// controllerTransport supplies explicitly host-authorized HTTP capabilities.
+	// Ordinary store reads and writes still use native storage; this is neither
+	// a fallback store nor an admission to the proxied-server topology.
+	controllerTransportMu sync.RWMutex
+	controllerTransport   *BdStore
 }
 
 // NativeStorage is the upstream beads storage handle a NativeDoltStore wraps.
@@ -1133,6 +1139,9 @@ func (s *NativeDoltStore) CloseStore() error {
 	if s == nil {
 		return nil
 	}
+	// Finish admitted HTTP operations before closing their native owner.
+	s.controllerTransportMu.Lock()
+	defer s.controllerTransportMu.Unlock()
 	// Phase 1 — latch closed immediately under mu before waiting on the reconnect
 	// gate, so a reconnect currently blocked in its reopen observes the close on
 	// its post-reopen re-check, while new operations fail with ErrStoreClosed.

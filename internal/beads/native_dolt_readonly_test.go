@@ -88,6 +88,16 @@ var nativeStoreMethodKinds = map[string]nativeStoreMethodKind{
 	"SupportsEphemeralGraphApply": nativeStoreLifecycle,
 	"CloseStore":                  nativeStoreLifecycle,
 	"ReadOnly":                    nativeStoreLifecycle,
+
+	// Optional HTTP capability lookup never itself admits a mutation.
+	"DecisionFrontierRecordWriterHandle":              nativeStoreLifecycle,
+	"PrivateEvidenceMetadataCASWriterHandle":          nativeStoreLifecycle,
+	"PrivateEvidenceArchiveReaderHandle":              nativeStoreLifecycle,
+	"ControllerMetadataTransitionWriterHandle":        nativeStoreLifecycle,
+	"ControllerMetadataTransitionReceiptReaderHandle": nativeStoreLifecycle,
+	"DecisionFrontierSourceReaderHandle":              nativeStoreLifecycle,
+	"RevisionTransitionReceiptReaderHandle":           nativeStoreLifecycle,
+	"RevisionTransitionWriterHandle":                  nativeStoreLifecycle,
 }
 
 // countingStorageSpy fails the test if the store reaches storage at all.

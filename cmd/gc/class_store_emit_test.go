@@ -596,6 +596,86 @@ func TestEmittingClassStoreKeepsEveryEngineCapability(t *testing.T) {
 	}
 }
 
+func TestEmittingClassStoreDoesNotInventPrivateEvidenceCapabilities(t *testing.T) {
+	var nilWrapper *emittingClassStore
+	native := beads.NewNativeDoltStoreOverStorageForTest(nil)
+	t.Cleanup(func() {
+		if err := native.CloseStore(); err != nil {
+			t.Error(err)
+		}
+	})
+	for name, store := range map[string]beads.Store{
+		"nil-wrapper": nilWrapper,
+		"nil-backing": &emittingClassStore{},
+		"memory":      &emittingClassStore{Store: beads.NewMemStore()},
+		"native":      &emittingClassStore{Store: native},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if writer, ok := beads.PrivateEvidenceMetadataCASWriterFor(store); ok || writer != nil {
+				t.Fatal("emitter invented private metadata authority")
+			}
+			if reader, ok := beads.PrivateEvidenceArchiveReaderFor(store); ok || reader != nil {
+				t.Fatal("emitter invented a private archive reader")
+			}
+		})
+	}
+}
+
+func TestEmittingClassStorePrivateEvidenceCapabilitiesFollowNativeLifetime(t *testing.T) {
+	for _, terminal := range []string{"closed", "read-only"} {
+		t.Run(terminal, func(t *testing.T) {
+			cityPath := t.TempDir()
+			server, transportConfig := controllerPermitTestTransport(t)
+			defer server.Close()
+			transport := beads.NewBdStore("", nil, beads.WithBdStorePrivateEvidenceHTTP(beads.PrivateEvidenceHTTPConfig{
+				Endpoint: transportConfig.Endpoint, ProjectID: transportConfig.ProjectID, Database: transportConfig.Database,
+				ScopeRef: "city:alpha", TokenFile: transportConfig.TokenFile, RevisionTransitions: true,
+			}))
+			native := beads.NewNativeDoltStoreOverStorageForTest(nil)
+			beads.WithNativeControllerTransport(transport)(native)
+			t.Cleanup(func() {
+				if err := native.CloseStore(); err != nil {
+					t.Error(err)
+				}
+			})
+			wrapped := splitClassRoutes(native).withCLIEmission(cityPath).stores[coordclass.ClassGraph]
+			writer, ok := beads.PrivateEvidenceMetadataCASWriterFor(wrapped)
+			if !ok || writer == nil {
+				t.Fatal("emitter dropped the native private metadata capability")
+			}
+			reader, ok := beads.PrivateEvidenceArchiveReaderFor(wrapped)
+			if !ok || reader == nil {
+				t.Fatal("emitter dropped the native private archive reader")
+			}
+
+			want := beads.ErrStoreClosed
+			if terminal == "closed" {
+				if err := native.CloseStore(); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				beads.WithProxiedReadOnly()(native)
+				want = beads.ErrProxiedNativeReadOnly
+			}
+			if _, err := writer.CompareAndSetPrivateEvidenceMetadataKey("owner", "key", "", "opaque"); !errors.Is(err, want) {
+				t.Fatalf("retained private metadata writer: %v, want %v", err, want)
+			}
+			if _, err := reader.ListPrivateEvidenceArchives("owner", "attempt"); !errors.Is(err, want) {
+				t.Fatalf("retained private archive reader: %v, want %v", err, want)
+			}
+			if handle, ok := beads.PrivateEvidenceMetadataCASWriterFor(wrapped); ok || handle != nil {
+				t.Fatal("terminal native store still advertises private metadata authority")
+			}
+			if handle, ok := beads.PrivateEvidenceArchiveReaderFor(wrapped); ok || handle != nil {
+				t.Fatal("terminal native store still advertises private archive reads")
+			}
+			if _, err := os.Stat(cityJournalPath(cityPath)); !os.IsNotExist(err) {
+				t.Fatalf("private capability calls reached the public bead journal: %v", err)
+			}
+		})
+	}
+}
+
 // bindingEngineTypes are the bead engines a relocated class binding can open.
 // Every layer the binding gets wrapped in — the one-shot CLI's emitter, the
 // controller's CachingStore — is held to their method sets, because optional

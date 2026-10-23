@@ -6655,6 +6655,9 @@ func initSeedArchive(t *testing.T, archiveRepo string, prevCount int) string {
 		{"-c", "init.defaultBranch=main", "init", "-q"},
 		{"config", "user.email", "test@example.invalid"},
 		{"config", "user.name", "test"},
+		// Keep fixture Git writers inside the commands that own them.
+		{"config", "maintenance.autoDetach", "false"},
+		{"config", "gc.autoDetach", "false"},
 		{"add", "-A"},
 		{"commit", "-q", "-m", "seed"},
 	}
@@ -6671,6 +6674,43 @@ func initSeedArchive(t *testing.T, archiveRepo string, prevCount int) string {
 		t.Fatalf("git rev-parse: %v\n%s", err, out)
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// TestInitSeedArchiveDoesNotDetachAutomaticMaintenance keeps the archive
+// fixture's Git writers within the commands that own them. A detached
+// maintenance process can race t.TempDir cleanup even after commit returns.
+func TestInitSeedArchiveDoesNotDetachAutomaticMaintenance(t *testing.T) {
+	tracePath := filepath.Join(t.TempDir(), "git-events.jsonl")
+	t.Setenv("GIT_TRACE2_EVENT", tracePath)
+	initSeedArchive(t, filepath.Join(t.TempDir(), "archive"), 3)
+
+	data, err := os.ReadFile(tracePath)
+	if err != nil {
+		t.Fatalf("read Git process trace: %v", err)
+	}
+	sawAutomaticMaintenance := false
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		var event struct {
+			Event string   `json:"event"`
+			Argv  []string `json:"argv"`
+		}
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			t.Fatalf("decode Git process trace: %v", err)
+		}
+		if event.Event != "child_start" || !slices.Contains(event.Argv, "--auto") {
+			continue
+		}
+		if !slices.Contains(event.Argv, "maintenance") && !slices.Contains(event.Argv, "gc") {
+			continue
+		}
+		sawAutomaticMaintenance = true
+		if slices.Contains(event.Argv, "--detach") {
+			t.Fatalf("seed archive launched detached automatic maintenance: %v", event.Argv)
+		}
+	}
+	if !sawAutomaticMaintenance {
+		t.Fatal("seed commit did not exercise automatic Git maintenance")
+	}
 }
 
 // writeMultiRecordDoltStub emits a `dolt` shim that returns a JSON object with

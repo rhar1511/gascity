@@ -132,6 +132,7 @@ go_test(
         "metadata_cas_operation_test.go",
         "metadata_empty_clear_conformance_test.go",
         "namespace_census_test.go",
+        "native_controller_transport_test.go",
         "native_dolt_proxied_open_test.go",
         "native_dolt_readonly_test.go",
         "native_dolt_store_close_retry_test.go",
