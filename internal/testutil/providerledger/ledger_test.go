@@ -589,9 +589,9 @@ func TestCatalogBindsFakeAndBothSubprocessConstructors(t *testing.T) {
 	}
 }
 
-func TestCatalogBindsACPWithDirAndDefersDefaultConstructor(t *testing.T) {
+func TestCatalogBindsACPWithDirAndDefaultConstructors(t *testing.T) {
 	var withDirProof *ProofRef
-	var defaultWaiver *Waiver
+	var defaultProof *ProofRef
 
 	for _, entry := range Catalog() {
 		if entry.ID != "runtime.builtin.acp" {
@@ -605,10 +605,10 @@ func TestCatalogBindsACPWithDirAndDefersDefaultConstructor(t *testing.T) {
 				}
 				withDirProof = claim.Proof
 			case repoSymbol("internal/runtime/acp", "NewSeamBacked"):
-				if claim.Disposition != DispositionWaived {
-					t.Errorf("ACP default disposition = %q, want %q", claim.Disposition, DispositionWaived)
+				if claim.Disposition != DispositionProved {
+					t.Errorf("ACP default disposition = %q, want %q", claim.Disposition, DispositionProved)
 				}
-				defaultWaiver = claim.Waiver
+				defaultProof = claim.Proof
 			}
 		}
 	}
@@ -622,24 +622,14 @@ func TestCatalogBindsACPWithDirAndDefersDefaultConstructor(t *testing.T) {
 	if got, want := renderSymbolRefs(withDirProof.AllowedCalls), "fmt.Sprintf, internal/runtime/acp.acpConformanceCommand, internal/runtime/acp.acpConformanceDir, sync/atomic.AddInt64"; got != want {
 		t.Errorf("ACP WithDir allowed calls = %q, want %q", got, want)
 	}
-	if defaultWaiver == nil {
-		t.Fatal("acp.NewSeamBacked waiver is missing")
+	if defaultProof == nil {
+		t.Fatal("acp.NewSeamBacked proof is missing")
 	}
-	if defaultWaiver.Owner != runtimeContractWaiverOwner {
-		t.Errorf("ACP default waiver = %+v, want %s ownership", defaultWaiver, runtimeContractWaiverOwner)
+	if defaultProof.File != "internal/runtime/acp/conformance_test.go" || defaultProof.Test != "TestACPDefaultDirConformance" {
+		t.Errorf("ACP default proof = %s#%s, want direct default-constructor conformance", defaultProof.File, defaultProof.Test)
 	}
-	// The default constructor now has its own direct proof attempt
-	// (TestACPDefaultDirConformance); the reason must point to that gap
-	// (currently: no clean Darwin-lane run yet, tracked by ga-csh74h) rather
-	// than resting on the WithDir proof, which does not exercise NewSeamBacked.
-	if strings.Contains(defaultWaiver.Reason, "WithDir proof does not exercise") {
-		t.Errorf("ACP default waiver reason still reads as the pre-ga-uz5t3a.10 generic reason: %q", defaultWaiver.Reason)
-	}
-	if !strings.Contains(defaultWaiver.Reason, "TestACPDefaultDirConformance") {
-		t.Errorf("ACP default waiver reason should name the implemented conformance test: %q", defaultWaiver.Reason)
-	}
-	if !strings.Contains(defaultWaiver.Reason, "ga-csh74h") {
-		t.Errorf("ACP default waiver reason should name the tracked Darwin-lane blocker: %q", defaultWaiver.Reason)
+	if got, want := renderSymbolRefs(defaultProof.AllowedCalls), "fmt.Sprintf, internal/runtime/acp.acpConformanceCommand, os.Getpid, sync/atomic.AddInt64"; got != want {
+		t.Errorf("ACP default allowed calls = %q, want %q", got, want)
 	}
 }
 
@@ -1668,7 +1658,18 @@ func TestCatalogReturnsIndependentEntries(t *testing.T) {
 	first[0].Claims[0].Contract = ContractID("mutated.contract")
 	first[0].Claims[0].Proof.File = "mutated-proof.go"
 	first[0].Claims[0].Proof.AllowedCalls[0].Name = "MutatedCall"
-	first[3].Claims[0].Waiver.Owner = "mutated-owner"
+	waivers := 0
+	for _, entry := range first {
+		for _, claim := range entry.Claims {
+			if claim.Waiver != nil {
+				claim.Waiver.Owner = "mutated-owner"
+				waivers++
+			}
+		}
+	}
+	if waivers == 0 {
+		t.Fatal("Catalog() has no waiver to exercise independence")
+	}
 	first[len(first)-1].Source.Function = "mutatedSource"
 
 	second := Catalog()
@@ -1693,8 +1694,12 @@ func TestCatalogReturnsIndependentEntries(t *testing.T) {
 	if got := second[0].Claims[0].Proof.AllowedCalls[0].Name; got != "Sprintf" {
 		t.Errorf("Catalog() proof allowed call leaked mutation: %q", got)
 	}
-	if second[3].Claims[0].Waiver.Owner != runtimeContractWaiverOwner {
-		t.Errorf("Catalog() waiver leaked mutation: %q", second[3].Claims[0].Waiver.Owner)
+	for _, entry := range second {
+		for _, claim := range entry.Claims {
+			if claim.Waiver != nil && claim.Waiver.Owner != runtimeContractWaiverOwner {
+				t.Errorf("Catalog() waiver leaked mutation for %s: %q", entry.ID, claim.Waiver.Owner)
+			}
+		}
 	}
 	if second[len(second)-1].Source.Function != "resolveSessionTransportProvider" {
 		t.Errorf("Catalog() source leaked mutation: %q", second[len(second)-1].Source.Function)

@@ -6,11 +6,14 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worktree"
 )
@@ -32,6 +35,11 @@ func (s *poolWorkspaceSeedStore) Create(row beads.Bead) (beads.Bead, error) {
 }
 
 func newPoolLifecycleWorkspaceFixture(t *testing.T, change func(map[string]string)) (lifecycleAdmissionTransitionSetup, *agentBuildParams, SessionRequest, worktree.Spec) {
+	t.Helper()
+	return newPoolLifecycleWorkspaceFixtureWithFormula(t, change, "formula = \"review\"\nversion = 1\n\n[[steps]]\nid = \"work\"\ntitle = \"Review work\"\n", nil)
+}
+
+func newPoolLifecycleWorkspaceFixtureWithFormula(t *testing.T, change func(map[string]string), formulaText string, configure func(*config.City)) (lifecycleAdmissionTransitionSetup, *agentBuildParams, SessionRequest, worktree.Spec) {
 	t.Helper()
 	repo, base := worktreeTestRepo(t)
 	root := t.TempDir()
@@ -57,8 +65,11 @@ func newPoolLifecycleWorkspaceFixture(t *testing.T, change func(map[string]strin
 	if change != nil {
 		change(metadata)
 	}
-	fixture := newLifecycleAdmissionPolicyFixture(t, "formula = \"review\"\nversion = 1\n\n[[steps]]\nid = \"work\"\ntitle = \"Review work\"\n")
+	fixture := newLifecycleAdmissionPolicyFixture(t, formulaText)
 	fixture.cfg.Rigs[0].Path = repo
+	if configure != nil {
+		configure(fixture.cfg)
+	}
 	backing := &poolWorkspaceSeedStore{MemStore: &beads.MemStore{IDPrefix: "pilot-rig", HonorExplicitIDs: true}, metadata: metadata}
 	setup := newLifecycleAdmissionTransitionSetupWithBacking(t, fixture, backing, false)
 	var stderr strings.Builder
@@ -85,6 +96,70 @@ func newPoolLifecycleWorkspaceFixture(t *testing.T, change func(map[string]strin
 		beadStore: setup.cityStore, sessionCensusRigStores: setup.rigStores,
 	}
 	return setup, bp, SessionRequest{WorkBeadID: step.ID, WorkStoreRef: "rig:pilot"}, spec
+}
+
+// The cold probe's trusted rig identity must survive demand allocation and the
+// protected workspace check; accepting a bare rig alias at the binder would
+// hide the producer error and weaken the admission boundary.
+func TestPoolLifecycleWorkspaceColdDemandPreservesCanonicalStore(t *testing.T) {
+	for _, named := range []bool{false, true} {
+		name := "ephemeral pool"
+		if named {
+			name = "named backing pool"
+		}
+		t.Run(name, func(t *testing.T) {
+			// The v1 cooker rewrites default task steps to excluded "step"
+			// records. An explicit bug leaf exercises ordinary routed demand.
+			formulaText := "formula = \"review\"\nversion = 1\n\n[[steps]]\nid = \"work\"\ntitle = \"Review work\"\ntype = \"bug\"\nmetadata = { \"gc.routed_to\" = \"pilot/worker\" }\n"
+			setup, _, request, spec := newPoolLifecycleWorkspaceFixtureWithFormula(t, nil, formulaText, func(cfg *config.City) {
+				a := &cfg.Agents[0]
+				a.MinActiveSessions = intPtr(0)
+				a.MaxActiveSessions = intPtr(1)
+				a.ScaleCheck = "printf 0"
+				a.StartCommand = "true"
+				if named {
+					cfg.NamedSessions = []config.NamedSession{{Template: "pilot/worker", Mode: "on_demand"}}
+				}
+			})
+			ready, err := readyForControllerDemand(setup.store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			foundTrigger := false
+			for _, row := range ready {
+				if row.ID == request.WorkBeadID && row.Metadata[beadmeta.RoutedToMetadataKey] == "pilot/worker" {
+					foundTrigger = true
+				}
+			}
+			if !foundTrigger {
+				t.Fatal("fixture must expose the execution trigger as ready routed work")
+			}
+			var stderr strings.Builder
+			got := buildDesiredStateWithSessionBeads("pilot", setup.fixture.cityPath, time.Now().UTC(),
+				setup.fixture.cfg, runtime.NewFake(), setup.cityStore, setup.rigStores,
+				newSessionBeadSnapshot(nil), nil, &stderr)
+			if got.ScaleCheckCounts["pilot/worker"] != 1 {
+				t.Fatalf("cold demand = %d, want 1: %s", got.ScaleCheckCounts["pilot/worker"], stderr.String())
+			}
+			rows, err := setup.cityStore.List(beads.ListQuery{Type: "session"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(rows) != 1 || len(got.State) != 1 {
+				t.Fatalf("cold demand did not realize one verified session: sessions=%d desired=%d: %s", len(rows), len(got.State), stderr.String())
+			}
+			if rows[0].Metadata[beadmeta.TriggerBeadIDMetadataKey] != request.WorkBeadID ||
+				rows[0].Metadata[beadmeta.TriggerBeadStoreRefMetadataKey] != spec.StoreRef ||
+				rows[0].Metadata[beadmeta.WorkDirMetadataKey] != spec.Path ||
+				rows[0].Metadata[beadmeta.WorktreeSourceBeadMetadataKey] != spec.BeadID ||
+				rows[0].Metadata[beadmeta.WorktreeAttemptMetadataKey] != spec.AttemptID {
+				t.Fatalf("cold demand lost source/trigger custody: %+v", rows[0].Metadata)
+			}
+			if setup.store.sourceGenericWrites != 0 {
+				t.Fatal("cold demand patched a protected source")
+			}
+		})
+	}
 }
 
 func TestPoolLifecycleWorkspaceBindsSourceProvenanceToExecutionStep(t *testing.T) {
@@ -157,10 +232,17 @@ func TestPoolLifecycleWorkspacePreservesExistingOwnerAndNativeResume(t *testing.
 
 func TestPoolLifecycleWorkspaceRefusesForeignStoreAndBrokenLineage(t *testing.T) {
 	setup, bp, request, _ := newPoolLifecycleWorkspaceFixture(t, nil)
-	wrongStore := request
-	wrongStore.WorkStoreRef = "rig:other"
-	if _, err := verifiedPoolTriggerWorkDir(bp, &setup.fixture.cfg.Agents[0], "pilot/worker", wrongStore); err == nil {
-		t.Fatal("accepted foreign store")
+	// Preserve the signed topology: local bare aliases, unknown/foreign rigs
+	// and the city store cannot stand in for the source's canonical rig.
+	for _, ref := range []string{"pilot", "rig:unknown", "rig:other", "city:pilot"} {
+		wrongStore := request
+		wrongStore.WorkStoreRef = ref
+		if _, err := verifiedPoolTriggerWorkDir(bp, &setup.fixture.cfg.Agents[0], "pilot/worker", wrongStore); err == nil {
+			t.Fatalf("accepted non-authoritative store %q", ref)
+		}
+	}
+	if _, err := verifiedPoolTriggerWorkDir(bp, &setup.fixture.cfg.Agents[0], "pilot/worker", request); err != nil {
+		t.Fatalf("canonical local store control must remain valid: %v", err)
 	}
 	step, err := setup.store.Get(request.WorkBeadID)
 	if err != nil {
