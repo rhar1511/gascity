@@ -544,7 +544,9 @@ func buildDesiredStateWithSessionBeadsAt(
 			continue
 		}
 		if s, ok := rigStores[rig.Name]; ok {
-			activeStores = append(activeStores, activeStore{store: s, ref: rig.Name})
+			// Demand carries this ref through allocation to protected workspace
+			// verification, where only the routed store's canonical identity is valid.
+			activeStores = append(activeStores, activeStore{store: s, ref: "rig:" + rig.Name})
 		}
 	}
 	// The store a control dispatcher's rows actually live in, asked once per
