@@ -578,6 +578,24 @@ func (s *emittingClassStore) ControllerMetadataTransitionWriterHandle() (beads.C
 	return beads.ControllerMetadataTransitionWriterFor(s.Store)
 }
 
+// RevisionTransitionPatchWriterHandle keeps protected source patches on the
+// backing store's typed port, outside the generic bead event stream.
+func (s *emittingClassStore) RevisionTransitionPatchWriterHandle() (beads.RevisionTransitionPatchWriter, bool) {
+	if s == nil {
+		return nil, false
+	}
+	return beads.RevisionTransitionPatchWriterFor(s.Store)
+}
+
+// RevisionTransitionPatchReceiptReaderHandle preserves exact receipt reads
+// through the backing store's lifetime and authorization boundary.
+func (s *emittingClassStore) RevisionTransitionPatchReceiptReaderHandle() (beads.RevisionTransitionPatchReceiptReader, bool) {
+	if s == nil {
+		return nil, false
+	}
+	return beads.RevisionTransitionPatchReceiptReaderFor(s.Store)
+}
+
 // PrivateEvidenceMetadataCASWriterHandle forwards owner-index writes without
 // exposing their private metadata through the generic bead event stream.
 func (s *emittingClassStore) PrivateEvidenceMetadataCASWriterHandle() (beads.PrivateEvidenceMetadataCASWriter, bool) {

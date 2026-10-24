@@ -617,6 +617,12 @@ func TestEmittingClassStoreDoesNotInventPrivateEvidenceCapabilities(t *testing.T
 			if reader, ok := beads.PrivateEvidenceArchiveReaderFor(store); ok || reader != nil {
 				t.Fatal("emitter invented a private archive reader")
 			}
+			if writer, ok := beads.RevisionTransitionPatchWriterFor(store); ok || writer != nil {
+				t.Fatal("emitter invented lifecycle patch authority")
+			}
+			if reader, ok := beads.RevisionTransitionPatchReceiptReaderFor(store); ok || reader != nil {
+				t.Fatal("emitter invented exact patch receipt reads")
+			}
 		})
 	}
 }
@@ -629,7 +635,7 @@ func TestEmittingClassStorePrivateEvidenceCapabilitiesFollowNativeLifetime(t *te
 			defer server.Close()
 			transport := beads.NewBdStore("", nil, beads.WithBdStorePrivateEvidenceHTTP(beads.PrivateEvidenceHTTPConfig{
 				Endpoint: transportConfig.Endpoint, ProjectID: transportConfig.ProjectID, Database: transportConfig.Database,
-				ScopeRef: "city:alpha", TokenFile: transportConfig.TokenFile, RevisionTransitions: true,
+				ScopeRef: "city:alpha", TokenFile: transportConfig.TokenFile, RevisionTransitions: true, RevisionTransitionPatches: true,
 			}))
 			native := beads.NewNativeDoltStoreOverStorageForTest(nil)
 			beads.WithNativeControllerTransport(transport)(native)
@@ -638,6 +644,12 @@ func TestEmittingClassStorePrivateEvidenceCapabilitiesFollowNativeLifetime(t *te
 					t.Error(err)
 				}
 			})
+			if _, ok := beads.RevisionTransitionPatchWriterFor(native); !ok {
+				t.Fatal("configured native backing missing lifecycle patch writer")
+			}
+			if _, ok := beads.RevisionTransitionPatchReceiptReaderFor(native); !ok {
+				t.Fatal("configured native backing missing exact patch receipt reader")
+			}
 			wrapped := splitClassRoutes(native).withCLIEmission(cityPath).stores[coordclass.ClassGraph]
 			writer, ok := beads.PrivateEvidenceMetadataCASWriterFor(wrapped)
 			if !ok || writer == nil {
@@ -646,6 +658,14 @@ func TestEmittingClassStorePrivateEvidenceCapabilitiesFollowNativeLifetime(t *te
 			reader, ok := beads.PrivateEvidenceArchiveReaderFor(wrapped)
 			if !ok || reader == nil {
 				t.Fatal("emitter dropped the native private archive reader")
+			}
+			patchWriter, ok := beads.RevisionTransitionPatchWriterFor(wrapped)
+			if !ok || patchWriter == nil {
+				t.Fatal("emitter dropped the native lifecycle patch writer")
+			}
+			patchReader, ok := beads.RevisionTransitionPatchReceiptReaderFor(wrapped)
+			if !ok || patchReader == nil {
+				t.Fatal("emitter dropped the native exact patch receipt reader")
 			}
 
 			want := beads.ErrStoreClosed
@@ -663,11 +683,23 @@ func TestEmittingClassStorePrivateEvidenceCapabilitiesFollowNativeLifetime(t *te
 			if _, err := reader.ListPrivateEvidenceArchives("owner", "attempt"); !errors.Is(err, want) {
 				t.Fatalf("retained private archive reader: %v, want %v", err, want)
 			}
+			if _, err := patchWriter.TransitionPatch("owner", beads.RevisionTransitionPatchRequest{}); !errors.Is(err, want) {
+				t.Fatalf("retained lifecycle patch writer: %v, want %v", err, want)
+			}
+			if _, _, err := patchReader.ReadRevisionTransitionPatchReceipt("receipt"); !errors.Is(err, want) {
+				t.Fatalf("retained exact patch receipt reader: %v, want %v", err, want)
+			}
 			if handle, ok := beads.PrivateEvidenceMetadataCASWriterFor(wrapped); ok || handle != nil {
 				t.Fatal("terminal native store still advertises private metadata authority")
 			}
 			if handle, ok := beads.PrivateEvidenceArchiveReaderFor(wrapped); ok || handle != nil {
 				t.Fatal("terminal native store still advertises private archive reads")
+			}
+			if handle, ok := beads.RevisionTransitionPatchWriterFor(wrapped); ok || handle != nil {
+				t.Fatal("terminal native store still advertises lifecycle patch authority")
+			}
+			if handle, ok := beads.RevisionTransitionPatchReceiptReaderFor(wrapped); ok || handle != nil {
+				t.Fatal("terminal native store still advertises exact patch receipt reads")
 			}
 			if _, err := os.Stat(cityJournalPath(cityPath)); !os.IsNotExist(err) {
 				t.Fatalf("private capability calls reached the public bead journal: %v", err)

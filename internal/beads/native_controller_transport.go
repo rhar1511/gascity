@@ -259,3 +259,48 @@ func (w nativeControllerCapabilities) CompareAndSetMetadataKeyWithReceipt(id, ke
 	})
 	return result, won, err
 }
+
+// RevisionTransitionPatchWriterHandle forwards typed patch writes through the native lifetime fence.
+func (s *NativeDoltStore) RevisionTransitionPatchWriterHandle() (RevisionTransitionPatchWriter, bool) {
+	if _, ok := RevisionTransitionPatchWriterFor(s.controllerTransportForCapabilities()); !ok {
+		return nil, false
+	}
+	return nativeControllerCapabilities{store: s}, true
+}
+
+// RevisionTransitionPatchReceiptReaderHandle forwards exact receipt reads through the native lifetime fence.
+func (s *NativeDoltStore) RevisionTransitionPatchReceiptReaderHandle() (RevisionTransitionPatchReceiptReader, bool) {
+	if _, ok := RevisionTransitionPatchReceiptReaderFor(s.controllerTransportForCapabilities()); !ok {
+		return nil, false
+	}
+	return nativeControllerCapabilities{store: s}, true
+}
+
+func (w nativeControllerCapabilities) TransitionPatch(issueID string, request RevisionTransitionPatchRequest) (RevisionTransitionPatchResult, error) {
+	var result RevisionTransitionPatchResult
+	err := w.store.withControllerTransport(func(transport *BdStore) error {
+		writer, ok := RevisionTransitionPatchWriterFor(transport)
+		if !ok {
+			return ErrRevisionTransitionPatchUnavailable
+		}
+		var err error
+		result, err = writer.TransitionPatch(issueID, request)
+		return err
+	})
+	return result, err
+}
+
+func (w nativeControllerCapabilities) ReadRevisionTransitionPatchReceipt(receiptID string) (RevisionTransitionPatchReceipt, bool, error) {
+	var result RevisionTransitionPatchReceipt
+	var found bool
+	err := w.store.withControllerTransport(func(transport *BdStore) error {
+		reader, ok := RevisionTransitionPatchReceiptReaderFor(transport)
+		if !ok {
+			return ErrRevisionTransitionPatchUnavailable
+		}
+		var err error
+		result, found, err = reader.ReadRevisionTransitionPatchReceipt(receiptID)
+		return err
+	})
+	return result, found, err
+}
