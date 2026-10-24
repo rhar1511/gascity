@@ -208,3 +208,75 @@ func TestLifecycleReadScopeRequiresConfiguredTransitionTransport(t *testing.T) {
 		})
 	}
 }
+
+func TestNativeLifecycleReadScopePreservesAuthorityAndLifetime(t *testing.T) {
+	const scope = "city:alpha/rig:fixture"
+	t.Run("metadata receipt", func(t *testing.T) {
+		request := controllerTransitionTestRequest()
+		request.Scope, request.Kind = scope, privateEvidenceLifecycleAdmissionAttachmentKind
+		receipt := controllerTransitionTestReceipt(t, request, request.Actor)
+		transport := &controllerTransitionTestTransport{handler: controllerTransitionTestHandler(&receipt, false)}
+		leaf := controllerTransitionTestStore(t, transport)
+		WithBdStorePrivateEvidenceLifecycleReadScope(scope)(leaf)
+		native := newNativeDoltStoreForTest(nil, WithNativeControllerTransport(leaf))
+		reader, ok := ControllerMetadataTransitionReceiptReaderFor(native)
+		if !ok {
+			t.Fatal("native store lost its configured lifecycle receipt reader")
+		}
+		if _, found, err := reader.ControllerMetadataTransitionReceipt("gc/one", request.ReceiptID); err != nil || !found {
+			t.Fatalf("read native lifecycle receipt: found=%v err=%v", found, err)
+		}
+		writer, ok := ControllerMetadataTransitionWriterFor(native)
+		if !ok {
+			t.Fatal("Q43 handle required by the attachment adapter is unavailable")
+		}
+		if _, err := writer.TransitionMetadata("gc/one", request); err == nil {
+			t.Fatal("native receipt read scope authorized a lifecycle metadata write")
+		}
+		if transport.postCount != 0 {
+			t.Fatal("native receipt scope submitted an HTTP mutation")
+		}
+		reads := transport.receiptGetCount
+		if err := native.CloseStore(); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := reader.ControllerMetadataTransitionReceipt("gc/one", request.ReceiptID); !errors.Is(err, ErrStoreClosed) {
+			t.Fatalf("retained metadata reader after close: %v", err)
+		}
+		if transport.receiptGetCount != reads {
+			t.Fatal("retained reader reached HTTP after its native owner closed")
+		}
+	})
+	t.Run("patch receipt", func(t *testing.T) {
+		request := controllerTransitionPatchTestRequest()
+		request.Scope, request.Kind = scope, "lifecycle_source_workspace_v1"
+		receipt := controllerTransitionPatchTestReceipt(t, request, request.Actor)
+		transport := &controllerTransitionTestTransport{handler: controllerTransitionPatchTestHandler(receipt, http.StatusOK)}
+		leaf := controllerTransitionTestStore(t, transport)
+		WithBdStorePrivateEvidenceLifecycleReadScope(scope)(leaf)
+		native := newNativeDoltStoreForTest(nil, WithNativeControllerTransport(leaf))
+		reader, ok := RevisionTransitionPatchReceiptReaderFor(native)
+		if !ok {
+			t.Fatal("native store lost its configured patch receipt reader")
+		}
+		if _, found, err := reader.ReadRevisionTransitionPatchReceipt(request.ReceiptID); err != nil || !found {
+			t.Fatalf("read native patch receipt: found=%v err=%v", found, err)
+		}
+		if writer, ok := RevisionTransitionPatchWriterFor(native); ok || writer != nil {
+			t.Fatal("native receipt read scope exposed a protected patch writer")
+		}
+		// A retained forwarding handle also rechecks the transport's authority.
+		if _, err := (nativeControllerCapabilities{store: native}).TransitionPatch("gc-1", request); !errors.Is(err, ErrRevisionTransitionPatchUnavailable) {
+			t.Fatalf("retained native patch write: %v; want unavailable", err)
+		}
+		if transport.postCount != 0 {
+			t.Fatal("native receipt scope submitted an HTTP mutation")
+		}
+		if err := native.CloseStore(); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := reader.ReadRevisionTransitionPatchReceipt(request.ReceiptID); !errors.Is(err, ErrStoreClosed) {
+			t.Fatalf("retained patch reader after close: %v", err)
+		}
+	})
+}
