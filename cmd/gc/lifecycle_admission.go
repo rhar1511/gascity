@@ -1122,8 +1122,27 @@ func lifecycleStoreForRef(cityPath string, cfg *config.City, ref string) (beads.
 			return nil, err
 		}
 		if cfg != nil && cfg.Lifecycle.AdmissionEnabled {
-			if leaf, ok := controllerBdWriteLeaf(store); ok {
+			leaf, haveLeaf := controllerBdWriteLeaf(store)
+			var native *beads.NativeDoltStore
+			if !haveLeaf {
+				native, _ = controllerPermitStoreLeaf(store).(*beads.NativeDoltStore)
+				if native != nil {
+					options := privateEvidenceOptionsForStore(cfg, path, cityPath)
+					if len(options) != 0 {
+						leaf = beads.NewBdStore(path, func(string, string, ...string) ([]byte, error) {
+							return nil, errors.New("native lifecycle receipt transport is HTTP-only")
+						}, options...)
+						haveLeaf = true
+					}
+				}
+			}
+			if haveLeaf {
+				// Match the existing BdStore receipt lane without installing a
+				// lifecycle write scope or a host protected-mutation issuer.
 				beads.WithBdStorePrivateEvidenceLifecycleReadScope(worklifecycle.ScopeForStore(censusCityName(cfg), ref))(leaf)
+				if native != nil {
+					beads.WithNativeControllerTransport(leaf)(native)
+				}
 			}
 		}
 		return store, nil

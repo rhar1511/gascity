@@ -1,8 +1,9 @@
 package beads
 
 // WithNativeControllerTransport attaches a controller-configured HTTP transport.
-// The caller validates its exact scope and protected writer before publishing
-// the store. Ordinary queries and mutations retain the native implementation.
+// The caller validates its exact scope and, when enabling protected writes,
+// its protected writer before publishing the store. A lifecycle receipt reader
+// binds only its read scope. Ordinary queries and mutations remain native.
 func WithNativeControllerTransport(transport *BdStore) NativeDoltStoreOption {
 	return func(s *NativeDoltStore) {
 		if s == nil {

@@ -2,9 +2,11 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -19,6 +21,89 @@ import (
 	"github.com/gastownhall/gascity/internal/rollout"
 	"github.com/gastownhall/gascity/internal/worklifecycle"
 )
+
+func TestLifecycleStoreForRefNativeReceiptReaders(t *testing.T) {
+	for _, state := range []string{"configured", "disabled admission", "absent transport", "foreign transport", "disabled transitions", "invalid token", "read-only", "closed"} {
+		t.Run(state, func(t *testing.T) {
+			cityPath := t.TempDir()
+			rigPath := filepath.Join(cityPath, "fixture")
+			if err := os.Mkdir(rigPath, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"alpha\"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			token := filepath.Join(cityPath, "fixture.token")
+			if err := os.WriteFile(token, []byte("private-test-token"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg := &config.City{
+				Workspace: config.Workspace{Name: "alpha"},
+				Rigs:      []config.Rig{{Name: "fixture", Path: rigPath}},
+				Lifecycle: config.LifecycleConfig{AdmissionEnabled: state != "disabled admission"},
+				Beads: config.BeadsConfig{PrivateEvidence: map[string]config.PrivateEvidenceTransportConfig{
+					"rig:fixture": {Endpoint: "http://127.0.0.1:1", ProjectID: "test-project", Database: "fixture", TokenFile: token, RevisionTransitions: true},
+				}},
+			}
+			entry := cfg.Beads.PrivateEvidence["rig:fixture"]
+			switch state {
+			case "absent transport":
+				delete(cfg.Beads.PrivateEvidence, "rig:fixture")
+			case "foreign transport":
+				delete(cfg.Beads.PrivateEvidence, "rig:fixture")
+				cfg.Beads.PrivateEvidence["rig:other"] = entry
+			case "disabled transitions":
+				entry.RevisionTransitions = false
+				cfg.Beads.PrivateEvidence["rig:fixture"] = entry
+			case "invalid token":
+				entry.TokenFile = filepath.Join(cityPath, "absent.token")
+				cfg.Beads.PrivateEvidence["rig:fixture"] = entry
+			}
+			// This fixture exercises composition, not native SQL. No ordinary
+			// query is made on the zero-value native store.
+			native := &beads.NativeDoltStore{}
+			if state == "read-only" {
+				beads.WithProxiedReadOnly()(native)
+			}
+			if state == "closed" {
+				if err := native.CloseStore(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			previous := openStoreFactoryForCity
+			openStoreFactoryForCity = func(_ context.Context, opts beads.StoreOpenOptions) (beads.StoreOpenResult, error) {
+				if opts.ScopeRoot != rigPath || opts.CityPath != cityPath {
+					t.Fatalf("opened another store: %q / %q", opts.ScopeRoot, opts.CityPath)
+				}
+				return beads.StoreOpenResult{Store: native}, nil
+			}
+			t.Cleanup(func() { openStoreFactoryForCity = previous })
+			store, err := lifecycleStoreForRef(cityPath, cfg, "rig:fixture")
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, adapterErr := worklifecycle.NewAdmissionAttachmentAdapter(store)
+			reader, sourceOK := beads.DecisionFrontierSourceReaderFor(store)
+			_, receiptOK := beads.ControllerMetadataTransitionReceiptReaderFor(store)
+			_, patchReceiptOK := beads.RevisionTransitionPatchReceiptReaderFor(store)
+			want := state == "configured"
+			if (adapterErr == nil) != want || sourceOK != want || receiptOK != want || patchReceiptOK != want {
+				t.Fatalf("native receipt composition: adapter=%v source=%t metadata=%t patch=%t; want available=%t", adapterErr, sourceOK, receiptOK, patchReceiptOK, want)
+			}
+			if writer, ok := beads.RevisionTransitionPatchWriterFor(store); ok || writer != nil {
+				t.Fatal("receipt read scope acquired protected patch-write authority")
+			}
+			if want {
+				if err := native.CloseStore(); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := reader.DecisionFrontierSourceSnapshot("fixture-source"); !errors.Is(err, beads.ErrStoreClosed) {
+					t.Fatalf("retained reader after native close: %v; want closed", err)
+				}
+			}
+		})
+	}
+}
 
 func TestLifecycleAdmissionHoldsSignedV2UntilAttachmentAndPolicyProof(t *testing.T) {
 	store, cfg, cityPath := lifecycleAdmissionFixture(t)
