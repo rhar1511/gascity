@@ -277,20 +277,23 @@ func (p *Provider) start(ctx context.Context, name string, cfg runtime.Config) e
 	// session_setup and inject the startup prime into a working session.
 	startupText := startupDeliveryText(cfg)
 	if !adopted && info.PaneID != "" && (startupText != "" || hasSessionSetup(cfg)) {
-		// A freshly-spawned agent boots through a shell→TUI handoff before its
-		// input prompt is listening; a paste or submit delivered in that window is
-		// silently swallowed, leaving the agent idle forever instead of running its
-		// first turn. Wait for herdr to report the agent idle (its prompt rendered)
-		// before delivering, mirroring how tmux's doStartSession waits for readiness
-		// before its Step-5.5 session_setup and Step-6 startup nudge. Idle is
-		// necessary but not sufficient — input-readiness lags it — but deliverNudge
-		// delegates the type+submit handshake to herdr ≥0.7.5's native `agent
-		// prompt`, which owns landing the input reliably rather than trusting a bare
-		// `pane run` paste.
-		// Bounded and best-effort: on a boot that never idles we deliver anyway (no
-		// worse than the prior unconditional send), and the reconciler tolerates a
-		// slow Start (pendingCreateNeverStartedTimeout = 10m).
-		idleOutcome := p.waitForIdleOutcome(ctx, name, startupNudgeIdleTimeout)
+		// Raw wrappers can still be preparing after their root process replaces
+		// the shell. When the provider declares an agent child, absence is not
+		// permission to paste into that wrapper. Wait for detection on the bound
+		// pane before using native first-turn delivery. Real shells keep their
+		// unregistered-pane fallback.
+		var idleOutcome idleWaitOutcome
+		wrappedAgent := spec.Raw != "" && expectsDetectedAgent(cfg.ProcessNames)
+		if wrappedAgent {
+			var readyErr error
+			idleOutcome, readyErr = p.waitForWrappedStartup(ctx, info.PaneID, startupNudgeIdleTimeout)
+			if readyErr != nil {
+				p.recordStartupDeliveryUnconfirmed(name, info.PaneID, idleOutcome, readyErr)
+				return nil // the live wrapper must not trigger a respawn storm
+			}
+		} else {
+			idleOutcome = p.waitForIdleOutcome(ctx, name, startupNudgeIdleTimeout)
+		}
 		// session_setup runs host-side ("in gc's process via sh -c", per the Config
 		// contract), so herdr can honor it the same way tmux does. Non-fatal, and
 		// ordered before the first turn so the agent's workspace is prepared when
@@ -307,12 +310,65 @@ func (p *Provider) start(ctx context.Context, name string, cfg runtime.Config) e
 		// path nudgeStalledPoolClaims remains the reconcile-tick backstop of
 		// last resort.
 		if startupText != "" {
-			if err := p.c.deliverStartupTurn(ctx, info.PaneID, startupText); err != nil {
+			if err := p.c.deliverStartupTurnWithFallback(ctx, info.PaneID, startupText, !wrappedAgent); err != nil {
 				p.recordStartupDeliveryUnconfirmed(name, info.PaneID, idleOutcome, err)
 			}
 		}
 	}
 	return nil
+}
+
+// expectsDetectedAgent distinguishes preparation wrappers for supported agent
+// processes from raw shells that intentionally have no Herdr agent identity.
+func expectsDetectedAgent(processNames []string) bool {
+	for _, name := range processNames {
+		if herdrAgentKinds[filepath.Base(name)] {
+			return true
+		}
+	}
+	return false
+}
+
+// waitForWrappedStartup shares the existing readiness budget between child
+// detection and idle waiting. Detection is scoped to the already-owned pane;
+// a display name or an unrelated agent is never a substitute.
+func (p *Provider) waitForWrappedStartup(ctx context.Context, paneID string, timeout time.Duration) (idleWaitOutcome, error) {
+	readyCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	for {
+		info, found, err := p.c.getAgent(readyCtx, paneID)
+		if err != nil {
+			return idleWaitError, fmt.Errorf("waiting for wrapped agent detection: %w", err)
+		}
+		if found {
+			if info.PaneID != paneID {
+				return idleWaitError, fmt.Errorf("wrapped agent detection returned pane %q, want %q", info.PaneID, paneID)
+			}
+			if info.AgentStatus == "blocked" {
+				return idleWaitError, fmt.Errorf("wrapped agent is blocked before startup delivery")
+			}
+			deadline, _ := readyCtx.Deadline()
+			outcome := p.waitForTargetIdleOutcome(readyCtx, paneID, time.Until(deadline))
+			if ctx.Err() != nil {
+				return outcome, ctx.Err()
+			}
+			// Once detection succeeded, an idle timeout retains the established
+			// best-effort native prompt handshake. Other failures cannot justify
+			// the unregistered-pane paste fallback.
+			if outcome == idleWaitTimeout || readyCtx.Err() == context.DeadlineExceeded {
+				return idleWaitTimeout, nil
+			}
+			if outcome != idleWaitReached {
+				return outcome, fmt.Errorf("wrapped agent readiness unconfirmed: %s", outcome)
+			}
+			return outcome, nil
+		}
+		select {
+		case <-readyCtx.Done():
+			return idleWaitNoAgent, fmt.Errorf("wrapped agent not detected: %w", readyCtx.Err())
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
 }
 
 // metaStartupUnconfirmed is the sidecar key recording that this life's startup

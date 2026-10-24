@@ -573,6 +573,12 @@ var startupConfirmStates = []string{"working", "done", "blocked"}
 // Unregistered panes (raw shells) keep the best-effort paste+settle+Enter
 // path. A non-nil error means the turn could not be confirmed submitted.
 func (c *client) deliverStartupTurn(ctx context.Context, paneID, text string) error {
+	return c.deliverStartupTurnWithFallback(ctx, paneID, text, true)
+}
+
+// deliverStartupTurnWithFallback can require native agent confirmation for a
+// wrapper whose detected child may exit between readiness and submission.
+func (c *client) deliverStartupTurnWithFallback(ctx context.Context, paneID, text string, allowShellFallback bool) error {
 	args := []string{"agent", "prompt", paneID, text, "--wait"}
 	for _, s := range startupConfirmStates {
 		args = append(args, "--until", s)
@@ -582,7 +588,7 @@ func (c *client) deliverStartupTurn(ctx context.Context, paneID, text string) er
 	if err == nil {
 		return nil
 	}
-	if c.targetHasNoNamedAgent(ctx, paneID, err) {
+	if allowShellFallback && c.targetHasNoNamedAgent(ctx, paneID, err) {
 		return c.pasteAndSubmit(ctx, paneID, text)
 	}
 	switch herdrErrorCode(err) {

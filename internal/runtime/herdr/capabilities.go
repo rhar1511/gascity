@@ -45,17 +45,23 @@ const (
 // spelling) — vs the pane-polling tmux does — and returns the verdict
 // distinctly instead of discarding it.
 func (p *Provider) waitForIdleOutcome(ctx context.Context, name string, timeout time.Duration) idleWaitOutcome {
+	return p.waitForTargetIdleOutcome(ctx, herdrAgentName(name), timeout)
+}
+
+// waitForTargetIdleOutcome also accepts bound pane IDs, which must not be
+// normalized as logical agent names.
+func (p *Provider) waitForTargetIdleOutcome(ctx context.Context, target string, timeout time.Duration) idleWaitOutcome {
 	ms := int(timeout / time.Millisecond)
 	if ms < 1 {
 		ms = 1
 	}
-	_, err := p.c.run(ctx, "agent", "wait", herdrAgentName(name), "--until", "idle", "--timeout", strconv.Itoa(ms))
+	_, err := p.c.run(ctx, "agent", "wait", target, "--until", "idle", "--timeout", strconv.Itoa(ms))
 	switch {
 	case err == nil:
 		return idleWaitReached
 	case herdrErrorCode(err) == "timeout":
 		return idleWaitTimeout
-	case p.c.targetHasNoNamedAgent(ctx, herdrAgentName(name), err):
+	case p.c.targetHasNoNamedAgent(ctx, target, err):
 		return idleWaitNoAgent
 	default:
 		return idleWaitError
