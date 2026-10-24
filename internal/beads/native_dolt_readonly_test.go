@@ -98,6 +98,8 @@ var nativeStoreMethodKinds = map[string]nativeStoreMethodKind{
 	"DecisionFrontierSourceReaderHandle":              nativeStoreLifecycle,
 	"RevisionTransitionReceiptReaderHandle":           nativeStoreLifecycle,
 	"RevisionTransitionWriterHandle":                  nativeStoreLifecycle,
+	"RevisionTransitionPatchReceiptReaderHandle":      nativeStoreLifecycle,
+	"RevisionTransitionPatchWriterHandle":             nativeStoreLifecycle,
 }
 
 // countingStorageSpy fails the test if the store reaches storage at all.
