@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -30,11 +29,11 @@ func TestBeadsAdmissionNativeSourceUsesScopedAuthoritativeSnapshot(t *testing.T)
 	t.Setenv("GC_CITY", fixture.cityPath)
 	var mu sync.Mutex
 	var requests []string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server, transport := privateEvidenceHTTPTestTransport(t, "native-project", "native-database", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		requests = append(requests, r.Method+" "+r.URL.Path)
 		mu.Unlock()
-		if r.Header.Get("Authorization") != "Bearer native-source-token" || r.Header.Get("Bd-Project-Id") != "native-project" {
+		if r.Header.Get("Authorization") != "Bearer test-token" || r.Header.Get("Bd-Project-Id") != "native-project" {
 			t.Error("native source request lost its configured transport identity")
 			http.Error(w, "unexpected transport identity", http.StatusForbidden)
 			return
@@ -70,10 +69,6 @@ func TestBeadsAdmissionNativeSourceUsesScopedAuthoritativeSnapshot(t *testing.T)
 		}
 	}))
 	defer server.Close()
-	tokenPath := filepath.Join(t.TempDir(), "source-token")
-	if err := os.WriteFile(tokenPath, []byte("native-source-token\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	configPath := filepath.Join(fixture.cityPath, "city.toml")
 	data, err := os.ReadFile(configPath)
 	if err != nil {
@@ -82,12 +77,12 @@ func TestBeadsAdmissionNativeSourceUsesScopedAuthoritativeSnapshot(t *testing.T)
 	data = []byte(strings.Replace(string(data), `provider = "file"`, `provider = "bd"`, 1))
 	data = append(data, []byte(fmt.Sprintf(`
 [beads.private_evidence."rig:pilot"]
-revision_transitions = true
+revision_transitions = %t
 endpoint = %q
-project_id = "native-project"
-database = "native-database"
+project_id = %q
+database = %q
 token_file = %q
-`, server.URL, tokenPath))...)
+`, transport.RevisionTransitions, transport.Endpoint, transport.ProjectID, transport.Database, transport.TokenFile))...)
 	if err := os.WriteFile(configPath, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -170,11 +165,11 @@ func TestBeadsAdmissionNativeAttachBindsOnlyVerifiedAdmissionScope(t *testing.T)
 				ToVersion string `json:"to_version"`
 			}
 			var committed *receiptWire
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			server, transport := privateEvidenceHTTPTestTransport(t, "native-project", "native-database", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				mu.Lock()
 				defer mu.Unlock()
 				w.Header().Set("Content-Type", "application/json")
-				if r.Header.Get("Authorization") != "Bearer native-source-token" || r.Header.Get("Bd-Project-Id") != "native-project" {
+				if r.Header.Get("Authorization") != "Bearer test-token" || r.Header.Get("Bd-Project-Id") != "native-project" {
 					t.Error("native attachment lost its exact configured transport identity")
 					http.Error(w, "unexpected transport identity", http.StatusForbidden)
 					return
@@ -256,10 +251,6 @@ func TestBeadsAdmissionNativeAttachBindsOnlyVerifiedAdmissionScope(t *testing.T)
 				}
 			}))
 			defer server.Close()
-			tokenPath := filepath.Join(t.TempDir(), "token")
-			if err := os.WriteFile(tokenPath, []byte("native-source-token"), 0o600); err != nil {
-				t.Fatal(err)
-			}
 			configPath := filepath.Join(f.cityPath, "city.toml")
 			data, err := os.ReadFile(configPath)
 			if err != nil {
@@ -268,12 +259,12 @@ func TestBeadsAdmissionNativeAttachBindsOnlyVerifiedAdmissionScope(t *testing.T)
 			data = []byte(strings.Replace(string(data), `provider = "file"`, `provider = "bd"`, 1))
 			data = append(data, []byte(fmt.Sprintf(`
 [beads.private_evidence."rig:pilot"]
-revision_transitions = true
+revision_transitions = %t
 endpoint = %q
-project_id = "native-project"
-database = "native-database"
+project_id = %q
+database = %q
 token_file = %q
-`, server.URL, tokenPath))...)
+`, transport.RevisionTransitions, transport.Endpoint, transport.ProjectID, transport.Database, transport.TokenFile))...)
 			if err := os.WriteFile(configPath, data, 0o600); err != nil {
 				t.Fatal(err)
 			}

@@ -284,7 +284,7 @@ func controllerPermitTestTransport(t *testing.T) (*httptest.Server, config.Priva
 		"issues.batchApply", "issues.batchApplyReceipt", "issues.casMetadata", "issues.create", "issues.get",
 		"issues.protectedMutation", "issues.sourceSnapshot", "issues.transitionMetadata", "issues.transitionReceipt.get", "project.enforce",
 	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return privateEvidenceHTTPTestTransport(t, projectID, database, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v0/beads/context":
 			w.Header().Set("Content-Type", "application/json")
@@ -299,6 +299,14 @@ func controllerPermitTestTransport(t *testing.T) (*httptest.Server, config.Priva
 			http.NotFound(w, r)
 		}
 	}))
+}
+
+// privateEvidenceHTTPTestTransport owns the shared loopback server, synthetic
+// credential and exact project/database configuration for HTTP boundary tests.
+func privateEvidenceHTTPTestTransport(t *testing.T, projectID, database string, handler http.Handler) (*httptest.Server, config.PrivateEvidenceTransportConfig) {
+	t.Helper()
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
 	tokenFile := filepath.Join(t.TempDir(), "beads-token")
 	if err := os.WriteFile(tokenFile, []byte("test-token\n"), 0o600); err != nil {
 		t.Fatal(err)
