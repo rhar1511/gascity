@@ -117,7 +117,11 @@ func attachBeadsAdmission(draftPath, storeRef, keyFile string, stderr io.Writer)
 	if err != nil {
 		return empty, err
 	}
-	if leaf, ok := controllerBdWriteLeaf(context.sourceLeg.store); ok {
+	leaf := context.sourceTransport
+	if leaf == nil {
+		leaf, _ = controllerBdWriteLeaf(context.sourceLeg.store)
+	}
+	if leaf != nil {
 		// Bind only the signed admission scope. Controller lifecycle patches
 		// still require their separate host-authorized permit capability.
 		beads.WithBdStorePrivateEvidenceAdmissionScope(receipt.Scope)(leaf)

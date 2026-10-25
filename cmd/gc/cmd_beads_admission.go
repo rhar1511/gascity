@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -132,6 +133,9 @@ type beadsAdmissionContext struct {
 	rigStores map[string]beads.Store
 	legs      []classStoreCandidate
 	sourceLeg classStoreCandidate
+	// A native source keeps ordinary operations in SQL. Only its scoped
+	// snapshot/receipt transport is bound here; no host writer is installed.
+	sourceTransport *beads.BdStore
 }
 
 func openBeadsAdmissionContext(storeRef string, stderr io.Writer) (*beadsAdmissionContext, error) {
@@ -149,7 +153,8 @@ func openBeadsAdmissionContext(storeRef string, stderr io.Writer) (*beadsAdmissi
 	if !cfg.Lifecycle.AdmissionEnabled || cfg.Lifecycle.AdmissionV2PrimaryAuthority == "" {
 		return nil, fmt.Errorf("v2 lifecycle admission is disabled or has no primary authority")
 	}
-	if _, _, err := resolveBeadsMetadataCASStore(cfg, runtimeContext.CityPath, storeRef); err != nil {
+	scopeRoot, canonicalRef, err := resolveBeadsMetadataCASStore(cfg, runtimeContext.CityPath, storeRef)
+	if err != nil {
 		return nil, err
 	}
 	context := &beadsAdmissionContext{cityPath: runtimeContext.CityPath, cityName: loadedCityName(cfg, runtimeContext.CityPath), cfg: cfg}
@@ -186,6 +191,17 @@ func openBeadsAdmissionContext(storeRef string, stderr io.Writer) (*beadsAdmissi
 	}
 	if !found {
 		return nil, fmt.Errorf("source store is not in the current work topology")
+	}
+	if native, ok := controllerPermitStoreLeaf(context.sourceLeg.store).(*beads.NativeDoltStore); ok && native != nil {
+		options := privateEvidenceOptionsForStoreRef(cfg, canonicalRef)
+		if len(options) != 0 {
+			transport := beads.NewBdStore(scopeRoot, func(string, string, ...string) ([]byte, error) {
+				return nil, errors.New("native admission source transport is HTTP-only")
+			}, options...)
+			beads.WithBdStorePrivateEvidenceLifecycleReadScope(worklifecycle.ScopeForStore(context.cityName, canonicalRef))(transport)
+			beads.WithNativeControllerTransport(transport)(native)
+			context.sourceTransport = transport
+		}
 	}
 	ready = true
 	return context, nil

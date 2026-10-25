@@ -857,6 +857,7 @@ go_test(
         "cmd_bd_show_watch_test.go",
         "cmd_bd_store_bridge_test.go",
         "cmd_bd_test.go",
+        "cmd_beads_admission_native_transport_test.go",
         "cmd_beads_admission_signing_other_test.go",
         "cmd_beads_admission_signing_unix_test.go",
         "cmd_beads_admission_test.go",
