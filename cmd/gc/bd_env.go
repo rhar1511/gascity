@@ -391,6 +391,13 @@ func privateEvidenceOptionsForStore(cfg *config.City, storeDir, cityPath string)
 		return nil
 	}
 	storeRef := workflowStoreRefForDir(storeDir, cityPath, loadedCityName(cfg, cityPath), cfg)
+	return privateEvidenceOptionsForStoreRef(cfg, storeRef)
+}
+
+func privateEvidenceOptionsForStoreRef(cfg *config.City, storeRef string) []beads.BdStoreOption {
+	if cfg == nil {
+		return nil
+	}
 	entry, ok := cfg.Beads.PrivateEvidence[storeRef]
 	if !ok {
 		return nil
