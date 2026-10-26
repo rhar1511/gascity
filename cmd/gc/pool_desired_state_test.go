@@ -1052,6 +1052,87 @@ func TestComputePoolDesiredStates_ManualSessionDoesNotConsumeSingletonNewDemand(
 	}
 }
 
+func TestComputePoolDesiredStatesAt_HeldManualWorkDoesNotReservePoolCapacity(t *testing.T) {
+	now := time.Date(2026, time.October, 25, 12, 0, 0, 0, time.UTC)
+	cfg := &config.City{Agents: []config.Agent{poolAgent("runner", "project", intPtr(1), 0)}}
+	infos := []sessionpkg.Info{{
+		ID: "manual-session", Template: "project/runner", AgentName: "project/personal",
+		Alias: "project/personal", SessionOrigin: "manual", State: sessionpkg.StateAsleep,
+		HeldUntil: now.Add(time.Hour).Format(time.RFC3339),
+	}}
+	assigned := []beads.Bead{workBead("personal-work", "project/runner", "manual-session", "in_progress", 0)}
+	beforeInfo := infos[0]
+	beforeWork := workBead("personal-work", "project/runner", "manual-session", "in_progress", 0)
+
+	result := ComputePoolDesiredStatesAt(cfg, assigned, infos, map[string]int{"project/runner": 1}, now)
+
+	if len(result) != 1 || len(result[0].Requests) != 1 {
+		t.Fatalf("desired states = %+v, want one new pool request", result)
+	}
+	request := result[0].Requests[0]
+	if request.Tier != "new" || request.SessionBeadID != "" || request.WorkBeadID == "personal-work" {
+		t.Fatalf("request = %+v, want new capacity without resuming held personal work", request)
+	}
+	if !reflect.DeepEqual(infos[0], beforeInfo) || !reflect.DeepEqual(assigned[0], beforeWork) {
+		t.Fatal("allocation changed the held session or its assigned work")
+	}
+}
+
+func TestComputePoolDesiredStatesAt_ManualResumeHoldBoundary(t *testing.T) {
+	now := time.Date(2026, time.October, 25, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name       string
+		origin     string
+		manualMark string
+		poolOwned  bool
+		heldUntil  string
+		decision   time.Time
+		wakeMode   string
+		max        int
+		wantTier   string
+	}{
+		{name: "manual future hold", origin: "manual", heldUntil: now.Add(time.Hour).Format(time.RFC3339), decision: now, max: 1, wantTier: "new"},
+		{name: "manual marker", manualMark: "true", heldUntil: now.Add(time.Hour).Format(time.RFC3339), decision: now, max: 1, wantTier: "new"},
+		{name: "legacy manual", origin: "ephemeral", heldUntil: now.Add(time.Hour).Format(time.RFC3339), decision: now, max: 2, wantTier: "new"},
+		{name: "manual fresh wake", origin: "manual", heldUntil: now.Add(time.Hour).Format(time.RFC3339), decision: now, wakeMode: "fresh", max: 1, wantTier: "new"},
+		{name: "manual expired", origin: "manual", heldUntil: now.Add(-time.Second).Format(time.RFC3339), decision: now, max: 1, wantTier: "resume"},
+		{name: "manual expires now", origin: "manual", heldUntil: now.Format(time.RFC3339), decision: now, max: 1, wantTier: "resume"},
+		{name: "manual no hold", origin: "manual", decision: now, max: 1, wantTier: "resume"},
+		{name: "invalid hold unchanged", origin: "manual", heldUntil: "invalid", decision: now, max: 1, wantTier: "resume"},
+		{name: "untimed caller unchanged", origin: "manual", heldUntil: now.Add(-time.Second).Format(time.RFC3339), max: 1, wantTier: "resume"},
+		{name: "pool owned claim", origin: "ephemeral", poolOwned: true, heldUntil: now.Add(time.Hour).Format(time.RFC3339), decision: now, max: 1, wantTier: "resume"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			agent := poolAgent("runner", "project", intPtr(tc.max), 0)
+			agent.WakeMode = tc.wakeMode
+			cfg := &config.City{Agents: []config.Agent{agent}}
+			infos := []sessionpkg.Info{{
+				ID: "existing-session", Template: "project/runner", AgentName: "project/personal",
+				SessionOrigin: tc.origin, ManualSessionMetadata: tc.manualMark, PoolManaged: tc.poolOwned,
+				State: sessionpkg.StateAsleep, HeldUntil: tc.heldUntil,
+			}}
+			assigned := []beads.Bead{workBead("owned-work", "project/runner", "existing-session", "in_progress", 0)}
+			result := ComputePoolDesiredStatesAt(cfg, assigned, infos, map[string]int{"project/runner": 1}, tc.decision)
+			if len(result) != 1 || len(result[0].Requests) == 0 {
+				t.Fatalf("desired states = %+v, want %s request", result, tc.wantTier)
+			}
+			request := result[0].Requests[0]
+			if request.Tier != tc.wantTier {
+				t.Fatalf("request = %+v, want tier %s", request, tc.wantTier)
+			}
+			if tc.wantTier == "new" {
+				for _, req := range result[0].Requests {
+					if req.SessionBeadID != "" || req.WorkBeadID == "owned-work" {
+						t.Fatalf("held manual work produced a resume or replacement: %+v", req)
+					}
+				}
+			} else if request.SessionBeadID != "existing-session" || request.WorkBeadID != "owned-work" {
+				t.Fatalf("request changed the existing claimant: %+v", request)
+			}
+		})
+	}
+}
+
 // TestComputePoolDesiredStates_NamedSessionBeadSkipsPoolResume verifies that
 // when work is assigned to a configured named session, the pool path does NOT
 // emit a resume request for the named session bead. Without this guard, the

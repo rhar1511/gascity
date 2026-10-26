@@ -325,6 +325,12 @@ func computePoolDesiredStatesAt(
 	// wake_mode="fresh" agent must not resume one of these stale rows — see the
 	// resume-tier guard below.
 	asleepSessionBeadIDs := make(map[string]bool)
+	sessionInfoByID := make(map[string]sessionpkg.Info, len(sessionInfos))
+	for _, info := range sessionInfos {
+		if info.ID != "" {
+			sessionInfoByID[info.ID] = info
+		}
+	}
 	for _, sb := range sessionInfos {
 		if sb.Closed {
 			continue
@@ -398,6 +404,13 @@ func computePoolDesiredStatesAt(
 				// instance — which would create two desired sessions for the
 				// same agent even when max_active_sessions=1.
 				if namedSessionBeadIDs[sessionBeadID] {
+					continue
+				}
+				// A user-held manual session cannot resume or reserve pool
+				// capacity. Keep its work assigned to that same identity;
+				// pool-managed claims still retain their concrete seat.
+				if info := sessionInfoByID[sessionBeadID]; !decisionTime.IsZero() &&
+					isManualSessionInfoForAgent(info, agent) && metadataTimeInFuture(info.HeldUntil, decisionTime) {
 					continue
 				}
 				// A wake_mode="fresh" pool agent must not inherit a stale
@@ -517,13 +530,6 @@ func computePoolDesiredStatesAt(
 		}
 	}
 	protectedNewRequests, inFlightNewRequests := poolNewDemandRequests(cfg, sessionInfos, resumeSessionBeadIDs, decisionTime)
-	sessionInfoByID := make(map[string]sessionpkg.Info, len(sessionInfos))
-	for _, info := range sessionInfos {
-		if info.ID == "" {
-			continue
-		}
-		sessionInfoByID[info.ID] = info
-	}
 	// A wake-known request has assigned work but no surviving concrete session
 	// identity. Freshly completed unassigned pool sessions are valid concrete
 	// capacity for that request. Bind them before calculating residual protected
