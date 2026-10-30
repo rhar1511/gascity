@@ -7,7 +7,7 @@ on:
 
 permissions:
   actions: write
-  contents: read
+  contents: write # Create an exact-head dispatch tag after verifying trusted policy.
   pull-requests: read
 
 jobs:
@@ -20,7 +20,8 @@ jobs:
     steps:
       # This workflow never checks out or runs pull request code. It reads the
       # trusted base allowlist, then dispatches a dedicated workflow with the
-      # PR head repository and SHA as explicit inputs.
+      # PR head repository and SHA as explicit inputs. Policy must match the
+      # trusted base before a tag binds the workflow run itself to that SHA.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           ref: ${{ github.event.pull_request.base.sha }}
@@ -31,6 +32,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
           BASE_REF: ${{ github.event.pull_request.base.ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
           LABEL_NAME: ${{ github.event.label.name }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_DRAFT: ${{ github.event.pull_request.draft }}
@@ -43,6 +45,7 @@ jobs:
           python3 - <<'PY'
           import json
           import os
+          import re
           import urllib.parse
           import urllib.request
           from pathlib import Path
@@ -72,6 +75,76 @@ jobs:
               "needs-review-formulas": ("review-formulas.yml", {}),
           }
           workflow, extra_inputs = workflows[label]
+
+          repository = os.environ["REPOSITORY"]
+          if repository != "rhar1511/gascity" or os.environ["PR_HEAD_REPO"] != repository:
+              print("Only fork-local rhar1511/gascity PRs support label dispatch")
+              raise SystemExit(0)
+
+          # Only main supplies trusted policy; an arbitrary PR base branch
+          # may contain the same unreviewed workflow changes as its head.
+          if os.environ.get("BASE_REF") != "main":
+              print("Only PRs targeting main support label dispatch")
+              raise SystemExit(0)
+
+          head_sha = os.environ["PR_HEAD_SHA"]
+          base_sha = os.environ["BASE_SHA"]
+          if not all(re.fullmatch(r"[0-9a-f]{40}", sha) for sha in (head_sha, base_sha)):
+              raise RuntimeError("Expected full base and head commit SHAs")
+
+          api_root = f"https://api.github.com/repos/{repository}"
+          headers = {
+              "Accept": "application/vnd.github+json",
+              "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
+              "Content-Type": "application/json",
+              "X-GitHub-Api-Version": "2026-03-10",
+          }
+
+          def read_api(path):
+              request = urllib.request.Request(api_root + path, headers=headers)
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  return json.load(response)
+
+          def policy_tree(commit_sha):
+              commit = read_api(f"/git/commits/{commit_sha}")
+              tree = read_api(f"/git/trees/{commit['tree']['sha']}")
+              if tree.get("truncated"):
+                  raise RuntimeError("Cannot verify truncated policy tree")
+              for entry in tree["tree"]:
+                  if entry["path"] == ".github" and entry["type"] == "tree":
+                      policy_sha = entry.get("sha")
+                      if not isinstance(policy_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", policy_sha):
+                          raise RuntimeError("Invalid .github policy tree SHA; refusing dispatch")
+                      return policy_sha
+              raise RuntimeError("Missing .github policy tree")
+
+          # Compare the whole directory, including reusable workflows, local
+          # actions and runner-policy scripts. Never execute PR workflow policy
+          # merely because its author is trusted. Policy changes need a separate
+          # review/promotion before this label path can run them.
+          if policy_tree(base_sha) != policy_tree(head_sha):
+              raise RuntimeError("PR .github policy differs from trusted base; refusing dispatch")
+
+          # workflow_dispatch accepts a branch or tag, not an immutable SHA.
+          # A new tag avoids the check/dispatch race of a moving PR branch.
+          # Never update/reuse an existing tag; a collision fails closed. Keep
+          # it for queued runs and reruns (cleanup is a separate operator task).
+          dispatch_ref = f"gc-ci/pr-{os.environ['PR_NUMBER']}/{head_sha}/{os.environ['GITHUB_RUN_ID']}-{os.environ['GITHUB_RUN_ATTEMPT']}"
+          request = urllib.request.Request(
+              api_root + "/git/refs",
+              data=json.dumps({"ref": "refs/tags/" + dispatch_ref, "sha": head_sha}).encode("utf-8"),
+              method="POST",
+              headers=headers,
+          )
+          with urllib.request.urlopen(request, timeout=30) as response:
+              if response.status != 201:
+                  raise RuntimeError(f"unexpected tag creation status {response.status}")
+              created_ref = json.load(response)
+              if (created_ref.get("ref") != "refs/tags/" + dispatch_ref
+                      or created_ref.get("object", {}).get("type") != "commit"
+                      or created_ref.get("object", {}).get("sha") != head_sha):
+                  raise RuntimeError("unexpected dispatch tag target; refusing dispatch")
+
           inputs = {
               **extra_inputs,
               "pr_number": os.environ["PR_NUMBER"],
@@ -80,7 +153,7 @@ jobs:
               "head_sha": os.environ["PR_HEAD_SHA"],
           }
           payload = json.dumps({
-              "ref": os.environ["BASE_REF"],
+              "ref": dispatch_ref,
               "inputs": inputs,
           }).encode("utf-8")
 
@@ -90,16 +163,11 @@ jobs:
               url,
               data=payload,
               method="POST",
-              headers={
-                  "Accept": "application/vnd.github+json",
-                  "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
-                  "Content-Type": "application/json",
-                  "X-GitHub-Api-Version": "2026-03-10",
-              },
+              headers=headers,
           )
           with urllib.request.urlopen(request, timeout=30) as response:
               if response.status not in {200, 204}:
                   raise RuntimeError(f"unexpected dispatch status {response.status}")
 
-          print(f"Dispatched {workflow} for PR #{inputs['pr_number']} at {inputs['head_repo']}@{inputs['head_sha']}")
+          print(f"Dispatched {workflow} for PR #{inputs['pr_number']} at {inputs['head_repo']}@{inputs['head_sha']} via {dispatch_ref}")
           PY
