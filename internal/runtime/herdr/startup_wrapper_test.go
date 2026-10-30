@@ -22,7 +22,7 @@ shift 2
 printf '%s\n' "$1 $2" >> '__DIR__/calls'
 case "$1 $2" in
  'agent list') printf '{"result":{"agents":[]}}';;
- 'workspace list') printf '{"result":{"workspaces":[]}}';;
+ 'workspace list') if [ -f '__DIR__/never' ];then sleep 0.2;fi;printf '{"result":{"workspaces":[]}}';;
  'workspace create') printf '{"result":{"workspace":{"workspace_id":"wBoot"},"tab":{"tab_id":"wBoot:t1"},"root_pane":{"pane_id":"wBoot:p1"}}}';;
  'tab list') printf '{"result":{"tabs":[]}}';;
  'pane run')
@@ -41,7 +41,7 @@ case "$1 $2" in
    count=$((count+1));printf '%s\n' "$count" > '__DIR__/polls'
   fi
   threshold=6
-  if [ -f '__DIR__/never' ];then threshold=1000000;fi
+  if [ -f '__DIR__/never' ];then threshold=1000000;if [ -f '__DIR__/booted' ] && [ "$2" = 'get' ];then : > '__DIR__/detection-probed';fi;fi
   if [ -f '__DIR__/blocked' ] || [ -f '__DIR__/disappeared' ];then threshold=0;fi
   if [ ! -f '__DIR__/booted' ] || [ "$count" -lt "$threshold" ];then printf '{"error":{"code":"agent_not_found","message":"wrapper still preparing; no detected TUI"}}'
   elif [ "$2" = 'get' ];then
@@ -88,10 +88,38 @@ func TestStartupRawWrapperWaitsForDetectedAgent(t *testing.T) {
 
 func TestStartupRawWrapperNeverDetectedWithholdsInput(t *testing.T) {
 	p, dir := newStartupWrapperReplay(t, "never")
-	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
-	defer cancel()
+	// Cancel only once the wrapper has launched and detection was attempted.
+	// A wall-clock deadline starting before placement can expire before the
+	// condition this test is meant to exercise, especially on a loaded host.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	watchDone := make(chan struct{})
+	go func() {
+		defer close(watchDone)
+		tick := time.NewTicker(5 * time.Millisecond)
+		defer tick.Stop()
+		for {
+			if _, err := os.Stat(filepath.Join(dir, "detection-probed")); err == nil {
+				cancel()
+				return
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-tick.C:
+			}
+		}
+	}()
+	t.Cleanup(func() { cancel(); <-watchDone })
 	cfg := runtime.Config{Command: "/fixture/protected-worker-wrapper", WorkDir: t.TempDir(), ProcessNames: []string{"codex"}, Nudge: "Synthetic first turn."}
-	_ = p.start(ctx, "diag-worker", cfg)
+	if err := p.start(ctx, "diag-worker", cfg); err != nil {
+		t.Fatalf("startup ended before wrapped-agent detection: %v", err)
+	}
+	if ctx.Err() != context.Canceled {
+		t.Fatalf("detection probe did not trigger cancellation: %v", ctx.Err())
+	}
+	if _, err := os.Stat(filepath.Join(dir, "detection-probed")); err != nil {
+		t.Fatalf("wrapper never reached detection probe: %v", err)
+	}
 	calls, _ := os.ReadFile(filepath.Join(dir, "calls"))
 	if strings.Contains(string(calls), "pane send-keys") {
 		t.Fatalf("keystroke sent before an agent appeared: %s", calls)
