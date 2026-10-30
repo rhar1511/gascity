@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "activity_memo.go",
         "catalog.go",
+        "continuation.go",
         "factory.go",
         "factory_resolved.go",
         "handle.go",
@@ -57,6 +58,7 @@ go_test(
     srcs = [
         "activity_memo_test.go",
         "factory_resolved_test.go",
+        "continuation_test.go",
         "factory_test.go",
         "handle_clone_test.go",
         "handle_history_provider_test.go",

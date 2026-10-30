@@ -1,0 +1,65 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "continuationprep",
+    srcs = [
+        "doc.go",
+        "prepare.go",
+        "settings_open_other.go",
+        "settings_open_unix.go",
+        "settings_snapshot.go",
+        "settings_snapshot_other.go",
+        "settings_snapshot_windows.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/continuationprep",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/agent",
+        "//internal/config",
+        "//internal/qualification",
+        "//internal/runtime",
+        "//internal/session",
+        "//internal/sessionauthority",
+        "//internal/shellquote",
+        "@com_github_google_shlex//:shlex",
+    ] + select({
+        "@rules_go//go/platform:windows": ["@org_golang_x_sys//windows"],
+        "//conditions:default": [],
+    }),
+)
+
+go_test(
+    name = "continuationprep_test",
+    srcs = [
+        "prepare_test.go",
+        "settings_access_other_test.go",
+        "settings_access_windows_test.go",
+        "settings_fifo_unix_test.go",
+        "settings_fixture_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":continuationprep"],
+    deps = [
+        "//internal/config",
+        "//internal/fsys",
+        "//internal/session",
+        "//internal/sessionauthority",
+        "//internal/shellquote",
+        "//internal/testenv",
+    ] + select({
+        "@rules_go//go/platform:windows": ["@org_golang_x_sys//windows"],
+        "//conditions:default": [],
+    }),
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
