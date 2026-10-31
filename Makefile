@@ -1171,3 +1171,4 @@ help:
 bazel-sync:
 	bazel run //:gazelle
 	python3 tools/bazel/repo_tree.py
+	PYTHONDONTWRITEBYTECODE=1 python3 -S -m unittest discover -s tools/bazel -p 'test_*.py'
