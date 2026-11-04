@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/shlex"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -168,7 +169,7 @@ func (e ContinuationExpectation) matches(row beads.Bead) bool {
 		row.Metadata["provider"] == e.Provider && row.Metadata["session_key"] == e.SessionKey &&
 		row.Metadata["generation"] == e.Generation && row.Metadata["instance_token"] == e.InstanceToken &&
 		row.Metadata["continuation_epoch"] == e.ContinuationEpoch &&
-		row.Metadata["work_dir"] == e.WorkDir && row.Metadata["gc.work_dir"] == e.WorkDir
+		row.Metadata["work_dir"] == e.WorkDir && row.Metadata[beadmeta.WorkDirMetadataKey] == e.WorkDir
 }
 
 // BuildContinuationCommand rejects fresh/ambiguous resume shapes instead of
