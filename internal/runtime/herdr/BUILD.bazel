@@ -59,6 +59,8 @@ go_test(
         "start_test.go",
         "startup_delivery_confirm_test.go",
         "startup_delivery_test.go",
+        "startup_fifo_other_test.go",
+        "startup_fifo_unix_test.go",
         "startup_wrapper_test.go",
         "testenv_import_test.go",
     ],
@@ -70,6 +72,7 @@ go_test(
         "//internal/runtime/runtimetest",
         "//internal/shellquote",
         "//internal/testenv",
+        "//internal/testutil",
     ],
 )
 

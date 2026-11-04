@@ -40,7 +40,7 @@ func (m *Manager) SubmitRequestForAttemptExact(ctx context.Context, id, requestI
 
 func (m *Manager) submitRequest(ctx context.Context, id, requestID string, generation int, message string, binding *RequestAttemptBinding, exactBinding bool) (RequestReceipt, error) {
 	var result RequestReceipt
-	err := withSessionMutationLock(id, func() error {
+	err := withSessionRuntimeMutationLock(id, func() error {
 		front := NewStore(beads.SessionStore{Store: m.store})
 		var accepted RequestAcceptance
 		var err error

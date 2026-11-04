@@ -775,31 +775,34 @@ var errDeadRuntimeCloseSuperseded = errors.New("dead runtime close superseded")
 // falls back to split writes. cleaned remains true if closure fails after the
 // runtime artifact was removed. This does not fence external runtime writers.
 func (s *Store) CleanupDeadRuntime(expected Info, now time.Time, cleanup func(Info) (bool, error)) (cleaned, closed bool, err error) {
-	_, err = tryWithSessionMutationLock(expected.ID, func() error {
-		bead, readErr := s.validatedBead(expected.ID)
-		if readErr != nil {
-			return readErr
-		}
-		current := infoFromPersistedBead(bead)
-		if bead.Status == "closed" || !deadRuntimeRowUnchanged(expected, current, now) {
-			return nil
-		}
-		cleaned, readErr = cleanup(current)
-		if readErr != nil || !cleaned || !ClaimsLiveRuntime(current) {
-			return readErr
-		}
-		closer, ok := beads.AtomicConditionalCloserFor(s.store)
-		if !ok {
-			return beads.ErrConditionalWriteUnsupported
-		}
-		var closeErr error
-		closed, closeErr = s.closeAtomically(closer, bead, ClosePatch(now, "dead-runtime"), func(open beads.Bead) error {
-			if !deadRuntimeRowUnchanged(expected, infoFromPersistedBead(open), now) {
-				return errDeadRuntimeCloseSuperseded
+	_, err = tryWithRuntimeStart(expected.ID, func() error {
+		_, cleanupErr := tryWithSessionMutationLock(expected.ID, func() error {
+			bead, readErr := s.validatedBead(expected.ID)
+			if readErr != nil {
+				return readErr
 			}
-			return nil
+			current := infoFromPersistedBead(bead)
+			if bead.Status == "closed" || !deadRuntimeRowUnchanged(expected, current, now) {
+				return nil
+			}
+			cleaned, readErr = cleanup(current)
+			if readErr != nil || !cleaned || !ClaimsLiveRuntime(current) {
+				return readErr
+			}
+			closer, ok := beads.AtomicConditionalCloserFor(s.store)
+			if !ok {
+				return beads.ErrConditionalWriteUnsupported
+			}
+			var closeErr error
+			closed, closeErr = s.closeAtomically(closer, bead, ClosePatch(now, "dead-runtime"), func(open beads.Bead) error {
+				if !deadRuntimeRowUnchanged(expected, infoFromPersistedBead(open), now) {
+					return errDeadRuntimeCloseSuperseded
+				}
+				return nil
+			})
+			return closeErr
 		})
-		return closeErr
+		return cleanupErr
 	})
 	if errors.Is(err, errDeadRuntimeCloseSuperseded) {
 		return cleaned, false, nil

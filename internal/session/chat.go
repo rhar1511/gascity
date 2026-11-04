@@ -362,13 +362,13 @@ func (m *Manager) retryFreshStartAfterStaleKey(
 	// not be confirmed dead: a survivor would race this replacement for the
 	// same work bead. This path reuses the existing bead ID, so there is no
 	// fresh-create to roll back — unroute and propagate the error before Start.
-	if orphanErr := m.killExistingOrphans(ctx, id); orphanErr != nil {
+	if orphanErr := m.runtimeStartIO(ctx, infoFromPersistedBead(*b), func() error { return m.killExistingOrphans(ctx, id) }); orphanErr != nil {
 		if unroute != nil {
 			unroute()
 		}
 		return false, fmt.Errorf("pre-start orphan cleanup: %w", orphanErr)
 	}
-	if err := m.sp.Start(ctx, sessName, cfg); err != nil {
+	if err := m.runtimeProviderStartIO(ctx, infoFromPersistedBead(*b), func() error { return m.sp.Start(ctx, sessName, cfg) }); err != nil {
 		if unroute != nil {
 			unroute()
 		}
@@ -428,6 +428,16 @@ func withSessionMutationLock(id string, fn func() error) error {
 	return fn()
 }
 
+// Manager runtime operations retain their original mutual exclusion even
+// while the runtime-only bridge releases the metadata mutex for provider I/O.
+// Store transactions use the exported metadata-only lock so startup claims and
+// cancellation can progress without waiting for provider readiness.
+func withSessionRuntimeMutationLock(id string, fn func() error) error {
+	return withRuntimeStart(context.Background(), id, func() error {
+		return WithSessionMutationLock(id, fn)
+	})
+}
+
 func acquireSessionMutationLock(id string) *sessionMutationLockEntry {
 	lock := referenceSessionMutationLock(id)
 	lock.mu.Lock()
@@ -461,8 +471,8 @@ func unreferenceSessionMutationLock(id string, lock *sessionMutationLockEntry) {
 	sessionMutationLocksMu.Unlock()
 }
 
-// tryWithSessionMutationLock defers background reconciliation rather than
-// waiting for an interactive attachment or an in-flight runtime start.
+// tryWithSessionMutationLock defers a busy metadata transaction. Callers with
+// runtime cleanup effects also retain the separate runtime reservation.
 func tryWithSessionMutationLock(id string, fn func() error) (bool, error) {
 	lock := referenceSessionMutationLock(id)
 	if !lock.mu.TryLock() {
@@ -482,7 +492,15 @@ func sessionName(id string, b beads.Bead) string {
 }
 
 func (m *Manager) loadSessionBead(id string, allowClosed bool) (beads.Bead, string, error) {
-	b, err := m.store.Get(id)
+	return m.loadSessionBeadForRead(id, allowClosed, false)
+}
+
+func (m *Manager) loadSessionBeadForRead(id string, allowClosed, authoritative bool) (beads.Bead, string, error) {
+	read := m.store.Get
+	if authoritative {
+		read = beads.HandlesFor(m.store).Live.Get
+	}
+	b, err := read(id)
 	if err != nil {
 		return beads.Bead{}, "", fmt.Errorf("getting session: %w", err)
 	}
@@ -693,7 +711,11 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config) error {
 	transport, _ := m.transportForBead(b, sessName)
 	unroute := m.routeACPIfNeeded(b.Metadata["provider"], transport, sessName)
-	if m.sp.IsRunning(sessName) {
+	running, err := m.runtimeStartRunning(ctx, infoFromPersistedBead(b), sessName)
+	if err != nil {
+		return err
+	}
+	if running {
 		return nil
 	}
 	if resumeCommand == "" {
@@ -742,13 +764,13 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b bea
 	// be confirmed dead: a survivor would race this replacement for the same
 	// work bead. This is the reconciler respawn bridge on a stable/reused bead
 	// ID. No fresh-create to roll back, so unroute and propagate before Start.
-	if orphanErr := m.killExistingOrphans(ctx, id); orphanErr != nil {
+	if orphanErr := m.runtimeStartIO(ctx, infoFromPersistedBead(b), func() error { return m.killExistingOrphans(ctx, id) }); orphanErr != nil {
 		if unroute != nil {
 			unroute()
 		}
 		return fmt.Errorf("pre-start orphan cleanup: %w", orphanErr)
 	}
-	if err := m.sp.Start(ctx, sessName, cfg); err != nil {
+	if err := m.runtimeProviderStartIO(ctx, infoFromPersistedBead(b), func() error { return m.sp.Start(ctx, sessName, cfg) }); err != nil {
 		switch {
 		// A capacity refusal says nothing about the resume key; it takes the
 		// plain failure path, not the stale-key recovery (see ensureRunning).
@@ -766,8 +788,18 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b bea
 				return fmt.Errorf("resuming session: %w", err)
 			}
 			started = retried
-		case errors.Is(err, runtime.ErrSessionExists) && m.sp.IsRunning(sessName):
-			return err
+		case errors.Is(err, runtime.ErrSessionExists):
+			running, probeErr := m.runtimeStartRunning(ctx, infoFromPersistedBead(b), sessName)
+			if probeErr != nil {
+				return probeErr
+			}
+			if running {
+				return err
+			}
+			if unroute != nil {
+				unroute()
+			}
+			return fmt.Errorf("resuming session: %w", err)
 		default:
 			if unroute != nil {
 				unroute()
@@ -778,13 +810,17 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b bea
 		started = true
 	}
 	if started && b.Metadata["session_key"] != "" {
-		if err := m.staleKeyDetectionWaiter(ctx, sessName); err != nil {
+		if err := m.runtimeStartIO(ctx, infoFromPersistedBead(b), func() error { return m.staleKeyDetectionWaiter(ctx, sessName) }); err != nil {
 			if unroute != nil {
 				unroute()
 			}
 			return err
 		}
-		if !m.sp.IsRunning(sessName) {
+		running, probeErr := m.runtimeStartRunning(ctx, infoFromPersistedBead(b), sessName)
+		if probeErr != nil {
+			return probeErr
+		}
+		if !running {
 			if _, err := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, unroute); err != nil {
 				return err
 			}
@@ -998,7 +1034,7 @@ func (m *Manager) sendLocked(ctx context.Context, id string, b beads.Bead, sessN
 }
 
 func (m *Manager) send(ctx context.Context, id, message, resumeCommand string, hints runtime.Config, immediate bool) error {
-	return withSessionMutationLock(id, func() error {
+	return withSessionRuntimeMutationLock(id, func() error {
 		b, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err
@@ -1009,7 +1045,7 @@ func (m *Manager) send(ctx context.Context, id, message, resumeCommand string, h
 
 func (m *Manager) sendLiveOnly(ctx context.Context, id, message string, immediate bool) (bool, error) {
 	var delivered bool
-	err := withSessionMutationLock(id, func() error {
+	err := withSessionRuntimeMutationLock(id, func() error {
 		_, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err
@@ -1031,7 +1067,7 @@ func (m *Manager) sendLiveOnly(ctx context.Context, id, message string, immediat
 // It is the canonical manager-level bring-up path for worker handles and
 // other callers that need bounded startup without attaching a terminal.
 func (m *Manager) Start(ctx context.Context, id, resumeCommand string, hints runtime.Config) error {
-	return withSessionMutationLock(id, func() error {
+	return withSessionRuntimeMutationLock(id, func() error {
 		b, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err
@@ -1045,12 +1081,15 @@ func (m *Manager) Start(ctx context.Context, id, resumeCommand string, hints run
 // bridge while they still own commit/rollback bookkeeping above the worker
 // boundary.
 func (m *Manager) StartRuntimeOnly(ctx context.Context, id, resumeCommand string, hints runtime.Config) error {
-	return withSessionMutationLock(id, func() error {
-		b, sessName, err := m.sessionBead(id)
+	return withRuntimeStart(ctx, id, func() error {
+		lock := acquireSessionMutationLock(id)
+		defer releaseSessionMutationLock(id, lock)
+		b, sessName, err := m.loadSessionBeadForRead(id, false, true)
 		if err != nil {
-			return err
+			return runtimeStartReadError(err)
 		}
-		return m.ensureRunningRuntimeOnly(ctx, id, b, sessName, resumeCommand, hints)
+		startCtx := context.WithValue(ctx, runtimeStartGuardKey{}, &runtimeStartGuard{id: id, lock: lock})
+		return m.ensureRunningRuntimeOnly(startCtx, id, b, sessName, resumeCommand, hints)
 	})
 }
 
@@ -1087,7 +1126,7 @@ func (m *Manager) SendImmediateLiveOnly(ctx context.Context, id, message string)
 // an operational error.
 func (m *Manager) TryWaitIdleNudge(ctx context.Context, id, source, message, resumeCommand string, hints runtime.Config) (bool, error) {
 	var delivered bool
-	err := withSessionMutationLock(id, func() error {
+	err := withSessionRuntimeMutationLock(id, func() error {
 		b, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err
@@ -1103,7 +1142,7 @@ func (m *Manager) TryWaitIdleNudge(ctx context.Context, id, source, message, res
 // session.
 func (m *Manager) TryWaitIdleNudgeLiveOnly(ctx context.Context, id, source, message string) (bool, error) {
 	var delivered bool
-	err := withSessionMutationLock(id, func() error {
+	err := withSessionRuntimeMutationLock(id, func() error {
 		b, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err
@@ -1118,7 +1157,7 @@ func (m *Manager) TryWaitIdleNudgeLiveOnly(ctx context.Context, id, source, mess
 // turn. For providers that need post-interrupt idle settlement (e.g. Claude),
 // it waits for the session to return to an idle prompt before returning.
 func (m *Manager) StopTurn(id string) error {
-	return withSessionMutationLock(id, func() error {
+	return withSessionRuntimeMutationLock(id, func() error {
 		b, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err
@@ -1175,7 +1214,7 @@ func (m *Manager) PendingByName(sessName string) (*runtime.PendingInteraction, b
 
 // Respond resolves the current pending interaction for a session.
 func (m *Manager) Respond(id string, response runtime.InteractionResponse) error {
-	return withSessionMutationLock(id, func() error {
+	return withSessionRuntimeMutationLock(id, func() error {
 		_, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err

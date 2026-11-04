@@ -63,87 +63,89 @@ func (m *Manager) StartContinuation(ctx context.Context, expected ContinuationEx
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return WithSessionMutationLock(expected.SessionID, func() error {
-		row, err := beads.HandlesFor(m.store).Live.Get(expected.SessionID)
-		if err != nil {
-			return errors.Join(ErrContinuationIdentity, err)
-		}
-		if !expected.matches(row) || !continuationEligible(row, m.now()) {
-			return ErrContinuationIdentity
-		}
-		writer, _, err := beads.ResolveConditionalWriter(m.store)
-		if err != nil {
-			return err
-		}
-		if writer == nil || row.Revision == 0 {
-			return beads.ErrConditionalWriteUnsupported
-		}
-		current := infoFromPersistedBead(row)
-		if err := m.continuationRuntimeAbsent(current); err != nil {
-			return err
-		}
-		launch, err := prepare(current)
-		if err != nil {
-			return err
-		}
-		current.Command = launch.Command
-		current.ResumeFlag = launch.Resume.ResumeFlag
-		current.ResumeStyle = launch.Resume.ResumeStyle
-		current.ResumeCommand = launch.Resume.ResumeCommand
-		command, err := BuildContinuationCommand(current)
-		if err != nil {
-			return err
-		}
-		cfg := launch.Hints
-		if cfg.WorkDir != "" && cfg.WorkDir != expected.WorkDir {
-			return ErrContinuationCommand
-		}
-		cfg.Command = command
-		if cfg.WorkDir == "" {
-			cfg.WorkDir = current.WorkDir
-		}
-		generation, err := strconv.Atoi(current.Generation)
-		if err != nil || generation <= 0 {
-			return ErrContinuationIdentity
-		}
-		epoch, err := strconv.Atoi(current.ContinuationEpoch)
-		if err != nil || epoch <= 0 {
-			return ErrContinuationIdentity
-		}
-		cfg.Env = mergeEnv(cfg.Env, RuntimeEnvWithSessionContext(current, generation, epoch, current.InstanceToken))
-		cfg.Env = git.ApplySSHKeepaliveEnv(cfg.Env)
-		cfg = runtime.SyncWorkDirEnv(cfg)
-		// Preparation may cross a slow config/settings boundary. Re-read
-		// authoritative state before launch; this is not a cross-store fence.
-		latest, err := beads.HandlesFor(m.store).Live.Get(expected.SessionID)
-		if err != nil {
-			return errors.Join(ErrContinuationIdentity, err)
-		}
-		if !expected.matches(latest) || !continuationEligible(latest, m.now()) {
-			return ErrContinuationIdentity
-		}
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if err := m.continuationRuntimeAbsent(current); err != nil {
-			return err
-		}
-		// A strict continuation never routes through legacy fresh recovery.
-		if err := m.sp.Start(ctx, current.SessionName, cfg); err != nil {
-			return err
-		}
-		if err := m.staleKeyDetectionWaiter(ctx, current.SessionName); err != nil {
-			return err
-		}
-		if !m.sp.IsRunning(current.SessionName) {
-			return runtime.ErrSessionDiedDuringStartup
-		}
-		// This conditional completion is not an atomic cross-store work lease.
-		// A failed completion can follow a real Start; callers must not retry
-		// under a replacement identity or report that no process was started.
-		return writer.UpdateIfMatch(row.ID, row.Revision, beads.UpdateOpts{Metadata: map[string]string{
-			"state": string(StateActive), "state_reason": "creation_complete",
-		}})
+	return withRuntimeStart(ctx, expected.SessionID, func() error {
+		return WithSessionMutationLock(expected.SessionID, func() error {
+			row, err := beads.HandlesFor(m.store).Live.Get(expected.SessionID)
+			if err != nil {
+				return errors.Join(ErrContinuationIdentity, err)
+			}
+			if !expected.matches(row) || !continuationEligible(row, m.now()) {
+				return ErrContinuationIdentity
+			}
+			writer, _, err := beads.ResolveConditionalWriter(m.store)
+			if err != nil {
+				return err
+			}
+			if writer == nil || row.Revision == 0 {
+				return beads.ErrConditionalWriteUnsupported
+			}
+			current := infoFromPersistedBead(row)
+			if err := m.continuationRuntimeAbsent(current); err != nil {
+				return err
+			}
+			launch, err := prepare(current)
+			if err != nil {
+				return err
+			}
+			current.Command = launch.Command
+			current.ResumeFlag = launch.Resume.ResumeFlag
+			current.ResumeStyle = launch.Resume.ResumeStyle
+			current.ResumeCommand = launch.Resume.ResumeCommand
+			command, err := BuildContinuationCommand(current)
+			if err != nil {
+				return err
+			}
+			cfg := launch.Hints
+			if cfg.WorkDir != "" && cfg.WorkDir != expected.WorkDir {
+				return ErrContinuationCommand
+			}
+			cfg.Command = command
+			if cfg.WorkDir == "" {
+				cfg.WorkDir = current.WorkDir
+			}
+			generation, err := strconv.Atoi(current.Generation)
+			if err != nil || generation <= 0 {
+				return ErrContinuationIdentity
+			}
+			epoch, err := strconv.Atoi(current.ContinuationEpoch)
+			if err != nil || epoch <= 0 {
+				return ErrContinuationIdentity
+			}
+			cfg.Env = mergeEnv(cfg.Env, RuntimeEnvWithSessionContext(current, generation, epoch, current.InstanceToken))
+			cfg.Env = git.ApplySSHKeepaliveEnv(cfg.Env)
+			cfg = runtime.SyncWorkDirEnv(cfg)
+			// Preparation may cross a slow config/settings boundary. Re-read
+			// authoritative state before launch; this is not a cross-store fence.
+			latest, err := beads.HandlesFor(m.store).Live.Get(expected.SessionID)
+			if err != nil {
+				return errors.Join(ErrContinuationIdentity, err)
+			}
+			if !expected.matches(latest) || !continuationEligible(latest, m.now()) {
+				return ErrContinuationIdentity
+			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if err := m.continuationRuntimeAbsent(current); err != nil {
+				return err
+			}
+			// A strict continuation never routes through legacy fresh recovery.
+			if err := m.sp.Start(ctx, current.SessionName, cfg); err != nil {
+				return err
+			}
+			if err := m.staleKeyDetectionWaiter(ctx, current.SessionName); err != nil {
+				return err
+			}
+			if !m.sp.IsRunning(current.SessionName) {
+				return runtime.ErrSessionDiedDuringStartup
+			}
+			// This conditional completion is not an atomic cross-store work lease.
+			// A failed completion can follow a real Start; callers must not retry
+			// under a replacement identity or report that no process was started.
+			return writer.UpdateIfMatch(row.ID, row.Revision, beads.UpdateOpts{Metadata: map[string]string{
+				"state": string(StateActive), "state_reason": "creation_complete",
+			}})
+		})
 	})
 }
 

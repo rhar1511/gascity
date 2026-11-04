@@ -2,13 +2,18 @@ package herdr
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // Model a raw preparation process that becomes a detected agent only after
@@ -41,7 +46,7 @@ case "$1 $2" in
    count=$((count+1));printf '%s\n' "$count" > '__DIR__/polls'
   fi
   threshold=6
-  if [ -f '__DIR__/never' ];then threshold=1000000;if [ -f '__DIR__/booted' ] && [ "$2" = 'get' ];then : > '__DIR__/detection-probed';fi;fi
+  if [ -f '__DIR__/never' ];then threshold=1000000;if [ -f '__DIR__/booted' ] && [ "$2" = 'get' ] && [ ! -f '__DIR__/detection-probed' ];then : > '__DIR__/detection-probed';printf x > '__DIR__/detection-notify';fi;fi
   if [ -f '__DIR__/blocked' ] || [ -f '__DIR__/disappeared' ];then threshold=0;fi
   if [ ! -f '__DIR__/booted' ] || [ "$count" -lt "$threshold" ];then printf '{"error":{"code":"agent_not_found","message":"wrapper still preparing; no detected TUI"}}'
   elif [ "$2" = 'get' ];then
@@ -86,36 +91,83 @@ func TestStartupRawWrapperWaitsForDetectedAgent(t *testing.T) {
 	}
 }
 
+// newStartupDetectionNotice owns the fake CLI's post-launch detection signal.
+// Stop sends an explicit abort before closing: a blocking FIFO read is not
+// interrupted reliably by Close on Darwin.
+func newStartupDetectionNotice(t *testing.T, dir string, cancel context.CancelFunc) (func() error, <-chan error) {
+	t.Helper()
+	path := filepath.Join(dir, "detection-notify")
+	if err := makeStartupDetectionFIFO(path); err != nil {
+		t.Fatalf("create detection notification FIFO: %v", err)
+	}
+	notice, err := os.OpenFile(path, os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	completed := make(chan struct{})
+	go func() {
+		var signal [1]byte
+		_, err := io.ReadFull(notice, signal[:])
+		if err == nil {
+			switch signal[0] {
+			case 'x':
+				cancel()
+			case 'c':
+				err = context.Canceled
+			default:
+				err = fmt.Errorf("unexpected detection notification %q", signal[0])
+			}
+		}
+		done <- err
+		close(done)
+		close(completed)
+	}()
+	var stopOnce sync.Once
+	var stopErr error
+	stop := func() error {
+		stopOnce.Do(func() {
+			select {
+			case <-completed:
+			default:
+				_, stopErr = notice.Write([]byte{'c'})
+			}
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), testutil.GoroutineRaceTimeout)
+			defer cleanupCancel()
+			select {
+			case <-completed:
+			case <-cleanupCtx.Done():
+				stopErr = errors.Join(stopErr, errors.New("detection notification reader did not exit after abort"))
+			}
+			stopErr = errors.Join(stopErr, notice.Close())
+		})
+		return stopErr
+	}
+	t.Cleanup(func() {
+		if err := stop(); err != nil {
+			t.Error(err)
+		}
+	})
+	return stop, done
+}
+
 func TestStartupRawWrapperNeverDetectedWithholdsInput(t *testing.T) {
 	p, dir := newStartupWrapperReplay(t, "never")
 	// Cancel only once the wrapper has launched and detection was attempted.
 	// A wall-clock deadline starting before placement can expire before the
 	// condition this test is meant to exercise, especially on a loaded host.
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	watchDone := make(chan struct{})
-	go func() {
-		defer close(watchDone)
-		tick := time.NewTicker(5 * time.Millisecond)
-		defer tick.Stop()
-		for {
-			if _, err := os.Stat(filepath.Join(dir, "detection-probed")); err == nil {
-				cancel()
-				return
-			}
-			select {
-			case <-ctx.Done():
-				return
-			case <-tick.C:
-			}
-		}
-	}()
-	t.Cleanup(func() { cancel(); <-watchDone })
+	ctx, cancel := context.WithTimeout(context.Background(), testutil.ExecRaceTimeout)
+	defer cancel()
+	_, watchDone := newStartupDetectionNotice(t, dir, cancel)
 	cfg := runtime.Config{Command: "/fixture/protected-worker-wrapper", WorkDir: t.TempDir(), ProcessNames: []string{"codex"}, Nudge: "Synthetic first turn."}
 	if err := p.start(ctx, "diag-worker", cfg); err != nil {
 		t.Fatalf("startup ended before wrapped-agent detection: %v", err)
 	}
 	if ctx.Err() != context.Canceled {
 		t.Fatalf("detection probe did not trigger cancellation: %v", ctx.Err())
+	}
+	if err := <-watchDone; err != nil {
+		t.Fatalf("detection notification failed: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "detection-probed")); err != nil {
 		t.Fatalf("wrapper never reached detection probe: %v", err)

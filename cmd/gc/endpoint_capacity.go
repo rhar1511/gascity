@@ -113,6 +113,12 @@ func classifyStartVerdict(r startResult) startVerdict {
 	if runtime.IsProviderCapacity(r.err) {
 		return verdictCapacity
 	}
+	// A stale lifecycle attempt can still prove endpoint acceptance. Only
+	// the Start-specific session boundary can produce this observation;
+	// cancellation, deadlines and every other outcome remain inconclusive.
+	if r.providerStartCalled && r.outcome == TraceOutcomeProviderError && sessionpkg.RuntimeStartProviderAccepted(r.err) {
+		return verdictSuccess
+	}
 	if r.err != nil || !r.providerStartCalled {
 		return verdictInconclusive
 	}
