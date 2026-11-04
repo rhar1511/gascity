@@ -136,6 +136,10 @@ var infoKeyCodec = []infoKeySpec{
 	{beadmeta.PackMetadataKey, func(i *Info, v string) { i.Pack = v }},
 	{beadmeta.PackWorkspaceMetadataKey, func(i *Info, v string) { i.PackWorkspace = v }},
 	{beadmeta.WorkDirMetadataKey, func(i *Info, v string) { i.WorkDirCanonical = v }},
+	{beadmeta.WorktreeSourceBeadMetadataKey, func(i *Info, v string) { i.WorktreeSourceBeadID = v }},
+	{beadmeta.WorktreeSourceStoreMetadataKey, func(i *Info, v string) { i.WorktreeSourceStoreRef = v }},
+	{beadmeta.WorktreeAttemptMetadataKey, func(i *Info, v string) { i.WorktreeAttemptID = v }},
+
 	{beadmeta.WorkerDirMetadataKey, func(i *Info, v string) { i.WorkerDir = v }},
 
 	// state / bookkeeping cluster
