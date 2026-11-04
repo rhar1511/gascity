@@ -1,0 +1,47 @@
+--- a/go/private/rules/binary_wrapper.sh
++++ b/go/private/rules/binary_wrapper.sh
+@@ -5,6 +5,11 @@
+-# The value of GOCACHE/GOPATH are determined from HOME.
+-# We place them in the execroot to avoid dependency on `mktemp` and because we don't know
+-# a safe scratch space on all systems. Note that HOME must be an absolute path, otherwise the
+-# Go toolchain will write some outputs to the wrong place and the result will be uncacheable.
+-# We include an output path of this action to prevent collisions with anything else,
+-# including differently configured versions of the same target, under an unsandboxed strategy.
++# Keep cache and transient work beneath the physical action directory. Do not
++# change HOME or touch a caller's shared cache. Relative inputs and outputs keep
++# their original working directory and argument vectors.
++bootstrap_workdir="$(pwd -P)"
++bootstrap_tmp="$(mktemp -d "${bootstrap_workdir}/.rules-go-bootstrap.XXXXXXXX")"
++if [[ "${bootstrap_tmp%/*}" != "${bootstrap_workdir}" ||
++      "${bootstrap_tmp##*/}" != .rules-go-bootstrap.* ||
++      ! -d "${bootstrap_tmp}" || -L "${bootstrap_tmp}" || ! -O "${bootstrap_tmp}" ]]; then
++    echo "invalid private bootstrap scratch directory" >&2
++    exit 1
++fi
+@@ -12,2 +17,24 @@
+-export HOME="${PWD}/_go_tool_binary-fake-home-${1//\\//_}"
+-trap "${GO_BINARY} clean -cache" EXIT
++bootstrap_cleanup() {
++    local command_status=$?
++    trap - EXIT
++    if rm -rf -- "${bootstrap_tmp}"; then
++        exit "${command_status}"
++    else
++        local cleanup_status=$?
++        if [[ "${command_status}" -eq 0 ]]; then
++            exit "${cleanup_status}"
++        fi
++        exit "${command_status}"
++    fi
++}
++# SIGKILL/crash can leave private scratch; it remains under the action directory
++# for the owner to account for and reconcile, never a broad cache sweep.
++trap bootstrap_cleanup EXIT
++trap 'exit 129' HUP
++trap 'exit 130' INT
++trap 'exit 143' TERM
++mkdir -p -- "${bootstrap_tmp}/gocache" "${bootstrap_tmp}/gopath" "${bootstrap_tmp}/tmp"
++export GOCACHE="${bootstrap_tmp}/gocache"
++export GOPATH="${bootstrap_tmp}/gopath"
++export GOTMPDIR="${bootstrap_tmp}/tmp"
++export TMPDIR="${bootstrap_tmp}/tmp"

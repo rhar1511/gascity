@@ -6,6 +6,13 @@ module(
 )
 
 bazel_dep(name = "rules_go", version = "0.63.0")
+# Keep bootstrap caches and scratch action-private without Go cache sweeps.
+single_version_override(
+    module_name = "rules_go",
+    version = "0.63.0",
+    patches = ["//third_party/patches:rules_go_private_bootstrap_scratch.patch"],
+    patch_strip = 1,
+)
 bazel_dep(name = "gazelle", version = "0.53.0")
 
 # The pilot uses a pinned SDK so local and CI actions compile with the same
