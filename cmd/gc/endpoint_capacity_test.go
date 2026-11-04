@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"math/rand/v2"
@@ -521,12 +522,21 @@ func (e *capacityEnv) startAsync(t *testing.T, candidates ...startCandidate) {
 // so the async commit finds the start stale.
 type supersedingStartProvider struct {
 	*runtime.Fake
-	store beads.Store
-	id    string
+	store       beads.Store
+	id          string
+	replacement []byte
 }
 
 func (p *supersedingStartProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
 	if err := p.store.SetMetadata(p.id, "instance_token", "tok-newer"); err != nil {
+		return err
+	}
+	row, err := p.store.Get(p.id)
+	if err != nil {
+		return err
+	}
+	p.replacement, err = json.Marshal(row)
+	if err != nil {
 		return err
 	}
 	return p.Fake.Start(ctx, name, cfg)
@@ -547,11 +557,14 @@ func TestAsyncStart_ProbeResolvedBeforeCommitEvenWhenStale(t *testing.T) {
 		t.Fatalf("async start did not finish within the hang budget (%s)", hangBudget)
 	}
 
-	if !strings.Contains(e.log.String(), "ignoring stale async start result") {
-		t.Fatalf("stderr = %q, want the commit to find the start stale", e.log.String())
-	}
 	if st := e.breakerStatus("upstream:e"); st.State != resilience.StateClosed {
 		t.Fatalf("breaker = %v, want closed by the probe's success despite the stale commit", st.State)
+	}
+	current, err := json.Marshal(e.bead(t, c.info.ID))
+	require.NoError(t, err)
+	require.Equal(t, string(provider.replacement), string(current), "superseded start changed the replacement row")
+	if !strings.Contains(e.log.String(), "outcome=stale_async_start") {
+		t.Fatalf("stderr = %q, want the superseded lifecycle result discarded", e.log.String())
 	}
 }
 
@@ -1352,20 +1365,25 @@ func TestCommitStartResult_CapacityRestoreKeepsSuspendDuringStart(t *testing.T) 
 
 		// The commit refresh sees the suspend and discards the start before
 		// any restore; the race that reaches the restore is the next case.
-		if !strings.Contains(e.log.String(), "ignoring stale async start result for s") {
-			t.Fatalf("log = %q, want the refresh to discard the suspended start", e.log.String())
-		}
 		requireSuspendKept(t, e.bead(t, c.info.ID))
+		if !strings.Contains(e.log.String(), "outcome=stale_async_start") {
+			t.Fatalf("log = %q, want the superseded attempt discarded", e.log.String())
+		}
 	})
 
 	t.Run("async, suspend after the commit refresh", func(t *testing.T) {
 		e := newCapacityEnv(t, true, "s")
 		c := asleepSession(t, e, nil)
-		store := &writeAfterNextGetStore{Store: e.store, id: c.info.ID, patch: suspendPatch(e.clk.Now())}
-		e.store = store
-		provider := &armingRefuser{Fake: e.sp, arm: store.arm}
-
-		e.startAsyncWith(t, provider, c)
+		result := refusedCapacityStartForRestore(t, e, c)
+		refreshed, verdict := refreshAsyncStartResult(result, e.store, &e.log)
+		if !verdict.commit || !refreshed.capacityRefused {
+			t.Fatalf("refresh did not reach the refused commit: %+v, error=%v", verdict, refreshed.err)
+		}
+		// Apply the suspend after the real refresh, before restore begins.
+		if err := e.store.SetMetadataBatch(c.info.ID, suspendPatch(e.clk.Now())); err != nil {
+			t.Fatal(err)
+		}
+		commitStartResultTraced(refreshed, sessionFrontDoor(e.store), e.clk, e.rec, 0, &e.log, &e.log, e.trace)
 
 		if !strings.Contains(e.log.String(), "endpoint refused (capacity)") {
 			t.Fatalf("log = %q, want the refused start to reach the capacity commit arm", e.log.String())
@@ -1374,51 +1392,24 @@ func TestCommitStartResult_CapacityRestoreKeepsSuspendDuringStart(t *testing.T) 
 	})
 }
 
-// writeAfterNextGetStore applies patch just after the first read of the row
-// that follows arm, so that read sees the row as it was and every later read
-// sees the write: a command landing between the async commit's refresh and
-// the restore's own re-read.
-type writeAfterNextGetStore struct {
-	beads.Store
-	id    string
-	patch map[string]string
-	mu    sync.Mutex
-	armed bool
-}
-
-func (s *writeAfterNextGetStore) arm() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.armed = true
-}
-
-func (s *writeAfterNextGetStore) Get(id string) (beads.Bead, error) {
-	b, err := s.Store.Get(id)
-	s.mu.Lock()
-	fire := s.armed && id == s.id
-	if fire {
-		s.armed = false
+// refusedCapacityStartForRestore executes the provider refusal before a test
+// injects a race at a specific commit/restore boundary.
+func refusedCapacityStartForRestore(t *testing.T, e *capacityEnv, c startCandidate) startResult {
+	t.Helper()
+	prepared, err := prepareStartCandidateForCity(c, "", "", e.cfg, e.sp, e.store, e.clk, &e.log, nil)
+	if err != nil {
+		t.Fatal(err)
 	}
-	s.mu.Unlock()
-	if fire {
-		if werr := s.SetMetadataBatch(s.id, s.patch); werr != nil {
-			return b, werr
-		}
+	prepared.capacityTicket, _ = e.guard.Admit(capacityTestEndpoint, c.info.ID, c.info.ID)
+	e.sp.StartErrors["s"] = capacityRefusal("s", "")
+	result := runPreparedStartCandidate(context.Background(), *prepared, "", e.sp, e.store, e.cfg, 0,
+		func(context.Context, string) bool { return false },
+		func(context.Context, string) error { return nil }, nil)
+	result = resolveStartCapacity(result, e.rec, &e.log)
+	if !result.capacityRefused {
+		t.Fatalf("provider did not reach a capacity refusal: %v", result.err)
 	}
-	return b, err
-}
-
-// armingRefuser refuses every start and arms its hook just before returning.
-type armingRefuser struct {
-	*runtime.Fake
-	arm func()
-}
-
-func (p *armingRefuser) Start(ctx context.Context, name string, cfg runtime.Config) error {
-	p.Fake.Start(ctx, name, cfg) //nolint:errcheck // records the call; the refusal below is the result
-	p.Stop(name)                 //nolint:errcheck
-	p.arm()
-	return capacityRefusal(name, "")
+	return result
 }
 
 // startAsyncWith is startAsync against a wrapped provider.
@@ -1773,9 +1764,9 @@ func TestCommitStartResult_CapacityRestoreIsOneFencedWrite(t *testing.T) {
 		e.store = store
 		c := asleepSession(t, e, nil)
 		store.id, store.patch = c.info.ID, suspendPatch(e.clk.Now())
-		provider := &armingRefuser{Fake: e.sp, arm: store.arm}
-
-		executePlannedStartsTraced(context.Background(), []startCandidate{c}, e.cfg, e.desiredState, provider, e.store, "", "", e.clk, e.rec, 0, &e.log, &e.log, e.trace, e.startOptions...)
+		result := refusedCapacityStartForRestore(t, e, c)
+		store.arm()
+		commitStartResultTraced(result, sessionFrontDoor(e.store), e.clk, e.rec, 0, &e.log, &e.log, e.trace)
 
 		if store.conflict == 0 {
 			t.Fatal("the suspend did not land between the restore's read and write; the race was not exercised")
@@ -1795,9 +1786,9 @@ func TestCommitStartResult_CapacityRestoreIsOneFencedWrite(t *testing.T) {
 		e.store = store
 		c := asleepSession(t, e, nil)
 		store.id = c.info.ID
-		provider := &armingRefuser{Fake: e.sp, arm: store.arm}
-
-		executePlannedStartsTraced(context.Background(), []startCandidate{c}, e.cfg, e.desiredState, provider, e.store, "", "", e.clk, e.rec, 0, &e.log, &e.log, e.trace, e.startOptions...)
+		result := refusedCapacityStartForRestore(t, e, c)
+		store.arm()
+		commitStartResultTraced(result, sessionFrontDoor(e.store), e.clk, e.rec, 0, &e.log, &e.log, e.trace)
 
 		if store.writes != 1 {
 			t.Fatalf("writes after the refusal = %d, want the restore as exactly one write", store.writes)
@@ -1868,4 +1859,79 @@ func TestEndpointCapacity_KeepsEndpointsSessionsStillUse(t *testing.T) {
 			}
 		})
 	}
+}
+
+func acceptedSupersededCapacityResult(t *testing.T) startResult {
+	t.Helper()
+	e := newCapacityEnv(t, true, "s")
+	c := e.pendingCreate(t, "s", "e", nil)
+	provider := &supersedingStartProvider{Fake: e.sp, store: e.store, id: c.info.ID}
+	prepared, err := prepareStartCandidateForCity(c, "", "", e.cfg, provider, e.store, e.clk, &e.log, nil)
+	require.NoError(t, err)
+	result := runPreparedStartCandidate(context.Background(), *prepared, "", provider, e.store, e.cfg, 0,
+		func(context.Context, string) bool { return false },
+		func(context.Context, string) error { return nil }, nil)
+	require.ErrorIs(t, result.err, sessionpkg.ErrRuntimeStartSuperseded)
+	require.True(t, sessionpkg.RuntimeStartProviderAccepted(result.err))
+	require.Equal(t, 1, e.sp.CountCalls("Start", "s"))
+	return result
+}
+
+func TestClassifyStartVerdict_SupersededAcceptance(t *testing.T) {
+	accepted := acceptedSupersededCapacityResult(t)
+	for _, tc := range []struct {
+		name    string
+		err     error
+		called  bool
+		outcome TraceOutcomeCode
+		want    startVerdict
+	}{
+		{"accepted but superseded", accepted.err, true, TraceOutcomeProviderError, verdictSuccess},
+		{"wrapped acceptance", fmt.Errorf("worker boundary: %w", accepted.err), true, TraceOutcomeProviderError, verdictSuccess},
+		{"no provider call", accepted.err, false, TraceOutcomeProviderError, verdictInconclusive},
+		{"canceled at controller boundary", accepted.err, true, TraceOutcomeCanceled, verdictInconclusive},
+		{"deadline at controller boundary", accepted.err, true, TraceOutcomeDeadlineExceeded, verdictInconclusive},
+		{"panic", accepted.err, true, TraceOutcomePanicRecovered, verdictInconclusive},
+		{"deferred", accepted.err, true, TraceOutcomeDeferred, verdictInconclusive},
+		{"initializing", accepted.err, true, TraceOutcomeSessionInitializing, verdictInconclusive},
+		{"bare supersession", sessionpkg.ErrRuntimeStartSuperseded, true, TraceOutcomeProviderError, verdictInconclusive},
+		{"unavailable", runtime.ErrRuntimeUnavailable, true, TraceOutcomeProviderError, verdictInconclusive},
+		{"generic failure", errors.New("provider error"), true, TraceOutcomeProviderError, verdictInconclusive},
+		{"capacity takes precedence", errors.Join(accepted.err, capacityRefusal("s", "")), true, TraceOutcomeProviderError, verdictCapacity},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := classifyStartVerdict(startResult{err: tc.err, providerStartCalled: tc.called, outcome: tc.outcome})
+			require.Equal(t, tc.want, got)
+		})
+	}
+}
+
+type canceledAcceptedStartProvider struct {
+	*runtime.Fake
+	cancel context.CancelFunc
+	result error
+}
+
+func (p *canceledAcceptedStartProvider) Start(context.Context, string, runtime.Config) error {
+	p.cancel()
+	return p.result
+}
+
+func TestSupersededStartCancellationAtControllerBoundaryIsInconclusive(t *testing.T) {
+	// An accepted observation can arrive wrapped from a lower worker boundary;
+	// cancellation observed by this controller still forbids a healthy verdict.
+	accepted := acceptedSupersededCapacityResult(t)
+	e := newCapacityEnv(t, true, "s")
+	c := e.pendingCreate(t, "s", "e", nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	provider := &canceledAcceptedStartProvider{Fake: e.sp, cancel: cancel, result: accepted.err}
+	prepared, err := prepareStartCandidateForCity(c, "", "", e.cfg, provider, e.store, e.clk, &e.log, nil)
+	require.NoError(t, err)
+	result := runPreparedStartCandidate(ctx, *prepared, "", provider, e.store, e.cfg, 0,
+		func(context.Context, string) bool { return false },
+		func(context.Context, string) error { return nil }, nil)
+	require.ErrorIs(t, result.err, sessionpkg.ErrRuntimeStartSuperseded)
+	require.Equal(t, TraceOutcomeCanceled, result.outcome)
+	require.Equal(t, verdictInconclusive, classifyStartVerdict(result))
 }

@@ -994,6 +994,7 @@ func prepareStartCandidateForCity(
 	prepared, _, err := buildPreparedStartWithWorkDirResolver(candidate, cityPath, cfg, store, workDirResolver)
 	if prepared != nil && undo.written != nil {
 		undo.token = prepared.candidate.info.InstanceToken
+		undo.custody = prepared.candidate.info
 		prepared.preWakeUndo = undo
 	}
 	return prepared, err
@@ -1713,6 +1714,24 @@ func runPreparedStartCandidate(
 	startCallBegin := time.Now()
 	startedFresh, err := startPreparedStartCandidate(startCtx, item, cityPath, store, sp, cfg, &phases, sessionStaleKeyDetectionWaiter, warmClaim)
 	startCtxErr := startCtx.Err()
+	if errors.Is(err, sessionpkg.ErrRuntimeStartSuperseded) {
+		// The session owner proved that its launch tuple changed during
+		// provider I/O. A matching runtime must not turn that verdict into
+		// success, trigger fresh-key recovery, or charge the current row.
+		phases.StartCall = time.Since(startCallBegin)
+		outcome := TraceOutcomeProviderError
+		switch startCtxErr {
+		case context.Canceled:
+			outcome = TraceOutcomeCanceled
+		case context.DeadlineExceeded:
+			outcome = TraceOutcomeDeadlineExceeded
+		}
+		return startResult{
+			prepared: item, err: err, outcome: outcome,
+			started: started, finished: time.Now(), providerStartCalled: startedFresh,
+			phases: phases,
+		}
+	}
 	// diedDuringStartup starts true when the provider/resume layer already
 	// reported the death directly (runtime.ErrSessionDiedDuringStartup,
 	// e.g. from the tmux adapter or from retryFreshStartAfterStaleKey's
@@ -2060,6 +2079,11 @@ func commitAsyncStartResultWithContext(
 // close a bead and free an alias from. It keeps the lease handling below and
 // retries next tick.
 func settleUncommittedAsyncStart(result startResult, refresh asyncStartRefreshVerdict, sp runtime.Provider, sessFront *sessionpkg.Store, clk clock.Clock, stderr io.Writer) string {
+	if errors.Is(result.err, sessionpkg.ErrRuntimeStartSuperseded) && runtime.IsProviderCapacity(result.err) {
+		// The attempted runtime was refused; undo only still-owned PreWake
+		// values while preserving the concurrent hold or replacement.
+		restorePreWakeState(result.prepared, sessFront, stderr)
+	}
 	// A capacity refusal holds its row like a deferral: the endpoint, not
 	// this session, failed.
 	deferred := startOutcomeDefersCommit(result.outcome) || result.capacityRefused
@@ -2118,6 +2142,13 @@ func refreshAsyncStartResult(result startResult, store beads.Store, stderr io.Wr
 	preparedInfo := result.prepared.candidate.info
 	if result.attemptInfo.ID == "" {
 		result.attemptInfo = preparedInfo
+	}
+	if errors.Is(result.err, sessionpkg.ErrRuntimeStartSuperseded) {
+		// The runtime-only bridge already used an authoritative identity
+		// read. A stale cached projection (or a failed refresh) cannot erase
+		// that verdict or authorize any mutation of the replacement row.
+		// The existing cleanup executor still checks the attempted runtime.
+		return result, asyncStartRefreshVerdict{cleanupRuntime: true}
 	}
 	if store == nil || strings.TrimSpace(preparedInfo.ID) == "" {
 		return result, asyncStartRefreshVerdict{commit: true}
@@ -2575,6 +2606,15 @@ func commitStartResultTraced(
 		// candidate still carries the original attempt lease.
 		result.attemptInfo = info
 	}
+	if errors.Is(result.err, sessionpkg.ErrRuntimeStartSuperseded) {
+		if runtime.IsProviderCapacity(result.err) {
+			restorePreWakeState(result.prepared, sessFront, stderr)
+		}
+		// No ordinary failure write is owned by a superseded attempt. Its
+		// caller may clean up only the runtime attributed to that attempt.
+		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, "stale_async_start", result.started, result.finished, nil, result.phases)
+		return startCommitStale
+	}
 	// A capacity refusal is checked first, ahead of every failure arm
 	// including the terminal-error classifier: the endpoint refused, so
 	// nothing about this session is terminal or crash-looping.
@@ -2775,6 +2815,9 @@ type preWakeUndo struct {
 	// token is the attempt's instance_token; the restore applies only to the
 	// incarnation that made it.
 	token string
+	// custody is the immutable final launch snapshot. Async refresh may update
+	// prepared.candidate.info but cannot adopt a new owner's recovery rights.
+	custody sessionpkg.Info
 	// written is PreWake's value for each restorable key, restore the value
 	// before it.
 	written, restore sessionpkg.MetadataPatch
@@ -2823,7 +2866,8 @@ func restorePreWakeState(prepared preparedStart, sessFront *sessionpkg.Store, st
 	}
 	err := sessionpkg.WithSessionMutationLock(id, func() error {
 		_, err := sessFront.UpdateMetadataFenced(id, preWakeRestoreAttempts, func(current sessionpkg.Info, persisted sessionpkg.PersistedResponse) sessionpkg.MetadataPatch {
-			if persisted.Status == "closed" || current.InstanceToken != undo.token {
+			if persisted.Status == "closed" || current.InstanceToken != undo.token ||
+				!sessionpkg.RuntimeStartRefusalRestoreAllowed(undo.custody, current) {
 				return nil
 			}
 			patch := make(sessionpkg.MetadataPatch, len(undo.restore))

@@ -1228,7 +1228,7 @@ func (m *Manager) createBeadOnly(spec CreateOptions) (Info, error) {
 // suspended, it is resumed first using resumeCommand. If the tmux session
 // died (active bead but no process), it is restarted.
 func (m *Manager) Attach(ctx context.Context, id string, resumeCommand string, hints runtime.Config) error {
-	return withSessionMutationLock(id, func() error {
+	return withSessionRuntimeMutationLock(id, func() error {
 		b, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err
@@ -1274,7 +1274,7 @@ func (m *Manager) SuspendForShutdown(id string) error {
 }
 
 func (m *Manager) suspend(id string, intent suspendIntent) error {
-	return withSessionMutationLock(id, func() error {
+	return withSessionRuntimeMutationLock(id, func() error {
 		b, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err
@@ -1409,7 +1409,7 @@ func (m *Manager) tearDownRuntimeForSuspend(sessName string) error {
 // controller, commitPendingContinuationReset for Submit/Send/Attach/Start), so
 // the epoch advances once per reset however the reset was asked for.
 func (m *Manager) RequestFreshRestart(id string) error {
-	return withSessionMutationLock(id, func() error {
+	return withSessionRuntimeMutationLock(id, func() error {
 		if _, _, err := m.sessionBead(id); err != nil {
 			return err
 		}
@@ -1429,7 +1429,7 @@ func (m *Manager) Close(id string) error {
 // CloseDetailed ends a conversation permanently and reports cleanup artifacts.
 func (m *Manager) CloseDetailed(id string) (CloseResult, error) {
 	result := CloseResult{}
-	err := withSessionMutationLock(id, func() error {
+	err := withSessionRuntimeMutationLock(id, func() error {
 		b, sessName, err := m.loadSessionBead(id, true)
 		if err != nil {
 			return err
@@ -1556,7 +1556,7 @@ func (m *Manager) Kill(id string) error {
 // so wiring an operator-facing drain here widens the bound's population.
 // Re-read cmd/gc/session_pool_drain_deadline.go before adding one.
 func (m *Manager) BeginDrain(id, reason string) error {
-	return withSessionMutationLock(id, func() error {
+	return withSessionRuntimeMutationLock(id, func() error {
 		cmdLegal, err := m.checkTransition(id, CmdDrain, StateDraining)
 		if err != nil {
 			return err
@@ -1571,7 +1571,7 @@ func (m *Manager) BeginDrain(id, reason string) error {
 // Archive transitions a session from draining to archived. Idempotent:
 // returns nil if the session is already archived.
 func (m *Manager) Archive(id, reason string) error {
-	return withSessionMutationLock(id, func() error {
+	return withSessionRuntimeMutationLock(id, func() error {
 		cmdLegal, err := m.checkTransition(id, CmdArchive, StateArchived)
 		if err != nil {
 			return err
@@ -1586,7 +1586,7 @@ func (m *Manager) Archive(id, reason string) error {
 // Quarantine marks a session as crash-quarantined until the given time.
 // Idempotent: returns nil if the session is already quarantined.
 func (m *Manager) Quarantine(id string, until time.Time, cycle int) error {
-	return withSessionMutationLock(id, func() error {
+	return withSessionRuntimeMutationLock(id, func() error {
 		cmdLegal, err := m.checkTransition(id, CmdQuarantine, StateQuarantined)
 		if err != nil {
 			return err
@@ -1602,7 +1602,7 @@ func (m *Manager) Quarantine(id string, until time.Time, cycle int) error {
 // asleep so normal wake machinery owns the next runtime start. Idempotent:
 // returns nil if the session is already in an awake-eligible state.
 func (m *Manager) Reactivate(id string) error {
-	return withSessionMutationLock(id, func() error {
+	return withSessionRuntimeMutationLock(id, func() error {
 		cmdLegal, err := m.checkTransition(id, CmdWake, StateAsleep)
 		if err != nil {
 			return err
@@ -1626,7 +1626,7 @@ func (m *Manager) Reactivate(id string) error {
 // runtime process has been confirmed alive. Idempotent: returns nil if the
 // session is already active.
 func (m *Manager) ConfirmCreation(id string) error {
-	return withSessionMutationLock(id, func() error {
+	return withSessionRuntimeMutationLock(id, func() error {
 		cmdLegal, err := m.checkTransition(id, CmdReady, StateActive)
 		if err != nil {
 			return err
@@ -1648,7 +1648,7 @@ func (m *Manager) ConfirmCreation(id string) error {
 //   - err: *IllegalTransitionError wrapping ErrIllegalTransition when the
 //     command is neither legal nor a no-op
 //
-// MUST be called while holding withSessionMutationLock(id).
+// MUST be called while holding withSessionRuntimeMutationLock(id).
 func (m *Manager) checkTransition(id string, cmd TransitionCommand, targetState State) (bool, error) {
 	b, _, err := m.sessionBead(id)
 	if err != nil {
@@ -1685,7 +1685,7 @@ func (m *Manager) UpdatePresentation(id string, title *string, alias *string) er
 			return err
 		}
 	}
-	return withSessionMutationLock(id, func() error {
+	return withSessionRuntimeMutationLock(id, func() error {
 		b, sessName, err := m.loadSessionBead(id, true)
 		if err != nil {
 			return err
@@ -1742,7 +1742,7 @@ func (m *Manager) UpdatePresentation(id string, title *string, alias *string) er
 // UpdateTemplateOverrides merges option overrides into the session metadata.
 func (m *Manager) UpdateTemplateOverrides(id string, updates map[string]string) (map[string]string, error) {
 	var merged map[string]string
-	err := withSessionMutationLock(id, func() error {
+	err := withSessionRuntimeMutationLock(id, func() error {
 		b, sessName, err := m.loadSessionBead(id, true)
 		if err != nil {
 			return err
@@ -1793,7 +1793,7 @@ func (m *Manager) UpdateTemplateOverrides(id string, updates map[string]string) 
 // The session generation and row revision are checked in the same write.
 func (m *Manager) UpdateAuthorityProfile(id string, expectedGeneration uint64, mode string, profile sessionauthority.Profile, auth sessionauthority.Authorization, record sessionauthority.TransitionRecord) (map[string]string, error) {
 	var merged map[string]string
-	err := withSessionMutationLock(id, func() error {
+	err := withSessionRuntimeMutationLock(id, func() error {
 		b, sessName, err := m.loadSessionBead(id, true)
 		if err != nil {
 			return err
@@ -2238,7 +2238,7 @@ func (m *Manager) PersistSessionKey(id, sessionKey string) error {
 	if id == "" || sessionKey == "" {
 		return nil
 	}
-	return withSessionMutationLock(id, func() error {
+	return withSessionRuntimeMutationLock(id, func() error {
 		b, _, err := m.sessionBead(id)
 		if err != nil {
 			return err
@@ -2270,7 +2270,7 @@ func (m *Manager) PersistInvocationUsageCursor(id, cursor string) error {
 	if id == "" || cursor == "" {
 		return nil
 	}
-	return withSessionMutationLock(id, func() error {
+	return withSessionRuntimeMutationLock(id, func() error {
 		if _, _, err := m.sessionBead(id); err != nil {
 			return err
 		}
