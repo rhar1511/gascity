@@ -484,6 +484,10 @@ func (s *stateWithSessionProvider) SessionProvider() runtime.Provider {
 	return s.provider
 }
 
+func (s *stateWithSessionProvider) SessionRuntimeSnapshot() (*config.City, runtime.Provider) {
+	return s.cfg, s.provider
+}
+
 func seedQueuedWaitNudge(t *testing.T, fs *fakeState, wait beads.Bead, agentName string) string {
 	t.Helper()
 	nudgeID := "wait-" + wait.ID

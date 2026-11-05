@@ -14,8 +14,10 @@ type PendingCreateLease struct {
 	// Identity fence. InstanceToken is authoritative when non-empty;
 	// Generation is the legacy fallback, compared as a trimmed string and
 	// never parsed (preserves the pre-refactor semantics exactly).
-	InstanceToken string // strings.TrimSpace(Info.InstanceToken)
-	Generation    string // strings.TrimSpace(Info.Generation)
+	InstanceToken      string // strings.TrimSpace(Info.InstanceToken)
+	Generation         string // strings.TrimSpace(Info.Generation)
+	RuntimeBackend     string
+	RuntimeFingerprint string
 
 	// Claim is the boolean the protocol keys on.
 	Claim bool // Info.PendingCreateClaim (pending_create_claim == "true")
@@ -32,18 +34,21 @@ type PendingCreateLease struct {
 // asyncStart* helpers read off Info directly.
 func LeaseFromInfo(i Info) PendingCreateLease {
 	return PendingCreateLease{
-		Closed:        i.Closed,
-		InstanceToken: strings.TrimSpace(i.InstanceToken),
-		Generation:    strings.TrimSpace(i.Generation),
-		Claim:         i.PendingCreateClaim,
-		State:         State(strings.TrimSpace(i.MetadataState)),
+		Closed:             i.Closed,
+		InstanceToken:      strings.TrimSpace(i.InstanceToken),
+		Generation:         strings.TrimSpace(i.Generation),
+		RuntimeBackend:     i.RuntimeBackend,
+		RuntimeFingerprint: i.RuntimeFingerprint,
+		Claim:              i.PendingCreateClaim,
+		State:              State(strings.TrimSpace(i.MetadataState)),
 	}
 }
 
 // LeaseCommitVerdict is what the async-start commit gate returns when an
 // in-flight start result meets the current session. The two mutually-exclusive
 // boolean helpers it replaces (asyncStartSessionStillCurrent /
-// asyncStartStaleRuntimeCleanupAllowed) fuse into this two-outcome enum.
+// asyncStartStaleRuntimeCleanupAllowed) are extended with a third verdict that
+// preserves runtime custody when the durable backend identity changes.
 type LeaseCommitVerdict int
 
 const (
@@ -54,6 +59,9 @@ const (
 	// to the separate runningSessionMatchesPendingCreate runtime probe) stop
 	// the spawned runtime.
 	LeaseDiscardStopRuntime
+	// LeaseDiscardRetainRuntime refuses to act on a different backend identity.
+	// A changed row cannot authorize cleanup of either backend's native key.
+	LeaseDiscardRetainRuntime
 )
 
 // StateConfirmsPendingStart reports whether a session in the given state
@@ -79,6 +87,9 @@ func StateConfirmsPendingStart(s State) bool {
 // of concurrent reconciler phases and must not invalidate an in-flight start
 // result (#1542).
 func (l PendingCreateLease) SameIdentity(current PendingCreateLease) bool {
+	if l.RuntimeBackend != current.RuntimeBackend || l.RuntimeFingerprint != current.RuntimeFingerprint {
+		return false
+	}
 	if l.InstanceToken != "" {
 		return current.InstanceToken == l.InstanceToken
 	}
@@ -93,7 +104,7 @@ func (l PendingCreateLease) SameIdentity(current PendingCreateLease) bool {
 // failed-create close may be retried after its claim was cleared.
 // Awake is advisory: heal can project it while the claimed Start is in flight.
 func (l PendingCreateLease) CanRollback(current PendingCreateLease) bool {
-	return !current.Closed && l.Generation == current.Generation && l.InstanceToken == current.InstanceToken &&
+	return !current.Closed && l.RuntimeBackend == current.RuntimeBackend && l.RuntimeFingerprint == current.RuntimeFingerprint && l.Generation == current.Generation && l.InstanceToken == current.InstanceToken &&
 		current.State != StateActive &&
 		(current.Claim || current.State == StateFailedCreate)
 }
@@ -103,6 +114,9 @@ func (l PendingCreateLease) CanRollback(current PendingCreateLease) bool {
 // This fuses asyncStartSessionStillCurrent (verdict == LeaseCommit) and
 // asyncStartStaleRuntimeCleanupAllowed (verdict == LeaseDiscardStopRuntime).
 func (l PendingCreateLease) CommitVerdict(current PendingCreateLease) LeaseCommitVerdict {
+	if l.RuntimeBackend != current.RuntimeBackend || l.RuntimeFingerprint != current.RuntimeFingerprint {
+		return LeaseDiscardRetainRuntime
+	}
 	if current.Closed {
 		return LeaseDiscardStopRuntime
 	}

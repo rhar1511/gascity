@@ -82,24 +82,26 @@ type Info struct {
 	// label). IsSessionBeadOrRepairableInfo reads it to classify repairable
 	// beads without touching the raw bead. Additive, internal-only (absent from
 	// the HTTP wire).
-	Type          string
-	Template      string
-	State         State
-	Closed        bool
-	Title         string
-	Alias         string
-	AgentName     string // persisted concrete identity for MCP materialization
-	Provider      string
-	Transport     string
-	Command       string // resolved command stored at creation
-	WorkDir       string
-	SessionName   string // tmux session name
-	SessionKey    string // provider-specific resume handle (UUID)
-	ResumeFlag    string // stored provider resume flag (e.g., "--resume")
-	ResumeStyle   string // "flag" or "subcommand"
-	ResumeCommand string // explicit resume command template ({{.SessionKey}})
-	CreatedAt     time.Time
-	LastActive    time.Time
+	Type               string
+	Template           string
+	State              State
+	Closed             bool
+	Title              string
+	Alias              string
+	AgentName          string // persisted concrete identity for MCP materialization
+	Provider           string
+	Transport          string
+	RuntimeBackend     string // exact runtime selection, distinct from coding provider/transport
+	RuntimeFingerprint string // immutable resolved execution declaration digest
+	Command            string // resolved command stored at creation
+	WorkDir            string
+	SessionName        string // tmux session name
+	SessionKey         string // provider-specific resume handle (UUID)
+	ResumeFlag         string // stored provider resume flag (e.g., "--resume")
+	ResumeStyle        string // "flag" or "subcommand"
+	ResumeCommand      string // explicit resume command template ({{.SessionKey}})
+	CreatedAt          time.Time
+	LastActive         time.Time
 	// LastNudgeDeliveredAt records the wall-clock time of the most recent
 	// successful nudge delivery to this session. Zero when no nudge has
 	// been delivered yet (or the metadata predates the stamping path).
@@ -601,6 +603,7 @@ type Manager struct {
 	sp                      runtime.Provider
 	cityPath                string
 	transportResolver       func(template, provider string) transportResolution
+	runtimeBackendResolver  RuntimeBackendResolver
 	clk                     clock.Clock
 	staleKeyDetectionWaiter StaleKeyDetectionWaiter
 }
@@ -869,6 +872,38 @@ func NewManagerWithOptions(store beads.Store, sp runtime.Provider, opts ...Manag
 // spec.BeadOnly is set, creates a start-pending bead for the reconciler to
 // start later.
 func (m *Manager) CreateSession(ctx context.Context, spec CreateOptions) (Info, error) {
+	var info Info
+	err := runtime.WithBackendCreation(m.sp, func() error {
+		var err error
+		info, err = m.createSession(ctx, spec)
+		return err
+	})
+	return info, err
+}
+
+func (m *Manager) createSession(ctx context.Context, spec CreateOptions) (Info, error) {
+	if m.runtimeBackendResolver != nil {
+		spec.Transport = normalizeTransport(spec.Provider, spec.Transport)
+		if spec.Transport == "" {
+			spec.Transport = m.resolveConfiguredTransport(spec.Template, spec.Provider)
+		}
+		var err error
+		backend, fingerprint, resolveErr := m.runtimeBackendResolver(spec)
+		err = resolveErr
+		if err == nil && (spec.RuntimeBackend != "" || spec.RuntimeFingerprint != "") && (spec.RuntimeBackend != backend || spec.RuntimeFingerprint != fingerprint) {
+			return Info{}, ErrRuntimeBackendIdentity
+		}
+		spec.RuntimeBackend, spec.RuntimeFingerprint = backend, fingerprint
+		if err != nil {
+			return Info{}, err
+		}
+		if _, err := RuntimeBackendKey(spec.RuntimeBackend, spec.RuntimeFingerprint); err != nil {
+			return Info{}, err
+		}
+	}
+	if err := m.validateCreateRuntime(spec); err != nil {
+		return Info{}, err
+	}
 	if spec.BeadOnly {
 		return m.createBeadOnly(spec)
 	}
@@ -957,6 +992,7 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 		if meta["session_origin"] == "" {
 			meta["session_origin"] = spec.defaultSessionOrigin()
 		}
+		setCreateRuntimeMetadata(meta, spec)
 		createdBead, createErr := m.store.Create(beads.Bead{
 			Title: title,
 			Type:  BeadType,
@@ -985,6 +1021,9 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 		b.Metadata["session_name"] = sessName
 		if explicitName != "" {
 			b.Metadata["session_name_explicit"] = "true"
+		}
+		if err := m.bindRuntime(infoFromPersistedBead(b)); err != nil {
+			return errors.Join(err, m.store.Close(b.ID))
 		}
 		if err := m.syncStoredMCPServers(b.ID, &b, hints.MCPServers); err != nil {
 			_ = m.store.Close(b.ID)
@@ -1195,6 +1234,7 @@ func (m *Manager) createBeadOnly(spec CreateOptions) (Info, error) {
 		if meta["session_origin"] == "" {
 			meta["session_origin"] = spec.defaultSessionOrigin()
 		}
+		setCreateRuntimeMetadata(meta, spec)
 		createdBead, createErr := m.store.Create(beads.Bead{
 			Title: title,
 			Type:  BeadType,
@@ -1221,6 +1261,9 @@ func (m *Manager) createBeadOnly(spec CreateOptions) (Info, error) {
 			b.Metadata = make(map[string]string)
 		}
 		b.Metadata["session_name"] = sessName
+		if err := m.bindRuntime(infoFromPersistedBead(b)); err != nil {
+			return errors.Join(err, m.store.Close(b.ID))
+		}
 
 		info = m.infoFromBead(b)
 		return nil
@@ -2099,6 +2142,9 @@ func (m *Manager) ObserveRuntimeForInfo(info Info, processNames []string) (Runti
 	if strings.TrimSpace(info.SessionName) == "" || m.sp == nil {
 		return obs, nil
 	}
+	if err := m.bindRuntime(info); err != nil {
+		return RuntimeObservation{}, err
+	}
 	liveness, err := runtime.ObserveLivenessWithError(m.sp, info.SessionName, processNames)
 	if err != nil {
 		return RuntimeObservation{}, err
@@ -2172,6 +2218,11 @@ func (m *Manager) EnrichInfo(info Info) Info {
 	sessName := info.SessionName
 
 	if !info.Closed {
+		if err := m.bindRuntime(info); err != nil {
+			// An unresolved backend is uncertainty, not a dormant session.
+			// Error-bearing observation reports the cause to lifecycle callers.
+			return info
+		}
 		transport, _ := m.transportForInfo(info)
 		info.Transport = transport
 		_ = m.routeACPIfNeeded(info.Provider, transport, sessName)

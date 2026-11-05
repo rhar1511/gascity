@@ -107,6 +107,11 @@ func newFakeState(t testing.TB) *fakeState {
 }
 
 func (f *fakeState) Config() *config.City { return f.cfg }
+
+func (f *fakeState) SessionRuntimeSnapshot() (*config.City, runtime.Provider) {
+	return f.cfg, f.SessionProvider()
+}
+
 func (f *fakeState) SessionProvider() runtime.Provider {
 	if f.sessionProvider != nil {
 		return f.sessionProvider

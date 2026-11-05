@@ -32,6 +32,8 @@ type NativeBindingTarget struct {
 	EffectiveConfigSHA256 string `json:"effective_config_sha256"`
 	PermissionMode        string `json:"permission_mode"`
 	CaptureSource         string `json:"capture_source"`
+	RuntimeBackend        string `json:"runtime_backend,omitempty"`
+	RuntimeFingerprint    string `json:"runtime_fingerprint,omitempty"`
 }
 
 // NativeBindingClaims is the complete signed capture statement. Only an
@@ -151,6 +153,11 @@ func validNativeBindingClaims(c NativeBindingClaims) bool {
 		return false
 	}
 	t := c.Target
+	if t.RuntimeBackend != "" || t.RuntimeFingerprint != "" {
+		if !validAtom(t.RuntimeBackend) || strings.TrimSpace(t.RuntimeBackend) != t.RuntimeBackend || !validSHA(t.RuntimeFingerprint) {
+			return false
+		}
+	}
 	for _, value := range []string{c.BindingID, c.AuthorizationID, c.KeyID, c.Issuer, c.Subject, t.City, t.SessionID, t.Provider, t.Transport, t.InstanceToken, t.CaptureSource, t.PermissionMode} {
 		if !validAtom(value) || strings.TrimSpace(value) != value {
 			return false

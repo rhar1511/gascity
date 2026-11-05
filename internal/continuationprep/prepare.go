@@ -53,6 +53,7 @@ func Prepare(request Request) (Prepared, error) {
 	empty := Prepared{}
 	if cfg == nil || expected.Revision == 0 || info.Type != session.BeadType || info.Closed || info.PendingCreateClaim ||
 		info.ID != expected.SessionID || info.Provider != expected.Provider || info.SessionKey != expected.SessionKey ||
+		info.RuntimeBackend != expected.RuntimeBackend || info.RuntimeFingerprint != expected.RuntimeFingerprint ||
 		info.Generation != expected.Generation || info.InstanceToken != expected.InstanceToken || info.ContinuationEpoch != expected.ContinuationEpoch ||
 		info.WorkDir != expected.WorkDir || info.WorkDirCanonical != expected.WorkDir || info.Transport != config.SessionTransportTmux || info.TransportMetadata != info.Transport {
 		return empty, session.ErrContinuationIdentity
@@ -131,6 +132,7 @@ func Prepare(request Request) (Prepared, error) {
 	}
 	if _, err := verifier.VerifyNativeBinding(nativeToken, sessionauthority.NativeBindingTarget{
 		City: cfg.EffectiveCityName(), SessionID: info.ID, SessionRevision: expected.Revision, Provider: info.Provider, Transport: info.Transport,
+		RuntimeBackend: info.RuntimeBackend, RuntimeFingerprint: info.RuntimeFingerprint,
 		SessionKey: info.SessionKey, Generation: generation, InstanceToken: info.InstanceToken, ContinuationEpoch: epoch, WorkDir: expected.WorkDir,
 		EffectiveConfigSHA256: snapshot.EffectiveConfigIdentitySHA256, PermissionMode: mode, CaptureSource: captureSource,
 	}, auth); err != nil {

@@ -95,6 +95,7 @@ Agent defines a configured agent in the city.
 | `prompt_template` | string |  |  | PromptTemplate is the path to this agent's prompt template file. Relative paths resolve against the city directory. |
 | `nudge` | string |  |  | Nudge is text typed into the agent's session after startup. Used for CLI agents that don't accept command-line prompts. For a known pool session whose trigger remains unclaimed after the 90-second recovery grace period, an empty or whitespace-only Nudge does not opt out: it sends "Run gc hook --claim --drain-ack --json now; if it returns work, execute it immediately." This fallback applies only to the initial stalled-claim recovery; continuation-claim recovery remains configured-only. Unknown templates receive no fallback. |
 | `session` | string |  |  | Session overrides the session transport for this agent. "" (default) uses the city-level session provider (typically tmux). "acp" uses the Agent Client Protocol (JSON-RPC over stdio). The agent's resolved provider must have supports_acp = true. Enum: `acp` |
+| `runtime` | string |  |  | Runtime selects a pack-declared exec runtime for new sessions, independently of coding provider and transport. Empty inherits the city backend. |
 | `provider` | string |  |  | Provider names the provider preset to use for this agent. |
 | `context_advisory` | ContextAdvisory |  |  | ContextAdvisory overrides context-pressure guidance for this agent. |
 | `upstream` | string |  |  | Upstream selects the model-serving endpoint (a key in [upstreams]) for this agent — WHO serves the model. "" (default) falls back to agent_defaults.upstream; if still empty, no upstream env is injected (ambient behavior). Switching it relaunches the agent in the warm box. |
@@ -178,6 +179,7 @@ AgentOverride modifies a pack-stamped agent for a specific rig.
 | `pre_start` | []string |  |  | PreStart overrides the agent's pre_start commands. |
 | `prompt_template` | string |  |  | PromptTemplate overrides the prompt template path. Relative paths resolve against the declaring config file's directory (pack-safe). Paths prefixed with "//" resolve against the city root. |
 | `session` | string |  |  | Session overrides the session transport ("acp"). |
+| `runtime` | string |  |  | Runtime overrides the named runtime for newly created sessions. |
 | `provider` | string |  |  | Provider overrides the provider name. |
 | `context_advisory` | ContextAdvisory |  |  | ContextAdvisory overrides context-pressure guidance for this agent. |
 | `upstream` | string |  |  | Upstream overrides the model-serving endpoint selection (Phase C). |
@@ -239,6 +241,7 @@ AgentPatch modifies existing agents identified by rig scope and Name.
 | `pre_start` | []string |  |  | PreStart overrides the agent's pre_start commands. |
 | `prompt_template` | string |  |  | PromptTemplate overrides the prompt template path. Relative paths resolve against the declaring config file's directory (pack-safe). Paths prefixed with "//" resolve against the city root. |
 | `session` | string |  |  | Session overrides the session transport ("acp" or "tmux"). |
+| `runtime` | string |  |  | Runtime overrides the named runtime for new sessions. |
 | `provider` | string |  |  | Provider overrides the provider name. |
 | `context_advisory` | ContextAdvisory |  |  | ContextAdvisory overrides context-pressure guidance for this agent. |
 | `upstream` | string |  |  | Upstream overrides the model-serving endpoint selection (Phase C). |
@@ -608,6 +611,7 @@ NamedSession defines a canonical persistent session backed by an agent template.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
+| `runtime` | string |  |  | Runtime overrides the backing template's named runtime for new sessions. Empty inherits the template and then the city backend. Existing sessions retain their persisted runtime identity. |
 | `name` | string |  |  | Name is the configured public session identity. When omitted, Template remains the compatibility identity. |
 | `template` | string | **yes** |  | Template is the referenced agent template name. Root declarations may target imported agents via "binding.agent". |
 | `scope` | string |  |  | Scope defines where this named session is instantiated in pack expansion: "city" (one per city) or "rig" (one per rig). Omit the field for an unscoped session instantiated in both city and rig expansion contexts. Enum: `city`, `rig` |
@@ -620,6 +624,7 @@ NamedSessionPatch modifies an existing named session identified by canonical nam
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
+| `runtime` | string |  |  | Runtime overrides the new-session runtime; empty restores inheritance. |
 | `dir` | string |  |  | Dir is the targeting key. Empty targets a city-scoped named session. |
 | `name` | string |  |  | Name is the canonical named-session identity. Use this to disambiguate sessions that share the same template. |
 | `template` | string |  |  | Template is a compatibility targeting key when Name is omitted. |

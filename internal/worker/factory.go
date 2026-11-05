@@ -28,6 +28,7 @@ type FactoryConfig struct {
 	Recorder              events.Recorder
 	UsageSink             usage.Sink
 	ResolveTransport      func(template, provider string) string
+	ResolveRuntimeBackend sessionpkg.RuntimeBackendResolver
 	ResolveSessionRuntime SessionRuntimeResolver
 	// StaleKeyDetectionWaiter supplies the session lifecycle signal used before
 	// a keyed start is probed for stale resume-key failure. Nil preserves the
@@ -71,6 +72,9 @@ func NewFactory(cfg FactoryConfig) (*Factory, error) {
 	}
 	if cfg.ResolveTransport != nil {
 		opts = append(opts, sessionpkg.WithTransportResolver(cfg.ResolveTransport))
+	}
+	if cfg.ResolveRuntimeBackend != nil {
+		opts = append(opts, sessionpkg.WithRuntimeBackendResolver(cfg.ResolveRuntimeBackend))
 	}
 	if cfg.StaleKeyDetectionWaiter != nil {
 		opts = append(opts, sessionpkg.WithStaleKeyDetectionWaiter(cfg.StaleKeyDetectionWaiter))
@@ -234,13 +238,15 @@ func (f *Factory) SessionByRecord(info sessionpkg.Info, pr sessionpkg.PersistedR
 
 func (f *Factory) sessionFromRecord(info sessionpkg.Info, pr sessionpkg.PersistedResponse) (Handle, error) {
 	spec := SessionSpec{
-		ID:       info.ID,
-		Template: info.Template,
-		Title:    info.Title,
-		Alias:    info.Alias,
-		Command:  info.Command,
-		Provider: info.Provider,
-		WorkDir:  info.WorkDir,
+		ID:                 info.ID,
+		Template:           info.Template,
+		Title:              info.Title,
+		Alias:              info.Alias,
+		Command:            info.Command,
+		Provider:           info.Provider,
+		RuntimeBackend:     info.RuntimeBackend,
+		RuntimeFingerprint: info.RuntimeFingerprint,
+		WorkDir:            info.WorkDir,
 		Resume: sessionpkg.ProviderResume{
 			ResumeFlag:    info.ResumeFlag,
 			ResumeStyle:   info.ResumeStyle,

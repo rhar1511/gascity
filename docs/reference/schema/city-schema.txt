@@ -125,6 +125,10 @@
           ],
           "description": "Session overrides the session transport for this agent.\n\"\" (default) uses the city-level session provider (typically tmux).\n\"acp\" uses the Agent Client Protocol (JSON-RPC over stdio).\nThe agent's resolved provider must have supports_acp = true."
         },
+        "runtime": {
+          "type": "string",
+          "description": "Runtime selects a pack-declared exec runtime for new sessions, independently\nof coding provider and transport. Empty inherits the city backend."
+        },
         "provider": {
           "type": "string",
           "description": "Provider names the provider preset to use for this agent."
@@ -501,6 +505,10 @@
           "type": "string",
           "description": "Session overrides the session transport (\"acp\")."
         },
+        "runtime": {
+          "type": "string",
+          "description": "Runtime overrides the named runtime for newly created sessions."
+        },
         "provider": {
           "type": "string",
           "description": "Provider overrides the provider name."
@@ -797,6 +805,10 @@
         "session": {
           "type": "string",
           "description": "Session overrides the session transport (\"acp\" or \"tmux\")."
+        },
+        "runtime": {
+          "type": "string",
+          "description": "Runtime overrides the named runtime for new sessions."
         },
         "provider": {
           "type": "string",
@@ -2103,6 +2115,10 @@
     },
     "NamedSession": {
       "properties": {
+        "runtime": {
+          "type": "string",
+          "description": "Runtime overrides the backing template's named runtime for new sessions.\nEmpty inherits the template and then the city backend. Existing sessions\nretain their persisted runtime identity."
+        },
         "name": {
           "type": "string",
           "description": "Name is the configured public session identity. When omitted, Template\nremains the compatibility identity."
@@ -2141,6 +2157,10 @@
     },
     "NamedSessionPatch": {
       "properties": {
+        "runtime": {
+          "type": "string",
+          "description": "Runtime overrides the new-session runtime; empty restores inheritance."
+        },
         "dir": {
           "type": "string",
           "description": "Dir is the targeting key. Empty targets a city-scoped named session."

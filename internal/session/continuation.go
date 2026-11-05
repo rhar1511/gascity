@@ -30,14 +30,16 @@ var ErrContinuationRuntime = errors.New("native continuation runtime absence unv
 // struct itself authenticates nothing and grants no work admission; trusted
 // composition must establish those separately before calling this primitive.
 type ContinuationExpectation struct {
-	SessionID         string
-	Revision          int64
-	Provider          string
-	SessionKey        string
-	Generation        string
-	InstanceToken     string
-	ContinuationEpoch string
-	WorkDir           string
+	SessionID          string
+	Revision           int64
+	Provider           string
+	RuntimeBackend     string
+	RuntimeFingerprint string
+	SessionKey         string
+	Generation         string
+	InstanceToken      string
+	ContinuationEpoch  string
+	WorkDir            string
 }
 
 // ContinuationLaunch carries canonical, resolved provider configuration.
@@ -81,6 +83,9 @@ func (m *Manager) StartContinuation(ctx context.Context, expected ContinuationEx
 				return beads.ErrConditionalWriteUnsupported
 			}
 			current := infoFromPersistedBead(row)
+			if err := m.bindRuntime(current); err != nil {
+				return err
+			}
 			if err := m.continuationRuntimeAbsent(current); err != nil {
 				return err
 			}
@@ -156,6 +161,11 @@ func (e ContinuationExpectation) valid() bool {
 			return false
 		}
 	}
+	if e.RuntimeBackend != "" || e.RuntimeFingerprint != "" {
+		if _, err := RuntimeBackendKey(e.RuntimeBackend, e.RuntimeFingerprint); err != nil {
+			return false
+		}
+	}
 	return validContinuationKey(e.SessionKey) && e.Revision != 0 && positiveContinuationInteger(e.Generation) && positiveContinuationInteger(e.ContinuationEpoch) && filepath.IsAbs(e.WorkDir) && filepath.Clean(e.WorkDir) == e.WorkDir
 }
 
@@ -166,6 +176,7 @@ func positiveContinuationInteger(value string) bool {
 
 func (e ContinuationExpectation) matches(row beads.Bead) bool {
 	return row.ID == e.SessionID && row.Revision == e.Revision && row.Type == BeadType &&
+		row.Metadata[beadmeta.RuntimeBackendMetadataKey] == e.RuntimeBackend && row.Metadata[beadmeta.RuntimeFingerprintMetadataKey] == e.RuntimeFingerprint &&
 		row.Metadata["provider"] == e.Provider && row.Metadata["session_key"] == e.SessionKey &&
 		row.Metadata["generation"] == e.Generation && row.Metadata["instance_token"] == e.InstanceToken &&
 		row.Metadata["continuation_epoch"] == e.ContinuationEpoch &&

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"os"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -9,18 +10,29 @@ import (
 )
 
 func (s *Server) sessionManager(store beads.Store) *session.Manager {
-	cfg := s.state.Config()
+	cfg, sp := s.state.SessionRuntimeSnapshot()
 	if cfg == nil {
-		return session.NewManagerWithOptions(store, s.state.SessionProvider(), session.WithCityPath(s.state.CityPath()))
+		return session.NewManagerWithOptions(store, sp, session.WithCityPath(s.state.CityPath()))
 	}
 	return session.NewManagerWithOptions(
 		store,
-		s.state.SessionProvider(),
+		sp,
 		session.WithCityPath(s.state.CityPath()),
+		session.WithRuntimeBackendResolver(s.runtimeBackendResolverForSnapshot(cfg, sp)),
 		session.WithTransportPolicyResolver(func(template, provider string) (string, bool) {
 			return configuredSessionTransportResolution(cfg, template, provider)
 		}),
 	)
+}
+
+func effectiveRuntimeBase(cfg *config.City) string {
+	if override := os.Getenv("GC_SESSION"); override != "" {
+		return override
+	}
+	if cfg == nil {
+		return ""
+	}
+	return cfg.Session.Provider
 }
 
 func configuredSessionTransport(cfg *config.City, template, provider string) string {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // ErrNoSessionEventSource reports that a provider has no session-event
@@ -34,11 +35,13 @@ type SessionEventSource struct {
 //     believes a backend is covered when its events are missing. Streams
 //     already opened close when ctx is done.
 //   - With no stream, the error wraps [ErrNoSessionEventSource].
-//   - One stream is returned unchanged; two are merged with
+//   - One stream is returned unchanged; multiple streams are merged with
 //     [MergeSessionEvents].
-func SubscribeSessionEventSources(ctx context.Context, a, b SessionEventSource) (<-chan SessionEvent, error) {
+func SubscribeSessionEventSources(ctx context.Context, sources ...SessionEventSource) (<-chan SessionEvent, error) {
 	var streams []<-chan SessionEvent
-	for _, src := range []SessionEventSource{a, b} {
+	var names []string
+	for _, src := range sources {
+		names = append(names, src.Name)
 		sep, ok := src.Provider.(SessionEventProvider)
 		if !ok {
 			continue
@@ -50,15 +53,22 @@ func SubscribeSessionEventSources(ctx context.Context, a, b SessionEventSource) 
 		if err != nil {
 			return nil, fmt.Errorf("%s backend: %w", src.Name, err)
 		}
+		if ch == nil {
+			return nil, fmt.Errorf("%s backend: nil session-event stream", src.Name)
+		}
 		streams = append(streams, ch)
 	}
 	switch len(streams) {
 	case 0:
-		return nil, fmt.Errorf("%w (%s, %s)", ErrNoSessionEventSource, a.Name, b.Name)
+		return nil, fmt.Errorf("%w (%s)", ErrNoSessionEventSource, strings.Join(names, ", "))
 	case 1:
 		return streams[0], nil
 	}
-	return MergeSessionEvents(ctx, streams[0], streams[1]), nil
+	merged := streams[0]
+	for _, stream := range streams[1:] {
+		merged = MergeSessionEvents(ctx, merged, stream)
+	}
+	return merged, nil
 }
 
 // MergeSessionEvents fans two session-event streams into one, closing the

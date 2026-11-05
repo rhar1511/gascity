@@ -105,6 +105,17 @@ func runAdoptionBarrier(
 			bySessionName[sn] = true
 		}
 	}
+	if _, strict := runtime.AsBackendBindingProvider(sp); strict {
+		for _, name := range running {
+			if bySessionName[name] {
+				result.AlreadyHadBead++
+				continue
+			}
+			result.Skipped++
+			fmt.Fprintf(stderr, "adoption barrier: runtime %q has no persisted owner; discovery cannot supply a binding\n", name) //nolint:errcheck
+		}
+		return result, result.Skipped == 0 && !partialList
+	}
 
 	// Build config agent lookup: session_name -> agent config.
 	// Also build a reverse lookup by qualified name for pool instance resolution.

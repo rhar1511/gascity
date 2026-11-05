@@ -53,6 +53,8 @@ type AgentPatch struct {
 	PromptTemplate *string `toml:"prompt_template,omitempty"`
 	// Session overrides the session transport ("acp" or "tmux").
 	Session *string `toml:"session,omitempty"`
+	// Runtime overrides the named runtime for new sessions.
+	Runtime *string `toml:"runtime,omitempty"`
 	// Provider overrides the provider name.
 	Provider *string `toml:"provider,omitempty"`
 	// ContextAdvisory overrides context-pressure guidance for this agent.
@@ -174,6 +176,8 @@ type AgentPatch struct {
 // NamedSessionPatch modifies an existing named session identified by canonical
 // name or, for compatibility, by an unambiguous template.
 type NamedSessionPatch struct {
+	// Runtime overrides the new-session runtime; empty restores inheritance.
+	Runtime *string `toml:"runtime,omitempty"`
 	// Dir is the targeting key. Empty targets a city-scoped named session.
 	Dir string `toml:"dir,omitempty"`
 	// Name is the canonical named-session identity. Use this to disambiguate
@@ -411,6 +415,9 @@ func namedSessionPatchMatches(cfg *City, patch *NamedSessionPatch) (string, []in
 }
 
 func applyNamedSessionPatchFields(s *NamedSession, p *NamedSessionPatch) {
+	if p.Runtime != nil {
+		s.Runtime = *p.Runtime
+	}
 	if p.Mode != nil {
 		s.Mode = *p.Mode
 	}
@@ -544,6 +551,9 @@ func applyAgentMutation(a *Agent, p *AgentPatch, sleepSource string) {
 	}
 	if p.Session != nil {
 		a.Session = *p.Session
+	}
+	if p.Runtime != nil {
+		a.Runtime = *p.Runtime
 	}
 	if p.Provider != nil {
 		a.Provider = *p.Provider

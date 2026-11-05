@@ -5265,6 +5265,7 @@ func TestCityRuntimeReloadRetainsTimedOutDispatcherForShutdownDrain(t *testing.T
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	lastProviderName := "fake"
+	cr.standaloneCityStore = beads.NewMemStore()
 	cr.reloadConfig(ctx, &lastProviderName, cityPath)
 	od.waitForDrainCalls(t, 1)
 
@@ -5315,6 +5316,7 @@ func TestCityRuntimeReloadDrainShortCircuitsOnTickContextCancel(t *testing.T) {
 	cancel()
 	lastProviderName := "fake"
 	start := time.Now()
+	cr.standaloneCityStore = beads.NewMemStore()
 	cr.reloadConfig(ctx, &lastProviderName, cityPath)
 	// errs[0] below is the precise proof that the cancellation short-circuit
 	// fired: blockingOrderDispatcher.drain records ctx.Err() synchronously at
@@ -5368,6 +5370,7 @@ func TestCityRuntimeReloadDrainBoundedByTimeout(t *testing.T) {
 	writeCityRuntimeConfigWithOneSecondShutdownTimeout(t, tomlPath)
 	lastProviderName := "fake"
 	start := time.Now()
+	cr.standaloneCityStore = beads.NewMemStore()
 	cr.reloadConfig(context.Background(), &lastProviderName, cityPath)
 	elapsed := time.Since(start)
 	// elapsed is the subject under test (it proves reloadConfig actually
@@ -5518,6 +5521,7 @@ func TestCityRuntimeReloadKeepsRegisteredAliasForEffectiveIdentity(t *testing.T)
 	}
 
 	lastProviderName := "fake"
+	cr.standaloneCityStore = beads.NewMemStore()
 	cr.reloadConfig(context.Background(), &lastProviderName, cityPath)
 
 	if got := cr.cfg.EffectiveCityName(); got != "machine-alias" {
@@ -5768,6 +5772,7 @@ func TestCityRuntimeReloadRestartsConfigWatcherWithNewPackTargets(t *testing.T) 
 
 	writeCityRuntimeConfigWithIncludes(t, tomlPath, []string{"packs/extra"})
 	lastProviderName := "fake"
+	cr.standaloneCityStore = beads.NewMemStore()
 	cr.reloadConfig(context.Background(), &lastProviderName, cityPath)
 
 	packDir := filepath.Join(cityPath, "packs", "extra")
@@ -5890,6 +5895,7 @@ func TestCityRuntimeReloadMaterializesNewlyAddedSkill(t *testing.T) {
 	writeSkillMaterializationTestConfig(t, tomlPath, "[orders]\nskip = [\"reaper\"]\n")
 
 	lastProviderName := "tmux"
+	cr.standaloneCityStore = beads.NewMemStore()
 	cr.reloadConfig(context.Background(), &lastProviderName, cityPath)
 
 	link := filepath.Join(cityPath, ".claude", "skills", "plan")
@@ -5955,6 +5961,7 @@ func TestCityRuntimeReloadRejectsCollidingSkillMaterialization(t *testing.T) {
 		"[[agent]]\nname = \"deputy\"\nscope = \"city\"\nprovider = \"claude\"\n\n")
 
 	lastProviderName := "tmux"
+	cr.standaloneCityStore = beads.NewMemStore()
 	reply := cr.reloadConfigTraced(context.Background(), &lastProviderName, cityPath, nil, reloadSourceWatch)
 
 	// (a) The reload is still applied — a collision does not abort it.

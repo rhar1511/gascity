@@ -950,18 +950,19 @@ func TestReloadConfigTracedRebuildsProviderWhenPackRuntimeCommandChanges(t *test
 	applyFeatureFlags(cfg)
 	var stdout, stderr bytes.Buffer
 	cr := &CityRuntime{
-		cityPath:   dir,
-		cityName:   "test",
-		configName: "test",
-		tomlPath:   tomlPath,
-		configRev:  result.Revision,
-		cfg:        cfg,
-		sp:         runtime.NewFake(),
-		dops:       newDrainOps(runtime.NewFake()),
-		rec:        events.Discard,
-		stdout:     &stdout,
-		stderr:     &stderr,
-		logPrefix:  "gc test",
+		standaloneCityStore: beads.NewMemStore(),
+		cityPath:            dir,
+		cityName:            "test",
+		configName:          "test",
+		tomlPath:            tomlPath,
+		configRev:           result.Revision,
+		cfg:                 cfg,
+		sp:                  runtime.NewFake(),
+		dops:                newDrainOps(runtime.NewFake()),
+		rec:                 events.Discard,
+		stdout:              &stdout,
+		stderr:              &stderr,
+		logPrefix:           "gc test",
 	}
 	lastProviderName := cfg.Session.Provider
 

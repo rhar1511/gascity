@@ -100,6 +100,16 @@ func (s *Store) GetPersistedResponse(id string) (Info, PersistedResponse, error)
 	return infoFromPersistedBead(b), PersistedResponseFromBead(b), nil
 }
 
+// GetAuthoritativePersistedResponse bypasses cached projections for a custody
+// decision after external runtime I/O. It performs no repair or provider effect.
+func (s *Store) GetAuthoritativePersistedResponse(id string) (Info, PersistedResponse, error) {
+	b, err := s.validatedBeadForRead(id, true)
+	if err != nil {
+		return Info{}, PersistedResponse{}, err
+	}
+	return infoFromPersistedBead(b), PersistedResponseFromBead(b), nil
+}
+
 // validatedBead loads the session bead for id. A load failure (including an
 // absent id) is wrapped with `loading session %q` context; a loaded bead that is
 // not a session bead (or has an empty id) is rejected with ErrSessionNotFound. It

@@ -13,19 +13,21 @@ import "github.com/gastownhall/gascity/internal/runtime"
 // Env and Hints are ignored on that path. Otherwise the runtime session is
 // started immediately.
 type CreateOptions struct {
-	Alias        string
-	ExplicitName string
-	Template     string
-	Title        string
-	Command      string
-	WorkDir      string
-	Provider     string
-	Transport    string
-	Env          map[string]string
-	Resume       ProviderResume
-	Hints        runtime.Config
-	ExtraMeta    map[string]string
-	BeadOnly     bool
+	Alias              string
+	ExplicitName       string
+	Template           string
+	Title              string
+	Command            string
+	WorkDir            string
+	Provider           string
+	Transport          string
+	RuntimeBackend     string
+	RuntimeFingerprint string
+	Env                map[string]string
+	Resume             ProviderResume
+	Hints              runtime.Config
+	ExtraMeta          map[string]string
+	BeadOnly           bool
 }
 
 // defaultSessionOrigin returns the session_origin to record when ExtraMeta does

@@ -361,6 +361,7 @@ filegroup(
         "//internal/runtime/k8s:bazel_repo_srcs",
         "//internal/runtime/proctable:bazel_repo_srcs",
         "//internal/runtime/registry:bazel_repo_srcs",
+        "//internal/runtime/routing:bazel_repo_srcs",
         "//internal/runtime/rppcheck:bazel_repo_srcs",
         "//internal/runtime/runtimecapability:bazel_repo_srcs",
         "//internal/runtime/runtimecontract:bazel_repo_srcs",

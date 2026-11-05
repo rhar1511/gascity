@@ -128,6 +128,11 @@ func TestStartContinuationRejectsChangedExpectationBeforePrepare(t *testing.T) {
 		{"wrong-revision", func(e *ContinuationExpectation) { e.Revision++ }},
 		{"missing-revision", func(e *ContinuationExpectation) { e.Revision = 0 }},
 		{"wrong-provider", func(e *ContinuationExpectation) { e.Provider = "other-provider" }},
+		{"wrong-runtime", func(e *ContinuationExpectation) {
+			e.RuntimeBackend = "remote"
+			e.RuntimeFingerprint = strings.Repeat("a", 64)
+		}},
+		{"partial-runtime", func(e *ContinuationExpectation) { e.RuntimeBackend = "remote" }},
 		{"missing-provider", func(e *ContinuationExpectation) { e.Provider = "" }},
 		{"wrong-generation", func(e *ContinuationExpectation) { e.Generation = "3" }},
 		{"noncanonical-generation", func(e *ContinuationExpectation) { e.Generation = "02" }},

@@ -113,6 +113,8 @@ type TemplateParams struct {
 	// EffectiveSessionProvider is the actual session provider after applying
 	// city-level defaults.
 	EffectiveSessionProvider string
+	// RuntimeBinding captures execution ownership for a new strict-routed row.
+	RuntimeBinding config.RuntimeBinding
 	// CityRuntimes is the city's pack-declared runtime registry
 	// (config.City.Runtimes), keyed by selection name. Consulted by
 	// promptDelivery's oversized-prompt guard so a pack-declared runtime
@@ -173,6 +175,17 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		return TemplateParams{}, fmt.Errorf("agent %q: %w", qualifiedName, err)
 	}
 	sessionTransport := config.ResolveSessionCreateTransport(cfgAgent.Session, resolved)
+	var runtimeBinding config.RuntimeBinding
+	if p.city != nil && (config.HasSessionRuntimeSelections(p.city) || requiresSessionRuntimeRouting(p.city, p.sessionBeads)) {
+		var selectionErr error
+		runtimeBinding, selectionErr = config.ResolveSelectedRuntimeBinding(p.city, p.sessionProvider, cfgAgent.Runtime, sessionTransport)
+		if selectionErr != nil {
+			return TemplateParams{}, selectionErr
+		}
+		local := *p
+		local.sessionProvider = runtimeBinding.Name
+		p = &local
+	}
 	// Step 2: Validate session vs provider compatibility.
 	switch sessionTransport {
 	case config.SessionTransportACP:
@@ -766,6 +779,10 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	}
 	params.SessionOverride = cfgAgent.Session
 	params.EffectiveSessionProvider = effectiveSessionProvider(cfgAgent.Session, p.sessionProvider)
+	if runtimeBinding.Name != "" {
+		params.EffectiveSessionProvider = runtimeBinding.Name
+	}
+	params.RuntimeBinding = runtimeBinding
 	if p.city != nil {
 		params.CityRuntimes = p.city.Runtimes
 	}

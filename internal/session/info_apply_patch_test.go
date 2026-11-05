@@ -21,6 +21,7 @@ import (
 // normalizeTransport's provider fallback), which oracleBaseBeads/oraclePatches
 // supply below.
 var allProjectedMetadataKeys = []string{
+	beadmeta.RuntimeBackendMetadataKey, beadmeta.RuntimeFingerprintMetadataKey,
 	"session_name", "state", "template", "alias", "agent_name", "provider",
 	"transport", "command", "work_dir", "session_key", "resume_flag",
 	"resume_style", "resume_command", "continuation_epoch", "sleep_reason",

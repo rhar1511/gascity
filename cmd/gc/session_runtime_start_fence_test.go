@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/routing"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/session/sessiontest"
 )
@@ -23,6 +25,7 @@ type supersededPreparedStartProvider struct {
 	*runtime.Fake
 	backing beads.Store
 	id      string
+	patch   map[string]string
 }
 
 func (p *supersededPreparedStartProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
@@ -35,8 +38,67 @@ func (p *supersededPreparedStartProvider) Start(ctx context.Context, name string
 		}
 	}
 	return sessionpkg.WithSessionMutationLock(p.id, func() error {
-		return p.backing.SetMetadata(p.id, "session_key", "replacement-native")
+		if err := p.backing.SetMetadata(p.id, "session_key", "replacement-native"); err != nil {
+			return err
+		}
+		if len(p.patch) > 0 {
+			return p.backing.SetMetadataBatch(p.id, p.patch)
+		}
+		return nil
 	})
+}
+
+func TestRuntimeBackendDriftRetainsSupersededOrCommandDriftAttempt(t *testing.T) {
+	for _, superseded := range []bool{false, true} {
+		t.Run(map[bool]string{false: "command", true: "native-superseded"}[superseded], func(t *testing.T) {
+			backing := beads.NewMemStore()
+			fingerprint := strings.Repeat("a", 64)
+			row, err := backing.Create(beads.Bead{Type: sessionpkg.BeadType, Labels: []string{sessionpkg.LabelSession}, Metadata: creatingMeta(map[string]string{"session_name": "worker", "template": "worker", "generation": "2", "continuation_epoch": "1", "instance_token": "original-token", "session_key": "original-native", "pending_create_claim": "true", "command": "worker", "gc.runtime_backend": "capsule", "gc.runtime_fingerprint": fingerprint})})
+			if err != nil {
+				t.Fatal(err)
+			}
+			cache := beads.NewCachingStoreForTest(backing, nil)
+			if err := cache.Prime(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			p := &supersededPreparedStartProvider{Fake: runtime.NewFake(), backing: backing, id: row.ID, patch: map[string]string{"gc.runtime_fingerprint": strings.Repeat("b", 64)}}
+			sp, err := routing.New("local", map[string]runtime.Provider{"local": runtime.NewFake(), "capsule@" + fingerprint: p})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := sp.Bind("worker", "capsule@"+fingerprint); err != nil {
+				t.Fatal(err)
+			}
+			item := preparedStart{candidate: startCandidate{info: sessiontest.SeedBead(t, row), tp: TemplateParams{Command: "worker", SessionName: "worker", TemplateName: "worker"}}, cfg: runtime.Config{Command: "worker"}}
+			var result startResult
+			if superseded {
+				result = runPreparedStartCandidate(context.Background(), item, t.TempDir(), sp, cache, &config.City{Agents: []config.Agent{{Name: "worker"}}}, 10*time.Second, func(context.Context, string) bool { return false }, func(context.Context, string) error { return nil }, nil)
+				if !errors.Is(result.err, sessionpkg.ErrRuntimeStartSuperseded) {
+					t.Fatalf("missing supersession: %v", result.err)
+				}
+			} else {
+				if err := backing.SetMetadataBatch(row.ID, map[string]string{"gc.runtime_fingerprint": strings.Repeat("b", 64), "command": "replacement"}); err != nil {
+					t.Fatal(err)
+				}
+				result = startResult{prepared: item, provider: sp}
+			}
+			current, err := backing.Get(row.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, verdict := refreshAsyncStartResult(result, cache, ioDiscard{})
+			if verdict.commit || verdict.cleanupRuntime || verdict.releaseInFlight || verdict.rollbackPendingCreate {
+				t.Fatalf("route drift authorized effects: %+v", verdict)
+			}
+			if commitAsyncStartResultWithContext(context.Background(), result, sp, cache, clock.Real{}, events.Discard, 0, ioDiscard{}, ioDiscard{}, nil) {
+				t.Fatal("stale attempt committed")
+			}
+			after, err := backing.Get(row.ID)
+			if err != nil || after.Revision != current.Revision || !reflect.DeepEqual(after.Metadata, current.Metadata) || p.CountCalls("Stop", "worker") != 0 {
+				t.Fatal("runtime drift changed current row or stopped original backend")
+			}
+		})
+	}
 }
 
 func TestPreparedRuntimeOnlyStartPreservesSupersededVerdict(t *testing.T) {

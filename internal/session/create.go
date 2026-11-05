@@ -1,6 +1,12 @@
 package session
 
-import "github.com/gastownhall/gascity/internal/beads"
+import (
+	"fmt"
+	"maps"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
+	"github.com/gastownhall/gascity/internal/beads"
+)
 
 // CreateSpec captures the typed vocabulary for creating a session bead through
 // the front door. It is the byte-identical replacement for the inline
@@ -31,6 +37,11 @@ type CreateSpec struct {
 
 	// Metadata is the assembled session-bead metadata map, written verbatim.
 	Metadata map[string]string
+
+	// RuntimeBackend and RuntimeFingerprint capture trusted creation-time
+	// selection. Both are empty for legacy sessions or present together.
+	RuntimeBackend     string
+	RuntimeFingerprint string
 }
 
 // CreateSessionInfo creates a session bead from spec and returns the projected
@@ -57,6 +68,21 @@ type CreateSpec struct {
 // pinned across every backend by the beadstest conformance case
 // CreateEchoMatchesGetOnMetadata, not just by the memstore-backed oracle here.
 func (s *Store) CreateSessionInfo(spec CreateSpec) (Info, error) {
+	for _, key := range []string{beadmeta.RuntimeBackendMetadataKey, beadmeta.RuntimeFingerprintMetadataKey} {
+		if _, exists := spec.Metadata[key]; exists {
+			return Info{}, fmt.Errorf("%w: use typed creation fields", ErrRuntimeBackendIdentity)
+		}
+	}
+	if spec.RuntimeBackend != "" || spec.RuntimeFingerprint != "" {
+		if _, err := RuntimeBackendKey(spec.RuntimeBackend, spec.RuntimeFingerprint); err != nil {
+			return Info{}, err
+		}
+		spec.Metadata = maps.Clone(spec.Metadata)
+		if spec.Metadata == nil {
+			spec.Metadata = make(map[string]string)
+		}
+		setCreateRuntimeMetadata(spec.Metadata, CreateOptions{RuntimeBackend: spec.RuntimeBackend, RuntimeFingerprint: spec.RuntimeFingerprint})
+	}
 	created, err := s.store.Create(beads.Bead{
 		ID:       spec.ID,
 		Title:    spec.Title,

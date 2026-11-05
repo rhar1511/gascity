@@ -36,10 +36,11 @@ type explicitBeadIDStore interface {
 }
 
 type poolSessionCreateIdentity struct {
-	AgentName string
-	Alias     string
-	Slot      int
-	Metadata  map[string]string
+	RuntimeBinding config.RuntimeBinding
+	AgentName      string
+	Alias          string
+	Slot           int
+	Metadata       map[string]string
 	// TransientSlot marks a pool slot that is a rebinding chair, not an
 	// occupant identity (an expanding pool with no namepool and no canonical
 	// singleton — usesTransientPoolSlotIdentity). The identity-derived name for
@@ -380,10 +381,12 @@ func createPoolSessionBeadWithIdentifiers(
 	// CreateSessionInfo projects the just-created bead (no post-create store.Get).
 	// The session_name is already final in meta, so there is no second write.
 	info, err := sessionFrontDoor(store).CreateSessionInfo(sessionpkg.CreateSpec{
-		ID:        explicitID,
-		Title:     title,
-		AgentName: agentName,
-		Metadata:  meta,
+		RuntimeBackend:     identity.RuntimeBinding.Name,
+		RuntimeFingerprint: identity.RuntimeBinding.Fingerprint,
+		ID:                 explicitID,
+		Title:              title,
+		AgentName:          agentName,
+		Metadata:           meta,
 	})
 	if err != nil {
 		return sessionpkg.Info{}, err

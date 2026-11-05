@@ -475,6 +475,10 @@ type DecisionFrontierConfig struct {
 // template. Unlike Agent, it does not carry behavior itself; it only
 // declares runtime identity and controller policy.
 type NamedSession struct {
+	// Runtime overrides the backing template's named runtime for new sessions.
+	// Empty inherits the template and then the city backend. Existing sessions
+	// retain their persisted runtime identity.
+	Runtime string `toml:"runtime,omitempty"`
 	// Name is the configured public session identity. When omitted, Template
 	// remains the compatibility identity.
 	Name string `toml:"name,omitempty"`
@@ -716,6 +720,8 @@ type AgentOverride struct {
 	PromptTemplate *string `toml:"prompt_template,omitempty"`
 	// Session overrides the session transport ("acp").
 	Session *string `toml:"session,omitempty"`
+	// Runtime overrides the named runtime for newly created sessions.
+	Runtime *string `toml:"runtime,omitempty"`
 	// Provider overrides the provider name.
 	Provider *string `toml:"provider,omitempty"`
 	// ContextAdvisory overrides context-pressure guidance for this agent.
@@ -3308,6 +3314,9 @@ type Agent struct {
 	// "acp" uses the Agent Client Protocol (JSON-RPC over stdio).
 	// The agent's resolved provider must have supports_acp = true.
 	Session string `toml:"session,omitempty" jsonschema:"enum=acp"`
+	// Runtime selects a pack-declared exec runtime for new sessions, independently
+	// of coding provider and transport. Empty inherits the city backend.
+	Runtime string `toml:"runtime,omitempty"`
 	// Provider names the provider preset to use for this agent.
 	Provider string `toml:"provider,omitempty"`
 	// ContextAdvisory overrides context-pressure guidance for this agent.
