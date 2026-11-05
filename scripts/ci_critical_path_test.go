@@ -369,8 +369,21 @@ func TestMacProductMetricsTesthookHasIndependentRequiredBudget(t *testing.T) {
 	if !ok {
 		t.Fatal("Mac workflow has no independent productmetrics-testhook job")
 	}
-	if job.TimeoutMinutes.Value != "20" || process.TimeoutMinutes.Value != "20" {
-		t.Errorf("profile/process budgets = %q/%q, want independent 20m jobs", job.TimeoutMinutes.Value, process.TimeoutMinutes.Value)
+	if job.TimeoutMinutes.Value != "20" {
+		t.Errorf("tagged profile budget = %q, want its independent 20m job", job.TimeoutMinutes.Value)
+	}
+	// Cold native CLI setup and cmd/gc compilation consumed the old 20m
+	// job budget before the shard could finish. Keep the test deadline and
+	// reserve separate time for setup, compilation and post-job cleanup.
+	processBudget, err := strconv.Atoi(process.TimeoutMinutes.Value)
+	const processTestMinutes, coldSetupAndBuildMinutes, cleanupMinutes = 20, 20, 5
+	if err != nil || processBudget < processTestMinutes+coldSetupAndBuildMinutes+cleanupMinutes {
+		t.Errorf("ordinary process job budget = %q, must cover 20m tests, 20m cold setup/build and 5m cleanup", process.TimeoutMinutes.Value)
+	}
+	makefile, err := os.ReadFile(filepath.Join(repoRoot(t), "Makefile"))
+	require.NoError(t, err)
+	if !regexp.MustCompile(`(?m)^test-cmd-gc-process-shard:\n\t[^\n]*GO_TEST_TIMEOUT=20m ./scripts/test-go-test-shard ./cmd/gc `).Match(makefile) {
+		t.Error("ordinary process shard must retain its 20m Go test deadline")
 	}
 	if !slices.Equal(process.Strategy.Matrix.Shard, []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}) {
 		t.Errorf("ordinary process shards changed: %v", process.Strategy.Matrix.Shard)

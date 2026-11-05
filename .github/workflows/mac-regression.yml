@@ -342,10 +342,11 @@ jobs:
       - name: Run make test-mac
         run: make test-mac
 
-  # cmd/gc unit/process tests — sharded 12-way so each shard comfortably fits
-  # the per-shard timeout even on slower Mac ARM runners. Mirrors the Linux
-  # cmd-gc-process matrix in ci.yml. cmd/gc is excluded from mac-unit's
-  # make test-mac sweep; coverage is preserved here across all 12 shards.
+  # cmd/gc unit/process tests — sharded 12-way, mirroring the Linux matrix.
+  # Cold native CLI setup and cmd/gc compilation consumed about 20 minutes
+  # before tests finished. Allow that preparation, the unchanged 20m Go test
+  # deadline and cleanup within a 45m job. cmd/gc remains excluded from
+  # make test-mac; coverage is preserved here across all 12 shards.
   mac-cmd-gc-process:
     name: Mac / cmd-gc process / shard ${{ matrix.shard }} of 12
     needs:
@@ -353,7 +354,7 @@ jobs:
       - gate
     if: needs.gate.outputs.run_smoke == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
-    timeout-minutes: 20
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
