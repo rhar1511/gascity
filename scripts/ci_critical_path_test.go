@@ -644,6 +644,43 @@ func TestAcceptanceJobsUseOnlyTheirHermeticProviderSetup(t *testing.T) {
 	}
 }
 
+func TestBeadsHeadRadarSelectsDependencyToolchainOnlyForBuild(t *testing.T) {
+	wf := readCriticalPathWorkflow(t, "ci.yml")
+	job := wf.Jobs["contract-radar-bd-head"]
+	require.Empty(t, job.Env["GOTOOLCHAIN"], "radar must not change the gc test toolchain globally")
+	var found bool
+	for _, step := range job.Steps {
+		if step.Name == "Build bd from beads main HEAD" {
+			found = true
+			assert.Equal(t, "auto", step.Env["GOTOOLCHAIN"], "upstream main may require a newer Go version than gc")
+		} else {
+			assert.NotEqual(t, "auto", step.Env["GOTOOLCHAIN"], "automatic selection belongs only to the upstream build")
+		}
+	}
+	require.True(t, found, "radar must still build the live upstream CLI")
+}
+
+func TestBazelOutputCacheRequiresRemoteExecution(t *testing.T) {
+	wf := readCriticalPathWorkflow(t, "bazel-test.yml")
+	job := wf.Jobs["bazel"]
+	var restore, save *ciCriticalPathStep
+	for i := range job.Steps {
+		step := &job.Steps[i]
+		switch step.Name {
+		case "Restore bazel output base":
+			restore = step
+		case "Save bazel output base":
+			save = step
+		}
+	}
+	require.NotNil(t, restore)
+	require.NotNil(t, save)
+	assert.Equal(t, "env.BAZEL_REMOTE_EXECUTOR != ''", restore.If, "local runners must not expand a full output-base archive")
+	assert.Contains(t, save.If, "env.BAZEL_REMOTE_EXECUTOR != ''", "local build outputs must never pollute the remote-only cache")
+	assert.True(t, strings.HasPrefix(restore.With["key"], "bazel-remote-v3-"))
+	assert.NotContains(t, restore.With["restore-keys"], "bazel-v2-", "old local/remote archives can exhaust the runner disk during restore")
+}
+
 func TestAcceptanceTargetsSeparateTierAFromExternalBdContracts(t *testing.T) {
 	root := repoRoot(t)
 	makefile, err := os.ReadFile(filepath.Join(root, "Makefile"))

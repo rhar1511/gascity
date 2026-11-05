@@ -700,6 +700,10 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Build bd from beads main HEAD
+        env:
+          # The advisory dependency follows upstream main, whose go.mod may
+          # advance beyond gc's pinned toolchain. Scope selection to bd.
+          GOTOOLCHAIN: auto
         run: |
           set -euo pipefail
           src="${RUNNER_TEMP}/beads-src"
