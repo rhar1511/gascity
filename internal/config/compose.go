@@ -253,6 +253,21 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		cityAgentsForProvenance = cityAgents
 		rootPackIncludes = append([]string(nil), pc.Pack.Includes...)
 		rootPackRequires = append([]PackRequirement(nil), pc.Pack.Requires...)
+		// The city's own pack declares runtimes in the same city-wide
+		// namespace as imported packs, with identical validation and provenance.
+		if len(pc.Runtimes) > 0 {
+			declaringDir, err := filepath.Abs(cityRoot)
+			if err != nil {
+				return nil, nil, fmt.Errorf("resolving city pack runtime directory: %w", err)
+			}
+			runtimes, err := packLocalRuntimes(&pc, declaringDir)
+			if err != nil {
+				return nil, nil, fmt.Errorf("city pack.toml: %w", err)
+			}
+			if err := mergeCityRuntimes(root, runtimes); err != nil {
+				return nil, nil, fmt.Errorf("city pack.toml: %w", err)
+			}
+		}
 		// Dedup: city.toml agents override pack.toml agents with the same
 		// name. Build a set of city.toml agent names and skip pack.toml
 		// agents that would duplicate.

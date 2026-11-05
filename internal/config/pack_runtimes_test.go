@@ -458,3 +458,76 @@ command = "gc-runtime-shared"
 		}
 	}
 }
+
+func TestLoadWithIncludesRootPackRuntime(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		protocol string
+		invalid  bool
+		conflict bool
+	}{
+		{name: "resolved", protocol: "0"},
+		{name: "unsupported protocol", protocol: "1", invalid: true},
+		{name: "conflicting import", protocol: "0", conflict: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			cityText := "[workspace]\nname = \"local\"\n"
+			if tc.conflict {
+				cityText += "[imports.remote]\nsource = \"packs/remote\"\n"
+				writeFile(t, dir, "packs/remote/pack.toml", "[pack]\nname = \"remote\"\nschema = 1\n[runtimes.capsule]\ncommand = \"./remote-runtime\"\n")
+			}
+			writeFile(t, dir, "city.toml", cityText)
+			writeFile(t, dir, "pack.toml", "[pack]\nname = \"local\"\nschema = 2\n[runtimes.capsule]\ncommand = \"./runtime\"\nprotocol = "+tc.protocol+"\n")
+			cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+			if tc.conflict {
+				if err == nil || !strings.Contains(err.Error(), "conflict") {
+					t.Fatalf("conflicting root/import runtime declaration error = %v", err)
+				}
+				return
+			}
+			if tc.invalid {
+				if err == nil || !strings.Contains(err.Error(), "protocol") {
+					t.Fatalf("unsupported root runtime declaration error = %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			rt, ok := cfg.Runtimes["capsule"]
+			if !ok || rt.Command != filepath.Join(dir, "runtime") || rt.PackDir != dir || rt.PackName != "local" {
+				t.Fatalf("root runtime declaration = %+v, present=%v", rt, ok)
+			}
+		})
+	}
+}
+
+func TestLoadWithIncludesRootPackRuntimePathSpelling(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "city.toml", "[workspace]\nname = \"local\"\n")
+	writeFile(t, dir, "pack.toml", "[pack]\nname = \"local\"\nschema = 2\n[runtimes.capsule]\ncommand = \"./runtime\"\n")
+	t.Chdir(dir)
+	absolute, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	relative, _, err := LoadWithIncludes(fsys.OSFS{}, "city.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if absolute.Runtimes["capsule"] != relative.Runtimes["capsule"] {
+		t.Errorf("path spelling changed runtime provenance: absolute=%+v relative=%+v", absolute.Runtimes["capsule"], relative.Runtimes["capsule"])
+	}
+	want, err := RuntimeBindingForName(absolute, "capsule")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := RuntimeBindingForName(relative, "capsule")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Fingerprint != want.Fingerprint {
+		t.Error("path spelling changed persisted runtime fingerprint")
+	}
+}
