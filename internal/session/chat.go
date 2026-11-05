@@ -594,6 +594,13 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 	if cfg.WorkDir == "" {
 		cfg.WorkDir = b.Metadata["work_dir"]
 	}
+	cfg = runtime.SyncWorkDirEnv(cfg)
+	if err := validateSourceWorkspaceRuntimeConfig(infoFromPersistedBead(b), cfg); err != nil {
+		if unroute != nil {
+			unroute()
+		}
+		return err
+	}
 	generation, err := strconv.Atoi(b.Metadata["generation"])
 	if err != nil || generation <= 0 {
 		generation = DefaultGeneration
@@ -624,6 +631,12 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 	}
 	cfg.Env = git.ApplySSHKeepaliveEnv(cfg.Env)
 	cfg = runtime.SyncWorkDirEnv(cfg)
+	if err := validateSourceWorkspaceRuntimeConfig(infoFromPersistedBead(b), cfg); err != nil {
+		if unroute != nil {
+			unroute()
+		}
+		return err
+	}
 	started := false
 	// Refuse to resume if a prior escaped process for this session could not be
 	// confirmed dead: a survivor would race this replacement for the same work
@@ -727,6 +740,15 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b bea
 	if cfg.WorkDir == "" {
 		cfg.WorkDir = b.Metadata["work_dir"]
 	}
+	// Reject conflicting prepared custody before consuming a continuation reset
+	// or minting an incarnation token. Keep the final check before provider I/O.
+	cfg = runtime.SyncWorkDirEnv(cfg)
+	if err := validateSourceWorkspaceRuntimeConfig(infoFromPersistedBead(b), cfg); err != nil {
+		if unroute != nil {
+			unroute()
+		}
+		return err
+	}
 	generation, err := strconv.Atoi(b.Metadata["generation"])
 	if err != nil || generation <= 0 {
 		generation = DefaultGeneration
@@ -759,6 +781,12 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b bea
 	}
 	cfg.Env = git.ApplySSHKeepaliveEnv(cfg.Env)
 	cfg = runtime.SyncWorkDirEnv(cfg)
+	if err := validateSourceWorkspaceRuntimeConfig(infoFromPersistedBead(b), cfg); err != nil {
+		if unroute != nil {
+			unroute()
+		}
+		return err
+	}
 	started := false
 	// Refuse to respawn if a prior escaped process for this session could not
 	// be confirmed dead: a survivor would race this replacement for the same

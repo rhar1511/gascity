@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -449,6 +450,70 @@ func TestPoolLifecycleWorkspaceBindingUsesAuthoritativeCachedSession(t *testing.
 				after.Metadata["instance_token"] != "original-incarnation" ||
 				after.Metadata["session_key"] != "original-conversation" {
 				t.Fatal("binding lost original identity or source custody")
+			}
+		})
+	}
+}
+
+// Publication alone is insufficient: legacy template-assigned work must not
+// replace the native source directory when that session is prepared and started.
+func TestPoolLifecycleWorkspacePreparedStartKeepsPublishedDirectory(t *testing.T) {
+	for _, snapshot := range []bool{false, true} {
+		name := "live lookup"
+		if snapshot {
+			name = "assigned snapshot"
+		}
+		t.Run(name, func(t *testing.T) {
+			setup, bp, request, spec := newPoolLifecycleWorkspaceFixture(t, nil)
+			row, err := setup.cityStore.Create(beads.Bead{Type: session.BeadType, Labels: []string{session.LabelSession}, Metadata: map[string]string{
+				"template": "pilot/worker", "session_name": "protected-worker", "state": "creating", "generation": "1", "continuation_epoch": "1", "instance_token": "original-token", "provider": "test",
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			info, err := sessionFrontDoor(setup.cityStore).Get(row.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			info, err = bindPoolSessionTriggerBead(bp, &setup.fixture.cfg.Agents[0], "pilot/worker", info, request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			legacyDir := t.TempDir()
+			legacy, err := setup.cityStore.Create(beads.Bead{Title: "unrelated legacy implementation", Type: "task", Status: "in_progress", Assignee: "pilot/worker", Metadata: map[string]string{"work_dir": legacyDir}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			before, err := setup.cityStore.Get(legacy.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var resolver taskWorkDirResolver
+			if snapshot {
+				resolver = newAssignedTaskWorkDirResolver(setup.fixture.cityPath, []beads.Bead{legacy})
+			}
+			fake := runtime.NewFake()
+			prepared, err := prepareStartCandidateForCity(startCandidate{info: info, tp: TemplateParams{TemplateName: "pilot/worker", SessionName: "protected-worker", Command: "test-worker", WorkDir: spec.Path}}, setup.fixture.cityPath, "pilot", setup.fixture.cfg, fake, setup.cityStore, &clock.Fake{Time: time.Now()}, nil, resolver)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if prepared.cfg.WorkDir != spec.Path || prepared.cfg.Env["GC_DIR"] != spec.Path {
+				t.Fatalf("prepared launch escaped native source: cwd=%q GC_DIR=%q want %q", prepared.cfg.WorkDir, prepared.cfg.Env["GC_DIR"], spec.Path)
+			}
+			manager := session.NewManagerWithOptions(setup.cityStore, fake)
+			if err := manager.StartRuntimeOnly(context.Background(), row.ID, prepared.cfg.Command, prepared.cfg); err != nil {
+				t.Fatal(err)
+			}
+			started := fake.LastStartConfig("protected-worker")
+			if started == nil || started.WorkDir != spec.Path || started.Env["GC_DIR"] != spec.Path || started.Env["GC_TRIGGER_WORK_BEAD_ID"] != request.WorkBeadID || started.Env["GC_TRIGGER_WORK_STORE_REF"] != spec.StoreRef {
+				t.Fatalf("provider launch lost published source/trigger: %+v", started)
+			}
+			after, err := setup.cityStore.Get(legacy.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(before, after) || setup.store.sourceGenericWrites != 0 {
+				t.Fatal("startup changed unrelated work or protected source")
 			}
 		})
 	}

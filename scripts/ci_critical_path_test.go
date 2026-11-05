@@ -369,8 +369,21 @@ func TestMacProductMetricsTesthookHasIndependentRequiredBudget(t *testing.T) {
 	if !ok {
 		t.Fatal("Mac workflow has no independent productmetrics-testhook job")
 	}
-	if job.TimeoutMinutes.Value != "20" || process.TimeoutMinutes.Value != "20" {
-		t.Errorf("profile/process budgets = %q/%q, want independent 20m jobs", job.TimeoutMinutes.Value, process.TimeoutMinutes.Value)
+	if job.TimeoutMinutes.Value != "20" {
+		t.Errorf("tagged profile budget = %q, want its independent 20m job", job.TimeoutMinutes.Value)
+	}
+	// Cold native CLI setup and cmd/gc compilation consumed the old 20m
+	// job budget before the shard could finish. Keep the test deadline and
+	// reserve separate time for setup, compilation and post-job cleanup.
+	processBudget, err := strconv.Atoi(process.TimeoutMinutes.Value)
+	const processTestMinutes, coldSetupAndBuildMinutes, cleanupMinutes = 20, 20, 5
+	if err != nil || processBudget < processTestMinutes+coldSetupAndBuildMinutes+cleanupMinutes {
+		t.Errorf("ordinary process job budget = %q, must cover 20m tests, 20m cold setup/build and 5m cleanup", process.TimeoutMinutes.Value)
+	}
+	makefile, err := os.ReadFile(filepath.Join(repoRoot(t), "Makefile"))
+	require.NoError(t, err)
+	if !regexp.MustCompile(`(?m)^test-cmd-gc-process-shard:\n\t[^\n]*GO_TEST_TIMEOUT=20m ./scripts/test-go-test-shard ./cmd/gc `).Match(makefile) {
+		t.Error("ordinary process shard must retain its 20m Go test deadline")
 	}
 	if !slices.Equal(process.Strategy.Matrix.Shard, []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}) {
 		t.Errorf("ordinary process shards changed: %v", process.Strategy.Matrix.Shard)
@@ -631,6 +644,43 @@ func TestAcceptanceJobsUseOnlyTheirHermeticProviderSetup(t *testing.T) {
 	}
 }
 
+func TestBeadsHeadRadarSelectsDependencyToolchainOnlyForBuild(t *testing.T) {
+	wf := readCriticalPathWorkflow(t, "ci.yml")
+	job := wf.Jobs["contract-radar-bd-head"]
+	require.Empty(t, job.Env["GOTOOLCHAIN"], "radar must not change the gc test toolchain globally")
+	var found bool
+	for _, step := range job.Steps {
+		if step.Name == "Build bd from beads main HEAD" {
+			found = true
+			assert.Equal(t, "auto", step.Env["GOTOOLCHAIN"], "upstream main may require a newer Go version than gc")
+		} else {
+			assert.NotEqual(t, "auto", step.Env["GOTOOLCHAIN"], "automatic selection belongs only to the upstream build")
+		}
+	}
+	require.True(t, found, "radar must still build the live upstream CLI")
+}
+
+func TestBazelOutputCacheRequiresRemoteExecution(t *testing.T) {
+	wf := readCriticalPathWorkflow(t, "bazel-test.yml")
+	job := wf.Jobs["bazel"]
+	var restore, save *ciCriticalPathStep
+	for i := range job.Steps {
+		step := &job.Steps[i]
+		switch step.Name {
+		case "Restore bazel output base":
+			restore = step
+		case "Save bazel output base":
+			save = step
+		}
+	}
+	require.NotNil(t, restore)
+	require.NotNil(t, save)
+	assert.Equal(t, "env.BAZEL_REMOTE_EXECUTOR != ''", restore.If, "local runners must not expand a full output-base archive")
+	assert.Contains(t, save.If, "env.BAZEL_REMOTE_EXECUTOR != ''", "local build outputs must never pollute the remote-only cache")
+	assert.True(t, strings.HasPrefix(restore.With["key"], "bazel-remote-v3-"))
+	assert.NotContains(t, restore.With["restore-keys"], "bazel-v2-", "old local/remote archives can exhaust the runner disk during restore")
+}
+
 func TestAcceptanceTargetsSeparateTierAFromExternalBdContracts(t *testing.T) {
 	root := repoRoot(t)
 	makefile, err := os.ReadFile(filepath.Join(root, "Makefile"))
@@ -699,6 +749,35 @@ func TestMacGraphIntegrationJobsSelectQualifiedBeads(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestMacUnitRetainsDeadlinesCoverageAndTimeoutDiagnostics(t *testing.T) {
+	job := readCriticalPathWorkflow(t, "mac-regression.yml").Jobs["mac-unit"]
+	budget, err := strconv.Atoi(job.TimeoutMinutes.Value)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, budget, 60, "allow cold builds and sequential package batches beyond the observed 35m cancellation")
+	require.False(t, job.ContinueOnError)
+	var runs, uploads int
+	for _, step := range job.Steps {
+		if strings.TrimSpace(step.Run) == "make test-mac" {
+			runs++
+			require.Equal(t, "50", step.TimeoutMinutes.Value, "leave seven minutes for setup and three for diagnostics")
+			require.Empty(t, step.If)
+			require.False(t, step.ContinueOnError)
+			require.Equal(t, "${{ runner.temp }}/test-mac.jsonl", step.Env["OBSERVABLE_TEST_LOG"])
+		}
+		if strings.HasPrefix(step.Uses, "actions/upload-artifact@") {
+			uploads++
+			require.Equal(t, "always()", step.If)
+			require.Equal(t, "${{ runner.temp }}/test-mac.jsonl", step.With["path"])
+			require.Equal(t, "3", step.TimeoutMinutes.Value)
+		}
+	}
+	require.Equal(t, 1, runs)
+	require.Equal(t, 1, uploads)
+	makefile, err := os.ReadFile(filepath.Join(repoRoot(t), "Makefile"))
+	require.NoError(t, err)
+	require.Regexp(t, `(?m)^test-mac: test-fsys-darwin-compile\n\t\$\(TEST_ENV\) GC_FAST_UNIT=1 scripts/go-test-observable test-mac -- -p=4 -count=1 -timeout 15m \$\(MAC_UNIT_PKGS\)$`, string(makefile))
 }
 
 func TestMacAcceptanceRetainsExternalBdContract(t *testing.T) {

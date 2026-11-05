@@ -3,12 +3,14 @@ package session
 import (
 	"context"
 	"errors"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	runtimepkg "github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/testutil"
@@ -516,5 +518,81 @@ func TestStartContinuationWaitsForRuntimeOnlyStart(t *testing.T) {
 				}
 			})
 		})
+	}
+}
+
+func TestSessionStartRejectsPublishedSourceCustodyMismatch(t *testing.T) {
+	for _, entry := range []struct {
+		name string
+		run  func(*Manager, context.Context, string, runtimepkg.Config) error
+	}{
+		{"StartRuntimeOnly", func(m *Manager, c context.Context, id string, cfg runtimepkg.Config) error {
+			return m.StartRuntimeOnly(c, id, "test-worker", cfg)
+		}},
+		{"Start", func(m *Manager, c context.Context, id string, cfg runtimepkg.Config) error {
+			return m.Start(c, id, "test-worker", cfg)
+		}},
+		{"Send", func(m *Manager, c context.Context, id string, cfg runtimepkg.Config) error {
+			return m.Send(c, id, "must not be delivered", "test-worker", cfg)
+		}},
+	} {
+		t.Run(entry.name, func(t *testing.T) {
+			for _, tc := range []struct {
+				name                    string
+				patch                   map[string]string
+				workDir, trigger, store string
+			}{
+				{name: "other task directory", workDir: "/other-task/worktree", trigger: "step-1", store: "rig:test"},
+				{name: "refusal preserves pending reset and missing token", patch: map[string]string{"continuation_reset_pending": "true", "instance_token": ""}, workDir: "/other-task/worktree", trigger: "step-1", store: "rig:test"},
+				{name: "wrong execution trigger", workDir: "/native/source", trigger: "other-step", store: "rig:test"},
+				{name: "wrong execution store", workDir: "/native/source", trigger: "step-1", store: "rig:other"},
+				{name: "partial native custody", patch: map[string]string{beadmeta.WorktreeAttemptMetadataKey: ""}, workDir: "/native/source", trigger: "step-1", store: "rig:test"},
+				{name: "conflicting persisted directories", patch: map[string]string{beadmeta.WorkDirMetadataKey: "/other/native"}, workDir: "/native/source", trigger: "step-1", store: "rig:test"},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					_, raw, expected := workClaimSessionFixture(t)
+					metadata := map[string]string{beadmeta.WorktreeSourceBeadMetadataKey: "source-1", beadmeta.WorktreeSourceStoreMetadataKey: "rig:test", beadmeta.WorktreeAttemptMetadataKey: "native-attempt-1", beadmeta.TriggerBeadIDMetadataKey: "step-1", beadmeta.TriggerBeadStoreRefMetadataKey: "rig:test"}
+					for key, value := range tc.patch {
+						metadata[key] = value
+					}
+					if err := raw.SetMetadataBatch(expected.ID, metadata); err != nil {
+						t.Fatal(err)
+					}
+					before, err := raw.Get(expected.ID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					provider := runtimepkg.NewFake()
+					manager := NewManagerWithOptions(raw, provider)
+					err = entry.run(manager, context.Background(), expected.ID, runtimepkg.Config{WorkDir: tc.workDir, Env: map[string]string{"GC_TRIGGER_WORK_BEAD_ID": tc.trigger, "GC_TRIGGER_WORK_STORE_REF": tc.store}})
+					if err == nil {
+						t.Fatal("startup accepted conflicting published source custody")
+					}
+					if provider.LastStartConfig(expected.SessionName) != nil {
+						t.Fatal("provider was called before refusing workspace mismatch")
+					}
+					after, readErr := raw.Get(expected.ID)
+					if readErr != nil {
+						t.Fatal(readErr)
+					}
+					if !reflect.DeepEqual(before, after) {
+						t.Fatal("workspace refusal consumed/reset persisted session identity")
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestRuntimeStartCustodyIncludesNativeSourceAndTrigger(t *testing.T) {
+	expected := Info{ID: "session-1", WorkDir: "/native/source", WorkDirCanonical: "/native/source", WorktreeSourceBeadID: "source-1", WorktreeSourceStoreRef: "rig:test", WorktreeAttemptID: "attempt-1", TriggerBeadID: "step-1", TriggerBeadStoreRef: "rig:test"}
+	for _, mutate := range []func(*Info){
+		func(i *Info) { i.WorktreeSourceBeadID = "source-2" }, func(i *Info) { i.WorktreeSourceStoreRef = "rig:other" }, func(i *Info) { i.WorktreeAttemptID = "attempt-2" }, func(i *Info) { i.TriggerBeadID = "step-2" }, func(i *Info) { i.TriggerBeadStoreRef = "rig:other" },
+	} {
+		current := expected
+		mutate(&current)
+		if runtimeStartSameCustody(expected, current) {
+			t.Fatal("startup retained authority after native source/trigger changed")
+		}
 	}
 }

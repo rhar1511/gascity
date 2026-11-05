@@ -223,6 +223,13 @@ type Info struct {
 	// independently, so the Info form needs a mirror for each; this one carries the
 	// canonical value verbatim. Additive, internal-only (absent from the HTTP wire).
 	WorkDirCanonical string // gc.work_dir (raw)
+	// Source workspace custody is published by the controller after native
+	// ownership verification. These mirrors constrain launch preparation; they
+	// do not themselves verify admission or authorize a workspace transfer.
+	WorktreeSourceBeadID   string // gc.worktree_source_bead_id (raw)
+	WorktreeSourceStoreRef string // gc.worktree_source_store_ref (raw)
+	WorktreeAttemptID      string // gc.worktree_attempt_id (raw)
+
 	// WorkerDir is the RAW worker_dir metadata (beadmeta.WorkerDirMetadataKey),
 	// the canonical agent-process-cwd key. It is DISTINCT from both Info.WorkDir
 	// (the legacy "work_dir" key) and Info.WorkDirCanonical (the "gc.work_dir"

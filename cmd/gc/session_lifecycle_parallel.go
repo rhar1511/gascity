@@ -1124,13 +1124,21 @@ func buildPreparedStartWithWorkDirResolver(
 	}
 
 	preOverrideWorkDir := agentCfg.WorkDir
-	if _, err := repairConcretePoolTemplateWorkDirOverride(&candidate, cityPath, cfg, store); err != nil {
+	if wd, bound, err := candidate.info.SourceWorkspaceDir(); err != nil {
 		return nil, candidate.info, err
-	}
-	if wd := resolvePreparedTaskWorkDir(candidate, cityPath, cfg, store, workDirResolver); wd != "" {
+	} else if bound {
+		// An unrelated task assigned to the same logical template cannot redirect
+		// the native source workspace already published for this exact session.
 		agentCfg.WorkDir = wd
-	} else if wd := preparedStartSessionWorkDir(candidate.info); wd != "" {
-		agentCfg.WorkDir = resolveWorkDirAgainstCity(cityPath, wd)
+	} else {
+		if _, err := repairConcretePoolTemplateWorkDirOverride(&candidate, cityPath, cfg, store); err != nil {
+			return nil, candidate.info, err
+		}
+		if wd := resolvePreparedTaskWorkDir(candidate, cityPath, cfg, store, workDirResolver); wd != "" {
+			agentCfg.WorkDir = wd
+		} else if wd := preparedStartSessionWorkDir(candidate.info); wd != "" {
+			agentCfg.WorkDir = resolveWorkDirAgainstCity(cityPath, wd)
+		}
 	}
 	if err := validateConcretePoolPreparedWorkDir(candidate, cityPath, cfg, agentCfg.WorkDir); err != nil {
 		return nil, candidate.info, err

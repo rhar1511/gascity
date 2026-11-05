@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -211,6 +213,10 @@ func runtimeStartSameCustody(expected, current Info) bool {
 		expected.Template != current.Template || expected.Command != current.Command ||
 		expected.Transport != current.Transport || expected.WorkDir != current.WorkDir ||
 		expected.WorkDirCanonical != current.WorkDirCanonical ||
+		expected.WorktreeSourceBeadID != current.WorktreeSourceBeadID ||
+		expected.WorktreeSourceStoreRef != current.WorktreeSourceStoreRef ||
+		expected.WorktreeAttemptID != current.WorktreeAttemptID ||
+		expected.TriggerBeadID != current.TriggerBeadID || expected.TriggerBeadStoreRef != current.TriggerBeadStoreRef ||
 		expected.ContinuationEpoch != current.ContinuationEpoch ||
 		expected.ContinuationResetPending != current.ContinuationResetPending || expected.WakeMode != current.WakeMode {
 		return false
@@ -235,4 +241,35 @@ func runtimeStartStillCurrent(expected, current Info) bool {
 	// behavior, including generation drift when the token still matches.
 	return (current.State == StateActive || current.State == StateAwake) &&
 		LeaseFromInfo(expected).CommitVerdict(LeaseFromInfo(current)) == LeaseCommit
+}
+
+// SourceWorkspaceDir preserves the exact controller-published native ownership
+// tuple. It is a consistency check, not admission or native ownership proof.
+// Partial custody must not fall back to legacy assignee-based cwd discovery.
+func (i Info) SourceWorkspaceDir() (string, bool, error) {
+	bound := i.WorktreeSourceBeadID != "" || i.WorktreeSourceStoreRef != "" || i.WorktreeAttemptID != ""
+	if !bound {
+		return "", false, nil
+	}
+	path := i.WorkDirCanonical
+	if i.WorktreeSourceBeadID == "" || i.WorktreeSourceStoreRef == "" || i.WorktreeAttemptID == "" ||
+		i.TriggerBeadID == "" || i.TriggerBeadID == i.WorktreeSourceBeadID || i.TriggerBeadStoreRef != i.WorktreeSourceStoreRef ||
+		!strings.HasPrefix(i.WorktreeSourceStoreRef, "rig:") || strings.TrimPrefix(i.WorktreeSourceStoreRef, "rig:") == "" ||
+		path == "" || !filepath.IsAbs(path) || filepath.Clean(path) != path || i.WorkDir != path {
+		return "", true, fmt.Errorf("session %s: incomplete or conflicting published source workspace custody", i.ID)
+	}
+	return path, true, nil
+}
+
+func validateSourceWorkspaceRuntimeConfig(info Info, cfg runtime.Config) error {
+	path, bound, err := info.SourceWorkspaceDir()
+	if err != nil {
+		return err
+	}
+	if bound && (cfg.WorkDir != path || cfg.Env["GC_DIR"] != path ||
+		cfg.Env["GC_TRIGGER_WORK_BEAD_ID"] != info.TriggerBeadID ||
+		cfg.Env["GC_TRIGGER_WORK_STORE_REF"] != info.WorktreeSourceStoreRef) {
+		return fmt.Errorf("session %s: prepared runtime differs from published source workspace or trigger", info.ID)
+	}
+	return nil
 }

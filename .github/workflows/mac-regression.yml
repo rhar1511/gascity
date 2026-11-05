@@ -319,7 +319,9 @@ jobs:
       - name: Docs
         run: make check-docs
 
-  # Unit tests — the suite Mac already ran as "smoke".
+  # Unit tests — the suite Mac already ran as "smoke". The full package list
+  # exhausted a 35m job on a cold runner. Allow setup/builds and sequential
+  # package batches while retaining the 15m per-package Go test deadline.
   mac-unit:
     name: Mac / make test
     needs:
@@ -327,7 +329,7 @@ jobs:
       - gate
     if: needs.gate.outputs.run_smoke == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
-    timeout-minutes: 35
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -340,12 +342,25 @@ jobs:
           bd-version: ${{ env.BD_VERSION }}
           install-claude-cli: "false"
       - name: Run make test-mac
+        timeout-minutes: 50
         run: make test-mac
+        env:
+          OBSERVABLE_TEST_LOG: ${{ runner.temp }}/test-mac.jsonl
+      - name: Retain Mac unit test output
+        if: always()
+        timeout-minutes: 3
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: mac-unit-test-output
+          path: ${{ runner.temp }}/test-mac.jsonl
+          if-no-files-found: warn
+          retention-days: 7
 
-  # cmd/gc unit/process tests — sharded 12-way so each shard comfortably fits
-  # the per-shard timeout even on slower Mac ARM runners. Mirrors the Linux
-  # cmd-gc-process matrix in ci.yml. cmd/gc is excluded from mac-unit's
-  # make test-mac sweep; coverage is preserved here across all 12 shards.
+  # cmd/gc unit/process tests — sharded 12-way, mirroring the Linux matrix.
+  # Cold native CLI setup and cmd/gc compilation consumed about 20 minutes
+  # before tests finished. Allow that preparation, the unchanged 20m Go test
+  # deadline and cleanup within a 45m job. cmd/gc remains excluded from
+  # make test-mac; coverage is preserved here across all 12 shards.
   mac-cmd-gc-process:
     name: Mac / cmd-gc process / shard ${{ matrix.shard }} of 12
     needs:
@@ -353,7 +368,7 @@ jobs:
       - gate
     if: needs.gate.outputs.run_smoke == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
-    timeout-minutes: 20
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
