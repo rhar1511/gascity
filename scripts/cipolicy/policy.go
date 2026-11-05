@@ -101,7 +101,10 @@ const (
 	// Reviewed process preparation: one native compile/cache producer; unchanged
 	// twelve test commands and budgets, exact-source/run cache required before
 	// native CLI/test builds; selected producer/process skips fail the aggregate.
-	expectedCIExecutionHash     = "06ec2428db65bc14f1fc5396196ce7522b6e463c4ee72f4dc0aaa381d6cda56b"
+	// Reviewed advisory dependency build: only the Beads main build opts into
+	// GOTOOLCHAIN=auto so it can satisfy its own go.mod. Contract tests retain
+	// Gas City's pinned Go toolchain; no trigger, permission or gate changes.
+	expectedCIExecutionHash     = "8573ce47366f5d3e4cc82c9f9572eb0f998af40badbfbc7068db5f909904e3d7"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,
