@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/routing"
 	"github.com/gastownhall/gascity/internal/session"
@@ -468,5 +469,142 @@ func TestRuntimeActualReloadPreservesOwnersAndRefusesDeclarationDrift(t *testing
 		if provider.(*runtime.Fake).CountCalls("Stop", "held-exact") != 0 {
 			t.Fatal("reload stopped retained owner")
 		}
+	}
+}
+
+// runtimeStartTestStore exercises the production require-mode store boundary.
+func runtimeStartTestStore(t *testing.T, store beads.Store) beads.Store {
+	t.Helper()
+	opened, err := beads.OpenStoreAtForCity(context.Background(), beads.StoreOpenOptions{ScopeRoot: t.TempDir(), Provider: "file", ConditionalWrites: gate.Require, OpenFileStore: func() (beads.Store, error) { return store, nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return opened.Store
+}
+
+func TestRuntimeDeferredClaimlessWakeReleasesExactAttempt(t *testing.T) {
+	for _, outcome := range []TraceOutcomeCode{TraceOutcomeSessionInitializing, TraceOutcomeDeferred} {
+		t.Run(string(outcome), func(t *testing.T) {
+			mem := beads.NewMemStore()
+			b, err := mem.Create(beads.Bead{Title: "worker", Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: creatingMeta(map[string]string{"session_name": "worker", "template": "worker", "generation": "2", "instance_token": "token-2", "session_key": "native-key", "last_woke_at": "2026-11-05T00:00:00Z", "gc.runtime_backend": "capsule", "gc.runtime_fingerprint": strings.Repeat("a", 64)})})
+			if err != nil {
+				t.Fatal(err)
+			}
+			front := sessionFrontDoor(runtimeStartTestStore(t, mem))
+			info, err := front.Get(b.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			clk := &clock.Fake{Time: time.Date(2026, 11, 5, 0, 0, 1, 0, time.UTC)}
+			result := startResult{prepared: preparedStart{candidate: startCandidate{info: info, tp: TemplateParams{SessionName: "worker", TemplateName: "worker"}}}, outcome: outcome, started: clk.Now(), finished: clk.Now()}
+			if commitStartResult(result, front, clk, events.Discard, 0, io.Discard, io.Discard) {
+				t.Fatal("deferred attempt committed")
+			}
+			after, err := front.Get(b.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if after.LastWokeAt != "" || after.PendingCreateClaim {
+				t.Fatalf("completed claimless lease retained: last_woke_at=%q claim=%v", after.LastWokeAt, after.PendingCreateClaim)
+			}
+			if pendingCreateStartInFlightInfo(after, clk, time.Minute) {
+				t.Fatal("completed attempt still blocks the next patrol")
+			}
+			if after.SessionKey != info.SessionKey || after.InstanceToken != info.InstanceToken || after.RuntimeBackend != info.RuntimeBackend || after.RuntimeFingerprint != info.RuntimeFingerprint {
+				t.Fatal("deferred completion changed custody")
+			}
+		})
+	}
+}
+
+func TestRuntimePreparationFailureRestoresOwnPreWake(t *testing.T) {
+	for _, claim := range []bool{false, true} {
+		t.Run(fmt.Sprint(claim), func(t *testing.T) {
+			mem := &failSetMetadataStore{MemStore: beads.NewMemStore(), failKey: "session_key"}
+			metadata := creatingMeta(map[string]string{"session_name": "worker", "template": "worker", "generation": "1", "continuation_epoch": "1", "instance_token": "token-worker", "gc.runtime_backend": "capsule", "gc.runtime_fingerprint": strings.Repeat("a", 64)})
+			if claim {
+				metadata["pending_create_claim"] = "true"
+			}
+			b, err := mem.Create(beads.Bead{Title: "worker", Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: metadata})
+			if err != nil {
+				t.Fatal(err)
+			}
+			store := runtimeStartTestStore(t, mem)
+			info, err := sessionFrontDoor(store).Get(b.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			backend := newGatedStartProvider()
+			t.Cleanup(func() { backend.release("worker") })
+			key, _ := session.RuntimeBackendKey(info.RuntimeBackend, info.RuntimeFingerprint)
+			sp, err := routing.New(key, map[string]runtime.Provider{key: backend})
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+			tp := TemplateParams{Command: "worker", SessionName: "worker", TemplateName: "worker", ResolvedProvider: &config.ResolvedProvider{SessionIDFlag: "--session-id"}}
+			clk := &clock.Fake{Time: time.Date(2026, 11, 5, 0, 0, 1, 0, time.UTC)}
+			if n := executePlannedStartsTraced(context.Background(), []startCandidate{{info: info, tp: tp}}, cfg, map[string]TemplateParams{"worker": tp}, sp, store, "test-city", "", clk, events.Discard, time.Minute, io.Discard, io.Discard, nil, withAsyncStartExecution()); n != 0 {
+				t.Fatalf("woken=%d", n)
+			}
+			backend.ensureNoFurtherStart(t, 100*time.Millisecond)
+			after, err := sessionFrontDoor(store).Get(b.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if after.LastWokeAt != "" {
+				t.Fatalf("failed preparation retained lease %q", after.LastWokeAt)
+			}
+			if after.PendingCreateClaim != claim || after.RuntimeBackend != info.RuntimeBackend || after.RuntimeFingerprint != info.RuntimeFingerprint || after.SessionKey != info.SessionKey {
+				t.Fatal("failed preparation changed runtime or conversation custody")
+			}
+			// PreWake owns a new incarnation even when preparation later fails;
+			// restoring the lease must not resurrect the previous incarnation.
+			if after.Generation != "2" || after.InstanceToken == "" || after.InstanceToken == info.InstanceToken {
+				t.Fatal("failed preparation lost its allocated incarnation")
+			}
+		})
+	}
+}
+
+func TestRuntimePreWakeRestoreRequiresAuthoritativeFence(t *testing.T) {
+	for _, disable := range []bool{false, true} {
+		t.Run(fmt.Sprint(disable), func(t *testing.T) {
+			mem := beads.NewMemStore()
+			b, err := mem.Create(beads.Bead{Title: "worker", Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: creatingMeta(map[string]string{"session_name": "worker", "template": "worker", "generation": "1", "instance_token": "token-worker", "gc.runtime_backend": "capsule", "gc.runtime_fingerprint": strings.Repeat("a", 64)})})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var store beads.Store = mem
+			if !disable {
+				store = runtimeStartTestStore(t, mem)
+			}
+			front := sessionFrontDoor(store)
+			info, persisted, err := front.GetPersistedResponse(b.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			clk := &clock.Fake{Time: time.Date(2026, 11, 5, 0, 0, 1, 0, time.UTC)}
+			_, _, fold, err := preWakeCommit(info, front, clk)
+			if err != nil {
+				t.Fatal(err)
+			}
+			attempted := info.ApplyPatch(fold)
+			undo := newPreWakeUndo(info, persisted.Metadata, fold)
+			undo.token = attempted.InstanceToken
+			undo.custody = attempted
+			mem.DisableConditionalWrites = disable
+			restorePreWakeState(preparedStart{candidate: startCandidate{info: attempted}, preWakeUndo: undo}, front, io.Discard)
+			after, err := mem.Get(b.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if disable && after.Metadata["last_woke_at"] != attempted.LastWokeAt {
+				t.Fatal("unfenced restore wrote metadata")
+			}
+			if !disable && after.Metadata["last_woke_at"] != "" {
+				t.Fatal("owned fenced attempt was not restored")
+			}
+		})
 	}
 }

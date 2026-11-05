@@ -987,8 +987,13 @@ func prepareStartCandidateForCity(
 	} else {
 		candidate.info = candidate.info.ApplyPatch(fold)
 	}
+	restoreFailedPreparation := func(info sessionpkg.Info) {
+		undo.token, undo.custody = info.InstanceToken, info
+		restorePreWakeState(preparedStart{candidate: startCandidate{info: info, tp: candidate.tp}, preWakeUndo: undo}, sessionFrontDoor(store), stderr)
+	}
 	candidate = refreshConfiguredNamedStartCandidate(candidate, cityPath, cityName, cfg, sp, store, clk, stderr)
 	if candidate.refreshErr != nil {
+		restoreFailedPreparation(candidate.info)
 		return nil, candidate.refreshErr
 	}
 	// buildPreparedStart folds its own post-append mutations (stale-resume clears,
@@ -996,9 +1001,12 @@ func prepareStartCandidateForCity(
 	// the returned prepared.candidate.info stays coherent with the store WITHOUT a
 	// second re-Get. The post-prep reads (session_key at runPreparedStartCandidate;
 	// recordWakeFailure's session_key/started_config_hash) read that folded twin. The
-	// partial-Info second return is only load-bearing for recoverRunningPendingCreate's
-	// abort residue; here the prepared already carries it, so it is discarded.
-	prepared, _, err := buildPreparedStartWithWorkDirResolver(candidate, cityPath, cfg, store, workDirResolver)
+	// partial-Info second return retains the failed preparation's final custody,
+	// so its own PreWake can be restored without adopting a later incarnation.
+	prepared, partial, err := buildPreparedStartWithWorkDirResolver(candidate, cityPath, cfg, store, workDirResolver)
+	if err != nil {
+		restoreFailedPreparation(partial)
+	}
 	if prepared != nil && undo.written != nil {
 		undo.token = prepared.candidate.info.InstanceToken
 		undo.custody = prepared.candidate.info
@@ -2915,8 +2923,12 @@ func restorePreWakeState(prepared preparedStart, sessFront *sessionpkg.Store, st
 	if id == "" || sessFront == nil || undo.written == nil {
 		return
 	}
+	update := sessFront.UpdateMetadataFenced
+	if undo.custody.RuntimeBackend != "" || undo.custody.RuntimeFingerprint != "" {
+		update = sessFront.UpdateMetadataAuthoritativeFenced
+	}
 	err := sessionpkg.WithSessionMutationLock(id, func() error {
-		_, err := sessFront.UpdateMetadataFenced(id, preWakeRestoreAttempts, func(current sessionpkg.Info, persisted sessionpkg.PersistedResponse) sessionpkg.MetadataPatch {
+		_, err := update(id, preWakeRestoreAttempts, func(current sessionpkg.Info, persisted sessionpkg.PersistedResponse) sessionpkg.MetadataPatch {
 			if persisted.Status == "closed" || current.InstanceToken != undo.token ||
 				!sessionpkg.RuntimeStartRefusalRestoreAllowed(undo.custody, current) {
 				return nil
@@ -3895,7 +3907,11 @@ func executePlannedStartsTraced(
 				item, err := prepareStartCandidateForCity(candidate, cityPath, cityName, cfg, sp, store, clk, stderr, startOpts.workDirResolver)
 				if err != nil {
 					abandonCapacityTicket(ticket, rec, stderr)
-					releaseExpectedPendingStartLease(candidate.info, sessFront, stderr)
+					// Typed preparation restores its own final PreWake custody locally.
+					// The original candidate cannot release that newer attempt's lease.
+					if candidate.info.RuntimeBackend == "" && candidate.info.RuntimeFingerprint == "" {
+						releaseExpectedPendingStartLease(candidate.info, sessFront, stderr)
+					}
 					if release != nil {
 						release()
 					}
