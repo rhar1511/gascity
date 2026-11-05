@@ -751,6 +751,35 @@ func TestMacGraphIntegrationJobsSelectQualifiedBeads(t *testing.T) {
 	}
 }
 
+func TestMacUnitRetainsDeadlinesCoverageAndTimeoutDiagnostics(t *testing.T) {
+	job := readCriticalPathWorkflow(t, "mac-regression.yml").Jobs["mac-unit"]
+	budget, err := strconv.Atoi(job.TimeoutMinutes.Value)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, budget, 60, "allow cold builds and sequential package batches beyond the observed 35m cancellation")
+	require.False(t, job.ContinueOnError)
+	var runs, uploads int
+	for _, step := range job.Steps {
+		if strings.TrimSpace(step.Run) == "make test-mac" {
+			runs++
+			require.Equal(t, "50", step.TimeoutMinutes.Value, "leave seven minutes for setup and three for diagnostics")
+			require.Empty(t, step.If)
+			require.False(t, step.ContinueOnError)
+			require.Equal(t, "${{ runner.temp }}/test-mac.jsonl", step.Env["OBSERVABLE_TEST_LOG"])
+		}
+		if strings.HasPrefix(step.Uses, "actions/upload-artifact@") {
+			uploads++
+			require.Equal(t, "always()", step.If)
+			require.Equal(t, "${{ runner.temp }}/test-mac.jsonl", step.With["path"])
+			require.Equal(t, "3", step.TimeoutMinutes.Value)
+		}
+	}
+	require.Equal(t, 1, runs)
+	require.Equal(t, 1, uploads)
+	makefile, err := os.ReadFile(filepath.Join(repoRoot(t), "Makefile"))
+	require.NoError(t, err)
+	require.Regexp(t, `(?m)^test-mac: test-fsys-darwin-compile\n\t\$\(TEST_ENV\) GC_FAST_UNIT=1 scripts/go-test-observable test-mac -- -p=4 -count=1 -timeout 15m \$\(MAC_UNIT_PKGS\)$`, string(makefile))
+}
+
 func TestMacAcceptanceRetainsExternalBdContract(t *testing.T) {
 	wf := readCriticalPathWorkflow(t, "mac-regression.yml")
 	job := wf.Jobs["mac-acceptance"]
