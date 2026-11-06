@@ -166,7 +166,11 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 		override                   bool
 	}{
 		{"fsspec", "2026.6.0", "2026.6.0", false},
-		{"gitpython", "3.1.60", "3.2.0", false},
+		{"gitpython", "3.2.1", "3.2.1", false},
+		{"authlib", "1.9.1", "1.9.1", true},
+		{"dnspython", "2.9.0", "2.9.0", false},
+		{"filelock", "4.2.1", "4.2.1", false},
+		{"joserfc", "1.7.5", "1.7.5", false},
 		{"aiohttp", "3.14.4", "3.14.4", false},
 		{"anyio", "4.14.2", "4.14.2", false},
 		{"certifi", "2026.10.19", "2026.10.19", false},
@@ -238,6 +242,7 @@ func TestMCPMailImageUpgradesPatchedOSPackages(t *testing.T) {
 	}
 
 	for _, pkg := range []string{
+		"apt", "libapt-pkg7.0",
 		// openssl / systemd set, already present.
 		"libcap2", "libssl3t64", "libsystemd0", "libudev1", "openssl", "openssl-provider-legacy",
 		// util-linux set, CVE-2026-53615, fixed in 2.41.5-0+deb13u1.
@@ -293,7 +298,8 @@ func TestRebuiltToolsForcePatchedXModules(t *testing.T) {
 		"ARG XTEXT_VERSION=0.42.0",
 		"ARG XMOD_VERSION=0.41.0",
 		"ARG THRIFT_VERSION=0.24.0",
-		"ARG COMPRESS_VERSION=1.18.7",
+		"ARG COMPRESS_VERSION=1.20.2",
+		"ARG JOSE_VERSION=4.1.6",
 	} {
 		if !strings.Contains(base, arg) {
 			t.Errorf("contrib/k8s/Dockerfile.base missing %q", arg)
@@ -310,6 +316,7 @@ func TestRebuiltToolsForcePatchedXModules(t *testing.T) {
 		"github.com/klauspost/compress": "COMPRESS_VERSION",
 	}
 	doltModules := map[string]string{
+		"github.com/go-jose/go-jose/v4": "JOSE_VERSION",
 		"golang.org/x/crypto":           "XCRYPTO_VERSION",
 		"golang.org/x/net":              "XNET_VERSION",
 		"golang.org/x/text":             "XTEXT_VERSION",
@@ -797,5 +804,53 @@ func TestControllerEmbeddedCryptoVersion(t *testing.T) {
 				t.Fatalf("embedded crypto verdict: err=%v output=%s want pass=%v", err, out, tc.pass)
 			}
 		})
+	}
+}
+
+// The same apt source package supplies both installed binary packages. Updating
+// only the CLI leaves the vulnerable library in the pinned runtime image.
+func TestRuntimeImagesUpgradeAptSourceClosure(t *testing.T) {
+	root := repoRoot(t)
+	for _, tc := range []struct{ path, library, floor string }{
+		{"contrib/k8s/Dockerfile.base", "libapt-pkg6.0t64", "2.8.4ubuntu0.1"},
+		{"contrib/k8s/Dockerfile.mail", "libapt-pkg7.0", "3.0.4"},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			body := readFile(t, root, tc.path)
+			if i := strings.LastIndex(body, "\nFROM "); i >= 0 {
+				body = body[i:]
+			}
+			for _, pkg := range []string{"apt", tc.library} {
+				if !strings.Contains(body, "\n    "+pkg+" \\") {
+					t.Errorf("runtime must upgrade %s", pkg)
+				}
+				want := `dpkg --compare-versions "$(dpkg-query -W -f='${Version}' ` + pkg + `)" ge ` + tc.floor
+				if !strings.Contains(body, want) {
+					t.Errorf("runtime must assert %s >= %s", pkg, tc.floor)
+				}
+			}
+		})
+	}
+}
+
+func TestImageBinariesSelectAndAssertPatchedJOSE(t *testing.T) {
+	root := repoRoot(t)
+	if !strings.Contains(readFile(t, root, "go.mod"), "github.com/go-jose/go-jose/v4 v4.1.6") {
+		t.Error("gc module must select patched go-jose")
+	}
+	for _, tc := range []struct{ path, binary string }{
+		{"contrib/k8s/Dockerfile.base", "dolt"},
+		{"contrib/k8s/Dockerfile.agent", "bd"},
+	} {
+		body := readFile(t, root, tc.path)
+		for _, want := range []string{
+			"ARG JOSE_VERSION=4.1.6",
+			`"github.com/go-jose/go-jose/v4@v${JOSE_VERSION}"`,
+			`go version -m /out/` + tc.binary + ` | tr '\t' ' ' | grep -Fq "dep github.com/go-jose/go-jose/v4 v${JOSE_VERSION} "`,
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("%s missing %q", tc.path, want)
+			}
+		}
 	}
 }

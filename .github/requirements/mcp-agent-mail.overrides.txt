@@ -2,7 +2,8 @@
 # image vulnerability gate. Keep these overrides until mcp-agent-mail's
 # transitive constraints move past the fixed versions.
 fastmcp>=3.2.0
-authlib>=1.6.9
+# Authlib 1.9.1 clears the image gate's signature and token-validation findings.
+authlib>=1.9.1
 
 # Security floor: CVE-2026-102268 (CRITICAL, token forgery) in PyJWT < 2.14.0.
 # CVE-2026-69247 affects cryptography < 50.0.0. python-multipart and starlette lower-severity

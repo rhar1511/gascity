@@ -7,8 +7,8 @@ mcp-agent-mail @ https://github.com/Dicklesworthstone/mcp_agent_mail/archive/327
 # CVE-2026-87817 (remote code execution). Pinning the floor ensures
 # the resolver picks the patched version even if mcp-agent-mail's transitive
 # constraint allows older. Drop this line once mcp-agent-mail upstream pins
-# GitPython>=3.1.60 itself.
-gitpython>=3.1.60
+# GitPython>=3.2.1 itself. CVE-2026-114145 raises the fixed floor to 3.2.1.
+gitpython>=3.2.1
 
 # Security floor: CVE-2026-69244 affects aiohttp < 3.14.3. Keep this explicit
 # until mcp-agent-mail's transitive requirements carry the fixed release.
@@ -46,9 +46,13 @@ litellm>=1.84.0
 
 # Security floor: CVE-2026-49852 (HIGH, HS256/HS384/HS512 verify accepts an
 # empty/nil HMAC key — cross-language sibling of CVE-2026-45363) in joserfc
-# < 1.6.8. joserfc arrives transitively via authlib; pin the floor until
-# authlib's transitive constraint carries the patched version itself.
-joserfc>=1.6.8
+# < 1.6.8. CVE-2026-119283 raises the floor to 1.7.5. joserfc arrives
+# transitively via authlib; retain the floor until that constraint catches up.
+joserfc>=1.7.5
+
+# Image scan floors for DNS pointer traversal and database-lock file handling.
+dnspython>=2.9.0
+filelock>=4.2.1
 
 # Security floor: CVE-2026-52869 + CVE-2026-52870 (HIGH, fixed 1.27.2 — HTTP
 # transports serve session requests without verifying the authenticated
