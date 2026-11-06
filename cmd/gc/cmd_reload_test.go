@@ -629,22 +629,23 @@ func TestReloadConfigTracedRescansOrdersWhenConfigRevisionUnchanged(t *testing.T
 		t.Fatalf("initial order scan: %v", err)
 	}
 	cr := &CityRuntime{
-		cityPath:           dir,
-		cityName:           "test",
-		configName:         "test",
-		tomlPath:           tomlPath,
-		configRev:          result.Revision,
-		cfg:                cfg,
-		sp:                 runtime.NewFake(),
-		dops:               newDrainOps(runtime.NewFake()),
-		od:                 buildOrderDispatcherFromOrderSet(nil, dir, cfg, initialOrders.Orders, events.Discard, &stderr),
-		orderSet:           initialOrders.Orders,
-		orderSetSignature:  initialOrders.Signature,
-		orderRescanEnabled: true,
-		rec:                events.Discard,
-		stdout:             &stdout,
-		stderr:             &stderr,
-		logPrefix:          "gc test",
+		cityPath:            dir,
+		cityName:            "test",
+		configName:          "test",
+		tomlPath:            tomlPath,
+		configRev:           result.Revision,
+		cfg:                 cfg,
+		standaloneCityStore: beads.NewMemStore(), // Reload must inspect an explicit empty session store.
+		sp:                  runtime.NewFake(),
+		dops:                newDrainOps(runtime.NewFake()),
+		od:                  buildOrderDispatcherFromOrderSet(nil, dir, cfg, initialOrders.Orders, events.Discard, &stderr),
+		orderSet:            initialOrders.Orders,
+		orderSetSignature:   initialOrders.Signature,
+		orderRescanEnabled:  true,
+		rec:                 events.Discard,
+		stdout:              &stdout,
+		stderr:              &stderr,
+		logPrefix:           "gc test",
 	}
 	lastProviderName := cfg.Session.Provider
 
@@ -664,8 +665,8 @@ schedule = "*/1 * * * *"
 
 	reply := cr.reloadConfigTraced(context.Background(), &lastProviderName, dir, nil, reloadSourceManual)
 	if reply.Outcome != reloadOutcomeApplied {
-		t.Fatalf("add reply.Outcome = %q, want %q; message=%q stderr=%q",
-			reply.Outcome, reloadOutcomeApplied, reply.Message, stderr.String())
+		t.Fatalf("add reply.Outcome = %q, want %q; message=%q error=%q stderr=%q",
+			reply.Outcome, reloadOutcomeApplied, reply.Message, reply.Error, stderr.String())
 	}
 	if strings.Contains(reply.Message, "No config changes detected") {
 		t.Fatalf("add reply.Message = %q, should not report no change", reply.Message)
