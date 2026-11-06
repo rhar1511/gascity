@@ -1732,6 +1732,7 @@ func collectAssignedWorkBeadsWithStores(
 	readyAssigned := make(map[storeScopedBeadKey]bool)
 	var partial bool
 	for _, r := range results {
+		stampAssignedWorkSourceRef(cfg, r.beads, r.ref)
 		result = append(result, r.beads...)
 		resultStores = append(resultStores, r.stores...)
 		resultStoreRefs = append(resultStoreRefs, r.storeRefs...)
@@ -1793,6 +1794,7 @@ func collectAssignedWorkBeadsWithStores(
 	}
 	wg.Wait()
 	for _, r := range readyResults {
+		stampAssignedWorkSourceRef(cfg, r.beads, r.ref)
 		result = append(result, r.beads...)
 		resultStores = append(resultStores, r.stores...)
 		resultStoreRefs = append(resultStoreRefs, r.storeRefs...)

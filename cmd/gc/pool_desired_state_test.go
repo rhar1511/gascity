@@ -3365,3 +3365,37 @@ func TestVerifiedPoolTriggerWorkDirAcceptsCanonicalStoreRefSpelling(t *testing.T
 		t.Errorf("rig:a vs rig:b err = %v, want a store mismatch", err)
 	}
 }
+
+// Assigned demand is absent from the new-work ready probe. Every assigned
+// constructor must retain the census identity, without trusting bead metadata.
+func TestComputePoolDesiredStatesAssignedStoreProvenance(t *testing.T) {
+	for _, tc := range []struct {
+		name, ref, state, mode, assignee, tier, session string
+	}{
+		{"resume city", "city:site", "awake", "resume", "sess-1", "resume", "sess-1"},
+		{"replace asleep class", "class:graph", "asleep", "fresh", "sess-1", "wake-known-identity", ""},
+		{"wake known rig", "rig:project", "", "resume", "claude", "wake-known-identity", ""},
+		{"missing provenance stays missing", "", "awake", "resume", "sess-1", "resume", "sess-1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := poolAgent("claude", "", intPtr(1), 0)
+			a.WakeMode = tc.mode
+			cfg := &config.City{Agents: []config.Agent{a}}
+			row := workBead("work-1", "claude", tc.assignee, "in_progress", 2)
+			row.SourceStoreRef = tc.ref
+			row.Metadata[beadmeta.RootStoreRefMetadataKey] = "rig:forged"
+			var sessions []beads.Bead
+			if tc.state != "" {
+				sessions = []beads.Bead{poolSessionBeadWithState("sess-1", tc.state, "")}
+			}
+			got := ComputePoolDesiredStates(cfg, []beads.Bead{row}, sessionInfosFromBeads(sessions), nil)
+			if len(got) != 1 || len(got[0].Requests) != 1 {
+				t.Fatalf("assigned demand = %+v, want one request", got)
+			}
+			r := got[0].Requests[0]
+			if r.WorkStoreRef != tc.ref || r.WorkBeadID != row.ID || r.Tier != tc.tier || r.SessionBeadID != tc.session {
+				t.Fatalf("assigned request lost census identity: %+v", r)
+			}
+		})
+	}
+}

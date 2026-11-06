@@ -436,6 +436,7 @@ func computePoolDesiredStatesAt(
 						// bead must not be reused, so realizePoolDesiredSessions
 						// plans a clean create.
 						WorkBeadID:     wb.ID,
+						WorkStoreRef:   strings.TrimSpace(wb.SourceStoreRef),
 						WorkBeadTitle:  strings.TrimSpace(wb.Title),
 						WorkPack:       strings.TrimSpace(wb.Metadata[beadmeta.PackMetadataKey]),
 						WorkWorkspace:  strings.TrimSpace(wb.Metadata[beadmeta.PackWorkspaceMetadataKey]),
@@ -456,6 +457,7 @@ func computePoolDesiredStatesAt(
 					Tier:           "resume",
 					SessionBeadID:  sessionBeadID,
 					WorkBeadID:     wb.ID,
+					WorkStoreRef:   strings.TrimSpace(wb.SourceStoreRef),
 					WorkBeadTitle:  strings.TrimSpace(wb.Title),
 					WorkPack:       strings.TrimSpace(wb.Metadata[beadmeta.PackMetadataKey]),
 					WorkWorkspace:  strings.TrimSpace(wb.Metadata[beadmeta.PackWorkspaceMetadataKey]),
@@ -508,6 +510,7 @@ func computePoolDesiredStatesAt(
 				BeadPriority:   beadPriorityRank(beadPriority(wb)),
 				Tier:           "wake-known-identity",
 				WorkBeadID:     wb.ID,
+				WorkStoreRef:   strings.TrimSpace(wb.SourceStoreRef),
 				WorkBeadTitle:  strings.TrimSpace(wb.Title),
 				WorkPack:       strings.TrimSpace(wb.Metadata[beadmeta.PackMetadataKey]),
 				WorkWorkspace:  strings.TrimSpace(wb.Metadata[beadmeta.PackWorkspaceMetadataKey]),

@@ -2853,7 +2853,7 @@ func TestCollectAssignedWorkBeadsWithStores_SkipSetIsStoreScopedAcrossSameID(t *
 		{ID: "sess-rig", Type: sessionBeadType, Status: "open", Metadata: map[string]string{"session_name": "worker-rig", "template": "worker", "state": "asleep"}},
 	})
 
-	got, _, _, _, partial := collectAssignedWorkBeadsWithStores(
+	got, stores, refs, _, partial := collectAssignedWorkBeadsWithStores(
 		"",
 		&config.City{Rigs: []config.Rig{{Name: "repo", Path: "/repo"}}},
 		cityStore,
@@ -2866,8 +2866,19 @@ func TestCollectAssignedWorkBeadsWithStores_SkipSetIsStoreScopedAcrossSameID(t *
 	}
 
 	gotIDs := make(map[string]bool)
-	for _, bead := range got {
+	for i, bead := range got {
 		gotIDs[bead.ID] = true
+		wantRef := "city:city"
+		if refs[i] != "" {
+			wantRef = "rig:" + refs[i]
+		}
+		if bead.SourceStoreRef != wantRef {
+			t.Fatalf("same-ID/Ready row lost physical store: id=%q ref=%q want=%q", bead.ID, bead.SourceStoreRef, wantRef)
+		}
+		persisted, err := stores[i].Get(bead.ID)
+		if err != nil || persisted.SourceStoreRef != "" {
+			t.Fatalf("census persisted transient provenance: %+v err=%v", persisted, err)
+		}
 	}
 	if !gotIDs[rigReadyWork.ID] {
 		t.Fatalf("worker-rig ready bead %q was dropped: the same-ID city ready bead collapsed the skip set and suppressed worker-rig's store-scoped Ready probe; collected=%#v", rigReadyWork.ID, gotIDs)

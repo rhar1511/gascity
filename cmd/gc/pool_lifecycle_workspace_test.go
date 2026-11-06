@@ -334,6 +334,7 @@ func TestPoolLifecycleWorkspaceBindsPublishedSourceThenClaimsDescendant(t *testi
 		Title: "pool workspace worker", AgentName: "pilot/worker", Metadata: map[string]string{
 			"template": "pilot/worker", "agent_name": "pilot/worker", "generation": "1",
 			"instance_token": "published-pool-claim", "session_key": "original-pool-thread",
+			"alias": "pilot/worker", // canonical singleton claimant, as on the affected route
 		},
 	})
 	if err != nil {
@@ -368,8 +369,40 @@ func TestPoolLifecycleWorkspaceBindsPublishedSourceThenClaimsDescendant(t *testi
 	if err != nil || after.Revision != source.Revision || !reflect.DeepEqual(after.Metadata, source.Metadata) {
 		t.Fatal("descendant claim rewrote source publication")
 	}
+	// After the first claim, ready demand disappears. The next pool decision
+	// must carry the assigned census's physical store through resume planning
+	// and reverify the same published workspace without changing ownership.
+	snapshot := newSessionBeadSnapshot(nil)
+	snapshot.addInfo(bound)
+	assigned, _, refs, _, partial := collectAssignedWorkBeadsWithStores(
+		setup.fixture.cityPath, setup.fixture.cfg, opened.Store, setup.rigStores, nil, snapshot)
+	if partial {
+		t.Fatal("assigned-work census is incomplete")
+	}
+	poolWork := filterAssignedWorkBeadsForPoolDemand(setup.fixture.cfg, setup.fixture.cityPath,
+		opened.Store, snapshot.OpenInfos(), assigned, refs)
+	decisions := ComputePoolDesiredStates(setup.fixture.cfg, poolWork, snapshot.OpenInfos(), map[string]int{})
+	var resumed bool
+	for _, decision := range decisions {
+		for _, resume := range decision.Requests {
+			if resume.WorkBeadID != step.ID {
+				continue
+			}
+			resumed = true
+			if resume.Tier != "resume" || resume.SessionBeadID != bound.ID {
+				t.Fatalf("claimed step lost original session: %+v", resume)
+			}
+			path, _, err := verifiedPoolTriggerWorkspace(bp, &setup.fixture.cfg.Agents[0], "pilot/worker", resume)
+			if err != nil || path != bound.WorkDir || resume.WorkStoreRef != string(publication.WorkStoreRef) {
+				t.Fatalf("assigned resume lost physical store/workspace: store=%q path=%q err=%v", resume.WorkStoreRef, path, err)
+			}
+		}
+	}
+	if !resumed {
+		t.Fatal("claimed step disappeared from pool resume demand")
+	}
 	if setup.store.sourceGenericWrites != 0 {
-		t.Fatal("ordinary publication/bind/claim performed generic source writes")
+		t.Fatal("ordinary publication/bind/claim/resume performed generic source writes")
 	}
 }
 

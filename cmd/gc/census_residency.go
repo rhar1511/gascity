@@ -230,6 +230,23 @@ func censusRef(cfg *config.City, ref storeref.StoreRef, style censusRefStyle) st
 	return "city:" + censusCityName(cfg)
 }
 
+// stampAssignedWorkSourceRef preserves the physical census leg on each row
+// before pool filtering discards the parallel bare refs. These refs come only
+// from censusStoreCandidates, never from row metadata. Class legs remain
+// distinct physical stores even when they serve the same logical city scope.
+func stampAssignedWorkSourceRef(cfg *config.City, rows []beads.Bead, bareRef string) {
+	ref := bareRef
+	switch {
+	case bareRef == "":
+		ref = "city:" + censusCityName(cfg)
+	case !storeref.IsClassRef(bareRef):
+		ref = string(storeref.RigRef(bareRef))
+	}
+	for i := range rows {
+		rows[i].SourceStoreRef = ref
+	}
+}
+
 // censusCityName uses the loaded site identity for the scoped city leg, matching
 // workflow and hook provenance. Raw configs retain the legacy "city" fallback.
 func censusCityName(cfg *config.City) string {

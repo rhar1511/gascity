@@ -135,6 +135,24 @@ func TestCensusCandidatesNameTheWorkStoreAndTheBindingSeparately(t *testing.T) {
 	if got[1].store != binding {
 		t.Fatal("the second leg is not the binding")
 	}
+	// A public logical root and an incoming transient value cannot replace
+	// the physical class leg that actually supplied the assigned row.
+	row, err := binding.Create(beads.Bead{
+		Title: "assigned class work", Type: "task", Status: "in_progress", Assignee: "worker",
+		SourceStoreRef: "rig:forged", Metadata: map[string]string{"gc.root_store_ref": "city:test-city"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assigned, _, refs, _, partial := collectAssignedWorkBeadsWithStores(cityPath, cfg, binding, nil, nil, nil)
+	physical := string(storeref.ClassRef(wholeSplitClasses()))
+	if partial || len(assigned) != 1 || assigned[0].ID != row.ID || refs[0] != physical || assigned[0].SourceStoreRef != physical {
+		t.Fatalf("class census lost physical authority: rows=%+v refs=%v partial=%v", assigned, refs, partial)
+	}
+	persisted, err := binding.Get(row.ID)
+	if err != nil || persisted.SourceStoreRef != row.SourceStoreRef {
+		t.Fatalf("census rewrote stored data: %+v err=%v", persisted, err)
+	}
 }
 
 // A refused city gets no census at all: every infrastructure class answers with
