@@ -191,7 +191,10 @@ Retrying reads the same committed claim without changing the execution step.
 The typed lifecycle claim request accepts an optional `execution_claim` with
 `work_id` and `claim_generation`. A worker that has already claimed a generated
 step uses this context when beginning that step's admitted source work. The API
-checks the current managed incarnation and reciprocal step claim. The controller
+checks the current managed incarnation from an authoritative persisted read.
+For a composed source claim, it checks identity and the reciprocal step claim
+from the same authoritative row before and after the source transition. Cached
+session projections do not establish current claim ownership. The controller
 verifies the step's existing protected claim, signed parent policy and compiled
 workflow membership before claiming the source. The session's current claim
 remains the execution step, preserving `gc hook current` and request attribution.

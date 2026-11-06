@@ -153,7 +153,7 @@ func (s *Server) humaHandleLifecycleClaimSubmit(ctx context.Context, input *Life
 		return nil, apierr.ServiceUnavailable.Msg("authoritative session store unavailable")
 	}
 	sessionStore := session.NewStore(sessions)
-	info, err := sessionStore.Get(body.SessionID)
+	info, _, err := sessionStore.GetAuthoritativePersistedResponse(body.SessionID)
 	if err != nil {
 		if errors.Is(err, beads.ErrNotFound) {
 			return nil, apierr.ConflictWrongState.Msg("managed claim session no longer exists")
@@ -281,12 +281,14 @@ func claimLifecycleSourceKeepingExecution(ctx context.Context, sessions *session
 	var result LifecycleClaimTransitionResult
 	err := session.WithSessionMutationLock(request.Session.ID, func() error {
 		verifySession := func() error {
-			current, err := sessions.Get(request.Session.ID)
+			current, persisted, err := sessions.GetAuthoritativePersistedResponse(request.Session.ID)
 			if err != nil || !lifecycleClaimSessionMatches(current, body) || session.AssigneeIdentifier(current) != request.Actor {
 				return worklifecycle.ErrTransitionChainStale
 			}
-			workID, generation, err := sessions.CurrentClaim(current.ID)
-			if err != nil || workID != body.ExecutionClaim.WorkID || generation != body.ExecutionClaim.ClaimGeneration {
+			// Identity and reciprocal claim must come from the same live row.
+			workID := strings.TrimSpace(persisted.Metadata[beadmeta.CurrentClaimBeadIDMetadataKey])
+			generation := strings.TrimSpace(persisted.Metadata[beadmeta.CurrentClaimGenerationMetadataKey])
+			if workID != body.ExecutionClaim.WorkID || generation != body.ExecutionClaim.ClaimGeneration {
 				return worklifecycle.ErrTransitionChainStale
 			}
 			request.Session = current

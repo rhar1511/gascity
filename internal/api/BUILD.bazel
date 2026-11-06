@@ -359,6 +359,7 @@ go_test(
         "handler_extmsg_test.go",
         "handler_formula_write_test.go",
         "handler_formulas_test.go",
+        "handler_lifecycle_claim_freshness_test.go",
         "handler_lifecycle_claim_session_fence_test.go",
         "handler_lifecycle_claim_test.go",
         "handler_lifecycle_completion_test.go",
