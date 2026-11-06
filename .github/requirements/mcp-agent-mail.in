@@ -39,10 +39,11 @@ urllib3>=2.8.0
 # carry the patched version themselves.
 idna>=3.15
 
-# Security floor: GHSA-g5ff-637f-6q2m (HIGH, arbitrary local file read)
-# affects litellm < 1.95.0. Keep this explicit until mcp-agent-mail's
-# transitive constraint carries the patched version itself.
-litellm>=1.95.0
+# Security floors: GHSA-g5ff-637f-6q2m (arbitrary local file read) and
+# CVE-2026-114612 / GHSA-7hp6-4w63-5g45 (proxy admin escalation).
+# The 1.103 release line is patched from 1.103.1. Keep this explicit
+# until mcp-agent-mail's transitive constraint carries the patched release.
+litellm>=1.103.1
 
 # Security floor: CVE-2026-49852 (HIGH, HS256/HS384/HS512 verify accepts an
 # empty/nil HMAC key — cross-language sibling of CVE-2026-45363) in joserfc
