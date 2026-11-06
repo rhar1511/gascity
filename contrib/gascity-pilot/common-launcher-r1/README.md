@@ -30,7 +30,12 @@ The source preparation supplies these public interfaces:
    the original conditional writer so its cache refresh remains part of the
    commit. Conflicting existing paths, source identities and attempts refuse.
 5. The common launcher runs native verify, idempotent ensure and verify against
-   that same source attempt, then uses `gc hook --claim --json`. The protected
+   that same source attempt, then uses `gc hook --claim --json --expect-work-id <trigger>
+   --expect-work-store-ref <store>`. These invocation-only restrictions refuse
+   unrelated adoption before any identity stamp or claim and reserve no sibling
+   continuation work during startup. The generated work query and its trusted
+   lifecycle provenance remain required. Later ordinary turns retain their
+   unconstrained supported claim behavior. The protected
    claim independently checks authoritative session/source custody while holding
    the native workspace lock. Session identity and the reciprocal claim stamp
    use the session front door and conditional writes. A post-commit refusal

@@ -44,7 +44,7 @@ class SourceWorkspaceTests(unittest.TestCase):
         native = [c for c in self.calls if c[0] == 'worktree']
         self.assertEqual(len(native), 3)
         self.assertTrue(all(c[c.index('--bead') + 1] == 'source' for c in native))
-        self.assertEqual(self.calls[-1], ('hook', '--claim', '--json'))
+        self.assertEqual(self.calls[-1], ('hook', '--claim', '--json', '--expect-work-id', 'task', '--expect-work-store-ref', 'rig:types'))
         self.assertEqual(self.claim['bead_id'], 'task')
 
     def test_lineage_pending_step_retains_original_source_owner(self):
@@ -104,7 +104,7 @@ class SourceWorkspaceTests(unittest.TestCase):
         self.assertEqual(len(native), 3)
         self.assertTrue(all(call[call.index('--bead') + 1] == 'source' for call in native))
         self.assertTrue(all(call[call.index('--store-ref') + 1] == 'rig:types' for call in native))
-        self.assertEqual(self.calls[-1], ('hook', '--claim', '--json'))
+        self.assertEqual(self.calls[-1], ('hook', '--claim', '--json', '--expect-work-id', 'task', '--expect-work-store-ref', 'rig:types'))
         self.assertNotIn('gc.root_store_ref', self.source['metadata'])
 
 

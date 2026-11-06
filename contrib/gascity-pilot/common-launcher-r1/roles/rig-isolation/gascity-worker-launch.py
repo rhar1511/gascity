@@ -294,7 +294,8 @@ def prepare(env):
             raise iso.IsolationError("native workspace verification changed or attempted new creation")
         attempt = current
     bound_session(env, bead, store, path)
-    claim = json.loads(run_gc(env, "hook", "--claim", "--json"))
+    claim = json.loads(run_gc(env, "hook", "--claim", "--json", "--expect-work-id", bead,
+                              "--expect-work-store-ref", store))
     if claim.get("action") != "work" or claim.get("bead_id") != bead:
         raise iso.IsolationError("protected claim differs from exact trigger; provider not started")
     return path

@@ -62,7 +62,7 @@ class ProtectedPrepareTests(unittest.TestCase):
             return json.dumps({'bead': copy.deepcopy(row), '_cache_age_s': 0})
         if args[:2] == ('worktree', 'verify') or args[:2] == ('worktree', 'ensure'):
             return json.dumps(self.report)
-        if args == ('hook', '--claim', '--json'):
+        if args == ('hook', '--claim', '--json', '--expect-work-id', 'task', '--expect-work-store-ref', 'rig:types'):
             return json.dumps(self.claim)
         raise AssertionError('raw claim or metadata write attempted: ' + repr(args))
 

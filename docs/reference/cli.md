@@ -2246,6 +2246,8 @@ gc hook [agent] [flags]
 |------|------|---------|-------------|
 | `--claim` | bool |  | atomically claim one routed work item for the current session |
 | `--drain-ack` | bool |  | with --claim, acknowledge runtime drain when no work is available |
+| `--expect-work-id` | string |  | with --claim, restrict startup to this exact routed work item |
+| `--expect-work-store-ref` | string |  | with --expect-work-id, require this exact source store |
 | `--inject` | bool |  | silent legacy Stop-hook compatibility; skip work query and exit 0 |
 | `--json` | bool |  | emit a JSON protocol result (always with --claim; on the discovery door only for a drain refusal) |
 

@@ -28,6 +28,7 @@ func newHookCmd(stdout, stderr io.Writer) *cobra.Command {
 	var claim bool
 	var drainAck bool
 	var jsonOut bool
+	var expectedWorkID, expectedWorkStoreRef string
 	cmd := &cobra.Command{
 		Use:   "hook [agent]",
 		Short: "Find routed work for an agent",
@@ -41,11 +42,13 @@ With --claim: runs the standard startup claim protocol for one work item.
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			opts := hookCommandOptions{
-				Inject:     inject,
-				HookFormat: hookFormat,
-				Claim:      claim,
-				DrainAck:   drainAck,
-				JSON:       jsonOut,
+				Inject:               inject,
+				HookFormat:           hookFormat,
+				Claim:                claim,
+				DrainAck:             drainAck,
+				JSON:                 jsonOut,
+				ExpectedWorkID:       expectedWorkID,
+				ExpectedWorkStoreRef: expectedWorkStoreRef,
 			}
 			if cmdHookWithOptions(args, opts, stdout, stderr) != 0 {
 				return errExit
@@ -58,6 +61,8 @@ With --claim: runs the standard startup claim protocol for one work item.
 	cmd.Flags().BoolVar(&claim, "claim", false, "atomically claim one routed work item for the current session")
 	cmd.Flags().BoolVar(&drainAck, "drain-ack", false, "with --claim, acknowledge runtime drain when no work is available")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit a JSON protocol result (always with --claim; on the discovery door only for a drain refusal)")
+	cmd.Flags().StringVar(&expectedWorkID, "expect-work-id", "", "with --claim, restrict startup to this exact routed work item")
+	cmd.Flags().StringVar(&expectedWorkStoreRef, "expect-work-store-ref", "", "with --expect-work-id, require this exact source store")
 	if flag := cmd.Flags().Lookup("hook-format"); flag != nil {
 		flag.Hidden = true
 	}
@@ -231,12 +236,14 @@ func drainHookStdin(ctx context.Context, stdin io.Reader) []byte {
 }
 
 type hookCommandOptions struct {
-	Inject     bool
-	HookFormat string
-	Claim      bool
-	DrainAck   bool
-	JSON       bool
-	DrainAckFn hookDrainAckFunc
+	ExpectedWorkID       string
+	ExpectedWorkStoreRef string
+	Inject               bool
+	HookFormat           string
+	Claim                bool
+	DrainAck             bool
+	JSON                 bool
+	DrainAckFn           hookDrainAckFunc
 }
 
 // cmdHook is the CLI entry point for gc hook. Resolves the agent from
@@ -251,6 +258,14 @@ func cmdHookWithFormat(args []string, inject bool, hookFormat string, stdout, st
 }
 
 func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr io.Writer) int {
+	if err := validateHookExpectedWork(opts.ExpectedWorkID, opts.ExpectedWorkStoreRef); err != nil {
+		fmt.Fprintf(stderr, "gc hook: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	if opts.ExpectedWorkID != "" && (!opts.Claim || opts.Inject || opts.DrainAck) {
+		fmt.Fprintln(stderr, "gc hook: exact startup expectations require --claim without --inject or --drain-ack") //nolint:errcheck
+		return 1
+	}
 	if opts.Inject {
 		return 0
 	}
@@ -501,6 +516,8 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	verifyLifecycleTransitionHead := newLifecycleClaimTransitionHeadVerifier(cityPath, cfg, resolveLifecycleStore)
 	if opts.Claim {
 		claimOpts := hookClaimOptions{
+			ExpectedWorkID:                opts.ExpectedWorkID,
+			ExpectedWorkStoreRef:          opts.ExpectedWorkStoreRef,
 			Assignee:                      assignee,
 			SessionID:                     sessionID,
 			IdentityCandidates:            identityCandidates,
@@ -711,7 +728,7 @@ func claimHookWork(cityPath, workQuery, workDir string, queryEnv []string, store
 	if !proceed {
 		return 1
 	}
-	ops := classRoutedHookClaimOps(hookClaimOps{}, route)
+	ops := hookClaimOpsForExpectation(hookClaimOps{}, route, claimOpts)
 	return claimHookWorkWithRunner(workQuery, workDir, queryEnv, stores, claimOpts, ops, shellWorkQueryWithEnv, emitFailure, stdout, stderr)
 }
 
@@ -780,6 +797,12 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 		if isZeroHookStore(claimStore) {
 			break // selected store emptied and no later store has ready work
 		}
+		if claimOpts.ExpectedWorkID != "" && claimStore.sourceStoreRef != claimOpts.ExpectedWorkStoreRef {
+			// Federated query provenance locates the row, but legacy mutations
+			// use this leg's dir/env. Never validate one store and write another.
+			remaining = removeHookStore(remaining, claimStore)
+			continue
+		}
 		storeOpts := claimOpts
 		storeOpts.Env = queryEnv
 		if len(claimStore.env) > 0 {
@@ -810,6 +833,10 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 		// store is not stranded behind it; claimsErrored carries any write-failure
 		// signal to the shared drain.
 		remaining = removeHookStore(remaining, claimStore)
+	}
+	if claimOpts.ExpectedWorkID != "" {
+		fmt.Fprintln(stderr, "gc hook --claim: expected startup work was not authoritatively claimable") //nolint:errcheck
+		return 1
 	}
 	return writeHookClaimNoWork(claimOpts, ops, claimsErrored, workDir, stdout, stderr)
 }

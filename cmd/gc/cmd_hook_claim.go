@@ -154,7 +154,9 @@ type hookClaimReleaseRecord struct {
 }
 
 type hookClaimOptions struct {
-	Assignee string
+	Assignee             string
+	ExpectedWorkID       string
+	ExpectedWorkStoreRef string
 	// SessionID is this session's durable bead ID. Assignee is deliberately the
 	// alias/agent form that read paths query through GC_AGENT, but a continuation
 	// pin means "run this on THIS session", which only a session identity can
@@ -421,6 +423,19 @@ func doHookClaim(workQuery, dir string, opts hookClaimOptions, ops hookClaimOps,
 // normalized in place so a non-terminal caller can reuse the normalized ops
 // (defaults applied) for the shared drain.
 func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimOps, stdout, stderr io.Writer) hookClaimResult {
+	if err := validateHookExpectedWork(opts.ExpectedWorkID, opts.ExpectedWorkStoreRef); err != nil {
+		fmt.Fprintf(stderr, "gc hook --claim: %v\n", err) //nolint:errcheck
+		return hookClaimResult{terminal: true, code: 1}
+	}
+	if opts.ExpectedWorkID != "" {
+		// A startup expectation restricts the normal authoritative claim path;
+		// it cannot supply query provenance or acknowledge an idle session.
+		opts.RequireAuthoritativeClaimRead = true
+		if opts.DrainAck {
+			fmt.Fprintln(stderr, "gc hook --claim: exact startup claims cannot acknowledge drain") //nolint:errcheck
+			return hookClaimResult{terminal: true, code: 1}
+		}
+	}
 	opts.Assignee = strings.TrimSpace(opts.Assignee)
 	opts.IdentityCandidates = hookClaimIdentityCandidates(append([]string{opts.Assignee}, opts.IdentityCandidates...)...)
 	opts.RouteTargets = hookClaimRouteTargets(opts.RouteTargets...)
@@ -522,6 +537,15 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 		if err != nil {
 			fmt.Fprintf(stderr, "gc hook --claim: refusing candidate set without exact source-store provenance: %v\n", err) //nolint:errcheck
 			return hookClaimResult{terminal: true, code: 1}
+		}
+		if opts.ExpectedWorkID != "" {
+			filtered := candidates[:0]
+			for _, candidate := range candidates {
+				if hookExpectedWorkMatches(candidate, *opts) {
+					filtered = append(filtered, candidate)
+				}
+			}
+			candidates = filtered
 		}
 		candidates, err = rereadHookClaimCandidates(candidates, *opts)
 		if err != nil {
@@ -640,6 +664,11 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 }
 
 func rereadHookClaimCandidates(candidates []beads.Bead, opts hookClaimOptions) ([]beads.Bead, error) {
+	for _, candidate := range candidates {
+		if !hookExpectedWorkMatches(candidate, opts) {
+			return nil, errors.New("candidate differs from exact startup work expectation")
+		}
+	}
 	needsSourceRead := false
 	for _, candidate := range candidates {
 		if !hookClaimCandidateIsMessage(candidate) {
@@ -1680,7 +1709,15 @@ func certifyHookAdoption(bead beads.Bead, opts hookClaimOptions, ops hookClaimOp
 	ctx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
 	defer cancel()
 	canonical, err := ops.ReadWorkMeta(ctx, dir, opts.Env, beadID, opts.Assignee)
+	if opts.ExpectedWorkID != "" && err == nil && canonical.ID != beadID {
+		fmt.Fprintln(stderr, "gc hook --claim: exact startup ownership read returned a different work item") //nolint:errcheck
+		return hookAdoptionRefused, ""
+	}
 	if err != nil {
+		if opts.ExpectedWorkID != "" {
+			fmt.Fprintf(stderr, "gc hook --claim: refusing exact startup adoption without ownership readback: %v\n", err) //nolint:errcheck
+			return hookAdoptionRefused, ""
+		}
 		fmt.Fprintf(stderr, "gc hook --claim: adopting %s without a canonical ownership readback: %v\n", beadID, err) //nolint:errcheck
 		return hookAdoptionUnverified, ""
 	}
@@ -2022,6 +2059,10 @@ func unwindUndeliveredHookClaim(reason, cause string, bead beads.Bead, opts hook
 // a demand-spawned seat draining empty is either correct pull or a broken
 // agreement invariant, and the drain itself cannot tell an operator which.
 func writeHookClaimNoWork(opts hookClaimOptions, ops hookClaimOps, claimsErrored bool, dir string, stdout, stderr io.Writer) int {
+	if opts.ExpectedWorkID != "" {
+		fmt.Fprintln(stderr, "gc hook --claim: expected startup work was not authoritatively claimable") //nolint:errcheck
+		return 1
+	}
 	reason := hookClaimReasonNoWork
 	if claimsErrored {
 		reason = hookClaimReasonClaimsErrored
@@ -2169,6 +2210,11 @@ func writeHookClaimDrain(label, reason string, jsonOut, drainAck bool, drainAckF
 }
 
 func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string) ([]string, error) {
+	// A managed startup is admitted for one exact trigger. Sibling reservation
+	// belongs to a later unconstrained turn, after that startup was delivered.
+	if opts.ExpectedWorkID != "" {
+		return nil, nil
+	}
 	rootID := strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
 	group := strings.TrimSpace(bead.Metadata[beadmeta.ContinuationGroupMetadataKey])
 	if rootID == "" || group == "" {

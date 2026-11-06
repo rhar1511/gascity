@@ -67,6 +67,29 @@ class BaseFreshnessTests(unittest.TestCase):
         with mock.patch.object(worker_launch.iso, "git", side_effect=[oid, f"{oid}\trefs/heads/main"]):
             self.assertEqual(worker_launch.verify_fresh_base(Path("/rig"), {}), oid)
 
+    def test_startup_claim_is_constrained_before_gc_can_adopt_other_work(self):
+        env = {"GC_TRIGGER_WORK_STORE_REF": "rig:inktree"}
+        path = Path("/pool/inktree/exact-task")
+        calls = []
+        def native(_env, *args):
+            calls.append(args)
+            if args[0] == "worktree":
+                return json.dumps({"ok": True, "path": str(path), "created": False,
+                                   "branch_created": False, "provenance": {"attempt_id": "owned"}})
+            self.assertEqual(args, ("hook", "--claim", "--json", "--expect-work-id", "exact-task",
+                                    "--expect-work-store-ref", "rig:inktree"))
+            return json.dumps({"action": "work", "bead_id": "exact-task"})
+        with mock.patch.object(worker_launch, "context", return_value=(Path("/rig"), "inktree", "exact-task", "session", Path("/pool"))), \
+             mock.patch.object(worker_launch, "verify_fresh_base"), \
+             mock.patch.object(worker_launch, "read_bead", return_value={"id": "exact-task", "metadata": {}}), \
+             mock.patch.object(worker_launch, "workspace_source", side_effect=lambda _env, work, _store: work), \
+             mock.patch.object(worker_launch, "native_workspace_args", return_value=(path, [])), \
+             mock.patch.object(worker_launch, "bound_session"), \
+             mock.patch.object(worker_launch.iso, "guard"), \
+             mock.patch.object(worker_launch, "run_gc", side_effect=native):
+            self.assertEqual(worker_launch.prepare(env), path)
+        self.assertEqual([args[1] for args in calls[:-1]], ["verify", "ensure", "verify"])
+
     def test_stale_local_main_refuses_before_claim(self):
         with mock.patch.object(
             worker_launch.iso,
@@ -121,14 +144,10 @@ class DeclaredLaunchContextTests(unittest.TestCase):
 
     def test_exact_declaration_restores_only_missing_inputs(self):
         self.write()
-        self.assertEqual(self.restore(), {**self.env, **self.inputs,
-                                         "GC_TRIGGER_WORK_STORE_REF": "rig:inktree"})
+        self.assertEqual(self.restore(), {
+            **self.env, **self.inputs, "GC_TRIGGER_WORK_STORE_REF": "rig:inktree",
+        })
         self.assertNotIn("GC_RIG", self.env)
-
-    def test_conflicting_canonical_trigger_store_refused(self):
-        self.write()
-        with self.assertRaises(worker_launch.iso.IsolationError):
-            self.restore({**self.env, "GC_TRIGGER_WORK_STORE_REF": "rig:ai"})
 
     def test_other_session_cannot_borrow_declaration(self):
         self.write()
@@ -146,8 +165,13 @@ class DeclaredLaunchContextTests(unittest.TestCase):
 
     def test_conflicting_trigger_refused(self):
         self.write()
-        with self.assertRaisesRegex(worker_launch.iso.IsolationError, "conflicts"):
-            self.restore({**self.env, "GC_TRIGGER_WORK_BEAD_ID": "inktree-unrelated"})
+        for key, value in (
+            ("GC_TRIGGER_WORK_BEAD_ID", "inktree-unrelated"),
+            ("GC_TRIGGER_WORK_BEAD_STORE_REF", "rig:frontend"),
+            ("GC_TRIGGER_WORK_STORE_REF", "rig:frontend"),
+        ):
+            with self.subTest(key=key), self.assertRaisesRegex(worker_launch.iso.IsolationError, "conflicts"):
+                self.restore({**self.env, key: value})
 
     def test_incomplete_or_extra_inputs_refused(self):
         for change in (lambda: self.inputs.pop("GC_RIG_ROOT"),
@@ -207,8 +231,9 @@ class DeclaredLaunchContextTests(unittest.TestCase):
         owned = Path(self.inputs["GC_ISOLATION_WORKTREES"]) / "inktree/inktree-task/test-session"
         owned.mkdir(parents=True)
         env = {**self.env, "GC_DIR": str(owned)}
-        self.assertEqual(self.restore(env), {**env, **self.inputs,
-                                            "GC_TRIGGER_WORK_STORE_REF": "rig:inktree"})
+        self.assertEqual(self.restore(env), {
+            **env, **self.inputs, "GC_TRIGGER_WORK_STORE_REF": "rig:inktree",
+        })
 
     def test_declared_native_thread_is_preserved(self):
         native = "01a11040-123c-7ad2-b7d6-967b17e2f60e"
