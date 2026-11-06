@@ -429,6 +429,12 @@ const NativeAuxRevisionMetadataKey = Namespace + "native_aux_revision"
 // It is deliberately bare for compatibility with the persisted session schema.
 const SessionInstanceTokenMetadataKey = "instance_token"
 
+// RuntimeBackendMetadataKey pins a session's resolved runtime selection.
+const RuntimeBackendMetadataKey = Namespace + "runtime_backend"
+
+// RuntimeFingerprintMetadataKey pins the runtime's execution declaration.
+const RuntimeFingerprintMetadataKey = Namespace + "runtime_fingerprint"
+
 var executionCredentialMetadataKeys = map[string]struct{}{
 	SessionInstanceTokenMetadataKey: {},
 	"execution_token":               {},
@@ -437,6 +443,8 @@ var executionCredentialMetadataKeys = map[string]struct{}{
 }
 
 var executionIdentityMetadataKeys = map[string]struct{}{
+	RuntimeBackendMetadataKey:       {},
+	RuntimeFingerprintMetadataKey:   {},
 	"session_name":                  {},
 	"sessionName":                   {},
 	SessionNameMetadataKey:          {},
@@ -627,6 +635,8 @@ const SessionRequestReceiptPrefix = Namespace + "session_request.v1."
 // declares. The guard test asserts every gc.* metadata literal used in non-test
 // Go resolves to a member of this slice (or a KnownMetadataPrefixes entry).
 var KnownMetadataKeys = []string{
+	RuntimeBackendMetadataKey,
+	RuntimeFingerprintMetadataKey,
 	PRActionSourceMetadataKey,
 	PRActionQueueIndexMetadataKey,
 	PRActionIdempotencyMetadataKey,

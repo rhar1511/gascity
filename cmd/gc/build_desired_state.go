@@ -1212,7 +1212,17 @@ func buildDesiredStateWithSessionBeadsAt(
 			continue
 		}
 		fpExtra := buildFingerprintExtra(spec.Agent)
-		tp, err := resolveTemplatePrepared(bp, spec.Agent, identity, fpExtra)
+		namedAgent := *spec.Agent
+		if spec.Named.Runtime != "" {
+			namedAgent.Runtime = spec.Named.Runtime
+		}
+		var tp TemplateParams
+		var err error
+		if hasCanonical {
+			tp, err = resolveTemplateForSessionBeadInfo(bp, &namedAgent, identity, fpExtra, canonicalInfo)
+		} else {
+			tp, err = resolveTemplatePrepared(bp, &namedAgent, identity, fpExtra)
+		}
 		if err != nil {
 			fmt.Fprintf(stderr, "buildDesiredState: named session %q: %v (skipping)\n", identity, err) //nolint:errcheck
 			continue
@@ -4118,6 +4128,32 @@ func resolveTemplateForSessionBeadInfo(
 ) (TemplateParams, error) {
 	local := *bp
 	local.beadNames = map[string]string{qualifiedName: info.SessionNameMetadata}
+	if info.RuntimeBackend != "" || info.RuntimeFingerprint != "" {
+		if _, err := session.RuntimeBackendKey(info.RuntimeBackend, info.RuntimeFingerprint); err != nil {
+			return TemplateParams{}, err
+		}
+		binding, err := config.RuntimeBindingForName(bp.city, info.RuntimeBackend)
+		if err != nil {
+			return TemplateParams{}, err
+		}
+		if binding.Fingerprint != info.RuntimeFingerprint {
+			return TemplateParams{}, session.ErrRuntimeBackendIdentity
+		}
+		if err := session.BindRuntimeInfo(bp.sp, info); err != nil {
+			return TemplateParams{}, err
+		}
+		local.sessionProvider = info.RuntimeBackend
+		ownerAgent := *cfgAgent
+		ownerAgent.Runtime = ""
+		ownerAgent.Session = info.Transport
+		if ownerAgent.Session == "" {
+			ownerAgent.Session = config.SessionTransportTmux
+		}
+		if info.WorkDir != "" {
+			ownerAgent.WorkDir = info.WorkDir
+		}
+		cfgAgent = &ownerAgent
+	}
 	tp, err := resolveTemplatePrepared(&local, cfgAgent, qualifiedName, fpExtra)
 	if err != nil {
 		return tp, err
@@ -5139,6 +5175,16 @@ func createPoolSessionBeadWithGuardedAliasUsingLock(
 		Metadata:      metadata,
 		TransientSlot: transientSlot,
 	}
+	if _, strict := runtime.AsBackendBindingProvider(bp.sp); strict {
+		if cfgAgent == nil {
+			return session.Info{}, session.ErrRuntimeBackendIdentity
+		}
+		transport := agentSessionCreateTransport(bp.city, *cfgAgent)
+		identity.RuntimeBinding, err = configuredRuntimeBindingForCreate(bp.city, bp.sp, template, "", transport)
+		if err != nil {
+			return session.Info{}, err
+		}
+	}
 	// A transient slot is never reserved as an alias: it is not an identity, so
 	// there is nothing to guard against collision and nothing to persist. The
 	// resolvedTmuxAlias lock lane below is unaffected — that one guards a
@@ -5171,8 +5217,14 @@ func createPoolSessionBeadWithGuardedAliasUsingLock(
 	// identifier spelling. Probing under those locks would stall every other
 	// creator of the same identifiers behind it. Do not close the
 	// probe-to-create window by widening the lock over this call.
-	if cfgAgent != nil && cfgAgent.UsesCanonicalSingletonPoolIdentity() && bp.sp != nil && bp.sp.IsRunning(identifiers.sessionName) {
-		return session.Info{}, fmt.Errorf("%w: runtime %q still occupies singleton template %q", errPoolSessionNameUnavailable, identifiers.sessionName, template)
+	if cfgAgent != nil && cfgAgent.UsesCanonicalSingletonPoolIdentity() && bp.sp != nil {
+		if _, strict := runtime.AsBackendBindingProvider(bp.sp); strict {
+			if err := prospectiveRuntimeNameAvailable(bp.sp, identifiers.sessionName, identity.RuntimeBinding); err != nil {
+				return session.Info{}, err
+			}
+		} else if bp.sp.IsRunning(identifiers.sessionName) {
+			return session.Info{}, fmt.Errorf("%w: runtime %q still occupies singleton template %q", errPoolSessionNameUnavailable, identifiers.sessionName, template)
+		}
 	}
 	if bp.beadStore == nil {
 		return createPoolSessionBeadWithIdentifiers(bp.beadStore, template, bp.city, bp.sessionBeads, bp.sessionBeads, poolSessionCreateStartedAt(bp), identity, identifiers)
@@ -5181,47 +5233,52 @@ func createPoolSessionBeadWithGuardedAliasUsingLock(
 
 	var info session.Info
 	lockErr := withLocks(bp.cityPath, lockIDs, func() error {
-		createIdentity := identity
-		// The exact identifier locks fence compliant creators across every store,
-		// but the pre-lock planning census is not current enough to prove absence.
-		// Re-read the full session topology under the lock. Any partial leg makes
-		// both alias and runtime-name answers unprovable, so fail before mutation.
-		availabilityInfos, availabilityErr := freshPoolAvailabilityInfos(bp)
-		if availabilityErr != nil {
-			return fmt.Errorf("checking locked pool availability for template %q: %w", template, availabilityErr)
-		}
-		if alias != "" {
-			// A proven collision retains the long-standing alias-deferral contract:
-			// the pool bead is created without a public alias and sync records
-			// pool_alias_conflict. An unanswerable reservation query is different:
-			// it is not proof of a collision and must fail the entire create closed.
-			aliasErr := session.EnsureAliasAvailableWithConfig(bp.beadStore, bp.city, alias, "")
-			if aliasErr == nil {
-				aliasErr = poolAliasCollisionFromInfos(availabilityInfos, alias)
+		return runtime.WithBackendCreation(bp.sp, func() error {
+			createIdentity := identity
+			// The exact identifier locks fence compliant creators across every store,
+			// but the pre-lock planning census is not current enough to prove absence.
+			// Re-read the full session topology under the lock. Any partial leg makes
+			// both alias and runtime-name answers unprovable, so fail before mutation.
+			availabilityInfos, availabilityErr := freshPoolAvailabilityInfos(bp)
+			if availabilityErr != nil {
+				return fmt.Errorf("checking locked pool availability for template %q: %w", template, availabilityErr)
 			}
-			switch {
-			case aliasErr == nil:
-				createIdentity.Alias = persistAlias
-			case errors.Is(aliasErr, session.ErrSessionAliasExists):
-				// Proven collision: intentionally defer alias persistence.
-			default:
-				return fmt.Errorf("checking pool alias %q for template %q: %w", alias, template, aliasErr)
+			if alias != "" {
+				// A proven collision retains the long-standing alias-deferral contract:
+				// the pool bead is created without a public alias and sync records
+				// pool_alias_conflict. An unanswerable reservation query is different:
+				// it is not proof of a collision and must fail the entire create closed.
+				aliasErr := session.EnsureAliasAvailableWithConfig(bp.beadStore, bp.city, alias, "")
+				if aliasErr == nil {
+					aliasErr = poolAliasCollisionFromInfos(availabilityInfos, alias)
+				}
+				switch {
+				case aliasErr == nil:
+					createIdentity.Alias = persistAlias
+				case errors.Is(aliasErr, session.ErrSessionAliasExists):
+					// Proven collision: intentionally defer alias persistence.
+				default:
+					return fmt.Errorf("checking pool alias %q for template %q: %w", alias, template, aliasErr)
+				}
 			}
-		}
-		var createErr error
-		// Only the primary snapshot receives the successful-create writeback.
-		availabilitySnapshot := newSessionBeadSnapshotFromInfos(availabilityInfos)
-		info, createErr = createPoolSessionBeadWithIdentifiers(
-			bp.beadStore,
-			template,
-			bp.city,
-			availabilitySnapshot,
-			bp.sessionBeads,
-			poolSessionCreateStartedAt(bp),
-			createIdentity,
-			identifiers,
-		)
-		return createErr
+			var createErr error
+			// Only the primary snapshot receives the successful-create writeback.
+			availabilitySnapshot := newSessionBeadSnapshotFromInfos(availabilityInfos)
+			info, createErr = createPoolSessionBeadWithIdentifiers(
+				bp.beadStore,
+				template,
+				bp.city,
+				availabilitySnapshot,
+				bp.sessionBeads,
+				poolSessionCreateStartedAt(bp),
+				createIdentity,
+				identifiers,
+			)
+			if createErr != nil {
+				return createErr
+			}
+			return session.BindRuntimeInfo(bp.sp, info)
+		})
 	})
 	return info, lockErr
 }
@@ -6717,6 +6774,15 @@ func materializeProviderOverlaysBeforeFingerprint(
 }
 
 func resolveTemplatePrepared(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, fpExtra map[string]string) (TemplateParams, error) {
+	if bp != nil && bp.city != nil && cfgAgent != nil && requiresSessionRuntimeRouting(bp.city, bp.sessionBeads) {
+		binding, err := config.ResolveSelectedRuntimeBinding(bp.city, bp.sessionProvider, cfgAgent.Runtime, agentSessionCreateTransport(bp.city, *cfgAgent))
+		if err != nil {
+			return TemplateParams{}, fmt.Errorf("%w: %w", session.ErrRuntimeBackendIdentity, err)
+		}
+		local := *bp
+		local.sessionProvider = binding.Name
+		bp = &local
+	}
 	if err := validateAgentSessionTransportForBuild(bp, cfgAgent, qualifiedName); err != nil {
 		return TemplateParams{}, err
 	}

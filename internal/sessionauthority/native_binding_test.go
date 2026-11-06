@@ -73,6 +73,45 @@ func TestNativeBindingVerifiesExactHostSignedSnapshot(t *testing.T) {
 	}
 }
 
+func TestNativeBindingRequiresExactRuntimeOwner(t *testing.T) {
+	v, priv, claims, auth := nativeBindingFixture(t)
+	legacyToken := mintNativeBinding(t, priv, claims)
+	want := claims.Target
+	want.RuntimeBackend = "capsule"
+	want.RuntimeFingerprint = strings.Repeat("a", 64)
+	if _, err := v.VerifyNativeBinding(legacyToken, want, auth); !errors.Is(err, ErrTargetMismatch) {
+		t.Fatalf("blank proof accepted typed owner: %v", err)
+	}
+	claims.Target = want
+	token := mintNativeBinding(t, priv, claims)
+	if _, err := v.VerifyNativeBinding(token, want, auth); err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"backend", "fingerprint", "partial"} {
+		changed := want
+		switch field {
+		case "backend":
+			changed.RuntimeBackend = "local"
+		case "fingerprint":
+			changed.RuntimeFingerprint = strings.Repeat("b", 64)
+		case "partial":
+			changed.RuntimeFingerprint = ""
+		}
+		if _, err := v.VerifyNativeBinding(token, changed, auth); err == nil {
+			t.Fatal("changed runtime accepted:", field)
+		}
+	}
+	claims.Target.RuntimeFingerprint = ""
+	if _, err := NativeBindingSigningBytes(claims); err == nil {
+		t.Fatal("partial runtime signed")
+	}
+	_, _, legacy, _ := nativeBindingFixture(t)
+	raw, err := NativeBindingSigningBytes(legacy)
+	if err != nil || strings.Contains(string(raw), "runtime_backend") || strings.Contains(string(raw), "runtime_fingerprint") {
+		t.Fatalf("legacy bytes changed: %s %v", raw, err)
+	}
+}
+
 func TestNativeBindingRejectsEveryChangedBinding(t *testing.T) {
 	cases := []struct {
 		name   string

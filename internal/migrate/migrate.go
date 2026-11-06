@@ -27,21 +27,22 @@ type Report struct {
 }
 
 type packFile struct {
-	Pack           config.PackMeta                `toml:"pack"`
-	Imports        map[string]config.Import       `toml:"imports,omitempty"`
-	NamedSessions  []config.NamedSession          `toml:"named_session,omitempty"`
-	Services       []config.Service               `toml:"service,omitempty"`
-	Providers      map[string]config.ProviderSpec `toml:"providers,omitempty"`
-	Upstreams      map[string]config.UpstreamSpec `toml:"upstreams,omitempty"`
-	Formulas       config.FormulasConfig          `toml:"formulas,omitempty"`
-	Patches        config.Patches                 `toml:"patches,omitempty"`
-	Doctor         []config.PackDoctorEntry       `toml:"doctor,omitempty"`
-	Commands       []config.PackCommandEntry      `toml:"commands,omitempty"`
-	Global         config.PackGlobal              `toml:"global,omitempty"`
-	AgentDefaults  config.AgentDefaults           `toml:"agent_defaults,omitempty"`
-	AgentsDefaults config.AgentDefaults           `toml:"agents,omitempty"`
-	Defaults       packDefaults                   `toml:"defaults,omitempty"`
-	Agents         []config.Agent                 `toml:"agent"`
+	Pack           config.PackMeta                    `toml:"pack"`
+	Imports        map[string]config.Import           `toml:"imports,omitempty"`
+	NamedSessions  []config.NamedSession              `toml:"named_session,omitempty"`
+	Services       []config.Service                   `toml:"service,omitempty"`
+	Providers      map[string]config.ProviderSpec     `toml:"providers,omitempty"`
+	Runtimes       map[string]config.PackRuntimeEntry `toml:"runtimes,omitempty"`
+	Upstreams      map[string]config.UpstreamSpec     `toml:"upstreams,omitempty"`
+	Formulas       config.FormulasConfig              `toml:"formulas,omitempty"`
+	Patches        config.Patches                     `toml:"patches,omitempty"`
+	Doctor         []config.PackDoctorEntry           `toml:"doctor,omitempty"`
+	Commands       []config.PackCommandEntry          `toml:"commands,omitempty"`
+	Global         config.PackGlobal                  `toml:"global,omitempty"`
+	AgentDefaults  config.AgentDefaults               `toml:"agent_defaults,omitempty"`
+	AgentsDefaults config.AgentDefaults               `toml:"agents,omitempty"`
+	Defaults       packDefaults                       `toml:"defaults,omitempty"`
+	Agents         []config.Agent                     `toml:"agent"`
 
 	defaultRigImportOrder []string
 	metadata              toml.MetaData
@@ -66,6 +67,7 @@ type agentFile struct {
 	Nudge                  string                  `toml:"nudge,omitempty"`
 	Session                string                  `toml:"session,omitempty"`
 	Provider               string                  `toml:"provider,omitempty"`
+	Runtime                string                  `toml:"runtime,omitempty"`
 	ContextAdvisory        *config.ContextAdvisory `toml:"context_advisory,omitempty"`
 	Upstream               string                  `toml:"upstream,omitempty"`
 	StartCommand           string                  `toml:"start_command,omitempty"`
@@ -924,6 +926,7 @@ func agentConfigFromAgent(agent config.Agent) agentFile {
 		Nudge:                  agent.Nudge,
 		Session:                agent.Session,
 		Provider:               agent.Provider,
+		Runtime:                agent.Runtime,
 		ContextAdvisory:        agent.ContextAdvisory,
 		Upstream:               agent.Upstream,
 		StartCommand:           agent.StartCommand,
@@ -979,6 +982,7 @@ func isZeroAgentConfig(cfg agentFile) bool {
 		cfg.Nudge == "" &&
 		cfg.Session == "" &&
 		cfg.Provider == "" &&
+		cfg.Runtime == "" &&
 		cfg.ContextAdvisory == nil &&
 		cfg.Upstream == "" &&
 		cfg.StartCommand == "" &&
@@ -1047,13 +1051,13 @@ func dropRedundantControlDispatcherNamedSession(sessions []config.NamedSession) 
 	for _, ns := range sessions {
 		// Match ONLY the auto-created shape: name=control-dispatcher, a bare or
 		// core-qualified backing template, on_demand (or unset) mode, and no
-		// explicit scope/dir. A user who hand-authored a control-dispatcher
-		// session with a custom template, always mode, or an explicit scope/dir
+		// explicit scope/dir/runtime. A user who hand-authored a control-dispatcher
+		// session with a custom template, always mode, or an explicit scope/dir/runtime
 		// expressed intent and must be left untouched.
 		autoCreated := ns.Name == dispatcher &&
 			(ns.Template == dispatcher || ns.Template == "core."+dispatcher) &&
 			(ns.Mode == "" || ns.Mode == "on_demand") &&
-			ns.Dir == "" && ns.Scope == ""
+			ns.Dir == "" && ns.Scope == "" && ns.Runtime == ""
 		if autoCreated {
 			removed++
 			continue

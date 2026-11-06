@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -89,6 +90,7 @@ func workerFactoryWithStaleKeyDetectionWaiter(
 		Recorder:                cliFactoryEventsRecorder(cityPath, cfg),
 		UsageSink:               usageSinkForCity(cfg, cityPath),
 		ResolveTransport:        resolveTransport,
+		ResolveRuntimeBackend:   session.RuntimeBackendResolverForConfig(cfg, sessionProviderContextForCity(cfg, cityPath, os.Getenv("GC_SESSION")).providerName, sp),
 		ResolveSessionRuntime:   workerSessionRuntimeResolverWithConfig(cityPath, cfg),
 		StaleKeyDetectionWaiter: waiter,
 		Pricing:                 cfg.PricingRegistry(),
@@ -308,7 +310,14 @@ func newWorkerSessionHandleForResolvedRuntimeWithConfig(
 	// runtime.Config directly and never routes through resolveTemplate
 	// (gc-6bw8o).
 	applyWorkerOverlayHints(&sessionCfg.Runtime.Hints, cfg, cityPath, template, resolved)
-	return factory.SessionForResolvedRuntime(sessionCfg)
+	handle, err := factory.SessionForResolvedRuntime(sessionCfg)
+	if err != nil {
+		return nil, err
+	}
+	if _, strict := runtime.AsBackendBindingProvider(sp); strict {
+		return &standaloneRuntimeCreationHandle{Handle: handle, cityPath: cityPath, cfg: cfg}, nil
+	}
+	return handle, nil
 }
 
 func resolvedWorkerSessionConfigWithConfig(

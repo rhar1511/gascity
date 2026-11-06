@@ -1065,6 +1065,7 @@ type AgentPatch struct {
 	Provider                *string           `json:"Provider"`
 	ResumeCommand           *string           `json:"ResumeCommand"`
 	Rig                     string            `json:"Rig"`
+	Runtime                 *string           `json:"Runtime"`
 	ScaleCheck              *string           `json:"ScaleCheck"`
 	Scope                   *string           `json:"Scope"`
 	Session                 *string           `json:"Session"`

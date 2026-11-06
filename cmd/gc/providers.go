@@ -199,6 +199,9 @@ func newStatusSessionProviderForCity(cfg *config.City, cityPath string) (runtime
 
 func newStatusSessionProviderForCityWithSnapshot(cfg *config.City, cityPath string, sessionBeads *sessionBeadSnapshot) (runtime.Provider, error) {
 	ctx := sessionProviderContextForCity(cfg, cityPath, os.Getenv("GC_SESSION"))
+	if sessionBeads == nil {
+		sessionBeads = loadProviderSessionSnapshot(ctx)
+	}
 	sp, err := withSessionProviderConstructionContext(newSessionProviderFromContext(ctx, sessionBeads))
 	if err != nil {
 		return nil, err
@@ -217,12 +220,12 @@ func registerStatusProviderACPRoutes(sp runtime.Provider, snapshot *sessionBeadS
 }
 
 func loadProviderSessionSnapshot(ctx sessionProviderContext) *sessionBeadSnapshot {
-	if ctx.cityPath == "" || ctx.providerName == "acp" {
+	if ctx.cityPath == "" {
 		return nil
 	}
 	store, err := openSessionProviderStore(ctx.cityPath)
 	if err != nil {
-		return nil
+		return newSessionBeadSnapshotWithError(err)
 	}
 	// This snapshot reads only session-class beads (the gc:session label) to
 	// drive transport/ACP routing decisions, so route through the session
@@ -231,13 +234,9 @@ func loadProviderSessionSnapshot(ctx sessionProviderContext) *sessionBeadSnapsho
 	// closes the gap on both the CLI and controller provider-construction paths.
 	// Identity to the opened store today (resolveClassStore is pure identity).
 	sessStore := cliSessionStore(store, ctx.cfg, ctx.cityPath)
-	// The label-only, closed-excluded, IsSessionBeadOrRepairable-UNfiltered Info
-	// lister is byte-identical to the retired newSessionBeadSnapshot(ListByLabel(
-	// gc:session)) set: same gc:session label scope, same closed exclusion, same
-	// no-narrowing (a damaged non-"session"-typed labeled bead is still surfaced).
-	infos, err := session.NewStore(beads.SessionStore{Store: sessStore}).ListLabeledSessionInfosUnfiltered()
+	infos, err := session.NewStore(beads.SessionStore{Store: sessStore}).ListRuntimeOwnershipInfos()
 	if err != nil {
-		return nil
+		return newSessionBeadSnapshotWithError(err)
 	}
 	return newSessionBeadSnapshotFromInfos(infos)
 }
@@ -263,6 +262,12 @@ func withSessionProviderConstructionContext(sp runtime.Provider, err error) (run
 // routed at start via the same auto.Provider (build_desired_state RouteACP).
 // Behavior is identical to the prior inline composition.
 func resolveSessionTransportProvider(ctx sessionProviderContext, sessionBeads *sessionBeadSnapshot) (runtime.Provider, error) {
+	if err := sessionBeads.LoadError(); err != nil {
+		return nil, fmt.Errorf("runtime ownership snapshot: %w", err)
+	}
+	if requiresSessionRuntimeRouting(ctx.cfg, sessionBeads) {
+		return rebuildSessionRuntimeRouting(ctx, sessionBeads, nil)
+	}
 	base, err := buildSessionProviderByName(ctx.cfg, ctx.providerName, ctx.sc, ctx.cityName, ctx.cityPath)
 	if err != nil {
 		return nil, err
@@ -1229,17 +1234,38 @@ func openCityEventsProviderWithConfig(providerConfig func() config.EventsConfig,
 	return p, 0
 }
 
+type hybridBackendFactories struct {
+	local  func(sessiontmux.Config) runtime.Provider
+	remote func() (runtime.Provider, error)
+}
+
 // newHybridProvider constructs a composite provider that routes sessions to
 // tmux (local) or k8s (remote) based on session name. The GC_HYBRID_REMOTE_MATCH
 // env var controls which sessions go to k8s. If unset, all sessions route to
 // local tmux.
-func newHybridProvider(sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
+func newHybridProvider(sc config.SessionConfig, cityName, cityPath string, supplied ...hybridBackendFactories) (runtime.Provider, error) {
 	// Cut-over: hybrid routes to the seam-backed tmux/k8s providers, so
 	// hybrid-routed sessions flow through the seams like every other path.
-	local := sessiontmux.NewSeamBackedWithConfig(tmuxConfigFromSession(sc, cityName, cityPath))
-	remote, err := sessionk8s.NewSeamBacked()
+	factories := hybridBackendFactories{
+		local:  sessiontmux.NewSeamBackedWithConfig,
+		remote: sessionk8s.NewSeamBacked,
+	}
+	if len(supplied) > 1 {
+		return nil, fmt.Errorf("hybrid: more than one backend factory set")
+	}
+	if len(supplied) == 1 {
+		factories = supplied[0]
+	}
+	if factories.local == nil || factories.remote == nil {
+		return nil, fmt.Errorf("hybrid: backend factory missing")
+	}
+	local := factories.local(tmuxConfigFromSession(sc, cityName, cityPath))
+	remote, err := factories.remote()
 	if err != nil {
 		return nil, fmt.Errorf("hybrid: k8s backend: %w", err)
+	}
+	if local == nil || remote == nil {
+		return nil, fmt.Errorf("hybrid: backend factory returned nil provider")
 	}
 	pattern := sc.RemoteMatch
 	if v := os.Getenv("GC_HYBRID_REMOTE_MATCH"); v != "" {

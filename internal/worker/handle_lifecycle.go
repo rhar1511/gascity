@@ -426,17 +426,19 @@ func (h *SessionHandle) ensureSessionID() (string, error) {
 
 func (h *SessionHandle) createDeferredLocked() (sessionpkg.Info, error) {
 	info, err := h.manager.CreateSession(context.Background(), sessionpkg.CreateOptions{
-		BeadOnly:     true,
-		Alias:        h.session.Alias,
-		ExplicitName: h.session.ExplicitName,
-		Template:     h.session.Template,
-		Title:        h.session.Title,
-		Command:      h.session.Command,
-		WorkDir:      h.session.WorkDir,
-		Provider:     h.session.Provider,
-		Transport:    h.session.Transport,
-		Resume:       h.session.Resume,
-		ExtraMeta:    cloneStringMap(h.session.Metadata),
+		BeadOnly:           true,
+		Alias:              h.session.Alias,
+		ExplicitName:       h.session.ExplicitName,
+		Template:           h.session.Template,
+		Title:              h.session.Title,
+		Command:            h.session.Command,
+		WorkDir:            h.session.WorkDir,
+		Provider:           h.session.Provider,
+		Transport:          h.session.Transport,
+		RuntimeBackend:     h.session.RuntimeBackend,
+		RuntimeFingerprint: h.session.RuntimeFingerprint,
+		Resume:             h.session.Resume,
+		ExtraMeta:          cloneStringMap(h.session.Metadata),
 	})
 	if err != nil {
 		return sessionpkg.Info{}, err
@@ -447,18 +449,20 @@ func (h *SessionHandle) createDeferredLocked() (sessionpkg.Info, error) {
 
 func (h *SessionHandle) createStartedLocked(ctx context.Context) (sessionpkg.Info, error) {
 	info, err := h.manager.CreateSession(ctx, sessionpkg.CreateOptions{
-		Alias:        h.session.Alias,
-		ExplicitName: h.session.ExplicitName,
-		Template:     h.session.Template,
-		Title:        h.session.Title,
-		Command:      h.session.Command,
-		WorkDir:      h.session.WorkDir,
-		Provider:     h.session.Provider,
-		Transport:    h.session.Transport,
-		Env:          cloneStringMap(h.session.Env),
-		Resume:       h.session.Resume,
-		Hints:        cloneRuntimeConfig(h.session.Hints),
-		ExtraMeta:    cloneStringMap(h.session.Metadata),
+		Alias:              h.session.Alias,
+		ExplicitName:       h.session.ExplicitName,
+		Template:           h.session.Template,
+		Title:              h.session.Title,
+		Command:            h.session.Command,
+		WorkDir:            h.session.WorkDir,
+		Provider:           h.session.Provider,
+		Transport:          h.session.Transport,
+		RuntimeBackend:     h.session.RuntimeBackend,
+		RuntimeFingerprint: h.session.RuntimeFingerprint,
+		Env:                cloneStringMap(h.session.Env),
+		Resume:             h.session.Resume,
+		Hints:              cloneRuntimeConfig(h.session.Hints),
+		ExtraMeta:          cloneStringMap(h.session.Metadata),
 	})
 	if err != nil {
 		return sessionpkg.Info{}, err

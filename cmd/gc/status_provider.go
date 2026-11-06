@@ -191,6 +191,41 @@ func (p *statusProvider) RouteACP(name string) {
 	}
 }
 
+// HasBackendBindings preserves the underlying provider's routing capability.
+func (p *statusProvider) HasBackendBindings() bool {
+	_, ok := runtime.AsBackendBindingProvider(p.base)
+	return ok
+}
+
+// ValidateBackend forwards exact registry validation.
+func (p *statusProvider) ValidateBackend(key string) error {
+	if binder, ok := runtime.AsBackendBindingProvider(p.base); ok {
+		return binder.ValidateBackend(key)
+	}
+	return runtime.ErrRuntimeUnavailable
+}
+
+// BoundBackend returns the underlying immutable owner.
+func (p *statusProvider) BoundBackend(name string) (string, error) {
+	if binder, ok := runtime.AsBackendBindingProvider(p.base); ok {
+		return binder.BoundBackend(name)
+	}
+	return "", runtime.ErrRuntimeUnavailable
+}
+
+// Bind reconstructs an exact underlying owner.
+func (p *statusProvider) Bind(name, key string) error {
+	if binder, ok := runtime.AsBackendBindingProvider(p.base); ok {
+		return binder.Bind(name, key)
+	}
+	return runtime.ErrRuntimeUnavailable
+}
+
+// WithBackendCreation preserves the underlying publication fence.
+func (p *statusProvider) WithBackendCreation(create func() error) error {
+	return runtime.WithBackendCreation(p.base, create)
+}
+
 func (p *statusProvider) GetLastActivity(name string) (time.Time, error) {
 	result := boundedStatusCall(p, struct {
 		value time.Time

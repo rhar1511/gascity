@@ -179,6 +179,7 @@ type startCandidate struct {
 	// (relaunchAgentForLaunchDrift, recoverRunningPendingCreate), which
 	// never produce a startResult and so never read it.
 	configured bool
+	refreshErr error
 }
 
 // name reads the RAW session_name metadata off the typed twin
@@ -963,6 +964,9 @@ func prepareStartCandidateForCity(
 			if err != nil {
 				return err
 			}
+			if err := sessionpkg.BindRuntimeInfo(sp, current); err != nil {
+				return err
+			}
 			// preWakeCommit persists its PreWakePatch through the front door and returns
 			// the batch; folding it onto the freshly re-read Info keeps the twin
 			// byte-coherent with the persisted state without a second Get. It shares
@@ -983,15 +987,26 @@ func prepareStartCandidateForCity(
 	} else {
 		candidate.info = candidate.info.ApplyPatch(fold)
 	}
+	restoreFailedPreparation := func(info sessionpkg.Info) {
+		undo.token, undo.custody = info.InstanceToken, info
+		restorePreWakeState(preparedStart{candidate: startCandidate{info: info, tp: candidate.tp}, preWakeUndo: undo}, sessionFrontDoor(store), stderr)
+	}
 	candidate = refreshConfiguredNamedStartCandidate(candidate, cityPath, cityName, cfg, sp, store, clk, stderr)
+	if candidate.refreshErr != nil {
+		restoreFailedPreparation(candidate.info)
+		return nil, candidate.refreshErr
+	}
 	// buildPreparedStart folds its own post-append mutations (stale-resume clears,
 	// session_key / instance_token mints) onto candidate.info at their write sites, so
 	// the returned prepared.candidate.info stays coherent with the store WITHOUT a
 	// second re-Get. The post-prep reads (session_key at runPreparedStartCandidate;
 	// recordWakeFailure's session_key/started_config_hash) read that folded twin. The
-	// partial-Info second return is only load-bearing for recoverRunningPendingCreate's
-	// abort residue; here the prepared already carries it, so it is discarded.
-	prepared, _, err := buildPreparedStartWithWorkDirResolver(candidate, cityPath, cfg, store, workDirResolver)
+	// partial-Info second return retains the failed preparation's final custody,
+	// so its own PreWake can be restored without adopting a later incarnation.
+	prepared, partial, err := buildPreparedStartWithWorkDirResolver(candidate, cityPath, cfg, store, workDirResolver)
+	if err != nil {
+		restoreFailedPreparation(partial)
+	}
 	if prepared != nil && undo.written != nil {
 		undo.token = prepared.candidate.info.InstanceToken
 		undo.custody = prepared.candidate.info
@@ -1021,6 +1036,9 @@ func refreshConfiguredNamedStartCandidate(
 		if stderr != nil {
 			fmt.Fprintf(stderr, "session reconciler: refreshing named session start %s: listing sessions: %v\n", candidate.name(), err) //nolint:errcheck
 		}
+		if _, strict := runtime.AsBackendBindingProvider(sp); strict {
+			candidate.refreshErr = fmt.Errorf("%w: %w", runtime.ErrRuntimeUnavailable, err)
+		}
 		return candidate
 	}
 	refreshed, refreshedInfo, err := resolvePreservedConfiguredNamedSessionTemplate(cityPath, cityName, cfg, sp, store, snapshot.OpenInfos(), candidate.info, clk, stderr)
@@ -1029,6 +1047,9 @@ func refreshConfiguredNamedStartCandidate(
 			fmt.Fprintf(stderr, "session reconciler: refreshing named session start %s: %v\n", candidate.name(), err) //nolint:errcheck
 		}
 		candidate.info = refreshedInfo // the bind may have cleared the stamp durably before the resolve failed
+		if _, strict := runtime.AsBackendBindingProvider(sp); strict {
+			candidate.refreshErr = fmt.Errorf("%w: %w", runtime.ErrRuntimeUnavailable, err)
+		}
 		return candidate
 	}
 	candidate.tp = refreshed
@@ -2014,7 +2035,7 @@ func commitAsyncStartResultWithContext(
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			err := fmt.Errorf("panic during async start commit: %v\n%s", recovered, debug.Stack())
-			clearPendingStartInFlightLease(result.prepared.candidate.info.ID, sessFront, stderr)
+			releaseExpectedPendingStartLease(result.prepared.candidate.info, sessFront, stderr)
 			fmt.Fprintf(stderr, "session reconciler: committing async start %s: %s\n", name, formatLifecycleError(err)) //nolint:errcheck
 			// Pass the pre-refresh phases so commit-time panic diagnostics
 			// still show start_call / post_start_observe timings; commit_refresh
@@ -2120,7 +2141,7 @@ func settleUncommittedAsyncStart(result startResult, refresh asyncStartRefreshVe
 			restorePreWakeState(result.prepared, sessFront, stderr)
 			return string(TraceOutcomeCapacityRefused)
 		}
-		clearPendingStartInFlightLease(result.prepared.candidate.info.ID, sessFront, stderr)
+		releaseExpectedPendingStartLease(result.prepared.candidate.info, sessFront, stderr)
 		return "async_start_refresh_failed"
 	}
 	return "stale_async_start"
@@ -2156,15 +2177,23 @@ func refreshAsyncStartResult(result startResult, store beads.Store, stderr io.Wr
 		// read. A stale cached projection (or a failed refresh) cannot erase
 		// that verdict or authorize any mutation of the replacement row.
 		// The existing cleanup executor still checks the attempted runtime.
-		return result, asyncStartRefreshVerdict{cleanupRuntime: true}
+		cleanup := preparedInfo.RuntimeBackend == "" && preparedInfo.RuntimeFingerprint == ""
+		if !cleanup && store != nil {
+			current, _, err := sessionFrontDoor(store).GetAuthoritativePersistedResponse(preparedInfo.ID)
+			cleanup = err == nil && preparedInfo.RuntimeBackend == current.RuntimeBackend && preparedInfo.RuntimeFingerprint == current.RuntimeFingerprint
+		}
+		return result, asyncStartRefreshVerdict{cleanupRuntime: cleanup}
 	}
 	if store == nil || strings.TrimSpace(preparedInfo.ID) == "" {
 		return result, asyncStartRefreshVerdict{commit: true}
 	}
-	currentInfo, _, err := sessionFrontDoor(store).GetPersistedResponse(preparedInfo.ID)
+	currentInfo, _, err := sessionFrontDoor(store).GetAuthoritativePersistedResponse(preparedInfo.ID)
 	if err != nil {
 		fmt.Fprintf(stderr, "session reconciler: refreshing async start %s: %v\n", result.prepared.candidate.name(), err) //nolint:errcheck
-		return result, asyncStartRefreshVerdict{releaseInFlight: true}
+		return result, asyncStartRefreshVerdict{releaseInFlight: preparedInfo.RuntimeBackend == "" && preparedInfo.RuntimeFingerprint == ""}
+	}
+	if preparedInfo.RuntimeBackend != currentInfo.RuntimeBackend || preparedInfo.RuntimeFingerprint != currentInfo.RuntimeFingerprint {
+		return result, asyncStartRefreshVerdict{current: currentInfo}
 	}
 	if asyncStartPreparedCommandStaleInfo(result.prepared, currentInfo) {
 		// last_woke_at is the in-flight lease of whichever incarnation owns
@@ -2206,6 +2235,21 @@ func asyncStartPreparedCommandStaleInfo(prepared preparedStart, current sessionp
 	return preparedCommand != "" && currentCommand != "" && preparedCommand != currentCommand
 }
 
+// releaseExpectedPendingStartLease preserves a newer persisted runtime owner or
+// attempt. Unbound legacy rows keep their original compatibility behavior.
+func releaseExpectedPendingStartLease(info sessionpkg.Info, sessFront *sessionpkg.Store, stderr io.Writer) {
+	if sessFront == nil {
+		return
+	}
+	if info.RuntimeBackend == "" && info.RuntimeFingerprint == "" {
+		clearPendingStartInFlightLease(info.ID, sessFront, stderr)
+		return
+	}
+	if _, err := sessFront.ReleaseCompletedPendingStartLease(info); err != nil {
+		fmt.Fprintf(stderr, "session reconciler: releasing completed runtime start lease for %s: %v\n", info.ID, err) //nolint:errcheck
+	}
+}
+
 // clearPendingStartInFlightLease clears last_woke_at for the session handle so a
 // stale in-flight start lease does not survive a rollback or abandoned start.
 // Fire-and-forget: setMeta logs on failure and the next reconciler tick
@@ -2237,6 +2281,10 @@ func stopStaleAsyncStartRuntime(result startResult, sp runtime.Provider, stderr 
 	}
 	name := result.prepared.candidate.name()
 	info := result.prepared.candidate.info
+	if err := sessionpkg.BindRuntimeInfo(sp, info); err != nil {
+		fmt.Fprintf(stderr, "session reconciler: stale runtime owner %s unavailable: %v\n", info.ID, err) //nolint:errcheck
+		return
+	}
 	if !runningSessionMatchesPendingCreateInfo(info, name, sp) {
 		if !beadScopedPoolRuntimeNotPositivelyForeign(info, name, sp) {
 			return
@@ -2302,6 +2350,9 @@ func startPreparedStartCandidate(
 ) (bool, error) {
 	name := item.candidate.name()
 	if sp != nil {
+		if err := sessionpkg.BindRuntimeInfo(sp, item.candidate.info); err != nil {
+			return false, err
+		}
 		running, alive, err := observeRuntimeProviderLiveness(sp, name, item.cfg.ProcessNames)
 		if err != nil {
 			return false, err
@@ -2638,7 +2689,7 @@ func commitStartResultTraced(
 	// Session startup is not yet safe to decide — back off silently without
 	// recording failure. The reconciler will retry on the next patrol tick.
 	if startOutcomeDefersCommit(result.outcome) {
-		clearPendingStartInFlightLease(info.ID, sessFront, stderr)
+		releaseExpectedPendingStartLease(info, sessFront, stderr)
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, string(result.outcome), result.started, result.finished, nil, result.phases)
 		return startCommitFailed
 	}
@@ -2690,7 +2741,7 @@ func commitStartResultTraced(
 	})
 	storedMCPSnapshot, err := sessionpkg.EncodeMCPServersSnapshot(result.prepared.cfg.MCPServers)
 	if err != nil {
-		clearPendingStartInFlightLease(info.ID, sessFront, stderr)
+		releaseExpectedPendingStartLease(info, sessFront, stderr)
 		fmt.Fprintf(stderr, "session reconciler: encoding MCP snapshot for %s: %v\n", name, err) //nolint:errcheck
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, "metadata_encode_failed", result.started, result.finished, err, result.phases)
 		return startCommitFailed
@@ -2699,7 +2750,7 @@ func commitStartResultTraced(
 		metadata[sessionpkg.MCPServersSnapshotMetadataKey] = storedMCPSnapshot
 	}
 	if err := sessionpkg.PersistRuntimeMCPServersSnapshot(result.prepared.cfg.Env["GC_CITY_PATH"], info.ID, result.prepared.cfg.MCPServers); err != nil {
-		clearPendingStartInFlightLease(info.ID, sessFront, stderr)
+		releaseExpectedPendingStartLease(info, sessFront, stderr)
 		fmt.Fprintf(stderr, "session reconciler: storing runtime MCP snapshot for %s: %v\n", name, err) //nolint:errcheck
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, "runtime_mcp_snapshot_failed", result.started, result.finished, err, result.phases)
 		return startCommitFailed
@@ -2718,7 +2769,7 @@ func commitStartResultTraced(
 	}
 	applied, err := sessFront.CommitStartedIfCurrent(info, metadata)
 	if err != nil {
-		clearPendingStartInFlightLease(info.ID, sessFront, stderr)
+		releaseExpectedPendingStartLease(info, sessFront, stderr)
 		fmt.Fprintf(stderr, "session reconciler: storing hashes for %s: %v\n", name, err) //nolint:errcheck
 		if trace != nil {
 			trace.RecordMutation(TraceSiteMutationBeadMetadata, TraceReasonUnknown, TraceOutcomeFailed, "metadata_batch", info.ID, "started_config_hash", traceRecordPayload{
@@ -2872,8 +2923,12 @@ func restorePreWakeState(prepared preparedStart, sessFront *sessionpkg.Store, st
 	if id == "" || sessFront == nil || undo.written == nil {
 		return
 	}
+	update := sessFront.UpdateMetadataFenced
+	if undo.custody.RuntimeBackend != "" || undo.custody.RuntimeFingerprint != "" {
+		update = sessFront.UpdateMetadataAuthoritativeFenced
+	}
 	err := sessionpkg.WithSessionMutationLock(id, func() error {
-		_, err := sessFront.UpdateMetadataFenced(id, preWakeRestoreAttempts, func(current sessionpkg.Info, persisted sessionpkg.PersistedResponse) sessionpkg.MetadataPatch {
+		_, err := update(id, preWakeRestoreAttempts, func(current sessionpkg.Info, persisted sessionpkg.PersistedResponse) sessionpkg.MetadataPatch {
 			if persisted.Status == "closed" || current.InstanceToken != undo.token ||
 				!sessionpkg.RuntimeStartRefusalRestoreAllowed(undo.custody, current) {
 				return nil
@@ -3512,6 +3567,10 @@ func releaseBeadScopedPoolRuntime(info sessionpkg.Info, sp runtime.Provider, std
 	if sp == nil || !isPoolManagedSessionInfo(info) || !infoOwnsPoolSessionName(info) {
 		return true
 	}
+	if err := sessionpkg.BindRuntimeInfo(sp, info); err != nil {
+		fmt.Fprintf(stderr, "session reconciler: retaining pool session %s: runtime owner unavailable: %v\n", info.ID, err) //nolint:errcheck
+		return false
+	}
 	name := strings.TrimSpace(info.SessionNameMetadata)
 	if err := sp.Stop(name); err != nil && !runtime.IsSessionGone(err) {
 		fmt.Fprintf(stderr, "session reconciler: holding pool session %s open: tearing down runtime %q before rollback: %v\n", info.ID, name, err) //nolint:errcheck
@@ -3848,7 +3907,11 @@ func executePlannedStartsTraced(
 				item, err := prepareStartCandidateForCity(candidate, cityPath, cityName, cfg, sp, store, clk, stderr, startOpts.workDirResolver)
 				if err != nil {
 					abandonCapacityTicket(ticket, rec, stderr)
-					clearPendingStartInFlightLease(candidate.info.ID, sessFront, stderr)
+					// Typed preparation restores its own final PreWake custody locally.
+					// The original candidate cannot release that newer attempt's lease.
+					if candidate.info.RuntimeBackend == "" && candidate.info.RuntimeFingerprint == "" {
+						releaseExpectedPendingStartLease(candidate.info, sessFront, stderr)
+					}
 					if release != nil {
 						release()
 					}

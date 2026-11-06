@@ -928,6 +928,12 @@ func TestRouteRecoveryBackstopConcurrentWithStandaloneStoreReload(t *testing.T) 
 		Stdout: io.Discard,
 		Stderr: io.Discard,
 	})
+	// Production run() publishes these handles before reloads or lane work.
+	cityStore, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cr.setStandaloneStores(cityStore, buildStandaloneRigStores(cfg, cityPath, io.Discard))
 	if cr.cs != nil {
 		t.Fatal("fixture has controller state; it must exercise the standalone store handles")
 	}

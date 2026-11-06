@@ -133,6 +133,7 @@ func (s *Store) ReadWorkClaimSession(expected Info) (Info, PersistedResponse, er
 
 func sameWorkClaimSession(expected, current Info) bool {
 	return CanClaimWork(current) && current.ID == expected.ID &&
+		current.RuntimeBackend == expected.RuntimeBackend && current.RuntimeFingerprint == expected.RuntimeFingerprint &&
 		current.InstanceToken == expected.InstanceToken && current.Generation == expected.Generation &&
 		AssigneeIdentifier(current) == AssigneeIdentifier(expected) && current.Template == expected.Template &&
 		current.Provider == expected.Provider && current.SessionKey == expected.SessionKey &&

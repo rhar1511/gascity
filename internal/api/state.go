@@ -104,6 +104,10 @@ type State interface {
 	// SessionProvider returns the current session provider.
 	SessionProvider() runtime.Provider
 
+	// SessionRuntimeSnapshot captures configuration and runtime from the same
+	// publication. Creation must not pair a stale config with a newer registry.
+	SessionRuntimeSnapshot() (*config.City, runtime.Provider)
+
 	// BeadStore returns the bead store for a rig (by name).
 	// Returns nil if the rig doesn't exist.
 	BeadStore(rig string) beads.Store

@@ -2282,6 +2282,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 	nextSp := cr.sp
 	nextDops := cr.dops
 	providerChanged := false
+	routingRefreshed := false
 	providerSwapSummary := ""
 
 	// Detect session provider change. A pack-declared runtime binds its
@@ -2294,7 +2295,25 @@ func (cr *CityRuntime) reloadConfigTraced(
 	if v := os.Getenv("GC_SESSION"); v != "" {
 		newProviderName = v
 	}
-	if newProviderName != *lastProviderName || packRuntimeDeclarationChanged(cr.cfg, nextCfg, newProviderName) {
+	ownership, ownershipErr := cr.runtimeOwnershipSnapshot()
+	if ownershipErr != nil {
+		return reloadControlReply{Outcome: reloadOutcomeFailed, Error: ownershipErr.Error(), Revision: result.Revision, Warnings: warnings}
+	}
+	_, priorStrict := runtime.AsBackendBindingProvider(cr.sp)
+	strictRouting := priorStrict || requiresSessionRuntimeRouting(nextCfg, ownership)
+	if strictRouting {
+		if !priorStrict {
+			return reloadControlReply{Outcome: reloadOutcomeFailed, Error: "enabling exact runtime routing requires a separately reconciled restart; keeping the current registry", Revision: result.Revision, Warnings: warnings}
+		}
+		candidate, routeErr := rebuildSessionRuntimeRouting(sessionProviderContextForCity(nextCfg, cr.cityPath, newProviderName), ownership, cr.sp)
+		if routeErr != nil {
+			return reloadControlReply{Outcome: reloadOutcomeFailed, Error: routeErr.Error(), Revision: result.Revision, Warnings: warnings}
+		}
+		nextSp = candidate
+		nextDops = newDrainOps(nextSp)
+		routingRefreshed = true
+		pendingProviderName = newProviderName
+	} else if newProviderName != *lastProviderName || packRuntimeDeclarationChanged(cr.cfg, nextCfg, newProviderName) {
 		newSp, spErr := newSessionProviderForCityByName(nextCfg, newProviderName, nextCfg.Session, cr.cityName, cr.cityPath)
 		if spErr != nil {
 			appendWarning(fmt.Sprintf("new session provider %q: %v (keeping old provider)", newProviderName, spErr))
@@ -2418,6 +2437,18 @@ func (cr *CityRuntime) reloadConfigTraced(
 	// callbacks; this final phase uses transactionMu -> updateMu ordering.
 	publicationAccepted := false
 	publish := func() error {
+		if routingRefreshed {
+			fresh, loadErr := cr.runtimeOwnershipSnapshot()
+			if loadErr != nil {
+				return loadErr
+			}
+			candidate, routeErr := rebuildSessionRuntimeRouting(sessionProviderContextForCity(nextCfg, cr.cityPath, newProviderName), fresh, cr.sp)
+			if routeErr != nil {
+				return routeErr
+			}
+			nextSp = candidate
+			nextDops = newDrainOps(nextSp)
+		}
 		if cr.cs != nil {
 			preparedControllerUpdate, err = cr.cs.prepareUpdateFromRuntime(nextCfg, nextSp, result.Revision)
 			if err != nil {
@@ -2438,20 +2469,35 @@ func (cr *CityRuntime) reloadConfigTraced(
 		publicationAccepted = cr.publishPreparedRuntimeConfig(preparedControllerUpdate, nextCfg, nextSp, nextDops)
 		return nil
 	}
+	guardedPublish := func() error {
+		if routingRefreshed {
+			gate, ok := cr.sp.(interface {
+				WithRoutingReplacement(func() (bool, error)) error
+			})
+			if !ok {
+				return fmt.Errorf("runtime registry publication fence unavailable")
+			}
+			return gate.WithRoutingReplacement(func() (bool, error) { err := publish(); return publicationAccepted, err })
+		}
+		return publish()
+	}
 	if cr.cs != nil {
 		err = func() error {
 			cr.cs.configTransactionMu.Lock()
 			defer cr.cs.configTransactionMu.Unlock()
-			return publish()
+			return guardedPublish()
 		}()
 	} else {
-		err = publish()
+		err = guardedPublish()
 	}
 	if err != nil {
 		return reloadControlReply{Outcome: reloadOutcomeFailed, Error: fmt.Sprintf("config reload: %v", err), Revision: result.Revision, Warnings: warnings}
 	}
 	if !publicationAccepted {
 		return rejectSuperseded("during runtime publication")
+	}
+	if routingRefreshed {
+		*lastProviderName = pendingProviderName
 	}
 	if providerChanged {
 		cr.rec.Record(events.Event{
@@ -2529,7 +2575,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 	// Re-point the session-event pump at the new provider's stream (or
 	// deactivate it when the new provider has none). Nil until run() wires
 	// it — startup one-shot reloads happen before the pump exists.
-	if providerChanged && cr.sessionEvents != nil {
+	if (providerChanged || routingRefreshed) && cr.sessionEvents != nil {
 		cr.sessionEvents.restart(nextSp)
 	}
 

@@ -603,6 +603,12 @@ func TestOrdersLaneRescanAfterReloadStageReadsReloadedConfig(t *testing.T) {
 		Stdout: io.Discard,
 		Stderr: io.Discard,
 	})
+	// Production run() publishes these handles before reloads or lane work.
+	cityStore, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cr.setStandaloneStores(cityStore, buildStandaloneRigStores(cfg, cityPath, io.Discard))
 	var scannedTimeouts []string
 	cr.orderSetScan = func(cityRoot string, cfg *config.City, cmdName string) (orderSetSnapshot, error) {
 		scannedTimeouts = append(scannedTimeouts, cfg.Daemon.ShutdownTimeout)
@@ -618,7 +624,10 @@ func TestOrdersLaneRescanAfterReloadStageReadsReloadedConfig(t *testing.T) {
 
 	writeCityRuntimeSoftReloadConfig(t, tomlPath, "6s")
 	lastProviderName := "fake"
-	cr.reloadConfigTraced(context.Background(), &lastProviderName, cityPath, nil, reloadSourceWatch)
+	reply := cr.reloadConfigTraced(context.Background(), &lastProviderName, cityPath, nil, reloadSourceWatch)
+	if reply.Outcome != reloadOutcomeApplied {
+		t.Fatalf("reload reply = %+v, want applied", reply)
+	}
 
 	if len(scannedTimeouts) != 1 {
 		t.Fatalf("lane rescans in the post-stage window = %v, want exactly one", scannedTimeouts)
@@ -660,6 +669,12 @@ func TestOrdersLaneConcurrentWithReloadConfigTraced(t *testing.T) {
 		Stdout: io.Discard,
 		Stderr: io.Discard,
 	})
+	// Production run() publishes these handles before reloads or lane work.
+	cityStore, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cr.setStandaloneStores(cityStore, buildStandaloneRigStores(cfg, cityPath, io.Discard))
 	lane := cr.ordersLaneOf()
 	startOrdersLaneForTest(t, cr)
 
@@ -680,7 +695,10 @@ func TestOrdersLaneConcurrentWithReloadConfigTraced(t *testing.T) {
 		}
 		writeCityRuntimeSoftReloadConfig(t, tomlPath, timeout)
 		wakeRescan()
-		cr.reloadConfigTraced(context.Background(), &lastProviderName, cityPath, nil, reloadSourceWatch)
+		reply := cr.reloadConfigTraced(context.Background(), &lastProviderName, cityPath, nil, reloadSourceWatch)
+		if reply.Outcome != reloadOutcomeApplied {
+			t.Fatalf("reload %d reply = %+v, want applied", i, reply)
+		}
 	}
 	awaitCond(t, func() bool { return lane.wakePasses.Load()+lane.cadencePasses.Load() > 1 }, "orders lane passes during the reloads")
 }

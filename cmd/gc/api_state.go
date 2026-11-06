@@ -1891,6 +1891,13 @@ func (cs *controllerState) SessionProvider() runtime.Provider {
 	return cs.sp
 }
 
+// SessionRuntimeSnapshot captures one immutable configuration/provider pair.
+func (cs *controllerState) SessionRuntimeSnapshot() (*config.City, runtime.Provider) {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return cs.cfg, cs.sp
+}
+
 // BeadStore returns the bead store for a rig (by name).
 func (cs *controllerState) BeadStore(rig string) beads.Store {
 	cs.mu.RLock()

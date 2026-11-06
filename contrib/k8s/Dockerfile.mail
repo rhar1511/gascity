@@ -24,12 +24,16 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # installed binary package of its source, so naming it alone is the whole fix.
 # These three landed in trixie/main as a point release rather than in
 # trixie-security, so they resolve off the base image's own apt source.
+# apt and libapt-pkg7.0 carry CVE-2026-109518, fixed in 3.0.4; both installed
+# binary packages must move together.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends --only-upgrade \
+    apt \
     bsdutils \
     gzip \
     libblkid1 \
     libcap2 \
+    libapt-pkg7.0 \
     liblastlog2-2 \
     libmount1 \
     libpcre2-8-0 \
@@ -44,6 +48,8 @@ RUN apt-get update \
     openssl \
     openssl-provider-legacy \
     util-linux \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' apt)" ge 3.0.4 \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libapt-pkg7.0)" ge 3.0.4 \
     && apt-get install -y --no-install-recommends \
     git \
     libnghttp2-14 \

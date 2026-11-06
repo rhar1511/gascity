@@ -507,6 +507,11 @@ func (m *Manager) loadSessionBeadForRead(id string, allowClosed, authoritative b
 	if !IsSessionBeadOrRepairable(b) {
 		return beads.Bead{}, "", fmt.Errorf("%w: bead %s (type=%q)", ErrNotSession, id, b.Type)
 	}
+	if b.Status != "closed" {
+		if err := m.bindRuntime(infoFromPersistedBead(b)); err != nil {
+			return beads.Bead{}, "", err
+		}
+	}
 	RepairEmptyType(m.store, &b)
 	if !allowClosed && b.Status == "closed" {
 		return beads.Bead{}, "", fmt.Errorf("%w: %s", ErrSessionClosed, id)
@@ -1025,7 +1030,11 @@ func (m *Manager) dismissKnownDialogsLocked(ctx context.Context, sessName string
 	if !ok {
 		return false
 	}
-	if err := dp.DismissKnownDialogs(ctx, sessName, timeout); errors.Is(err, runtime.ErrWorkspaceTrustUnconfirmed) {
+	err := dp.DismissKnownDialogs(ctx, sessName, timeout)
+	if errors.Is(err, runtime.ErrInteractionUnsupported) {
+		return false
+	}
+	if errors.Is(err, runtime.ErrWorkspaceTrustUnconfirmed) {
 		log.Printf("session: %q: %v", sessName, err)
 	}
 	return true

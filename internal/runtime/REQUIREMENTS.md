@@ -107,6 +107,13 @@ differs, fix code and prove the row with a test.
 
 ### Provider Contract
 
+The explicit-binding router below is a provider building block. Its presence
+does not select a runtime in city configuration or migrate an existing session.
+
+| ID | Scenario | Required behavior | Evidence |
+|---|---|---|---|
+| RUNTIME-ROUTE-001 | Explicit backend ownership | `routing.Provider` copies its backend registry and requires an exact binding even for the default backend. Unknown and conflicting bindings refuse. Stop retains the binding; named operations and optional capabilities never contact a sibling backend. Unbound liveness is unavailable, not absence. Discovery retains attribution and reports duplicate or wrongly attributed names without assigning ownership. Session events remain hints from every backend. Process-table scanning is deliberately unsupported until termination provenance can be established. | `internal/runtime/routing/routing_test.go` (`TestStopNeverFallsBackToAnotherBackend`, `TestUnboundSessionRefusesWithoutDefaultProbe`, `TestBindingCannotMigrateAfterSuccessfulStop`, `TestConcurrentBindingHasOneOwner`, `TestEveryCoreOperationStaysOnItsBoundBackend`, `TestOptionalOperationsStayOnTheirOwner`, `TestOptionalObservationsCannotReachASibling`, `TestExecPreservesSelectedResultAndNeverFallsBack`, `TestDiscoveryRetainsAttributionWithoutAssigningOwnership`, `TestEventsCoverAllThreeBackends`) |
+
 | ID | Scenario | Required behavior | Evidence |
 |---|---|---|---|
 | RUNTIME-CONTRACT-001 | Conformance suite is the executable contract | Every `runtime.Provider` implementation must pass `runtimetest.RunProviderTests` (or the lifecycle/session sub-suites for slow substrates). New contract semantics land as conformance cases, not prose. | `internal/runtime/runtimetest/conformance.go`; `internal/runtime/fake_conformance_test.go`; per-provider conformance tests |

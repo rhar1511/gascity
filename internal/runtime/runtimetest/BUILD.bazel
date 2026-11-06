@@ -17,6 +17,7 @@ go_test(
     name = "runtimetest_test",
     srcs = [
         "conformance_test.go",
+        "constructor_factory_test.go",
         "testenv_import_test.go",
     ],
     embed = [":runtimetest"],

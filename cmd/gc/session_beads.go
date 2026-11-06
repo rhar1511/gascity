@@ -2074,15 +2074,32 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 				}
 			}
 			createBead := func() (beads.Bead, error) {
+				var created beads.Bead
+				transport := ""
+				if tp.IsACP {
+					transport = config.SessionTransportACP
+				}
+				binding, err := configuredRuntimeBindingForCreate(cfg, sp, qualifiedTemplate, tp.ConfiguredNamedIdentity, transport)
+				if err != nil {
+					return beads.Bead{}, err
+				}
+				if _, strict := runtime.AsBackendBindingProvider(sp); strict {
+					if err := prospectiveRuntimeNameAvailable(sp, meta["session_name"], binding); err != nil {
+						return beads.Bead{}, err
+					}
+				}
 				beadID, err := sessionFrontDoor(store).CreateSession(session.CreateSpec{
-					Title:     agentName,
-					AgentName: agentName,
-					Metadata:  meta,
+					RuntimeBackend:     binding.Name,
+					RuntimeFingerprint: binding.Fingerprint,
+					Title:              agentName,
+					AgentName:          agentName,
+					Metadata:           meta,
 				})
 				if err != nil {
 					return beads.Bead{}, err
 				}
-				return store.Get(beadID)
+				created, err = store.Get(beadID)
+				return created, err
 			}
 			var (
 				newBead            beads.Bead
@@ -2116,6 +2133,24 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 				if createdSessionName == "" {
 					createdSessionName = sn
 				}
+				runtimeInfo, err := sessFront.Get(newBead.ID)
+				if err == nil {
+					err = session.BindRuntimeInfo(sp, runtimeInfo)
+				}
+				if err != nil {
+					finalizeErr = err
+					fmt.Fprintf(stderr, "session beads: binding runtime owner for %s: %v\n", agentName, err) //nolint:errcheck // diagnostic only
+				} //nolint:errcheck
+			}
+			createAndFinalize := func() error {
+				return runtime.WithBackendCreation(sp, func() error {
+					newBead, createErr = createBead()
+					created = true
+					if createErr == nil {
+						finalizeCreatedSessionName()
+					}
+					return nil
+				})
 			}
 			if managedAlias != "" {
 				lockFn := func() error {
@@ -2137,12 +2172,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 							return nil
 						}
 					}
-					newBead, createErr = createBead()
-					created = true
-					if createErr == nil {
-						finalizeCreatedSessionName()
-					}
-					return nil
+					return createAndFinalize()
 				}
 				var lockErr error
 				if isConfiguredNamed {
@@ -2152,13 +2182,16 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 				}
 				if lockErr != nil {
 					fmt.Fprintf(stderr, "session beads: locking alias %q for %s: %v\n", managedAlias, agentName, lockErr) //nolint:errcheck
+					if _, strict := runtime.AsBackendBindingProvider(sp); strict {
+						createErr = lockErr
+						blocked = true
+					}
 				}
 			}
 			if !created && !blocked {
-				newBead, createErr = createBead()
-				created = true
-				if createErr == nil {
-					finalizeCreatedSessionName()
+				if err := createAndFinalize(); err != nil {
+					createErr = err
+					blocked = true
 				}
 			}
 			switch {

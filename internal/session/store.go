@@ -107,17 +107,30 @@ func (s *Store) CommitStartedIfCurrent(expected Info, patch MetadataPatch) (bool
 // A late completion cannot release a newer incarnation or a newer attempt's
 // timestamp. The session mutation lock serializes local incarnation allocation;
 // UpdateMetadataFenced also protects the read/write window where conditional
-// writes are available. Legacy stores retain that helper's reread-only limit.
+// writes are available. Persisted runtime owners require an authoritative read
+// and conditional writer; legacy rows retain the reread-only compatibility limit.
 func (s *Store) ReleaseCompletedPendingStartLease(expected Info) (bool, error) {
-	if !expected.PendingCreateClaim || strings.TrimSpace(expected.LastWokeAt) == "" {
+	strict := expected.RuntimeBackend != "" || expected.RuntimeFingerprint != ""
+	if (!expected.PendingCreateClaim && !strict) || strings.TrimSpace(expected.LastWokeAt) == "" {
 		return false, nil
 	}
 	applied := false
+	update := s.UpdateMetadataFenced
+	if strict {
+		update = s.UpdateMetadataAuthoritativeFenced
+	}
 	err := WithSessionMutationLock(expected.ID, func() error {
 		var err error
-		applied, err = s.UpdateMetadataFenced(expected.ID, 3, func(current Info, _ PersistedResponse) MetadataPatch {
-			if !current.PendingCreateClaim || !LeaseFromInfo(expected).CanRollback(LeaseFromInfo(current)) ||
-				current.LastWokeAt != expected.LastWokeAt {
+		applied, err = update(expected.ID, 3, func(current Info, _ PersistedResponse) MetadataPatch {
+			sameEpisode := LeaseFromInfo(expected).CanRollback(LeaseFromInfo(current))
+			if strict && !expected.PendingCreateClaim {
+				// Existing-session wakes carry a creating-state lease without a
+				// pending-create claim. Releasing it still requires the exact episode.
+				sameEpisode = !current.Closed && current.MetadataState == string(StateCreating) &&
+					current.Generation == expected.Generation && current.InstanceToken == expected.InstanceToken
+			}
+			if current.PendingCreateClaim != expected.PendingCreateClaim || !sameEpisode || current.LastWokeAt != expected.LastWokeAt ||
+				(strict && !runtimeStartSameCustody(expected, current)) {
 				return nil
 			}
 			return MetadataPatch{"last_woke_at": ""}
@@ -280,7 +293,7 @@ func (s *Store) updateMetadataFenced(id string, attempts int, decide func(Info, 
 // inputs rather than a hand-picked key list keeps this check in step with the
 // projection when it learns a new key.
 func sameLifecycleFacts(a, b Info) bool {
-	return reflect.DeepEqual(LifecycleInputFromInfo(a), LifecycleInputFromInfo(b))
+	return a.RuntimeBackend == b.RuntimeBackend && a.RuntimeFingerprint == b.RuntimeFingerprint && reflect.DeepEqual(LifecycleInputFromInfo(a), LifecycleInputFromInfo(b))
 }
 
 // ApplyPatchInfo persists patch for info.ID (via ApplyPatch) and returns the

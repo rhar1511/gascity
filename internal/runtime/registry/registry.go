@@ -109,6 +109,10 @@ func (r *Registry) New(name string, sc config.SessionConfig, cityName, cityPath 
 	return p, nil
 }
 
+// CanResolve validates a selection without constructing a provider. A strict
+// clone with no fallback rejects unknown names before any factory is invoked.
+func (r *Registry) CanResolve(name string) bool { return r.lookup(name) != nil }
+
 func (r *Registry) lookup(name string) Factory {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

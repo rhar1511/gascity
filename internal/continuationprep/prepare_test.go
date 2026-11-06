@@ -194,6 +194,16 @@ func TestPrepareTrustedContinuationRejectsUntrustedOrDriftingInputs(t *testing.T
 		name   string
 		change func(*config.City, *session.Info, *session.ContinuationExpectation, *string, *string)
 	}{
+		{"runtime-expectation-drift", func(_ *config.City, i *session.Info, _ *session.ContinuationExpectation, _ *string, _ *string) {
+			i.RuntimeBackend = "capsule"
+			i.RuntimeFingerprint = strings.Repeat("a", 64)
+		}},
+		{"runtime-native-proof-missing", func(_ *config.City, i *session.Info, e *session.ContinuationExpectation, _ *string, _ *string) {
+			i.RuntimeBackend = "capsule"
+			i.RuntimeFingerprint = strings.Repeat("a", 64)
+			e.RuntimeBackend = i.RuntimeBackend
+			e.RuntimeFingerprint = i.RuntimeFingerprint
+		}},
 		{"native-proof-missing", func(_ *config.City, _ *session.Info, _ *session.ContinuationExpectation, _ *string, token *string) {
 			*token = ""
 		}},

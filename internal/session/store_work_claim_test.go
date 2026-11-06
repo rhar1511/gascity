@@ -72,6 +72,7 @@ func TestCommitWorkClaimHoldsSessionLockThroughTransitionAndReciprocalStamp(t *t
 
 func TestCommitWorkClaimRejectsChangedIdentityBeforeTransition(t *testing.T) {
 	for key, value := range map[string]string{
+		"gc.runtime_backend": "other", "gc.runtime_fingerprint": "changed",
 		"instance_token": "new-token", "generation": "3", "work_dir": "/other", "gc.work_dir": "/other",
 		"session_key": "replacement-thread", "provider": "other", "template": "foreign/worker", "alias": "foreign",
 		"state": "suspended",

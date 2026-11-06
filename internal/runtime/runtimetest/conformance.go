@@ -15,7 +15,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -29,6 +31,62 @@ import (
 // leave partial resources and therefore still needs temporary fallback cleanup.
 type Factory func(t *testing.T) (runtime.Provider, runtime.Config, string)
 
+// ConstructorFactory constructs a provider whose errors must fail conformance.
+// The runner supplies empty session configuration and unique session names.
+type ConstructorFactory func(t *testing.T) (runtime.Provider, error)
+
+type providerFactory interface {
+	Factory | func(*testing.T) (runtime.Provider, runtime.Config, string) |
+		ConstructorFactory | func(*testing.T) (runtime.Provider, error)
+}
+
+var constructedSessionSequence atomic.Uint64
+
+type constructorReporter interface {
+	Helper()
+	Fatalf(string, ...any)
+}
+
+func requireConstructedProvider(t constructorReporter, provider runtime.Provider, err error) runtime.Provider {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("runtime provider constructor: %v", err)
+		return nil
+	}
+	if provider == nil || (reflect.ValueOf(provider).Kind() == reflect.Pointer && reflect.ValueOf(provider).IsNil()) {
+		t.Fatalf("runtime provider constructor returned a nil provider")
+		return nil
+	}
+	return provider
+}
+
+func constructorSessions(construct ConstructorFactory) Factory {
+	return func(t *testing.T) (runtime.Provider, runtime.Config, string) {
+		t.Helper()
+		if construct == nil {
+			t.Fatal("runtime provider constructor is nil")
+		}
+		provider, err := construct(t)
+		return requireConstructedProvider(t, provider, err), runtime.Config{},
+			fmt.Sprintf("runtime-conformance-%d", constructedSessionSequence.Add(1))
+	}
+}
+
+func normalizeProviderFactory[F providerFactory](factory F) Factory {
+	switch f := any(factory).(type) {
+	case Factory:
+		return f
+	case func(*testing.T) (runtime.Provider, runtime.Config, string):
+		return f
+	case ConstructorFactory:
+		return constructorSessions(f)
+	case func(*testing.T) (runtime.Provider, error):
+		return constructorSessions(f)
+	default:
+		panic("unreachable provider factory type")
+	}
+}
+
 // Options customizes provider conformance behavior for implementations whose
 // integration environment can fail before the provider behavior under test
 // begins, such as an external runtime daemon being killed by the CI host.
@@ -39,12 +97,14 @@ type Options struct {
 }
 
 // RunProviderTests runs the full conformance suite against a Provider.
-// newSession returns a (provider, config, sessionName) tuple per test.
+// newSession returns a (provider, config, sessionName) tuple per test, or a
+// (provider, error) constructor result. Constructor errors and nil providers
+// fail immediately, without applying environmental Start-error skips.
 // The provider may be shared across tests; config and name must be unique.
-func RunProviderTests(t *testing.T, newSession Factory) {
+func RunProviderTests[F providerFactory](t *testing.T, newSession F) {
 	t.Helper()
 
-	RunProviderTestsWithOptions(t, newSession, Options{})
+	RunProviderTestsWithOptions(t, normalizeProviderFactory(newSession), Options{})
 }
 
 // RunProviderTestsWithOptions runs the full conformance suite against a

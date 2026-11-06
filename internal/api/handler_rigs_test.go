@@ -119,6 +119,10 @@ func (s *sessionProviderOverrideState) SessionProvider() runtime.Provider {
 	return s.provider
 }
 
+func (s *sessionProviderOverrideState) SessionRuntimeSnapshot() (*config.City, runtime.Provider) {
+	return s.cfg, s.provider
+}
+
 func TestRigEnrichmentUsesProcessNamesForRuntimeFalseNegative(t *testing.T) {
 	base := newFakeState(t)
 	base.cfg.Agents = []config.Agent{

@@ -1163,7 +1163,7 @@ func TestLoadProviderSessionSnapshotLoadsStoreWithoutACPAgents(t *testing.T) {
 	}
 }
 
-func TestStatusSessionProviderSkipsSessionSnapshot(t *testing.T) {
+func TestStatusSessionProviderRefusesUnavailableOwnershipSnapshot(t *testing.T) {
 	oldOpen := openSessionProviderStore
 	t.Cleanup(func() { openSessionProviderStore = oldOpen })
 
@@ -1177,14 +1177,11 @@ func TestStatusSessionProviderSkipsSessionSnapshot(t *testing.T) {
 		Workspace: config.Workspace{Name: "city"},
 		Session:   config.SessionConfig{Provider: "subprocess"},
 	}, "/tmp/city")
-	if err != nil {
-		t.Fatalf("newStatusSessionProviderForCity: %v", err)
+	if err == nil || sp != nil {
+		t.Fatalf("unavailable ownership accepted: %v, %v", sp, err)
 	}
-	if sp == nil {
-		t.Fatal("newStatusSessionProviderForCity() = nil")
-	}
-	if calls != 0 {
-		t.Fatalf("openSessionProviderStore called %d times, want 0", calls)
+	if calls != 1 {
+		t.Fatalf("openSessionProviderStore called %d times, want 1", calls)
 	}
 }
 

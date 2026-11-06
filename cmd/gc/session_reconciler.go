@@ -1850,6 +1850,10 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// every helper below takes the session id or the folded Info.
 		id := orderedRows[i].Info.ID
 		info := infoByID[id]
+		if err := sessionpkg.BindRuntimeInfo(sp, info); err != nil {
+			fmt.Fprintf(stderr, "session reconciler: runtime owner %s unavailable: %v\n", id, err) //nolint:errcheck
+			continue
+		}
 		name := strings.TrimSpace(info.SessionNameMetadata)
 		tp, desired := desiredState[name]
 		if _, _, pending := resetPendingCommittedAtInfo(info); !pending && dt != nil {

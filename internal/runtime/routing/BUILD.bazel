@@ -1,0 +1,44 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "routing",
+    srcs = [
+        "events.go",
+        "exec.go",
+        "liveness.go",
+        "operations.go",
+        "optional.go",
+        "routing.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/runtime/routing",
+    visibility = ["//:__subpackages__"],
+    deps = ["//internal/runtime"],
+)
+
+go_test(
+    name = "routing_test",
+    srcs = [
+        "conformance_test.go",
+        "creation_test.go",
+        "routing_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":routing"],
+    deps = [
+        "//internal/runtime",
+        "//internal/runtime/runtimetest",
+        "//internal/testenv",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

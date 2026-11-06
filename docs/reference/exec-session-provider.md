@@ -58,6 +58,41 @@ Rules:
   `check` is the smoke test, `conformance` the full requirement-coded
   suite.
 
+## Per-session runtime selection
+
+Keep the city's terminal backend and select a declared exec runtime for new
+sessions of one template:
+
+```toml
+[session]
+provider = "herdr"
+
+[[agent]]
+name = "builder"
+runtime = "capsule"
+```
+
+Here `capsule` must already be declared by a pack under `[runtimes.capsule]`.
+A named session may also set `runtime`; its nonempty override takes precedence
+over the backing template. Clearing that override restores template inheritance
+for new sessions. `provider` continues to select the coding CLI, and `session`
+continues to select its transport. ACP remains independent; combining an explicit
+exec-runtime override with ACP transport is refused.
+
+Creation records both the runtime name and its declaration fingerprint on the
+session bead before calling a backend. Existing sessions retain that pair across
+template changes and restarts. Every operation, including cleanup, targets the
+recorded owner. Backend failure does not trigger fallback to the city's backend.
+Unknown, partial or conflicting ownership makes observation unavailable rather
+than proving the session absent.
+
+Mixed routing requires complete persisted ownership. Older nonclosed rows with
+no runtime pair cannot acquire ownership from current configuration or discovery;
+construction refuses them until their original backend has been independently
+established. These fields are execution identity, not generic metadata to patch
+manually. Runtime selection supplies no task claim, native conversation proof,
+worktree admission or permission to activate workers.
+
 ## Calling Convention
 
 The script receives the operation name as its first argument:
@@ -285,3 +320,15 @@ See `contrib/session-scripts/` for maintained implementations:
 
 - **gc-session-screen** — GNU screen backend. Dependencies: `screen`,
   `jq`, `bash`.
+
+Strict per-session routing uses controller-owned allocation while the controller
+is running. Independent CLI creation refuses a live controller instead of
+persisting an older runtime declaration after a reload; use the controller API
+for managed creation. Offline CLI creation holds the city's exclusive controller
+lock and rechecks the captured configuration through the create transaction.
+Existing-session operations continue to use the persisted owner.
+
+An incomplete ACP inventory does not prevent a new session on a separately
+selected Herdr or exec backend. New allocation checks only the selected runtime
+namespace, together with authoritative session-name reservations. Global cleanup
+still requires complete discovery and never adopts or stops an unknown owner.

@@ -41,6 +41,7 @@ type sessionCommandableWaiter interface {
 }
 
 func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCreateInput) (*SessionCreateOutput, error) {
+	runtimeCfg, runtimeSP := s.state.SessionRuntimeSnapshot()
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
 		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
@@ -64,7 +65,7 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 	}
 
 	if kind == "provider" {
-		return s.humaCreateProviderSession(ctx, store, body, name)
+		return s.humaCreateProviderSessionForRuntimeSnapshot(ctx, store, body, name, runtimeCfg, runtimeSP)
 	}
 
 	// Agent track.
@@ -164,7 +165,7 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 			s.emitSessionCreateFailed(reqID, "create_failed", cfgErr.Error())
 			return
 		}
-		handle, handleErr := s.newResolvedWorkerSessionHandle(store.Store, resolvedCfg)
+		handle, handleErr := s.newResolvedWorkerSessionHandleForRuntimeSnapshot(store.Store, resolvedCfg, runtimeCfg, runtimeSP)
 		if handleErr != nil {
 			s.emitSessionCreateFailed(reqID, "create_failed", handleErr.Error())
 			return
@@ -234,7 +235,12 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 
 // humaCreateProviderSession handles the "provider" kind session creation.
 
-func (s *Server) humaCreateProviderSession(_ context.Context, store beads.SessionStore, body sessionCreateBody, providerName string) (*SessionCreateOutput, error) {
+func (s *Server) humaCreateProviderSession(ctx context.Context, store beads.SessionStore, body sessionCreateBody, providerName string) (*SessionCreateOutput, error) {
+	cfg, sp := s.state.SessionRuntimeSnapshot()
+	return s.humaCreateProviderSessionForRuntimeSnapshot(ctx, store, body, providerName, cfg, sp)
+}
+
+func (s *Server) humaCreateProviderSessionForRuntimeSnapshot(_ context.Context, store beads.SessionStore, body sessionCreateBody, providerName string, runtimeCfg *config.City, runtimeSP runtime.Provider) (*SessionCreateOutput, error) {
 	cfg := s.state.Config()
 	if cfg == nil {
 		return nil, apierr.ServiceUnavailable.Msg("city config not loaded yet")
@@ -336,7 +342,7 @@ func (s *Server) humaCreateProviderSession(_ context.Context, store beads.Sessio
 			s.emitSessionCreateFailed(reqID, "create_failed", cfgErr.Error())
 			return
 		}
-		handle, handleErr := s.newResolvedWorkerSessionHandle(store.Store, resolvedCfg)
+		handle, handleErr := s.newResolvedWorkerSessionHandleForRuntimeSnapshot(store.Store, resolvedCfg, runtimeCfg, runtimeSP)
 		if handleErr != nil {
 			s.emitSessionCreateFailed(reqID, "create_failed", handleErr.Error())
 			return

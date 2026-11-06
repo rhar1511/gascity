@@ -41,6 +41,7 @@ func TestDropRedundantControlDispatcherNamedSession(t *testing.T) {
 		{Name: "control-dispatcher", Template: "myrig/custom-dispatcher", Mode: "always"},                  // custom template
 		{Name: "control-dispatcher", Template: "core.control-dispatcher", Mode: "always"},                  // always mode
 		{Name: "control-dispatcher", Template: "core.control-dispatcher", Mode: "on_demand", Scope: "rig"}, // explicit scope
+		{Name: "control-dispatcher", Template: "core.control-dispatcher", Runtime: "capsule"},              // explicit runtime
 	}
 	if out, n := dropRedundantControlDispatcherNamedSession(keep); n != 0 || len(out) != len(keep) {
 		t.Fatalf("dropped a user-authored control-dispatcher session (removed=%d); all must be kept", n)
@@ -1118,6 +1119,7 @@ func TestAgentConfigFromAgentCoversPersistedFields(t *testing.T) {
 		Nudge:                  "nudge text",
 		Session:                "acp",
 		Provider:               "claude",
+		Runtime:                "capsule",
 		ContextAdvisory:        &config.ContextAdvisory{Enabled: &trueVal, WindowTokens: intPtr(1_000_000), Tiers: []config.ContextAdvisoryTier{{Threshold: intPtr(75), Message: &advisoryMessage, Enabled: &trueVal}}},
 		Upstream:               "anthropic",
 		StartCommand:           "claude --dangerously",
@@ -1253,5 +1255,84 @@ func TestAgentConfigFromAgentCarriesAutoReclaimStaleClaims(t *testing.T) {
 	got := agentConfigFromAgent(config.Agent{AutoReclaimStaleClaims: true})
 	if !got.AutoReclaimStaleClaims {
 		t.Error("agentConfigFromAgent should carry AutoReclaimStaleClaims through to the persisted agentFile")
+	}
+}
+
+func TestMigratePreservesRuntimeOnlyAgent(t *testing.T) {
+	t.Parallel()
+	city := t.TempDir()
+	writeFile(t, city, "city.toml", `[workspace]
+name = "runtime-city"
+[[agent]]
+name = "worker"
+runtime = "capsule"
+`)
+	if _, err := Apply(city, Options{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, filepath.Join(city, "agents", "worker", "agent.toml")); !strings.Contains(got, `runtime = "capsule"`) {
+		t.Fatalf("runtime-only agent lost its selection: %s", got)
+	}
+}
+
+func TestMigratePreservesPackRuntimeSelection(t *testing.T) {
+	t.Parallel()
+	city := t.TempDir()
+	writeFile(t, city, "city.toml", `[workspace]
+name = "runtime-city"
+`)
+	writeFile(t, city, "pack.toml", `[pack]
+name = "runtime-city"
+schema = 2
+[runtimes.capsule]
+command = "./capsule-runtime"
+protocol = 0
+prompt_delivery = "nudge-fallback"
+[[agent]]
+name = "worker"
+runtime = "capsule"
+`)
+	writeFile(t, city, "capsule-runtime", "#!/bin/sh\nexit 97\n")
+	if err := os.Chmod(filepath.Join(city, "capsule-runtime"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Apply(city, Options{}); err != nil {
+		t.Fatal(err)
+	}
+	pack := readFile(t, filepath.Join(city, "pack.toml"))
+	for _, want := range []string{"[runtimes.capsule]", `command = "./capsule-runtime"`, `prompt_delivery = "nudge-fallback"`} {
+		if !strings.Contains(pack, want) {
+			t.Fatalf("rewritten pack lost %q: %s", want, pack)
+		}
+	}
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(city, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, agent := range cfg.Agents {
+		if agent.Name == "worker" {
+			found = true
+			if agent.Runtime != "capsule" {
+				t.Fatalf("migrated agent runtime=%q", agent.Runtime)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("migrated worker is missing")
+	}
+	declaration, ok := cfg.Runtimes["capsule"]
+	if !ok || declaration.Command != filepath.Join(city, "capsule-runtime") || declaration.Protocol != 0 || declaration.PromptDelivery != "nudge-fallback" {
+		t.Fatalf("runtime declaration changed: %+v (present=%v)", declaration, ok)
+	}
+	agentFile := readFile(t, filepath.Join(city, "agents", "worker", "agent.toml"))
+	if _, err := Apply(city, Options{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, filepath.Join(city, "pack.toml")); got != pack {
+		t.Fatal("second migration changed runtime declaration")
+	}
+	if got := readFile(t, filepath.Join(city, "agents", "worker", "agent.toml")); got != agentFile {
+		t.Fatal("second migration changed runtime-only agent")
 	}
 }

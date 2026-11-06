@@ -210,6 +210,7 @@ func runtimeStartSameCustody(expected, current Info) bool {
 		AssigneeIdentifier(expected) != AssigneeIdentifier(current) ||
 		expected.SessionNameMetadata != current.SessionNameMetadata ||
 		expected.Provider != current.Provider || expected.ProviderKind != current.ProviderKind ||
+		expected.RuntimeBackend != current.RuntimeBackend || expected.RuntimeFingerprint != current.RuntimeFingerprint ||
 		expected.Template != current.Template || expected.Command != current.Command ||
 		expected.Transport != current.Transport || expected.WorkDir != current.WorkDir ||
 		expected.WorkDirCanonical != current.WorkDirCanonical ||

@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionauthority"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -36,6 +37,7 @@ type sessionCreateRequest struct {
 }
 
 func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
+	runtimeCfg, runtimeSP := s.state.SessionRuntimeSnapshot()
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
@@ -123,7 +125,7 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 		}
 
 	case "provider":
-		s.createProviderSession(w, r, store, body, name, idemKey, bodyHash)
+		s.createProviderSession(w, r, store, body, name, idemKey, bodyHash, runtimeCfg, runtimeSP)
 		return
 	}
 
@@ -187,7 +189,7 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 		writeSessionManagerError(w, err)
 		return
 	}
-	handle, err := s.newResolvedWorkerSessionHandle(store.Store, resolvedCfg)
+	handle, err := s.newResolvedWorkerSessionHandleForRuntimeSnapshot(store.Store, resolvedCfg, runtimeCfg, runtimeSP)
 	if err != nil {
 		s.idem.unreserve(idemKey)
 		writeSessionManagerError(w, err)
@@ -252,7 +254,7 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 
 // createProviderSession handles the "provider" kind session creation.
 // Resolves a bare provider (not an agent template) and creates a session.
-func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, store beads.SessionStore, body sessionCreateRequest, providerName, idemKey, bodyHash string) {
+func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, store beads.SessionStore, body sessionCreateRequest, providerName, idemKey, bodyHash string, runtimeCfg *config.City, runtimeSP runtime.Provider) {
 	cfg := s.state.Config()
 	if cfg == nil {
 		s.idem.unreserve(idemKey)
@@ -377,7 +379,7 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 		writeSessionManagerError(w, err)
 		return
 	}
-	handle, err := s.newResolvedWorkerSessionHandle(store.Store, resolvedCfg)
+	handle, err := s.newResolvedWorkerSessionHandleForRuntimeSnapshot(store.Store, resolvedCfg, runtimeCfg, runtimeSP)
 	if err != nil {
 		s.idem.unreserve(idemKey)
 		writeSessionManagerError(w, err)
