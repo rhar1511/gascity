@@ -1234,17 +1234,38 @@ func openCityEventsProviderWithConfig(providerConfig func() config.EventsConfig,
 	return p, 0
 }
 
+type hybridBackendFactories struct {
+	local  func(sessiontmux.Config) runtime.Provider
+	remote func() (runtime.Provider, error)
+}
+
 // newHybridProvider constructs a composite provider that routes sessions to
 // tmux (local) or k8s (remote) based on session name. The GC_HYBRID_REMOTE_MATCH
 // env var controls which sessions go to k8s. If unset, all sessions route to
 // local tmux.
-func newHybridProvider(sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
+func newHybridProvider(sc config.SessionConfig, cityName, cityPath string, supplied ...hybridBackendFactories) (runtime.Provider, error) {
 	// Cut-over: hybrid routes to the seam-backed tmux/k8s providers, so
 	// hybrid-routed sessions flow through the seams like every other path.
-	local := sessiontmux.NewSeamBackedWithConfig(tmuxConfigFromSession(sc, cityName, cityPath))
-	remote, err := sessionk8s.NewSeamBacked()
+	factories := hybridBackendFactories{
+		local:  sessiontmux.NewSeamBackedWithConfig,
+		remote: sessionk8s.NewSeamBacked,
+	}
+	if len(supplied) > 1 {
+		return nil, fmt.Errorf("hybrid: more than one backend factory set")
+	}
+	if len(supplied) == 1 {
+		factories = supplied[0]
+	}
+	if factories.local == nil || factories.remote == nil {
+		return nil, fmt.Errorf("hybrid: backend factory missing")
+	}
+	local := factories.local(tmuxConfigFromSession(sc, cityName, cityPath))
+	remote, err := factories.remote()
 	if err != nil {
 		return nil, fmt.Errorf("hybrid: k8s backend: %w", err)
+	}
+	if local == nil || remote == nil {
+		return nil, fmt.Errorf("hybrid: backend factory returned nil provider")
 	}
 	pattern := sc.RemoteMatch
 	if v := os.Getenv("GC_HYBRID_REMOTE_MATCH"); v != "" {

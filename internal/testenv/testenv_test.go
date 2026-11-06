@@ -13,6 +13,12 @@ import (
 	"github.com/gastownhall/gascity/internal/testenv"
 )
 
+func TestHybridRuntimeRoutingOverrideIsScrubbed(t *testing.T) {
+	if !slices.Contains(testenv.LeakVectorVars, "GC_HYBRID_REMOTE_MATCH") {
+		t.Fatal("ambient hybrid route override must not select a live backend in tests")
+	}
+}
+
 // TestInitScrubsLeakVectors verifies init() unsets every var in
 // LeakVectorVars. Done by re-execing this test binary with the leak vars
 // pre-set in env, then asking the child to report what it sees.
